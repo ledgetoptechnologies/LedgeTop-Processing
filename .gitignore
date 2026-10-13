@@ -1,0 +1,34 @@
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Keep datasets and generated outputs out of Git by default
+/data/
+/datasets/
+/raw/
+/outputs/
+/artifacts/
+/cache/
+*.las
+*.laz
+*.e57
+*.ply
+*.pcd
+*.tif
+*.tiff
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+
+# Python/local tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
