@@ -1,34 +1,45 @@
-# Local credentials and environment
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-
-# Keep datasets and generated outputs out of Git by default
-/data/
-/datasets/
-/raw/
-/outputs/
-/artifacts/
-/cache/
+# Sensitive and large data must stay outside Git (see CLAUDE.md).
+# Point clouds
 *.las
 *.laz
+*.copc.laz
 *.e57
 *.ply
 *.pcd
+*.xyz
+*.pts
+# Rasters and imagery
 *.tif
 *.tiff
-*.gpkg
+*.jpg
+*.jpeg
+*.png
+*.dng
+*.ecw
+*.jp2
+# Raw sensor, trajectory and GNSS data
+*.bin
+*.sbet
+*.out
+*.imr
+*.rinex
+*.obs
+*.ubx
+*.T04
+# Vector data with coordinates
 *.shp
 *.shx
 *.dbf
 *.prj
-
-# Python/local tooling
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.DS_Store
+*.gpkg
+*.kml
+*.kmz
+*.geojson
+# Archives
+*.zip
+*.7z
+*.tar
+*.gz
+# Local working folders
+data/
+outputs/
