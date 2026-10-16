@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import __version__, chm, features, io, qc, segment, terrain
+from . import __version__, chm, classify, features, io, jev, qc, segment, terrain
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -95,6 +95,38 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_classify(args) -> int:
+    report = classify.run(args.trees, args.features, args.labels, args.out, block_m=args.block_m,
+                          min_accuracy=args.min_accuracy, min_coverage=args.min_coverage)
+    cv = report["cross_validation"]
+    chosen = cv["chosen"]
+    msg = (f"{cv['n_labelled']} labelled trees in {report['labelled_blocks']} blocks; "
+           f"cross-validated accuracy {cv['accuracy_all']:.1%} with no unknowns")
+    if chosen:
+        msg += (f"; at confidence >= {chosen['threshold']:.2f}: {chosen['accuracy']:.1%} correct, "
+                f"{chosen['coverage']:.1%} labelled")
+    else:
+        msg += f"; no threshold reaches {args.min_accuracy:.0%}, all predictions set to unknown"
+    print(msg + f" -> {args.out}")
+    return 0
+
+
+def cmd_jev(args) -> int:
+    report = jev.run(args.trees, args.features, args.labels, args.out, model=args.model,
+                     workers=args.workers, include_unlabelled=args.all_trees,
+                     min_accuracy=args.min_accuracy, min_coverage=args.min_coverage)
+    msg = (f"Jev ({report['model']}): {report['trees_sent']} trees, "
+           f"{report['input_tokens']:,} input tokens, about ${report['estimated_cost_usd']:.4f}")
+    ev = report.get("evaluation")
+    if ev:
+        msg += f"; accuracy {ev['accuracy_all']:.1%} on {ev['n_labelled']} labelled trees"
+        if ev["chosen"]:
+            msg += (f"; at confidence >= {ev['chosen']['threshold']:.2f}: "
+                    f"{ev['chosen']['accuracy']:.1%} correct, {ev['chosen']['coverage']:.1%} labelled")
+    print(msg + f" -> {args.out}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="treedar", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -117,6 +149,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--spike-threshold", type=float, default=5.0,
                        help="lower CHM cells this far above their 5x5 median (0 disables)")
     p_run.set_defaults(func=cmd_run)
+    p_cls = sub.add_parser("classify", help="train and cross-validate a tree type classifier")
+    p_cls.add_argument("--trees", required=True, help="trees.csv from run")
+    p_cls.add_argument("--features", required=True, help="tree_features.csv from run")
+    p_cls.add_argument("--labels", required=True, help="CSV with tree_id,label (trusted labels only)")
+    p_cls.add_argument("--out", required=True)
+    p_cls.add_argument("--block-m", type=float, default=50.0,
+                       help="spatial block size for cross-validation (metres)")
+    p_cls.add_argument("--min-accuracy", type=float, default=0.85)
+    p_cls.add_argument("--min-coverage", type=float, default=0.70)
+    p_cls.set_defaults(func=cmd_classify)
+
+    p_jev = sub.add_parser("jev", help="ask TypeSafe Jev for tree types (sends features only, "
+                                       "no coordinates; needs TYPESAFE_API_KEY and owner approval)")
+    p_jev.add_argument("--trees", required=True)
+    p_jev.add_argument("--features", required=True)
+    p_jev.add_argument("--labels", required=True)
+    p_jev.add_argument("--out", required=True)
+    p_jev.add_argument("--model", default="jev-latest")
+    p_jev.add_argument("--workers", type=int, default=4)
+    p_jev.add_argument("--all-trees", action="store_true",
+                       help="also send unlabelled trees (default: labelled trees only)")
+    p_jev.add_argument("--min-accuracy", type=float, default=0.85)
+    p_jev.add_argument("--min-coverage", type=float, default=0.70)
+    p_jev.set_defaults(func=cmd_jev)
     return parser
 
 
@@ -124,7 +180,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
         print(f"treedar: error: {exc}", file=sys.stderr)
         return 2
 
