@@ -58,14 +58,15 @@ def cmd_run(args) -> int:
     pts = io.read_points(args.laz, bbox=bbox, step=args.step)
     dtm, transform = terrain.ground_dtm(pts["x"], pts["y"], pts["z"], cell=args.cell,
                                         classification=pts.get("classification"))
-    canopy = chm.canopy_height_model(pts["x"], pts["y"], pts["z"], dtm, transform,
-                                     cell=args.cell)
+    raw = chm.max_height_grid(pts["x"], pts["y"], pts["z"], dtm, transform, cell=args.cell)
+    canopy, chm_stats = chm.filter_pits_and_spikes(raw, spike_threshold=args.spike_threshold)
     tops = segment.detect_treetops(canopy, transform, min_height=args.min_height)
     labels = segment.segment_crowns(canopy, tops, transform)
     trees = segment.tree_table(canopy, labels, transform)
 
     _write_raster(out / "dtm.tif", dtm, transform, crs)
     _write_raster(out / "chm.tif", canopy, transform, crs)
+    _write_raster(out / "chm_raw.tif", raw, transform, crs)
     _write_raster(out / "crowns.tif", labels, transform, crs, nodata=0)
     with open(out / "trees.csv", "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=TREE_COLUMNS)
@@ -78,6 +79,7 @@ def cmd_run(args) -> int:
         "runtime_s": round(time.perf_counter() - start, 1),
         "params": {"cell": args.cell, "min_height": args.min_height,
                    "bbox": bbox, "step": args.step},
+        "chm_filter": chm_stats,
         "version": __version__,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
@@ -103,6 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--min-height", type=float, default=5.0)
     p_run.add_argument("--bbox", default=None, help="minx,miny,maxx,maxy in file CRS")
     p_run.add_argument("--step", type=int, default=1, help="keep every Nth point")
+    p_run.add_argument("--spike-threshold", type=float, default=5.0,
+                       help="lower CHM cells this far above their 5x5 median (0 disables)")
     p_run.set_defaults(func=cmd_run)
     return parser
 
