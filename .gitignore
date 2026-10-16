@@ -71,3 +71,6 @@ __pycache__/
 
 # Local example datasets from Beau (never push)
 /Example Datasets/
+
+# Local tool config with machine paths
+/.claude/

@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import __version__, areas, chm, classify, features, io, jev, ortho, qc, segment, terrain, treemap
+from . import (__version__, areas, chm, classify, features, io, jev, labeltool, ortho, qc,
+               segment, terrain, treemap)
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -163,6 +164,12 @@ def cmd_chips(args) -> int:
     return 0
 
 
+def cmd_labelpage(args) -> int:
+    n = labeltool.build(args.run_dir, args.chips, args.out, per_area=args.per_area, seed=args.seed)
+    print(f"{n} crowns on the labelling page -> {args.out} (contains property imagery: keep local)")
+    return 0
+
+
 def cmd_pipeline(args) -> int:
     """One command: LAZ -> trees, areas, labels and classifier when named, tree map."""
     start = time.perf_counter()
@@ -280,6 +287,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch.add_argument("--ortho", required=True)
     p_ch.add_argument("--out", required=True)
     p_ch.set_defaults(func=cmd_chips)
+
+    p_lp = sub.add_parser("labelpage", help="offline click-to-label page for the owner")
+    p_lp.add_argument("run_dir")
+    p_lp.add_argument("--chips", required=True, help="folder from `treedar chips`")
+    p_lp.add_argument("--out", required=True, help="output .html")
+    p_lp.add_argument("--per-area", type=int, default=15)
+    p_lp.add_argument("--seed", type=int, default=0)
+    p_lp.set_defaults(func=cmd_labelpage)
 
     p_pipe = sub.add_parser("pipeline", help="one command from LAZ to tree map")
     add_run_args(p_pipe)
