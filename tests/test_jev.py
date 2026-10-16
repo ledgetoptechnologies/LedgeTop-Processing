@@ -1,11 +1,23 @@
 """Offline Jev integration: no key access and no network requests allowed."""
 
+import base64
 import csv
+import io
 import json
 
 import pytest
 
 from treedar import cli, jev
+
+
+REAL_POST = jev._post
+
+
+def synthetic_png():
+    from PIL import Image
+    stream = io.BytesIO()
+    Image.new("RGB", (320, 320), (20, 150, 40)).save(stream, format="PNG")
+    return stream.getvalue()
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +85,7 @@ def test_requests_exclude_identifiers_and_preserve_unknown_probability(tree_tabl
     report = jev.run(trees, features, labels, out, post=fake_post, workers=1)
     assert len(requests) == report["trees_sent"] == 3
     assert report["model"] == "offline-fixture-model"
+    assert report["with_images"] is False
     for body in requests:
         serialized = json.dumps(body)
         for forbidden in ('"x"', '"y"', "tree_id", "private-file", "private-tree-identifier"):
@@ -162,6 +175,76 @@ def test_split_threshold_uses_development_only(tree_tables, tmp_path, final_resp
     else:
         assert final["n_labelled"] == 0 and final["accuracy"] is None
         assert final["coverage"] == 0
+
+
+def test_image_request_contains_referenced_png_and_preserves_state():
+    state = {"tree_height_m": 15., "survey": "Synthetic offline image test"}
+    before = dict(state)
+    png = synthetic_png()
+    body = jev.request_body(state, jev.DEFAULT_CLASSES, "offline-model", png)
+    assert state == before
+    assert body["state"]["crown_image"] == jev.IMAGE_REF
+    assert set(body["assets"]) == {jev.IMAGE_REF}
+    asset = body["assets"][jev.IMAGE_REF]
+    assert asset["type"] == "image" and asset["format"] == "png"
+    assert base64.b64decode(asset["data_base64"], validate=True) == png
+    assert "unknown" in body["questions"]["tree_type"]["criteria"]
+
+
+@pytest.mark.parametrize("with_image", [False, True])
+def test_post_adds_image_header_only_for_asset_body(with_image, monkeypatch):
+    body = jev.request_body({"tree_height_m": 15.}, jev.DEFAULT_CLASSES, "offline-model",
+                            synthetic_png() if with_image else None)
+    captured = []
+    response = {"model": "offline-response"}
+
+    def fake_urlopen(request, timeout):
+        captured.append(request)
+        assert timeout == 60
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(jev.urllib.request, "urlopen", fake_urlopen)
+    # This is the real request builder with an intercepted transport and an
+    # invented test token. No actual key resolver or remote endpoint runs.
+    assert REAL_POST(body, "offline-test-token", retries=0) == response
+    assert len(captured) == 1
+    request = captured[0]
+    assert request.get_method() == "POST"
+    assert json.loads(request.data) == body
+    headers = {key.lower(): value for key, value in request.header_items()}
+    assert headers["authorization"] == "Bearer offline-test-token"
+    if with_image:
+        assert headers["typesafe-danger-zone-images"] == "true"
+    else:
+        assert "typesafe-danger-zone-images" not in headers
+
+
+def test_image_run_attaches_only_present_chip_and_falls_back_to_text(tree_tables, tmp_path):
+    trees, features, labels, source_rows = tree_tables
+    chips = tmp_path / "chips"
+    chips.mkdir()
+    png = synthetic_png()
+    (chips / f"tree_{source_rows[0]['tree_id']}.png").write_bytes(png)
+    requests = []
+
+    def fake_post(body):
+        requests.append(body)
+        return response_for_height(body["state"]["tree_height_m"])
+
+    report = jev.run(trees, features, labels, tmp_path / "image_run", chips_dir=chips,
+                     post=fake_post, workers=1)
+    assert report["with_images"] is True
+    assert report["trees_sent"] == 3
+    assert ["assets" in body for body in requests] == [True, False, False]
+    assert base64.b64decode(requests[0]["assets"][jev.IMAGE_REF]["data_base64"]) == png
+    for body in requests:
+        assert ("crown_image" in body["state"]) == ("assets" in body)
+        serialized = json.dumps(body)
+        assert "tree_id" not in serialized
+        assert "private-tree-identifier" not in serialized
+        assert "private-file" not in serialized
+        for row in source_rows:
+            assert str(row["x"]) not in serialized and str(row["y"]) not in serialized
 
 
 def test_cli_missing_key_fails_without_registry_or_network_access(tree_tables, tmp_path, monkeypatch, capsys):
