@@ -10,14 +10,14 @@ Self-hosted research pilot for Wisconsin forest LiDAR plus RGB orthophoto analys
 
 ## Status
 
-Desk research complete (2026-10-14). See [findings.md](findings.md) for the tool survey, prior work, public datasets, sensor and processing feasibility, a clean-room review of LiDAR360 Forestry, recommended scope, and open questions. Source notes are in [research_notes/](research_notes/). No prototype or accuracy validation has been done yet.
+Desk research complete (2026-10-14). See [findings.md](findings.md) for the tool survey, prior work, public datasets, sensor and processing feasibility, a clean-room review of LiDAR360 Forestry, recommended scope, and open questions. Source notes are in [research_notes/](research_notes/). A local structural prototype and synthetic end-to-end tests are implemented. Field accuracy remains unvalidated.
 
 Updates from Beau (2026-10-14):
 
 - The owner of the R3 Pro and M350 (Todd) has given permission to use the unit's processing licenses.
 - Todd will provide a few processed R3 Pro test datasets. They will be kept outside this repository. Land ownership, season, and size must be confirmed before analysis.
 
-Next step: data quality check on Todd's test datasets, then confirm direction with Beau before building the prototype. Do not purchase equipment or assume a sensor purchase.
+Next step: evaluate data quality and compare prototype outputs against field-confirmed measurements on authorized test datasets. Do not purchase equipment or assume a sensor purchase.
 
 The GitHub repository holds the shared implementation and research notes. The current TreeDar Codex and Claude chats are linked through the Agent Message Bus for coordination.
 
@@ -50,4 +50,12 @@ For an explicitly authorized local dataset, keep input data local and write deri
 ./.venv/Scripts/treedar.exe run 'C:/local-data/example.laz' --out outputs/pilot --cell 0.5 --min-height 5
 ```
 
-`run` produces `qc.json`, `dtm.tif`, `chm.tif`, `chm_raw.tif`, `crowns.tif`, `trees.csv`, and `summary.json`. `chm.tif` is filtered: pits more than 1 m below their 3x3 median are raised, and cells more than `--spike-threshold` metres (default 5, 0 disables) above their 5x5 median are lowered. This is heuristic noise suppression and can lower a narrow real apex beside a gap; counts are in `summary.json` under `chm_filter`. `chm_raw.tif` is the surface before that filtering, but it still drops points more than 60 m above ground and fills empty cells from their highest neighbour, so it is not untouched observations. Use a small approved spatial subset with `--bbox minx,miny,maxx,maxy` before a full cloud, and treat `--step N` as decimation that changes density and may miss treetops. Confirm source CRS and metre units before interpreting heights or crown area. Coordinates, rasters, logs, and outputs from real data must stay out of Git and external services.
+`run` produces `qc.json`, `dtm.tif`, `chm.tif`, `chm_raw.tif`, `crowns.tif`, `trees.csv`, `tree_features.csv`, and `summary.json`. `tree_features.csv` contains one row per detected tree with relative height summaries, return fractions, intensity, and upper-crown colour features. Colour is uncalibrated camera RGB; compare within a flight only. All-zero RGB samples are excluded, and unavailable colour features are blank.
+
+Use `--no-qc` on `run` to skip the whole-file QC pass and writing `qc.json`, which makes repeated spatial-subset runs faster. The terrain, canopy, crown, tree, feature, and summary outputs are still produced. Run `qc` separately when a whole-file quality report is needed. Use a new output directory to avoid confusing a previously written `qc.json` with this run.
+
+`qc.json` includes `strip_alignment`: relative offsets between `point_source_id` flight lines over overlapping smooth cells. These offsets are measured against the median of usable line means in each cell, so they do not establish absolute height accuracy or a vertical datum. Missing overlap or suitable smooth cells yields zero compared cells and no offset estimate. Treat point source IDs as flight lines only when the export uses them that way.
+
+`chm.tif` is filtered: pits more than 1 m below their 3x3 median are raised, and cells more than `--spike-threshold` metres (default 5, 0 disables) above their 5x5 median are lowered. This is heuristic noise suppression and can lower a narrow real apex beside a gap; counts are in `summary.json` under `chm_filter`. `chm_raw.tif` is the surface before that filtering, but it still drops points more than 60 m above ground and fills empty cells from their highest neighbour, so it is not untouched observations.
+
+Use a small approved spatial subset with `--bbox minx,miny,maxx,maxy` before a full cloud, and treat `--step N` as decimation that changes density and may miss treetops. Confirm source CRS and metre units before interpreting heights or crown area. Coordinates, rasters, logs, and outputs from real data must stay out of Git and external services.
