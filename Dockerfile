@@ -6,9 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MPLCONFIGDIR=/tmp/treedar-matplotlib \
     HOME=/home/treedar
 
-# Native numeric/geospatial wheels need the C++ and OpenMP runtimes.
+# Native numeric/geospatial wheels need C++, OpenMP and Expat runtimes.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libstdc++6 libgomp1 \
+    && apt-get install -y --no-install-recommends libstdc++6 libgomp1 libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/treedar
