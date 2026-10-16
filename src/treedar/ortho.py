@@ -99,6 +99,14 @@ def crown_chips(run_dir, ortho_tif, out_dir, tree_ids=None, margin_m: float = 1.
             rr = np.clip(((ctf.f - ly) / -ctf.e).astype(int), 0, labels.shape[0] - 1)
             cc = np.clip(((lx - ctf.c) / ctf.a).astype(int), 0, labels.shape[1] - 1)
             mask = labels[np.ix_(rr, cc)] == tid
+            # Pad very elongated chips (e.g. windbreak rows) to at most 3:1 so
+            # shrinking to max_px never pushes the short side below 280 px.
+            short = int(np.ceil(max(img.shape[:2]) / 3))
+            pad_r, pad_c = max(0, short - img.shape[0]), max(0, short - img.shape[1])
+            if pad_r or pad_c:
+                pads = ((pad_r // 2, pad_r - pad_r // 2), (pad_c // 2, pad_c - pad_c // 2))
+                img = np.pad(img, pads + ((0, 0),))
+                mask = np.pad(mask, pads)
             scale = max(1, int(np.ceil(min_px / min(img.shape[:2]))))
             pil = Image.fromarray(img).resize((img.shape[1] * scale, img.shape[0] * scale),
                                               Image.NEAREST)
