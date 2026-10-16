@@ -11,7 +11,8 @@ MAX_TREE_HEIGHT_M = 60.0  # anything higher above ground is treated as noise
 
 
 def canopy_height_model(x, y, z, dtm, transform, cell: float = 0.5,
-                        pit_threshold: float = 1.0) -> np.ndarray:
+                        pit_threshold: float = 1.0,
+                        spike_threshold: float = 5.0) -> np.ndarray:
     """Highest normalized point per cell, with pits and empty cells filled."""
     grid = Grid.from_transform(transform, dtm.shape)
     if not np.isclose(grid.cell, cell):
@@ -34,4 +35,11 @@ def canopy_height_model(x, y, z, dtm, transform, cell: float = 0.5,
     local = ndimage.median_filter(chm, size=3)
     pits = chm < local - pit_threshold
     chm = np.where(pits, local, chm)
+
+    # Spikes: isolated cells far above their neighbourhood (birds, multipath,
+    # airborne noise). Real emergent crowns span many cells, so their 5x5
+    # median stays high and they are kept.
+    local = ndimage.median_filter(chm, size=5)
+    spikes = chm > local + spike_threshold
+    chm = np.where(spikes, local, chm)
     return np.clip(chm, 0.0, None).astype(np.float32)
