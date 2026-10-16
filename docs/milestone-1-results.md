@@ -39,6 +39,10 @@ Visual review of the plot overlays suggests the default merges some neighbouring
 
 Clustering the 1,067 default detections on colour and structure, with no labels, produced spatially coherent groups: one group filled the regular plantation block, another the taller woodlot, another the edges and windbreaks. This suggests the features carry type information. It is not an accuracy result.
 
+## Shape features (added after Hermes's prior-art review)
+
+Six literature features were added per tree: skewness and kurtosis of relative heights, the Clark-Evans aggregation index of upper-crown points in plan view, and eigenvalue linearity, planarity and sphericity. On this property, comparing the woodlot zone (A1, 108 trees) with the plantation zones (A2 to A4, 619 trees) as a rough proxy, not labels: Clark-Evans did not differ (median 0.895 vs 0.892), while height skew (-1.08 vs -0.71), sphericity (0.24 vs 0.30) and green fraction (0.62 vs 0.54) did. The classifier will show which features matter once labels exist; the 94 to 95% conifer/broadleaf accuracy reported in the literature is not evidence for this site.
+
 ## Tools ready for the comparison
 
 - `treedar classify` holds out whole named areas: development areas for cross-validation and threshold choice, and a separate final test set of areas scored once.
