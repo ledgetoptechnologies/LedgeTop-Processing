@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "treedar"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local research baseline for canopy tree structure from LiDAR"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,9 @@ treedar = "treedar.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "treedar.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
