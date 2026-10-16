@@ -19,11 +19,14 @@ class Grid:
 
     @classmethod
     def from_bounds(cls, minx, miny, maxx, maxy, cell) -> "Grid":
-        # Snap to whole cells so grids built from the same bounds line up.
+        if not (np.isfinite(cell) and cell > 0):
+            raise ValueError(f"cell size must be a positive number, got {cell}")
+        # Snap the origin to whole cells so grids built from the same bounds
+        # line up; floor(range / cell) + 1 cells cover a point exactly at max.
         minx = np.floor(minx / cell) * cell
         maxy = np.ceil(maxy / cell) * cell
-        cols = int(np.ceil((maxx - minx) / cell)) + 1
-        rows = int(np.ceil((maxy - miny) / cell)) + 1
+        cols = int(np.floor((maxx - minx) / cell)) + 1
+        rows = int(np.floor((maxy - miny) / cell)) + 1
         return cls(float(minx), float(maxy), float(cell), rows, cols)
 
     @classmethod
@@ -43,8 +46,10 @@ class Grid:
         return Affine(self.cell, 0.0, self.minx, 0.0, -self.cell, self.maxy)
 
     def rowcol(self, x, y):
-        col = ((x - self.minx) / self.cell).astype(np.int64)
-        row = ((self.maxy - y) / self.cell).astype(np.int64)
+        # floor, not truncation, so points just outside the left/top edge
+        # get -1 instead of being pulled into cell 0.
+        col = np.floor((x - self.minx) / self.cell).astype(np.int64)
+        row = np.floor((self.maxy - y) / self.cell).astype(np.int64)
         return row, col
 
     def flat_index(self, x, y):

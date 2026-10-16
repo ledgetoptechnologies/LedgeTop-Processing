@@ -59,6 +59,24 @@ def _interpolate(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return fill_nearest(out)
 
 
+def _refine_with_near_ground_mean(grid, x, y, z, dtm, ground, band: float = 0.3):
+    """The lowest point per cell sits below the true surface by about the
+    ranging noise. Re-estimate ground cells as the mean of points within
+    `band` metres of the first-pass surface."""
+    row, col = grid.rowcol(x, y)
+    inside = (row >= 0) & (row < grid.rows) & (col >= 0) & (col < grid.cols)
+    row, col, zz = row[inside], col[inside], z[inside]
+    near = np.abs(zz - dtm[row, col]) <= band
+    flat = row[near] * grid.cols + col[near]
+    sums = np.bincount(flat, weights=zz[near], minlength=grid.rows * grid.cols)
+    counts = np.bincount(flat, minlength=grid.rows * grid.cols)
+    mean = np.full(grid.rows * grid.cols, np.nan)
+    np.divide(sums, counts, out=mean, where=counts > 0)
+    mean = mean.reshape(grid.shape)
+    mask = ground & ~np.isnan(mean)
+    return _interpolate(mean, mask) if mask.any() else dtm
+
+
 def ground_dtm(x, y, z, cell: float = 0.5, classification=None):
     """Bare-earth DTM on a regular grid. Returns (dtm, transform)."""
     grid = Grid.from_points(x, y, cell)
@@ -75,7 +93,8 @@ def ground_dtm(x, y, z, cell: float = 0.5, classification=None):
                                   grid.minx + grid.cols * cell, grid.maxy, coarse_cell)
         zmin_c = _remove_low_outliers(aggregate(coarse, x, y, z, "min"))
         ground_c = progressive_morphological_ground(zmin_c, coarse_cell)
-        dtm_c = _interpolate(zmin_c, ground_c)
+        dtm_c = _refine_with_near_ground_mean(
+            coarse, x, y, z, _interpolate(zmin_c, ground_c), ground_c)
         if coarse_cell == cell:
             return dtm_c.astype(np.float32), coarse.transform
         # Resample coarse DTM to the requested grid by bilinear interpolation.

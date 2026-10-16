@@ -65,6 +65,7 @@ def read_points(path: str | Path, bbox=None, step: int = 1) -> dict[str, np.ndar
     if step < 1:
         raise ValueError("step must be >= 1")
     parts: list[dict[str, np.ndarray]] = []
+    retained = 0  # points kept by bbox so far, so decimation is global, not per chunk
     with open_las(path) as reader:
         names = set(reader.header.point_format.dimension_names)
         for chunk in reader.chunk_iterator(CHUNK):
@@ -75,10 +76,14 @@ def read_points(path: str | Path, bbox=None, step: int = 1) -> dict[str, np.ndar
                 if not keep.any():
                     continue
                 chunk = chunk[keep]
-            parts.append(_to_dict(chunk, names))
+            n = len(chunk)
+            if step > 1:
+                # Decimate per chunk to bound peak memory; the phase keeps the
+                # result identical to decimating the concatenated stream.
+                chunk = chunk[(-retained) % step::step]
+            retained += n
+            if len(chunk):
+                parts.append(_to_dict(chunk, names))
     if not parts:
         raise ValueError("no points found (empty file or bbox outside data)")
-    merged = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
-    if step > 1:
-        merged = {k: v[::step] for k, v in merged.items()}
-    return merged
+    return {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
