@@ -66,6 +66,10 @@ def test_known_upper_colour_and_return_fractions(tmp_path):
     columns, rows = csv_rows(out / "tree_features.csv")
     _, trees = csv_rows(out / "trees.csv")
     assert columns == FEATURE_COLUMNS
+    assert columns[-6:] == ["hag_skew", "hag_kurt", "clark_evans",
+                            "linearity", "planarity", "sphericity"]
+    for row in rows:
+        assert all(np.isfinite(float(row[name])) for name in columns[-6:])
     assert len(rows) == len(trees) == len({row["tree_id"] for row in rows})
     assert {row["tree_id"] for row in rows} == {row["tree_id"] for row in trees}
     assert_structural_features(rows)
