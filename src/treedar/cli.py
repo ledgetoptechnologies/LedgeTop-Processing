@@ -13,13 +13,14 @@ import numpy as np
 import rasterio
 
 from . import (__version__, areas, chm, classify, features, io, jev, labeltool, ortho, qc,
-               segment, terrain, treemap)
+               runinfo, segment, terrain, treemap)
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
 
 def _write_raster(path: Path, array: np.ndarray, transform, crs, nodata=None):
-    with rasterio.open(path, "w", driver="GTiff", height=array.shape[0],
+    # Cloud-optimized GeoTIFF: tiled with overviews, streamable by web viewers.
+    with rasterio.open(path, "w", driver="COG", height=array.shape[0],
                        width=array.shape[1], count=1, dtype=array.dtype,
                        crs=crs.to_wkt() if crs else None, transform=transform,
                        nodata=nodata, compress="deflate") as dst:
@@ -185,7 +186,18 @@ def cmd_pipeline(args) -> int:
             min_accuracy=args.min_accuracy, min_coverage=args.min_coverage))
         predictions = run_dir / "classify" / "predictions.csv"
     make_map(run_dir, predictions)
-    print(f"pipeline finished in {time.perf_counter() - start:.0f} s")
+    params = {k: v for k, v in vars(args).items() if k not in ("func", "laz", "out")}
+    runinfo.write_manifest(run_dir, input_path=args.laz, params=params, command="pipeline")
+    report = runinfo.write_report(run_dir)
+    print(f"pipeline finished in {time.perf_counter() - start:.0f} s; report: {report}")
+    return 0
+
+
+def cmd_report(args) -> int:
+    run_dir = Path(args.run_dir)
+    if not (run_dir / "manifest.json").exists():
+        runinfo.write_manifest(run_dir, command="report")
+    print(f"report -> {runinfo.write_report(run_dir)}")
     return 0
 
 
@@ -295,6 +307,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_lp.add_argument("--per-area", type=int, default=15)
     p_lp.add_argument("--seed", type=int, default=0)
     p_lp.set_defaults(func=cmd_labelpage)
+
+    p_rep = sub.add_parser("report", help="(re)build report.html for a run folder")
+    p_rep.add_argument("run_dir")
+    p_rep.set_defaults(func=cmd_report)
 
     p_pipe = sub.add_parser("pipeline", help="one command from LAZ to tree map")
     add_run_args(p_pipe)
