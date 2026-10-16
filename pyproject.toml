@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "treedar"
+version = "0.1.0"
+description = "Local research baseline for canopy tree structure from LiDAR"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "laspy[lazrs]>=2.7,<3",
+  "numpy>=2.2,<3",
+  "scipy>=1.15,<2",
+  "scikit-image>=0.25,<1",
+  "pyproj>=3.7,<4",
+  "rasterio>=1.4,<2",
+  "affine>=2.4,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3,<10"]
+
+[project.scripts]
+treedar = "treedar.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

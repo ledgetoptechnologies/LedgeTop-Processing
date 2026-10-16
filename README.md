@@ -19,6 +19,35 @@ Updates from Beau (2026-10-14):
 
 Next step: data quality check on Todd's test datasets, then confirm direction with Beau before building the prototype. Do not purchase equipment or assume a sensor purchase.
 
-The GitHub repository is the shared handoff location. Claude Code is not assumed to watch the Agent Message Bus. Keep findings, questions, and architecture decisions here as Markdown.
+The GitHub repository holds the shared implementation and research notes. The current TreeDar Codex and Claude chats are linked through the Agent Message Bus for coordination.
 
 No client datasets, hunting-land coordinates, credentials, or raw sensor data belong in Git history.
+
+## Local prototype and tests
+
+Beau authorized collaborative prototype implementation on 2026-10-16. The baseline processes local LAS/LAZ into terrain, canopy height, crown labels, and tree metrics. It does not estimate species or establish field accuracy. Dependency licenses and the tested environment are recorded in [docs/dependency-licenses.md](docs/dependency-licenses.md).
+
+On Windows with Python 3.13, run from the repository root:
+
+```powershell
+./scripts/setup.ps1
+```
+
+This creates `.venv`, installs exact versions from `requirements-test.lock`, installs TreeDar, and runs pytest. Activation is unnecessary. The lock is tested on Windows x86-64 with CPython 3.13.14; other platforms and Python versions are unverified. The package metadata allows Python 3.11+, with compatible dependency resolution rather than this exact lock.
+
+To rerun the tests:
+
+```powershell
+./.venv/Scripts/python.exe -m pytest
+```
+
+Tests generate small synthetic LAZ files in temporary directories and invoke the real CLI. They check three separated crowns on sloping ground, classified and unclassified ground handling, height and terrain recovery, matching raster grids and CRS, a bare-ground negative case, QC counts, and invalid inputs. They need no real dataset, model weights, network service, or GPU. Passing synthetic tests demonstrates this controlled pipeline case, not Wisconsin forest accuracy or commercial readiness.
+
+For an explicitly authorized local dataset, keep input data local and write derivatives to the ignored `outputs/` directory:
+
+```powershell
+./.venv/Scripts/treedar.exe qc 'C:/local-data/example.laz' --out outputs/qc
+./.venv/Scripts/treedar.exe run 'C:/local-data/example.laz' --out outputs/pilot --cell 0.5 --min-height 5
+```
+
+`run` produces `qc.json`, `dtm.tif`, `chm.tif`, `crowns.tif`, `trees.csv`, and `summary.json`. Use a small approved spatial subset with `--bbox minx,miny,maxx,maxy` before a full cloud, and treat `--step N` as decimation that changes density and may miss treetops. Confirm source CRS and metre units before interpreting heights or crown area. Coordinates, rasters, logs, and outputs from real data must stay out of Git and external services.
