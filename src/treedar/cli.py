@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import __version__, areas, chm, classify, features, io, jev, qc, segment, terrain, treemap
+from . import __version__, areas, chm, classify, features, io, jev, ortho, qc, segment, terrain, treemap
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -150,6 +150,19 @@ def cmd_map(args) -> int:
     return 0
 
 
+def cmd_ortho(args) -> int:
+    info = ortho.build(args.laz, args.out, cell=args.cell, bbox=_parse_bbox(args.bbox))
+    print(f"{info['cols']} x {info['rows']} px at {info['cell_m']} m, "
+          f"{info['filled_fraction']:.0%} of cells coloured -> {args.out}")
+    return 0
+
+
+def cmd_chips(args) -> int:
+    written = ortho.crown_chips(args.run_dir, args.ortho, args.out)
+    print(f"{len(written)} crown chips -> {args.out}")
+    return 0
+
+
 def cmd_pipeline(args) -> int:
     """One command: LAZ -> trees, areas, labels and classifier when named, tree map."""
     start = time.perf_counter()
@@ -196,7 +209,7 @@ def cmd_jev(args) -> int:
     report = jev.run(args.trees, args.features, args.labels, args.out, model=args.model,
                      workers=args.workers, include_unlabelled=args.all_trees,
                      min_accuracy=args.min_accuracy, min_coverage=args.min_coverage,
-                     split_csv=args.split_from)
+                     split_csv=args.split_from, chips_dir=args.chips)
     msg = (f"Jev ({report['model']}): {report['trees_sent']} trees, "
            f"{report['input_tokens']:,} input tokens, about ${report['estimated_cost_usd']:.4f}")
     ev = report.get("evaluation")
@@ -255,6 +268,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_map.add_argument("--predictions", default=None, help="predictions.csv from classify")
     p_map.set_defaults(func=cmd_map)
 
+    p_or = sub.add_parser("ortho", help="true orthophoto from point colour (GeoTIFF)")
+    p_or.add_argument("laz")
+    p_or.add_argument("--out", required=True, help="output .tif")
+    p_or.add_argument("--cell", type=float, default=0.1)
+    p_or.add_argument("--bbox", default=None)
+    p_or.set_defaults(func=cmd_ortho)
+
+    p_ch = sub.add_parser("chips", help="per-crown image chips from an ortho")
+    p_ch.add_argument("run_dir")
+    p_ch.add_argument("--ortho", required=True)
+    p_ch.add_argument("--out", required=True)
+    p_ch.set_defaults(func=cmd_chips)
+
     p_pipe = sub.add_parser("pipeline", help="one command from LAZ to tree map")
     add_run_args(p_pipe)
     p_pipe.add_argument("--area-types", default=None,
@@ -274,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cls.add_argument("--min-coverage", type=float, default=0.70)
     p_cls.set_defaults(func=cmd_classify)
 
-    p_jev = sub.add_parser("jev", help="ask TypeSafe Jev for tree types (sends features only, "
+    p_jev = sub.add_parser("jev", help="ask TypeSafe Jev for tree types (sends features, plus crown images with --chips; "
                                        "no coordinates; needs TYPESAFE_API_KEY and owner approval)")
     p_jev.add_argument("--trees", required=True)
     p_jev.add_argument("--features", required=True)
@@ -286,6 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="also send unlabelled trees (default: labelled trees only)")
     p_jev.add_argument("--min-accuracy", type=float, default=0.85)
     p_jev.add_argument("--min-coverage", type=float, default=0.70)
+    p_jev.add_argument("--chips", default=None,
+                       help="folder of crown chips (tree_<id>.png) to send as images (experimental)")
     p_jev.add_argument("--split-from", default=None,
                        help="predictions.csv from classify: reuse its development/final test split")
     p_jev.set_defaults(func=cmd_jev)

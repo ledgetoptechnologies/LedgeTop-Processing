@@ -26,12 +26,18 @@ def write_geojson(run_dir, out_path, predictions_csv=None) -> int:
     with rasterio.open(run_dir / "crowns.tif") as ds:
         labels = ds.read(1)
         transform, crs = ds.transform, ds.crs
-    feats = []
+    # A crown label can be split into disconnected pieces; collect them so each
+    # tree is exactly one Polygon or MultiPolygon feature.
+    pieces: dict[str, list] = {}
     for geom, value in rfeatures.shapes(labels, mask=labels > 0, transform=transform):
-        tid = str(int(value))
+        pieces.setdefault(str(int(value)), []).append(geom["coordinates"])
+    feats = []
+    for tid, rings in sorted(pieces.items(), key=lambda kv: int(kv[0])):
         t = trees.get(tid)
         if t is None:
             continue
+        geom = ({"type": "Polygon", "coordinates": rings[0]} if len(rings) == 1
+                else {"type": "MultiPolygon", "coordinates": rings})
         props = {"tree_id": int(tid), "height_m": float(t["height_m"]),
                  "crown_area_m2": float(t["crown_area_m2"]),
                  "crown_diameter_m": float(t["crown_diameter_m"])}
