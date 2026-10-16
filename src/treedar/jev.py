@@ -9,6 +9,7 @@ user-level value is also read if the current process predates it).
 
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import os
@@ -75,20 +76,35 @@ def tree_state(tree: dict, feat: dict) -> dict:
     }
 
 
-def request_body(state: dict, classes: dict, model: str) -> dict:
+IMAGE_REF = "crown-chip-7f3a"
+
+
+def request_body(state: dict, classes: dict, model: str, image_png: bytes | None = None) -> dict:
+    """Choice question over tree types plus unknown. With image_png, the crown's
+    top-down image (outlined in yellow) is attached as an asset referenced from
+    state; requests with images need the TypeSafe danger-zone image header."""
     criteria = dict(classes)
     criteria[classify.UNKNOWN] = "The measurements do not clearly indicate any of the other types"
-    return {"model": model, "state": state, "questions": {"tree_type": {
-        "type": "choice",
-        "instructions": "Which type of tree is this, based on its measurements in `survey` context?",
-        "criteria": criteria}}}
+    instructions = "Which type of tree is this, based on its measurements in `survey` context?"
+    body = {"model": model, "state": dict(state), "questions": {}}
+    if image_png is not None:
+        body["state"]["crown_image"] = IMAGE_REF
+        body["assets"] = {IMAGE_REF: {"type": "image", "format": "png",
+                                      "data_base64": base64.b64encode(image_png).decode()}}
+        instructions = ("Which type of tree is this? Use its measurements and `crown_image`, a "
+                        "top-down view of the crown (outlined in yellow) from the same survey.")
+    body["questions"]["tree_type"] = {"type": "choice", "instructions": instructions,
+                                      "criteria": criteria}
+    return body
 
 
 def _post(body: dict, key: str, retries: int = 4) -> dict:
     data = json.dumps(body).encode()
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    if "assets" in body:
+        headers["TypeSafe-Danger-Zone-Images"] = "true"  # experimental image support
     for attempt in range(retries + 1):
-        req = urllib.request.Request(API_URL, data=data, method="POST", headers={
-            "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        req = urllib.request.Request(API_URL, data=data, method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return json.loads(resp.read())
@@ -107,7 +123,7 @@ def _post(body: dict, key: str, retries: int = 4) -> dict:
 
 def run(trees_csv, features_csv, labels_csv, out_dir, classes=None, model="jev-latest",
         workers=4, include_unlabelled=False, min_accuracy=0.85, min_coverage=0.70,
-        post=None, split_csv=None) -> dict:
+        post=None, split_csv=None, chips_dir=None) -> dict:
     """Ask Jev about each (labelled) tree and score its answers.
 
     With `split_csv` (classify's predictions.csv), the confidence threshold is
@@ -132,7 +148,11 @@ def run(trees_csv, features_csv, labels_csv, out_dir, classes=None, model="jev-l
         post = lambda body: _post(body, key)  # noqa: E731
 
     def ask(tid):
-        return post(request_body(tree_state(trees[tid], feats[tid]), classes, model))
+        image = None
+        if chips_dir is not None:
+            chip = Path(chips_dir) / f"tree_{tid}.png"
+            image = chip.read_bytes() if chip.exists() else None
+        return post(request_body(tree_state(trees[tid], feats[tid]), classes, model, image))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         responses = list(pool.map(ask, ids))
@@ -153,7 +173,8 @@ def run(trees_csv, features_csv, labels_csv, out_dir, classes=None, model="jev-l
         w.writeheader()
         w.writerows(rows)
 
-    report = {"model": model_used, "trees_sent": len(ids), "input_tokens": tokens_in,
+    report = {"model": model_used, "trees_sent": len(ids), "with_images": chips_dir is not None,
+              "input_tokens": tokens_in,
               "output_tokens": tokens_out,
               "estimated_cost_usd": round(tokens_in / 1e6 * PRICE_PER_M_INPUT_TOKENS, 6),
               "price_note": "input-token list price only; check the TypeSafe bill for the actual amount"}
