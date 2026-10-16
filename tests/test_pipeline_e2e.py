@@ -102,6 +102,23 @@ def test_missing_input_fails_without_success_summary(tmp_path):
     assert not (out / "summary.json").exists()
 
 
+def test_no_qc_preserves_pipeline_outputs(tmp_path):
+    source = tmp_path / "forest.laz"
+    write_forest(source)
+    baseline, skipped = tmp_path / "baseline", tmp_path / "skipped"
+    normal = run_pipeline(source, baseline)
+    without_qc = run_pipeline(source, skipped, "--no-qc")
+    assert (baseline / "qc.json").is_file()
+    assert not (skipped / "qc.json").exists()
+    assert (baseline / "trees.csv").read_bytes() == (skipped / "trees.csv").read_bytes()
+    for name in ("dtm.tif", "chm.tif", "chm_raw.tif", "crowns.tif"):
+        with rasterio.open(baseline / name) as a, rasterio.open(skipped / name) as b:
+            np.testing.assert_array_equal(a.read(1), b.read(1))
+            assert a.transform == b.transform and a.crs == b.crs
+    for key in ("n_trees", "n_points_used", "params", "chm_filter", "version"):
+        assert normal[key] == without_qc[key]
+
+
 @pytest.mark.parametrize("option,value", [("--cell", "0"), ("--cell", "-1"), ("--step", "0")])
 def test_invalid_sampling_parameters_fail(tmp_path, option, value):
     source, out = tmp_path / "forest.laz", tmp_path / "result"
