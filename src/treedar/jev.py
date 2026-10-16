@@ -107,8 +107,12 @@ def _post(body: dict, key: str, retries: int = 4) -> dict:
 
 def run(trees_csv, features_csv, labels_csv, out_dir, classes=None, model="jev-latest",
         workers=4, include_unlabelled=False, min_accuracy=0.85, min_coverage=0.70,
-        post=None) -> dict:
+        post=None, split_csv=None) -> dict:
     """Ask Jev about each (labelled) tree and score its answers.
+
+    With `split_csv` (classify's predictions.csv), the confidence threshold is
+    chosen on the development trees and scored once on the same final test
+    trees as the local classifier.
 
     `post(body) -> response dict` can be injected for tests; by default the
     real API is called with TYPESAFE_API_KEY.
@@ -162,5 +166,14 @@ def run(trees_csv, features_csv, labels_csv, out_dir, classes=None, model="jev-l
         proba = np.array([[r.get(f"p_{c}", 0.0) for c in cls] for r in lab])
         report["evaluation"] = classify.evaluate(y, cls, proba, min_accuracy, min_coverage)
         report["evaluation"]["jev_chose_unknown"] = int(sum(r["predicted"] == classify.UNKNOWN for r in lab))
+        if split_csv:
+            part = {r["tree_id"]: r.get("partition", "") for r in classify._read_csv(split_csv)}
+            dev = np.array([part.get(r["tree_id"]) == "development" for r in lab])
+            test = np.array([part.get(r["tree_id"]) == "final_test" for r in lab])
+            if dev.any() and test.any():
+                dev_eval = classify.evaluate(y[dev], cls, proba[dev], min_accuracy, min_coverage)
+                threshold = dev_eval["chosen"]["threshold"] if dev_eval["chosen"] else 1.01
+                report["development"] = dev_eval
+                report["final_test"] = classify.at_threshold(y[test], cls, proba[test], threshold)
     (out / "jev_report.json").write_text(json.dumps(report, indent=2))
     return report
