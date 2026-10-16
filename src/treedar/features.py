@@ -11,6 +11,7 @@ within one flight, not across flights.
 from __future__ import annotations
 
 import numpy as np
+from scipy import ndimage
 
 from .grid import Grid
 
@@ -62,8 +63,15 @@ class _Groups:
         return [v[self.starts + np.floor((self.counts - 1) * q).astype(int)] for q in qs]
 
 
-def tree_features(points: dict, dtm, labels, transform, upper_fraction: float = 0.5) -> list[dict]:
-    """Return one feature row per crown label in `labels` (ids > 0)."""
+def tree_features(points: dict, dtm, labels, transform, upper_fraction: float = 0.5,
+                  chm=None, above_top_tolerance: float = 1.0) -> list[dict]:
+    """Return one feature row per crown label in `labels` (ids > 0).
+
+    With `chm` (the filtered canopy height model), each tree's top is its
+    maximum CHM value, so a raw outlier the CHM filter removed cannot set the
+    scale, and points more than `above_top_tolerance` m above that top are
+    dropped. Without it, the highest raw point in the crown is used.
+    """
     grid = Grid.from_transform(transform, labels.shape)
     x, y, z = points["x"], points["y"], points["z"]
     row, col = grid.rowcol(x, y)
@@ -75,11 +83,20 @@ def tree_features(points: dict, dtm, labels, transform, upper_fraction: float = 
         return []
     # Sort the selected points by label once; every array below is in that order.
     sel = sel[np.argsort(lab[sel], kind="stable")]
-    lab = lab[sel]
     hag = z[sel] - dtm[row[sel], col[sel]]
+    if chm is not None:
+        top_of = np.zeros(int(labels.max()) + 1)
+        ids = np.unique(lab[sel])
+        top_of[ids] = ndimage.maximum(chm, labels, ids)
+        keep = hag <= top_of[lab[sel]] + above_top_tolerance
+        sel, hag = sel[keep], hag[keep]
+        if sel.size == 0:
+            return []
+    lab = lab[sel]
     g = _Groups(lab)
+    top = g.max(hag) if chm is None else top_of[g.ids]
 
-    rel = np.clip(hag / np.maximum(g.broadcast(g.max(hag)), 1e-6), 0.0, 1.0)
+    rel = np.clip(hag / np.maximum(g.broadcast(top), 1e-6), 0.0, 1.0)
     upper = rel >= upper_fraction
 
     rel_std, rel_mean, n_points = g.std(rel)

@@ -64,7 +64,7 @@ def cmd_run(args) -> int:
     tops = segment.detect_treetops(canopy, transform, min_height=args.min_height)
     labels = segment.segment_crowns(canopy, tops, transform)
     trees = segment.tree_table(canopy, labels, transform)
-    tree_feats = features.tree_features(pts, dtm, labels, transform)
+    tree_feats = features.tree_features(pts, dtm, labels, transform, chm=canopy)
 
     _write_raster(out / "dtm.tif", dtm, transform, crs)
     _write_raster(out / "chm.tif", canopy, transform, crs)
