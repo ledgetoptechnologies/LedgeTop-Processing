@@ -73,6 +73,8 @@ def test_bare_ground_has_no_trees(tmp_path):
     assert run_pipeline(source, out)["n_trees"] == 0
     with (out / "trees.csv").open(newline="") as stream:
         assert list(csv.DictReader(stream)) == []
+    with (out / "tree_features.csv").open(newline="") as stream:
+        assert list(csv.DictReader(stream)) == []
     with rasterio.open(out / "crowns.tif") as crowns:
         assert not crowns.read(1).any()
 
@@ -111,6 +113,7 @@ def test_no_qc_preserves_pipeline_outputs(tmp_path):
     assert (baseline / "qc.json").is_file()
     assert not (skipped / "qc.json").exists()
     assert (baseline / "trees.csv").read_bytes() == (skipped / "trees.csv").read_bytes()
+    assert (baseline / "tree_features.csv").read_bytes() == (skipped / "tree_features.csv").read_bytes()
     for name in ("dtm.tif", "chm.tif", "chm_raw.tif", "crowns.tif"):
         with rasterio.open(baseline / name) as a, rasterio.open(skipped / name) as b:
             np.testing.assert_array_equal(a.read(1), b.read(1))
