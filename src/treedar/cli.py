@@ -51,8 +51,9 @@ def cmd_run(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     bbox = _parse_bbox(args.bbox)
 
-    report = qc.qc_report(args.laz)
-    (out / "qc.json").write_text(json.dumps(report, indent=2))
+    if not args.no_qc:
+        report = qc.qc_report(args.laz)
+        (out / "qc.json").write_text(json.dumps(report, indent=2))
     crs = io.read_crs(args.laz)
 
     pts = io.read_points(args.laz, bbox=bbox, step=args.step)
@@ -105,6 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--min-height", type=float, default=5.0)
     p_run.add_argument("--bbox", default=None, help="minx,miny,maxx,maxy in file CRS")
     p_run.add_argument("--step", type=int, default=1, help="keep every Nth point")
+    p_run.add_argument("--no-qc", action="store_true",
+                       help="skip the whole-file qc.json report (faster tile runs)")
     p_run.add_argument("--spike-threshold", type=float, default=5.0,
                        help="lower CHM cells this far above their 5x5 median (0 disables)")
     p_run.set_defaults(func=cmd_run)
