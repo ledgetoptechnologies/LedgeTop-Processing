@@ -65,3 +65,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .DS_Store
+
+# Local example datasets from Beau (never push)
+/Example Datasets/
