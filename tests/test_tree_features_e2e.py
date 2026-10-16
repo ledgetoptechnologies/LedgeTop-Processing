@@ -107,3 +107,38 @@ def test_unavailable_colour_is_blank_but_structure_present(tmp_path, rgb):
     for row in rows:
         assert all(row[name] == "" for name in COLOUR_COLUMNS)
         assert row["n_colour_points"] == ("0" if rgb else "")
+
+
+def test_high_outlier_does_not_rescale_crown_features(tmp_path):
+    clean_source, dirty_source = tmp_path / "clean.laz", tmp_path / "outlier.laz"
+    original = write_attributed_forest(clean_source)
+    # Duplicate a real upper-crown return one metre away from the apex and
+    # lift it by 20 m. Ground and all legitimate crown observations survive.
+    candidate = np.flatnonzero(
+        (np.asarray(original.classification) == 5)
+        & np.isclose(np.asarray(original.x), TREES[0].x + 1)
+        & np.isclose(np.asarray(original.y), TREES[0].y)
+    )
+    assert candidate.size == 1
+    dirty = laspy.LasData(original.header.copy())
+    dirty.points = laspy.ScaleAwarePointRecord.zeros(len(original.points) + 1, header=dirty.header)
+    dirty.points.array[:-1] = original.points.array
+    index = int(candidate[0])
+    dirty.points.array[-1:] = original.points.array[index:index + 1]
+    dirty.z[-1] += 20
+    dirty.write(dirty_source)
+
+    clean_out, dirty_out = tmp_path / "clean_result", tmp_path / "dirty_result"
+    run_pipeline(clean_source, clean_out)
+    summary = run_pipeline(dirty_source, dirty_out)
+    assert summary["chm_filter"]["spike_cells_lowered"] >= 1
+    _, clean = csv_rows(clean_out / "tree_features.csv")
+    _, contaminated = csv_rows(dirty_out / "tree_features.csv")
+    by_id = {row["tree_id"]: row for row in contaminated}
+    assert set(by_id) == {row["tree_id"] for row in clean}
+    for row in clean:
+        other = by_id[row["tree_id"]]
+        for name in ("n_points", "n_upper_points", "n_colour_points"):
+            assert other[name] == row[name]
+        for name in ("hag_p50_rel", "hag_p75_rel", "hag_p90_rel", "rcc_mean", "gcc_mean", "bcc_mean"):
+            assert float(other[name]) == pytest.approx(float(row[name]), abs=1e-4)
