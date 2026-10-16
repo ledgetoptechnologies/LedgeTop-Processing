@@ -12,7 +12,7 @@ Status as of 2026-10-16. Targets are in [milestone-1.md](milestone-1.md). Number
 | Type classifier (local) | 85%+ correct while labeling 70%+, held-out areas | Built and tested on synthetic data; no real labels yet. | Waiting on labels |
 | Calibration | Calibration table reported | Produced automatically by `treedar classify`. | Ready |
 | Jev comparison | Same held-out trees, same metrics, cost per 1,000 trees | Built (`treedar jev --split-from`). About 620 input tokens per tree, about $0.03 per 1,000 trees at list price. | Waiting on labels |
-| Engineering | One command, full site under 5 min, tests pass | `treedar pipeline` runs the 200M-point site in 95 s. Tests: see the latest PR. | Met |
+| Engineering | One command, full site under 5 min, tests pass | `treedar pipeline` runs the 200M-point site in 95 s (peak memory 24 GB, so much larger sites will need tiling). Tests: see the latest PR. | Met |
 
 ## Data quality (measured)
 
@@ -38,6 +38,12 @@ Visual review of the plot overlays suggests the default merges some neighbouring
 ## Unsupervised check (not evidence of accuracy)
 
 Clustering the 1,067 default detections on colour and structure, with no labels, produced spatially coherent groups: one group filled the regular plantation block, another the taller woodlot, another the edges and windbreaks. This suggests the features carry type information. It is not an accuracy result.
+
+## Tools ready for the comparison
+
+- `treedar classify` holds out whole named areas: development areas for cross-validation and threshold choice, and a separate final test set of areas scored once.
+- `treedar jev --split-from` scores Jev on the same final test trees with a threshold chosen on the development trees. `--chips` adds a top-down crown image per tree (experimental TypeSafe image support).
+- `treedar ortho` and `treedar chips` build a true orthophoto from point colour (aligned with the LiDAR crowns) and per-crown images. Todd's raw photos can replace this colour source when they arrive.
 
 ## What is needed to finish
 
