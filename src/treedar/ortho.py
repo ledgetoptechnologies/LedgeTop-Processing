@@ -54,9 +54,9 @@ def build(path, out_tif, cell: float = 0.1, bbox=None) -> dict:
     img8 = np.clip(rgb / np.maximum(white, 1) * 255, 0, 255).astype(np.uint8)
     img8[~filled] = 0
     img8 = img8.reshape(grid.rows, grid.cols, 3)
-    with rasterio.open(out_tif, "w", driver="GTiff", height=grid.rows, width=grid.cols, count=3,
+    with rasterio.open(out_tif, "w", driver="COG", height=grid.rows, width=grid.cols, count=3,
                        dtype="uint8", crs=crs.to_wkt() if crs else None, transform=grid.transform,
-                       compress="deflate", photometric="RGB") as dst:
+                       compress="deflate") as dst:
         for band in range(3):
             dst.write(img8[:, :, band], band + 1)
     return {"cell_m": cell, "rows": grid.rows, "cols": grid.cols,
