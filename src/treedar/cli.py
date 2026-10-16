@@ -1,4 +1,4 @@
-"""Command line entry point: `treedar qc` and `treedar run`."""
+"""Command line entry point for the TreeDar pipeline."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import __version__, chm, features, io, qc, segment, terrain
+from . import __version__, areas, chm, classify, features, io, jev, ortho, qc, segment, terrain, treemap
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -46,6 +46,12 @@ def cmd_qc(args) -> int:
 
 
 def cmd_run(args) -> int:
+    process(args)
+    return 0
+
+
+def process(args) -> dict:
+    """LAZ to rasters, trees.csv, tree_features.csv and summary.json in args.out."""
     start = time.perf_counter()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -92,6 +98,132 @@ def cmd_run(args) -> int:
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"{len(trees)} trees from {summary['n_points_used']:,} points "
           f"in {summary['runtime_s']} s -> {out}")
+    return summary
+
+
+def cmd_areas(args) -> int:
+    run_dir = Path(args.run_dir)
+    with rasterio.open(run_dir / "chm.tif") as ds:
+        canopy, transform, crs = ds.read(1), ds.transform, ds.crs
+    area_map, names = areas.delineate(canopy, transform, min_height=args.min_height)
+    trees = classify._read_csv(run_dir / "trees.csv")
+    rows = areas.tree_areas(trees, area_map, names, transform)
+    _write_raster(run_dir / "areas.tif", area_map, transform, crs, nodata=0)
+    areas.write_csv(run_dir / "tree_areas.csv", rows, ["tree_id", "area"])
+    counts = {n: 0 for n in names.values()}
+    for r in rows:
+        if r["area"]:
+            counts[r["area"]] += 1
+    template = run_dir / "area_types.csv"
+    if not template.exists():  # never overwrite names the owner already filled in
+        areas.write_csv(template, [{"area": n, "label": "", "n_trees": c} for n, c in counts.items()],
+                        ["area", "label", "n_trees"])
+    areas.render(canopy, area_map, names, run_dir / "areas.png",
+                 title="Tree areas: name what grows in each (skip if unsure)")
+    print(f"{len(names)} areas, {sum(counts.values())} trees assigned -> {run_dir / 'areas.png'}; "
+          f"fill in {template}")
+    return 0
+
+
+def make_labels(run_dir: Path, area_types_csv) -> Path:
+    types = areas.read_area_types(area_types_csv)
+    rows = areas.labels_from_areas(classify._read_csv(run_dir / "tree_areas.csv"), types)
+    path = run_dir / "labels.csv"
+    areas.write_csv(path, rows, ["tree_id", "label", "group"])
+    print(f"{len(rows)} labelled trees from {len(types)} named areas -> {path}")
+    return path
+
+
+def cmd_labels(args) -> int:
+    make_labels(Path(args.run_dir), args.area_types)
+    return 0
+
+
+def make_map(run_dir: Path, predictions_csv=None):
+    n = treemap.write_geojson(run_dir, run_dir / "tree_map.geojson", predictions_csv)
+    treemap.render_preview(run_dir, run_dir / "tree_map.png", predictions_csv)
+    print(f"{n} crowns -> {run_dir / 'tree_map.geojson'}, {run_dir / 'tree_map.png'}")
+
+
+def cmd_map(args) -> int:
+    make_map(Path(args.run_dir), args.predictions)
+    return 0
+
+
+def cmd_ortho(args) -> int:
+    info = ortho.build(args.laz, args.out, cell=args.cell, bbox=_parse_bbox(args.bbox))
+    print(f"{info['cols']} x {info['rows']} px at {info['cell_m']} m, "
+          f"{info['filled_fraction']:.0%} of cells coloured -> {args.out}")
+    return 0
+
+
+def cmd_chips(args) -> int:
+    written = ortho.crown_chips(args.run_dir, args.ortho, args.out)
+    print(f"{len(written)} crown chips -> {args.out}")
+    return 0
+
+
+def cmd_pipeline(args) -> int:
+    """One command: LAZ -> trees, areas, labels and classifier when named, tree map."""
+    start = time.perf_counter()
+    process(args)
+    run_dir = Path(args.out)
+    cmd_areas(argparse.Namespace(run_dir=run_dir, min_height=3.0))
+    predictions = None
+    if args.area_types:
+        labels_csv = make_labels(run_dir, args.area_types)
+        cmd_classify(argparse.Namespace(
+            trees=run_dir / "trees.csv", features=run_dir / "tree_features.csv",
+            labels=labels_csv, out=run_dir / "classify", block_m=args.block_m,
+            min_accuracy=args.min_accuracy, min_coverage=args.min_coverage))
+        predictions = run_dir / "classify" / "predictions.csv"
+    make_map(run_dir, predictions)
+    print(f"pipeline finished in {time.perf_counter() - start:.0f} s")
+    return 0
+
+
+def cmd_classify(args) -> int:
+    report = classify.run(args.trees, args.features, args.labels, args.out, block_m=args.block_m,
+                          min_accuracy=args.min_accuracy, min_coverage=args.min_coverage)
+    cv = report["cross_validation"]
+    chosen = cv["chosen"]
+    msg = (f"{report['labelled_blocks']} label groups ({report['grouping']}): "
+           f"{report['development_groups']} development, {report['final_test_groups']} final test. "
+           f"Development CV on {cv['n_labelled']} trees: {cv['accuracy_all']:.1%} with no unknowns")
+    if chosen:
+        msg += f"; threshold {chosen['threshold']:.2f} chosen"
+    else:
+        msg += f"; no threshold reaches {args.min_accuracy:.0%}, all predictions set to unknown"
+    final = report.get("final_test")
+    if final:
+        ft = final["at_threshold"]
+        acc = "n/a" if ft["accuracy"] is None else f"{ft['accuracy']:.1%}"
+        msg += f". FINAL TEST on {ft['n']} held-out trees: {acc} correct, {ft['coverage']:.1%} labelled"
+    else:
+        msg += ". No independent final test (too few label groups)"
+    print(msg + f" -> {args.out}")
+    return 0
+
+
+def cmd_jev(args) -> int:
+    report = jev.run(args.trees, args.features, args.labels, args.out, model=args.model,
+                     workers=args.workers, include_unlabelled=args.all_trees,
+                     min_accuracy=args.min_accuracy, min_coverage=args.min_coverage,
+                     split_csv=args.split_from, chips_dir=args.chips)
+    msg = (f"Jev ({report['model']}): {report['trees_sent']} trees, "
+           f"{report['input_tokens']:,} input tokens, about ${report['estimated_cost_usd']:.4f}")
+    ev = report.get("evaluation")
+    if ev:
+        msg += f"; accuracy {ev['accuracy_all']:.1%} on {ev['n_labelled']} labelled trees"
+        if ev["chosen"]:
+            msg += (f"; at confidence >= {ev['chosen']['threshold']:.2f}: "
+                    f"{ev['chosen']['accuracy']:.1%} correct, {ev['chosen']['coverage']:.1%} labelled")
+    ft = report.get("final_test")
+    if ft:
+        acc = "n/a" if ft["accuracy"] is None else f"{ft['accuracy']:.1%}"
+        msg += (f". FINAL TEST on {ft['n']} held-out trees at development threshold "
+                f"{ft['threshold']:.2f}: {acc} correct, {ft['coverage']:.1%} labelled")
+    print(msg + f" -> {args.out}")
     return 0
 
 
@@ -105,18 +237,86 @@ def build_parser() -> argparse.ArgumentParser:
     p_qc.add_argument("--out", required=True)
     p_qc.set_defaults(func=cmd_qc)
 
-    p_run = sub.add_parser("run", help="DTM, CHM, treetops and crowns")
-    p_run.add_argument("laz")
-    p_run.add_argument("--out", required=True)
-    p_run.add_argument("--cell", type=float, default=0.5)
-    p_run.add_argument("--min-height", type=float, default=5.0)
-    p_run.add_argument("--bbox", default=None, help="minx,miny,maxx,maxy in file CRS")
-    p_run.add_argument("--step", type=int, default=1, help="keep every Nth point")
-    p_run.add_argument("--no-qc", action="store_true",
+    def add_run_args(p):
+        p.add_argument("laz")
+        p.add_argument("--out", required=True)
+        p.add_argument("--cell", type=float, default=0.5)
+        p.add_argument("--min-height", type=float, default=5.0)
+        p.add_argument("--bbox", default=None, help="minx,miny,maxx,maxy in file CRS")
+        p.add_argument("--step", type=int, default=1, help="keep every Nth point")
+        p.add_argument("--no-qc", action="store_true",
                        help="skip the whole-file qc.json report (faster tile runs)")
-    p_run.add_argument("--spike-threshold", type=float, default=5.0,
+        p.add_argument("--spike-threshold", type=float, default=5.0,
                        help="lower CHM cells this far above their 5x5 median (0 disables)")
+
+    p_run = sub.add_parser("run", help="DTM, CHM, treetops, crowns and tree features")
+    add_run_args(p_run)
     p_run.set_defaults(func=cmd_run)
+
+    p_areas = sub.add_parser("areas", help="named tree areas and a labelling template")
+    p_areas.add_argument("run_dir", help="output folder of `treedar run`")
+    p_areas.add_argument("--min-height", type=float, default=3.0)
+    p_areas.set_defaults(func=cmd_areas)
+
+    p_lab = sub.add_parser("labels", help="tree labels from owner-named areas")
+    p_lab.add_argument("run_dir")
+    p_lab.add_argument("--area-types", required=True, help="CSV with area,label")
+    p_lab.set_defaults(func=cmd_labels)
+
+    p_map = sub.add_parser("map", help="crown polygons (GeoJSON) and preview image")
+    p_map.add_argument("run_dir")
+    p_map.add_argument("--predictions", default=None, help="predictions.csv from classify")
+    p_map.set_defaults(func=cmd_map)
+
+    p_or = sub.add_parser("ortho", help="true orthophoto from point colour (GeoTIFF)")
+    p_or.add_argument("laz")
+    p_or.add_argument("--out", required=True, help="output .tif")
+    p_or.add_argument("--cell", type=float, default=0.1)
+    p_or.add_argument("--bbox", default=None)
+    p_or.set_defaults(func=cmd_ortho)
+
+    p_ch = sub.add_parser("chips", help="per-crown image chips from an ortho")
+    p_ch.add_argument("run_dir")
+    p_ch.add_argument("--ortho", required=True)
+    p_ch.add_argument("--out", required=True)
+    p_ch.set_defaults(func=cmd_chips)
+
+    p_pipe = sub.add_parser("pipeline", help="one command from LAZ to tree map")
+    add_run_args(p_pipe)
+    p_pipe.add_argument("--area-types", default=None,
+                        help="CSV with area,label; if given, train and apply the classifier")
+    p_pipe.add_argument("--block-m", type=float, default=50.0)
+    p_pipe.add_argument("--min-accuracy", type=float, default=0.85)
+    p_pipe.add_argument("--min-coverage", type=float, default=0.70)
+    p_pipe.set_defaults(func=cmd_pipeline)
+    p_cls = sub.add_parser("classify", help="train and cross-validate a tree type classifier")
+    p_cls.add_argument("--trees", required=True, help="trees.csv from run")
+    p_cls.add_argument("--features", required=True, help="tree_features.csv from run")
+    p_cls.add_argument("--labels", required=True, help="CSV with tree_id,label (trusted labels only)")
+    p_cls.add_argument("--out", required=True)
+    p_cls.add_argument("--block-m", type=float, default=50.0,
+                       help="spatial block size for cross-validation (metres)")
+    p_cls.add_argument("--min-accuracy", type=float, default=0.85)
+    p_cls.add_argument("--min-coverage", type=float, default=0.70)
+    p_cls.set_defaults(func=cmd_classify)
+
+    p_jev = sub.add_parser("jev", help="ask TypeSafe Jev for tree types (sends features, plus crown images with --chips; "
+                                       "no coordinates; needs TYPESAFE_API_KEY and owner approval)")
+    p_jev.add_argument("--trees", required=True)
+    p_jev.add_argument("--features", required=True)
+    p_jev.add_argument("--labels", required=True)
+    p_jev.add_argument("--out", required=True)
+    p_jev.add_argument("--model", default="jev-latest")
+    p_jev.add_argument("--workers", type=int, default=4)
+    p_jev.add_argument("--all-trees", action="store_true",
+                       help="also send unlabelled trees (default: labelled trees only)")
+    p_jev.add_argument("--min-accuracy", type=float, default=0.85)
+    p_jev.add_argument("--min-coverage", type=float, default=0.70)
+    p_jev.add_argument("--chips", default=None,
+                       help="folder of crown chips (tree_<id>.png) to send as images (experimental)")
+    p_jev.add_argument("--split-from", default=None,
+                       help="predictions.csv from classify: reuse its development/final test split")
+    p_jev.set_defaults(func=cmd_jev)
     return parser
 
 
@@ -124,7 +324,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
         print(f"treedar: error: {exc}", file=sys.stderr)
         return 2
 
