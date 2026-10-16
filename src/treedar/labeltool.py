@@ -123,9 +123,10 @@ function render() {
   document.getElementById("count").textContent = `${Object.keys(picks).length} of ${ITEMS.length} reviewed, ${n} labelled (` +
     Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(", ") + ")";
 }
-function pick(i, v) { picks[ITEMS[i].id] = v; save(); active = Math.min(i + 1, ITEMS.length - 1); render();
+function pick(i, v) { if (!ITEMS.length || i < 0 || i >= ITEMS.length) return; picks[ITEMS[i].id] = v; save(); active = Math.min(i + 1, ITEMS.length - 1); render();
   grid.children[active]?.scrollIntoView({block: "nearest"}); }
 document.addEventListener("keydown", e => {
+  if (!ITEMS.length) return;
   if (["1","2","3"].includes(e.key)) pick(active, CHOICES[+e.key - 1][0]);
   else if (e.key === "ArrowRight" || e.key === "ArrowDown") { active = Math.min(active + 1, ITEMS.length - 1); render(); }
   else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { active = Math.max(active - 1, 0); render(); }
