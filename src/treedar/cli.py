@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import __version__, chm, io, qc, segment, terrain
+from . import __version__, chm, features, io, qc, segment, terrain
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -64,6 +64,7 @@ def cmd_run(args) -> int:
     tops = segment.detect_treetops(canopy, transform, min_height=args.min_height)
     labels = segment.segment_crowns(canopy, tops, transform)
     trees = segment.tree_table(canopy, labels, transform)
+    tree_feats = features.tree_features(pts, dtm, labels, transform)
 
     _write_raster(out / "dtm.tif", dtm, transform, crs)
     _write_raster(out / "chm.tif", canopy, transform, crs)
@@ -73,6 +74,11 @@ def cmd_run(args) -> int:
         writer = csv.DictWriter(fh, fieldnames=TREE_COLUMNS)
         writer.writeheader()
         writer.writerows(trees)
+
+    with open(out / "tree_features.csv", "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=features.FEATURE_COLUMNS)
+        writer.writeheader()
+        writer.writerows(tree_feats)
 
     summary = {
         "n_trees": len(trees),
