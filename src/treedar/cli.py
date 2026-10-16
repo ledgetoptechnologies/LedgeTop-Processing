@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import __version__, chm, io, qc, segment, terrain
+from . import __version__, chm, features, io, qc, segment, terrain
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -51,8 +51,9 @@ def cmd_run(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     bbox = _parse_bbox(args.bbox)
 
-    report = qc.qc_report(args.laz)
-    (out / "qc.json").write_text(json.dumps(report, indent=2))
+    if not args.no_qc:
+        report = qc.qc_report(args.laz)
+        (out / "qc.json").write_text(json.dumps(report, indent=2))
     crs = io.read_crs(args.laz)
 
     pts = io.read_points(args.laz, bbox=bbox, step=args.step)
@@ -63,6 +64,7 @@ def cmd_run(args) -> int:
     tops = segment.detect_treetops(canopy, transform, min_height=args.min_height)
     labels = segment.segment_crowns(canopy, tops, transform)
     trees = segment.tree_table(canopy, labels, transform)
+    tree_feats = features.tree_features(pts, dtm, labels, transform, chm=canopy)
 
     _write_raster(out / "dtm.tif", dtm, transform, crs)
     _write_raster(out / "chm.tif", canopy, transform, crs)
@@ -72,6 +74,11 @@ def cmd_run(args) -> int:
         writer = csv.DictWriter(fh, fieldnames=TREE_COLUMNS)
         writer.writeheader()
         writer.writerows(trees)
+
+    with open(out / "tree_features.csv", "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=features.FEATURE_COLUMNS)
+        writer.writeheader()
+        writer.writerows(tree_feats)
 
     summary = {
         "n_trees": len(trees),
@@ -105,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--min-height", type=float, default=5.0)
     p_run.add_argument("--bbox", default=None, help="minx,miny,maxx,maxy in file CRS")
     p_run.add_argument("--step", type=int, default=1, help="keep every Nth point")
+    p_run.add_argument("--no-qc", action="store_true",
+                       help="skip the whole-file qc.json report (faster tile runs)")
     p_run.add_argument("--spike-threshold", type=float, default=5.0,
                        help="lower CHM cells this far above their 5x5 median (0 disables)")
     p_run.set_defaults(func=cmd_run)
