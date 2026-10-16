@@ -36,6 +36,8 @@ def build(path, out_tif, cell: float = 0.1, bbox=None) -> dict:
         r, g, b = (np.asarray(chunk[c]) for c in ("red", "green", "blue"))
         idx = grid.flat_index(x, y)
         ok = (idx >= 0) & ((r.astype(np.uint32) + g + b) > 0)
+        if bbox is not None:  # spatial queries and full scans can both return extra points
+            ok &= (x >= bbox[0]) & (x <= bbox[2]) & (y >= bbox[1]) & (y <= bbox[3])
         if not ok.any():
             continue
         idx, z, r, g, b = idx[ok], z[ok], r[ok], g[ok], b[ok]

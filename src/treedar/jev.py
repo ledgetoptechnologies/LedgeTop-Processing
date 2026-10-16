@@ -1,9 +1,11 @@
 """Compare TypeSafe Jev against the local classifier on the same trees.
 
 Each tree is sent as a small text/JSON description of its measured features
-with a Choice question over the tree types plus "unknown". No coordinates,
-tree ids, imagery or file names are sent. Jev answers are predictions, never
-labels. Requires the TYPESAFE_API_KEY environment variable (on Windows the
+with a Choice question over the tree types plus "unknown". In the default text
+mode no coordinates, tree ids, imagery or file names are sent. In chip mode
+(explicitly requested with `chips_dir` / `--chips`), the tree's top-down crown
+image is also sent, using TypeSafe's experimental image support; it still
+carries no coordinates or ids. Jev answers are predictions, never labels. Requires the TYPESAFE_API_KEY environment variable (on Windows the
 user-level value is also read if the current process predates it).
 """
 
