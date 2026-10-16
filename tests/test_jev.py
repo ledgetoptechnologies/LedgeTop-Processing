@@ -120,6 +120,50 @@ def test_all_trees_sends_unlabelled_but_scores_only_labels(tree_tables, tmp_path
     assert report["output_tokens"] == 17
 
 
+@pytest.mark.parametrize("final_response", ["wrong-confident", "unknown"])
+def test_split_threshold_uses_development_only(tree_tables, tmp_path, final_response):
+    trees, features, labels, source_rows = tree_tables
+    split = tmp_path / "split.csv"
+    write_csv(split, ["tree_id", "partition", "cv_group"], [
+        {"tree_id": row["tree_id"], "partition": part, "cv_group": index}
+        for index, (row, part) in enumerate(zip(
+            source_rows, ["development", "development", "final_test", ""]
+        ))
+    ])
+
+    def fake_post(body):
+        height = body["state"]["tree_height_m"]
+        if height != 13:
+            return response_for_height(height)
+        response = response_for_height(13)
+        if final_response == "wrong-confident":
+            answer = {"choice": "broadleaf", "confidence": .9,
+                      "probabilities": {"conifer": .05, "broadleaf": .9, "unknown": .05}}
+        else:
+            answer = {"choice": "unknown", "confidence": .8,
+                      "probabilities": {"conifer": .1, "broadleaf": .1, "unknown": .8}}
+        response["answers"]["tree_type"] = answer
+        return response
+
+    report = jev.run(trees, features, labels, tmp_path / "split_result", post=fake_post,
+                     split_csv=split, workers=1)
+    development = report["development"]
+    final = report["final_test"]
+    assert development["n_labelled"] == 2
+    assert development["chosen"]["threshold"] == .3
+    assert final["threshold"] == development["chosen"]["threshold"]
+    assert final["n"] == 1
+    if final_response == "wrong-confident":
+        # Including this confident wrong final-test tree in threshold selection
+        # would eliminate the development choice instead of freezing it.
+        assert report["evaluation"]["chosen"] is None
+        assert final["n_labelled"] == 1 and final["accuracy"] == 0
+        assert final["coverage"] == 1
+    else:
+        assert final["n_labelled"] == 0 and final["accuracy"] is None
+        assert final["coverage"] == 0
+
+
 def test_cli_missing_key_fails_without_registry_or_network_access(tree_tables, tmp_path, monkeypatch, capsys):
     trees, features, labels, _ = tree_tables
     monkeypatch.setenv("TYPESAFE_API_KEY", "")

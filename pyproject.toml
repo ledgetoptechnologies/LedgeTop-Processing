@@ -17,6 +17,7 @@ dependencies = [
   "pyproj>=3.7,<4",
   "rasterio>=1.4,<2",
   "affine>=2.4,<3",
+  "matplotlib>=3.11,<4",
 ]
 
 [project.optional-dependencies]
