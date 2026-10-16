@@ -6,6 +6,12 @@ intensity use only upper-crown points (height above ground at least
 Points without camera colour (R = G = B = 0) are ignored for colour features.
 Colour comes from the LiDAR unit's camera and is uncalibrated: compare trees
 within one flight, not across flights.
+
+Shape features follow the conifer/broadleaf literature: skewness and kurtosis
+of relative heights, the Clark-Evans aggregation index of upper-crown points
+in plan view (mean nearest-neighbour distance over its expectation for a
+random pattern; below 1 is clustered, above 1 regular), and eigenvalue
+linearity, planarity and sphericity of upper-crown points in 3D.
 """
 
 from __future__ import annotations
@@ -21,7 +27,10 @@ FEATURE_COLUMNS = [
     "second_return_frac", "intensity_mean", "intensity_cv",
     "red_mean", "green_mean", "blue_mean",
     "rcc_mean", "gcc_mean", "bcc_mean", "exg_mean", "gcc_std",
+    "hag_skew", "hag_kurt", "clark_evans", "linearity", "planarity", "sphericity",
 ]
+
+SHAPE_SAMPLE = 2000  # upper-crown points per tree used for the shape features
 
 
 class _Groups:
@@ -61,6 +70,46 @@ class _Groups:
         v = np.asarray(values, dtype=np.float64)
         v = v[np.argsort(run * 2.0 + v)]  # label runs stay apart because v <= 1
         return [v[self.starts + np.floor((self.counts - 1) * q).astype(int)] for q in qs]
+
+
+def _shape_features(g, x, y, hag, rel, upper, sample=SHAPE_SAMPLE) -> dict:
+    """Per-tree skew/kurtosis of relative height, Clark-Evans index and
+    eigenvalue shape features. Arrays are in label-sorted order."""
+    from scipy.spatial import ConvexHull, QhullError, cKDTree
+    n = g.ids.size
+    out = {k: np.full(n, np.nan) for k in
+           ("hag_skew", "hag_kurt", "clark_evans", "linearity", "planarity", "sphericity")}
+    mean, _ = g.mean(rel)
+    std = np.sqrt(np.maximum(g.mean(rel * rel)[0] - mean * mean, 0.0))
+    d = rel - g.broadcast(mean)
+    sd = g.broadcast(np.where(std > 0, std, np.nan))
+    with np.errstate(invalid="ignore"):
+        out["hag_skew"] = g.mean((d / sd) ** 3)[0]
+        out["hag_kurt"] = g.mean((d / sd) ** 4)[0] - 3.0
+    ends = np.append(g.starts[1:], g.size)
+    for i, (a, b) in enumerate(zip(g.starts, ends)):
+        idx = a + np.flatnonzero(upper[a:b])
+        if idx.size < 10:
+            continue
+        if idx.size > sample:  # even subsample keeps runs deterministic
+            idx = idx[np.linspace(0, idx.size - 1, sample).astype(int)]
+        xy = np.c_[x[idx], y[idx]]
+        xy = np.unique(xy, axis=0)  # duplicate XY would make nearest distance 0
+        if len(xy) >= 10:
+            try:
+                area = ConvexHull(xy).volume  # 2D hull "volume" is its area
+            except QhullError:
+                area = 0.0
+            if area > 0:
+                dist, _ = cKDTree(xy).query(xy, k=2)
+                out["clark_evans"][i] = dist[:, 1].mean() / (0.5 * np.sqrt(area / len(xy)))
+        pts = np.c_[x[idx], y[idx], hag[idx]]
+        ev = np.sort(np.linalg.eigvalsh(np.cov(pts.T)))[::-1]
+        if ev[0] > 0:
+            out["linearity"][i] = (ev[0] - ev[1]) / ev[0]
+            out["planarity"][i] = (ev[1] - ev[2]) / ev[0]
+            out["sphericity"][i] = ev[2] / ev[0]
+    return out
 
 
 def tree_features(points: dict, dtm, labels, transform, upper_fraction: float = 0.5,
@@ -128,6 +177,8 @@ def tree_features(points: dict, dtm, labels, transform, upper_fraction: float = 
         cols["bcc_mean"], _ = g.mean(bcc, coloured)
         cols["exg_mean"], _ = g.mean(2 * gcc - rcc - bcc, coloured)
         cols["gcc_std"], cols["gcc_mean"], _ = g.std(gcc, coloured)
+
+    cols.update(_shape_features(g, x[sel], y[sel], hag, rel, upper))
 
     out = []
     for i, tid in enumerate(g.ids):
