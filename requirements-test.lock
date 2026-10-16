@@ -1,0 +1,27 @@
+# Tested on Windows x86-64, CPython 3.13.14.
+# Install with scripts/setup.ps1; other Python/OS resolutions are unverified.
+affine==2.4.0
+attrs==26.1.0
+certifi==2026.7.22
+click==8.5.0
+colorama==0.4.6
+ImageIO==2.38.1
+iniconfig==2.3.1
+laspy==2.7.0
+lazrs==0.8.2
+lazy-loader==0.6
+networkx==3.7
+numpy==2.5.4
+packaging==26.3
+pillow==12.3.0
+pip==26.1.2
+pluggy==1.7.0
+Pygments==2.21.0
+pyparsing==3.3.3
+pyproj==3.8.0
+pytest==9.1.1
+rasterio==1.5.2
+scikit-image==0.26.0
+scipy==1.18.1
+setuptools==84.0.0
+tifffile==2026.10.15
