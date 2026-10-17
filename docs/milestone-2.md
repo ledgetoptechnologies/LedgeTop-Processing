@@ -16,6 +16,24 @@ Find which processing and flight settings actually change TreeDar's results on B
 | 4 | Flight trajectory from Todd | Check flight-line alignment and scan angle against the trajectory directly | Strip offsets by line, density by scan angle |
 | 5 | A leaf-off flight of the same property (spring) | Ground model and stem detection under the hardwoods | Ground model change in the woodlot, detection recall, broadleaf vs conifer separation |
 
+## Results so far
+
+### Experiment 2 (first look): ROCK export with and without the "50/50" range gate
+
+Same flight of Beau's property, two ROCK exports, same TreeDar settings (2026-10-17):
+
+| Measure | With 50/50 range gate | Without (original, narrower) |
+|---|---|---|
+| Points | 199.9 million | 155.9 million (22% fewer) |
+| Median density, all returns | 1,040 per m2 | 874 per m2 |
+| Second-return share | 10.8% | 10.8% |
+| Flight-line agreement (median / 95th percentile) | 0.5 / 2.3 cm | 0.4 / 2.3 cm |
+| Trees detected | 1,067 | 988 (7% fewer) |
+| Tree height median / 95th percentile | 10.5 / 16.5 m | 10.6 / 16.6 m |
+| Single-cell spikes removed from the canopy model | 954 | 535 |
+
+88% of trees found in the 50/50 export have a tree within 1.5 m in the other export, and matched heights agree (median difference 0.00 m, 95% within 0.21 m). The 50/50 export adds points and detections and also more isolated high spikes. Which export gives the more correct tree count cannot be decided until the audit plots are hand counted.
+
 ## Notes
 
 - ROCK documents a range gate (minimum and maximum distance from the sensor kept in the output; R3 Pro defaults 8 m and 65 m) and an angle gate. What "50/50" means in Todd's export is not yet confirmed. It may refer to settings or to the flight plan (the file name also contains "5050"). Ask Todd for the exact range gate, angle gate, altitude and overlap values.
