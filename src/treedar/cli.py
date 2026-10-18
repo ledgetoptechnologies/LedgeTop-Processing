@@ -12,8 +12,8 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import (__version__, areas, chm, classify, features, io, jev, labeltool, ortho, qc,
-               runinfo, segment, terrain, treemap)
+from . import (__version__, areas, benchmark, chm, classify, features, io, jev, labeltool,
+               ortho, qc, runinfo, segment, terrain, treemap)
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -171,6 +171,16 @@ def cmd_labelpage(args) -> int:
     return 0
 
 
+def cmd_benchmark(args) -> int:
+    r = benchmark.evaluate_run(args.reference, args.run_dir, max_dist_m=args.max_dist,
+                               max_dz_m=args.max_dz, min_height=args.min_height)
+    fmt = lambda v: "n/a" if v is None else f"{v:.1%}"  # noqa: E731
+    print(f"{r['reference']}: {r['n_reference']} reference trees >= {r['min_height_m']} m, "
+          f"{r['n_detected']} detected; recall {fmt(r['recall'])}, precision {fmt(r['precision'])}, "
+          f"F1 {fmt(r['f1'])} -> {Path(args.run_dir) / 'benchmark.json'}")
+    return 0
+
+
 def cmd_pipeline(args) -> int:
     """One command: LAZ -> trees, areas, labels and classifier when named, tree map."""
     start = time.perf_counter()
@@ -307,6 +317,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_lp.add_argument("--per-area", type=int, default=15)
     p_lp.add_argument("--seed", type=int, default=0)
     p_lp.set_defaults(func=cmd_labelpage)
+
+    p_bm = sub.add_parser("benchmark", help="score detections against a hand-segmented reference")
+    p_bm.add_argument("reference", help="LAS/LAZ with a per-point treeID field (0 = no tree)")
+    p_bm.add_argument("run_dir", help="TreeDar run folder for the same area")
+    p_bm.add_argument("--max-dist", type=float, default=1.5, help="max horizontal match distance (m)")
+    p_bm.add_argument("--max-dz", type=float, default=3.0, help="max height difference for a match (m)")
+    p_bm.add_argument("--min-height", type=float, default=5.0)
+    p_bm.set_defaults(func=cmd_benchmark)
 
     p_rep = sub.add_parser("report", help="(re)build report.html for a run folder")
     p_rep.add_argument("run_dir")
