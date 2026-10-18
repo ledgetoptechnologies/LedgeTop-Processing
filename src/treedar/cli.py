@@ -69,7 +69,9 @@ def process(args) -> dict:
                                         classification=pts.get("classification"))
     raw = chm.max_height_grid(pts["x"], pts["y"], pts["z"], dtm, transform, cell=args.cell)
     canopy, chm_stats = chm.filter_pits_and_spikes(raw, spike_threshold=args.spike_threshold)
-    tops = segment.detect_treetops(canopy, transform, min_height=args.min_height)
+    preset = segment.WINDOW_PRESETS[args.preset]
+    window = {k: (getattr(args, k) if getattr(args, k) is not None else v) for k, v in preset.items()}
+    tops = segment.detect_treetops(canopy, transform, min_height=args.min_height, **window)
     labels = segment.segment_crowns(canopy, tops, transform)
     trees = segment.tree_table(canopy, labels, transform)
     tree_feats = features.tree_features(pts, dtm, labels, transform, chm=canopy)
@@ -93,7 +95,7 @@ def process(args) -> dict:
         "n_points_used": int(pts["x"].size),
         "runtime_s": round(time.perf_counter() - start, 1),
         "params": {"cell": args.cell, "min_height": args.min_height,
-                   "bbox": bbox, "step": args.step},
+                   "bbox": bbox, "step": args.step, "preset": args.preset, **window},
         "chm_filter": chm_stats,
         "version": __version__,
     }
@@ -277,6 +279,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="skip the whole-file qc.json report (faster tile runs)")
         p.add_argument("--spike-threshold", type=float, default=5.0,
                        help="lower CHM cells this far above their 5x5 median (0 disables)")
+        p.add_argument("--preset", choices=sorted(segment.WINDOW_PRESETS), default="broadleaf",
+                       help="treetop search settings: broadleaf (wide crowns, original default) or "
+                            "conifer (tuned on FOR-instance conifer plots)")
+        p.add_argument("--window-base", dest="window_base_m", type=float, default=None,
+                       help="override: treetop window diameter at height 0 (m)")
+        p.add_argument("--window-slope", dest="window_slope", type=float, default=None,
+                       help="override: window diameter increase per metre of height")
+        p.add_argument("--smooth", dest="smooth_sigma_m", type=float, default=None,
+                       help="override: CHM smoothing sigma before treetop search (m)")
 
     p_run = sub.add_parser("run", help="DTM, CHM, treetops, crowns and tree features")
     add_run_args(p_run)
