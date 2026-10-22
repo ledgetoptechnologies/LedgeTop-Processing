@@ -55,7 +55,7 @@ def test_score_metrics_height_errors_and_half_open_bins():
     assert result["recall"] == 0.75
     assert result["precision"] == 0.6
     assert result["f1"] == 0.6667
-    assert result["height_error_median_m"] == 0.5
+    assert result["height_error_median_m"] == 1
     assert result["height_error_abs_p95_m"] == 2
     assert result["recall_by_height"] == [
         {"height_m": "5-10", "n_reference": 1, "recall": 1.0},
@@ -72,6 +72,34 @@ def test_score_no_matches_has_zero_f1():
     result = benchmark.score(points, points, np.empty((0, 2), int))
     assert result["recall"] == result["precision"] == 0
     assert result["f1"] == 0
+
+
+def test_score_discards_pairs_with_either_member_below_threshold():
+    ref = np.array([[0, 0, 9], [1, 0, 4]], float)
+    det = np.array([[0, 0, 4], [1, 0, 9]], float)
+    result = benchmark.score(ref, det, np.array([[0, 0], [1, 1]]))
+    assert result["recall"] == result["precision"] == result["f1"] == 0
+    assert result["height_error_median_m"] is None
+
+
+@pytest.mark.parametrize("empty_reference", [True, False])
+def test_score_one_empty_population_has_undefined_f1(empty_reference):
+    nonempty, empty = np.array([[0, 0, 10]], float), np.empty((0, 3))
+    ref, det = (empty, nonempty) if empty_reference else (nonempty, empty)
+    result = benchmark.score(ref, det, np.empty((0, 2), int))
+    assert result["f1"] is None
+    assert result["recall" if empty_reference else "precision"] is None
+    assert result["precision" if empty_reference else "recall"] == 0
+
+
+def test_reference_class_exclusion_is_per_tree_and_aggregated_across_chunks(tmp_path, monkeypatch):
+    rows = [(0, 0, 100, 0, 2)]
+    rows += [(1, 1, 110 + i, 7, 3 if i < 6 else 5) for i in range(10)]
+    rows += [(2, 1, 110 + i, 8, 3 if i < 5 else 5) for i in range(10)]
+    reference = write_reference(tmp_path / "class-exclusion.las", rows)
+    monkeypatch.setattr(io, "CHUNK", 3)
+    assert set(benchmark.reference_tops(reference)[:, 0]) == {7, 8}
+    assert benchmark.reference_tops(reference, exclude_class=3)[:, 0].tolist() == [8]
 
 
 def test_evaluate_run_filters_short_trees_before_matching(tmp_path):
