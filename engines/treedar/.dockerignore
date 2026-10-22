@@ -1,0 +1,28 @@
+# Allow only the files used by Dockerfile. New data folders stay excluded.
+**
+!Dockerfile
+!.dockerignore
+!requirements-test.lock
+!pyproject.toml
+!README.md
+!src/
+!src/**
+
+# Keep local tooling, credentials and data excluded even inside source folders.
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.env.*
+.git/
+.claude/
+.venv/
+venv/
+.pytest_cache/
+Example Datasets/
+outputs/
+data/
+datasets/
+raw/
+artifacts/
+cache/
+tests/

@@ -1,4 +1,15 @@
 .env
+.env.*
+!.env.example
+.venv/
+venv/
+*.egg-info/
+outputs/
+data/
+datasets/
+raw/
+artifacts/
+cache/
 __pycache__/
 *.pyc
 .pytest_cache/

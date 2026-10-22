@@ -8,6 +8,12 @@ has verified and accepted the result.
 
 ## Current status
 
+TreeDar now lives in [`engines/treedar`](engines/treedar) with its original Git
+history preserved. It remains a separate Python package, `treedar` command and
+worker container. Its tested local processing commands are available today;
+coordinator submission, scheduling and Viewer integration for that engine are
+still future adapter work.
+
 This repository contains the initial architecture and a Dockerized **routing
 probe**. The probe can inspect fixed ODM-family nodes and plan local/main
 routing. It does not accept datasets, submit engine tasks, store jobs, or return
@@ -54,8 +60,37 @@ health may change before an eventual real submission.
    undersized local node.
 3. The selected engine works on a temporary copy. The result returns to TrueNAS
    and is checked there before temporary copies are eligible for deletion.
-4. NodeODX/ODM is the first engine. OpenSPLAT and TreeDAR follow through separate
-   adapters and explicit input/output contracts.
+4. NodeODX/ODM is the first coordinated engine. OpenSPLAT and TreeDar follow
+   through separate adapters and explicit input/output contracts.
+
+## Repository layout and TreeDar development
+
+```text
+processing/          coordinator and routing probe
+tests/               coordinator tests
+Dockerfile           coordinator image
+engines/treedar/     forestry engine, tests, research notes and worker Dockerfile
+```
+
+From this repository root:
+
+```powershell
+python -m unittest discover -v
+docker build --tag ledgetop-processing .
+docker build --tag treedar ./engines/treedar
+Set-Location ./engines/treedar
+./scripts/setup.ps1
+```
+
+The setup script creates an engine-local virtual environment using its locked
+dependencies and runs the engine tests. Do not install the engine's dependencies
+into the coordinator image. Run subsequent TreeDar Python commands from the engine
+directory; `treedar` CLI arguments and mounted dataset paths are unchanged.
+See [TreeDar's README](engines/treedar/README.md),
+[worker instructions](engines/treedar/docs/docker.md) and
+[migration record](docs/treedar-migration.md). Source datasets and existing NAS
+run folders stay in their current private locations; the migration moves code
+and documentation only.
 
 The proposed photo threshold of 800 is a **starting configuration value**, not
 a guarantee that the cluster PC can safely process 800 photos. Benchmarks and
