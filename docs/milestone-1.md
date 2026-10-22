@@ -4,7 +4,7 @@ Set by Claude on 2026-10-16 at Beau's request. Owner: Claude, with Codex on test
 
 ## Goal
 
-Produce a per-tree map of Beau's own property that says, for each detected canopy tree, its height, crown size and type group (conifer, broadleaf, or unknown), and prove how good it is against labels we trust. Then compare a locally trained classifier against Jev on the same held-out trees and decide which path to build on.
+Produce a per-tree map of Beau's own property that says, for each detected canopy tree, its height, crown size and type group (conifer, broadleaf, or unknown), and prove how good it is against labels we trust. A Jev comparison on the same held-out trees is optional (Beau, 2026-10-22).
 
 One property shows local feasibility only. It does not show Wisconsin-wide accuracy or commercial readiness.
 
@@ -17,7 +17,7 @@ One property shows local feasibility only. It does not show Wisconsin-wide accur
 | Height | Detected height against tape or hypsometer on 20 trees | Median error within 1 m |
 | Type classifier (local) | Accuracy on spatially held-out blocks, with an "unknown" option | 85% or more correct on the trees it labels, while labeling at least 70% of them |
 | Calibration | Stated confidence against observed accuracy | Reported with a calibration table; no claim without it |
-| Jev comparison | Same held-out trees, same metrics, plus cost per 1,000 trees | Reported side by side |
+| Jev comparison (optional) | Same held-out trees, same metrics, plus cost per 1,000 trees | Reported side by side if run; not a pass/fail criterion |
 | Engineering | One command from LAZ to tree map; full site under 5 minutes; all tests pass | Met |
 
 ## Rules for the evaluation
@@ -29,13 +29,13 @@ One property shows local feasibility only. It does not show Wisconsin-wide accur
 
 ## Go or no-go
 
-- Go: either classifier meets the type target. Next step is species within groups and a second property.
-- No-go: neither meets it. Report which part failed (detection, labels, features or model) and the cheapest fix, such as raw-photo colour, a leaf-off flight or more labels.
+- Go: the local classifier (or Jev, if run) meets the type target. Next step is species within groups and a second property.
+- No-go: it does not. Report which part failed (detection, labels, features or model) and the cheapest fix, such as raw-photo colour, a leaf-off flight or more labels.
 
 ## Steps
 
 1. Beau names what grows in each mapped area (plantation blocks, woodlot, windbreaks). This gives the first labels by area.
 2. Add a labeling input (areas or points with a type) and a `treedar classify` step with spatial cross-validation and an unknown output.
 3. Hand-count 3 plots for the detection check (field or high-resolution imagery).
-4. Run the Jev comparison on the held-out trees, text features first, then crown image chips from Todd's raw photos when they arrive.
+4. Optional: run the Jev comparison on the held-out trees with the original-photo crown views (`treedar raw-chips`).
 5. Write `docs/milestone-1-results.md` with the numbers, without coordinates.
