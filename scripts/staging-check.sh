@@ -17,6 +17,7 @@ ROOT="${1:-/mnt/Staging/TreeDar Test Datasets}"
 CONFIG="$ROOT/staging-check.json"
 COMMIT="$(git rev-parse --short=12 HEAD)"
 IMAGE="treedar:staging-check-$COMMIT"
+NAME="treedar-staging-check-$COMMIT-$$"
 OUT_REL="Scratch/staging-check-$COMMIT"
 
 fail() { echo "TREEDAR STAGING CHECK FAIL commit=$COMMIT reason=$1"; exit 1; }
@@ -38,9 +39,13 @@ docker build --quiet --tag "$IMAGE" . >/dev/null || fail "image-build"
 
 mkdir -p "$ROOT/Scratch"
 rm -rf "$ROOT/$OUT_REL"
+# timeout only stops the docker client; remove the container itself on any exit.
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 START=$(date +%s)
+# Run as the calling user so the output folder is writable on a freshly made Scratch.
 # shellcheck disable=SC2086  # ARGS is a space-separated option list from the config
-timeout "$MAX_S" docker run --rm --network none --memory "$MEM" --cpus "$CPUS" \
+timeout "$MAX_S" docker run --rm --name "$NAME" --network none --memory "$MEM" --cpus "$CPUS" \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp -e MPLCONFIGDIR=/tmp \
   -v "$ROOT/Datasets:/data:ro" -v "$ROOT/Scratch:/runs" \
   "$IMAGE" run "/data/$INPUT" --out "/runs/staging-check-$COMMIT" --bbox "$BBOX" $ARGS \
   >"$ROOT/Scratch/staging-check-$COMMIT.log" 2>&1 || fail "pipeline-run (see Scratch/staging-check-$COMMIT.log)"
