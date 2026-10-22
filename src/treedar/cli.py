@@ -167,6 +167,30 @@ def cmd_chips(args) -> int:
     return 0
 
 
+def cmd_raw_chips(args) -> int:
+    from .raw_chips import generate_raw_chips
+    tree_ids = None
+    if args.tree_ids:
+        tree_ids = json.loads(Path(args.tree_ids).read_text(encoding="utf-8"))
+        if not isinstance(tree_ids, list):
+            raise ValueError("tree IDs JSON must contain a list")
+    result = generate_raw_chips(args.opensfm, args.images, args.run_dir, args.out,
+                                tree_ids=tree_ids, views=args.views,
+                                search_radius_m=args.search_radius,
+                                edge_margin=args.edge_margin)
+    print(f"{len(result)} trees, {sum(len(v) for v in result.values())} views -> {args.out}")
+    return 0
+
+
+def cmd_photo_ortho(args) -> int:
+    from .photo_ortho import render_photo_ortho
+    result = render_photo_ortho(args.opensfm, args.images, args.run_dir, args.out,
+                                cell=args.cell, bbox=_parse_bbox(args.bbox),
+                                candidates=args.candidates, edge_margin=args.edge_margin)
+    print(json.dumps(result))
+    return 0
+
+
 def cmd_labelpage(args) -> int:
     n = labeltool.build(args.run_dir, args.chips, args.out, per_area=args.per_area, seed=args.seed)
     print(f"{n} crowns on the labelling page -> {args.out} (contains property imagery: keep local)")
@@ -320,6 +344,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch.add_argument("--ortho", required=True)
     p_ch.add_argument("--out", required=True)
     p_ch.set_defaults(func=cmd_chips)
+
+    p_rc = sub.add_parser("raw-chips", help="crown views from aligned original photos")
+    p_rc.add_argument("run_dir", help="run with dtm.tif, chm_raw.tif and crowns.tif")
+    p_rc.add_argument("--opensfm", required=True, help="folder containing reconstruction.json")
+    p_rc.add_argument("--images", required=True, help="folder containing aligned source photos")
+    p_rc.add_argument("--out", required=True, help="output JPEG views and views.json folder")
+    p_rc.add_argument("--tree-ids", help="JSON list of crown IDs (default: all positive IDs)")
+    p_rc.add_argument("--views", type=int, default=3)
+    p_rc.add_argument("--search-radius", type=float, default=40, help="camera search radius (m)")
+    p_rc.add_argument("--edge-margin", type=int, default=40, help="photo edge exclusion (pixels)")
+    p_rc.set_defaults(func=cmd_raw_chips)
+
+    p_po = sub.add_parser("photo-ortho", help="project aligned photos onto the LiDAR surface")
+    p_po.add_argument("run_dir", help="run with dtm.tif and chm_raw.tif; ellipsoidal Z required")
+    p_po.add_argument("--opensfm", required=True, help="folder containing reconstruction.json")
+    p_po.add_argument("--images", required=True)
+    p_po.add_argument("--out", required=True, help="output RGB GeoTIFF")
+    p_po.add_argument("--cell", type=float, default=0.03, help="output resolution in metres")
+    p_po.add_argument("--bbox", help="minx,miny,maxx,maxy in the surface CRS")
+    p_po.add_argument("--candidates", type=int, default=6, help="nearest cameras tried per pixel")
+    p_po.add_argument("--edge-margin", type=int, default=20, help="photo edge exclusion (pixels)")
+    p_po.set_defaults(func=cmd_photo_ortho)
 
     p_lp = sub.add_parser("labelpage", help="offline click-to-label page for the owner")
     p_lp.add_argument("run_dir")
