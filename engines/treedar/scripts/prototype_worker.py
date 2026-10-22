@@ -160,6 +160,20 @@ def execute(image, output, container, timeout):
             path = output / relative
             if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != result[key]:
                 raise WorkerError('output hash mismatch')
+        hashes = json.loads((output / 'output-sha256.json').read_text())
+        if (not isinstance(hashes, dict) or not {'summary.json', 'report.html'} <= hashes.keys()
+                or len(hashes) > 100):
+            raise WorkerError('invalid output index')
+        artifact_root = (output / 'synthetic').resolve()
+        for relative, digest in hashes.items():
+            if (not isinstance(relative, str) or '\\' in relative or ':' in relative
+                    or Path(relative).is_absolute() or '..' in Path(relative).parts
+                    or not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest)):
+                raise WorkerError('invalid output index')
+            path = output / 'synthetic' / relative
+            if (path.is_symlink() or not path.resolve().is_relative_to(artifact_root)
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+                raise WorkerError('output hash mismatch')
         return 'succeeded', result
     except Exception:
         if not stop_and_verify(container):

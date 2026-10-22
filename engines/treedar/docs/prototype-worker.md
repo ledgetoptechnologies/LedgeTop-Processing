@@ -45,6 +45,13 @@ are retained at `<scratch>/<environment>/<jobId>/synthetic`; each fresh job
 requires a new directory. The default wall timeout is 240 seconds, configurable
 from 180 to 300 seconds. Containers are retained stopped for inspection.
 
+The host also recomputes every file hash from the output index after Docker
+stops. The per-job directory permits the container UID to write; the private
+scratch root's permissions/ACL are the access boundary and must be retained.
+Image IDs identify exact image bytes. Recording the source revision in a build
+label and adding atomic output publication for real datasets remain future
+production-adapter work, alongside explicit job metadata and input hashes.
+
 Exit codes are 0 for completed success or no queued work, 1 for a verified
 container failure reported to the coordinator, and 2 for an uncertain state or
 configuration error. A timeout stops and inspects the exact uniquely named

@@ -169,10 +169,14 @@ class WorkerTests(unittest.TestCase):
             root = Path(directory)
             (root / 'synthetic').mkdir()
             (root / 'synthetic' / 'manifest.json').write_bytes(b'{}')
-            (root / 'output-sha256.json').write_bytes(b'{}')
+            for name in ('summary.json', 'report.html'):
+                (root / 'synthetic' / name).write_bytes(b'fixture')
+            hashes = {name: hashlib.sha256(b'fixture').hexdigest() for name in ('summary.json', 'report.html')}
+            encoded = json.dumps(hashes).encode()
+            (root / 'output-sha256.json').write_bytes(encoded)
             digest = hashlib.sha256(b'{}').hexdigest()
             data = {'n_trees': 3, 'treedar_version': '0.1',
-                    'manifest_sha256': digest, 'outputs_sha256': digest}
+                    'manifest_sha256': digest, 'outputs_sha256': hashlib.sha256(encoded).hexdigest()}
 
             def docker(args, timeout=20):
                 if args[0] == 'start':
@@ -183,6 +187,8 @@ class WorkerTests(unittest.TestCase):
 
             with patch.object(worker, 'docker', side_effect=docker):
                 self.assertEqual(worker.execute(IMAGE, root, 'test', 240), ('succeeded', data))
+                (root / 'synthetic' / 'report.html').write_bytes(b'changed after container output')
+                self.assertEqual(worker.execute(IMAGE, root, 'test', 240)[0], 'failed')
 
     def test_empty_queue_does_not_run_container_or_print_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
