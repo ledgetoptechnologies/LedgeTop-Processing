@@ -46,8 +46,8 @@ def staging_checkout(tmp_path):
     root = tmp_path / "synthetic staging share"
     (root / "Datasets").mkdir(parents=True)
     scratch = root / "Scratch"
-    scratch.mkdir(mode=0o777)
-    scratch.chmod(0o777)
+    scratch.mkdir(mode=0o755)
+    scratch.chmod(0o755)
     bins = tmp_path / "tool shims"
     bins.mkdir()
     # Do not rely on Windows' python3 Store alias or a different Python install.
@@ -121,6 +121,8 @@ def test_staging_check_real_docker_pass_and_wrong_expectation(staging_checkout):
         assert "n_trees=3" in passed.stdout
         output = staging_checkout["root"] / "Scratch" / ("staging-check-" + staging_checkout["commit"])
         assert json.loads((output / "summary.json").read_text())["n_trees"] == 3
+        if os.name != "nt":
+            assert (output / "summary.json").stat().st_uid == os.getuid()
         staging_checkout["config"]["expect"]["n_trees"] = 999
         write_config(staging_checkout)
         failed = run_check(staging_checkout)
@@ -145,3 +147,43 @@ def test_staging_check_real_docker_pass_and_wrong_expectation(staging_checkout):
                     "--entrypoint", "python", image, "-c", permissions],
                    cwd=staging_checkout["repo"])
         invoke([docker, "image", "rm", "--force", image], cwd=staging_checkout["repo"])
+
+
+def test_staging_timeout_removes_running_container(staging_checkout):
+    docker = shutil.which("docker")
+    if not docker:
+        pytest.skip("Docker CLI is unavailable")
+    engine = invoke([docker, "info", "--format", "{{.OSType}}"],
+                    cwd=staging_checkout["repo"], timeout=15)
+    if engine.returncode or engine.stdout.strip() != "linux":
+        pytest.skip("A running Linux Docker engine is required")
+    repo = staging_checkout["repo"]
+    # A disposable image with a deliberately long-running process makes the
+    # timeout deterministic and proves cleanup stops a real running container.
+    (repo / "src" / "treedar" / "__main__.py").write_text(
+        "import time\nprint('FIXTURE STARTED', flush=True)\ntime.sleep(30)\n")
+    # The installed console script calls cli.main, rather than __main__.
+    with (repo / "src" / "treedar" / "cli.py").open("a") as stream:
+        stream.write("\ndef main(argv=None):\n    import time\n    print('FIXTURE STARTED', flush=True)\n    time.sleep(30)\n")
+    git = shutil.which("git")
+    for args in (["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                                "commit", "--quiet", "-m", "Slow synthetic timeout fixture"]):
+        result = invoke([git, *args], cwd=repo)
+        assert result.returncode == 0, result.stdout + result.stderr
+    commit = invoke([git, "rev-parse", "--short=12", "HEAD"], cwd=repo).stdout.strip()
+    staging_checkout["config"]["limits"]["max_seconds"] = 5
+    write_config(staging_checkout)
+    prefix = "treedar-staging-check-" + commit
+    try:
+        result = run_check(staging_checkout)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "reason=pipeline-run" in result.stdout
+        log = staging_checkout["root"] / "Scratch" / f"staging-check-{commit}.log"
+        assert "FIXTURE STARTED" in log.read_text()
+        remaining = invoke([docker, "ps", "--all", "--quiet", "--filter", f"name={prefix}"], cwd=repo)
+        assert remaining.returncode == 0 and not remaining.stdout.strip()
+    finally:
+        own = invoke([docker, "ps", "--all", "--quiet", "--filter", f"name={prefix}"], cwd=repo)
+        for identifier in own.stdout.split():
+            invoke([docker, "rm", "--force", identifier], cwd=repo)
+        invoke([docker, "image", "rm", "--force", "treedar:staging-check-" + commit], cwd=repo)
