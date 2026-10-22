@@ -1,0 +1,76 @@
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Keep datasets and generated outputs out of Git by default (see CLAUDE.md)
+/data/
+/datasets/
+/raw/
+/outputs/
+/artifacts/
+/cache/
+
+# Point clouds
+*.las
+*.laz
+*.e57
+*.ply
+*.pcd
+*.xyz
+*.pts
+
+# Rasters and imagery
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+*.dng
+*.ecw
+*.jp2
+
+# Raw sensor, trajectory and GNSS data
+*.bin
+*.sbet
+*.out
+*.imr
+*.rinex
+*.obs
+*.ubx
+*.T04
+
+# Vector data with coordinates
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.kml
+*.kmz
+*.geojson
+
+# Archives
+*.zip
+*.7z
+*.tar
+*.gz
+
+# Python/local tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+/build/
+/dist/
+.DS_Store
+
+# Local example datasets from Beau (never push)
+/Example Datasets/
+
+# Local tool config with machine paths
+/.claude/
