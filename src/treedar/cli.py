@@ -12,8 +12,8 @@ from pathlib import Path
 import numpy as np
 import rasterio
 
-from . import (__version__, areas, chm, classify, features, io, jev, labeltool, ortho, qc,
-               runinfo, segment, terrain, treemap)
+from . import (__version__, areas, benchmark, chm, classify, features, io, jev, labeltool,
+               ortho, qc, runinfo, segment, terrain, treemap)
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -69,7 +69,9 @@ def process(args) -> dict:
                                         classification=pts.get("classification"))
     raw = chm.max_height_grid(pts["x"], pts["y"], pts["z"], dtm, transform, cell=args.cell)
     canopy, chm_stats = chm.filter_pits_and_spikes(raw, spike_threshold=args.spike_threshold)
-    tops = segment.detect_treetops(canopy, transform, min_height=args.min_height)
+    preset = segment.WINDOW_PRESETS[args.preset]
+    window = {k: (getattr(args, k) if getattr(args, k) is not None else v) for k, v in preset.items()}
+    tops = segment.detect_treetops(canopy, transform, min_height=args.min_height, **window)
     labels = segment.segment_crowns(canopy, tops, transform)
     trees = segment.tree_table(canopy, labels, transform)
     tree_feats = features.tree_features(pts, dtm, labels, transform, chm=canopy)
@@ -93,7 +95,7 @@ def process(args) -> dict:
         "n_points_used": int(pts["x"].size),
         "runtime_s": round(time.perf_counter() - start, 1),
         "params": {"cell": args.cell, "min_height": args.min_height,
-                   "bbox": bbox, "step": args.step},
+                   "bbox": bbox, "step": args.step, "preset": args.preset, **window},
         "chm_filter": chm_stats,
         "version": __version__,
     }
@@ -168,6 +170,16 @@ def cmd_chips(args) -> int:
 def cmd_labelpage(args) -> int:
     n = labeltool.build(args.run_dir, args.chips, args.out, per_area=args.per_area, seed=args.seed)
     print(f"{n} crowns on the labelling page -> {args.out} (contains property imagery: keep local)")
+    return 0
+
+
+def cmd_benchmark(args) -> int:
+    r = benchmark.evaluate_run(args.reference, args.run_dir, max_dist_m=args.max_dist,
+                               max_dz_m=args.max_dz, min_height=args.min_height)
+    fmt = lambda v: "n/a" if v is None else f"{v:.1%}"  # noqa: E731
+    print(f"{r['reference']}: {r['n_reference']} reference trees >= {r['min_height_m']} m, "
+          f"{r['n_detected']} detected; recall {fmt(r['recall'])}, precision {fmt(r['precision'])}, "
+          f"F1 {fmt(r['f1'])} -> {Path(args.run_dir) / 'benchmark.json'}")
     return 0
 
 
@@ -267,6 +279,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="skip the whole-file qc.json report (faster tile runs)")
         p.add_argument("--spike-threshold", type=float, default=5.0,
                        help="lower CHM cells this far above their 5x5 median (0 disables)")
+        p.add_argument("--preset", choices=sorted(segment.WINDOW_PRESETS), default="broadleaf",
+                       help="treetop search settings: broadleaf (wide crowns, original default) or "
+                            "conifer (tuned on FOR-instance conifer plots)")
+        p.add_argument("--window-base", dest="window_base_m", type=float, default=None,
+                       help="override: treetop window diameter at height 0 (m)")
+        p.add_argument("--window-slope", dest="window_slope", type=float, default=None,
+                       help="override: window diameter increase per metre of height")
+        p.add_argument("--smooth", dest="smooth_sigma_m", type=float, default=None,
+                       help="override: CHM smoothing sigma before treetop search (m)")
 
     p_run = sub.add_parser("run", help="DTM, CHM, treetops, crowns and tree features")
     add_run_args(p_run)
@@ -307,6 +328,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_lp.add_argument("--per-area", type=int, default=15)
     p_lp.add_argument("--seed", type=int, default=0)
     p_lp.set_defaults(func=cmd_labelpage)
+
+    p_bm = sub.add_parser("benchmark", help="score detections against a hand-segmented reference")
+    p_bm.add_argument("reference", help="LAS/LAZ with a per-point treeID field (0 = no tree)")
+    p_bm.add_argument("run_dir", help="TreeDar run folder for the same area")
+    p_bm.add_argument("--max-dist", type=float, default=1.5, help="max horizontal match distance (m)")
+    p_bm.add_argument("--max-dz", type=float, default=3.0, help="max height difference for a match (m)")
+    p_bm.add_argument("--min-height", type=float, default=5.0)
+    p_bm.set_defaults(func=cmd_benchmark)
 
     p_rep = sub.add_parser("report", help="(re)build report.html for a run folder")
     p_rep.add_argument("run_dir")

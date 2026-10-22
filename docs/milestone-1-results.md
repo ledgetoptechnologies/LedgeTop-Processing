@@ -7,7 +7,7 @@ Status as of 2026-10-16. Targets are in [milestone-1.md](milestone-1.md). Number
 | Area | Target | Result | Status |
 |---|---|---|---|
 | Labels | 150+ trusted trees, 30+ per group, 3+ areas | None yet. Area naming map and template are ready (`treedar areas`). | Waiting on Beau |
-| Tree detection | Recall 80%+, precision 85%+ in plantation plots | Not measured. Detection count is highly sensitive to settings (table below), so it needs hand counts. | Waiting on plot counts |
+| Tree detection | Recall 80%+, precision 85%+ in plantation plots | Not measured on this property. Public benchmark (below): tuned conifer window reaches F1 48 to 100% on conifer test plots; broadleaf leaf-off 28%. | Waiting on plot counts |
 | Height | Median error within 1 m on 20 trees | Not measured in the field. Synthetic recovery within 0.06 m. | Waiting on field heights |
 | Type classifier (local) | 85%+ correct while labeling 70%+, held-out areas | Built and tested on synthetic data; no real labels yet. | Waiting on labels |
 | Calibration | Calibration table reported | Produced automatically by `treedar classify`. | Ready |
@@ -34,6 +34,24 @@ Treetop counts in four 20 x 20 m audit plots (A1 woodlot, A2 to A4 plantation bl
 | 1.5 + 0.05h, no smoothing | 32 | 45 | 33 | 45 | 3,234 |
 
 Visual review of the plot overlays suggests the default merges some neighbouring crowns in the plantation, but the right setting cannot be chosen without counts. Hand counts in these plots decide it.
+
+## Detection benchmark on FOR-instance (public, hand-segmented)
+
+FOR-instance (Puliti et al. 2023, CC BY 4.0) is drone LiDAR (RIEGL) of 32 plots in Czechia (CULS), Norway (NIBIO), Australia (RMIT), New Zealand (SCION) and Austria (TUWIEN, the only broadleaf plot, leaf-off) with every tree segmented by hand. Scores are for reference trees at least 5 m tall, one-to-one matching within 1.5 m and 3 m in height, detections outside the annotated plot ignored. The window setting was chosen on the dataset's development plots only; test plots below were held out for that choice.
+
+| Region (test plots) | Original window (3 + 0.1 x height m, 0.5 m smoothing) | Tuned window (fixed 2 m, 0.25 m smoothing) |
+|---|---|---|
+| CULS, conifer (20 trees) | F1 71% (recall 55%, precision 100%) | F1 100% (100%, 100%) |
+| NIBIO, spruce (160) | F1 38% (24%, 91%) | F1 60% (46%, 88%) |
+| RMIT, pine (49) | F1 36% (27%, 54%) | F1 48% (51%, 45%) |
+| SCION, pine (43) | F1 66% (49%, 100%) | F1 70% (84%, 60%) |
+| TUWIEN, broadleaf leaf-off (34) | F1 14% (9%, 38%) | F1 28% (26%, 30%) |
+
+Rechecked on 2026-10-21 after Codex's review fixed the scoring (trees below 5 m are now removed before pairing, and F1 is 0 rather than blank when nothing matches): the numbers above and the chosen setting did not change.
+
+Trunk detection (compact vertical point clusters 1 to 2.5 m above ground, with canopy above) roughly doubled recall over the original window, but on top of the tuned window it added more false trees than true ones. Trunk-variant comparisons were made on test plots, so they are indicative only. Trunks are kept as an option, not the default.
+
+On Beau's property the tuned window ("conifer" preset) finds 2,525 trees instead of 1,067: it places one treetop on almost every plantation conifer but splits large woodlot broadleaf crowns into two or three. The pipeline therefore offers `--preset broadleaf` (original) and `--preset conifer` (tuned). Choosing per area, or by crown type, waits for the audit plot counts.
 
 ## Unsupervised check (not evidence of accuracy)
 

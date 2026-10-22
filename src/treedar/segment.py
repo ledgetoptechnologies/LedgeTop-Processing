@@ -14,9 +14,19 @@ from skimage.segmentation import watershed
 from .grid import Grid
 
 
-def window_diameter_m(height):
-    """Search window diameter for a treetop of the given height (lidR example form)."""
-    return 3.0 + 0.1 * np.asarray(height)
+# Window presets. "broadleaf" is the original default (lidR example form) and
+# suits wide deciduous crowns; "conifer" was tuned on FOR-instance conifer dev
+# plots (hand-segmented drone LiDAR), where it raised test F1 in every region,
+# but it splits large broadleaf crowns on Beau's property.
+WINDOW_PRESETS = {
+    "broadleaf": {"window_base_m": 3.0, "window_slope": 0.1, "smooth_sigma_m": 0.5},
+    "conifer": {"window_base_m": 2.0, "window_slope": 0.0, "smooth_sigma_m": 0.25},
+}
+
+
+def window_diameter_m(height, base_m: float = 3.0, slope: float = 0.1):
+    """Search window diameter (m) for a treetop of the given height: base + slope * height."""
+    return base_m + slope * np.asarray(height)
 
 
 def _disk(radius_cells: int) -> np.ndarray:
@@ -25,8 +35,8 @@ def _disk(radius_cells: int) -> np.ndarray:
     return (xx * xx + yy * yy) <= r * r
 
 
-def detect_treetops(chm, transform, min_height: float = 5.0,
-                    smooth_sigma_m: float = 0.5) -> np.ndarray:
+def detect_treetops(chm, transform, min_height: float = 5.0, smooth_sigma_m: float = 0.5,
+                    window_base_m: float = 3.0, window_slope: float = 0.1) -> np.ndarray:
     """Treetops as an (n, 3) array of [x, y, height]."""
     grid = Grid.from_transform(transform, chm.shape)
     smooth = ndimage.gaussian_filter(chm, smooth_sigma_m / grid.cell) \
@@ -37,7 +47,7 @@ def detect_treetops(chm, transform, min_height: float = 5.0,
 
     # Keep a candidate only if it is the maximum within its height-dependent window.
     radius_cells = np.maximum(
-        1, np.round(window_diameter_m(smooth) / 2.0 / grid.cell)).astype(int)
+        1, np.round(window_diameter_m(smooth, window_base_m, window_slope) / 2.0 / grid.cell)).astype(int)
     keep = np.zeros_like(candidates)
     for r in np.unique(radius_cells[candidates]):
         sel = candidates & (radius_cells == r)
