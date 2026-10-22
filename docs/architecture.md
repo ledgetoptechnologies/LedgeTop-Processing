@@ -14,11 +14,17 @@ Ops UI -> Viewer API + durable client/job records on TrueNAS
                      -> verified result -> TrueNAS
 ```
 
-The cluster PC and staging PC are the same computer. Its Docker service and
-roughly 1 TB SSD are for orchestration and bounded scratch space. The main
-processing PC is currently unavailable, so large jobs must remain queued or
-fail admission clearly until it becomes healthy. The SSD must not be the only
-copy of either a source dataset or a completed product.
+The cluster PC and the staging PC are separate computers. The cluster PC (an
+older 3rd-generation Intel Core i7 with 48 GB RAM) runs the coordinator and
+processes both production jobs and staging test datasets. Its Docker service
+and roughly 1 TB SSD are for orchestration and bounded scratch space. The
+staging PC (a Lenovo ThinkCentre M720q) is dedicated to Engineering Hub staging,
+CI and deployment tests; it is not a processing node.
+
+The main processing PC remains part of the plan but is currently down for
+hardware repair. Until it is healthy, the cluster PC is the only processing
+node, and large jobs must remain queued or fail admission clearly. The SSD must
+not be the only copy of either a source dataset or a completed product.
 
 For the first release, the Viewer remains the authority for projects, datasets,
 client permissions, task submissions, and published outputs. The coordinator
