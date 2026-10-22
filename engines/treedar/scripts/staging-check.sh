@@ -15,7 +15,11 @@ set -euo pipefail
 
 ROOT="${1:-/mnt/Staging/TreeDar Test Datasets}"
 CONFIG="$ROOT/staging-check.json"
-COMMIT="$(git rev-parse --short=12 HEAD)"
+ENGINE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# Git Bash may disable automatic argument conversion for Docker bind mounts.
+# Native Git and Docker then need the Windows spelling of this same path.
+if command -v cygpath >/dev/null; then ENGINE_ROOT="$(cygpath -m "$ENGINE_ROOT")"; fi
+COMMIT="$(git -C "$ENGINE_ROOT" rev-parse --short=12 HEAD)"
 IMAGE="treedar:staging-check-$COMMIT"
 NAME="treedar-staging-check-$COMMIT-$$"
 OUT_REL="Scratch/staging-check-$COMMIT"
@@ -25,7 +29,7 @@ fail() { echo "TREEDAR STAGING CHECK FAIL commit=$COMMIT reason=$1"; exit 1; }
 [ -f "$CONFIG" ] || fail "missing-config"
 command -v docker >/dev/null || fail "docker-not-found"
 command -v python3 >/dev/null || fail "python3-not-found"
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then fail "uncommitted-changes"; fi
+if [ -n "$(git -C "$ENGINE_ROOT" status --porcelain --untracked-files=no -- .)" ]; then fail "uncommitted-changes"; fi
 
 read_cfg() { python3 -c "import json,sys; c=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {}, {'c': c}))" "$CONFIG" "$1"; }
 INPUT="$(read_cfg 'c["input"]')"
@@ -35,7 +39,7 @@ MEM="$(read_cfg 'c["limits"]["memory"]')"
 CPUS="$(read_cfg 'c["limits"]["cpus"]')"
 MAX_S="$(read_cfg 'c["limits"]["max_seconds"]')"
 
-docker build --quiet --tag "$IMAGE" . >/dev/null || fail "image-build"
+docker build --quiet --tag "$IMAGE" "$ENGINE_ROOT" >/dev/null || fail "image-build"
 
 mkdir -p "$ROOT/Scratch"
 rm -rf "$ROOT/$OUT_REL"

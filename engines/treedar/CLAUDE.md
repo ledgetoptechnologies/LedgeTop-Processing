@@ -8,13 +8,21 @@
 
 ## Current owner direction
 
-Beau requested that the handoff and review be pushed to https://github.com/ledgetoptechnologies/TreeDar so Claude Code can pick them up when Beau gets home. The repository replaces MCP as the shared handoff channel for now. Do not assume Claude is watching MCP and do not require it for progress.
+On 2026-10-22 Beau authorized migrating TreeDar into LedgeTop Processing.
+Work in `engines/treedar` within that repository. The old TreeDar repo is for
+historical PRs and will be archived by Beau after verification. See the root
+`CLAUDE.md` and `docs/treedar-migration.md` for repository boundaries and provenance.
 
-Keep shared notes, architecture decisions, findings, and open questions in this repository as `.md` files. The original handoff's MCP instruction is superseded by this direction.
+Keep shared implementation and research notes as Markdown in this engine.
+Use the existing linked MCP discussion for coordination when available. The
+original handoff is historical context, not a request to redo completed work.
 
 ## First work
 
-Begin Task 1 (open-source tool survey) and Task 3 (sensor and data feasibility) in parallel if practical. Include matched-label availability and raw-data processing costs in the feasibility assessment. Report back to Beau before building a prototype.
+The structural prototype, classifier, benchmarks and aligned-photo commands are
+implemented. Continue from the current milestone documents and the latest
+owner decisions; do not restart the initial tool survey. Synthetic tests do not
+establish field accuracy.
 
 Treat the Hermes review as recommended refinements to resolve in that report, not as proof of feasibility or approval of commercial claims. Establish measurable success criteria and bounded resource budgets before implementation or large downloads.
 
@@ -28,7 +36,9 @@ One property demonstrates local feasibility, not Wisconsin-wide generalization. 
 
 ## Boundaries
 
-- Work only in this separate repository. Do not edit Project Alpha, its website, LedgeTop-Ops, CRM, or production infrastructure.
+- TreeDar work belongs in this engine directory. Coordinator changes require
+  their own task and checks. Do not edit Project Alpha, its website,
+  LedgeTop-Ops, CRM, or production infrastructure as part of engine work.
 - No client contact, outbound messages, private-data uploads, paid services, purchases, or remote inference on project data without Beau's approval.
 - Public web research is allowed. Agree on resource limits before large public-data downloads or compute-intensive runs.
 - Stop and ask before accessing client data, touching production, or spending money.
@@ -42,4 +52,6 @@ One property demonstrates local feasibility, not Wisconsin-wide generalization. 
 
 ## Honest status
 
-This repository currently contains planning material only. Tool names, sensor specifications, licenses, flight settings, model performance, and regional market uniqueness still require verification. Do not invent findings or treat hypotheses as facts.
+Local processing and synthetic end-to-end tests are implemented. Field-confirmed
+accuracy and broader generalization remain unvalidated. Do not invent findings
+or treat hypotheses, synthetic recovery or model output as ground truth.

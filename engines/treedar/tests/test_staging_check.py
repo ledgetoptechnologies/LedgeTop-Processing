@@ -19,8 +19,8 @@ def invoke(command, *, cwd, env=None, timeout=60):
                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
-@pytest.fixture
-def staging_checkout(tmp_path):
+@pytest.fixture(params=["standalone", "monorepo"])
+def staging_checkout(tmp_path, request):
     git = shutil.which("git")
     bash = (Path("C:/Program Files/Git/bin/bash.exe") if os.name == "nt"
             else shutil.which("bash"))
@@ -29,14 +29,17 @@ def staging_checkout(tmp_path):
     project = Path(__file__).resolve().parents[1]
     repo = tmp_path / "isolated checkout"
     repo.mkdir()
+    engine = repo if request.param == "standalone" else repo / "engines" / "treedar"
+    engine.mkdir(parents=True, exist_ok=True)
     for name in ("Dockerfile", ".dockerignore", "requirements-test.lock", "pyproject.toml", "README.md"):
-        shutil.copy2(project / name, repo / name)
-    shutil.copytree(project / "src", repo / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    (repo / "scripts").mkdir()
-    script = repo / "scripts" / "staging-check.sh"
+        shutil.copy2(project / name, engine / name)
+    shutil.copytree(project / "src", engine / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    (engine / "scripts").mkdir()
+    script = engine / "scripts" / "staging-check.sh"
     script.write_text((project / "scripts" / script.name).read_text(), newline="\n")
     # The script tags by commit: make our image unique even in simultaneous runs.
-    (repo / "fixture-id").write_text(uuid4().hex)
+    (engine / "fixture-id").write_text(uuid4().hex)
+    (repo / "coordinator.txt").write_text("Unrelated coordinator code")
     for args in (["init", "--quiet"], ["add", "."],
                  ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                   "commit", "--quiet", "-m", "Synthetic staging fixture"]):
@@ -63,13 +66,13 @@ def staging_checkout(tmp_path):
            "limits": {"memory": "2g", "cpus": 2, "max_seconds": 120},
            "expect": {"n_trees": 3, "n_trees_tolerance": 0,
                       "height_median_m": 15, "height_tolerance_m": 1}}
-    return {"repo": repo, "root": root, "script": script, "bash": str(bash),
+    return {"repo": repo, "engine": engine, "root": root, "script": script, "bash": str(bash),
             "env": env, "commit": commit, "config": cfg}
 
 
-def run_check(fixture):
+def run_check(fixture, cwd=None):
     return invoke([fixture["bash"], fixture["script"].as_posix(), fixture["root"].as_posix()],
-                  cwd=fixture["repo"], env=fixture["env"], timeout=1200)
+                  cwd=cwd or fixture["repo"], env=fixture["env"], timeout=1200)
 
 
 def write_config(fixture):
@@ -84,12 +87,21 @@ def test_staging_check_missing_config(staging_checkout):
     assert not list((staging_checkout["root"] / "Scratch").iterdir())
 
 
+def test_staging_check_finds_repository_from_unrelated_cwd(staging_checkout, tmp_path):
+    unrelated = tmp_path / "unrelated caller"
+    unrelated.mkdir()
+    result = run_check(staging_checkout, cwd=unrelated)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.stdout.strip() == (
+        f"TREEDAR STAGING CHECK FAIL commit={staging_checkout['commit']} reason=missing-config")
+
+
 def test_staging_check_rejects_dirty_tracked_files(staging_checkout):
     if not shutil.which("docker"):
         pytest.skip("The script checks Docker CLI presence before dirty checkout detection")
     write_config(staging_checkout)
     # This is our disposable checkout, never the developer's source tree.
-    (staging_checkout["repo"] / "fixture-id").write_text("dirty")
+    (staging_checkout["engine"] / "fixture-id").write_text("dirty")
     result = run_check(staging_checkout)
     assert result.returncode == 1, result.stdout + result.stderr
     assert result.stdout.strip() == (
@@ -112,6 +124,9 @@ def test_staging_check_real_docker_pass_and_wrong_expectation(staging_checkout):
     write_forest(source)
     original = source.read_bytes()
     write_config(staging_checkout)
+    if staging_checkout["engine"] != staging_checkout["repo"]:
+        # A tracked coordinator edit must not invalidate this engine's build.
+        (staging_checkout["repo"] / "coordinator.txt").write_text("Coordinator-only edit")
     image = "treedar:staging-check-" + staging_checkout["commit"]
     try:
         passed = run_check(staging_checkout)
@@ -160,10 +175,10 @@ def test_staging_timeout_removes_running_container(staging_checkout):
     repo = staging_checkout["repo"]
     # A disposable image with a deliberately long-running process makes the
     # timeout deterministic and proves cleanup stops a real running container.
-    (repo / "src" / "treedar" / "__main__.py").write_text(
+    (staging_checkout["engine"] / "src" / "treedar" / "__main__.py").write_text(
         "import time\nprint('FIXTURE STARTED', flush=True)\ntime.sleep(30)\n")
     # The installed console script calls cli.main, rather than __main__.
-    with (repo / "src" / "treedar" / "cli.py").open("a") as stream:
+    with (staging_checkout["engine"] / "src" / "treedar" / "cli.py").open("a") as stream:
         stream.write("\ndef main(argv=None):\n    import time\n    print('FIXTURE STARTED', flush=True)\n    time.sleep(30)\n")
     git = shutil.which("git")
     for args in (["add", "."], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",

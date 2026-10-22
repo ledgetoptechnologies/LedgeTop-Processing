@@ -1,8 +1,9 @@
 # Local Docker processing
 
-Build from the repository root in PowerShell, with Docker Desktop's Linux engine running:
+Build from `engines/treedar` in PowerShell, with Docker Desktop's Linux engine running:
 
 ```powershell
+Set-Location C:\Projects\LedgeTop-Processing\engines\treedar
 docker build --tag treedar .
 docker run --rm treedar --help
 ```
@@ -16,7 +17,7 @@ Create an output folder on local disk and mount input read-only:
 ```powershell
 New-Item -ItemType Directory -Force 'C:\TreeDar\Runs' | Out-Null
 docker run --rm --network none `
-  -v 'C:\Projects\TreeDar\Example Datasets:/data:ro' `
+  -v 'C:\TreeDar\Datasets:/data:ro' `
   -v 'C:\TreeDar\Runs:/runs' `
   treedar pipeline '/data/example.laz' --out '/runs/pilot-01'
 ```

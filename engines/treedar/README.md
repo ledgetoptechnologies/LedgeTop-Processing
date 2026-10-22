@@ -1,5 +1,14 @@
 # TreeDar
 
+TreeDar is the forestry engine in [LedgeTop Processing](../../README.md).
+The previous standalone repository is retained for historical PRs; all new code
+belongs in `LedgeTop-Processing/engines/treedar`. Run the commands below from this
+engine directory:
+
+```powershell
+Set-Location C:\Projects\LedgeTop-Processing\engines\treedar
+```
+
 Aligned original-photo crown views and surface-projected overviews are available
 through `raw-chips` and `photo-ortho`; see [the photo workflow](docs/photo-tools.md).
 

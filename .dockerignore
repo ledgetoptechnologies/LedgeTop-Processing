@@ -1,7 +1,16 @@
-.git
-.github
-__pycache__
-*.pyc
-.env
-tests
-docs
+# The coordinator needs only its Dockerfile and Python package. Keep engine
+# checkouts, datasets, tests, virtualenvs, outputs and credentials out of the
+# build context, including any new top-level directories added in the future.
+**
+!Dockerfile
+!.dockerignore
+!processing/
+!processing/**/*.py
+
+# Never include generated Python or hidden metadata inside the source package.
+**/__pycache__/
+**/.git/
+**/.env
+**/.env.*
+**/.venv/
+**/venv/

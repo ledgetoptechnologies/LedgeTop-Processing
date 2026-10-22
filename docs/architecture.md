@@ -95,8 +95,12 @@ handles before it is opened outside the internal network.
    recovery, cancellation, and cleanup after the Viewer acceptance receipt.
 4. Benchmark local limits, then bring the main PC online and test unavailable,
    saturated, and failover states. Only then switch the Viewer's provider URL.
-5. Add OpenSPLAT and TreeDAR adapters after their input/output contracts and
+5. Add OpenSPLAT and TreeDar adapters after their input/output contracts and
    Viewer display or delivery paths are verified.
+
+TreeDar's existing local CLI and worker source are in `engines/treedar`.
+Their presence in this repository does not implement a coordinator adapter;
+the routing probe's engine contract remains unchanged by the code migration.
 
 No live deployment, DNS, TrueNAS configuration, or existing Viewer provider
 setting is changed by this document.
