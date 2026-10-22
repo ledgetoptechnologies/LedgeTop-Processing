@@ -4,8 +4,10 @@ Reference files carry a per-point tree identifier (e.g. FOR-instance `treeID`,
 0 = not a tree). Each reference tree's top is its highest point. Detected
 treetops (trees.csv) are paired one-to-one with reference tops by minimum
 total distance, accepting a pair only within `max_dist_m` horizontally and
-`max_dz_m` in height. Recall = matched / reference, precision = matched /
-detected, reported for all reference trees and by height class.
+`max_dz_m` in height. Reference trees and detections below the minimum
+height are removed before pairing, so a short tree can never take a tall
+partner. Recall = matched / reference, precision = matched / detected,
+reported for all reference trees and by height class.
 """
 
 from __future__ import annotations
@@ -19,14 +21,17 @@ import numpy as np
 from . import io
 
 
-def reference_tops(path, id_field="treeID", min_points=10, dtm=None, transform=None):
+def reference_tops(path, id_field="treeID", min_points=10, dtm=None, transform=None,
+                   exclude_class: int | None = None):
     """(n, 4) array [tree_id, x, y, height] of reference tree tops.
 
     Height is above the supplied DTM when given (same grid as TreeDar runs),
-    otherwise the raw top z minus the lowest point of the file.
+    otherwise the raw top z minus the lowest point of the file. Trees whose
+    points are mostly `exclude_class` (outside the annotated plot) are left out.
     """
     tops: dict[int, tuple] = {}
     counts: dict[int, int] = {}
+    excluded: dict[int, int] = {}
     zmin = np.inf
     with io.open_las(path) as reader:
         if id_field not in reader.header.point_format.dimension_names:
@@ -38,6 +43,10 @@ def reference_tops(path, id_field="treeID", min_points=10, dtm=None, transform=N
             sel = tid > 0
             if not sel.any():
                 continue
+            if exclude_class is not None:
+                ex = tid[sel & (np.asarray(chunk.classification) == exclude_class)]
+                for k, v in zip(*np.unique(ex, return_counts=True)):
+                    excluded[int(k)] = excluded.get(int(k), 0) + int(v)
             tid, z, x, y = tid[sel], z[sel], np.asarray(chunk.x)[sel], np.asarray(chunk.y)[sel]
             order = np.lexsort((z, tid))
             last = np.r_[tid[order][1:] != tid[order][:-1], True]
@@ -50,7 +59,7 @@ def reference_tops(path, id_field="treeID", min_points=10, dtm=None, transform=N
                     tops[k] = (float(x[i]), float(y[i]), float(z[i]))
     rows = []
     for k, (x, y, z) in tops.items():
-        if counts.get(k, 0) < min_points:
+        if counts.get(k, 0) < min_points or excluded.get(k, 0) * 2 > counts.get(k, 0):
             continue
         if dtm is not None:
             from .grid import Grid
@@ -79,22 +88,33 @@ def match(ref_xyh, det_xyh, max_dist_m=1.5, max_dz_m=3.0):
     return np.c_[r[keep], c[keep]]
 
 
+def above(xyh, min_height):
+    """[x, y, height] rows at or above min_height, to filter before `match`."""
+    xyh = np.asarray(xyh, dtype=float).reshape(-1, 3)
+    return xyh[xyh[:, 2] >= min_height]
+
+
 def score(ref_xyh, det_xyh, pairs, min_height=5.0, classes=((5, 10), (10, 20), (20, 999))) -> dict:
     """Recall/precision/F1 overall (reference and detections at or above
-    min_height) and recall by reference height class."""
+    min_height) and recall by reference height class.
+
+    Only pairs with both members at or above min_height count, so true
+    positives are the same for recall and precision. F1 is 0 when both
+    sides have trees but nothing matched, and None when either side is empty.
+    """
+    pairs = np.asarray(pairs, dtype=int).reshape(-1, 2)
     ref_ok = ref_xyh[:, 2] >= min_height
     det_ok = det_xyh[:, 2] >= min_height
+    pairs = pairs[ref_ok[pairs[:, 0]] & det_ok[pairs[:, 1]]]
     matched_ref = np.zeros(len(ref_xyh), bool)
-    matched_det = np.zeros(len(det_xyh), bool)
-    if len(pairs):
-        matched_ref[pairs[:, 0]] = True
-        matched_det[pairs[:, 1]] = True
-    n_ref, n_det = int(ref_ok.sum()), int(det_ok.sum())
-    tp_r = int((matched_ref & ref_ok).sum())
-    tp_d = int((matched_det & det_ok).sum())
-    recall = tp_r / n_ref if n_ref else None
-    precision = tp_d / n_det if n_det else None
-    f1 = (2 * recall * precision / (recall + precision)) if recall and precision else None
+    matched_ref[pairs[:, 0]] = True
+    n_ref, n_det, tp = int(ref_ok.sum()), int(det_ok.sum()), len(pairs)
+    recall = tp / n_ref if n_ref else None
+    precision = tp / n_det if n_det else None
+    if recall is None or precision is None:
+        f1 = None
+    else:
+        f1 = 2 * recall * precision / (recall + precision) if tp else 0.0
     by_class = []
     for lo, hi in classes:
         m = (ref_xyh[:, 2] >= lo) & (ref_xyh[:, 2] < hi)
@@ -143,7 +163,7 @@ def evaluate_run(reference_las, run_dir, max_dist_m=1.5, max_dz_m=3.0, min_heigh
     run_dir = Path(run_dir)
     with rasterio.open(run_dir / "dtm.tif") as ds:
         dtm, transform = ds.read(1), ds.transform
-    ref = reference_tops(reference_las, dtm=dtm, transform=transform)
+    ref = reference_tops(reference_las, dtm=dtm, transform=transform, exclude_class=exclude_class)
     if detections is None:
         with open(run_dir / "trees.csv", newline="") as fh:
             detections = [[float(r["x"]), float(r["y"]), float(r["height_m"])] for r in csv.DictReader(fh)]
@@ -158,9 +178,10 @@ def evaluate_run(reference_las, run_dir, max_dist_m=1.5, max_dz_m=3.0, min_heigh
         keep = ~mask[r, c]
         n_dropped = int((~keep).sum())
         det = det[keep]
-    pairs = match(ref[:, 1:4], det, max_dist_m, max_dz_m)
+    ref, det = above(ref[:, 1:4], min_height), above(det, min_height)
+    pairs = match(ref, det, max_dist_m, max_dz_m)
     result = {"reference": Path(reference_las).name, "max_dist_m": max_dist_m, "max_dz_m": max_dz_m,
               "detections_outside_plot_dropped": n_dropped,
-              **score(ref[:, 1:4], det, pairs, min_height)}
+              **score(ref, det, pairs, min_height)}
     (run_dir / "benchmark.json").write_text(json.dumps(result, indent=2))
     return result
