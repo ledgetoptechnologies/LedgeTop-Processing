@@ -8,10 +8,40 @@ has verified and accepted the result.
 
 ## Current status
 
-This repository contains the initial architecture and integration contract. It
-does **not** yet contain a deployable orchestrator. Keep the existing Viewer
-processing path in service until a candidate passes the compatibility and
-recovery checks in [the implementation plan](docs/architecture.md).
+This repository contains the initial architecture and a Dockerized **routing
+probe**. The probe can inspect fixed ODM-family nodes and plan local/main
+routing. It does not accept datasets, submit engine tasks, store jobs, or return
+results. Keep the existing Viewer processing path in service until a candidate
+passes the compatibility and recovery checks in [the implementation
+plan](docs/architecture.md).
+
+## Run the probe locally
+
+1. Copy `.env.example` to `.env`. Replace the example token with a private,
+   random value of at least 32 characters. Keep `.env` outside Git.
+2. Add the exact local and main processing-node origins when available. A blank
+   origin reports `not_configured` and cannot be selected.
+3. Start the container with `docker compose up --build -d`. Compose binds the
+   API to `127.0.0.1:8080` on the host by default. Do not make it reachable on
+   the LAN until its authentication and network boundary are reviewed for that
+   deployment.
+4. Request `GET /healthz`, then use the token as a Bearer credential for
+   `GET /v1/nodes` and `POST /v1/plan`. The planning JSON is:
+
+   ```json
+   {"engine":"odm","photoCount":250,"inputBytes":1000000000}
+   ```
+
+   The response includes `mode: routing_probe` and `executesWork: false` so a
+   caller cannot mistake a route decision for a processing submission. The
+   probe reads `/info` and `/options` from each configured node. It requires
+   the capability signature and output options currently expected by the
+   Viewer; incompatible nodes are marked unavailable.
+
+Run `python -m unittest discover -v` for local checks and `docker compose
+config --quiet` to validate Compose. This first image has no external Python
+packages or writable data volume. Its node selection is a planning result;
+health may change before an eventual real submission.
 
 ## First target
 
