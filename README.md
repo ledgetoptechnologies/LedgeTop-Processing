@@ -1,5 +1,8 @@
 # TreeDar
 
+Aligned original-photo crown views and surface-projected overviews are available
+through `raw-chips` and `photo-ortho`; see [the photo workflow](docs/photo-tools.md).
+
 Self-hosted research pilot for Wisconsin forest LiDAR plus RGB orthophoto analysis. Initial scope: individually resolvable canopy trees, structural estimates, and species estimation with honest uncertainty.
 
 ## Start here

@@ -4,6 +4,12 @@ Reviewed 2026-10-16 against upstream license files and official PyPI release met
 
 ## Code
 
+Photo processing directly declares Pillow `>=12,<13`; the existing lock remains
+Pillow 12.3.0. Its installed metadata reports MIT-CMU, consistent with the
+[upstream license documentation](https://pillow.readthedocs.io/en/stable/about.html#license)
+(checked 2026-10-21). Keep Pillow and its bundled image-codec notices when
+redistributing the environment. No new lock entries were needed.
+
 | Dependency | Candidate version | Purpose | Upstream license evidence |
 | --- | --- | --- | --- |
 | laspy | 2.7.0 | LAS/LAZ input and synthetic fixture output | [BSD-2-Clause](https://github.com/laspy/laspy/blob/2.7.0/LICENSE.txt) |
