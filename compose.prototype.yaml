@@ -1,0 +1,26 @@
+# Separate, synthetic-only deployment. Does not use the normal probe stack.
+services:
+  coordinator:
+    build: .
+    init: true
+    restart: "no"
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    cpus: 0.5
+    mem_limit: 256m
+    ports:
+      - "127.0.0.1:${PROTOTYPE_PORT:-18080}:8080"
+    environment:
+      PROCESSING_API_TOKEN: ${PROCESSING_API_TOKEN:?set a private prototype token}
+      PROCESSING_PROTOTYPE_STATE_DIR: /prototype-state
+      PROCESSING_PROTOTYPE_OPERATOR_TOKEN: ${PROCESSING_PROTOTYPE_OPERATOR_TOKEN:?set a separate operator token}
+    volumes:
+      - prototype-state:/prototype-state
+    networks: [prototype]
+volumes:
+  prototype-state:
+networks:
+  prototype: {}

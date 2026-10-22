@@ -23,6 +23,12 @@ plan](docs/architecture.md).
 
 ## Run the probe locally
 
+An opt-in [synthetic coordinator prototype](docs/prototype.md) adds durable
+production/staging test jobs, one-slot worker claims, result completion and
+restart recovery. It uses `compose.prototype.yaml` as a separate localhost-only
+stack. This is a synthetic TreeDar integration trial, not a live Viewer provider
+or a replacement for the current photogrammetry router.
+
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
 2. Add the exact local and main processing-node origins when available. A blank
