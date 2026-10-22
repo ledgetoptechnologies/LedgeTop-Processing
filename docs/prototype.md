@@ -93,14 +93,21 @@ retain its volume unless deliberately retiring only this test's history.
 ```sh
 python -m unittest discover -v
 python scripts/prototype_api_smoke.py
+python engines/treedar/tests/test_prototype_worker.py
+python scripts/prototype_treedar_smoke.py
 ```
 
 The Docker API smoke creates a unique temporary Compose project, generates
 in-memory test credentials, verifies priority/idempotency/restart holds/operator
 recovery/completion over real HTTP, and removes only its own stack and volume.
-It does **not** run TreeDar. TreeDar's independent synthetic worker acceptance
-must additionally prove a real pipeline result, fixed fixture tree count,
-output integrity, environment/job namespace and bounded container shutdown.
+It does **not** run TreeDar. The separate `prototype_treedar_smoke.py` builds the
+engine image, runs two real TreeDar jobs through the queue and checks production
+before staging, three fixture trees per job, validated artifacts and durable
+completion. It retains private synthetic outputs/receipts in a newly created
+temporary directory and the exact stopped worker containers for inspection.
+It removes only its own coordinator stack and state volume after the test.
+For persistent one-shot worker usage, see
+[the worker guide](../engines/treedar/docs/prototype-worker.md).
 
 Never mark a host deployment passed based only on these local checks. Record
 the exact source revision, host identity, image IDs, resource limits and actual
