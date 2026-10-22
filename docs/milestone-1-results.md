@@ -47,6 +47,8 @@ FOR-instance (Puliti et al. 2023, CC BY 4.0) is drone LiDAR (RIEGL) of 32 plots 
 | SCION, pine (43) | F1 66% (49%, 100%) | F1 70% (84%, 60%) |
 | TUWIEN, broadleaf leaf-off (34) | F1 14% (9%, 38%) | F1 28% (26%, 30%) |
 
+Rechecked on 2026-10-21 after Codex's review fixed the scoring (trees below 5 m are now removed before pairing, and F1 is 0 rather than blank when nothing matches): the numbers above and the chosen setting did not change.
+
 Trunk detection (compact vertical point clusters 1 to 2.5 m above ground, with canopy above) roughly doubled recall over the original window, but on top of the tuned window it added more false trees than true ones. Trunk-variant comparisons were made on test plots, so they are indicative only. Trunks are kept as an option, not the default.
 
 On Beau's property the tuned window ("conifer" preset) finds 2,525 trees instead of 1,067: it places one treetop on almost every plantation conifer but splits large woodlot broadleaf crowns into two or three. The pipeline therefore offers `--preset broadleaf` (original) and `--preset conifer` (tuned). Choosing per area, or by crown type, waits for the audit plot counts.
