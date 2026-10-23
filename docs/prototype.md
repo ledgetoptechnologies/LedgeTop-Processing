@@ -112,6 +112,9 @@ temporary directory and the exact stopped worker containers for inspection.
 It removes only its own coordinator stack and state volume after the test.
 For persistent one-shot worker usage, see
 [the worker guide](../engines/treedar/docs/prototype-worker.md).
+For automatically draining a bounded set of synthetic jobs in one invocation,
+see [the host dispatcher](dispatch.md). This remains separate from any service
+or production dispatcher.
 
 Never mark a host deployment passed based only on these local checks. Record
 the exact source revision, host identity, image IDs, resource limits and actual

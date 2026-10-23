@@ -1,0 +1,108 @@
+{
+  "scope": "two synthetic TreeDar jobs, no real datasets",
+  "coordinatorImage": "sha256:9c234ac9f7be3dd7579747280afb7584c3eb85c3a59825cd2992e378aa36b2b0",
+  "engineImage": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029",
+  "elapsedSeconds": 10.19,
+  "dispatcherOutput": {
+    "completed": 2,
+    "completedJobIds": [
+      "3a537c51-fbce-4405-bfeb-c7db1ae8ac0a",
+      "8de766ea-f553-4b13-b89c-824db8cf12c2"
+    ],
+    "reason": "max_jobs"
+  },
+  "jobs": [
+    {
+      "id": "8de766ea-f553-4b13-b89c-824db8cf12c2",
+      "requestId": "staging-first",
+      "environment": "staging",
+      "profile": "treedar-synthetic-v1",
+      "status": "succeeded",
+      "workerId": "dispatch-smoke",
+      "createdAt": "2026-10-23 06:24:01",
+      "updatedAt": "2026-10-23 06:24:11",
+      "result": {
+        "environment": "staging",
+        "image_id": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029",
+        "jobId": "8de766ea-f553-4b13-b89c-824db8cf12c2",
+        "manifest_sha256": "ed1b30cd562a39fefb608089ef1e6b3ac4998101d8b84ed41ac0caf16de78766",
+        "n_trees": 3,
+        "outputs_sha256": "e40b1f3e54c720e3d76a7a64e400c88a48d3f653d8d76b93a66dcd8d9983396e",
+        "treedar_version": "0.0.1"
+      }
+    },
+    {
+      "id": "3a537c51-fbce-4405-bfeb-c7db1ae8ac0a",
+      "requestId": "production-second",
+      "environment": "production",
+      "profile": "treedar-synthetic-v1",
+      "status": "succeeded",
+      "workerId": "dispatch-smoke",
+      "createdAt": "2026-10-23 06:24:01",
+      "updatedAt": "2026-10-23 06:24:05",
+      "result": {
+        "environment": "production",
+        "image_id": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029",
+        "jobId": "3a537c51-fbce-4405-bfeb-c7db1ae8ac0a",
+        "manifest_sha256": "c92f076a95378eea8f16d8faec5d0d749281aa15600204951c728ba8974193ad",
+        "n_trees": 3,
+        "outputs_sha256": "f464b9fbb84f115c110c7bba026c9c1bf4b7d19b35a6358b5e1681655df1bcfa",
+        "treedar_version": "0.0.1"
+      }
+    }
+  ],
+  "dispatcherState": [
+    {
+      "environment": "staging",
+      "expectedJobId": "8de766ea-f553-4b13-b89c-824db8cf12c2",
+      "image": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029",
+      "receipt": "c324500c4525410caad11bb7d5b7d2f9.json",
+      "startedAt": "2026-10-23T06:24:05.866227+00:00",
+      "state": "completed",
+      "workerId": "dispatch-smoke"
+    },
+    {
+      "environment": "production",
+      "expectedJobId": "3a537c51-fbce-4405-bfeb-c7db1ae8ac0a",
+      "image": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029",
+      "receipt": "5928496ccd4b49a7a8af128f36c6c68e.json",
+      "startedAt": "2026-10-23T06:24:01.223416+00:00",
+      "state": "completed",
+      "workerId": "dispatch-smoke"
+    }
+  ],
+  "productionBeforeStaging": true,
+  "workerContainersInspectedStopped": 2,
+  "testContainersAndScratchRemoved": true,
+  "sourceRevision": "7b815df",
+  "dispatcherSourceRevision": "f07d2f0",
+  "host": "cluster",
+  "hostAcceptanceVerifiedAt": "2026-10-23T06:24:24.263589+00:00",
+  "precedingSetupIssues": [
+    "helper0600 unreadable by UID10001; failed job stopped dispatcher before staging; cleaned",
+    "two-job processing passed but host could not remove UID10001 outputs; cleaned with scoped same-UID helper; harness corrected"
+  ],
+  "existingContainerStates": [
+    "ledgetop-processing-prototype-c911e22 Up 2 hours (healthy)",
+    "arm-rippers Up 4 days (healthy)",
+    "clusterodx Up 4 days",
+    "node-odx-gpu Up 4 days"
+  ],
+  "checks": {
+    "rootUnitTests": 51,
+    "independentReview": "No blockers; Linux cleanup fix independently reviewed",
+    "realDataProcessed": false,
+    "reusedExistingImages": true
+  },
+  "localFinalAcceptance": {
+    "elapsedSeconds": 5.09,
+    "productionBeforeStaging": true,
+    "testContainersAndScratchRemoved": true
+  },
+  "installedIdleCheck": {
+    "completed": 0,
+    "reason": "empty",
+    "serviceInstalled": false,
+    "coordinator": "localhost18080"
+  }
+}
