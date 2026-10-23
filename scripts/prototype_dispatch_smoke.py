@@ -128,6 +128,25 @@ def main():
         assert sequence == [jobs[1]['id'], jobs[0]['id']]
         evidence['productionBeforeStaging'] = True
         evidence['workerContainersInspectedStopped'] = len(engine_containers)
+        # Save sanitized acceptance before cleanup, so a host permission failure
+        # cannot lose already-verified results or require another processing run.
+        evidence['testContainersAndScratchRemoved'] = False
+        evidence_path.write_text(json.dumps(evidence, indent=2) + '\n')
+        # Engine outputs are owned by image UID10001 on Linux. Delete only the
+        # verified job directory's children using that same UID, without granting
+        # root privileges or changing shared host directory permissions.
+        for receipt in receipts:
+            folder = work / receipt['job']['environment'] / receipt['job']['id']
+            assert folder.resolve() == folder and folder.parent.parent == work
+            command(['docker', 'run', '--rm', '--network', 'none', '--read-only',
+                     '--user', '10001:10001', '--cap-drop', 'ALL',
+                     '--security-opt', 'no-new-privileges', '--cpus', '0.25',
+                     '--memory', '64m', '--pids-limit', '32',
+                     '--mount', 'type=bind,source=' + str(folder) + ',target=/cleanup',
+                     '--entrypoint', 'python', args.engine_image, '-B', '-c',
+                     'from pathlib import Path; import shutil; '
+                     '[(p.unlink() if p.is_symlink() or not p.is_dir() else shutil.rmtree(p)) '
+                     'for p in Path("/cleanup").iterdir()]'])
         for container in engine_containers:
             command(['docker', 'rm', container])
         command(['docker', 'stop', '--time', '10', name])

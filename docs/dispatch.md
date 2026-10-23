@@ -107,5 +107,12 @@ and earlier host evidence cover restart holds. Failure preserves private scratch
 and uncertain worker containers for inspection. No claim token or image content
 belongs in the metadata-only acceptance export.
 
+On Linux, bind-mounted helper scripts must be readable by engine UID10001; keep
+their source deployment parent private while using readable script files. Engine
+outputs belong to UID10001. After inspected-stop verification, the acceptance
+harness uses a small network-disabled helper under that same UID, mounting only
+each verified job output directory, to remove its contents. It checkpoints safe
+evidence before cleanup and marks cleanup verified only after all removals pass.
+
 NodeODX/TreeDar stage chaining still requires
 [artifact and ground/reference admission](engine-handoff.md).
