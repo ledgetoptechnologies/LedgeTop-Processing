@@ -18,6 +18,7 @@ import uuid
 
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 PROFILE = "treedar-synthetic-v1"
+PHOTO_PROFILE = "odx-photo-smoke-v1"
 
 
 class Conflict(Exception):
@@ -25,7 +26,8 @@ class Conflict(Exception):
 
 
 class Queue:
-    def __init__(self, directory):
+    def __init__(self, directory, photo_smoke_enabled=False):
+        self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
@@ -93,8 +95,11 @@ class Queue:
     def submit(self, payload):
         self.fields(payload, ("requestId", "environment", "profile"))
         self.slug(payload["requestId"])
-        if payload["environment"] not in ("production", "staging") or payload["profile"] != PROFILE:
-            raise ValueError("only the synthetic TreeDar profile and explicit environment are supported")
+        if (payload["environment"] not in ("production", "staging")
+                or not isinstance(payload["profile"], str) or payload["profile"] not in self.allowed_profiles):
+            raise ValueError("profile is not enabled or environment is invalid")
+        if payload["profile"] == PHOTO_PROFILE and payload["environment"] != "staging":
+            raise ValueError("the bounded photo smoke profile is staging-only")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT * FROM jobs WHERE request_id=?", (payload["requestId"],)).fetchone()
@@ -106,7 +111,7 @@ class Queue:
                 raise Conflict("prototype history limit reached")
             identifier = str(uuid.uuid4())
             db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
-                       (identifier, payload["requestId"], payload["environment"], PROFILE))
+                       (identifier, payload["requestId"], payload["environment"], payload["profile"]))
             return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()), True
 
     def list(self):
@@ -119,8 +124,13 @@ class Queue:
             return self.public(row) if row else None
 
     def claim(self, payload):
-        self.fields(payload, ("workerId",))
+        self.fields(payload, ("workerId", "profiles") if isinstance(payload, dict) and "profiles" in payload else ("workerId",))
         self.slug(payload["workerId"])
+        profiles = payload.get("profiles", [PROFILE])
+        if (not isinstance(profiles, list) or not 1 <= len(profiles) <= 2
+                or any(not isinstance(p, str) or p not in self.allowed_profiles for p in profiles)
+                or len(profiles) != len(set(profiles))):
+            raise ValueError("worker must declare supported enabled profiles")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
@@ -128,6 +138,10 @@ class Queue:
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
+                return None
+            if row["profile"] not in profiles:
+                # Do not bypass earlier work or production for a worker that
+                # cannot run it. Legacy TreeDar workers never claim photo jobs.
                 return None
             token = secrets.token_urlsafe(32)
             db.execute("UPDATE jobs SET status='running',worker_id=?,claim_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",

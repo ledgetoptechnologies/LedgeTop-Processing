@@ -29,6 +29,11 @@ restart recovery. It uses `compose.prototype.yaml` as a separate localhost-only
 stack. This is a synthetic TreeDar integration trial, not a live Viewer provider
 or a replacement for the current photogrammetry router.
 
+A separate opt-in [NodeODX photo trial](docs/photo-smoke.md) has passed a
+16-photo alignment test through the coordinator on the cluster PC. All selected
+photos registered; test copies and outputs were removed and original hashes
+verified unchanged. See the [metadata-only evidence](docs/evidence/odx-photo-smoke-20261023.json).
+
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
 2. Add the exact local and main processing-node origins when available. A blank

@@ -1,0 +1,128 @@
+{
+  "startedAt": "2026-10-23T05:24:11.065761+00:00",
+  "inputCount": 16,
+  "inputBytes": 175988736,
+  "inputDigest": "a64230aa7c091f9b163da1701c0d21976d3685d119033bcb85e7dc8fd40ad974",
+  "containers": [
+    {
+      "role": "coordinator",
+      "image": "sha256:9c234ac9f7be3dd7579747280afb7584c3eb85c3a59825cd2992e378aa36b2b0",
+      "readonly": true,
+      "nanoCpus": 500000000,
+      "memory": 268435456,
+      "pidsLimit": 64,
+      "tmpfs": {},
+      "ports": {
+        "8080/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "18081"
+          }
+        ]
+      }
+    },
+    {
+      "role": "nodeodx",
+      "image": "sha256:80250f727dfcf8a90a0a259f0e50f8eedb0f180754243b69137e37b5608d788d",
+      "readonly": true,
+      "nanoCpus": 2000000000,
+      "memory": 6442450944,
+      "pidsLimit": 256,
+      "tmpfs": {
+        "/tmp": "rw,nosuid,nodev,size=512m,mode=1777",
+        "/var/www/data": "rw,nosuid,nodev,size=2g,mode=1777",
+        "/var/www/logs": "rw,nosuid,nodev,size=16m,mode=1777",
+        "/var/www/tmp": "rw,nosuid,nodev,size=1g,mode=1777"
+      },
+      "ports": {
+        "3000/tcp": null
+      }
+    }
+  ],
+  "job": {
+    "id": "9b5674c0-bfa2-4fff-b02c-b50359c1f1dc",
+    "requestId": "odx-photo-smoke-20261023-0d8f7a2c",
+    "environment": "staging",
+    "profile": "odx-photo-smoke-v1",
+    "status": "succeeded",
+    "workerId": "photo-smoke-1",
+    "createdAt": "2026-10-23 05:24:11",
+    "updatedAt": "2026-10-23 05:25:16",
+    "result": {
+      "apiVersion": "2.3.1",
+      "archiveSha256": "9279183f6964fecf192b1770120f5b5b3decdd2669a84cb853d39621157c7653",
+      "cameras": 1,
+      "cleanupVerified": true,
+      "components": 1,
+      "engine": "odx",
+      "engineImage": "sha256:80250f727dfcf8a90a0a259f0e50f8eedb0f180754243b69137e37b5608d788d",
+      "engineStatus": 40,
+      "engineUUID": "5fa37dde-eaf7-482b-9022-8139e157c01c",
+      "engineVersion": "3.8.3",
+      "environment": "staging",
+      "inputBytes": 175988736,
+      "inputCount": 16,
+      "inputDigest": "a64230aa7c091f9b163da1701c0d21976d3685d119033bcb85e7dc8fd40ad974",
+      "jobId": "9b5674c0-bfa2-4fff-b02c-b50359c1f1dc",
+      "options": [
+        {
+          "name": "end-with",
+          "value": "opensfm"
+        },
+        {
+          "name": "feature-quality",
+          "value": "low"
+        },
+        {
+          "name": "max-concurrency",
+          "value": 2
+        }
+      ],
+      "points": 2254,
+      "profile": "odx-photo-smoke-v1",
+      "registeredShots": 16
+    }
+  },
+  "taskInventoryAfterRemoval": [],
+  "engineDockerStatsAfterRun": {
+    "BlockIO": "757MB / 0B",
+    "CPUPerc": "0.02%",
+    "Container": "lt-photo-smoke-20261023-0d8f7a2c-nodeodx-1",
+    "ID": "99d5f3777702",
+    "MemPerc": "5.37%",
+    "MemUsage": "330.2MiB / 6GiB",
+    "Name": "lt-photo-smoke-20261023-0d8f7a2c-nodeodx-1",
+    "NetIO": "176MB / 1.23MB",
+    "PIDs": "12"
+  },
+  "engineStopped": {
+    "Running": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "OOMKilled": false,
+    "FinishedAt": "2026-10-23T05:25:57.878673276Z"
+  },
+  "workerExitCode": 0,
+  "testStackAndStateRemoved": true,
+  "finishedAt": "2026-10-23T05:25:58.612914+00:00",
+  "remoteTestCopiesAndReceiptsRemoved": true,
+  "originalFilesRehashedUnchanged": 16,
+  "originalRehashVerifiedBy": "Codex on Windows against original operator manifest",
+  "cleanupCompletedAt": "2026-10-23T05:26:56.912716+00:00",
+  "scope": "One dedicated staging-only alignment trial; no dense reconstruction, ortho, fleet dispatch or production compatibility claim.",
+  "ioMeasurementLimit": "Docker engine block I/O reported 757 MB reads and 0 B writes at completion. Image import, Docker metadata, coordinator SQLite and host-wide SSD writes are outside that container measurement.",
+  "sourceSha256": {
+    "processing/__init__.py": "d7ef6a480c640c35f2de72724b4bc3504143e042b419dee1b560662a41d4ed31",
+    "processing/app.py": "0d52ec880a60a74c3b72fc5a6d2375bfc1be66cb7b1a5afd97ce59197d772639",
+    "processing/config.py": "38504a43f5262eaea8df91017c1ee6fdf7a25d704c2666095adeceec4bf01aa1",
+    "processing/odx_smoke_worker.py": "52f81b04126b54a7bbadd48cbd040a9892f4d01ac5c97e9df1366f955ca29e68",
+    "processing/policy.py": "4bc1114bec0eea117c023e5e049afa7b0824fb576c60b1eefebf06d0a7e397e8",
+    "processing/prototype.py": "50dc2f92ed889e009f5cd0640914f100ec36719e210e96302016b83ad1b73ee2",
+    "processing/provider.py": "b3f4ca526b6be635ccfa4677e2460f755e4398edbc29ccb24b0efdbcdc614901"
+  },
+  "verification": {
+    "unitTests": 38,
+    "independentCodeReview": "No dispatch blockers found",
+    "localTestArchivesRemoved": true
+  }
+}

@@ -2,9 +2,13 @@
 
 This opt-in prototype exercises durable job submission, production-first
 admission and a separate TreeDar worker. It accepts only the fixed
-`treedar-synthetic-v1` profile. It does not accept client datasets, commands,
+`treedar-synthetic-v1` profile by default. It does not accept client datasets, commands,
 paths or URLs, and is not a Viewer-compatible provider or a replacement for
 ClusterODM/ClusterODX yet. Existing `/v1/plan` routing behavior is unchanged.
+
+An independent, explicitly enabled staging-only photo trial is documented in
+[NodeODX photo smoke test](photo-smoke.md). It uses a separate Compose project
+and does not expand the default synthetic deployment's admission rules.
 
 The cluster PC is separate from the Lenovo M720q staging PC. Use the verified
 cluster host for deployment; an old address in a note is not current identity

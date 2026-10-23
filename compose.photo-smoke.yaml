@@ -1,0 +1,70 @@
+# Opt-in bounded real-photo test; original data is mounted read-only to worker.
+services:
+  coordinator:
+    image: ${PROCESSING_SMOKE_IMAGE:?set verified immutable coordinator image ID}
+    init: true
+    restart: "no"
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 64
+    ports: ["127.0.0.1:${PHOTO_SMOKE_PORT:-18081}:8080"]
+    environment:
+      PROCESSING_API_TOKEN: ${PROCESSING_API_TOKEN:?set private test credential}
+      PROCESSING_PROTOTYPE_OPERATOR_TOKEN: ${PROCESSING_PROTOTYPE_OPERATOR_TOKEN:?set separate operator credential}
+      PROCESSING_PROTOTYPE_STATE_DIR: /prototype-state
+      PROCESSING_PHOTO_SMOKE_ENABLED: "1"
+    volumes: ["state:/prototype-state"]
+    networks: [api, engine]
+  nodeodx:
+    image: ${NODEODX_SMOKE_IMAGE:?set verified existing immutable NodeODX image ID}
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 2
+    mem_limit: 6g
+    pids_limit: 256
+    environment:
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      HOME: /tmp
+    command: ["--config", "/var/www/smoke-config.json", "--port", "3000", "--parallel_queue_processing", "1", "--max_images", "50", "--max_concurrency", "2", "--max_runtime", "10"]
+    volumes:
+      - "${NODEODX_SMOKE_CONFIG:?set private test config file}:/var/www/smoke-config.json:ro"
+    tmpfs:
+      - /var/www/data:rw,nosuid,nodev,size=2g,mode=1777
+      - /var/www/tmp:rw,nosuid,nodev,size=1g,mode=1777
+      - /var/www/logs:rw,nosuid,nodev,size=16m,mode=1777
+      - /tmp:rw,nosuid,nodev,size=512m,mode=1777
+    networks: [engine]
+  worker:
+    profiles: [worker]
+    image: ${PROCESSING_SMOKE_IMAGE:?set verified immutable coordinator image ID}
+    user: "${SMOKE_WORKER_UID:-1000}:${SMOKE_WORKER_GID:-1000}"
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1
+    mem_limit: 512m
+    pids_limit: 64
+    environment:
+      PROCESSING_API_TOKEN: ${PROCESSING_API_TOKEN:?set private test credential}
+    volumes:
+      - "${PHOTO_SMOKE_INPUTS:?set isolated selected-photo copy directory}:/photos:ro"
+      - "${PHOTO_SMOKE_MANIFEST:?set operator-generated hash manifest}:/manifest.json:ro"
+      - "${PHOTO_SMOKE_WORK:?set private empty worker directory}:/work"
+    command: ["python", "-m", "processing.odx_smoke_worker", "--coordinator", "http://coordinator:8080", "--node-origin", "http://nodeodx:3000", "--manifest", "/manifest.json", "--photos", "/photos", "--work", "/work", "--worker-id", "photo-smoke-1", "--engine-image", "${NODEODX_SMOKE_IMAGE}"]
+    networks: [engine]
+volumes:
+  state:
+networks:
+  api:
+  engine:
+    internal: true
