@@ -1,0 +1,190 @@
+"""Durable, single-slot queue for the isolated synthetic TreeDar prototype.
+
+This is not a Viewer API or a production dataset admission path. A process lock
+prevents a second coordinator from resetting another coordinator's live claims.
+"""
+
+import hashlib
+from contextlib import contextmanager
+import hmac
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import sqlite3
+import uuid
+
+
+SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+PROFILE = "treedar-synthetic-v1"
+
+
+class Conflict(Exception):
+    pass
+
+
+class Queue:
+    def __init__(self, directory):
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
+        self._lock = (root / "coordinator.lock").open("a+b")
+        self._lock.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                if not self._lock.read(1):
+                    self._lock.write(b"0")
+                    self._lock.flush()
+                self._lock.seek(0)
+                msvcrt.locking(self._lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                self._lock.close()
+                raise RuntimeError("prototype state already owned") from None
+        else:
+            import fcntl
+            try:
+                fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                self._lock.close()
+                raise RuntimeError("prototype state already owned") from None
+        self.path = root / "jobs.sqlite3"
+        with self._db() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS jobs (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+                request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
+                profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,
+                claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            db.execute("UPDATE jobs SET status='held', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
+
+    def close(self):
+        self._lock.close()
+
+    @contextmanager
+    def _db(self):
+        db = sqlite3.connect(self.path, timeout=10)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA synchronous=FULL")
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def public(row):
+        return {"id": row["id"], "requestId": row["request_id"],
+                "environment": row["environment"], "profile": row["profile"],
+                "status": row["status"], "workerId": row["worker_id"],
+                "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+                "result": json.loads(row["result"]) if row["result"] else None}
+
+    @staticmethod
+    def fields(payload, expected):
+        if not isinstance(payload, dict) or set(payload) != set(expected):
+            raise ValueError("unexpected or missing fields")
+
+    @staticmethod
+    def slug(value):
+        if not isinstance(value, str) or not SLUG.fullmatch(value):
+            raise ValueError("identifier must be an ASCII slug of 1 to 64 characters")
+
+    def submit(self, payload):
+        self.fields(payload, ("requestId", "environment", "profile"))
+        self.slug(payload["requestId"])
+        if payload["environment"] not in ("production", "staging") or payload["profile"] != PROFILE:
+            raise ValueError("only the synthetic TreeDar profile and explicit environment are supported")
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT * FROM jobs WHERE request_id=?", (payload["requestId"],)).fetchone()
+            if old:
+                if old["environment"] != payload["environment"] or old["profile"] != payload["profile"]:
+                    raise Conflict("requestId already belongs to a different submission")
+                return self.public(old), False
+            if db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] >= 1000:
+                raise Conflict("prototype history limit reached")
+            identifier = str(uuid.uuid4())
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
+                       (identifier, payload["requestId"], payload["environment"], PROFILE))
+            return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()), True
+
+    def list(self):
+        with self._db() as db:
+            return [self.public(row) for row in db.execute("SELECT * FROM jobs ORDER BY seq")]
+
+    def get(self, identifier):
+        with self._db() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
+            return self.public(row) if row else None
+
+    def claim(self, payload):
+        self.fields(payload, ("workerId",))
+        self.slug(payload["workerId"])
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
+                return None
+            row = db.execute("""SELECT * FROM jobs WHERE status='queued'
+                ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
+            if not row:
+                return None
+            token = secrets.token_urlsafe(32)
+            db.execute("UPDATE jobs SET status='running',worker_id=?,claim_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (payload["workerId"], hashlib.sha256(token.encode()).hexdigest(), row["id"]))
+            job = self.public(db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
+            return {**job, "claimToken": token}
+
+    def complete(self, identifier, payload):
+        self.fields(payload, ("claimToken", "status", "result"))
+        if (not isinstance(payload["claimToken"], str) or len(payload["claimToken"]) > 128
+                or payload["status"] not in ("succeeded", "failed") or not isinstance(payload["result"], dict)):
+            raise ValueError("invalid completion")
+        result = json.dumps(payload["result"], sort_keys=True, allow_nan=False, separators=(",", ":"))
+        if len(result.encode()) > 4096:
+            raise ValueError("result exceeds prototype limit")
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
+            if not row:
+                raise Conflict("unknown job")
+            supplied_hash = hashlib.sha256(payload["claimToken"].encode()).hexdigest()
+            if not row["claim_hash"] or not hmac.compare_digest(supplied_hash, row["claim_hash"]):
+                raise Conflict("invalid claim")
+            if row["status"] in ("succeeded", "failed"):
+                if row["status"] == payload["status"] and row["result"] == result:
+                    return self.public(row)
+                raise Conflict("terminal completion differs")
+            if row["status"] != "running":
+                raise Conflict("job is held for operator inspection; completion cannot release it")
+            db.execute("UPDATE jobs SET status=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (payload["status"], result, identifier))
+            return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
+
+    def operator(self, identifier, action, payload):
+        """A separate human/operator credential is required by the HTTP layer.
+
+        Holding never kills a worker; resolution is an explicit attestation after
+        the operator independently verifies no old worker/container remains.
+        """
+        self.fields(payload, ("note", "workerStopped") if action == "resolve" else ("note",))
+        if not isinstance(payload["note"], str) or not 1 <= len(payload["note"]) <= 256:
+            raise ValueError("operator inspection note required")
+        if action == "resolve" and payload["workerStopped"] is not True:
+            raise ValueError("verify the worker is stopped before resolution")
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
+            if not row:
+                raise Conflict("unknown job")
+            if action == "hold" and row["status"] == "running":
+                status = "held"
+            elif action == "resolve" and row["status"] == "held":
+                status = "failed"
+            else:
+                raise Conflict("operator transition not allowed")
+            result = json.dumps({"environment": row["environment"], "operatorAction": action,
+                                 "note": payload["note"], "workerStopped": payload.get("workerStopped", False)})
+            db.execute("UPDATE jobs SET status=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (status, result, identifier))
+            return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
