@@ -34,6 +34,14 @@ declare `profiles`; legacy `{workerId}` claims support only TreeDar. The single
 global slot still chooses production first, then FIFO. A worker with the wrong
 profile cannot bypass that selected job. Priority is nonpreemptive.
 
+A queued photo job blocks later staging TreeDar jobs when no matching worker is
+available. Do not disable the photo profile until its queue is empty. If disabled
+with queued work, restore the flag and the appropriate worker, or retire this
+isolated test stack after stopping all its workers/engine and exporting evidence.
+There is no queued-job cancel/delete API; hold/resolve applies only to running or
+held jobs. Do not edit SQLite or falsely attest that an executing worker stopped
+to bypass a blocked head job.
+
 The queue accepts no paths or URLs. The operator supplies the worker with an
 isolated read-only directory and a manifest of 10–50 JPEGs, at most 512 MiB total:
 
@@ -51,6 +59,8 @@ orthophoto stages are excluded. The actual node must advertise these options.
 The worker has a 600-second polling budget. The server additionally has an
 approximate ten-minute watchdog. No uncertain mutation is retried. An uncertain
 run leaves its claim blocking the queue for operator recovery.
+Only the 16-photo batch has been measured on this hardware. The 50-photo bound
+is an admission ceiling, not an established runtime/capacity guarantee.
 
 Success requires the reported input count, an actual nonempty OpenSfM
 reconstruction, cameras and points, and registration of at least 80% of inputs.
@@ -95,6 +105,12 @@ through `/v1/prototype/jobs`. Then run the worker once:
 ```sh
 docker compose -p UNIQUE-TEST --env-file PRIVATE.env -f compose.photo-smoke.yaml run --no-deps worker
 ```
+
+The worker's `engineImage` result is parent-asserted: pass the actual inspected
+engine container image ID, not an unverified tag or expected value. The worker
+has no Docker access and cannot independently attest that identity. If enabling
+NodeODX token authentication, query tokens can enter engine access logs; keep
+those logs private in RAM and remove them with the dedicated test container.
 
 The coordinator binds localhost 18081 and has a small persistent queue volume.
 The engine has 2 CPUs, 6 GiB RAM, a read-only root and RAM-backed data/uploads/logs.
