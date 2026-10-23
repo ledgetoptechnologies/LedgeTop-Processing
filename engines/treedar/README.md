@@ -71,3 +71,20 @@ Use `--no-qc` on `run` to skip the whole-file QC pass and writing `qc.json`, whi
 `chm.tif` is filtered: pits more than 1 m below their 3x3 median are raised, and cells more than `--spike-threshold` metres (default 5, 0 disables) above their 5x5 median are lowered. This is heuristic noise suppression and can lower a narrow real apex beside a gap; counts are in `summary.json` under `chm_filter`. `chm_raw.tif` is the surface before that filtering, but it still drops points more than 60 m above ground and fills empty cells from their highest neighbour, so it is not untouched observations.
 
 Use a small approved spatial subset with `--bbox minx,miny,maxx,maxy` before a full cloud, and treat `--step N` as decimation that changes density and may miss treetops. Confirm source CRS and metre units before interpreting heights or crown area. Coordinates, rasters, logs, and outputs from real data must stay out of Git and external services.
+
+### Lasting tree IDs across reruns
+
+A run's `tree_id` is numbered in scan order, so rerunning the same flight with other settings can renumber every tree. To keep IDs, give each dataset one registry file and pass it to every run of that dataset:
+
+```powershell
+./.venv/Scripts/treedar.exe run 'C:/local-data/example.laz' --out outputs/run-001 --ids-registry outputs/example-tree-ids.json
+./.venv/Scripts/treedar.exe run 'C:/local-data/example.laz' --out outputs/run-002 --preset conifer --ids-registry outputs/example-tree-ids.json
+```
+
+`treedar ids RUN_DIR --registry FILE` does the same for an existing run folder. The first run creates the registry, and each tree's lasting ID is its `tree_id` from that run, so labels already written against it stay valid. Later runs pair each treetop with one registered tree, closest pairs first, within 1.5 m horizontally and 3 m in height (`--max-dist` and `--max-dz` set these only when the registry is created). Each run folder gets `tree_ids.csv`: `tree_id`, `stable_id`, `match` (`seed`, `matched` or `new`), the distance and height change, `review` and `related_ids`.
+
+`review` is `possible_split` when a registered tree has two or more treetops in range, and `possible_merge` when a treetop has two or more registered trees in range. `related_ids` lists the other lasting IDs involved. Check these trees by hand. Registered trees that a run does not find are kept as `missing`, and their IDs are never reused. If the tree is found again later, it keeps its ID. The registry must use the run's projected metre CRS. A run already in the registry is not assigned again.
+
+Labels keyed by lasting ID carry over to any run. Give `--labels` a CSV with `stable_id,label[,group]`, and `treedar ids` writes that run's `labels.csv` (`tree_id,label,group`) for `classify`. Trees flagged for review, and labels whose tree the run did not find, are skipped and listed rather than moved to another tree. Leave a tree out of the labels file, or leave its label blank, when its type is unknown.
+
+The registry contains tree positions, so keep it with the dataset's private run folders, not in Git.

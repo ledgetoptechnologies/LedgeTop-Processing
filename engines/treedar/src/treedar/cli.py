@@ -13,7 +13,7 @@ import numpy as np
 import rasterio
 
 from . import (__version__, areas, benchmark, chm, classify, features, io, jev, labeltool,
-               ortho, qc, runinfo, segment, terrain, treemap)
+               ortho, qc, runinfo, segment, terrain, treeids, treemap)
 
 TREE_COLUMNS = ["tree_id", "x", "y", "height_m", "crown_area_m2", "crown_diameter_m"]
 
@@ -99,6 +99,8 @@ def process(args) -> dict:
         "chm_filter": chm_stats,
         "version": __version__,
     }
+    if getattr(args, "ids_registry", None):
+        summary["tree_ids"] = treeids.update_run(out, args.ids_registry)
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"{len(trees)} trees from {summary['n_points_used']:,} points "
           f"in {summary['runtime_s']} s -> {out}")
@@ -136,6 +138,22 @@ def make_labels(run_dir: Path, area_types_csv) -> Path:
     areas.write_csv(path, rows, ["tree_id", "label", "group"])
     print(f"{len(rows)} labelled trees from {len(types)} named areas -> {path}")
     return path
+
+
+def cmd_ids(args) -> int:
+    run_dir = Path(args.run_dir)
+    counts = treeids.update_run(run_dir, args.registry, args.max_dist, args.max_dz)
+    print(f"{counts['trees']} trees: {counts['seed']} seeded, {counts['matched']} matched, "
+          f"{counts['new']} new, {counts['missing']} registered trees missing, "
+          f"{counts['review']} to review -> {run_dir / 'tree_ids.csv'}")
+    if args.labels:
+        rows, skipped = treeids.labels_for_run(treeids.read_tree_ids(run_dir / "tree_ids.csv"),
+                                               classify._read_csv(args.labels))
+        areas.write_csv(run_dir / "labels.csv", rows, ["tree_id", "label", "group"])
+        print(f"{len(rows)} labels -> {run_dir / 'labels.csv'}; {len(skipped)} skipped")
+        for reason in skipped:
+            print(f"  skipped stable_id {reason}")
+    return 0
 
 
 def cmd_labels(args) -> int:
@@ -222,7 +240,7 @@ def cmd_pipeline(args) -> int:
             min_accuracy=args.min_accuracy, min_coverage=args.min_coverage))
         predictions = run_dir / "classify" / "predictions.csv"
     make_map(run_dir, predictions)
-    params = {k: v for k, v in vars(args).items() if k not in ("func", "laz", "out")}
+    params = {k: v for k, v in vars(args).items() if k not in ("func", "laz", "out", "ids_registry")}
     runinfo.write_manifest(run_dir, input_path=args.laz, params=params, command="pipeline")
     report = runinfo.write_report(run_dir)
     print(f"pipeline finished in {time.perf_counter() - start:.0f} s; report: {report}")
@@ -312,10 +330,27 @@ def build_parser() -> argparse.ArgumentParser:
                        help="override: window diameter increase per metre of height")
         p.add_argument("--smooth", dest="smooth_sigma_m", type=float, default=None,
                        help="override: CHM smoothing sigma before treetop search (m)")
+        p.add_argument("--ids-registry", default=None,
+                       help="tree ID registry JSON for this dataset; assigns lasting IDs "
+                            "(tree_ids.csv), creating the registry on the first run")
 
     p_run = sub.add_parser("run", help="DTM, CHM, treetops, crowns and tree features")
     add_run_args(p_run)
     p_run.set_defaults(func=cmd_run)
+
+    p_ids = sub.add_parser("ids", help="lasting tree IDs across reruns of one dataset")
+    p_ids.add_argument("run_dir", help="output folder of `treedar run` or `pipeline`")
+    p_ids.add_argument("--registry", required=True,
+                       help="tree ID registry JSON for this dataset (created on the first run)")
+    p_ids.add_argument("--max-dist", type=float, default=treeids.MAX_DIST_M,
+                       help="max horizontal treetop distance for the same tree (m); "
+                            "used only when the registry is created")
+    p_ids.add_argument("--max-dz", type=float, default=treeids.MAX_DZ_M,
+                       help="max height difference for the same tree (m); "
+                            "used only when the registry is created")
+    p_ids.add_argument("--labels", default=None,
+                       help="CSV with stable_id,label[,group]; writes this run's labels.csv")
+    p_ids.set_defaults(func=cmd_ids)
 
     p_areas = sub.add_parser("areas", help="named tree areas and a labelling template")
     p_areas.add_argument("run_dir", help="output folder of `treedar run`")
