@@ -13,7 +13,7 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
-    queue = Queue(config.prototype_state_dir) if config.prototype_state_dir else None
+    queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled) if config.prototype_state_dir else None
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"
@@ -59,7 +59,7 @@ def make_handler(config: Config):
                 if queue is None:
                     self._reply(404, {"error": "prototype_disabled"})
                 elif self.path == "/v1/prototype/jobs":
-                    self._reply(200, {"jobs": queue.list(), "mode": "synthetic_prototype"})
+                    self._reply(200, {"jobs": queue.list(), "mode": "bounded_photo_test" if config.photo_smoke_enabled else "synthetic_prototype"})
                 elif self.path.startswith("/v1/prototype/jobs/"):
                     job = queue.get(self.path.removeprefix("/v1/prototype/jobs/"))
                     self._reply(200 if job else 404, {"job": job})
@@ -68,7 +68,8 @@ def make_handler(config: Config):
                 return
             if self.path == "/healthz":
                 self._reply(200, {"status": "ok", "mode": "routing_probe",
-                                  "syntheticPrototypeEnabled": queue is not None})
+                                  "syntheticPrototypeEnabled": queue is not None,
+                                  "photoSmokeEnabled": config.photo_smoke_enabled})
             elif self.path == "/v1/nodes":
                 if self._authorized():
                     self._reply(200, {"nodes": self._nodes()})

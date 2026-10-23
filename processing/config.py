@@ -16,6 +16,7 @@ class Config:
     port: int = 8080
     prototype_state_dir: str = ""
     prototype_operator_token: str = ""
+    photo_smoke_enabled: bool = False
 
 
 def _node_origin(value: str) -> str:
@@ -44,6 +45,11 @@ def from_environment() -> Config:
     if len(token) < 32 or any(ord(char) < 33 or ord(char) > 126 for char in token):
         raise ValueError("PROCESSING_API_TOKEN must contain at least 32 printable characters")
     operator = os.environ.get("PROCESSING_PROTOTYPE_OPERATOR_TOKEN", "")
+    photo_smoke = os.environ.get("PROCESSING_PHOTO_SMOKE_ENABLED", "0")
+    if photo_smoke not in ("0", "1"):
+        raise ValueError("PROCESSING_PHOTO_SMOKE_ENABLED must be 0 or 1")
+    if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
+        raise ValueError("photo smoke requires a dedicated prototype state directory")
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
@@ -57,4 +63,5 @@ def from_environment() -> Config:
         port=_positive_int(os.environ.get("PROCESSING_PORT", "8080"), "PROCESSING_PORT", 65535),
         prototype_state_dir=os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR", ""),
         prototype_operator_token=operator,
+        photo_smoke_enabled=photo_smoke == "1",
     )
