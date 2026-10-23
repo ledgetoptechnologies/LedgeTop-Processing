@@ -34,6 +34,12 @@ A separate opt-in [NodeODX photo trial](docs/photo-smoke.md) has passed a
 photos registered; test copies and outputs were removed and original hashes
 verified unchanged. See the [metadata-only evidence](docs/evidence/odx-photo-smoke-20261023.json).
 
+The [bounded synthetic dispatcher](docs/dispatch.md) can drain queued TreeDar
+fixture jobs serially from one host command. It preserves production priority and
+stops on uncertain execution. The [engine handoff requirements](docs/engine-handoff.md)
+describe the remaining ground/coordinate checks before NodeODX products can
+become TreeDar forestry inputs.
+
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
 2. Add the exact local and main processing-node origins when available. A blank
