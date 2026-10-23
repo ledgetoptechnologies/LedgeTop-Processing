@@ -26,6 +26,7 @@ ROLES = {
     "areas.tif": ("area_labels", "cog"), "ortho_rgb.tif": ("orthophoto_point_colour", "cog"),
     "tree_map.geojson": ("crowns", "geojson"), "trees.csv": ("tree_table", "csv"),
     "tree_features.csv": ("tree_features", "csv"), "tree_areas.csv": ("tree_areas", "csv"),
+    "tree_ids.csv": ("lasting_tree_ids", "csv"),
     "area_types.csv": ("area_types_template", "csv"), "labels.csv": ("labels", "csv"),
     "qc.json": ("quality_report", "json"), "summary.json": ("run_summary", "json"),
     "tree_map.png": ("preview", "png"), "areas.png": ("area_map_preview", "png"),
