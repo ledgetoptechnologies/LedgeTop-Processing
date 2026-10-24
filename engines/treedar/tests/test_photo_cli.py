@@ -17,9 +17,10 @@ def test_raw_chips_cli_forwards_ids_and_options(tmp_path, monkeypatch, capsys):
                         lambda *a, **kw: calls.append((a, kw)) or {"1": [{"view": 0}]})
     assert cli.main(["raw-chips", "run", "--opensfm", "alignment", "--images", "photos",
                      "--out", "views", "--tree-ids", str(ids), "--views", "2",
-                     "--search-radius", "25", "--edge-margin", "0"]) == 0
+                     "--search-radius", "25", "--edge-margin", "0", "--select", "spread"]) == 0
     assert calls == [(("alignment", "photos", "run", "views"),
-                      dict(tree_ids=[1, "7"], views=2, search_radius_m=25, edge_margin=0))]
+                      dict(tree_ids=[1, "7"], views=2, search_radius_m=25, edge_margin=0,
+                           select="spread"))]
     assert "1 trees, 1 views" in capsys.readouterr().out
 
 

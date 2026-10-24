@@ -195,8 +195,20 @@ def cmd_raw_chips(args) -> int:
     result = generate_raw_chips(args.opensfm, args.images, args.run_dir, args.out,
                                 tree_ids=tree_ids, views=args.views,
                                 search_radius_m=args.search_radius,
-                                edge_margin=args.edge_margin)
+                                edge_margin=args.edge_margin, select=args.select)
     print(f"{len(result)} trees, {sum(len(v) for v in result.values())} views -> {args.out}")
+    return 0
+
+
+def cmd_fieldpack(args) -> int:
+    from .fieldpack import build
+    out = Path(args.out) if args.out else Path(args.run_dir) / "fieldpack"
+    pack = build(args.run_dir, out, args.laz, raw_photos=args.raw_photos,
+                 ortho_chips=args.ortho_chips, ortho=args.ortho, predictions=args.predictions,
+                 max_points=args.max_points, photo_px=args.photo_px, seed=args.seed)
+    size = sum(f["bytes"] for f in pack["files"].values())
+    print(f"{pack['trees']} trees, {pack['photos']['trees_with_raw']} with photo views, "
+          f"{size / 1e6:.0f} MB -> {out} (contains property imagery: keep out of Git)")
     return 0
 
 
@@ -257,7 +269,8 @@ def cmd_report(args) -> int:
 
 def cmd_classify(args) -> int:
     report = classify.run(args.trees, args.features, args.labels, args.out, block_m=args.block_m,
-                          min_accuracy=args.min_accuracy, min_coverage=args.min_coverage)
+                          min_accuracy=args.min_accuracy, min_coverage=args.min_coverage,
+                          label_map=getattr(args, "label_map", None))
     cv = report["cross_validation"]
     chosen = cv["chosen"]
     msg = (f"{report['labelled_blocks']} label groups ({report['grouping']}): "
@@ -395,7 +408,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_rc.add_argument("--views", type=int, default=3)
     p_rc.add_argument("--search-radius", type=float, default=40, help="camera search radius (m)")
     p_rc.add_argument("--edge-margin", type=int, default=40, help="photo edge exclusion (pixels)")
+    p_rc.add_argument("--select", choices=("overhead", "spread"), default="overhead",
+                      help="most overhead views, or the most overhead then varied directions")
     p_rc.set_defaults(func=cmd_raw_chips)
+
+    p_fp = sub.add_parser("fieldpack", help="small per-tree files for labelling on a phone")
+    p_fp.add_argument("run_dir", help="run with trees.csv, crowns.tif, dtm.tif and tree_ids.csv")
+    p_fp.add_argument("--laz", required=True, help="the run's input point cloud")
+    p_fp.add_argument("--out", help="output folder (default: <run_dir>/fieldpack); must not exist")
+    p_fp.add_argument("--raw-photos", help="folder from `treedar raw-chips` (with views.json)")
+    p_fp.add_argument("--ortho-chips", help="folder from `treedar chips` (tree_<id>.png)")
+    p_fp.add_argument("--ortho", help="orthophoto GeoTIFF for the map overview")
+    p_fp.add_argument("--predictions", help="classify predictions.csv to include")
+    p_fp.add_argument("--max-points", type=int, default=150_000, help="points kept per tree")
+    p_fp.add_argument("--photo-px", type=int, default=1600, help="longest photo side (pixels)")
+    p_fp.add_argument("--seed", type=int, default=0)
+    p_fp.set_defaults(func=cmd_fieldpack)
 
     p_po = sub.add_parser("photo-ortho", help="project aligned photos onto the LiDAR surface")
     p_po.add_argument("run_dir", help="run with dtm.tif and chm_raw.tif; ellipsoidal Z required")
@@ -445,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="spatial block size for cross-validation (metres)")
     p_cls.add_argument("--min-accuracy", type=float, default=0.85)
     p_cls.add_argument("--min-coverage", type=float, default=0.70)
+    p_cls.add_argument("--label-map", help="CSV with label,type mapping species to trained classes")
     p_cls.set_defaults(func=cmd_classify)
 
     p_jev = sub.add_parser("jev", help="ask TypeSafe Jev for tree types (sends features, plus crown images with --chips; "

@@ -25,15 +25,33 @@ def _integer(value, name):
         raise ValueError(f"{name} must be an integer") from exc
 
 
+def _spread(scored, views):
+    """Most overhead view first, then each next view as far in viewing
+    direction from those already chosen as possible, so a tree is seen from
+    several sides rather than from near-identical overhead shots."""
+    chosen = [0]
+    dirs = np.array([row[5] for row in scored])
+    while len(chosen) < min(views, len(scored)):
+        # Smallest angle to any chosen direction; take the candidate maximising it.
+        sep = np.arccos(np.clip(dirs @ dirs[chosen].T, -1, 1)).min(axis=1)
+        sep[chosen] = -1
+        chosen.append(int(np.argmax(sep)))
+    return [scored[k] for k in chosen]
+
+
 def generate_raw_chips(opensfm_dir, images_dir, run_dir, out_dir, tree_ids=None,
-                       views=3, search_radius_m=40, edge_margin=40) -> dict:
+                       views=3, search_radius_m=40, edge_margin=40, select="overhead") -> dict:
     """Write tree_ID_vK.jpg and views.json, without modifying originals.
 
     Complete finite crowns must be visible in front of an above-canopy camera.
+    select="overhead" keeps the most overhead views; select="spread" keeps the
+    most overhead view, then views from directions as different as possible.
     """
     views = _integer(views, "views")
     if views < 1:
         raise ValueError("views must be a positive integer")
+    if select not in ("overhead", "spread"):
+        raise ValueError("select must be 'overhead' or 'spread'")
     if not np.isfinite(search_radius_m) or search_radius_m <= 0:
         raise ValueError("search radius must be finite and positive")
     if not np.isfinite(edge_margin) or edge_margin < 0:
@@ -106,9 +124,10 @@ def generate_raw_chips(opensfm_dir, images_dir, run_dir, out_dir, tree_ids=None,
                     and u.min() > edge_margin and u.max() < width - edge_margin
                     and v.min() > edge_margin and v.max() < height - edge_margin):
                 angle = float(np.degrees(np.arctan2(np.hypot(*delta[:2]), delta[2])))
-                scored.append((angle, scene.names[i], i, u, v))
+                scored.append((angle, scene.names[i], i, u, v, delta / np.linalg.norm(delta)))
         scored.sort(key=lambda row: (row[0], row[1]))
-        for rank, (angle, name, i, u, v) in enumerate(scored[:views]):
+        picked = _spread(scored, views) if select == "spread" and scored else scored[:views]
+        for rank, (angle, name, i, u, v, direction) in enumerate(picked):
             image = Image.fromarray(scene.photo(i))
             span = max(float(np.ptp(u)), float(np.ptp(v)))
             side = max(1, int(np.ceil(span * 1.5 + 60)))
@@ -125,6 +144,8 @@ def generate_raw_chips(opensfm_dir, images_dir, run_dir, out_dir, tree_ids=None,
             chip.save(out / filename, quality=90)
             result.setdefault(str(tid), []).append({
                 "view": rank, "photo": name, "off_nadir_deg": round(angle, 1),
+                # Compass bearing from the tree to the camera (topocentric east/north).
+                "azimuth_deg": round(float(np.degrees(np.arctan2(direction[0], direction[1]))) % 360, 1),
                 "filename": filename,
             })
     (out / "views.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

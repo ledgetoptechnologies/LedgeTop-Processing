@@ -88,3 +88,28 @@ A run's `tree_id` is numbered in scan order, so rerunning the same flight with o
 Labels keyed by lasting ID carry over to any run. Give `--labels` a CSV with `stable_id,label[,group]`, and `treedar ids` writes that run's `labels.csv` (`tree_id,label,group`) for `classify`. Trees flagged for review, and labels whose tree the run did not find, are skipped and listed rather than moved to another tree. Leave a tree out of the labels file, or leave its label blank, when its type is unknown.
 
 The registry contains tree positions, so keep it with the dataset's private run folders, not in Git.
+
+### Field pack for labelling on a phone
+
+`treedar fieldpack RUN_DIR --laz CLOUD.laz` writes small, ready-to-show files for one run, for a phone page such as the planned Engineering Hub Trees workspace. Run `treedar ids` on the run first: the pack is keyed by lasting ID.
+
+```powershell
+./.venv/Scripts/treedar.exe raw-chips outputs/run-001 --opensfm PHOTO_ALIGNMENT --images PHOTOS --out outputs/run-001/chips_spread --views 6 --select spread
+./.venv/Scripts/treedar.exe fieldpack outputs/run-001 --laz 'C:/local-data/example.laz' --raw-photos outputs/run-001/chips_spread --ortho-chips outputs/run-001/chips --ortho outputs/run-001/photo_ortho.tif
+```
+
+The pack folder (default `RUN_DIR/fieldpack`, which must not exist yet) holds:
+
+- `trees.geojson`: crown outlines in WGS84 longitude and latitude, one feature per tree, with `stable_id`, the treetop (`top`), height, crown size, area, review flag, prediction (with `--predictions`) and the tree's point and photo files.
+- `points/<stable_id>.bin`: every point inside the crown footprint, ground and stem included, thinned at random to at most `--max-points` (150,000). Each point is 16 bytes, little-endian: float32 x, y, z, then uint8 r, g, b and a pad byte. Colour is brightened with a display gamma of 2.2, recorded in `pack.json`, because LiDAR colour is linear and canopy often looks almost black. x and y are metres east and north of the treetop; z is metres above the ground model at the treetop. A browser reads it straight into typed arrays, with no LAZ decoder.
+- `photos/<stable_id>/`: original-photo crops `v<k>.jpg` with their angle from vertical and compass bearing, and the orthophoto crop `ortho.jpg`, resized to at most 1,600 px.
+- `ortho/overview.jpg`: the orthophoto warped to Web Mercator, at most 4,096 px, with its latitude and longitude bounds in `pack.json`.
+- `pack.json`: contents, point format, and the size and SHA-256 of every file.
+
+`raw-chips --select spread` keeps the most overhead photo, then each next photo from the viewing direction most different from those already chosen, so a tree is seen from several sides. The default `--select overhead` keeps the most overhead photos. `views.json` now records each view's compass bearing (`azimuth_deg`).
+
+The pack is built under `<out>.partial` and renamed when complete. It holds property imagery and coordinates, so keep it with the private run folders, not in Git.
+
+### Species labels
+
+Field labels can name species. `classify --label-map docs/species_types.csv` maps each label to the class the classifier trains on (`conifer` or `broadleaf`), ignoring case. A blank type, such as `not sure`, leaves the tree unlabelled. A label missing from the map is an error, so a new species is added to the map rather than silently trained as a class of its own. `docs/species_types.csv` is a starter list for the region; edit it as labels come in.
