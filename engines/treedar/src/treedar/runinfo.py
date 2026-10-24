@@ -149,6 +149,7 @@ def write_report(run_dir) -> Path:
             f"<h2>Tree type classifier</h2><p>{cls['labelled_blocks']} label groups "
             f"({html.escape(cls['grouping'])}): {cls['development_groups']} development, "
             f"{cls['final_test_groups']} final test. Threshold {cls['threshold_used']:.2f}.</p>"
+            + (f"<p>{html.escape(cv['note'])}</p>" if cv.get("note") else "")
             + _table(rows, ["Set", "Trees", "Accuracy, no unknowns", "At chosen threshold"])
             + "<h3>Calibration (development)</h3>"
             + _table(cal, ["confidence_from", "confidence_to", "n", "mean_confidence", "observed_accuracy"]))

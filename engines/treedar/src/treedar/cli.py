@@ -262,7 +262,13 @@ def cmd_classify(args) -> int:
     chosen = cv["chosen"]
     msg = (f"{report['labelled_blocks']} label groups ({report['grouping']}): "
            f"{report['development_groups']} development, {report['final_test_groups']} final test. "
-           f"Development CV on {cv['n_labelled']} trees: {cv['accuracy_all']:.1%} with no unknowns")
+           f"Development CV on {cv['n_labelled']} trees: "
+           + ("n/a" if cv["accuracy_all"] is None else f"{cv['accuracy_all']:.1%}")
+           + " with no unknowns")
+    if cv["n_unscored"]:
+        msg += f" ({cv['n_unscored']} trees in folds that could not be scored are left out)"
+    if cv.get("note"):
+        msg += f"; {cv['note']}"
     if chosen:
         msg += f"; threshold {chosen['threshold']:.2f} chosen"
     else:

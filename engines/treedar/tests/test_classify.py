@@ -183,6 +183,51 @@ def test_named_label_groups_override_spatial_blocks(n_groups, synthetic_tables, 
         _assert_whole_group_holdout(report, predictions)
 
 
+def test_class_in_one_group_is_left_unscored_not_counted(synthetic_tables, tmp_path):
+    # Conifer spread over four areas; broadleaf only in "area-b", like a single
+    # owner-named broadleaf stand. Holding out area-b leaves one training class.
+    labels = []
+    for i, row in enumerate(synthetic_tables["labels"]):
+        group = "area-b" if row["label"] == "broadleaf" else f"area-c{i % 4}"
+        labels.append(dict(**row, group=group))
+    labels_path = tmp_path / "one_group_labels.csv"
+    _write_csv(labels_path, labels)
+    trees, features, _ = synthetic_tables["paths"]
+    with threadpool_limits(limits=2):
+        report = run(trees, features, labels_path, tmp_path / "out", test_fraction=0)
+    cv = report["cross_validation"]
+    n_broadleaf = sum(row["label"] == "broadleaf" for row in labels)
+    skipped = report["skipped_folds"]
+    assert skipped and all("area-b" in fold["groups"] for fold in skipped)
+    assert cv["n_unscored"] == sum(fold["n"] for fold in skipped) >= n_broadleaf
+    assert cv["n_labelled"] == len(labels) - cv["n_unscored"]
+    broadleaf = cv["per_class"]["broadleaf"]
+    assert broadleaf == {**broadleaf, "n_labelled": n_broadleaf, "n_scored": 0,
+                         "precision": None, "recall": None}
+    assert "not tested: broadleaf" in cv["note"]
+    # Accuracy is over the scored trees only, which are all conifer here.
+    conifer = cv["confusion"]["conifer"]
+    assert sum(cv["confusion"]["broadleaf"].values()) == 0
+    assert cv["accuracy_all"] == round(conifer["conifer"] / sum(conifer.values()), 4)
+
+
+def test_no_scored_fold_reports_nothing_tested_and_all_unknown(synthetic_tables, tmp_path):
+    # Each class lives in a single group, so every fold trains on one class.
+    labels = [dict(**row, group=row["label"]) for row in synthetic_tables["labels"]]
+    labels_path = tmp_path / "class_groups.csv"
+    _write_csv(labels_path, labels)
+    trees, features, _ = synthetic_tables["paths"]
+    with threadpool_limits(limits=2):
+        report = run(trees, features, labels_path, tmp_path / "out", test_fraction=0)
+    cv = report["cross_validation"]
+    assert cv["n_labelled"] == 0 and cv["n_unscored"] == len(labels)
+    assert cv["accuracy_all"] is None and cv["chosen"] is None
+    assert all(stats["recall"] is None for stats in cv["per_class"].values())
+    assert "not tested: broadleaf, conifer" in cv["note"]
+    predictions = _read_predictions(tmp_path / "out" / "predictions.csv")
+    assert {row["predicted"] for row in predictions} == {"unknown"}
+
+
 def test_spatial_blocks_keep_known_squares_and_groupkfold_disjoint(synthetic_tables):
     xy = np.array([[0, 0], [5, 8], [49.9, 49.9], [50, 0], [51, 40],
                    [0, 50], [40, 51], [50, 50]])
