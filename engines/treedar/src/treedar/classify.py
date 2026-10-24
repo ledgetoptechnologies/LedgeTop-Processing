@@ -96,25 +96,33 @@ def _fit_calibrated(X, y, groups, inner_folds: int):
 
 
 def cross_validate(X, y, groups, outer_folds: int = 5, inner_folds: int = 3):
-    """Out-of-fold class probabilities for labelled trees, by spatial block."""
+    """Out-of-fold class probabilities for labelled trees, by spatial block.
+
+    Returns (classes, proba, scored, info). A fold whose training side has a
+    single class cannot be scored: its trees are False in `scored`, their
+    probability rows are zero and must be left out of any metric. `info`
+    lists the skipped folds' groups.
+    """
     from sklearn.model_selection import GroupKFold
     classes = np.unique(y)
     n_groups = len(np.unique(groups))
     k = min(outer_folds, n_groups)
     if k < 2:
         raise ValueError("need labelled trees in at least 2 spatial blocks for cross-validation")
-    proba = np.full((len(y), len(classes)), np.nan)
-    calibrated_folds = 0
+    proba = np.zeros((len(y), len(classes)))
+    scored = np.zeros(len(y), dtype=bool)
+    calibrated_folds, skipped = 0, []
     for tr, te in GroupKFold(n_splits=k).split(X, y, groups):
         if len(np.unique(y[tr])) < 2:
-            continue  # a fold whose training side has a single class cannot be scored
+            skipped.append({"groups": np.unique(groups[te]).tolist(), "n": int(len(te)),
+                            "train_classes": [str(c) for c in np.unique(y[tr])]})
+            continue
         model, calibrated = _fit_calibrated(X[tr], y[tr], groups[tr], inner_folds)
         calibrated_folds += calibrated
-        p = model.predict_proba(X[te])
-        for j, c in enumerate(model.classes_):
-            proba[te, np.searchsorted(classes, c)] = p[:, j]
-    proba = np.nan_to_num(proba, nan=0.0)
-    return classes, proba, {"outer_folds": k, "calibrated_folds": int(calibrated_folds)}
+        proba[te] = _align(model, classes, model.predict_proba(X[te]))
+        scored[te] = True
+    return classes, proba, scored, {"outer_folds": k, "calibrated_folds": int(calibrated_folds),
+                                    "skipped_folds": skipped}
 
 
 def coverage_table(y, classes, proba, thresholds=None) -> list[dict]:
@@ -256,8 +264,10 @@ def run(trees_csv, features_csv, labels_csv, out_dir, block_m=50.0,
     # Labels given per named area are held out a whole area at a time; otherwise
     # trees are grouped by square spatial blocks.
     use_label_groups = bool(labelled.any() and all(label_groups[labelled]))
+    group_names = None
     if use_label_groups:
-        _, groups = np.unique(np.where(labelled, label_groups, "~unlabelled"), return_inverse=True)
+        group_names, groups = np.unique(np.where(labelled, label_groups, "~unlabelled"),
+                                        return_inverse=True)
     else:
         groups = blocks
     Xl, yl, gl = X[labelled], y_all[labelled], groups[labelled]
@@ -273,10 +283,35 @@ def run(trees_csv, features_csv, labels_csv, out_dir, block_m=50.0,
 
     # Development: cross-validation on development groups only; the threshold is
     # chosen here and never on the final test groups.
-    classes, oof, cv_info = cross_validate(Xl[dev], yl[dev], gl[dev])
+    classes, oof, scored, cv_info = cross_validate(Xl[dev], yl[dev], gl[dev])
+    for fold in cv_info["skipped_folds"]:
+        fold["groups"] = [str(group_names[g]) if group_names is not None else int(g)
+                          for g in fold["groups"]]
     report.update(cv_info)
-    report["cross_validation"] = evaluate(yl[dev], classes, oof, min_accuracy, min_coverage)
-    chosen = report["cross_validation"]["chosen"]
+    y_dev = yl[dev]
+    if scored.any():
+        cv = evaluate(y_dev[scored], classes, oof[scored], min_accuracy, min_coverage)
+    else:
+        # Nothing was tested, so there is no accuracy and no threshold to choose.
+        cv = {"n_labelled": 0, "accuracy_all": None,
+              "per_class": {str(c): {"n": 0} for c in classes},
+              "confusion": {str(a): {str(b): 0 for b in classes} for a in classes},
+              "coverage_table": [], "chosen": None, "calibration": []}
+    cv["n_unscored"] = int((~scored).sum())
+    untested = []
+    for c in classes:
+        stats = cv["per_class"][str(c)]
+        stats["n_labelled"] = int((y_dev == c).sum())
+        stats["n_scored"] = int((y_dev[scored] == c).sum())
+        if stats["n_scored"] == 0:
+            stats["precision"] = stats["recall"] = None
+            untested.append(str(c))
+    if untested:
+        cv["note"] = (f"not tested: {', '.join(untested)}. A class whose labels are all in one "
+                      "group can't be held out and still trained on; each class needs labels in "
+                      "2 or more groups")
+    report["cross_validation"] = cv
+    chosen = cv["chosen"]
     threshold = chosen["threshold"] if chosen else 1.01  # nothing confident enough: all unknown
     report["threshold_used"] = threshold
 

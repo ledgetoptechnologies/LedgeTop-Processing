@@ -196,6 +196,9 @@ def test_pipeline_two_stands_has_no_independent_final_test(stands_run, tmp_path)
     assert report["final_test_groups"] == 0
     assert report["final_test"] is None
     assert "development only" in report["final_test_note"]
+    # One area per class: holding either out leaves one class, so nothing is tested.
+    assert report["cross_validation"]["n_unscored"] == 12
+    assert report["cross_validation"]["accuracy_all"] is None
     assert not (out / "classify" / "final_test_predictions.csv").exists()
     predictions = read_csv(out / "classify" / "predictions.csv")
     assert len(predictions) == len(labels) == 12
