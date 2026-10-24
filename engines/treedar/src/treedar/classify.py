@@ -30,23 +30,48 @@ def _float(v):
     return float(v) if v not in ("", None) else np.nan
 
 
-def load_table(trees_csv, features_csv, labels_csv=None):
+def read_label_map(path) -> dict[str, str]:
+    """CSV with columns label,type mapping field labels (e.g. species) to the
+    classes the classifier trains on (e.g. conifer, broadleaf). Matching
+    ignores case and surrounding spaces. A blank type means "not a usable
+    label" (e.g. not sure): such trees are treated as unlabelled."""
+    out = {}
+    for r in _read_csv(path):
+        key = (r.get("label") or "").strip().lower()
+        if key:
+            out[key] = (r.get("type") or "").strip()
+    if not out:
+        raise ValueError(f"label map has no rows: {path}")
+    return out
+
+
+def load_table(trees_csv, features_csv, labels_csv=None, label_map=None):
     """Join trees, features and optional labels on tree_id.
 
     Returns (ids, xy, X, feature_names, labels, groups) where labels holds the
     label string per tree ("" when unlabelled) and groups the optional "group"
     column of the labels file ("" when absent), e.g. the named area a label
-    came from.
+    came from. With `label_map` (from read_label_map), every label is replaced
+    by its mapped type; a label missing from the map is an error, so a new
+    species is never silently trained as its own class.
     """
     trees = {r["tree_id"]: r for r in _read_csv(trees_csv)}
     feats = {r["tree_id"]: r for r in _read_csv(features_csv)}
     labels, label_groups = {}, {}
+    unmapped: set[str] = set()
     if labels_csv is not None:
         for r in _read_csv(labels_csv):
             lab = (r.get("label") or "").strip()
+            if lab and label_map is not None:
+                if lab.lower() not in label_map:
+                    unmapped.add(lab)
+                    continue
+                lab = label_map[lab.lower()]
             if lab:
                 labels[r["tree_id"]] = lab
                 label_groups[r["tree_id"]] = (r.get("group") or "").strip()
+    if unmapped:
+        raise ValueError(f"labels missing from the label map: {', '.join(sorted(unmapped))}")
     ids = [tid for tid in trees if tid in feats]
     if not ids:
         raise ValueError("no tree_id appears in both the trees and features tables")
@@ -245,10 +270,13 @@ def _write_predictions(path, ids, classes, proba, y, threshold):
 
 
 def run(trees_csv, features_csv, labels_csv, out_dir, block_m=50.0,
-        min_accuracy=0.85, min_coverage=0.70, test_fraction=0.3, seed=0) -> dict:
+        min_accuracy=0.85, min_coverage=0.70, test_fraction=0.3, seed=0,
+        label_map=None) -> dict:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    ids, xy, X, fnames, y_all, label_groups = load_table(trees_csv, features_csv, labels_csv)
+    mapping = read_label_map(label_map) if label_map is not None else None
+    ids, xy, X, fnames, y_all, label_groups = load_table(trees_csv, features_csv, labels_csv,
+                                                          mapping)
     labelled = y_all != ""
     if labelled.sum() < 10:
         raise ValueError("need at least 10 labelled trees")
@@ -276,7 +304,8 @@ def run(trees_csv, features_csv, labels_csv, out_dir, block_m=50.0,
     report = {"features": fnames, "dropped_empty_features": dropped,
               "grouping": "label group column" if use_label_groups else f"{block_m} m blocks",
               "block_m": block_m, "labelled_blocks": int(len(np.unique(gl))),
-              "targets": {"min_accuracy": min_accuracy, "min_coverage": min_coverage}}
+              "targets": {"min_accuracy": min_accuracy, "min_coverage": min_coverage},
+              "label_map": Path(label_map).name if label_map is not None else None}
     dev = ~test if test is not None else np.ones(len(yl), dtype=bool)
     report["development_groups"] = int(len(np.unique(gl[dev])))
     report["final_test_groups"] = int(len(np.unique(gl[test]))) if test is not None else 0

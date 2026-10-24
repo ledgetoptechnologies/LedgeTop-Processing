@@ -1,0 +1,46 @@
+label,type
+conifer,conifer
+broadleaf,broadleaf
+not sure,
+unsure,
+white pine,conifer
+red pine,conifer
+jack pine,conifer
+scots pine,conifer
+austrian pine,conifer
+white spruce,conifer
+norway spruce,conifer
+blue spruce,conifer
+black spruce,conifer
+balsam fir,conifer
+douglas fir,conifer
+eastern hemlock,conifer
+northern white cedar,conifer
+eastern red cedar,conifer
+tamarack,conifer
+apple,broadleaf
+crabapple,broadleaf
+pear,broadleaf
+black cherry,broadleaf
+sugar maple,broadleaf
+red maple,broadleaf
+silver maple,broadleaf
+boxelder,broadleaf
+red oak,broadleaf
+white oak,broadleaf
+bur oak,broadleaf
+green ash,broadleaf
+white ash,broadleaf
+basswood,broadleaf
+paper birch,broadleaf
+river birch,broadleaf
+quaking aspen,broadleaf
+bigtooth aspen,broadleaf
+eastern cottonwood,broadleaf
+black willow,broadleaf
+black walnut,broadleaf
+shagbark hickory,broadleaf
+american elm,broadleaf
+honey locust,broadleaf
+black locust,broadleaf
+hackberry,broadleaf
