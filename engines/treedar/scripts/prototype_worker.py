@@ -2,6 +2,8 @@
 
 Only the standard library runs on the host. Docker receives no credentials.
 Receipts contain claim secrets: keep the approved scratch directory private.
+Requires a node-aware coordinator returning the exact claimed nodeId; no legacy
+claim fallback may bypass maintenance admission.
 """
 
 import argparse
@@ -68,7 +70,7 @@ def post(base, token, route, payload):
         raise WorkerError('coordinator response uncertain; do not repeat claim') from None
 
 
-def validate_job(job):
+def validate_job(job, node_id='cluster'):
     if not isinstance(job, dict):
         raise WorkerError('invalid claimed job')
     identifier = job.get('id')
@@ -78,10 +80,12 @@ def validate_job(job):
         valid_id = False
     if (not valid_id or job.get('environment') not in ('production', 'staging')
             or job.get('profile') != PROFILE
+            or not isinstance(job.get('nodeId'), str) or not SLUG.fullmatch(job['nodeId'])
+            or job['nodeId'] != node_id
             or not isinstance(job.get('claimToken'), str)
             or not TOKEN.fullmatch(job['claimToken'])):
         raise WorkerError('invalid claimed job; operator inspection required')
-    return {key: job[key] for key in ('id', 'environment', 'profile', 'claimToken')}
+    return {key: job[key] for key in ('id', 'environment', 'profile', 'claimToken', 'nodeId')}
 
 
 def save(path, receipt):
@@ -190,8 +194,10 @@ def complete(receipt_path, receipt, token):
 
 def run(args):
     base = origin(args.coordinator, args.verified_origin)
-    if not IMAGE.fullmatch(args.image) or not SLUG.fullmatch(args.worker_id):
-        raise WorkerError('use an immutable sha256 image ID and an ASCII worker ID')
+    node_id = getattr(args, 'node_id', 'cluster')
+    if (not IMAGE.fullmatch(args.image) or not SLUG.fullmatch(args.worker_id)
+            or not isinstance(node_id, str) or not SLUG.fullmatch(node_id)):
+        raise WorkerError('use an immutable sha256 image ID and ASCII worker/node IDs')
     token = os.environ.get('PROCESSING_API_TOKEN', '')
     if not token or '\n' in token or '\r' in token:
         raise WorkerError('PROCESSING_API_TOKEN is required')
@@ -215,8 +221,9 @@ def run(args):
             if receipt_path.parent != receipts or receipt_path.is_symlink():
                 raise WorkerError('resume requires a receipt in the approved scratch root')
             receipt = json.loads(receipt_path.read_text())
-            validate_job(receipt['job'])
-            if receipt['coordinator'] != base or receipt['state'] != 'completion_pending':
+            validate_job(receipt['job'], node_id)
+            if (receipt['coordinator'] != base or receipt['state'] != 'completion_pending'
+                    or receipt.get('nodeId') != node_id):
                 raise WorkerError('receipt cannot be resumed; inspect manually')
             complete(receipt_path, receipt, token)
             return 0 if receipt['payload']['status'] == 'succeeded' else 1
@@ -227,13 +234,16 @@ def run(args):
         if inspected.returncode or inspected.stdout.strip() != args.image:
             raise WorkerError('exact image ID must already exist locally')
         receipt_path = receipts / (uuid.uuid4().hex + '.json')
-        receipt = {'coordinator': base, 'state': 'claim_pending', 'workerId': args.worker_id}
+        receipt = {'coordinator': base, 'state': 'claim_pending', 'workerId': args.worker_id,
+                   'nodeId': node_id}
         save(receipt_path, receipt)
-        response = post(base, token, '/v1/prototype/claim', {'workerId': args.worker_id})
+        response = post(base, token, '/v1/prototype/claim',
+                        {'workerId': args.worker_id, 'nodeId': node_id})
         if 'job' not in response:
             raise WorkerError('invalid claim response; inspect coordinator before retry')
         if response['job'] is None:
             receipt['state'] = 'completed'
+            receipt['claimAcknowledgedEmpty'] = True
             save(receipt_path, receipt)
             print('No work available.')
             return 0
@@ -241,7 +251,7 @@ def run(args):
         receipt['job'] = response['job']
         receipt['state'] = 'claimed'
         save(receipt_path, receipt)
-        job = validate_job(response['job'])
+        job = validate_job(response['job'], node_id)
         receipt['job'] = job
         receipt['container'] = 'treedar-prototype-' + uuid.uuid4().hex
         save(receipt_path, receipt)
@@ -253,7 +263,8 @@ def run(args):
         output.mkdir(mode=0o777)
         output.chmod(0o777)
         status, result = execute(args.image, output, receipt['container'], args.timeout)
-        result.update(environment=job['environment'], jobId=job['id'], image_id=args.image)
+        result.update(environment=job['environment'], jobId=job['id'], image_id=args.image,
+                      nodeId=node_id)
         if len(json.dumps(result, allow_nan=False).encode()) > 4096:
             raise WorkerError('result exceeds coordinator limit')
         receipt['payload'] = {'claimToken': job['claimToken'], 'status': status, 'result': result}
@@ -273,6 +284,7 @@ def main():
     parser.add_argument('--image', required=True, help='Locally built sha256 image ID')
     parser.add_argument('--scratch', required=True, help='Existing approved private scratch root')
     parser.add_argument('--worker-id', required=True)
+    parser.add_argument('--node-id', default='cluster', help='Exact coordinator node identity')
     parser.add_argument('--timeout', type=int, choices=range(180, 301), default=240)
     parser.add_argument('--resume', help='Resend only an exact pending completion receipt')
     args = parser.parse_args()

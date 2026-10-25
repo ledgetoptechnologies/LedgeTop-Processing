@@ -40,6 +40,10 @@ stops on uncertain execution. The [engine handoff requirements](docs/engine-hand
 describe the remaining ground/coordinate checks before NodeODX products can
 become TreeDar forestry inputs.
 
+[Node maintenance](docs/maintenance.md) adds scheduled draining and a bounded
+container update/health/rollback runner. It prevents new claims on a drained node
+and preserves uncertain updates for recovery. OS updates and reboots are deferred.
+
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
 2. Add the exact local and main processing-node origins when available. A blank
