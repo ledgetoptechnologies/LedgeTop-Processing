@@ -20,7 +20,7 @@ worker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(worker)
 IMAGE = 'sha256:' + 'a' * 64
 JOB = {'id': '12345678-1234-4234-8234-123456789abc', 'environment': 'staging',
-       'profile': worker.PROFILE, 'claimToken': 'secret_' + 'a' * 36}
+       'profile': worker.PROFILE, 'claimToken': 'secret_' + 'a' * 36, 'nodeId': 'cluster'}
 
 
 def result(stdout='', returncode=0):
@@ -38,10 +38,52 @@ class WorkerTests(unittest.TestCase):
     def test_returned_job_cannot_select_paths_profile_or_environment(self):
         for key, value in [('id', '../../escape'), ('id', 'not-a-uuid'),
                            ('environment', '../production'), ('environment', 'dev'),
-                           ('profile', 'shell'), ('claimToken', '\r\nX: evil')]:
+                           ('profile', 'shell'), ('claimToken', '\r\nX: evil'),
+                           ('nodeId', 'main'), ('nodeId', '../cluster'), ('nodeId', 'clustér')]:
             with self.subTest(key=key, value=value), self.assertRaises(worker.WorkerError):
                 worker.validate_job({**JOB, key: value})
         self.assertEqual(worker.validate_job(JOB), JOB)
+
+    def test_wrong_node_claim_is_retained_without_engine_invocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            wrong = {**JOB, 'nodeId': 'main'}
+            with patch.dict(os.environ, {'PROCESSING_API_TOKEN': 'api-secret'}), \
+                    patch.object(worker, 'docker', return_value=result(IMAGE)), \
+                    patch.object(worker, 'post', return_value={'job': wrong}) as post, \
+                    patch.object(worker, 'execute') as execute, \
+                    self.assertRaises(worker.WorkerError):
+                worker.run(self.args(root))
+            execute.assert_not_called()
+            self.assertEqual(post.call_args.args[3], {'workerId': 'test-worker', 'nodeId': 'cluster'})
+            receipt = json.loads(next((root / '.prototype-receipts').glob('*.json')).read_text())
+            self.assertEqual(receipt['state'], 'claimed')
+            self.assertEqual(receipt['job']['nodeId'], 'main')
+
+    def test_explicit_node_identity_reaches_claim_and_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            posts = []
+
+            def post(base, token, route, payload):
+                posts.append((route, payload))
+                return {'job': {**JOB, 'nodeId': 'main'}}
+
+            with patch.dict(os.environ, {'PROCESSING_API_TOKEN': 'api-secret'}), \
+                    patch.object(worker, 'docker', return_value=result(IMAGE)), \
+                    patch.object(worker, 'post', side_effect=post), \
+                    patch.object(worker, 'execute', return_value=('succeeded', {'n_trees': 3})), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(worker.run(self.args(root, node_id='main')), 0)
+            self.assertEqual(posts[0][1], {'workerId': 'test-worker', 'nodeId': 'main'})
+            self.assertEqual(posts[-1][1]['result']['nodeId'], 'main')
+
+    def test_invalid_node_id_refused_before_claim(self):
+        for node in ('../cluster', 'clustér', '', 'cluster/other'):
+            with self.subTest(node=node), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(worker, 'post') as post, self.assertRaises(worker.WorkerError):
+                worker.run(self.args(Path(directory), node_id=node))
+            post.assert_not_called()
 
     def test_verified_origin_and_redirect_policy(self):
         self.assertEqual(worker.origin('http://localhost:8899/'), 'http://localhost:8899')
@@ -201,6 +243,10 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(worker.run(self.args(root)), 0)
             self.assertEqual(docker.call_count, 1)
             self.assertEqual(stdout.getvalue(), 'No work available.\n')
+            receipt = json.loads(next((root / '.prototype-receipts').glob('*.json')).read_text())
+            self.assertIs(receipt['claimAcknowledgedEmpty'], True)
+            self.assertEqual(receipt['nodeId'], 'cluster')
+            self.assertTrue({'job', 'container', 'payload'}.isdisjoint(receipt))
 
     def test_mutable_image_refused_before_claim(self):
         with tempfile.TemporaryDirectory() as directory, \

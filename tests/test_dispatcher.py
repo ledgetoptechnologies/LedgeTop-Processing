@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
 import json
@@ -36,7 +37,8 @@ class DispatcherTests(unittest.TestCase):
         self.state.mkdir()
         self.handler = make_handler(Config(TOKEN, '', '', 800, 20000,
                                           prototype_state_dir=str(self.root / 'coordinator'),
-                                          photo_smoke_enabled=True))
+                                          photo_smoke_enabled=True,
+                                          prototype_node_ids=('cluster', 'main')))
         self.server = start_server(self.handler)
         self.base = f'http://127.0.0.1:{self.server.server_port}'
         self.launched = []
@@ -71,10 +73,13 @@ class DispatcherTests(unittest.TestCase):
                       if json.loads(path.read_text())['state'] != 'completed']
         self.assertEqual(len(unresolved), 1)
         self.assertEqual(unresolved[0]['state'], 'launch_pending')
-        claim = self.request('/v1/prototype/claim', {'workerId': args.worker_id})['job']
+        node_id = getattr(args, 'node_id', 'cluster')
+        claim = self.request('/v1/prototype/claim', {'workerId': args.worker_id,
+                                                    'nodeId': node_id})['job']
         self.assertIsNotNone(claim)
         self.launched.append(claim['id'])
         result = {'jobId': claim['id'], 'environment': claim['environment'], 'image_id': IMAGE,
+                  'nodeId': node_id,
                   'n_trees': 3, 'treedar_version': '0.test',
                   'manifest_sha256': 'b' * 64, 'outputs_sha256': 'c' * 64}
         payload = {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': result}
@@ -82,7 +87,7 @@ class DispatcherTests(unittest.TestCase):
         receipts = scratch / '.prototype-receipts'
         receipts.mkdir(exist_ok=True)
         (receipts / (uuid.uuid4().hex + '.json')).write_text(json.dumps({
-            'state': 'completed', 'coordinator': base, 'workerId': args.worker_id,
+            'state': 'completed', 'coordinator': base, 'workerId': args.worker_id, 'nodeId': node_id,
             'job': claim, 'payload': payload}))
         return 0
 
@@ -106,6 +111,157 @@ class DispatcherTests(unittest.TestCase):
         records = [json.loads(path.read_text()) for path in self.state.glob('dispatch-*.json')]
         self.assertEqual(len(records), 2)
         self.assertTrue(all(record['state'] == 'completed' for record in records))
+        self.assertTrue(all(record['nodeId'] == 'cluster' for record in records))
+
+    def test_maintenance_blocks_every_non_admitting_node_state(self):
+        self.submit('blocked-node')
+        for node_status in ('draining', 'updating', 'held', 'failed'):
+            with self.subTest(state=node_status), \
+                    patch.object(dispatcher, 'node_state', return_value=node_status):
+                code, report, launch = self.invoke()
+                self.assertEqual(code, 0)
+                self.assertEqual(report, {'completed': 0, 'completedJobIds': [], 'reason': 'maintenance'})
+                launch.assert_not_called()
+        self.assertFalse(list(self.state.glob('dispatch-*.json')))
+
+    def test_node_drain_between_jobs_stops_before_second_child(self):
+        first = self.submit('before-drain')
+        self.submit('after-drain')
+        with patch.object(dispatcher, 'node_state', side_effect=['active', 'draining']) as node:
+            _, report, launch = self.invoke()
+        self.assertEqual(report, {'completed': 1, 'completedJobIds': [first['id']], 'reason': 'maintenance'})
+        self.assertEqual(node.call_count, 2)
+        self.assertEqual(launch.call_count, 1)
+
+    def test_server_refreshes_due_cutoff_between_jobs_without_second_launch(self):
+        queue = self.handler.prototype_queue
+        now = datetime(2026, 10, 24, 18, tzinfo=timezone.utc)
+        queue._clock = lambda: now
+        cutoff = (now + timedelta(seconds=1)).isoformat()
+        queue.schedule_node('cluster', {'expectedRevision': queue.get_node('cluster')['revision'],
+                                       'drainAt': cutoff, 'notBefore': cutoff,
+                                       'afterJobId': None, 'targetImage': IMAGE})
+        first = self.submit('scheduled-first')
+        self.submit('scheduled-second')
+
+        def child(*args):
+            nonlocal now
+            result = self.fake_child(*args)
+            now += timedelta(seconds=2)
+            return result
+
+        _, report, launch = self.invoke(child=child)
+        self.assertEqual(report, {'completed': 1, 'completedJobIds': [first['id']], 'reason': 'maintenance'})
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(queue.get_node('cluster')['state'], 'draining')
+
+    def test_dispatch_uses_selected_node_not_other_nodes_maintenance_state(self):
+        queue = self.handler.prototype_queue
+        cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        queue.schedule_node('cluster', {'expectedRevision': queue.get_node('cluster')['revision'],
+                                       'drainAt': cutoff, 'notBefore': cutoff,
+                                       'afterJobId': None, 'targetImage': IMAGE})
+        job = self.submit('main-only')
+        _, report, launch = self.invoke(node_id='main')
+        self.assertEqual(report['completedJobIds'], [job['id']])
+        self.assertEqual(report['reason'], 'empty')
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(self.request('/v1/prototype/jobs/' + job['id'])['job']['nodeId'], 'main')
+        record = json.loads(next(self.state.glob('dispatch-*.json')).read_text())
+        self.assertEqual(record['nodeId'], 'main')
+
+    def empty_claim_child(self, args, base, scratch, *, drain=True):
+        if drain:
+            queue = self.handler.prototype_queue
+            cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+            queue.schedule_node('cluster', {'expectedRevision': queue.get_node('cluster')['revision'],
+                                           'drainAt': cutoff, 'notBefore': cutoff,
+                                           'afterJobId': None, 'targetImage': IMAGE})
+            reply = self.request('/v1/prototype/claim', {'workerId': args.worker_id, 'nodeId': 'cluster'})
+            self.assertEqual(reply, {'job': None})
+        root = scratch / '.prototype-receipts'
+        root.mkdir(exist_ok=True)
+        (root / (uuid.uuid4().hex + '.json')).write_text(json.dumps({
+            'state': 'completed', 'coordinator': base, 'workerId': args.worker_id,
+            'nodeId': 'cluster', 'claimAcknowledgedEmpty': True}))
+        return 0
+
+    def test_drain_between_precheck_and_claim_reconciles_and_can_resume(self):
+        job = self.submit('drain-race')
+        _, report, launch = self.invoke(child=self.empty_claim_child)
+        self.assertEqual(report, {'completed': 0, 'completedJobIds': [], 'reason': 'maintenance'})
+        self.assertEqual(launch.call_count, 1)
+        record = json.loads(next(self.state.glob('dispatch-*.json')).read_text())
+        self.assertEqual(record['state'], 'completed')
+        self.assertEqual(record['outcome'], 'no_claim_maintenance')
+        self.assertEqual(self.request('/v1/prototype/jobs/' + job['id'])['job']['status'], 'queued')
+        queue = self.handler.prototype_queue
+        node = queue.get_node('cluster')
+        queue.cancel_node('cluster', {'expectedRevision': node['revision'], 'planId': node['planId']})
+        _, report, launch = self.invoke()
+        self.assertEqual(report['completedJobIds'], [job['id']])
+        self.assertEqual(launch.call_count, 1)
+
+    def test_empty_acknowledgment_without_maintenance_remains_uncertain(self):
+        self.submit('empty-not-drained')
+        with self.assertRaises(dispatcher.DispatchError):
+            self.invoke(child=lambda *args: self.empty_claim_child(*args, drain=False))
+        record = json.loads(next(self.state.glob('dispatch-*.json')).read_text())
+        self.assertEqual(record['state'], 'launch_pending')
+
+    def test_empty_drain_receipt_with_any_claim_evidence_remains_uncertain(self):
+        self.submit('empty-with-container')
+
+        def child(*args):
+            result = self.empty_claim_child(*args)
+            path = next((self.scratch / '.prototype-receipts').glob('*.json'))
+            receipt = json.loads(path.read_text())
+            receipt['container'] = None
+            path.write_text(json.dumps(receipt))
+            return result
+
+        with self.assertRaises(dispatcher.DispatchError):
+            self.invoke(child=child)
+        self.assertEqual(json.loads(next(self.state.glob('dispatch-*.json')).read_text())['state'],
+                         'launch_pending')
+
+    def test_legacy_node_api_404_fails_closed_without_worker_or_state(self):
+        from http.server import BaseHTTPRequestHandler
+
+        class LegacyHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(404)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+
+        old = start_server(LegacyHandler)
+        try:
+            with self.assertRaisesRegex(dispatcher.DispatchError, 'legacy 404'):
+                self.invoke(coordinator=f'http://127.0.0.1:{old.server_port}')
+            self.assertFalse(list(self.state.glob('dispatch-*.json')))
+            self.assertEqual(self.launched, [])
+        finally:
+            old.shutdown()
+            old.server_close()
+
+    def test_wrong_node_receipt_not_accepted_as_progress(self):
+        self.submit('wrong-node-receipt')
+
+        def child(*args):
+            self.fake_child(*args)
+            path = next((self.scratch / '.prototype-receipts').glob('*.json'))
+            receipt = json.loads(path.read_text())
+            receipt['job']['nodeId'] = 'main'
+            path.write_text(json.dumps(receipt))
+            return 0
+
+        with self.assertRaises(dispatcher.DispatchError):
+            self.invoke(child=child)
+        self.assertEqual(json.loads(next(self.state.glob('dispatch-*.json')).read_text())['state'],
+                         'launch_pending')
 
     def test_bounded_jobs_and_repeated_invocation_after_verified_completion(self):
         jobs = [self.submit('bounded-' + str(index)) for index in range(3)]
@@ -242,6 +398,8 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(kwargs['stdout'], subprocess.DEVNULL)
         self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
         self.assertNotIn(TOKEN, ' '.join(run.call_args.args[0]))
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('--node-id') + 1], 'cluster')
 
     def test_origin_and_pinned_image_validation(self):
         for value in ('http://localhost/path', 'http://user:pass@localhost', 'http://remote:8080',
@@ -252,6 +410,9 @@ class DispatcherTests(unittest.TestCase):
                          'http://remote:8080')
         with self.assertRaises(dispatcher.DispatchError):
             self.invoke(image='treedar:latest')
+        for node_id in ('../cluster', 'clustér', '', 'main/cluster'):
+            with self.subTest(node_id=node_id), self.assertRaises(dispatcher.DispatchError):
+                self.invoke(node_id=node_id)
 
 
 if __name__ == '__main__':

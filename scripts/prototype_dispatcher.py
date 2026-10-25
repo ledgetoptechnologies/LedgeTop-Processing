@@ -8,6 +8,9 @@ requires operator inspection; this command never discards or retries it.
 The existing worker bounds Docker execution. Deliberately no parent subprocess
 timeout kills that worker mid-container. If the host/child hangs, stop and inspect
 the recorded worker receipt/container manually before resolving state.
+
+Requires the coordinator's node-maintenance API. A legacy 404 is refused;
+this dispatcher cannot safely run against an older coordinator deployment.
 """
 
 from contextlib import contextmanager
@@ -152,12 +155,41 @@ def queue(base, token):
             if (not isinstance(job, dict) or str(uuid.UUID(job['id'])) != job['id']
                     or job['id'] in seen or job['environment'] not in ('production', 'staging')
                     or job['status'] not in ('queued', 'running', 'held', 'succeeded', 'failed')
-                    or not isinstance(job['profile'], str) or not SLUG.fullmatch(job['profile'])):
+                    or not isinstance(job['profile'], str) or not SLUG.fullmatch(job['profile'])
+                    or (job.get('nodeId') is not None and
+                        (not isinstance(job['nodeId'], str) or not SLUG.fullmatch(job['nodeId'])))):
                 raise ValueError()
             seen.add(job['id'])
         return jobs
     except Exception:
         raise DispatchError('queue read uncertain; no further worker launched') from None
+    finally:
+        if connection:
+            connection.close()
+
+
+def node_state(base, token, node_id):
+    """Server refreshes scheduled cutoffs before returning this node snapshot."""
+    parsed = urlsplit(base)
+    connection = None
+    try:
+        kind = http.client.HTTPSConnection if parsed.scheme == 'https' else http.client.HTTPConnection
+        connection = kind(parsed.hostname, parsed.port, timeout=15)
+        connection.request('GET', '/v1/prototype/nodes/' + node_id,
+                           headers={'Authorization': 'Bearer ' + token})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError()
+        data = response.read(65537)
+        if len(data) > 65536:
+            raise ValueError()
+        node = json.loads(data)['node']
+        if (not isinstance(node, dict) or node.get('id') != node_id
+                or node.get('state') not in ('active', 'scheduled', 'draining', 'updating', 'held', 'failed')):
+            raise ValueError()
+        return node['state']
+    except Exception:
+        raise DispatchError('node maintenance API unavailable or invalid; legacy 404 cannot dispatch') from None
     finally:
         if connection:
             connection.close()
@@ -214,7 +246,7 @@ def verify_image(image):
 def launch(args, base, scratch):
     command = [sys.executable, str(WORKER), '--coordinator', base, '--image', args.image,
                '--scratch', str(scratch), '--worker-id', args.worker_id,
-               '--timeout', str(args.timeout)]
+               '--timeout', str(args.timeout), '--node-id', getattr(args, 'node_id', 'cluster')]
     if args.verified_origin:
         command.extend(['--verified-origin', args.verified_origin])
     environment = {key: value for key, value in os.environ.items()
@@ -226,6 +258,7 @@ def launch(args, base, scratch):
 
 
 def verify_progress(args, base, expected, before, after, jobs):
+    node_id = getattr(args, 'node_id', 'cluster')
     new = set(after) - set(before)
     if set(before) - set(after) or len(new) != 1:
         raise DispatchError('no uniquely verified worker receipt; inspect dispatch')
@@ -234,7 +267,9 @@ def verify_progress(args, base, expected, before, after, jobs):
     job = receipt.get('job')
     payload = receipt.get('payload')
     if (receipt.get('coordinator') != base or receipt.get('workerId') != args.worker_id
+            or receipt.get('nodeId') != node_id
             or not isinstance(job, dict) or job.get('id') != expected['id']
+            or job.get('nodeId') != node_id
             or job.get('environment') != expected['environment'] or job.get('profile') != PROFILE
             or not isinstance(payload, dict) or payload.get('status') != 'succeeded'
             or not isinstance(job.get('claimToken'), str)
@@ -244,6 +279,7 @@ def verify_progress(args, base, expected, before, after, jobs):
     finished = next((item for item in jobs if item['id'] == expected['id']), None)
     result = payload.get('result')
     if (not isinstance(result, dict) or result.get('jobId') != expected['id']
+            or result.get('nodeId') != node_id
             or result.get('environment') != expected['environment'] or result.get('image_id') != args.image
             or type(result.get('n_trees')) is not int or result['n_trees'] != 3
             or not isinstance(result.get('treedar_version'), str)
@@ -252,16 +288,43 @@ def verify_progress(args, base, expected, before, after, jobs):
                    for key in ('manifest_sha256', 'outputs_sha256'))
             or not finished or finished.get('status') != 'succeeded'
             or finished.get('workerId') != args.worker_id
+            or finished.get('nodeId') != node_id
             or finished.get('profile') != PROFILE or finished.get('environment') != expected['environment']
             or finished.get('result') != result):
         raise DispatchError('post-run queue does not verify worker progress')
     return receipt_name
 
 
+def no_claim_maintenance(args, base, token, expected, before, after, jobs):
+    """Reconcile only a proven empty acknowledgment caused by a node drain."""
+    new = set(after) - set(before)
+    if set(before) - set(after) or len(new) != 1:
+        return None
+    name = new.pop()
+    receipt = after[name]
+    node_id = getattr(args, 'node_id', 'cluster')
+    if (receipt.get('state') != 'completed' or receipt.get('claimAcknowledgedEmpty') is not True
+            or receipt.get('coordinator') != base or receipt.get('workerId') != args.worker_id
+            or receipt.get('nodeId') != node_id
+            or not {'job', 'container', 'payload'}.isdisjoint(receipt)
+            or any(job['status'] in ('running', 'held') for job in jobs)):
+        return None
+    pending = next((job for job in jobs if job['id'] == expected['id']), None)
+    if (not pending or pending['status'] != 'queued' or pending.get('nodeId') is not None
+            or pending['environment'] != expected['environment'] or pending['profile'] != PROFILE
+            or pending.get('workerId') is not None):
+        return None
+    if node_state(base, token, node_id) not in ('draining', 'updating', 'held', 'failed'):
+        return None
+    return name
+
+
 def run(args):
     base = origin(args.coordinator, args.verified_origin)
+    node_id = getattr(args, 'node_id', 'cluster')
     if (not re.fullmatch('sha256:[0-9a-f]{64}', args.image)
             or not SLUG.fullmatch(args.worker_id) or type(args.max_jobs) is not int
+            or not isinstance(node_id, str) or not SLUG.fullmatch(node_id)
             or not 1 <= args.max_jobs <= 10 or type(args.timeout) is not int
             or not 180 <= args.timeout <= 300):
         raise DispatchError('invalid pinned image, worker ID or bounded limits')
@@ -285,6 +348,11 @@ def run(args):
         verify_image(args.image)
         completed = []
         for _ in range(args.max_jobs):
+            state_now = node_state(base, token, node_id)
+            if state_now not in ('active', 'scheduled'):
+                print(json.dumps({'completed': len(completed), 'completedJobIds': completed,
+                                  'reason': 'maintenance'}))
+                return 0
             jobs = queue(base, token)
             expected, reason = select_head(jobs)
             if reason:
@@ -294,6 +362,7 @@ def run(args):
             dispatch_path = state / ('dispatch-' + uuid.uuid4().hex + '.json')
             record = {'state': 'launch_pending', 'expectedJobId': expected['id'],
                       'environment': expected['environment'], 'coordinator': base,
+                      'nodeId': node_id,
                       'workerId': args.worker_id, 'image': args.image, 'scratch': str(scratch),
                       'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat()}
             save(dispatch_path, record)
@@ -303,6 +372,13 @@ def run(args):
                     raise DispatchError('child failed or is uncertain; inspect dispatch and worker')
                 after = receipts(scratch)
                 post_run = queue(base, token)
+                empty_receipt = no_claim_maintenance(args, base, token, expected, before, after, post_run)
+                if empty_receipt:
+                    record.update(state='completed', receipt=empty_receipt, outcome='no_claim_maintenance')
+                    save(dispatch_path, record)
+                    print(json.dumps({'completed': len(completed), 'completedJobIds': completed,
+                                      'reason': 'maintenance'}))
+                    return 0
                 receipt_name = verify_progress(args, base, expected, before, after, post_run)
             except BaseException:
                 # Keep the persisted pre-launch record unresolved even after Ctrl+C.
@@ -321,6 +397,7 @@ def main():
     for name in ('coordinator', 'image', 'scratch', 'state', 'worker-id'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--verified-origin')
+    parser.add_argument('--node-id', default='cluster', help='Node identity; maintenance API required')
     parser.add_argument('--max-jobs', type=int, choices=range(1, 11), default=2)
     parser.add_argument('--timeout', type=int, choices=range(180, 301), default=240)
     args = parser.parse_args()

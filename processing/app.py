@@ -13,7 +13,8 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
-    queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled) if config.prototype_state_dir else None
+    queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
+                  node_ids=config.prototype_node_ids) if config.prototype_state_dir else None
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"
@@ -60,6 +61,14 @@ def make_handler(config: Config):
                     self._reply(404, {"error": "prototype_disabled"})
                 elif self.path == "/v1/prototype/jobs":
                     self._reply(200, {"jobs": queue.list(), "mode": "bounded_photo_test" if config.photo_smoke_enabled else "synthetic_prototype"})
+                elif self.path == "/v1/prototype/nodes":
+                    self._reply(200, {"nodes": queue.list_nodes()})
+                elif self.path.startswith("/v1/prototype/nodes/"):
+                    try:
+                        node = queue.get_node(self.path.removeprefix("/v1/prototype/nodes/"))
+                        self._reply(200 if node else 404, {"node": node})
+                    except ValueError:
+                        self._reply(404, {"error": "unknown_node"})
                 elif self.path.startswith("/v1/prototype/jobs/"):
                     job = queue.get(self.path.removeprefix("/v1/prototype/jobs/"))
                     self._reply(200 if job else 404, {"job": job})
@@ -81,7 +90,8 @@ def make_handler(config: Config):
             if self.path != "/v1/plan" and not prototype:
                 self._reply(404, {"error": "not_found"})
                 return
-            operator = prototype and self.path.endswith(("/hold", "/resolve"))
+            operator = prototype and (self.path.endswith(("/hold", "/resolve"))
+                                      or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return
             if prototype and queue is None:
@@ -105,6 +115,16 @@ def make_handler(config: Config):
                         self._reply(201 if created else 200, {"job": job})
                     elif self.path == "/v1/prototype/claim":
                         self._reply(200, {"job": queue.claim(request)})
+                    elif self.path.startswith("/v1/prototype/nodes/"):
+                        identifier, _, action = self.path[len("/v1/prototype/nodes/"):].rpartition("/")
+                        methods = {"schedule": queue.schedule_node, "cancel": queue.cancel_node,
+                                   "begin": queue.begin_node_update, "finish": queue.finish_node_update,
+                                   "resume": queue.resume_node}
+                        if action not in methods:
+                            self._reply(404, {"error": "not_found"})
+                        else:
+                            result = methods[action](identifier, request)
+                            self._reply(200, result if action == "begin" else {"node": result})
                     elif operator and self.path.startswith("/v1/prototype/jobs/"):
                         identifier, _, action = self.path[len("/v1/prototype/jobs/"):].rpartition("/")
                         self._reply(200, {"job": queue.operator(identifier, action, request)})

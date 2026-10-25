@@ -14,6 +14,9 @@ import re
 import secrets
 import sqlite3
 import uuid
+from datetime import datetime, timezone
+
+from .maintenance import Conflict, Maintenance
 
 
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -21,12 +24,14 @@ PROFILE = "treedar-synthetic-v1"
 PHOTO_PROFILE = "odx-photo-smoke-v1"
 
 
-class Conflict(Exception):
-    pass
-
-
-class Queue:
-    def __init__(self, directory, photo_smoke_enabled=False):
+class Queue(Maintenance):
+    def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',), clock=None):
+        if (not isinstance(node_ids, (tuple, list)) or not node_ids
+                or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
+                or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
+            raise ValueError("node_ids must be unique configured slugs including cluster")
+        self.node_ids = tuple(node_ids)
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
@@ -58,7 +63,11 @@ class Queue:
                 profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,
                 claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+            if 'node_id' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN node_id TEXT')
+            db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
             db.execute("UPDATE jobs SET status='held', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
+            self._init_maintenance(db)
 
     def close(self):
         self._lock.close()
@@ -79,6 +88,7 @@ class Queue:
         return {"id": row["id"], "requestId": row["request_id"],
                 "environment": row["environment"], "profile": row["profile"],
                 "status": row["status"], "workerId": row["worker_id"],
+                "nodeId": row["node_id"],
                 "createdAt": row["created_at"], "updatedAt": row["updated_at"],
                 "result": json.loads(row["result"]) if row["result"] else None}
 
@@ -124,8 +134,13 @@ class Queue:
             return self.public(row) if row else None
 
     def claim(self, payload):
-        self.fields(payload, ("workerId", "profiles") if isinstance(payload, dict) and "profiles" in payload else ("workerId",))
+        expected = ['workerId']
+        if isinstance(payload, dict):
+            expected.extend(key for key in ('profiles', 'nodeId') if key in payload)
+        self.fields(payload, expected)
         self.slug(payload["workerId"])
+        node_id = payload.get('nodeId', 'cluster')
+        self._known_node(node_id)
         profiles = payload.get("profiles", [PROFILE])
         if (not isinstance(profiles, list) or not 1 <= len(profiles) <= 2
                 or any(not isinstance(p, str) or p not in self.allowed_profiles for p in profiles)
@@ -133,6 +148,9 @@ class Queue:
             raise ValueError("worker must declare supported enabled profiles")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._refresh_nodes(db)
+            if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
+                return None
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
                 return None
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
@@ -144,8 +162,8 @@ class Queue:
                 # cannot run it. Legacy TreeDar workers never claim photo jobs.
                 return None
             token = secrets.token_urlsafe(32)
-            db.execute("UPDATE jobs SET status='running',worker_id=?,claim_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                       (payload["workerId"], hashlib.sha256(token.encode()).hexdigest(), row["id"]))
+            db.execute("UPDATE jobs SET status='running',worker_id=?,node_id=?,claim_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (payload["workerId"], node_id, hashlib.sha256(token.encode()).hexdigest(), row["id"]))
             job = self.public(db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
             return {**job, "claimToken": token}
 

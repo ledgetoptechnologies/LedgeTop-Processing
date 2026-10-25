@@ -1,0 +1,53 @@
+{
+  "scope": "disposable NodeODX API fixture; no real engine processing",
+  "images": {
+    "old": "sha256:f6f0d53504533e90968ca550d6d063c554525a1e06bd8773d8eca8defc8a18e8",
+    "new": "sha256:ab484511c939130a3fffaa5fda70ca55998c36d97e2f2da05c02c8031017aceb",
+    "bad": "sha256:31eca4f8b670769a552c8893315902cfd7b4d53fb6c46d1908c50bb0e7ad8ef7"
+  },
+  "drainBlockedClaim": true,
+  "busyJobDelayedUpdate": true,
+  "healthyUpdateResumedAdmission": true,
+  "failedHealthRestoredPinnedImage": true,
+  "failedUpdateKeptNodeBlocked": true,
+  "unrelatedContainerUnchanged": true,
+  "persistentVolumeMarkerPreserved": true,
+  "success": {
+    "status": "succeeded",
+    "nodeId": "cluster",
+    "healthy": true,
+    "image": "sha256:ab484511c939130a3fffaa5fda70ca55998c36d97e2f2da05c02c8031017aceb",
+    "previousImage": "sha256:f6f0d53504533e90968ca550d6d063c554525a1e06bd8773d8eca8defc8a18e8"
+  },
+  "failure": {
+    "status": "failed",
+    "nodeId": "cluster",
+    "healthy": false,
+    "rollbackHealthy": true,
+    "restoredImage": "sha256:ab484511c939130a3fffaa5fda70ca55998c36d97e2f2da05c02c8031017aceb"
+  },
+  "testResourcesRemoved": true,
+  "checks": {
+    "rootTests": 88,
+    "workerTests": 14,
+    "independentReview": "No remaining code blockers",
+    "actualTreeDarRegression": {
+      "jobs": 2,
+      "treesPerJob": 3,
+      "productionBeforeStaging": true,
+      "cleanup": true
+    }
+  },
+  "coordinatorImage": "sha256:642eca745fd7a88f7e74c7853436a0058c968d89b0d95aabec7123f426e93a04",
+  "sourceSha256": {
+    "processing/prototype.py": "61a10f54f4825706ba4f4e2a5b964e919a0db3dc2dc5546f3e9f488a0f794389",
+    "processing/maintenance.py": "8a2bf66e56684de601333880706b2db288c0cf60d3e287f3213583ad5073ff47",
+    "processing/container_update.py": "0fda4a5af6ec7e094c7cb45113f6b39bd5fe23f2319cfa5bf15d9631ea80a9ae",
+    "processing/app.py": "2d232eddee0dbbb1a3836919605919919b430172a0463c0b86039da0652af051",
+    "processing/config.py": "e09702a33507f917195b0c85ebd8b77d8195261af8db37679d38623a7e89e844",
+    "scripts/prototype_dispatcher.py": "e32c10e8377ab87b3e8b2e86c3a9e5a8e465c6f19de015c9f9afb5bf7b0b90ca",
+    "engines/treedar/scripts/prototype_worker.py": "809c43911c0f5bd82dcb2f4532af43e7124d4b23481c7b952068a5ac2ce4cff0"
+  },
+  "limits": "Local disposable NodeODX API fixture, not an actual NodeODX release update. No live nodes, OS updates, background service or maintenance window activated.",
+  "developmentFinding": "Docker top requires PID in its output columns; args-only census failed fixture readiness and was corrected to pid,args before final passing acceptance. All fixtures cleaned."
+}

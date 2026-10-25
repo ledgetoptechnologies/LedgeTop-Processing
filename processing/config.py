@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import os
+import re
 from urllib.parse import urlsplit
 
 
@@ -17,6 +18,7 @@ class Config:
     prototype_state_dir: str = ""
     prototype_operator_token: str = ""
     photo_smoke_enabled: bool = False
+    prototype_node_ids: tuple[str, ...] = ("cluster",)
 
 
 def _node_origin(value: str) -> str:
@@ -45,6 +47,10 @@ def from_environment() -> Config:
     if len(token) < 32 or any(ord(char) < 33 or ord(char) > 126 for char in token):
         raise ValueError("PROCESSING_API_TOKEN must contain at least 32 printable characters")
     operator = os.environ.get("PROCESSING_PROTOTYPE_OPERATOR_TOKEN", "")
+    node_ids = tuple(os.environ.get("PROCESSING_PROTOTYPE_NODE_IDS", "cluster").split(","))
+    if (not 1 <= len(node_ids) <= 8 or 'cluster' not in node_ids or len(set(node_ids)) != len(node_ids)
+            or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):
+        raise ValueError("PROCESSING_PROTOTYPE_NODE_IDS must list 1 to 8 unique ASCII node IDs")
     photo_smoke = os.environ.get("PROCESSING_PHOTO_SMOKE_ENABLED", "0")
     if photo_smoke not in ("0", "1"):
         raise ValueError("PROCESSING_PHOTO_SMOKE_ENABLED must be 0 or 1")
@@ -64,4 +70,5 @@ def from_environment() -> Config:
         prototype_state_dir=os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR", ""),
         prototype_operator_token=operator,
         photo_smoke_enabled=photo_smoke == "1",
+        prototype_node_ids=node_ids,
     )
