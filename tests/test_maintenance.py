@@ -189,3 +189,42 @@ class MaintenanceTests(unittest.TestCase):
             self.queue.resume_node('cluster', {'expectedRevision': row['revision'],
                 'planId': row['planId'], 'note': 'inspected', 'workerStopped': True, 'healthy': True})
 
+    def test_operator_hold_fences_updater_without_touching_main_work(self):
+        self.schedule()
+        begun = self.begin()
+        self.submit()
+        job = self.queue.claim({'workerId': 'main-worker', 'nodeId': 'main'})
+        held = self.queue.hold_node('cluster', {
+            'expectedRevision': begun['node']['revision'],
+            'planId': begun['node']['planId'], 'note': 'updater response uncertain'})
+        self.assertEqual(held['state'], 'held')
+        self.assertEqual(held['revision'], begun['node']['revision'] + 1)
+        self.assertEqual(held['result'], {'operatorAction': 'hold', 'note': 'updater response uncertain'})
+        self.assertEqual(self.queue.get(job['id'])['status'], 'running')
+        self.assertEqual(self.queue.get(job['id'])['nodeId'], 'main')
+        self.assertEqual(self.queue.get_node('main')['state'], 'active')
+        with self.assertRaises(Conflict):
+            self.finish(begun)
+        self.assertNotIn('updateToken', json.dumps(held))
+
+    def test_operator_hold_requires_updating_state_current_revision_and_plan(self):
+        row = self.queue.get_node('cluster')
+        with self.assertRaises(Conflict):
+            self.queue.hold_node('cluster', {'expectedRevision': row['revision'],
+                'planId': row['planId'], 'note': 'not updating'})
+        self.schedule()
+        begun = self.begin()
+        payload = {'expectedRevision': begun['node']['revision'],
+                   'planId': begun['node']['planId'], 'note': 'inspect updater'}
+        for bad in ({**payload, 'expectedRevision': payload['expectedRevision'] - 1},
+                    {**payload, 'planId': 'wrong-plan'}):
+            with self.assertRaises(Conflict):
+                self.queue.hold_node('cluster', bad)
+        for note in ('', ' ', 'x' * 257, None):
+            with self.assertRaises(ValueError):
+                self.queue.hold_node('cluster', {**payload, 'note': note})
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'updating')
+        self.queue.hold_node('cluster', payload)
+        with self.assertRaises(Conflict):
+            self.queue.hold_node('cluster', payload)
+

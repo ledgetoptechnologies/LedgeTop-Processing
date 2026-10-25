@@ -67,12 +67,16 @@ All mutations below require the distinct operator credential:
 | cancel | `{expectedRevision,planId}`; only scheduled/draining |
 | begin | `{expectedRevision,planId}`; returns `{node,updateToken}` only when drained, due and no running/held job on the node |
 | finish | `{planId,updateToken,status,result}`; success requires `result.healthy=true` |
+| hold | `{expectedRevision,planId,note}`; updating to held and invalidates token; does not stop processes |
 | resume | `{expectedRevision,planId,note,workerStopped:true,healthy:true}`; failed/held only, no unresolved active job |
 
 A coordinator restart changes updating to held and invalidates its token. It
 never guesses that replacement or rollback finished. Identical finish replay is
 idempotent; it is not permission to repeat Docker replacement. Operator resume
 attestations require real process and health checks, not just checking boxes.
+Use the node's operator `hold` action to fence an uncertain update without
+restarting the coordinator or disturbing other nodes' running work. Holding
+does not kill an updater or prove that its Docker operation stopped.
 
 ## Host update runner
 
@@ -118,6 +122,20 @@ candidate images separately under the node's storage/capacity policy. Replacemen
 uses only the selected service with `--no-deps --no-build --pull never`; volumes
 and unrelated services remain in place. A cold image load and sparse-SSD impact
 are outside the small fixture's performance evidence.
+
+The runner validates forward and rollback configuration before reservation and
+executes the exact private resolved Compose configuration it validated. A changed
+validation failure before a replacement is issued does not recreate the old
+service as an unnecessary rollback. Resolved configuration may contain secrets
+from the operator's Compose environment; keep the whole receipt directory private.
+
+**Persist the image pin for subsequent starts.** The original operator-owned
+Compose file is not rewritten automatically. After success, use the retained
+`resolved-compose.json`/`image-override.json` for future managed Compose starts,
+or update the reviewed original Compose image pin. Ordinary `compose up` without
+the maintenance pin can revert to its old image. The success result explicitly
+reports `composePinUpdateRequired:true`. Docker restarting the existing container
+does not itself reselect an image from the original Compose source.
 
 Intent is fsynced before reservation and each Docker mutation. A lost/unknown
 Docker mutation response leaves the gate and receipt for inspection, avoiding a

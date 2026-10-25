@@ -170,6 +170,23 @@ class Maintenance:
                 WHERE id=?""", (state, result, payload["status"], identifier))
             return self._node_public(self._node(db, identifier))
 
+    def hold_node(self, identifier, payload):
+        """Fence an uncertain updater; does not stop containers or restore health."""
+        self.fields(payload, ("expectedRevision", "planId", "note"))
+        if (not isinstance(payload["note"], str) or not payload["note"].strip()
+                or len(payload["note"]) > 256):
+            raise ValueError("operator inspection note required")
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._node(db, identifier)
+            self._cas(row, payload, plan=True)
+            if row["state"] != "updating":
+                raise Conflict("only an updating node can be held")
+            result = json.dumps({"operatorAction": "hold", "note": payload["note"]})
+            db.execute("""UPDATE nodes SET state='held',revision=revision+1,result=?,
+                update_hash=NULL,finish_status=NULL WHERE id=?""", (result, identifier))
+            return self._node_public(self._node(db, identifier))
+
     def resume_node(self, identifier, payload):
         self.fields(payload, ("expectedRevision", "planId", "note", "workerStopped", "healthy"))
         if (payload["workerStopped"] is not True or payload['healthy'] is not True or not isinstance(payload["note"], str)

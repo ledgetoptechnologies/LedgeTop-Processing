@@ -10,7 +10,7 @@ import subprocess
 
 from processing.app import make_handler
 from processing.config import Config
-from processing.container_update import execute, ComposeNode, UpdateError, Uncertain
+from processing.container_update import execute, ComposeNode, UpdateError, Uncertain, PreflightError
 from processing.odx_smoke_worker import Client, SmokeError
 from tests.test_service import TOKEN, start_server
 
@@ -39,6 +39,9 @@ class Adapter:
         self.current = image
         if self.uncertain:
             raise Uncertain('lost mutation response')
+
+    def prepare(self, image):
+        self.image(image)
 
     def healthy(self, image):
         return self.current == image and not (self.bad_health and image == NEW)
@@ -137,6 +140,24 @@ class MaintenanceUpdateTests(unittest.TestCase):
             self.run_update()
         self.assertEqual(self.queue.get_node('cluster')['state'], 'draining')
         self.assertFalse((self.work / 'update.json').exists())
+
+    def test_config_preflight_failure_does_not_reserve_or_recreate(self):
+        self.plan()
+        with patch.object(self.adapter, 'prepare', side_effect=UpdateError('invalid configuration')):
+            with self.assertRaises(UpdateError):
+                self.run_update()
+        self.assertEqual(self.adapter.calls, [])
+        self.assertFalse((self.work / 'update.json').exists())
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'draining')
+
+    def test_changed_preflight_after_reservation_does_not_rollback_recreate(self):
+        self.plan()
+        with patch.object(self.adapter, 'replace', side_effect=PreflightError('configuration changed')):
+            result = self.run_update()
+        self.assertEqual(result['status'], 'failed')
+        self.assertFalse(result['rollbackPerformed'])
+        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'failed')
 
     def test_worker_credential_cannot_plan_or_update_node(self):
         with self.assertRaises(SmokeError):
@@ -247,7 +268,7 @@ class ComposeBoundaryTests(unittest.TestCase):
     def test_docker_timeout_is_uncertain_not_safe_rollback_signal(self):
         with patch('processing.container_update.subprocess.run', side_effect=subprocess.TimeoutExpired('docker', 1)):
             with self.assertRaises(Uncertain):
-                self.adapter.docker(['docker', 'compose', 'up'], mutation=True)
+                self.adapter.docker(['docker', 'compose', 'up'])
 
 
 if __name__ == '__main__':

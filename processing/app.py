@@ -119,7 +119,7 @@ def make_handler(config: Config):
                         identifier, _, action = self.path[len("/v1/prototype/nodes/"):].rpartition("/")
                         methods = {"schedule": queue.schedule_node, "cancel": queue.cancel_node,
                                    "begin": queue.begin_node_update, "finish": queue.finish_node_update,
-                                   "resume": queue.resume_node}
+                                   "hold": queue.hold_node, "resume": queue.resume_node}
                         if action not in methods:
                             self._reply(404, {"error": "not_found"})
                         else:

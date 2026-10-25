@@ -29,6 +29,10 @@ class Uncertain(UpdateError):
     pass
 
 
+class PreflightError(UpdateError):
+    """No replacement command was issued; recreating the old service is wrong."""
+
+
 def save(path, value):
     temporary = path.with_suffix('.tmp')
     with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
@@ -74,7 +78,7 @@ class ComposeNode:
         self.base = ['docker', 'compose', '-p', args.project, '-f', str(Path(args.compose_file).resolve())]
         self.node = Client(loopback(args.node_origin), os.environ.get('NODEODX_API_TOKEN', ''), node=True)
 
-    def docker(self, command, *, mutation=False, timeout=30):
+    def docker(self, command, *, timeout=30):
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         except (OSError, subprocess.SubprocessError):
@@ -160,11 +164,13 @@ class ComposeNode:
                 return False
         return server == 1 and wrapper <= 1 and init <= 1
 
-    def replace(self, image):
+    def prepare(self, image):
         self.engine()
         self.image(image)
         override = self.root / 'image-override.json'
-        override.write_text(json.dumps({'services': {self.args.service: {'image': image, 'pull_policy': 'never'}}}))
+        data = json.dumps({'services': {self.args.service: {'image': image, 'pull_policy': 'never'}}})
+        with os.fdopen(os.open(override, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as stream:
+            stream.write(data)
         # Normal application hooks are outside this adapter's scope.
         configuration = json.loads(self.docker([*self.base, '-f', str(override), 'config', '--format', 'json']))
         service = configuration['services'][self.args.service]
@@ -172,8 +178,25 @@ class ComposeNode:
         if (service.get('post_start') or service.get('pre_stop') or service.get('scale', 1) != 1
                 or deployment.get('replicas', 1) != 1 or deployment.get('mode', 'replicated') != 'replicated'):
             raise UpdateError('service hooks/scaling are not supported by maintenance adapter')
-        self.docker([*self.base, '-f', str(override), 'up', '-d', '--no-deps', '--no-build',
-                     '--pull', 'never', '--force-recreate', self.args.service], mutation=True, timeout=120)
+        # Execute the exact resolved configuration we validated. Source edits
+        # between validation and 'up' must not introduce a new hook or mount.
+        resolved = self.root / 'resolved-compose.json'
+        with os.fdopen(os.open(resolved, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as stream:
+            json.dump(configuration, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return ['docker', 'compose', '-p', self.args.project, '-f', str(resolved),
+                'up', '-d', '--no-deps', '--no-build',
+                '--pull', 'never', '--force-recreate', self.args.service]
+
+    def replace(self, image):
+        try:
+            command = self.prepare(image)
+        except Uncertain:
+            raise
+        except UpdateError:
+            raise PreflightError('replacement validation failed before container mutation') from None
+        self.docker(command, timeout=120)
 
     def healthy(self, image):
         item = self.inspect()
@@ -219,6 +242,9 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
     target = node['targetImage']
     adapter.image(old)
     adapter.image(target)
+    # Validate both forward and rollback configuration before reserving the node.
+    adapter.prepare(target)
+    adapter.prepare(old)
     receipt = {'stage': 'begin_pending', 'nodeId': node_id, 'planId': node['planId'],
                'oldImage': old, 'targetImage': target, 'startedAt': datetime.now(timezone.utc).isoformat()}
     save(path, receipt)
@@ -235,10 +261,14 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         adapter.replace(target)
         if not wait_healthy(adapter, target, health_seconds):
             raise UpdateError('replacement health failed')
-        status, result = 'succeeded', {'healthy': True, 'image': target, 'previousImage': old}
+        status, result = 'succeeded', {'healthy': True, 'image': target, 'previousImage': old,
+                                       'composePinUpdateRequired': True}
     except Uncertain:
         # The Docker daemon may still be acting. Rollback here could race it.
         raise
+    except PreflightError:
+        status, result = 'failed', {'healthy': False, 'rollbackPerformed': False,
+                                    'reason': 'validation_changed_before_mutation', 'previousImage': old}
     except (UpdateError, SmokeError):
         receipt['stage'] = 'rollback_pending'
         save(path, receipt)

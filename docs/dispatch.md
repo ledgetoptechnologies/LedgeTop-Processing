@@ -6,6 +6,11 @@ job, serially, for at most 1–10 jobs. It exits when empty, running/held work b
 the slot, the head profile is unsupported, or its job budget is exhausted.
 It creates no jobs and never runs the real-photo profile.
 
+The dispatcher now checks the selected node's admission state before each launch
+and passes `--node-id` (default `cluster`) to its worker. Upgrade the coordinator
+before using this version: a legacy API without node admission fails closed.
+See [scheduled node maintenance](maintenance.md) for drain and recovery behavior.
+
 This is a host command using the Docker CLI through the existing worker. The
 coordinator container has no Docker socket. No service, timer, startup policy or
 production routing change is installed. A later service needs separate resource,
