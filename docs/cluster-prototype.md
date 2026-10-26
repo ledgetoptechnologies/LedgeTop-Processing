@@ -55,6 +55,10 @@ delivery while running. No continuously polling worker or worker boot service
 is installed. If the host/worker process is interrupted, inspect the private
 receipt and use the documented completion-only resume procedure before any new
 dispatch. Do not clear an uncertain dispatcher guard to make it run again.
+For a repeatable submission, supply a unique `--request-id YOUR_SLUG` and reuse
+that ID only for an identical retry. Without it, each invocation creates a new
+request ID: after an uncertain reply inspect the queue before submitting again.
+The wrapper refuses redirects and ignores environment proxies.
 
 The API remains private to the host. An SSH tunnel can expose it temporarily on
 an unused localhost port; no LAN firewall or public access change was made.

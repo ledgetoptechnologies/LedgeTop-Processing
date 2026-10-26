@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 import uuid
 
 root = Path(__file__).resolve().parent
@@ -17,15 +17,22 @@ commands = parser.add_subparsers(dest='command', required=True)
 commands.add_parser('status')
 submit = commands.add_parser('submit-synthetic')
 submit.add_argument('--environment', choices=('production','staging'), default='staging')
+submit.add_argument('--request-id', help='Stable unique slug; reuse only for an identical submission retry')
 dispatch = commands.add_parser('dispatch')
 dispatch.add_argument('--max-jobs', type=int, choices=range(1,11), default=2)
 args = parser.parse_args()
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise ValueError('coordinator redirect refused')
+
+opener = build_opener(ProxyHandler({}), NoRedirect())
 
 def api(path, payload=None):
     request = Request(installation['origin'] + path,
         data=None if payload is None else json.dumps(payload).encode(),
         headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
-    with urlopen(request,timeout=10) as response:
+    with opener.open(request,timeout=10) as response:
         return json.load(response)
 
 try:
@@ -38,7 +45,7 @@ try:
                          for state in ('queued','running','held','succeeded','failed')},
             'nodes':[{key:n[key] for key in ('id','state')} for n in nodes]}))
     elif args.command == 'submit-synthetic':
-        job=api('/v1/prototype/jobs',{'requestId':'manual-synthetic-'+uuid.uuid4().hex,
+        job=api('/v1/prototype/jobs',{'requestId':args.request_id or 'manual-synthetic-'+uuid.uuid4().hex,
             'environment':args.environment,'profile':'treedar-synthetic-v1'})['job']
         print(json.dumps({'id':job['id'],'environment':job['environment'],'status':job['status']}))
     else:
