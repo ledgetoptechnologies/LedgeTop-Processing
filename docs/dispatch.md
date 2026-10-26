@@ -10,6 +10,8 @@ The dispatcher now checks the selected node's admission state before each launch
 and passes `--node-id` (default `cluster`) to its worker. Upgrade the coordinator
 before using this version: a legacy API without node admission fails closed.
 See [scheduled node maintenance](maintenance.md) for drain and recovery behavior.
+It also requires an explicitly provisioned Engine-bound host gate. Follow
+[ownership and outage recovery](resilience.md) before starting a worker.
 
 This is a host command using the Docker CLI through the existing worker. The
 coordinator container has no Docker socket. No service, timer, startup policy or
@@ -30,6 +32,7 @@ python scripts/prototype_dispatcher.py \
   --scratch /private/synthetic-scratch \
   --state /private/durable-dispatch-state \
   --worker-id synthetic-dispatch \
+  --docker-engine-id VERIFIED_ENGINE_ID --node-generation 1 \
   --max-jobs 2 --timeout 240
 ```
 
@@ -63,9 +66,11 @@ The next invocation refuses to launch. A zero exit alone is insufficient:
 exactly one new completed private worker receipt must match the expected job,
 worker, image, environment, synthetic metrics and coordinator completion readback.
 
-The local lock is scoped to that state directory, not a global host reservation.
-The coordinator's single execution slot and worker receipts provide additional
-fencing, but this is not a fleet-wide resource manager or exactly-once claim API.
+The dispatcher lock is scoped to its state directory. The worker additionally
+reserves the canonical Engine-bound host gate before claiming; another scratch
+root cannot bypass that reservation. All Docker writers must use the same host
+account/state location and gate. This is not protection against direct Docker
+administrators or an exactly-once claim API.
 
 ## Recovery
 

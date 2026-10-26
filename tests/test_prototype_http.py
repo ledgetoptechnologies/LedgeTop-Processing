@@ -66,6 +66,26 @@ class PrototypeHTTPTests(unittest.TestCase):
             disabled.shutdown()
             disabled.server_close()
 
+    def test_observer_can_read_authority_but_cannot_submit_or_claim(self):
+        from dataclasses import replace
+        self.server.shutdown()
+        self.server.server_close()
+        self.handler.prototype_queue.close()
+        observer = 'observer-only-test-token-1234567890123456'
+        self.handler = make_handler(replace(Config(TOKEN, '', '', 800, 20000,
+            prototype_state_dir=self.directory.name), prototype_observer_token=observer))
+        self.server = start_server(self.handler)
+        self.origin = f'http://127.0.0.1:{self.server.server_port}'
+        _, authority = self.request('/v1/prototype/authority', token=observer)
+        self.assertEqual(authority['authorityId'], self.handler.prototype_queue.authority_id)
+        self.request('/v1/prototype/jobs', token=observer)
+        self.request('/v1/prototype/nodes', token=observer)
+        for route, payload in [('/v1/prototype/jobs', submission('observer-submit')),
+                               ('/v1/prototype/claim', {'workerId': 'observer'})]:
+            with self.assertRaises(HTTPError) as caught:
+                self.request(route, payload, token=observer)
+            self.assertEqual(caught.exception.code, 401)
+
     def test_worker_credential_cannot_resolve_held_work(self):
         _, submitted = self.request("/v1/prototype/jobs", submission("held"))
         identifier = submitted["job"]["id"]

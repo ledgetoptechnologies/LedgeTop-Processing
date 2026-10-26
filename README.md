@@ -44,6 +44,13 @@ become TreeDar forestry inputs.
 container update/health/rollback runner. It prevents new claims on a drained node
 and preserves uncertain updates for recovery. OS updates and reboots are deferred.
 
+[Node ownership and outage recovery](docs/resilience.md) adds an Engine-bound
+host admission guard, isolated candidate testing and a read-only shadow preview.
+The synthetic worker durably retries the original completion after outages;
+restarts preserve ownership and operator holds. Artifact files remain on the
+worker: verified artifact transfer and downstream pipeline admission are still
+separate work.
+
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
 2. Add the exact local and main processing-node origins when available. A blank

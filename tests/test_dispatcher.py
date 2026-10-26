@@ -52,7 +52,7 @@ class DispatcherTests(unittest.TestCase):
     def args(self, **changes):
         values = dict(coordinator=self.base, verified_origin=None, image=IMAGE,
                       scratch=str(self.scratch), state=str(self.state), worker_id='dispatch-test',
-                      timeout=240, max_jobs=2)
+                      timeout=240, max_jobs=2, docker_engine_id='test-physical-engine', node_generation=1)
         values.update(changes)
         return argparse.Namespace(**values)
 

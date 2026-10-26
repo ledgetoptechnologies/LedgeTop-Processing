@@ -25,7 +25,8 @@ python engines/treedar/scripts/prototype_worker.py `
   --coordinator http://127.0.0.1:8899 `
   --image sha256:REPLACE_WITH_FULL_64_HEX_LOCAL_IMAGE_ID `
   --scratch C:/approved-private/processing-prototype `
-  --worker-id cluster-synthetic-1
+  --worker-id cluster-synthetic-1 `
+  --docker-engine-id VERIFIED_LOCAL_ENGINE_ID --node-generation 1
 ```
 
 An independently verified remote coordinator origin also requires
@@ -35,6 +36,11 @@ Plain HTTP carries the API token in cleartext; use loopback or a trusted isolate
 network for the prototype. There is no scheduler loop: each invocation claims at
 most one job, and production-first admission is owned by the coordinator.
 Production admission does not preempt a running staging container.
+Provision the persistent Engine-bound host gate first using the repository's
+[ownership and resilience procedure](../../../docs/resilience.md). A different
+coordinator authority, origin or generation cannot use the same node, even from
+another scratch directory. Local Docker access must be restricted to cooperative
+writers; the gate is not an administrator security boundary.
 
 Docker is limited to two CPUs, 2 GiB memory, 128 PIDs, a 512 MiB temporary
 filesystem, no network, no capabilities, no privilege escalation, read-only
@@ -62,14 +68,21 @@ Private receipts under `<scratch>/.prototype-receipts` contain **claim secrets**
 On POSIX they use restrictive permissions; on Windows the scratch root must
 have a private inherited ACL. Do not share, commit or print receipt contents.
 Unresolved receipts block subsequent claims on that scratch root. A process
-lock blocks simultaneous invocations; a stale lock requires checking the old
-worker and its named container before manually removing that exact lock file.
+lock blocks simultaneous invocations on the physical Engine. A persistent gate
+reservation survives crashes and never expires. Legacy `worker.lock` files still
+require checking the old worker/container before manually retiring them.
 
-If a completion reply is lost, the receipt remains `completion_pending`.
-After verifying the coordinator is reachable, rerun the same command with
+If a completion reply is lost, the receipt remains `completion_pending` and the
+foreground worker retries with capped jittered backoff until an exact ACK.
+Use `--delivery-wait-seconds 0` for one due attempt or a positive bounded wait.
+After worker process interruption, rerun the same command with
 `--resume <absolute-receipt-path>`. This resends only the saved exact completion
 payload using the current API token; it never claims or reruns a job. Other
-receipt states require operator inspection. The separately authenticated
+uncertain execution states require operator inspection. An exact completed
+receipt can reconcile a crash before gate release without any network write.
+Artifacts are flushed and retained; the completion sends metadata/hashes only,
+not the file bytes. Coordinator ACK does not authorize deleting those files.
+The separately authenticated
 coordinator hold/resolve process must verify no old worker/container remains;
 never delete an unresolved receipt just to get a new claim.
 

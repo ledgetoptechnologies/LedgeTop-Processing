@@ -19,6 +19,7 @@ class Config:
     prototype_operator_token: str = ""
     photo_smoke_enabled: bool = False
     prototype_node_ids: tuple[str, ...] = ("cluster",)
+    prototype_observer_token: str = ""
 
 
 def _node_origin(value: str) -> str:
@@ -47,6 +48,10 @@ def from_environment() -> Config:
     if len(token) < 32 or any(ord(char) < 33 or ord(char) > 126 for char in token):
         raise ValueError("PROCESSING_API_TOKEN must contain at least 32 printable characters")
     operator = os.environ.get("PROCESSING_PROTOTYPE_OPERATOR_TOKEN", "")
+    observer = os.environ.get("PROCESSING_PROTOTYPE_OBSERVER_TOKEN", "")
+    if observer and (len(observer) < 32 or observer in (token, operator)
+                     or any(ord(char) < 33 or ord(char) > 126 for char in observer)):
+        raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
     node_ids = tuple(os.environ.get("PROCESSING_PROTOTYPE_NODE_IDS", "cluster").split(","))
     if (not 1 <= len(node_ids) <= 8 or 'cluster' not in node_ids or len(set(node_ids)) != len(node_ids)
             or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):
@@ -71,4 +76,5 @@ def from_environment() -> Config:
         prototype_operator_token=operator,
         photo_smoke_enabled=photo_smoke == "1",
         prototype_node_ids=node_ids,
+        prototype_observer_token=observer,
     )

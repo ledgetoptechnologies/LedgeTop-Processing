@@ -37,13 +37,16 @@ def make_handler(config: Config):
             self.end_headers()
             self.wfile.write(body)
 
-        def _authorized(self, operator=False) -> bool:
+        def _authorized(self, operator=False, observer=False) -> bool:
             value = self.headers.get("Authorization", "")
             token = config.prototype_operator_token if operator else config.api_token
             if not token:
                 self._reply(403, {"error": "operator_actions_disabled"})
                 return False
             expected = f"Bearer {token}"
+            if observer and config.prototype_observer_token and hmac.compare_digest(
+                    value.encode(), f'Bearer {config.prototype_observer_token}'.encode()):
+                return True
             if not hmac.compare_digest(value.encode(), expected.encode()):
                 self._reply(401, {"error": "unauthorized"})
                 return False
@@ -55,10 +58,12 @@ def make_handler(config: Config):
 
         def do_GET(self):
             if self.path.startswith("/v1/prototype/"):
-                if not self._authorized():
+                if not self._authorized(observer=True):
                     return
                 if queue is None:
                     self._reply(404, {"error": "prototype_disabled"})
+                elif self.path == "/v1/prototype/authority":
+                    self._reply(200, {"authorityId": queue.authority_id})
                 elif self.path == "/v1/prototype/jobs":
                     self._reply(200, {"jobs": queue.list(), "mode": "bounded_photo_test" if config.photo_smoke_enabled else "synthetic_prototype"})
                 elif self.path == "/v1/prototype/nodes":
