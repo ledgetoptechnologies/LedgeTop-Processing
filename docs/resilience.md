@@ -33,6 +33,16 @@ origin, authority, node ID or generation fails closed. No claim or engine run ma
 precede the durable reservation. A process lock prevents simultaneous workers;
 the reservation survives process death and has no expiry.
 
+The OS lock is held throughout execution and result retries. The current `status`
+command also takes that lock, so it refuses while a worker owns it. Inspect the
+worker's private atomic receipts locally for its current delivery state; do not
+print or share them because they contain claim secrets. A completed receipt can
+still own the gate after a crash before release: explicitly resume that receipt
+to reconcile the exact stored ACK. If reservation preceded the first receipt
+write, or the receipt is lost, inspect local execution and remote queue history
+before using the explicit abandonment procedure; never infer an empty node from
+a missing receipt.
+
 This is a cooperative admission boundary, not protection against Docker
 administrators. All writers must use the same OS account/state location and gate;
 lock down the supervisor's environment and Docker access. Direct NodeODX,
