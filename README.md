@@ -51,6 +51,10 @@ restarts preserve ownership and operator holds. Artifact files remain on the
 worker: verified artifact transfer and downstream pipeline admission are still
 separate work.
 
+The reviewed prototype is now [installed and tested on the cluster PC](docs/cluster-prototype.md).
+Its coordinator is healthy on host-local port 18080; synthetic workers use the
+installed bounded command. Existing ODX services remain in place.
+
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
 2. Add the exact local and main processing-node origins when available. A blank
