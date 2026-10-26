@@ -1,0 +1,20 @@
+{
+  "sourceCommit": "c3fcb3a0016bb645e2bc7e111150b51576f38b10",
+  "coordinatorImage": "sha256:2b51cb9baa73c486571071f2e3c4c48599a416fefa8a7375cc44d90a8859b8ff",
+  "engineImage": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029",
+  "host": "cluster",
+  "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+  "syntheticJobs": 4,
+  "automaticRetryAfterReconnect": true,
+  "treesPerJob": 3,
+  "productionBeforeStaging": true,
+  "actualCoordinatorOutage": true,
+  "originalClaimCompletedAfterRestart": true,
+  "deliveryProcessInterruptedAndResumed": true,
+  "sameContainerNoEngineRerun": true,
+  "canonicalGateIdle": true,
+  "testArtifactsReceiptsContainersRemoved": true,
+  "existingServicesUnchanged": true,
+  "coordinatorLeftRunning": true,
+  "realDatasetsProcessed": false
+}
