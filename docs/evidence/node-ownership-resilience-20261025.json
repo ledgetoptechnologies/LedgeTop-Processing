@@ -1,0 +1,31 @@
+{
+  "scope": "local synthetic source acceptance; no real datasets or cluster deployment",
+  "coordinatorImage": "sha256:817e920ae2a66b8471b9f38b563b248410c491090761dc41500dfb47cc5861e8",
+  "engineImage": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029",
+  "workerUnitTestsPassed": 34,
+  "rootTestsTotal": 115,
+  "windowsPrivilegedSymlinkTestsSkipped": 1,
+  "linuxGateTestsPassedIncludingSymlinkCase": 15,
+  "actualHTTPResilienceTestsPassed": 4,
+  "httpCases": [
+    "original completion after coordinator restart with same claim",
+    "committed completion with lost acknowledgment then restart and replay",
+    "independent staging authority cannot acquire production node",
+    "observer shadow proposes production without assigning work"
+  ],
+  "actualDocker": {
+    "syntheticJobs": 2,
+    "treesPerJob": 3,
+    "productionBeforeStaging": true,
+    "engineBoundGateUsed": true,
+    "elapsedSeconds": 10.33,
+    "exactTestContainersAndScratchRemoved": true
+  },
+  "limits": [
+    "same OS user and configured state home; direct Docker writers must be fenced",
+    "no live cluster or production routing change",
+    "no installed worker reboot supervisor",
+    "metadata delivery only; output files retained and not uploaded",
+    "no downstream dependent-job or real NodeODX-to-TreeDar chain"
+  ]
+}

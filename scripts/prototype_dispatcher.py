@@ -246,7 +246,9 @@ def verify_image(image):
 def launch(args, base, scratch):
     command = [sys.executable, str(WORKER), '--coordinator', base, '--image', args.image,
                '--scratch', str(scratch), '--worker-id', args.worker_id,
-               '--timeout', str(args.timeout), '--node-id', getattr(args, 'node_id', 'cluster')]
+               '--timeout', str(args.timeout), '--node-id', getattr(args, 'node_id', 'cluster'),
+               '--docker-engine-id', args.docker_engine_id,
+               '--node-generation', str(args.node_generation)]
     if args.verified_origin:
         command.extend(['--verified-origin', args.verified_origin])
     environment = {key: value for key, value in os.environ.items()
@@ -325,6 +327,9 @@ def run(args):
     if (not re.fullmatch('sha256:[0-9a-f]{64}', args.image)
             or not SLUG.fullmatch(args.worker_id) or type(args.max_jobs) is not int
             or not isinstance(node_id, str) or not SLUG.fullmatch(node_id)
+            or not isinstance(getattr(args, 'docker_engine_id', None), str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9:._-]{0,255}', args.docker_engine_id)
+            or type(getattr(args, 'node_generation', None)) is not int or args.node_generation < 1
             or not 1 <= args.max_jobs <= 10 or type(args.timeout) is not int
             or not 180 <= args.timeout <= 300):
         raise DispatchError('invalid pinned image, worker ID or bounded limits')
@@ -363,6 +368,7 @@ def run(args):
             record = {'state': 'launch_pending', 'expectedJobId': expected['id'],
                       'environment': expected['environment'], 'coordinator': base,
                       'nodeId': node_id,
+                      'dockerEngineId': args.docker_engine_id, 'nodeGeneration': args.node_generation,
                       'workerId': args.worker_id, 'image': args.image, 'scratch': str(scratch),
                       'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat()}
             save(dispatch_path, record)
@@ -398,6 +404,8 @@ def main():
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--verified-origin')
     parser.add_argument('--node-id', default='cluster', help='Node identity; maintenance API required')
+    parser.add_argument('--docker-engine-id', required=True, help='Pinned local Docker Engine identity')
+    parser.add_argument('--node-generation', required=True, type=int, help='Provisioned node ownership generation')
     parser.add_argument('--max-jobs', type=int, choices=range(1, 11), default=2)
     parser.add_argument('--timeout', type=int, choices=range(180, 301), default=240)
     args = parser.parse_args()

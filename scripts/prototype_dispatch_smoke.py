@@ -45,6 +45,12 @@ def main():
     name = 'lt-dispatch-smoke-' + uuid.uuid4().hex[:12]
     env = {**os.environ, 'PROCESSING_API_TOKEN': secrets.token_urlsafe(36),
            'PROCESSING_PROTOTYPE_OPERATOR_TOKEN': secrets.token_urlsafe(36)}
+    # Explicit isolated test profile: never provision or overwrite a real host's
+    # persistent production node binding from a disposable acceptance fixture.
+    test_profile = scratch / 'test-profile'
+    test_profile.mkdir(mode=0o700)
+    env['LOCALAPPDATA'] = str(test_profile)
+    env['XDG_STATE_HOME'] = str(test_profile)
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
@@ -90,6 +96,11 @@ def main():
                 time.sleep(0.25)
         else:
             raise RuntimeError('isolated coordinator failed readiness')
+        engine_id = command(['docker', 'info', '--format', '{{.ID}}']).strip()
+        authority_id = request('/v1/prototype/authority')['authorityId']
+        command([sys.executable, '-m', 'processing.node_gate', '--engine-id', engine_id,
+                 'provision', '--node-id', 'cluster', '--coordinator', origin,
+                 '--authority-id', authority_id])
         jobs = []
         for request_id, environment in [('staging-first', 'staging'), ('production-second', 'production')]:
             jobs.append(request('/v1/prototype/jobs', {'requestId': request_id,
@@ -98,7 +109,8 @@ def main():
         output = command([sys.executable, str(root / 'scripts/prototype_dispatcher.py'),
                           '--coordinator', origin, '--image', args.engine_image,
                           '--scratch', str(work), '--state', str(state),
-                          '--worker-id', 'dispatch-smoke', '--max-jobs', '2'], timeout=650)
+                          '--worker-id', 'dispatch-smoke', '--max-jobs', '2',
+                          '--docker-engine-id', engine_id, '--node-generation', '1'], timeout=650)
         evidence['elapsedSeconds'] = round(time.monotonic() - started, 2)
         evidence['dispatcherOutput'] = json.loads(output)
         final = request('/v1/prototype/jobs')['jobs']

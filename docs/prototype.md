@@ -63,6 +63,9 @@ preempted** if production arrives; production is next after that run finishes.
 This is an explicit first-prototype limitation. There is no automatic dispatch,
 retry, cancellation, cleanup, promotion or downstream ODM submission.
 
+Worker completion delivery now retries durably while the foreground worker runs;
+this never retries engine execution. See [ownership and resilience](resilience.md).
+
 The worker retains its claim token until completion. Status/list responses never
 expose it; the database keeps only its hash. An identical completion is safe to
 repeat after an uncertain response. A mismatched or stale completion cannot
@@ -74,6 +77,12 @@ Only one coordinator process may own the state directory. On restart, all
 running jobs become held and continue blocking the slot. A worker dying without
 a coordinator restart leaves its job running. There is no lease-based release:
 expiry cannot prove the engine stopped.
+
+Restart-held jobs now carry `heldReason: coordinator_restart`. Their original
+worker can complete the unchanged claim, including through the durable outbox.
+An operator hold has a different reason and still vetoes completion. The manual
+procedure below applies to uncertain execution and explicit operator holds,
+rather than requiring successful original work to be discarded after an outage.
 
 1. Inspect job status and the worker's named Docker container and local output.
 2. Stop the worker and the exact engine container if still running. Verify that

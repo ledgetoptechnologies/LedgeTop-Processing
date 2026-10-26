@@ -52,8 +52,44 @@ class QueueTests(unittest.TestCase):
         self.queue = Queue(self.directory.name)
         self.assertEqual(self.queue.get(claim["id"])["status"], "held")
         self.assertIsNone(self.queue.claim({"workerId": "worker"}))
+        self.assertEqual(self.queue.get(claim['id'])['heldReason'], 'coordinator_restart')
+        self.queue.complete(claim["id"], {"claimToken": claim["claimToken"], "status": "succeeded", "result": {}})
+        self.assertIsNotNone(self.queue.claim({'workerId': 'worker'}))
+
+    def test_authority_survives_restart_and_independent_queues_differ(self):
+        authority = self.queue.authority_id
+        self.queue.close()
+        self.queue = Queue(self.directory.name)
+        self.assertEqual(authority, self.queue.authority_id)
+        with tempfile.TemporaryDirectory() as directory:
+            other = Queue(directory)
+            try:
+                self.assertNotEqual(authority, other.authority_id)
+            finally:
+                other.close()
+
+    def test_operator_can_veto_original_completion_after_restart(self):
+        self.queue.submit(submission('restart-veto'))
+        claim = self.queue.claim({'workerId': 'worker'})
+        self.queue.close()
+        self.queue = Queue(self.directory.name)
+        self.queue.operator(claim['id'], 'hold', {'note': 'inspect original process'})
+        self.queue.close()
+        self.queue = Queue(self.directory.name)
+        self.assertEqual(self.queue.get(claim['id'])['heldReason'], 'operator')
         with self.assertRaises(Conflict):
-            self.queue.complete(claim["id"], {"claimToken": claim["claimToken"], "status": "succeeded", "result": {}})
+            self.queue.complete(claim['id'], {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}})
+
+    def test_completion_lost_reply_is_idempotent_after_restart(self):
+        self.queue.submit(submission('lost-reply'))
+        claim = self.queue.claim({'workerId': 'worker'})
+        payload = {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {'artifact': 'retained'}}
+        first = self.queue.complete(claim['id'], payload)
+        self.queue.close()
+        self.queue = Queue(self.directory.name)
+        self.assertEqual(first, self.queue.complete(claim['id'], payload))
+        with self.assertRaises(Conflict):
+            self.queue.complete(claim['id'], {**payload, 'result': {}})
 
     def test_stale_completion_cannot_release_slot(self):
         self.queue.submit(submission("one"))

@@ -65,8 +65,13 @@ class Queue(Maintenance):
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
             if 'node_id' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN node_id TEXT')
+            if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN held_reason TEXT')
+            db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
+            db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
+            self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
             db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
-            db.execute("UPDATE jobs SET status='held', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
+            db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
             self._init_maintenance(db)
 
     def close(self):
@@ -83,12 +88,12 @@ class Queue(Maintenance):
         finally:
             db.close()
 
-    @staticmethod
-    def public(row):
+    def public(self, row):
         return {"id": row["id"], "requestId": row["request_id"],
                 "environment": row["environment"], "profile": row["profile"],
                 "status": row["status"], "workerId": row["worker_id"],
                 "nodeId": row["node_id"],
+                "authorityId": self.authority_id, "heldReason": row["held_reason"],
                 "createdAt": row["created_at"], "updatedAt": row["updated_at"],
                 "result": json.loads(row["result"]) if row["result"] else None}
 
@@ -187,9 +192,9 @@ class Queue(Maintenance):
                 if row["status"] == payload["status"] and row["result"] == result:
                     return self.public(row)
                 raise Conflict("terminal completion differs")
-            if row["status"] != "running":
+            if row["status"] != "running" and not (row['status'] == 'held' and row['held_reason'] == 'coordinator_restart'):
                 raise Conflict("job is held for operator inspection; completion cannot release it")
-            db.execute("UPDATE jobs SET status=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            db.execute("UPDATE jobs SET status=?,result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                        (payload["status"], result, identifier))
             return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
 
@@ -209,7 +214,8 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             if not row:
                 raise Conflict("unknown job")
-            if action == "hold" and row["status"] == "running":
+            if action == "hold" and (row["status"] == "running" or
+                                     (row["status"] == "held" and row['held_reason'] == 'coordinator_restart')):
                 status = "held"
             elif action == "resolve" and row["status"] == "held":
                 status = "failed"
@@ -217,6 +223,6 @@ class Queue(Maintenance):
                 raise Conflict("operator transition not allowed")
             result = json.dumps({"environment": row["environment"], "operatorAction": action,
                                  "note": payload["note"], "workerStopped": payload.get("workerStopped", False)})
-            db.execute("UPDATE jobs SET status=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                       (status, result, identifier))
+            db.execute("UPDATE jobs SET status=?,result=?,held_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (status, result, 'operator' if action == 'hold' else None, identifier))
             return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
