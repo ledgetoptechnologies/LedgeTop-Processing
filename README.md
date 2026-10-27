@@ -59,6 +59,11 @@ through that same coordinator, followed by staging work on the cluster PC.
 Its acceptance connection uses temporary private SSH relays; permanent worker
 connectivity remains separate work.
 
+[Dynamic engine option discovery](docs/engine-options.md) fetches current NodeODX
+flags and metadata per request and reports a conservative shared catalog across
+configured engines. This management API does not yet implement the Viewer's
+native provider task lifecycle.
+
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
 2. Add the exact local and main processing-node origins when available. A blank

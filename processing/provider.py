@@ -2,6 +2,7 @@
 
 import json
 import re
+from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 
@@ -13,7 +14,9 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _get_json(origin: str, route: str, max_bytes: int):
+def _get_json(origin: str, route: str, max_bytes: int, token: str = ''):
+    if token:
+        route += '?' + urlencode({'token': token})
     request = Request(f"{origin}{route}", headers={"Accept": "application/json"})
     with build_opener(ProxyHandler({}), _NoRedirect).open(request, timeout=3) as response:
         if "json" not in response.headers.get("Content-Type", "").lower():
@@ -48,12 +51,12 @@ def _viewer_type(info: dict) -> str | None:
     return None
 
 
-def probe_node(role: str, origin: str) -> dict:
+def probe_node(role: str, origin: str, token: str = '') -> dict:
     if not origin:
         return {"role": role, "configured": False, "ready": False, "reason": "not_configured"}
     try:
-        info = _get_json(origin, "/info", 65536)
-        options = _get_json(origin, "/options", 262144)
+        info = _get_json(origin, "/info", 65536, token)
+        options = _get_json(origin, "/options", 262144, token)
         if not isinstance(options, list):
             raise ValueError("options must be an array")
         option_names = {item.get("name") for item in options if isinstance(item, dict) and isinstance(item.get("name"), str)}
