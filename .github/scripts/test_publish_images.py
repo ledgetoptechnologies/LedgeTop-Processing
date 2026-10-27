@@ -1,5 +1,5 @@
 import unittest
-from publish_images import context, private_package, REPOSITORY
+from publish_images import context, private_package, source_repository, REPOSITORY
 
 
 class PublicationBoundaryTests(unittest.TestCase):
@@ -32,6 +32,14 @@ class PublicationBoundaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             private_package({'visibility': 'private'}, required=True)
         private_package({'visibility': 'private', 'repository': {'full_name': REPOSITORY}}, required=True)
+
+    def test_source_visibility_does_not_relax_private_package_requirement(self):
+        for visibility in ('public', 'private'):
+            self.assertEqual(source_repository({'full_name': REPOSITORY, 'visibility': visibility}), visibility)
+        with self.assertRaises(ValueError):
+            source_repository({'full_name': 'someone/other', 'visibility': 'public'})
+        with self.assertRaises(ValueError):
+            private_package({'visibility': 'public', 'repository': {'full_name': REPOSITORY}}, required=True)
 
 
 if __name__ == '__main__':

@@ -61,6 +61,14 @@ def private_package(value, *, required=False):
         raise ValueError('package must be linked to LedgeTop-Processing')
 
 
+def source_repository(value):
+    # Source visibility and container-package visibility are independent. Beau
+    # temporarily made this repository public; the packages still stay private.
+    if not isinstance(value, dict) or value.get('full_name') != REPOSITORY:
+        raise ValueError('exact source repository required')
+    return value.get('visibility')
+
+
 def receipt(value):
     path = Path('publish-receipt.json')
     temporary = path.with_suffix('.tmp')
@@ -79,8 +87,7 @@ def main():
     receipt(state)
     try:
         repository = github('/repos/' + REPOSITORY)
-        if not repository or not repository.get('private'):
-            raise ValueError('private source repository required')
+        state['sourceRepositoryVisibility'] = source_repository(repository)
         for package in PACKAGES:
             private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package))
         for package, build_root in zip(PACKAGES, ('.', 'engines/treedar')):
