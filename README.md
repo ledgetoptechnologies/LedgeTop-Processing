@@ -54,6 +54,10 @@ separate work.
 The reviewed prototype is now [installed and tested on the cluster PC](docs/cluster-prototype.md).
 Its coordinator is healthy on host-local port 18080; synthetic workers use the
 installed bounded command. Existing ODX services remain in place.
+The [returning main PC](docs/main-node.md) has also completed a synthetic job
+through that same coordinator, followed by staging work on the cluster PC.
+Its acceptance connection uses temporary private SSH relays; permanent worker
+connectivity remains separate work.
 
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
