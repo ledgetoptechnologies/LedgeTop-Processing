@@ -1,0 +1,23 @@
+{
+  "sourceCommit": "cc467d127f67d55196db48dc8ac54af66c0b54d1",
+  "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+  "productionJobId": "b05071c5-783a-4ab8-ae4f-330498bbf4c6",
+  "stagingJobId": "20425878-e710-45a0-a3b5-821c9feac15e",
+  "productionNode": "main",
+  "stagingNode": "cluster",
+  "productionBeforeStaging": true,
+  "failedStartupJobId": "62c49b1f-ef8f-4203-aefb-e0074b5a16ca",
+  "failedStartupPreserved": true,
+  "clusterTrees": 3,
+  "mainTrees": 3,
+  "mainSuccessfulFixtureCleaned": true,
+  "mainFailedFixtureContainerAndEmptyOutputRemoved": true,
+  "privateFailedReceiptAndDispatcherGuardRetained": true,
+  "mainLegacyNodeODXTaskCensus": "unknown",
+  "existingDCGMRestartFault": "preexisting; not modified",
+  "clusterFixtureCleaned": true,
+  "singleCoordinatorPreserved": true,
+  "transport": "temporary loopback SSH relay via Windows",
+  "testRelaysClosedAfterAcceptance": true,
+  "realDatasetsProcessed": false
+}

@@ -1,5 +1,9 @@
 # Installed cluster prototype
 
+The installation below records October 25. On October 26 the same coordinator
+was extended to register `cluster,main`, preserving its image/state/authority;
+see [the returning main-node acceptance](main-node.md) for current cross-PC facts.
+
 On October 25, Beau confirmed the new SSD and authorized installation and staging
 tests on the cluster PC, which has no production workload yet. SSH verified
 `bkoltz@192.168.50.89`, hostname `cluster`, Samsung SSD 870, and approximately

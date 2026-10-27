@@ -21,9 +21,11 @@ and roughly 1 TB SSD are for orchestration and bounded scratch space. The
 staging PC (a Lenovo ThinkCentre M720q) is dedicated to Engineering Hub staging,
 CI and deployment tests; it is not a processing node.
 
-The main processing PC remains part of the plan but is currently down for
-hardware repair. Until it is healthy, the cluster PC is the only processing
-node, and large jobs must remain queued or fail admission clearly. The SSD must
+The main processing PC returned from repair on October 26 and is reachable as
+`node` at `192.168.50.88`: Threadripper PRO 3955WX, 16 cores/32 threads and about
+252 GiB RAM. Its initial synthetic worker enrollment uses the existing cluster
+coordinator; a separate main-PC orchestrator is not started. Real workload
+admission and large-job capacity still require validation. The SSD must
 not be the only copy of either a source dataset or a completed product.
 
 For the first release, the Viewer remains the authority for projects, datasets,
