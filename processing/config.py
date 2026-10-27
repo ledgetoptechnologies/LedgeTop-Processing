@@ -1,6 +1,6 @@
 """Strict startup configuration for the private routing prototype."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 import re
 from urllib.parse import urlsplit
@@ -20,6 +20,8 @@ class Config:
     photo_smoke_enabled: bool = False
     prototype_node_ids: tuple[str, ...] = ("cluster",)
     prototype_observer_token: str = ""
+    local_node_token: str = field(default="", repr=False)
+    main_node_token: str = field(default="", repr=False)
 
 
 def _node_origin(value: str) -> str:
@@ -49,6 +51,9 @@ def from_environment() -> Config:
         raise ValueError("PROCESSING_API_TOKEN must contain at least 32 printable characters")
     operator = os.environ.get("PROCESSING_PROTOTYPE_OPERATOR_TOKEN", "")
     observer = os.environ.get("PROCESSING_PROTOTYPE_OBSERVER_TOKEN", "")
+    node_tokens = tuple(os.environ.get(name, '') for name in ('LOCAL_NODE_TOKEN', 'MAIN_NODE_TOKEN'))
+    if any(len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value) for value in node_tokens):
+        raise ValueError('node tokens must contain at most 4096 non-space printable ASCII characters')
     if observer and (len(observer) < 32 or observer in (token, operator)
                      or any(ord(char) < 33 or ord(char) > 126 for char in observer)):
         raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
@@ -77,4 +82,6 @@ def from_environment() -> Config:
         photo_smoke_enabled=photo_smoke == "1",
         prototype_node_ids=node_ids,
         prototype_observer_token=observer,
+        local_node_token=node_tokens[0],
+        main_node_token=node_tokens[1],
     )

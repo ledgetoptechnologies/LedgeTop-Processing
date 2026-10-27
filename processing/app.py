@@ -8,6 +8,7 @@ from .config import Config, from_environment
 from .policy import plan
 from .provider import probe_node
 from .prototype import Queue, Conflict
+from .options import catalog
 
 MAX_BODY = 8192
 
@@ -53,8 +54,8 @@ def make_handler(config: Config):
             return True
 
         def _nodes(self) -> tuple[dict, dict]:
-            return (probe_node("local", config.local_node_url),
-                    probe_node("main", config.main_node_url))
+            return (probe_node("local", config.local_node_url, config.local_node_token),
+                    probe_node("main", config.main_node_url, config.main_node_token))
 
         def do_GET(self):
             if self.path.startswith("/v1/prototype/"):
@@ -84,6 +85,12 @@ def make_handler(config: Config):
                 self._reply(200, {"status": "ok", "mode": "routing_probe",
                                   "syntheticPrototypeEnabled": queue is not None,
                                   "photoSmokeEnabled": config.photo_smoke_enabled})
+            elif self.path == '/v1/options':
+                if self._authorized(observer=True):
+                    self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
+                        'viewerProviderReady': False, 'snapshotConsistency': 'best_effort_read_only', **catalog([
+                        ('local', config.local_node_url, config.local_node_token),
+                        ('main', config.main_node_url, config.main_node_token)])})
             elif self.path == "/v1/nodes":
                 if self._authorized():
                     self._reply(200, {"nodes": self._nodes()})
