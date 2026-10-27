@@ -1,0 +1,14 @@
+{
+  "jobId": "790a4c18-aeef-4faa-8853-6c6889fb8cf5",
+  "nodeId": "cluster",
+  "environment": "staging",
+  "status": "succeeded",
+  "n_trees": 3,
+  "manifestSha256": "e5c19d667d4312f3d1173fabdc5343ecac04c957b9f355049533d4f899c88fca",
+  "outputsSha256": "9b506937e5e4f4e8eb9cc16678a48c606287b653d0a2f849e352dc75945a8038",
+  "filesVerified": 15,
+  "exactAcknowledgmentVerified": true,
+  "gateIdle": true,
+  "generatedOutputAndStoppedContainerRemoved": true,
+  "completedPrivateReceiptRetained": true
+}

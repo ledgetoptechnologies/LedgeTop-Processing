@@ -1,0 +1,1 @@
+{"activeConnectionBlockedDrainCompletion": true, "finalState": "closed", "newRequestReceived503": true, "oldConnectionFinishedUninterrupted": true, "scope": "disposable nginx gateway and 30-byte synthetic HTTP response; no datasets", "timeoutRetainedClosingIntent": true, "unverifiedOpenRefused": true, "wrongImageOpenRefused": true}

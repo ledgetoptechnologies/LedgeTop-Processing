@@ -140,8 +140,20 @@ class ComposeNode:
             return False
         # Unfinished uploads are not necessarily registered tasks. Never remove
         # them automatically. The fixed NodeODX staging path is part of this adapter.
-        raw = self.docker(['docker', 'exec', item['Id'], '/bin/ls', '-A', '/var/www/tmp'])
-        return raw == '' and self.processing_idle(item['Id'])
+        return self.uploads_idle(item['Id']) and self.processing_idle(item['Id'])
+
+    def uploads_idle(self, identifier):
+        raw = self.docker(['docker', 'exec', identifier, '/bin/ls', '-A', '/var/www/tmp'])
+        if raw == '':
+            return True
+        # NodeODX ships this one-byte tracked placeholder. Do not mistake it
+        # for an unfinished upload, or accept arbitrary hidden files/symlinks.
+        if raw != '.gitignore\n':
+            return False
+        path = '/var/www/tmp/.gitignore'
+        kind = self.docker(['docker', 'exec', identifier, '/usr/bin/stat', '-c', '%F %s', path])
+        return kind == 'regular file 1\n' and self.docker(
+            ['docker', 'exec', identifier, '/bin/cat', path]) == '*'
 
     def processing_idle(self, identifier):
         # Canceled/removed tasks can still have running children. A conservative
@@ -221,13 +233,16 @@ def wait_healthy(adapter, image, seconds):
 
 
 def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
-            health_seconds=30, poll_seconds=3):
+            health_seconds=30, poll_seconds=3, *, expected_plan_id=None, expected_target=None):
     path = root / 'update.json'
     if path.exists() or path.is_symlink():
         raise UpdateError('existing update receipt; never replay an uncertain update')
     deadline = time.monotonic() + wait_seconds
     while True:
         node = coordinator.json('GET', '/v1/prototype/nodes/' + node_id)['node']
+        if ((expected_plan_id is not None and node.get('planId') != expected_plan_id)
+                or (expected_target is not None and node.get('targetImage') != expected_target)):
+            raise UpdateError('maintenance plan changed; do not adopt another operation')
         if node['state'] not in ('scheduled', 'draining'):
             return {'status': 'not_eligible', 'nodeState': node['state']}
         due = datetime.fromisoformat(node['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)

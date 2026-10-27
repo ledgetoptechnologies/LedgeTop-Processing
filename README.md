@@ -56,8 +56,11 @@ Its coordinator is healthy on host-local port 18080; synthetic workers use the
 installed bounded command. Existing ODX services remain in place.
 The [returning main PC](docs/main-node.md) has also completed a synthetic job
 through that same coordinator, followed by staging work on the cluster PC.
-Its acceptance connection uses temporary private SSH relays; permanent worker
-connectivity remains separate work.
+The [installed main-node maintenance workflow](docs/main-maintenance.md) now
+uses a direct supervised SSH tunnel, a drained ingress and a pinned NodeODX
+2.4.0 / ODX 3.8.5 backend. Production-first and paused-node synthetic dispatch
+have passed across both PCs. Continuous workers and full Viewer task integration
+remain separate work.
 
 [Dynamic engine option discovery](docs/engine-options.md) fetches current NodeODX
 flags and metadata per request and reports a conservative shared catalog across

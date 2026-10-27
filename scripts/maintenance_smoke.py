@@ -56,6 +56,7 @@ def main():
         assert command(['docker', 'image', 'inspect', '--format', '{{.Id}}', BASE]) == BASE
         base_tag = name + '-base:local'
         tags, images = [], {}
+        original_base_tags = json.loads(command(['docker', 'image', 'inspect', '--format', '{{json .RepoTags}}', BASE])) or []
         command(['docker', 'tag', BASE, base_tag])
         (root / 'server.py').write_text(SERVER)
         (root / 'Dockerfile').write_text('FROM ' + base_tag + '''
@@ -167,8 +168,12 @@ ENTRYPOINT ["/usr/bin/node", "/var/www/index.js"]
                 handler.prototype_queue.close()
             if compose_file.exists():
                 command([*compose, 'down', '--volumes', '--remove-orphans'])
-            for tag in tags + [base_tag]:
+            # Removing an imported image's last tag also deletes that preexisting
+            # image. Keep the small base-cache tag when it originally had none.
+            for tag in tags + ([base_tag] if original_base_tags else []):
                 command(['docker', 'image', 'rm', tag])
+        evidence['preexistingBaseImageRetained'] = command(['docker', 'image', 'inspect', '--format', '{{.Id}}', BASE]) == BASE
+        evidence['retainedBaseTag'] = None if original_base_tags else base_tag
         evidence['testResourcesRemoved'] = True
         evidence_path.write_text(json.dumps(evidence, indent=2) + '\n')
         print(json.dumps({'status': 'PASS', 'drain': True, 'update': True, 'rollback': True, 'cleanup': True}))

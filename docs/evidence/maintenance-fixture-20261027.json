@@ -1,0 +1,33 @@
+{
+  "scope": "disposable NodeODX API fixture; no real engine processing",
+  "images": {
+    "old": "sha256:7d273fa090bbc11a0ecc1054c980da7a0c05a7e5eddf40a458bdb9f163c37f01",
+    "new": "sha256:d0f0d3783981b4329a3b39a4ec8138776bcd48ab8b13ca153790172115988e16",
+    "bad": "sha256:8cb5aedfa0ac37d81b9506173191d535cb3b8d807404e09c8435b6fd1c011b7e"
+  },
+  "drainBlockedClaim": true,
+  "busyJobDelayedUpdate": true,
+  "healthyUpdateResumedAdmission": true,
+  "failedHealthRestoredPinnedImage": true,
+  "failedUpdateKeptNodeBlocked": true,
+  "unrelatedContainerUnchanged": true,
+  "persistentVolumeMarkerPreserved": true,
+  "success": {
+    "status": "succeeded",
+    "nodeId": "cluster",
+    "healthy": true,
+    "image": "sha256:d0f0d3783981b4329a3b39a4ec8138776bcd48ab8b13ca153790172115988e16",
+    "previousImage": "sha256:7d273fa090bbc11a0ecc1054c980da7a0c05a7e5eddf40a458bdb9f163c37f01",
+    "composePinUpdateRequired": true
+  },
+  "failure": {
+    "status": "failed",
+    "nodeId": "cluster",
+    "healthy": false,
+    "rollbackHealthy": true,
+    "restoredImage": "sha256:d0f0d3783981b4329a3b39a4ec8138776bcd48ab8b13ca153790172115988e16"
+  },
+  "preexistingBaseImageRetained": true,
+  "retainedBaseTag": null,
+  "testResourcesRemoved": true
+}
