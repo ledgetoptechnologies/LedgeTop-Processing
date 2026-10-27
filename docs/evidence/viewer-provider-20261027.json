@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-27",
+  "scope": "Ready for Beau's small real Viewer provider trial; not final scientific or Viewer-ingestion acceptance",
+  "sourceCommit": "ba01f372d31a2354ff4321dc5ae7ebf9f2b5f310",
+  "image": "sha256:40a4d54c3b7311384ba031cf05acb3e760237ada4d6d2434ab1392fabd5bc401",
+  "endpoint": "http://192.168.50.89:3005",
+  "containerHealth": "healthy",
+  "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+  "historicalJobsPreserved": 12,
+  "queuedRunningHeldAtHandoff": [0, 0, 0],
+  "viewerExternalProbe": {
+    "actualAdapter": true,
+    "providerType": "nodeodm",
+    "engine": "ledgetop-processing",
+    "options": 74,
+    "maxParallelTasks": 1,
+    "adapterSha256": "c14e7bb53be48009f48a736e98d6e275e86c2e27954f258aa787a5ef04d48ac2"
+  },
+  "checks": {
+    "linuxImageSuiteAtF5fb753": {"tests": 227, "passed": true},
+    "finalDiscoveryChangeAtBa01f37": {"tests": 4, "passed": true},
+    "mainLinuxMaintenanceAndIngressChecks": {"tests": 21, "passed": true},
+    "finalActualViewerAdapterSynthetic": {
+      "inventedFiles": 62,
+      "completed": 3,
+      "cancelled": 1,
+      "executionOrder": ["production-small:cluster", "production-large:main", "staging-small:cluster"],
+      "globalTreeDarSlotExclusion": true,
+      "duplicateCommitIdempotent": true,
+      "stagingCredentialIsolation": true,
+      "blankOutputCursorPreserved": true,
+      "repeatDownloadSha256": "c4f468e12ca109e5680f9d9cb5dda893057c5ca4fe95e991c8de48f72095c7e4"
+    },
+    "realInstalledNodeWire": {"nodes": ["cluster:ODM3.6.2", "main:ODX3.8.5"], "initUploadPassed": true, "commitSent": false, "photogrammetryExecuted": false, "ownedTmpCleanupVerified": true},
+    "directEngineLanIngress": {"cluster3001": 403, "main3004": 403, "legacyClusterOdxStopped": true},
+    "nativeCredentialFileMode": "0600"
+  },
+  "routing": {"localMaxPhotos": 1000, "smallNodeFirst": true, "smallWaitsForCluster": true, "largeWaitsForMain": true, "productionFirst": true, "globalExecutionSlots": 1},
+  "recoveryCovered": ["coordinator restart after engine completion", "lost init/upload ACK holds without replay", "lost commit ACK read-only reconciliation", "read outage exponential backoff", "cancel waits for engine terminal readback", "download interruption retry", "HTTP200 asset-not-ready rejected", "UUID reset preserves environment and history", "maintenance waits jobs before closing ingress"],
+  "limitations": ["No new real dataset processed", "Real Viewer EPT/model ingestion remains Beau's acceptance step", "Real LiDAR TreeDar adapter is not supplied by the native photo facade", "Unattended image update detection and reboot recovery are not enabled", "Results retained until verified cleanup; Viewer has no successful-ingestion ACK", "Docker administrators can bypass software admission", "One synthetic-only Windows temp folder retained because automatic deletion was blocked by policy"],
+  "credentials": "Private host files only; no credentials or client data in this receipt"
+}

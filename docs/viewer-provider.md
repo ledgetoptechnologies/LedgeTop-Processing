@@ -14,6 +14,22 @@ Running staging is allowed to finish when production arrives.
 
 ## Operator setup
 
+Verified October27 deployment: **`http://192.168.50.89:3005`**. The actual Viewer
+adapter successfully probed this LAN endpoint and detected `nodeodm`, engine
+`ledgetop-processing`, 74dynamic options and `maxParallelTasks:1`.
+The private production token is on cluster at
+`/home/bkoltz/.local/share/ledgetop-processing-prototype/viewer-ba01f37/viewer-production.token`
+(mode0600). Read it in your own SSH terminal and enter it in Viewer; do not paste
+it into chat. The adjacent `viewer-staging.token` is for explicitly staged jobs.
+
+Runtime source: `ba01f372d31a2354ff4321dc5ae7ebf9f2b5f310`, image
+`sha256:40a4d54c3b7311384ba031cf05acb3e760237ada4d6d2434ab1392fabd5bc401`.
+Existing authority/state and all12historical jobs were preserved, with no active
+jobs at handoff. Node backends bind localhost only; ordinary LAN direct access
+to their ingress ports returns403. Cluster ingress permits its host/default
+Docker bridge; main ingress permits cluster plus loopback. Docker administrators
+remain able to bypass host software controls. Legacy ClusterODX is retained stopped.
+
 Use the cluster's single existing coordinator and state volume. Never start a
 second real dispatcher for staging. `compose.viewer.yaml` requires explicit
 existing volume, immutable image, private runtime env path and LAN bind address.
@@ -77,3 +93,14 @@ are explicitly labelled transport fixtures. Passing these checks does not prove
 valid ODM geometry, final Viewer EPT/model ingestion, real-data throughput,
 hardware capacity, or unattended reboot recovery. The first real small job is
 Beau's next acceptance step after provider configuration.
+
+Acceptance evidence is in [the deployment receipt](evidence/viewer-provider-20261027.json).
+The full227-test suite passed inside the Linux image at `f5fb753`; the final
+discovery-readiness-only change at `ba01f37` passed its four focused checks.
+Final actual-adapter synthetic round trip passed with62invented input files,
+three completions, one cancellation and exact repeat-download hashes. Each real
+installed engine also accepted an initialized/uploaded synthetic wire fixture;
+neither was committed, no photogrammetry ran, and exact owned tmp files were
+verified removed. One earlier Windows-only smoke temp directory remains after
+automatic approval review rejected its explicit deletion; other successful smoke
+directories clean themselves after releasing the queue lock.
