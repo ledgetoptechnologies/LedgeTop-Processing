@@ -15,7 +15,8 @@ MAX_BODY = 8192
 
 def make_handler(config: Config):
     queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
-                  node_ids=config.prototype_node_ids) if config.prototype_state_dir else None
+                  node_ids=config.prototype_node_ids,
+                  treedar_node_ids=config.treedar_node_ids) if config.prototype_state_dir else None
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"

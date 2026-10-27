@@ -22,6 +22,7 @@ class Config:
     prototype_observer_token: str = ""
     local_node_token: str = field(default="", repr=False)
     main_node_token: str = field(default="", repr=False)
+    treedar_node_ids: tuple[str, ...] | None = None
 
 
 def _node_origin(value: str) -> str:
@@ -61,6 +62,10 @@ def from_environment() -> Config:
     if (not 1 <= len(node_ids) <= 8 or 'cluster' not in node_ids or len(set(node_ids)) != len(node_ids)
             or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):
         raise ValueError("PROCESSING_PROTOTYPE_NODE_IDS must list 1 to 8 unique ASCII node IDs")
+    treedar_node_ids = tuple(os.environ.get("PROCESSING_TREEDAR_NODE_IDS", ",".join(node_ids)).split(","))
+    if (not treedar_node_ids or len(set(treedar_node_ids)) != len(treedar_node_ids)
+            or any(node not in node_ids for node in treedar_node_ids)):
+        raise ValueError("PROCESSING_TREEDAR_NODE_IDS must list unique configured node IDs")
     photo_smoke = os.environ.get("PROCESSING_PHOTO_SMOKE_ENABLED", "0")
     if photo_smoke not in ("0", "1"):
         raise ValueError("PROCESSING_PHOTO_SMOKE_ENABLED must be 0 or 1")
@@ -73,7 +78,7 @@ def from_environment() -> Config:
         api_token=token,
         local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
         main_node_url=_node_origin(os.environ.get("MAIN_NODE_URL", "")),
-        local_max_photos=_positive_int(os.environ.get("LOCAL_MAX_PHOTOS", "800"), "LOCAL_MAX_PHOTOS", 1_000_000),
+        local_max_photos=_positive_int(os.environ.get("LOCAL_MAX_PHOTOS", "1000"), "LOCAL_MAX_PHOTOS", 1_000_000),
         local_max_input_bytes=_positive_int(os.environ.get("LOCAL_MAX_INPUT_BYTES", "21474836480"), "LOCAL_MAX_INPUT_BYTES", 10**15),
         bind_host=os.environ.get("PROCESSING_BIND_HOST", "127.0.0.1"),
         port=_positive_int(os.environ.get("PROCESSING_PORT", "8080"), "PROCESSING_PORT", 65535),
@@ -81,6 +86,7 @@ def from_environment() -> Config:
         prototype_operator_token=operator,
         photo_smoke_enabled=photo_smoke == "1",
         prototype_node_ids=node_ids,
+        treedar_node_ids=treedar_node_ids,
         prototype_observer_token=observer,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],

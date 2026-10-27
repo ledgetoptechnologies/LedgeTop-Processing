@@ -25,12 +25,21 @@ PHOTO_PROFILE = "odx-photo-smoke-v1"
 
 
 class Queue(Maintenance):
-    def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',), clock=None):
+    def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
+                 treedar_node_ids=None, clock=None):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
             raise ValueError("node_ids must be unique configured slugs including cluster")
         self.node_ids = tuple(node_ids)
+        if treedar_node_ids is None:
+            # Isolated legacy fixtures retain their original node capabilities.
+            treedar_node_ids = self.node_ids
+        if (not isinstance(treedar_node_ids, (tuple, list)) or not treedar_node_ids
+                or any(not isinstance(node, str) or node not in self.node_ids for node in treedar_node_ids)
+                or len(set(treedar_node_ids)) != len(treedar_node_ids)):
+            raise ValueError("treedar_node_ids must be unique configured node IDs")
+        self.treedar_node_ids = tuple(treedar_node_ids)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
         root = Path(directory)
@@ -76,6 +85,13 @@ class Queue(Maintenance):
 
     def close(self):
         self._lock.close()
+
+    def node_profiles(self, node_id):
+        return sorted(profile for profile in self.allowed_profiles
+                      if profile != PROFILE or node_id in self.treedar_node_ids)
+
+    def _node_public(self, row):
+        return {**super()._node_public(row), "allowedProfiles": self.node_profiles(row['id'])}
 
     @contextmanager
     def _db(self):
@@ -162,7 +178,7 @@ class Queue(Maintenance):
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
                 return None
-            if row["profile"] not in profiles:
+            if row["profile"] not in profiles or row["profile"] not in self.node_profiles(node_id):
                 # Do not bypass earlier work or production for a worker that
                 # cannot run it. Legacy TreeDar workers never claim photo jobs.
                 return None

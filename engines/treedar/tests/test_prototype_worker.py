@@ -99,7 +99,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(receipt['state'], 'claimed')
             self.assertEqual(receipt['job']['nodeId'], 'main')
 
-    def test_explicit_node_identity_reaches_claim_and_receipt(self):
+    def test_explicit_main_policy_reaches_execute_claim_and_receipt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             posts = []
@@ -115,11 +115,16 @@ class WorkerTests(unittest.TestCase):
             with patch.dict(os.environ, {'PROCESSING_API_TOKEN': 'api-secret'}), \
                     patch.object(worker, 'docker', side_effect=runtime_docker), \
                     patch.object(worker, 'post', side_effect=post), \
-                    patch.object(worker, 'execute', return_value=('succeeded', {'n_trees': 3})), \
+                    patch.object(worker, 'execute', return_value=('succeeded', {'n_trees': 3})) as execute, \
                     contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(worker.run(self.args(root, node_id='main', node_generation=2)), 0)
+                self.assertEqual(worker.run(self.args(root, node_id='main', node_generation=2,
+                                                     resource_policy='main-unrestricted')), 0)
             self.assertEqual(posts[0][1], {'workerId': 'test-worker', 'nodeId': 'main'})
             self.assertEqual(posts[-1][1]['result']['nodeId'], 'main')
+            self.assertEqual(execute.call_args.kwargs,
+                             {'resource_policy': 'main-unrestricted', 'node_id': 'main'})
+            receipt = json.loads(next((root / '.prototype-receipts').glob('*.json')).read_text())
+            self.assertEqual(receipt['resourcePolicy'], 'main-unrestricted')
 
     def test_invalid_node_id_refused_before_claim(self):
         for node in ('../cluster', 'clustér', '', 'cluster/other'):
@@ -312,6 +317,44 @@ class WorkerTests(unittest.TestCase):
             self.assertNotIn('api-secret', str(create))
             self.assertNotIn('docker.sock', str(create))
             self.assertEqual(create[create.index('--network') + 1], 'none')
+
+    def test_resource_policy_defaults_stay_bounded_and_main_opt_in_preserves_isolation(self):
+        for policy, node_id in [('bounded-fixture', 'cluster'), ('bounded-fixture', 'main'),
+                                ('main-unrestricted', 'main')]:
+            with self.subTest(policy=policy, node_id=node_id), tempfile.TemporaryDirectory() as directory:
+                calls = []
+
+                def docker(args, timeout=20):
+                    calls.append(args)
+                    if args[0] == 'start':
+                        raise subprocess.TimeoutExpired('docker', timeout)
+                    return result('false' if args[0] == 'inspect' else '')
+
+                with patch.object(worker, 'docker', side_effect=docker):
+                    worker.execute(IMAGE, Path(directory), 'policy-test', 240,
+                                   resource_policy=policy, node_id=node_id)
+                create = calls[0]
+                for cap in ('--cpus', '--memory', '--pids-limit',
+                            'OMP_NUM_THREADS=2', 'OPENBLAS_NUM_THREADS=2'):
+                    self.assertEqual(cap in create, policy == 'bounded-fixture')
+                for flag in ('--read-only', '--cap-drop', '--security-opt', '--tmpfs'):
+                    self.assertIn(flag, create)
+                self.assertEqual(create[create.index('--network') + 1], 'none')
+                self.assertIn('no-new-privileges', create)
+                self.assertEqual(create.count('--mount'), 3)
+                self.assertIn(IMAGE, create)
+
+    def test_unrestricted_policy_rejected_before_docker_or_claim_on_non_main(self):
+        for node_id in ('cluster', 'nodecluster', 'other'):
+            with self.subTest(node_id=node_id), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(worker, 'docker') as docker, patch.object(worker, 'post') as post:
+                with self.assertRaisesRegex(worker.WorkerError, 'requires node main'):
+                    worker.run(self.args(directory, node_id=node_id, resource_policy='main-unrestricted'))
+                with self.assertRaisesRegex(worker.WorkerError, 'requires node main'):
+                    worker.execute(IMAGE, Path(directory), 'refused', 240,
+                                   resource_policy='main-unrestricted', node_id=node_id)
+                docker.assert_not_called()
+                post.assert_not_called()
 
     def test_unverified_stop_leaves_claim_uncompleted(self):
         with tempfile.TemporaryDirectory() as directory:
