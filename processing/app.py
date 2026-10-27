@@ -102,10 +102,13 @@ def make_handler(config: Config):
                                   "viewerEnabled": config.viewer_enabled})
             elif self.path == '/v1/options':
                 if self._authorized(observer=True):
-                    self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
-                        'viewerProviderReady': False, 'snapshotConsistency': 'best_effort_read_only', **catalog([
+                    snapshot = catalog([
                         ('local', config.local_node_url, config.local_node_token),
-                        ('main', config.main_node_url, config.main_node_token)])})
+                        ('main', config.main_node_url, config.main_node_token)])
+                    self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
+                        'viewerNativeApiEnabled': config.viewer_enabled,
+                        'viewerProviderReady': config.viewer_enabled and snapshot['ready'],
+                        'snapshotConsistency': 'best_effort_read_only', **snapshot})
             elif self.path == "/v1/nodes":
                 if self._authorized():
                     self._reply(200, {"nodes": self._nodes()})
