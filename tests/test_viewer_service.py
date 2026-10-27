@@ -466,6 +466,24 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(len(self.fleet.commits), 2)
         self.assertEqual(len(self.engines['cluster'].tasks), 2)
 
+    def test_http200_asset_not_ready_json_is_not_cached_as_zip(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        engine = self.engines['cluster']
+        expected = engine.archive
+        engine.archive = b'{"error":"Asset not ready"}'
+        with self.assertRaises(EngineUnavailable):
+            self.service.download(identifier)
+        self.assertIsNone(self.task(identifier)['archive_path'])
+        engine.archive = expected
+        stream, length = self.service.download(identifier)
+        with stream:
+            self.assertEqual(stream.read(), expected)
+        self.assertEqual(length, len(expected))
+        self.assertEqual(len(self.fleet.commits), 1)
+
     def test_dynamic_options_removed_after_enqueue_prevent_dispatch(self):
         identifier = self.submit()
         self.option_catalog = [item for item in self.option_catalog if item['name'] != 'pc-ept']

@@ -15,6 +15,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, build_opener, ProxyHandler
 import uuid
+import zipfile
 
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
@@ -193,6 +194,10 @@ class ViewerService:
                 with self.engines[task['node_id']].download(task['engine_uuid']) as response:
                     if getattr(response, 'status', 200) != 200:
                         raise EngineUnavailable('archive_unavailable')
+                    media_type = response.headers.get('Content-Type', '').split(';')[0].lower()
+                    if media_type and media_type not in ('application/zip', 'application/octet-stream',
+                                                          'application/x-zip-compressed'):
+                        raise EngineUnavailable('archive_not_ready')
                     declared = response.headers.get('Content-Length')
                     if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
                         raise Conflict('archive exceeds configured disk allowance')
@@ -207,7 +212,7 @@ class ViewerService:
                             raise EngineUnavailable('archive_transfer_incomplete')
                         output.flush()
                         os.fsync(output.fileno())
-                if total < 4:
+                if total < 4 or not zipfile.is_zipfile(partial):
                     raise EngineUnavailable('archive_transfer_incomplete')
                 os.replace(partial, path)
                 sync_directory(path.parent)
