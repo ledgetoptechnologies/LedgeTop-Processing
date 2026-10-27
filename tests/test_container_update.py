@@ -91,6 +91,19 @@ class MaintenanceUpdateTests(unittest.TestCase):
             self.run_update()
         self.assertEqual(self.adapter.calls, [NEW])
 
+    def test_frozen_plan_refuses_a_cancelled_and_rescheduled_operation(self):
+        original = self.plan()
+        self.operator.json('POST', '/v1/prototype/nodes/cluster/cancel', {
+            'planId': original['planId'], 'expectedRevision': original['revision']})
+        replacement = self.plan()
+        self.assertNotEqual(original['planId'], replacement['planId'])
+        with self.assertRaises(UpdateError):
+            execute(self.api, self.operator, self.adapter, 'cluster', self.work,
+                    expected_plan_id=original['planId'], expected_target=NEW)
+        self.assertEqual(self.adapter.calls, [])
+        self.assertFalse((self.work / 'update.json').exists())
+        self.assertEqual(self.queue.get_node('cluster')['planId'], replacement['planId'])
+
     def test_failed_health_rolls_back_but_keeps_node_blocked(self):
         self.plan()
         self.adapter.bad_health = True
@@ -247,6 +260,21 @@ class ComposeBoundaryTests(unittest.TestCase):
             self.assertFalse(self.adapter.processing_idle('exact-container'))
         with patch.object(self.adapter, 'docker', return_value='COMMAND\n'):
             self.assertFalse(self.adapter.processing_idle('exact-container'))
+
+    def test_only_exact_regular_nodeodx_placeholder_is_not_an_upload(self):
+        with patch.object(self.adapter, 'docker', side_effect=['.gitignore\n', 'regular file 1\n', '*']):
+            self.assertTrue(self.adapter.uploads_idle('exact-container'))
+        for listing in ('.gitignore\nupload\n', '.other\n', 'upload\n'):
+            with patch.object(self.adapter, 'docker', return_value=listing) as command:
+                self.assertFalse(self.adapter.uploads_idle('exact-container'))
+                self.assertEqual(command.call_count, 1)
+        for kind in ('symbolic link 1\n', 'regular file 2\n', 'directory 1\n'):
+            with patch.object(self.adapter, 'docker', side_effect=['.gitignore\n', kind]):
+                self.assertFalse(self.adapter.uploads_idle('exact-container'))
+        with patch.object(self.adapter, 'docker', side_effect=['.gitignore\n', 'regular file 1\n', '\n']):
+            self.assertFalse(self.adapter.uploads_idle('exact-container'))
+        with patch.object(self.adapter, 'docker', return_value=''):
+            self.assertTrue(self.adapter.uploads_idle('exact-container'))
 
     def test_compose_hooks_or_replication_refused_before_replacement(self):
         with patch.dict(os.environ, {'DOCKER_HOST': ''}), patch.object(self.adapter, 'docker', side_effect=self.docker):

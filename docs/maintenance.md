@@ -1,6 +1,8 @@
 # Container maintenance with node draining
 
 This prototype can fence a particular processing node before a container update.
+The [installed main-node workflow](main-maintenance.md) adds an ingress drain,
+direct supervised transport and a combined host command, accepted October 27.
 OS package updates and PC reboots are excluded. It keeps the existing single
 global execution slot; node identity does not yet create a parallel fleet scheduler.
 

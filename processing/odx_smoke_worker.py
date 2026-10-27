@@ -201,7 +201,12 @@ def read_manifest(manifest_path, photos):
                 if stream.read(3) != b'\xff\xd8\xff':
                     raise ValueError()
                 stream.seek(0)
-                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                # Ubuntu's main-node host runtime is Python 3.10; file_digest
+                # is available only in 3.11+. Keep hashing bounded and streaming.
+                hasher = hashlib.sha256()
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    hasher.update(block)
+                digest = hasher.hexdigest()
             if digest != item['sha256']:
                 raise ValueError()
         files.sort(key=lambda item: item['name'])

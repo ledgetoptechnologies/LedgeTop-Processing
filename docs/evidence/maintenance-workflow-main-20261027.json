@@ -1,0 +1,14 @@
+{
+  "jobId": "a3e0de32-c64a-43d3-99cf-ac3ae5826da5",
+  "nodeId": "main",
+  "environment": "production",
+  "status": "succeeded",
+  "n_trees": 3,
+  "manifestSha256": "45f0ea7b35fafc8b4d99945b1cdf80606c27c90eb12c343d032a9951fcaf3d2c",
+  "outputsSha256": "8c0fd9ffcce8b2302da3cb8f12052fc135fa2d15b165376b434f34eb95f23869",
+  "filesVerified": 15,
+  "exactAcknowledgmentVerified": true,
+  "gateIdle": true,
+  "generatedOutputAndStoppedContainerRemoved": true,
+  "completedPrivateReceiptRetained": true
+}

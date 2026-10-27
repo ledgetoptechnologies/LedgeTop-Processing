@@ -1,5 +1,11 @@
 # Returning main processing node
 
+The October 27 [installed maintenance workflow](main-maintenance.md) supersedes
+the temporary-transport and old-container observations below. Main now has a
+direct supervised coordinator tunnel, a private updated backend and a drained
+LAN ingress. This historical October 26 acceptance still describes the original
+two-node fixture and its retained failure evidence.
+
 Beau confirmed the main processing PC was back on October 26 and asked Codex and
 Hermes to continue testing through the existing Ledge Top Processing topic.
 The same topic correlation and owning Codex chat were reused. Fresh substantive

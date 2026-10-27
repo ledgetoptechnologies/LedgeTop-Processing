@@ -13,6 +13,7 @@ UUID and cannot use the old binding merely because its node slug matches.
 """
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -30,6 +31,10 @@ RECEIPT = re.compile(r'[0-9a-f]{32}\Z')
 
 class GateError(Exception):
     """Safe failure category; never includes credentials or server responses."""
+
+
+class GateBusy(GateError):
+    """The OS lock is contended, distinct from invalid state or I/O failure."""
 
 
 def _uuid(value):
@@ -119,10 +124,12 @@ class NodeGate:
             else:
                 import fcntl
                 fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except OSError as error:
             self._stream.close()
             self._stream = None
-            raise GateError('another worker owns this physical node gate') from None
+            if error.errno in (errno.EACCES, errno.EAGAIN):
+                raise GateBusy('another worker owns this physical node gate') from None
+            raise GateError('physical node gate lock unavailable') from None
         return self
 
     def __exit__(self, *_):
