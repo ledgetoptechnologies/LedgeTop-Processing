@@ -78,13 +78,11 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
         if backend['Id'] != item['Id']:
             raise GateError('ingress and updater select different backends')
         adapter.image(node['targetImage'])
-        state = {'stage': 'ingress_close_pending', 'planId': node['planId'], 'targetImage': node['targetImage']}
+        state = {'stage': 'waiting_for_jobs', 'planId': node['planId'], 'targetImage': node['targetImage']}
         save(receipt / 'managed-update.json', state)
-        ingress.change(True, seconds=drain_seconds)
-        state['stage'] = 'ingress_closed'
-        save(receipt / 'managed-update.json', state)
-        # The coordinator fence stops claims; the canonical Engine lock excludes
-        # another cooperative host worker during replacement and reopening.
+        # The coordinator is already draining and prevents new node claims.
+        # Keep ingress open until existing uploads/status/result transfers drain;
+        # closing it first would strand their queue completion indefinitely.
         with idle_host_gate(api, node_id, args.docker_engine_id, deadline) as gate:
             binding = gate.snapshot()
             authority = api.json('GET', '/v1/prototype/authority')['authorityId']
@@ -94,6 +92,11 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
             current = api.json('GET', '/v1/prototype/nodes/' + node_id)['node']
             if current['planId'] != node['planId'] or current['targetImage'] != node['targetImage']:
                 raise GateError('maintenance plan changed while closing ingress')
+            state['stage'] = 'ingress_close_pending'
+            save(receipt / 'managed-update.json', state)
+            ingress.change(True, seconds=drain_seconds)
+            state['stage'] = 'ingress_closed'
+            save(receipt / 'managed-update.json', state)
             result = execute(api, operator, adapter, node_id, receipt,
                 wait_seconds=max(0, deadline - time.monotonic()), health_seconds=30,
                 expected_plan_id=node['planId'], expected_target=node['targetImage'])

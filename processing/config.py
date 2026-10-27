@@ -23,6 +23,11 @@ class Config:
     local_node_token: str = field(default="", repr=False)
     main_node_token: str = field(default="", repr=False)
     treedar_node_ids: tuple[str, ...] | None = None
+    viewer_enabled: bool = False
+    viewer_token: str = field(default='', repr=False)
+    viewer_staging_token: str = field(default='', repr=False)
+    viewer_max_input_bytes: int = 20 * 1024 ** 3
+    viewer_max_archive_bytes: int = 100 * 1024 ** 3
 
 
 def _node_origin(value: str) -> str:
@@ -71,6 +76,22 @@ def from_environment() -> Config:
         raise ValueError("PROCESSING_PHOTO_SMOKE_ENABLED must be 0 or 1")
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
+    viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    if viewer not in ('0', '1'):
+        raise ValueError('PROCESSING_VIEWER_ENABLED must be 0 or 1')
+    viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
+    viewer_staging = os.environ.get('PROCESSING_VIEWER_STAGING_TOKEN', '')
+    if viewer == '1':
+        if (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or 'main' not in node_ids
+                or not os.environ.get('LOCAL_NODE_URL') or not os.environ.get('MAIN_NODE_URL')):
+            raise ValueError('Viewer requires persistent state and both configured nodes')
+        credentials = (token, operator, observer)
+        for value in (viewer_token, viewer_staging):
+            if value and (len(value) < 32 or value in credentials
+                          or any(ord(c) < 33 or ord(c) > 126 for c in value)):
+                raise ValueError('Viewer credentials must be separate printable secrets')
+        if not viewer_token or (viewer_staging and viewer_staging == viewer_token):
+            raise ValueError('separate Viewer production credential required')
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
@@ -87,6 +108,12 @@ def from_environment() -> Config:
         photo_smoke_enabled=photo_smoke == "1",
         prototype_node_ids=node_ids,
         treedar_node_ids=treedar_node_ids,
+        viewer_enabled=viewer == '1', viewer_token=viewer_token,
+        viewer_staging_token=viewer_staging,
+        viewer_max_input_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_INPUT_BYTES', str(20 * 1024 ** 3)),
+                                            'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
+        viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
+                                              'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
         prototype_observer_token=observer,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],

@@ -1,0 +1,23 @@
+# Reuse the existing authority/state; never start a second real dispatcher.
+services:
+  coordinator:
+    image: ${PROCESSING_IMAGE:?set the reviewed immutable image ID}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    cpus: 0.5
+    mem_limit: 256m
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "${VIEWER_BIND_ADDRESS:?set the cluster LAN address}:${VIEWER_PORT:-3005}:8080"
+    env_file: ${PROCESSING_RUNTIME_ENV:?set the private operator-owned runtime env path}
+    volumes:
+      - state:/prototype-state
+volumes:
+  state:
+    external: true
+    name: ${PROCESSING_STATE_VOLUME:?set the existing coordinator state volume}

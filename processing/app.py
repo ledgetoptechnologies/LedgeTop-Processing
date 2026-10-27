@@ -3,6 +3,7 @@
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+from pathlib import Path
 
 from .config import Config, from_environment
 from .policy import plan
@@ -16,11 +17,21 @@ MAX_BODY = 8192
 def make_handler(config: Config):
     queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
                   node_ids=config.prototype_node_ids,
-                  treedar_node_ids=config.treedar_node_ids) if config.prototype_state_dir else None
+                  treedar_node_ids=config.treedar_node_ids,
+                  viewer_enabled=config.viewer_enabled) if config.prototype_state_dir else None
+    service = facade = None
+    if config.viewer_enabled:
+        from .viewer_service import ViewerService
+        from .viewer_http import ViewerFacade
+        service = ViewerService(queue, config)
+        spool = Path(config.prototype_state_dir) / 'viewer-spool'
+        spool.mkdir(mode=0o700, exist_ok=True)
+        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"
         prototype_queue = queue
+        viewer_service = service
 
         def setup(self):
             super().setup()
@@ -59,6 +70,8 @@ def make_handler(config: Config):
                     probe_node("main", config.main_node_url, config.main_node_token))
 
         def do_GET(self):
+            if facade and facade.handle(self):
+                return
             if self.path.startswith("/v1/prototype/"):
                 if not self._authorized(observer=True):
                     return
@@ -85,7 +98,8 @@ def make_handler(config: Config):
             if self.path == "/healthz":
                 self._reply(200, {"status": "ok", "mode": "routing_probe",
                                   "syntheticPrototypeEnabled": queue is not None,
-                                  "photoSmokeEnabled": config.photo_smoke_enabled})
+                                  "photoSmokeEnabled": config.photo_smoke_enabled,
+                                  "viewerEnabled": config.viewer_enabled})
             elif self.path == '/v1/options':
                 if self._authorized(observer=True):
                     self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
@@ -99,6 +113,8 @@ def make_handler(config: Config):
                 self._reply(404, {"error": "not_found"})
 
         def do_POST(self):
+            if facade and facade.handle(self):
+                return
             prototype = self.path.startswith("/v1/prototype/")
             if self.path != "/v1/plan" and not prototype:
                 self._reply(404, {"error": "not_found"})
@@ -172,11 +188,15 @@ def main():
     config = from_environment()
     handler = make_handler(config)
     server = ThreadingHTTPServer((config.bind_host, config.port), handler)
+    if handler.viewer_service:
+        handler.viewer_service.start()
     print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        if handler.viewer_service:
+            handler.viewer_service.close()
         if handler.prototype_queue:
             handler.prototype_queue.close()
 

@@ -55,7 +55,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
             with self.assertRaises(GateError):
                 run(self.root, self.api, MagicMock(), self.receipt, 0)
             execute.assert_not_called()
-        self.ingress.change.assert_called_once_with(True, seconds=60)
+        self.ingress.change.assert_not_called()
         self.assertEqual(json.loads((self.root / 'compose.json').read_text())['services']['node']['image'], self.old)
 
     def test_mismatched_backend_never_closes_another_ingress(self):
@@ -86,6 +86,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
         polls = []
         def api(method, path):
             if path.endswith('/jobs'):
+                self.ingress.change.assert_not_called()
                 polls.append(1)
                 return {'jobs': [{'nodeId': 'main', 'status': 'running'}] if len(polls) == 1 else []}
             return {'authorityId': 'authority'} if path.endswith('/authority') else {'node': self.node}
@@ -108,7 +109,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
                 run(self.root, self.api, MagicMock(), self.receipt, 1)
             execute.assert_not_called()
             host.assert_not_called()
-        self.ingress.change.assert_called_once_with(True, seconds=60)
+        self.ingress.change.assert_not_called()
 
     def test_non_contention_gate_error_is_not_retried(self):
         with self.context(), patch('ops.node_maintenance.NodeGate') as host, \

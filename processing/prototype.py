@@ -22,11 +22,12 @@ from .maintenance import Conflict, Maintenance
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 PROFILE = "treedar-synthetic-v1"
 PHOTO_PROFILE = "odx-photo-smoke-v1"
+VIEWER_PROFILE = "odm-viewer-v1"
 
 
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
-                 treedar_node_ids=None, clock=None):
+                 treedar_node_ids=None, viewer_enabled=False, clock=None):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
@@ -42,6 +43,8 @@ class Queue(Maintenance):
         self.treedar_node_ids = tuple(treedar_node_ids)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
+        if viewer_enabled:
+            self.allowed_profiles.add(VIEWER_PROFILE)
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
@@ -157,13 +160,16 @@ class Queue(Maintenance):
     def claim(self, payload):
         expected = ['workerId']
         if isinstance(payload, dict):
-            expected.extend(key for key in ('profiles', 'nodeId') if key in payload)
+            expected.extend(key for key in ('profiles', 'nodeId', 'expectedJobId') if key in payload)
         self.fields(payload, expected)
         self.slug(payload["workerId"])
         node_id = payload.get('nodeId', 'cluster')
         self._known_node(node_id)
+        expected_job = payload.get('expectedJobId')
+        if expected_job is not None:
+            self.slug(expected_job)
         profiles = payload.get("profiles", [PROFILE])
-        if (not isinstance(profiles, list) or not 1 <= len(profiles) <= 2
+        if (not isinstance(profiles, list) or not 1 <= len(profiles) <= 3
                 or any(not isinstance(p, str) or p not in self.allowed_profiles for p in profiles)
                 or len(profiles) != len(set(profiles))):
             raise ValueError("worker must declare supported enabled profiles")
@@ -177,6 +183,8 @@ class Queue(Maintenance):
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
+                return None
+            if expected_job is not None and row['id'] != expected_job:
                 return None
             if row["profile"] not in profiles or row["profile"] not in self.node_profiles(node_id):
                 # Do not bypass earlier work or production for a worker that
