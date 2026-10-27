@@ -29,12 +29,28 @@ TreeDar worker service.
 
 ## Rollout status
 
-Core eligibility, dispatcher and resource policy changes are implemented locally.
-Deployment and the cluster engine's 1,000-photo flag still require verification.
+Core eligibility, dispatcher and resource policy changes are committed as
+`6532dbb`. The cluster coordinator was rebuilt locally and deployed, preserving
+its authority identity and all 12 historical job records. Main's new worker code
+is staged under its private node-role setup directory; it is a foreground tool,
+not an installed worker service. Coordinator tests passed on cluster (158) and
+Windows (158, 13 platform skips), with 36 focused worker tests passing on main
+and Windows. The full TreeDar science suite needs its isolated engine dependencies.
+
+The cluster engine now reports `maxImages: 1000`; its empty task list and
+placeholder-only data/tmp directories were verified after network fencing and
+before replacement. The old container and data copy were retained privately.
+Canonical replacement Compose lives under the cluster's private
+`node-roles-6532dbb/cluster-engine/compose.json`; the historical source's cap was
+also changed to 1,000. Main's same-image recreation used the maintenance runner,
+verified idle/health checks, and reopened ingress successfully. Docker reports
+all GPUs exposed (`Count: -1`), `Memory: 0` and `NanoCpus: 0` for its engine.
+
 The existing cluster engine is NodeODM/ODM 3.6.2; main is NodeODX/ODX 3.8.5.
 Do not treat their names or capabilities as interchangeable.
 
-The queue serializes its own claimed work. Legacy direct NodeAPI/ClusterODX
+Real-photo prototype admission remains disabled. The queue serializes its own
+claimed work. Legacy direct NodeAPI/ClusterODX
 submission routes can bypass it. Complete ingress fencing and the native Viewer
 task/artifact bridge before claiming system-wide exclusivity or opening a live
 production provider.
