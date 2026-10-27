@@ -1,5 +1,15 @@
 # Dynamic engine option discovery
 
+Deployed discovery runtime: `a40acf5b32c8ab9c220a201f98774ff4da784514`, image
+`sha256:b497c6de3326387225173852998bcab61429aad510c9ac0534449e96fb4e1e90`.
+Live authenticated reads returned 82 local definitions, 81 main definitions,
+75 identical shared definitions and five conflicting definitions. Existing queue
+records, authority, named state volume and ODX/ARM services were preserved; no
+processing job or Viewer provider registration was started. The stopped previous
+coordinator is retained for rollback. The container's historical name remains
+`ledgetop-processing-prototype-c3fcb3a`; its current image/revision is recorded in
+the private installation metadata. See [deployment evidence](evidence/dynamic-options-20261026.json).
+
 Authenticated `GET /v1/options` fetches fresh `/info` and `/options` responses from
 the fixed configured local/main engines on every request. No engine flag list is
 hardcoded. It preserves option names, types, raw defaults, domains, help and

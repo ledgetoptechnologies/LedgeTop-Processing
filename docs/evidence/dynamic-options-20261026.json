@@ -1,0 +1,49 @@
+{
+  "stage": "completed",
+  "sourceCommit": "a40acf5b32c8ab9c220a201f98774ff4da784514",
+  "image": "sha256:b497c6de3326387225173852998bcab61429aad510c9ac0534449e96fb4e1e90",
+  "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+  "rollbackContainer": "ledgetop-processing-prototype-before-options-a40acf5",
+  "oldImage": "sha256:2b51cb9baa73c486571071f2e3c4c48599a416fefa8a7375cc44d90a8859b8ff",
+  "stateVolume": "ledgetop-processing-prototype-c3fcb3a-state",
+  "upstreamRoles": [
+    "local",
+    "main"
+  ],
+  "viewerProviderRegistered": false,
+  "queuePreserved": true,
+  "authorityPreserved": true,
+  "existingServicesPreserved": true,
+  "commonOptionCount": 75,
+  "conflictingOptionCount": 5,
+  "commonOptionsSha256": "ec481d0548539345ec73ddf24c6d4ba94cfafc9c27d2fd901de9eb50fa42407b",
+  "nodeCatalogs": [
+    {
+      "role": "local",
+      "version": "3.6.2",
+      "engine": "odm",
+      "engineVersion": "3.6.2",
+      "optionsSha256": "32887a4ed714b5f3073b007cffcd561cd95fbf202a1be31f54e71f197bf6d165",
+      "capabilitiesSha256": "5c9c383101993ab13e74cdb7ba4ce232d7af9292e6029bd482639ade59db9bd9",
+      "optionCount": 82
+    },
+    {
+      "role": "main",
+      "version": "2.3.1",
+      "engine": "odx",
+      "engineVersion": "3.8.2",
+      "optionsSha256": "fadaf74e9052bf1b8a3c0625acf416862c0bdfd1cbe4e52b2cac0897035bc87e",
+      "capabilitiesSha256": "5350b8483e399c53fb9ad85c551f8b3e5d80c8e771c59dd5b4980c1eb147919a",
+      "optionCount": 81
+    }
+  ],
+  "processingRunsStarted": 0,
+  "managementOrigin": "http://127.0.0.1:18080",
+  "rootChecks": 131,
+  "windowsPrivilegedSymlinkChecksSkipped": 1,
+  "workerChecks": 34,
+  "focusedOptionChecks": 16,
+  "independentHostReadback": "passed",
+  "nativeProviderInfoAndOptionsEndpoints": "404; full task facade absent",
+  "viewerProviderReady": false
+}
