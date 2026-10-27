@@ -235,6 +235,28 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.assertEqual(archived['generation'], 1)
         self.assertIn(old['job_id'], archived['metadata'])
 
+    def test_removed_uuid_retains_original_environment_across_reset(self):
+        self.ready(environment='staging')
+        self.store.remove(self.identifier)
+        with self.assertRaises(Conflict):
+            self.initialize(environment='production')
+        with self.assertRaises(KeyError):
+            self.store.info(self.identifier)
+        self.initialize(environment='staging')
+        task = self.store.task(self.identifier)
+        self.assertEqual(task['environment'], 'staging')
+        self.assertEqual(task['generation'], 2)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX database permissions')
+    def test_database_is_private_before_claim_metadata_is_written(self):
+        self.queue.path.chmod(0o644)
+        self.store = TaskStore(self.queue, self.root / 'inputs')
+        self.assertEqual(self.queue.path.stat().st_mode & 0o777, 0o600)
+        self.ready()
+        claim = self.claim()
+        self.store.update(self.identifier, claim_token=claim['claimToken'])
+        self.assertEqual(self.queue.path.stat().st_mode & 0o777, 0o600)
+
     def test_private_updates_output_cursor_and_owned_archive(self):
         self.ready()
         engine_id = str(uuid.uuid4())

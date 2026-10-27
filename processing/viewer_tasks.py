@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import threading
 import uuid as uuid_module
 
@@ -69,6 +70,29 @@ class TaskStore:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
         self._lock = threading.RLock()
+        # Claim credentials are stored in this shared database. Tighten the
+        # exact existing, owned database before creating or updating secret
+        # metadata; future SQLite rollback journals inherit its private mode.
+        database = Path(queue.path).absolute()
+        if database.resolve() != database or database.is_symlink():
+            raise ValueError('owned regular queue database required')
+        initial = database.lstat()
+        if (not stat.S_ISREG(initial.st_mode)
+                or (os.name != 'nt' and initial.st_uid != os.geteuid())):
+            raise ValueError('owned regular queue database required')
+        descriptor = os.open(database, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                             | getattr(os, 'O_NONBLOCK', 0))
+        try:
+            observed = os.fstat(descriptor)
+            current = database.lstat()
+            if (not stat.S_ISREG(observed.st_mode)
+                    or (observed.st_dev, observed.st_ino) != (current.st_dev, current.st_ino)
+                    or (os.name != 'nt' and observed.st_uid != os.geteuid())):
+                raise ValueError('owned regular queue database required')
+            if os.name != 'nt':
+                os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
         with self.queue._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_tasks (
                 uuid TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1,
@@ -145,6 +169,11 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()
+            if row is not None and row['environment'] != environment:
+                # Authorization and task operations use separate reads. Keep
+                # the original UUID's credential domain stable even while a
+                # removed task is reset into a new private incarnation.
+                raise Conflict('task UUID belongs to another environment')
             if row is not None and not row['removed']:
                 if (row['name'], row['options'], row['outputs'], row['environment']) != (
                         name, options_text, outputs_text, environment):
