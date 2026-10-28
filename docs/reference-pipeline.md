@@ -64,12 +64,13 @@ Beau supplies a smaller dataset.
    engine/gate bindings. Never replay uncertain engine mutations automatically.
 4. Connect the qualified Viewer acceptance/receipt components to the production
    ingestion closure and verify its actual storage durability barriers.
-5. Extend accepted archive cleanup with separate input-retention receipts and
-   exact owned engine-task cleanup. Missing files, downloads and age are not ACKs.
+5. Wire the separate input-retention receipt to enforced NAS retention and worker
+   input cleanup; qualify opt-in exact engine-task cleanup on the installed path.
+   Missing files, downloads and age are not ACKs.
 6. Repeat relevant synthetic failure/recovery checks against the installed path
    before enabling real data; the isolated source checks do not prove deployment.
 
-Source acceptance: the full 503-test checkpoint passes in an isolated Linux container
+Source acceptance: the latest full 543-test checkpoint passes in an isolated Linux container
 with network disabled and a read-only source mount. Linux also exercises the
 symlink checks that Windows skips without symlink privileges. Tests include real loopback HTTP, metadata grant
 replay, transfer corruption/expiry and completion-commit crash windows. These
@@ -140,9 +141,10 @@ manifest and derives accepted object coverage locally. Cleanup still requires
 terminal state, exact accepted objects, no active/uncertain pins and grace.
 Confirmed engine failure/cancellation now has a durable terminal-outcome outbox and
 Viewer metadata-acceptance relay. That receipt does not authorize file deletion.
-Engine task removal, reservation renewal and installed NAS/runtime mounting remain
-integration work; a retained engine task may intentionally block the existing strict
-maintenance census.
+Reservation renewal and installed NAS/runtime mounting remain integration work;
+retained engine task data may intentionally block the strict maintenance census.
+Success-only engine task cleanup is implemented as a separate opt-in described
+below; it does not treat terminal metadata acceptance as file acceptance.
 
 ## Operational source qualification, October 27
 
@@ -182,9 +184,80 @@ worker path. TreeDar availability remains disabled until that integration exists
 
 See `evidence/reference-operational-20261027.json` for this source checkpoint.
 Outstanding deployment work includes the NAS broker HTTPS mount, input-retention
-receipts before input-cache deletion, exact owned engine-task cleanup, runtime
-PKI/service installation and production Viewer ingestion. No real photo trial was
+enforcement before input-cache deletion, installed engine-task cleanup qualification,
+runtime PKI/service installation and production Viewer ingestion. No real photo trial was
 started; Beau will choose a smaller dataset separately.
+
+## Separate source retention and engine cache cleanup
+
+`contracts/source-retention-v1.contract.json` is an additive, LF-stable shared
+fixture. `reference_source_retention.py` validates the complete, ASCII-sorted
+input object closure against job/generation/environment, manifest and pipeline
+digests. Its explicit `source_retention` family and `until_release_ack_v1`
+guarantee cannot be substituted by result or terminal receipts. The validator
+performs no file deletion, issuer authentication or pin installation. Viewer
+must enforce durable source pins against **every** purge path, or use separately
+managed immutable storage, before issuing it. A future explicit release handshake
+must retire those pins; result acceptance and TTL cannot do so. Global receipt-ID
+role uniqueness and durable coordinator relay remain required integration work.
+
+`reference_engine_cleanup.py` independently removes one exact, successful native
+engine task only after coordinator metadata acknowledgement and full, locally
+persisted Viewer result acceptance. It retains the original worker input files,
+verifies their hashes again, waits for grace and released result pins, and holds
+the same physical node gate across idle census and removal. A FULL journal intent
+precedes the remove call; a lost response permits only read-only exact-UUID
+reconciliation. An absent task without an intent is held, never counted as a
+successful deletion. Failed/cancelled metadata ACKs authorize no removal.
+
+The worker daemon's `engineCleanupEnabled` is separate from archive
+`cleanupEnabled`, and defaults to false. The driver keeps deferred cleanup proof
+after execution capacity is released; it does not need to claim a new execution
+slot or receive a new Viewer acknowledgement to retry grace/pin checks. No new
+cleanup is enabled on either real processing PC by this source change.
+
+## TreeDar host adapter and rollout preparation
+
+`treedar_engine.py` is a main-only Linux host controller, separate from the ODM
+HTTP adapter. It uses the existing canonical physical Docker Engine gate and a
+configured local Unix socket; the engine container receives no socket, network,
+credentials or submission-controlled executable. The image is an exact cached
+ID with `--pull never`. Trusted installed bootstrap code, input and control
+metadata mount read-only; outputs remain in reserved persistent scratch.
+
+Create/start/stop intentions commit before Docker mutations. Uncertain launches
+are reconciled by exact container identity/image/binding inspection, never by
+creating another container. Terminal engine and output proofs persist before
+scratch settlement; completion acknowledgement and gate release remain the
+driver's responsibility. Runtime processing has no CPU, RAM, PID or thread caps,
+and no processing timeout by default. Separate synthetic test containers impose
+their own 2 CPU / 2 GiB safety bounds.
+
+The fixed in-image bootstrap was executed using actual TreeDar 0.0.1 in the
+cached image as UID/GID 1000, with no network, read-only root/source and temporary
+input/control/output mounts. It verified the synthetic LAS, recovered all three
+known 12/15/18 metre crowns and emitted 16 outputs whose hashes were independently
+checked. `ops/qualify_treedar_bootstrap.py` reproduces that synthetic-only check.
+Host Docker lifecycle tests additionally cover uncertainty, gate retention and
+proof recovery; those use a controlled Docker transport double. They do not prove
+installed host execution or genuine LiDAR acquisition.
+
+This adapter currently accepts a TreeDar-only single LAS/LAZ job. Combined
+ODM-plus-TreeDar stages, provenance issuance, the general worker driver's TreeDar
+dispatch and Viewer ingestion are still required. TreeDar capability remains
+disabled. Gaussian splats remain disabled as well.
+
+See [reference-deployment.md](reference-deployment.md) for actual two-host
+preflight, source-only staging/import verification and the remaining TLS/NAS,
+service installation and rollback steps. Existing coordinator/native provider
+and both engine services were left running unchanged.
+
+The final source checkpoint passed all 543 Linux tests with no skips, the actual
+bootstrap probe above, and an independent blocking review. Both Python and Viewer
+Node validators share the additive source-retention fixture exactly; an independent
+isolated Linux run passed all 23 Node protocol/retention tests. Evidence and source
+hashes are in `evidence/reference-readiness-20261027.json`. This remains source
+qualification and inactive source staging, not completion of runtime acceptance.
 
 Missing delivery acknowledgements retain results. Disk pressure stops intake.
 Production priority, the shared execution fence and maintenance gates apply to

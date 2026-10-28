@@ -83,7 +83,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
         # No certificate generation or network: only startup loading is mocked.
         client_context = ssl.create_default_context()
         return (patch("processing.reference_runtime.ssl.SSLContext.load_cert_chain"),
-                patch("processing.reference_runtime.ssl.create_default_context", return_value=client_context))
+                patch("processing.reference_runtime.verified_client_context", return_value=client_context))
 
     def runtime(self, queue, **kwargs):
         first, second = self.tls_patches()

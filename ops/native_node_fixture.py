@@ -200,6 +200,23 @@ class NativeNodeFixture:
         if method == 'GET' and path == '/task/list':
             with self._db() as db:
                 return 200, [{'uuid': row[0]} for row in db.execute('SELECT uuid FROM tasks ORDER BY uuid')], False
+        if method == 'POST' and path == '/task/remove':
+            if headers.get('Content-Type') != 'application/x-www-form-urlencoded':
+                raise ValueError('invalid removal form')
+            fields = parse_qs(body.decode('ascii'), keep_blank_values=True, strict_parsing=True)
+            if set(fields) != {'uuid'} or len(fields['uuid']) != 1:
+                raise ValueError('one exact task UUID required')
+            identifier = fields['uuid'][0]
+            p._uuid(identifier, 'synthetic task UUID')
+            with self._db() as db:
+                task = db.execute('SELECT status FROM tasks WHERE uuid=?', (identifier,)).fetchone()
+                if task is None:
+                    return 404, {'error': 'synthetic_not_found'}, False
+                if task['status'] != 40:
+                    return 409, {'error': 'synthetic_task_not_complete'}, False
+                db.execute('DELETE FROM tasks WHERE uuid=?', (identifier,))
+                db.execute("INSERT INTO calls VALUES('remove',?)", (identifier,))
+            return 200, {'success': True}, False
         if method == 'POST' and path == '/task/new/init':
             identifier = headers.get('set-uuid')
             p._uuid(identifier, 'synthetic task UUID')

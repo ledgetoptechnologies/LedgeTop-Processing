@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-27",
+  "processingBaseCommit": "2039f4a",
+  "scope": "source qualification, actual synthetic TreeDar bootstrap and inactive two-host source staging",
+  "fullLinuxSuite": {
+    "tests": 543,
+    "passed": true,
+    "skipped": 0,
+    "seconds": 49.726
+  },
+  "cachedQualificationImage": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb",
+  "qualificationIsolation": {
+    "network": "none",
+    "rootReadOnly": true,
+    "sourceReadOnly": true,
+    "cpus": 2,
+    "memoryGiB": 2,
+    "pids": 128
+  },
+  "actualTreeDarBootstrap": {
+    "passed": true,
+    "actualFixedBootstrapExecuted": true,
+    "actualCliExecuted": true,
+    "uid": 1000,
+    "gid": 1000,
+    "engineVersion": "0.0.1",
+    "syntheticOnly": true,
+    "genuineAcquisition": false,
+    "inputPoints": 4555,
+    "knownCrowns": 3,
+    "recoveredCrowns": 3,
+    "heightsMetres": [
+      12,
+      15,
+      18
+    ],
+    "outputObjects": 16,
+    "allOutputHashesVerified": true,
+    "dockerSocketMounted": false,
+    "persistentFixtureData": false,
+    "processingHostsTouched": false
+  },
+  "engineCacheCleanup": {
+    "actualNativeEngineHttpRemovalTested": true,
+    "coordinatorMetadataAckAloneDoesNotRemove": true,
+    "partialViewerAckDoesNotRemove": true,
+    "fullViewerAckExactTaskRemovedOnce": true,
+    "rawWorkerInputsRetained": true,
+    "failureMetadataAckDoesNotRemove": true,
+    "lostMutationResponseNeverReplayed": true,
+    "runtimeOptInDefault": false
+  },
+  "sourceRetentionContract": {
+    "pythonTests": 7,
+    "viewerNodeProtocolAndRetentionTests": 23,
+    "viewerNodeTestsIndependentlyPassedOnLinux": true,
+    "goldenFixtureSha256": "1e92894764faa888cfabf8adb7ca24c305fe7faec158decf03dc766996225fe4",
+    "issuerRetentionEnforcementInstalled": false,
+    "workerInputCleanupEnabled": false
+  },
+  "tls": {
+    "systemRootsPreserved": true,
+    "privateCaAddedPerClient": true,
+    "realTrustTests": 4,
+    "globalTrustChanged": false
+  },
+  "sourceStaging": {
+    "commit": "8ae9fe09bbe049071aee027caffae1cfc8b8d5b1",
+    "archiveSha256": "60830f7c4340cbce322602b28ef575844b720d67e39997ba06bf882f2a057ea9",
+    "archiveBytes": 634880,
+    "fileCount": 50,
+    "bothHostsVerifiedAllFileHashes": true,
+    "bothHostsActualPythonImportsPassed": true,
+    "path": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-8ae9fe0/source",
+    "clusterReceiptSha256": "7ec3f384f9c277a206c25caa8885f5a58708ed74268f5a8b6247d46436d59710",
+    "mainReceiptSha256": "ed846305cc75ff83426f7f1d121868cfa2ce8d2a2b9ff3adb014ec17a01429e2",
+    "currentNewerSourceInstalled": false,
+    "runtimeActivated": false
+  },
+  "independentReview": "No blocking findings in TreeDar controller, engine cleanup opt-in, TLS wiring or inactive source-retention validator.",
+  "limitations": [
+    "Host TreeDar Docker lifecycle uses controlled transport tests; the actual engine bootstrap executes in an isolated cached container.",
+    "TreeDar host-driver dispatch, outbox/result registration, combined ODM/TreeDar stages and Viewer ingestion remain incomplete; availability remains disabled.",
+    "No NAS retention pins, source-retention API/global receipt-role registry/release handshake or input cleanup are activated.",
+    "No new PKI, coordinator replacement or worker service activation occurred on the processing PCs.",
+    "No real photographs or genuine LiDAR acquisition were processed."
+  ],
+  "sourceHashNormalization": "UTF-8 source text with CRLF normalized to LF",
+  "sourceHashes": {
+    "processing/reference_engine_cleanup.py": "30cab88a230cbd1e84b1b2b99920936431602a4a95077af9c434d2cfb6f14d87",
+    "processing/treedar_engine.py": "b3e9600f117347e774d05ba80bf5a91d805233aa38fd7e0bd2d0535dfc0039f5",
+    "processing/reference_tls.py": "7e1f062afcf50b6b1f2647350976490d46f66e3cf5166b00688641f82449b612",
+    "processing/reference_source_retention.py": "f7925f4e3d68c9c336dc89d324df199d1808b47bdbf2530e64ccf1636b44bb8f",
+    "processing/reference_driver.py": "60fa73c62373be3d0f7e3b2c7f8510f8f732d14e910e31bf3fbf3691be2d0d37",
+    "processing/reference_runtime.py": "7a4a17250563fb944c216502c04b8e56fbd072743daac37aeaf9f204de03c0cd",
+    "ops/reference_worker_daemon.py": "5e6fecf357d6c4912e3bd221ea81a2ea5efa592a6414bb3a595f2c5688a0eecd",
+    "ops/qualify_treedar_bootstrap.py": "5a1d2ea2147cc15362773e15fe8f4e6338f4b58274319005ced8d9ac8854af52",
+    "ops/native_node_fixture.py": "04aaa6e853ad099ed80e9a7074eb98145a9f1bdeb7a114ed06bcb6b3ecaced1c",
+    "tests/test_reference_engine_cleanup.py": "0e30f6dbc9151602833bf006e12c1c350f3662d48cd82d476da30eab6b53ba85",
+    "tests/test_treedar_engine.py": "86a7a773f65d818afec6f152ab321b5f74161a170247510a111f26ad6c24e4bb",
+    "tests/test_reference_tls.py": "ee2bfd117d262a8c525ffee1d200275df1ba2726a7706e82d5c57030533e9118",
+    "tests/test_reference_source_retention.py": "b5e0ef69eca1d078641ac15e0e607e69e1a925fbe9d09da35908242557408d7f",
+    "tests/test_reference_driver.py": "cb0b1917ec38e91202a3a82597d2b6aefd5c74a78a1feaf73effaeef69bf39fa",
+    "tests/test_reference_runtime.py": "e0f37a8b5cc3be773e09cb2e88541abfbddeb000ddf3351190a51f2df4af78ed",
+    "tests/test_native_node_fixture.py": "42cd9214a9c2d09ac43bc83edacabf059b6d454512962119d8dc62ffbe156c64"
+  }
+}

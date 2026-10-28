@@ -28,6 +28,7 @@ from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
 from .reference_terminal import validate_terminal_acceptance
+from .reference_engine_cleanup import EngineCacheCleanup
 from .options import _validate_options
 from .reference_runtime import _UNSAFE
 
@@ -51,12 +52,15 @@ class _NoRedirects(HTTPRedirectHandler):
 class ReferenceDriver:
     def __init__(self, worker, ledger, outbox, broker, coordinator_origin, worker_bearer,
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
-                 failure_outbox, worker_instance_id, cleanup_executor=None,
+                 failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time):
         if not isinstance(worker.engine, NativeEngine) or not isinstance(broker, BrokerClient):
             raise ValueError('actual native engine and broker client required')
         if worker.ledger is not ledger or worker.outbox is not outbox or not isinstance(failure_outbox, FailureOutbox):
             raise ValueError('driver durable components differ')
+        if engine_cleanup is not None and (not isinstance(engine_cleanup, EngineCacheCleanup)
+                                           or engine_cleanup.worker is not worker):
+            raise ValueError('engine cleanup ownership differs')
         for value in (output_budget, transfer_ttl):
             p._integer(value, 'driver budget')
         if transfer_ttl > 86400 or type(safety_floor) is not int or safety_floor < 0 or ledger.floor != safety_floor:
@@ -68,6 +72,7 @@ class ReferenceDriver:
         p._slug(worker_instance_id, 'worker instance ID')
         self.output_budget, self.transfer_ttl = output_budget, transfer_ttl
         self.failure_outbox, self.cleanup_executor = failure_outbox, cleanup_executor
+        self.engine_cleanup = engine_cleanup
         self.allowed_environments = frozenset(allowed_environments)
         self.worker_instance_id = worker_instance_id
         self._option_definitions = {}
@@ -334,8 +339,14 @@ class ReferenceDriver:
                     if accepted:
                         data['terminalAcceptance'] = validate_terminal_acceptance(receipt, failure=data['failure'])
                 if accepted:
+                    if kind == 'acceptance' and self.engine_cleanup is not None:
+                        # Persist exact success proof even if grace, pins or a
+                        # newer task defer removal. Failure ACKs accept no data.
+                        self.engine_cleanup.remove(row['job'], viewer_receipts=relayed['receipts'])
                     self._save(row['job'], 'completed', data)
                     observed = {'state': 'completed', 'jobId': row['job']}
+        if self.engine_cleanup is not None:
+            self.engine_cleanup.reconcile_one()
         if self.cleanup_executor is not None:
             for item in self.ledger.cleanup_candidates(max_count=1, max_bytes=self.output_budget):
                 self.cleanup_executor.execute(item['reservation'], item['id'], generation=item['generation'],

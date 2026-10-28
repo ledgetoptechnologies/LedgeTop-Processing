@@ -21,6 +21,7 @@ from .reference_control import ReferenceControlAPI
 from .reference_http import create_reference_http_server
 from .reference_result_proxy import ResultProxy
 from .reference_store import ReferenceStore
+from .reference_tls import verified_client_context
 
 MAX_CONFIG_BYTES = 64 * 1024
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
@@ -188,8 +189,7 @@ class ReferenceRuntime:
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
-            worker_context = ssl.create_default_context(cafile=settings.listener["clientCA"])
-            worker_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes, main_node_id="main")

@@ -19,12 +19,14 @@ from processing import reference_protocol as p
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_driver import ReferenceDriver
+from processing.reference_engine_cleanup import EngineCacheCleanup
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_http import create_reference_http_server
 from processing.reference_result_api import ReferenceResultAPI
 from processing.reference_results import ReferenceResults
 from processing.reference_transfer import BrokerClient
+from processing.reference_tls import verified_client_context
 from processing.scratch_cleanup import ScratchCleanupExecutor
 from processing.scratch_policy import ScratchLedger
 from processing.viewer_service import NativeEngine
@@ -35,7 +37,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineId','gateGeneration','gateCoordinatorOrigin','coordinatorOrigin','brokerOrigin','engineOrigin',
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
-OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','allowedOdmOptions','schemaVersion'))
+OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion'))
 
 
 class DaemonStateLock:
@@ -260,8 +262,10 @@ def load_config(path):
         if config['shareResults'] is not True:
             raise ValueError('explicit result sharing decision required')
         config.setdefault('cleanupEnabled', False)
+        config.setdefault('engineCleanupEnabled', False)
         config.setdefault('allowedEnvironments', ['production','staging'])
-        if type(config['cleanupEnabled']) is not bool or type(config['allowedEnvironments']) is not list or not config['allowedEnvironments']:
+        if (type(config['cleanupEnabled']) is not bool or type(config['engineCleanupEnabled']) is not bool
+                or type(config['allowedEnvironments']) is not list or not config['allowedEnvironments']):
             raise ValueError('invalid worker sharing or cleanup policy')
         for environment in config['allowedEnvironments']:
             p._environment(environment)
@@ -295,7 +299,7 @@ def build_worker(config):
         if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
                 config['nodeId'], config['authorityId'], config['gateCoordinatorOrigin'].rstrip('/'), config['gateGeneration']):
             raise ValueError('preprovisioned physical gate differs')
-    client_tls = ssl.create_default_context(cafile=config['caFile'])
+    client_tls = verified_client_context(config['caFile'])
     parsed = urlsplit(config['engineOrigin'])
     if (parsed.scheme not in ('http','https') or not ipaddress.ip_address(parsed.hostname).is_loopback
             or parsed.username is not None or parsed.password is not None or parsed.path not in ('','/')
@@ -317,6 +321,8 @@ def build_worker(config):
         state_path=root / 'driver.sqlite', ssl_context=client_tls, output_budget=config['outputBudget'],
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
+        engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
+            if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
     permitted = frozenset(config['allowedEnvironments'])
     result_api = ReferenceResultAPI(ReferenceResults(worker), bearer_readers={config['resultReadBearer']: dict(

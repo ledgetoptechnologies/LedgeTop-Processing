@@ -76,6 +76,20 @@ class NativeNodeFixtureTests(unittest.TestCase):
             self.engine.action('commit', self.job)
         self.assertEqual(self.fixture.counts(), dict(initialize=1,upload=1,commit=1,download=0))
 
+    def test_real_native_remove_only_exact_completed_task(self):
+        self.initialize()
+        with self.assertRaises(SmokeError):
+            self.engine.action('remove', self.job)
+        self.assertEqual(self.fixture.counts().get('remove', 0), 0)
+        self.upload()
+        self.engine.action('commit', self.job)
+        self.assertEqual(self.engine.action('remove', self.job), {'success': True})
+        self.assertIsNone(self.engine.read('/task/' + self.job + '/info', missing=True))
+        self.assertEqual(self.engine.read('/task/list'), [])
+        with self.assertRaises(SmokeError):
+            self.engine.action('remove', self.job)
+        self.assertEqual(self.fixture.counts()['remove'], 1)
+
     def test_unknown_ids_and_nonfixture_upload_never_create_results(self):
         self.assertIsNone(self.engine.read('/task/' + self.job + '/info', missing=True))
         self.initialize()

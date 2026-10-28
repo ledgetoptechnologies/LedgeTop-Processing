@@ -34,6 +34,8 @@ from processing.reference_http import create_reference_http_server
 from processing.reference_binary import BinaryResponse
 from processing.reference_api import Response
 from tests.test_reference_results import ResultsFixture
+from processing.reference_engine_cleanup import EngineCacheCleanup
+from ops.native_node_fixture import NativeNodeFixture
 
 TOKEN = 'synthetic-operational-worker-token'
 VIEWER = 'synthetic-operational-viewer-token'
@@ -424,6 +426,97 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 0)
         self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
         self.assertFalse(any(kind in ('remove','cancel') for kind, _ in self.transport.calls))
+
+
+class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
+    # Reuse durable coordinator/transport helpers, while replacing the patched
+    # engine instance with a separate real NativeEngine and local HTTP backend.
+    make_driver = ReferenceDriverTests.make_driver
+    request = ReferenceDriverTests.request
+    sender_open = ReferenceDriverTests.sender_open
+    download = ReferenceDriverTests.download
+    submit = ReferenceDriverTests.submit
+    supply_grants = ReferenceDriverTests.supply_grants
+    advance = ReferenceDriverTests.advance
+
+    def setUp(self):
+        ReferenceDriverTests.setUp(self)
+        self.node_fixture = NativeNodeFixture(self.root / 'native-http.sqlite', engine_version='pinned-engine-1', synthetic_enabled=True).start()
+        self.native = NativeEngine(self.node_fixture.origin)
+        self.worker = ReferenceEngineWorker(self.root / 'actual-native-worker.sqlite', ledger=self.ledger,
+            outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
+            authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
+            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+        self.engine_cleanup = EngineCacheCleanup(self.worker, path=self.root / 'actual-engine-cleanup.sqlite')
+        self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+            'https://coordinator.invalid:9443', TOKEN, state_path=self.root / 'actual-driver.sqlite', ssl_context=self.context,
+            output_budget=1024 * 1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
+            worker_instance_id='instance', engine_cleanup=self.engine_cleanup)
+        self.driver._request = self.request
+        self.driver.sender._open = self.sender_open
+
+    def tearDown(self):
+        self.node_fixture.close()
+        ReferenceDriverTests.tearDown(self)
+
+    def acceptance(self, job, *, full):
+        private = self.store.get(job['jobId'], private=True)
+        result = private['resultManifest']
+        label = 'full' if full else 'partial'
+        return dict(schemaVersion=1, receiptId='native-viewer-' + label, storageReceiptId='native-storage-' + label,
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']] if full else [],
+            acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+
+    def test_actual_native_http_cache_removed_once_only_after_full_viewer_ack_with_inputs_retained(self):
+        job = self.submit(contents=(b'abc',))
+        self.advance(job, 'awaiting_acceptance')
+        for _ in range(2):
+            self.driver.step()
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
+        self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 40)
+        self.store.accept(job['jobId'], self.acceptance(job, full=False))
+        self.driver.step()
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
+        self.store.accept(job['jobId'], self.acceptance(job, full=True))
+        self.driver.step()
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 1)
+        self.assertIsNone(self.native.read('/task/' + job['jobId'] + '/info', missing=True))
+        for _ in range(2):
+            self.driver.step()
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 1)
+        inputs = list(self.scratch.glob('jobs/*/*.input'))
+        self.assertEqual(len(inputs), 1)
+        self.assertEqual(inputs[0].read_bytes(), b'abc')
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
+        with self.driver._db() as db:
+            self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], 'completed')
+
+    def test_actual_failed_http_task_terminal_ack_never_admits_cache_removal(self):
+        job = self.submit(contents=(b'abc',))
+        self.advance(job, 'executing')
+        # Fixture-only terminal failure injection, subsequently observed over the
+        # actual NativeEngine HTTP path; no synthetic success archive is fetched.
+        with self.node_fixture._db() as db:
+            db.execute('UPDATE tasks SET status=30 WHERE uuid=?', (job['jobId'],))
+        self.advance(job, 'awaiting_failure_acceptance')
+        failure = self.api.viewer.terminal.outcome(job['jobId'], 'staging')
+        receipt = dict(schemaVersion=1, receiptId='native-terminal-viewer', storageReceiptId='native-terminal-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], failureSha256=failure['failureSha256'],
+            acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+        self.api.viewer.terminal.accept(job['jobId'], receipt, 'staging')
+        with patch.object(self.engine_cleanup, 'remove', wraps=self.engine_cleanup.remove) as attempted:
+            self.driver.step()
+            self.assertEqual(attempted.call_count, 0)
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
+        self.assertEqual(self.node_fixture.counts()['download'], 0)
+        self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 30)
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+        self.assertEqual(self.engine_cleanup.pending(), [])
+        with self.driver._db() as db:
+            self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], 'completed')
 
 
 class DaemonLifecycleTests(ResultsFixture, unittest.TestCase):
