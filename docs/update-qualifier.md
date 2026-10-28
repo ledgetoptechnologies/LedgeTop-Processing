@@ -1,8 +1,35 @@
 # Startup/API/options-only candidate qualification
 
+## Actual main-PC acceptance — October 28, 2026
+
+Committed source `65b7015` passed the real isolated startup check on
+`192.168.50.88`. The candidate returned NodeODX API 2.4.0, engine 3.8.5 and 80
+fresh options. The exact candidate was verified running after the probe, then
+stopped and removed, including its temporary files and writable layer. An
+independent read-only review verified all 68 staged source files, receipt and
+SQLite hashes, container absence, and the unchanged installed main service.
+See [actual acceptance evidence](evidence/main-nodeodx-startup-20261028.json).
+
+The supervisor is `qualified` at generation zero with zero schedule/run
+intents. The installed node still uses its original image and start time.
+This is startup/API/options acceptance; reconstruction and GPU processing remain
+unqualified. The candidate build reports the same engine version as the
+installed node. No processing data was submitted.
+
+The first read-only-root attempt failed because the vendor logger needs a
+writable application directory. A second attempt served the API but exposed the
+Node launcher's version banner before JSON. Both failed test containers were
+removed after exact ownership and terminal-state proof; their held journals and
+failure closures remain separate from the successful receipt. These real
+findings led to the explicitly bound disposable-layer and launcher-output
+policies described below.
+
+## Source and scope
+
 `processing/update_qualifier.py` implements the existing supervisor `Qualifier`
-protocol for Linux hosts. It is source only: no adapter is installed or enabled,
-no channel is approved, and no candidate has been started by this change.
+protocol for Linux hosts. Its one-shot main-PC startup acceptance does not
+install an unattended updater, approve processing/GPU acceptance, or replace the
+running node.
 
 The policy is deliberately `startup-api-options-only-v1`. Success proves that a
 definitely staged linux/amd64 image started with its reviewed defaults, exposed
