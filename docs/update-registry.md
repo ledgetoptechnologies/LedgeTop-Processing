@@ -27,6 +27,11 @@ before Docker runs. An uncertain response holds further staging; `reconcile`
 only inspects the exact immutable reference and never repeats the pull. Neither
 method prunes images or releases another component's capacity reservation.
 
+`inspect_staged(candidate)` is a read-only qualification prerequisite. It
+requires a previously definite staged record, checks its unchanged metadata
+against the exact local image and engine, and neither promotes an unknown pull
+nor changes the journal. Only explicit `reconcile` can resolve a staging intent.
+
 The reservation is not an extraction quota. Compressed layer bytes cannot bound
 unpacked storage; a post-pull size check cannot prevent disk exhaustion during
 extraction. The operator must supply a sufficient trusted reservation before

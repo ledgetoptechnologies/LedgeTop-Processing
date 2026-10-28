@@ -89,6 +89,30 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(self.open().stage(candidate),metadata)
         self.assertEqual(len([args for args in self.docker.calls if args[0]=='pull']),1)
 
+    def test_readonly_staged_proof_preserves_journal_and_never_pulls(self):
+        candidate=self.registry.discover('test');metadata=self.registry.stage(candidate)
+        with self.registry._db() as db:before=[tuple(row) for row in db.execute('SELECT * FROM registry_staging')]
+        self.docker.calls.clear()
+        self.assertEqual(self.registry.inspect_staged(candidate),metadata)
+        with self.registry._db() as db:after=[tuple(row) for row in db.execute('SELECT * FROM registry_staging')]
+        self.assertEqual(after,before)
+        self.assertFalse(any(args[0]=='pull' for args in self.docker.calls))
+        self.docker.image['Id']='sha256:'+'e'*64
+        with self.assertRaises(RegistryError):self.registry.inspect_staged(candidate)
+        with self.registry._db() as db:self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM registry_staging')],before)
+
+    def test_readonly_proof_cannot_promote_an_unstaged_or_unknown_pull(self):
+        candidate=self.registry.discover('test')
+        with self.assertRaisesRegex(RegistryHeld,'definite_staged_image_required'):
+            self.registry.inspect_staged(candidate)
+        self.docker.error=TimeoutError('private pull response lost')
+        with self.assertRaises(RegistryHeld):self.registry.stage(candidate)
+        self.docker.calls.clear()
+        with self.assertRaisesRegex(RegistryHeld,'definite_staged_image_required'):
+            self.registry.inspect_staged(candidate)
+        self.assertEqual(self.docker.calls,[])
+        with self.registry._db() as db:self.assertEqual(db.execute('SELECT state FROM registry_staging').fetchone()[0],'held')
+
     def test_stage_rejects_forged_or_nonpersisted_candidate(self):
         candidate=self.registry.discover('test')
         for changed in (dict(candidate,configDigest='sha256:'+'e'*64),dict(candidate,candidateId='f'*64)):

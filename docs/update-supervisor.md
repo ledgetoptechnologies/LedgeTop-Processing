@@ -72,7 +72,8 @@ lookup semantics. It must not pretend NodeODM and NodeODX are interchangeable.
 
 `MaintenanceAdapter.binding` is exactly `{adapterId, authorityId, nodeId,
 engineId}`. Required methods are `inspect_host()`, `schedule(request)`,
-`lookup_schedule(request)`, `run(request)`, and `lookup_completion(request)`.
+`lookup_schedule(request)`, `ready_to_run(request)`, `run(request)`, and
+`lookup_completion(request)`.
 `inspect_host()` returns exactly `{nodeId, authorityId, engineId, imageId}`;
 the last two lookup methods are read-only. Schedule receives the accepted
 qualification SHA. Its closed plan receipt contains the qualification receipt's
@@ -90,6 +91,14 @@ only container health or replacement is insufficient. Unknown or failed
 qualification, schedule, replacement, rollback, pin, ingress, or coordinator
 finish outcomes remain held; there is no automatic replacement or rollback
 retry in this component.
+
+Before recording a run intent, the supervisor calls the read-only
+`ready_to_run(request)` probe. It must return an exact boolean: `False` leaves
+the operation scheduled without a run request, so a future window or busy node
+can wait across restart. Exceptions and invalid results also cannot issue a run.
+After `True`, the supervisor rechecks its ownership and the current host image
+before committing the run intent. Readiness is a point-in-time observation;
+managed run must still reserve the exact current plan before touching ingress.
 
 ## Sole-coordinator integration boundary
 

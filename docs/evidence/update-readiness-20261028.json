@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Pre-intent run readiness and read-only definite-stage proof",
+  "tests": {
+    "command": "python -B -m unittest tests.test_update_registry tests.test_update_supervisor",
+    "environment": "isolated cached Linux container; no network; read-only repository",
+    "passed": 48,
+    "skipped": 0,
+    "seconds": 1.313,
+    "exitCode": 0
+  },
+  "review": "Independent readiness review found no blocking findings; actual adapter must still reserve exact plan because readiness is point-in-time",
+  "runtimeChanged": false,
+  "automaticUpdatesEnabled": false,
+  "nasCommandsExecuted": false,
+  "sourceSha256": {
+    "processing/update_supervisor.py": "a09d88c65690090fbd6b98400a71dc5630a9eda177bf555e8bd6e462b0f4d977",
+    "processing/update_registry.py": "1f9f37c91dca7ac2bf827b3c8fcd0233ad8df6b8c277132b5d51a2299e216d41",
+    "tests/test_update_supervisor.py": "aa3c91441c1772f49d0606d9716f1da4c0607e2a4852018862ebeb7cba0c865f",
+    "tests/test_update_registry.py": "a04589923ddf47070d17ba5730daae2eaa3861abb9bf75171aa9579f7605141e",
+    "docs/update-supervisor.md": "108015ae89dabf6656319183bfdbfcfade8a2e16c1a53a40e404bd6ba5eba811",
+    "docs/update-registry.md": "696758f974d05a52799891da3ed3b4201718e132edffd229ab623eeda23396af"
+  }
+}

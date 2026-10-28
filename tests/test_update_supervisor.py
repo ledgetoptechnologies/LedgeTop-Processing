@@ -97,6 +97,10 @@ class FixtureMaintenance:
     def inspect_host(self):return self.backend.inspect_host()
     def schedule(self,request):return self.backend.mutate('schedule',request)
     def lookup_schedule(self,request):return self.backend.lookup('schedule',request)
+    def ready_to_run(self,request):
+        ready=self.backend.faults.get('readiness',True)
+        if isinstance(ready,Exception):raise ready
+        return ready
     def run(self,request):return self.backend.mutate('run',request)
     def lookup_completion(self,request):return self.backend.lookup('run',request)
 
@@ -148,6 +152,41 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNone(self.supervisor.discover())
         self.assertEqual([self.backend.count(kind) for kind in ('qualification','schedule','run')],[1,1,1])
         self.assertEqual(len([call for call in self.docker.calls if call[0]=='pull']),1)
+
+    def test_future_window_or_busy_host_waits_without_run_intent_across_restart(self):
+        identifier=self.discover();self.through(identifier,'scheduled')
+        self.backend.faults['readiness']=False
+        for _ in range(2):
+            self.assertEqual(self.supervisor.advance(identifier)['state'],'scheduled')
+            self.assertIsNone(self.supervisor._row(identifier)['run_request'])
+        self.assertEqual(self.backend.count('run'),0)
+        self.restart();self.backend.faults['readiness']=False
+        self.assertEqual(self.supervisor.advance(identifier)['state'],'scheduled')
+        self.backend.faults['readiness']=True
+        self.assertEqual(self.supervisor.advance(identifier)['state'],'completed')
+        self.assertEqual(self.backend.count('run'),1)
+
+    def test_readiness_error_or_non_boolean_never_issues_run_intent(self):
+        identifier=self.discover();self.through(identifier,'scheduled')
+        for ready in (OSError('private details'),None,1,{'ready':True}):
+            self.backend.faults['readiness']=ready
+            with self.subTest(ready=ready),self.assertRaises(SupervisorHeld):
+                self.supervisor.advance(identifier)
+            self.assertEqual(self.supervisor.status(identifier)['state'],'scheduled')
+            self.assertIsNone(self.supervisor._row(identifier)['run_request'])
+        self.assertEqual(self.backend.count('run'),0)
+
+    def test_host_changed_during_readiness_is_rechecked_before_run_intent(self):
+        identifier=self.discover();self.through(identifier,'scheduled')
+        def changed(request):
+            with self.backend.db() as db:
+                db.execute('UPDATE host SET image=?',('sha256:'+'f'*64,))
+            return True
+        with patch.object(self.supervisor.maintenance,'ready_to_run',changed):
+            with self.assertRaisesRegex(SupervisorHeld,'host_identity_or_image_changed'):
+                self.supervisor.advance(identifier)
+        self.assertIsNone(self.supervisor._row(identifier)['run_request'])
+        self.assertEqual(self.backend.count('run'),0)
 
     def test_lost_qualification_receipt_readonly_lookup_no_reexecution(self):
         identifier=self.discover();self.supervisor.advance(identifier)

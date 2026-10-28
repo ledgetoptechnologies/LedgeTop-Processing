@@ -66,6 +66,7 @@ class MaintenanceAdapter(Protocol):
     def inspect_host(self)->dict:...
     def schedule(self,request:dict)->dict:...
     def lookup_schedule(self,request:dict)->dict|None:...
+    def ready_to_run(self,request:dict)->bool:...
     def run(self,request:dict)->dict:...
     def lookup_completion(self,request:dict)->dict|None:...
 
@@ -98,7 +99,7 @@ class UpdateSupervisor:
         if (getattr(self.qualifier,'binding',None)!=expected or getattr(self.maintenance,'binding',None)!=adapter
                 or any(not callable(getattr(self.qualifier,name,None)) for name in ('qualify','lookup'))
                 or any(not callable(getattr(self.maintenance,name,None)) for name in
-                       ('inspect_host','schedule','lookup_schedule','run','lookup_completion'))):
+                       ('inspect_host','schedule','lookup_schedule','ready_to_run','run','lookup_completion'))):
             raise SupervisorError('fixed_adapter_binding_required')
 
     @property
@@ -405,6 +406,15 @@ class UpdateSupervisor:
                     raise SupervisorHeld('staging_outcome_requires_reconciliation') from None
             else:
                 request=self._request(row,kind)
+                if kind=='run':
+                    # Future windows and draining jobs are a normal wait, not an
+                    # uncertain issued update. This probe cannot issue actions.
+                    try:ready=self.maintenance.ready_to_run(_load(_json(request)))
+                    except Exception:raise SupervisorHeld('run_readiness_unavailable') from None
+                    self.check()
+                    if type(ready) is not bool:raise SupervisorHeld('explicit_run_readiness_required')
+                    if not ready:return self.status(identifier)
+                    self._host(row['base_image'])
                 column={'qualification':'qualification_request','schedule':'schedule_request','run':'run_request'}[kind]
                 self._checkpoint(identifier,state,kind+'_intent',**{column:request})
                 try:

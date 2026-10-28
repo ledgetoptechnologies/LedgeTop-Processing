@@ -402,6 +402,20 @@ class DockerRegistry:
             except Exception:pass  # Original durable intent still fences replay.
             raise RegistryHeld('pull_outcome_requires_reconciliation') from None
 
+    def inspect_staged(self,candidate):
+        """Read-only proof of a previously definite staged candidate.
+
+        Unlike reconcile, this never promotes an unknown pull or rewrites its
+        metadata. Qualifiers cannot silently resolve another stage's intent.
+        """
+        self._candidate(candidate);identifier=self._pull_id(candidate)
+        with self._db() as db:
+            row=db.execute('SELECT state,metadata FROM registry_staging WHERE id=?',(identifier,)).fetchone()
+        if row is None or row['state']!='staged':raise RegistryHeld('definite_staged_image_required')
+        self._engine();metadata=self._inspect(candidate);self._engine()
+        if row['metadata']!=_json(metadata):raise RegistryHeld('staged_metadata_changed')
+        return metadata
+
     def reconcile(self,candidate):
         self._candidate(candidate);identifier=self._pull_id(candidate)
         with self._db() as db:
