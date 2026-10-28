@@ -25,6 +25,15 @@ health and the main SSH tunnel remain healthy. Both engine images and generation
 gates are unchanged, and legacy ClusterODX remains stopped. See
 [installed evidence](evidence/reference-installed-20261028.json).
 
+The actual Viewer client at commit `867dd3f2` also passed authenticated discovery
+against this installed API on Node 24.16.0 using its endpoint-scoped private CA
+transport. Invalid credentials and a production/staging configuration mismatch
+were rejected. `ops/reference_installed_viewer_probe.cjs --read-only` reproduces
+the check with explicit local source/CA paths; the staging bearer is read over
+SSH into captured process memory only. The probe submits no jobs and changes no
+persisted Viewer provider configuration. It does not prove the NAS broker mount
+or production application integration.
+
 Reference worker/result daemons, NAS broker, reference Viewer client, input or
 engine-task cleanup and real-data processing are **not** activated. NAS SSH as
 `bkoltz` is rejected; the NAS account/management connection remains a requested

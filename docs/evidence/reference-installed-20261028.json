@@ -291,6 +291,28 @@
       "futureHelperStaged": true,
       "liveRollbackExecuted": false,
       "runtimeChangedBySafetyPatch": false
+    },
+    "actualViewerSdkProbe": {
+      "recordedAt": "2026-10-28T05:41:52.4638421Z",
+      "viewerCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+      "nodeVersion": "24.16.0",
+      "sourceHashes": {
+        "referenceProvider.js": "cde67f2506fb07e3faefd7d4efee7684198bbd68eb3d286d2562f2618e2705e3",
+        "referenceCaTransport.js": "3ea6ed955d40727d0c8d2bdc6d7f34fbb39c4802c130534da81c51465a3c9d19",
+        "referenceProtocol.js": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159"
+      },
+      "hashSemantics": "Exact Windows working-file bytes",
+      "probeScriptSha256": "b578d59a0a5cb6958a7e3c7b934d6d3655958be708bd92c0a8104b1776eab75f",
+      "actualInstalledCoordinator": true,
+      "privateCaTls": true,
+      "authenticatedDiscovery": true,
+      "invalidCredentialRejected": true,
+      "credentialEnvironmentBound": true,
+      "treeDarAvailable": false,
+      "gaussianEnabled": false,
+      "jobsSubmitted": 0,
+      "credentialsPrinted": false,
+      "providerConfigurationChanged": false
     }
   },
   "privacy": {
@@ -298,6 +320,32 @@
     "rawJobRecordsRecorded": false,
     "customerNamesOrPathsRecorded": false,
     "privateKeysRecorded": false
+  },
+  "postInstallSourceOnlyRollbackHardening": {
+    "helperSourceSha256": "cb467eb2bbd01ae755ed2f7f98a0be454ad586ed47f32c22777a1c30bc48c362",
+    "testSourceSha256": "a71bb5426aedbea338c8a75db54562eb7f35171a1071228ce0f6b10fe150b620",
+    "focusedValidation": {
+      "platform": "isolated Linux UID 1000",
+      "passed": 15,
+      "elapsedSeconds": 0.508,
+      "network": "none",
+      "readOnlySourceBind": true,
+      "temporaryInjectedFiles": "container tmpfs",
+      "productionStateEnvironmentOrTLSMounted": false,
+      "testContainerRemoved": true
+    },
+    "coverage": [
+      "Changed or unverifiable completed-install history refuses before checkpoint or Docker mutation",
+      "Any reference row blocks downgrade, including after execution slot release",
+      "Immutable SQLite census after replacement stops detects admission during drain",
+      "Unsafe or unavailable offline census resumes only the exact owned current replacement",
+      "Lost create, schedule and cancel responses preserve exact ownership and uncertainty",
+      "Foreign containers and peer maintenance plans are never modified"
+    ],
+    "liveRollbackPerformed": false,
+    "installedPrimaryIdAndImageUnchanged": true,
+    "historicalFrozenInstallationHelperOverwrittenByThisReview": false,
+    "publicationScope": "Future source-only helper; the completed installation and its historical installer commit above remain separate"
   },
   "hashSemantics": {
     "historySha256": "Canonical selected public job fields, compared with prepared checkpoint; raw rows excluded",
