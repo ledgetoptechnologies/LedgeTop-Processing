@@ -9,6 +9,7 @@ from processing.reference_delivery import DeliveryReceiver, BINDING
 from processing.reference_protocol import digest, validate_submission
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI, PREFIX
+from processing.reference_failure import FailureOutbox, make_failure
 
 
 WORKER = "synthetic-worker-token-0001"
@@ -70,6 +71,8 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.api = ReferenceWorkerAPI(self.store, DeliveryReceiver(self.store), bearer_workers=self.identities)
 
     def test_private_auth_transport_and_fixed_identity_claim_replay(self):
+        self.assertEqual(self.request('GET','/authority').body, {'authorityId':self.queue.authority_id})
+        self.assertEqual(self.request('GET','/authority',token=VIEWER).status,401)
         payload = {"jobId": self.job["jobId"], "claimRequestId": "claim-1"}
         self.assertEqual(self.request("POST", "/claim", payload, protected=False).status, 503)
         self.assertEqual(self.request("POST", "/claim", payload, token=VIEWER).status, 401)
@@ -83,6 +86,28 @@ class ReferenceWorkerAPITests(unittest.TestCase):
                          {"workerInstanceId": "spoofed"}, {"localPath": "C:/private/input"}):
             self.assertEqual(self.request("POST", "/claim", {**payload, **mutation}).status, 400)
         self.assertNotIn(WORKER, json.dumps(claim))
+
+    def test_terminal_acceptance_relay_requires_exact_worker_claim(self):
+        claim = self.claim()
+        failure = make_failure(job_id=self.job['jobId'],generation=1,environment='staging',
+            input_manifest_sha256=self.job['manifestSha256'],pipeline_digest=self.job['pipelineDigest'],
+            terminal_state='failed',error_code='engine_failed')
+        outbox = FailureOutbox(Path(self.directory.name)/'failure.sqlite')
+        outbox.persist(failure,engine_terminal=True)
+        delivery = outbox.claim_next()
+        envelope = {key:delivery[key] for key in ('outboxId','payloadSha256','payload')}
+        self.assertEqual(self.request('POST','/terminal-outcomes',dict(claimRequestId='claim-1',
+            claimToken=claim['claimToken'],delivery=envelope)).status,200)
+        route = '/jobs/'+self.job['jobId']+'/terminal-acceptance'
+        self.assertEqual(self.request('GET',route,claim_token=claim['claimToken']).body,
+                         {'receipt':None,'terminalAccepted':False})
+        receipt = {key:failure[key] for key in ('jobId','generation','environment','inputManifestSha256','pipelineDigest','failureSha256')}
+        receipt.update(schemaVersion=1,receiptId='terminal-ack',storageReceiptId='terminal-storage',
+            acceptedAt='2026-10-27T00:00:00.000Z',validationVersion='ltds-reference-v1')
+        self.api.terminal.accept(self.job['jobId'],receipt,'staging')
+        self.assertEqual(self.request('GET',route,claim_token=claim['claimToken']).body,
+                         {'receipt':receipt,'terminalAccepted':True})
+        self.assertEqual(self.request('GET',route,claim_token=claim['claimToken'],token=OTHER).status,409)
 
     def test_owned_worker_reserves_and_advances_only_permitted_phases(self):
         ready = self.request('GET', '/next')

@@ -34,6 +34,8 @@ class ReferenceWorkerAPI:
         self.store, self.receiver = store, receiver
         from .reference_failure import FailureReceiver
         self.failure_receiver = FailureReceiver(store)
+        from .reference_terminal import TerminalService
+        self.terminal = TerminalService(store)
         self._workers = MappingProxyType(workers)
 
     @staticmethod
@@ -92,6 +94,8 @@ class ReferenceWorkerAPI:
         if identity is None:
             return self._error(401, "unauthorized")
         try:
+            if method == 'GET' and path == PREFIX + '/authority':
+                return Response(200, {'authorityId': self.store.queue.authority_id})
             if method == 'GET' and path == PREFIX + '/next':
                 return Response(200, {'job': self.store.next_for_node(identity['node_id'])})
             if method == "POST" and path == PREFIX + "/claim":
@@ -134,7 +138,7 @@ class ReferenceWorkerAPI:
                 if payload[field] not in ('fetching', 'processing'):
                     raise ValueError('worker may only advance transfer and processing phases')
                 return Response(200, self.store.update_phase(job_id, payload[field]))
-            match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance)", path) if type(path) is str else None
+            match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance|terminal-acceptance)", path) if type(path) is str else None
             if method == "GET" and match:
                 claim_token = self._header(headers, "X-Claim-Token")
                 if claim_token is None or not 1 <= len(claim_token) <= 128:
@@ -142,6 +146,9 @@ class ReferenceWorkerAPI:
                 if match[2] == 'acceptance':
                     self._owned_job(match[1], identity, claim_token)
                     return Response(200, self.store.acceptance_receipts(match[1]))
+                if match[2] == 'terminal-acceptance':
+                    job = self._owned_job(match[1], identity, claim_token)
+                    return Response(200, self.terminal.accepted(match[1], job['environment']))
                 return Response(200, self._grant(match[1], identity, claim_token))
             return self._error(404, "not_found")
         except Conflict:

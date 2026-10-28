@@ -28,6 +28,7 @@ class Config:
     viewer_staging_token: str = field(default='', repr=False)
     viewer_max_input_bytes: int = 20 * 1024 ** 3
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
+    reference_config_path: str = field(default='', repr=False)
 
 
 def _node_origin(value: str) -> str:
@@ -117,4 +118,5 @@ def from_environment() -> Config:
         prototype_observer_token=observer,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
+        reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
     )

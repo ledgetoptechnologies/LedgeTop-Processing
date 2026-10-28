@@ -80,6 +80,17 @@ class TerminalService:
             _, failure = self._outcome(db, job_id, environment)
             return failure
 
+    def accepted(self, job_id, environment):
+        """Private relay. A terminal metadata ACK grants no artifact cleanup."""
+        with self.store.queue._db() as db:
+            _, failure = self._outcome(db, job_id, environment)
+            row = db.execute('SELECT receipt_json FROM reference_terminal_acceptances WHERE job_id=? AND generation=?',
+                             (job_id, failure['generation'])).fetchone()
+            if row is None:
+                return {'receipt': None, 'terminalAccepted': False}
+            receipt = validate_terminal_acceptance(json.loads(row[0]), failure=failure)
+            return {'receipt': receipt, 'terminalAccepted': True}
+
     def _check_ids(self, db, checked):
         ids = {checked["receiptId"], checked["storageReceiptId"]}
         for row in db.execute("SELECT receipt_id,receipt_json FROM reference_acceptances"):

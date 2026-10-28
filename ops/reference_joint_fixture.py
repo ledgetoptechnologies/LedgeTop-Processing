@@ -32,7 +32,7 @@ from processing.worker_outbox import WorkerOutbox
 
 VIEWER_TOKEN = 'synthetic-reference-staging-token'
 WORKER_TOKEN = 'synthetic-reference-worker-token'
-READ_TOKEN = 'synthetic-reference-read-token'
+READ_TOKEN = 'synthetic-reference-result-read-token'
 FIXTURE_TOKEN = 'synthetic-reference-fixture-token'
 
 
@@ -128,11 +128,58 @@ class FixtureAPI:
             self.lock.release()
 
 
+def build_operational_fixture(root, tls, queue, store, engine_id, origin):
+    """Actual runtime/daemon builders against a synthetic local HTTP engine."""
+    from ops.native_node_fixture import NativeNodeFixture
+    from ops.reference_worker_daemon import build_worker, load_config
+    from processing.config import Config
+    from processing.reference_runtime import ReferenceRuntime, load_reference_settings
+    backend = NativeNodeFixture(root/'native-node.sqlite',port=3001,synthetic_enabled=True)
+    backend.start()
+    worker_config = dict(schemaVersion=1,stateRoot=str(root/'operational-worker'),scratchRoot=str(root/'scratch'),
+        nodeId='cluster',workerId='worker',workerInstanceId='operational-joint-instance',authorityId=queue.authority_id,
+        engineId=engine_id,gateGeneration=1,gateCoordinatorOrigin=origin,coordinatorOrigin=origin,
+        brokerOrigin='https://viewer:9444',engineOrigin=backend.origin,engineToken='',workerBearer=WORKER_TOKEN,
+        resultReadBearer=READ_TOKEN,caFile=str(tls/'cert.pem'),serverCertFile=str(tls/'cert.pem'),
+        serverKeyFile=str(tls/'key.pem'),listenHost='0.0.0.0',listenPort=9445,outputBudget=1024*1024,
+        safetyFloor=1024*1024,transferTtl=240,cleanupGrace=0,pollSeconds=0.1,
+        engineVersion='synthetic-transport-only',shareResults=True,allowedEnvironments=['staging'],cleanupEnabled=True)
+    def private_json(path, value):
+        descriptor = os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        with os.fdopen(descriptor,'w') as target:
+            json.dump(value,target)
+    worker_path = root/'operational-worker.json'
+    if not worker_path.exists():
+        private_json(worker_path,worker_config)
+    driver, result_server = build_worker(load_config(str(worker_path)))
+    config = Config(api_token='synthetic-legacy-api-token-00000000',local_node_url=backend.origin,
+        main_node_url=backend.origin,local_max_photos=1000,local_max_input_bytes=20*1024**3,
+        prototype_state_dir=str(root/'coordinator'),prototype_node_ids=('cluster','main'),treedar_node_ids=('main',))
+    settings = dict(schemaVersion=1,listener=dict(host='0.0.0.0',port=9443,certificate=str(tls/'cert.pem'),
+        privateKey=str(tls/'key.pem'),clientCA=str(tls/'cert.pem')),viewerBearers={'staging':VIEWER_TOKEN},
+        workers={'cluster':dict(bearer=WORKER_TOKEN,workerId='worker',instanceId='operational-joint-instance',
+            resultOrigin='https://processing:9445',resultBearer=READ_TOKEN),
+            'main':dict(bearer='synthetic-reference-main-worker-token',workerId='main-worker',instanceId='main-joint-instance',
+            resultOrigin='https://processing:9445',resultBearer='synthetic-reference-main-result-read-token')},
+        streamBudget=dict(maxConcurrent=2,maxObjectBytes=1024*1024))
+    runtime_path = root/'operational-runtime.json'
+    if not runtime_path.exists():
+        private_json(runtime_path,settings)
+    runtime = ReferenceRuntime(queue,config,load_reference_settings(str(runtime_path),config))
+    api = FixtureAPI(runtime.api,store,backend,driver.ledger)
+    api.driver = driver
+    runtime.api = api
+    runtime.start()
+    threading.Thread(target=result_server.serve_forever,daemon=True).start()
+    return backend,runtime,result_server
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--synthetic', action='store_true', required=True)
     parser.add_argument('--state-root', required=True)
     parser.add_argument('--cert-dir', required=True)
+    parser.add_argument('--operational-driver',action='store_true')
     args = parser.parse_args()
     root, tls = Path(args.state_root), Path(args.cert_dir)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -144,9 +191,6 @@ def main():
     client_tls = ssl.create_default_context(cafile=str(tls / 'cert.pem'))
     queue = Queue(root / 'coordinator', reference_enabled=True, node_ids=('cluster', 'main'), treedar_node_ids=('main',))
     store = ReferenceStore(queue)
-    ledger = ScratchLedger(root / 'scratch.sqlite', scratch, safety_floor_bytes=1024*1024, cleanup_grace_seconds=0)
-    outbox = WorkerOutbox(root / 'outbox.sqlite')
-    engine = SyntheticEngine(root / 'engine.sqlite')
     engine_id, origin = 'synthetic-reference-joint-engine', 'https://processing:9443'
     with NodeGate(engine_id) as gate:
         state = gate._load()
@@ -155,6 +199,21 @@ def main():
         elif any(state[k] != v for k,v in dict(nodeId='cluster', coordinatorOrigin=origin,
                                                authorityId=queue.authority_id).items()):
             raise ValueError('synthetic gate binding changed')
+    if args.operational_driver:
+        backend,runtime,result_server = build_operational_fixture(root,tls,queue,store,engine_id,origin)
+        print('synthetic operational runtime fixture ready',flush=True)
+        try:
+            threading.Event().wait()
+        finally:
+            result_server.shutdown()
+            result_server.server_close()
+            runtime.close()
+            backend.close()
+            queue.close()
+        return
+    ledger = ScratchLedger(root / 'scratch.sqlite', scratch, safety_floor_bytes=1024*1024, cleanup_grace_seconds=0)
+    outbox = WorkerOutbox(root / 'outbox.sqlite')
+    engine = SyntheticEngine(root / 'engine.sqlite')
     worker = ReferenceEngineWorker(root / 'worker.sqlite', ledger=ledger, outbox=outbox, engine=engine,
         engine_id=engine_id, node_id='cluster', authority_id=queue.authority_id, coordinator_origin=origin,
         gate_generation=1, worker_id='worker', engine_version='synthetic-transport-only')

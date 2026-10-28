@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-27",
+  "scope": "operational source and isolated synthetic transport/TreeDar geometry; not installed runtime acceptance",
+  "processingBaseCommit": "6726850",
+  "viewerCommit": "e30504c10a51940efaf26f9460a7da1030a89034",
+  "fullSuite": {
+    "tests": 503,
+    "seconds": 50.152,
+    "passed": true,
+    "skipped": 0,
+    "network": "none",
+    "sourceReadOnly": true,
+    "rootReadOnly": true,
+    "cpuLimit": 2,
+    "memoryLimitGiB": 2,
+    "cachedImageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb"
+  },
+  "operationalJointProbe": {
+    "passed": true,
+    "realTls": true,
+    "actualCoordinatorRuntimeBuilder": true,
+    "actualWorkerDaemonBuilder": true,
+    "actualNativeEngineHttpTransport": true,
+    "syntheticNodeOdmBackend": true,
+    "inputBytes": 3,
+    "archiveBytes": 22,
+    "engineCalls": {
+      "initialize": 1,
+      "upload": 1,
+      "commit": 1,
+      "download": 1
+    },
+    "viewerDurableAcceptance": true,
+    "workerArchiveAutomaticallyCleanedAfterAcceptance": true,
+    "viewerArchiveRetainedBeforeFixtureRemoval": true,
+    "productionPublication": false,
+    "ownedContainersVolumesAndNetworkRemoved": true,
+    "initialProbeFailure": "Probe expected one manual cleanup; actual driver had already cleaned the accepted archive. Explicit automatic-cleanup mode fixed the expectation; a fresh complete run passed."
+  },
+  "treeDarCli": {
+    "actualEngineExecuted": true,
+    "admissionPassed": true,
+    "syntheticOnly": true,
+    "genuineAcquisition": false,
+    "inputPoints": 4555,
+    "groundPoints": 4096,
+    "knownCrowns": 3,
+    "recoveredCrowns": 3,
+    "heightsMetres": [
+      15,
+      12,
+      18
+    ],
+    "outputEpsg": 32616,
+    "rasterWidth": 64,
+    "rasterHeight": 64,
+    "rasterValuesFinite": true,
+    "outputFiles": 16,
+    "outputBytes": 72680,
+    "network": "none",
+    "temporaryFixtureRemoved": true
+  },
+  "shutdown": {
+    "osOwnershipLock": true,
+    "activeHttpReadPinsDrainBeforeExit": true,
+    "inFlightDriverStageJoined": true,
+    "unexpectedThreadFailureUnhealthyExit": true,
+    "abruptKillStalePinsAutomaticallyReleased": false
+  },
+  "limitations": [
+    "No new runtime was installed on either processing PC.",
+    "No real photographs or customer data were processed.",
+    "Native engine task data and worker input copies remain retained pending their separate cleanup contracts.",
+    "Reference options currently support safe numeric and boolean values; string/enum/EPSG values remain unsupported.",
+    "TreeDar worker pipeline, genuine acquisition issuer, NAS broker mount and production Viewer ingestion remain integration work.",
+    "Synthetic filesystem/process checks do not prove NAS hardware power-loss durability."
+  ],
+  "sourceHashNormalization": "UTF-8 source text with CRLF normalized to LF",
+  "sourceHashes": {
+    "processing/reference_driver.py": "beab8cab401a39e985a63d8f1c00cfab3384f17d5f618d78a38d6d80d8a8deb6",
+    "processing/reference_runtime.py": "edddd399c24e443ba5ab242d8973735ad8ce82e615f41de0ba1d229634ab8b21",
+    "processing/treedar_admission.py": "3341911ff66b94ea395dba58f26b944feb81f4f44ed514730fe5186c0bb9c6e6",
+    "processing/app.py": "09269bb9accb38ed67e3e77e99ee72873d951e797767377694109973797ee44b",
+    "processing/config.py": "2e75da82baf4bdd2746958bfb2ba215f56c2862434cd62ca2bd5a376c4c9e602",
+    "processing/reference_terminal.py": "72b61696ab76053dce1f847f0a21e9b04f5e3e3954bcd48305b3d2f4e0f08319",
+    "processing/reference_worker_api.py": "7a68b5f0cadc7277d10880f29b89e8e2209f6279170dadb249042a15adee4a69",
+    "ops/reference_worker_daemon.py": "21cc60c8fed4928fe3f7a8e565ecbdb383bd9240b16dc76999d4866ffbbcdf18",
+    "ops/native_node_fixture.py": "66da694edf55c8dddbb307687e172a5ac0ff245a9c36f32058eed0ceef175e53",
+    "ops/qualify_treedar.py": "fa0c13dfac49e3625f2ee3144811173c682263609eb36926b0642f888e4b1c95",
+    "ops/reference_joint_fixture.py": "0fba5723ca4750bbfcef63534446cf74a817d914a86e6f052e44f2d4a3e25891",
+    "ops/reference_joint_probe.py": "943da6cc4f7f7da41eb8be3684e6723a300cc1813b3f78ca43e9d40210d008a5",
+    "tests/test_reference_driver.py": "95581afc9ce5f76d973aa9b9ffd9f1cfc6ab21f242517c2deeca704d45e1f265",
+    "tests/test_reference_runtime.py": "a77b791e478cde74c92e8ba0a56dca50c486b4edf77419604dfeab0d77ee51fa",
+    "tests/test_treedar_admission.py": "e3e98d6d99c8e1f0ae7be461304d893ae2dd5acab7d81d4c1e463194f1d0184d",
+    "tests/test_native_node_fixture.py": "1f78bb425d3a602a3ac5a22563245aadd999a4f86802b1d975fa951b7cf2be87",
+    "tests/test_reference_worker_api.py": "2a2e48af4e3b83f7d954b5c98f555dcc78b89cde4f8147f9843eb9ba2209f336"
+  }
+}

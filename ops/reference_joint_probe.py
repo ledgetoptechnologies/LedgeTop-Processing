@@ -12,7 +12,8 @@ TOKEN = 'synthetic-reference-fixture-token'
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--synthetic', action='store_true', required=True)
-    parser.add_argument('--mode', choices=('success', 'prepare', 'crash-before-ack', 'recover'), default='success')
+    parser.add_argument('--mode', choices=('success', 'prepare', 'crash-before-ack', 'recover', 'verify'), default='success')
+    parser.add_argument('--automatic-cleanup',action='store_true')
     args = parser.parse_args()
     context = ssl.create_default_context(cafile='/tls/cert.pem')
     opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context))
@@ -28,7 +29,7 @@ def main():
             raise RuntimeError(f'{node}/{action}: {result}') from None
         print(json.dumps({'endpoint':node+'/'+action,'result':result}), flush=True)
         return result
-    if args.mode != 'recover':
+    if args.mode not in ('recover','verify'):
         submitted = call('viewer','submit')
         if args.mode in ('success', 'prepare'):
             assert submitted['status'] == 'queued'
@@ -57,16 +58,17 @@ def main():
             raise RuntimeError('Viewer did not exit at its durable commit failpoint')
         accepted = call('viewer','ingest')
         assert accepted['durableCopy'] and accepted['acknowledged'] and accepted['published'] is False
-    else:
+    elif args.mode == 'recover':
         replay = call('viewer','replay-acceptance')
         assert replay['replayed'] == 1 and replay['receipts'][0]['acknowledged']
-    for _ in range(4):
-        step = call('processing','step')
-        if step['state'] == 'completed':
-            break
-    assert step['state'] == 'completed'
+    if args.mode != 'verify':
+        for _ in range(4):
+            step = call('processing','step')
+            if step['state'] == 'completed':
+                break
+        assert step['state'] == 'completed'
     cleaned = call('processing','cleanup')
-    assert cleaned['cleanedObjects'] == 1
+    assert cleaned['cleanedObjects'] == (0 if args.automatic_cleanup else 1)
     final = call('processing','state',method='GET')
     assert final['engineCalls'] == {'initialize':1,'upload':1,'commit':1,'download':1}
     assert final['retainedArchiveCount'] == 0

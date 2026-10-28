@@ -15,10 +15,15 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    reference_settings = None
+    if config.reference_config_path:
+        from .reference_runtime import load_reference_settings
+        reference_settings = load_reference_settings(config.reference_config_path, config)
     queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
                   node_ids=config.prototype_node_ids,
                   treedar_node_ids=config.treedar_node_ids,
-                  viewer_enabled=config.viewer_enabled) if config.prototype_state_dir else None
+                  viewer_enabled=config.viewer_enabled,
+                  reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService
@@ -27,11 +32,23 @@ def make_handler(config: Config):
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
         facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
+    reference_runtime = None
+    if reference_settings is not None:
+        from .reference_runtime import ReferenceRuntime
+        try:
+            reference_runtime = ReferenceRuntime(queue, config, reference_settings)
+        except Exception:
+            if service:
+                service.close()
+            if queue:
+                queue.close()
+            raise
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"
         prototype_queue = queue
         viewer_service = service
+        reference_listener = reference_runtime
 
         def setup(self):
             super().setup()
@@ -191,12 +208,18 @@ def main():
     config = from_environment()
     handler = make_handler(config)
     server = ThreadingHTTPServer((config.bind_host, config.port), handler)
-    if handler.viewer_service:
-        handler.viewer_service.start()
-    print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
+    if handler.reference_listener:
+        server.daemon_threads, server.block_on_close = False, True
     try:
+        if handler.viewer_service:
+            handler.viewer_service.start()
+        if handler.reference_listener:
+            handler.reference_listener.start()
+        print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
         server.serve_forever()
     finally:
+        if handler.reference_listener:
+            handler.reference_listener.close()
         server.server_close()
         if handler.viewer_service:
             handler.viewer_service.close()

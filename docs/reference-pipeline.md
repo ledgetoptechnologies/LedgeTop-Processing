@@ -56,21 +56,20 @@ Beau supplies a smaller dataset.
 
 ## Remaining integration and acceptance
 
-1. Wire the protected HTTP factory into explicit runtime configuration, current
-   engine option discovery and the deployed listener; retain the native API.
-2. Finish the Viewer storage broker and connect reservation-scoped transfers.
-   Waiting jobs contain metadata; bytes transfer only after capacity is reserved.
-3. Install a private node agent with persistent scratch, engine adapters and a
-   durable result outbox. Never replay uncertain engine commits automatically.
-4. Implement Viewer file verification, file/directory durability barriers and a
-   durable receipt/outbox transaction before acknowledging results.
-5. Connect receipt verification, downstream pins and grace periods to an exact
-   owned-object cleanup executor. A disconnect, download or old age is not an ACK.
-6. Test disconnects, restart recovery, partial acceptance, full disks, transfer
-   expiry, production priority, small-node-first routing and maintenance with
-   synthetic fixtures before enabling the reference path or running real data.
+1. Install the opt-in TLS runtime configuration and current option discovery on
+   the coordinator while retaining the existing native API and queue authority.
+2. Mount the implemented Viewer storage broker on the actual NAS HTTPS route and
+   connect reservation-scoped transfers. Waiting jobs retain metadata only.
+3. Install the private worker daemon with persistent scratch and exact existing
+   engine/gate bindings. Never replay uncertain engine mutations automatically.
+4. Connect the qualified Viewer acceptance/receipt components to the production
+   ingestion closure and verify its actual storage durability barriers.
+5. Extend accepted archive cleanup with separate input-retention receipts and
+   exact owned engine-task cleanup. Missing files, downloads and age are not ACKs.
+6. Repeat relevant synthetic failure/recovery checks against the installed path
+   before enabling real data; the isolated source checks do not prove deployment.
 
-Source acceptance: the full 450-test checkpoint passes in an isolated Linux container
+Source acceptance: the full 503-test checkpoint passes in an isolated Linux container
 with network disabled and a read-only source mount. Linux also exercises the
 symlink checks that Windows skips without symlink privileges. Tests include real loopback HTTP, metadata grant
 replay, transfer corruption/expiry and completion-commit crash windows. These
@@ -139,9 +138,53 @@ After coordinator metadata acknowledgement, the worker may release its engine
 fence. It independently validates relayed Viewer receipts against its persisted
 manifest and derives accepted object coverage locally. Cleanup still requires
 terminal state, exact accepted objects, no active/uncertain pins and grace.
-Engine task removal, real-engine failure/cancellation reporting, reservation renewal,
-NAS/runtime mounting and automatic daemon wiring remain integration work; a retained
-engine task may intentionally block the existing strict maintenance census.
+Confirmed engine failure/cancellation now has a durable terminal-outcome outbox and
+Viewer metadata-acceptance relay. That receipt does not authorize file deletion.
+Engine task removal, reservation renewal and installed NAS/runtime mounting remain
+integration work; a retained engine task may intentionally block the existing strict
+maintenance census.
+
+## Operational source qualification, October 27
+
+The optional coordinator TLS listener now shares the existing queue authority;
+`PROCESSING_REFERENCE_CONFIG` must explicitly name an owner-private configuration.
+It remains disabled without that configuration. Separate worker, result-reader,
+Viewer and legacy credentials cannot be substituted for each other. Fresh engine
+options are exposed through `/ltds/v1/options`; this first reference implementation
+admits safe numeric/boolean values. String enums and EPSG settings still need their
+typed contract and are not advertised as supported.
+
+`ops/reference_worker_daemon.py` builds the real `NativeEngine` driver, persistent
+transfer/result/failure journals and private TLS result service. The pre-existing
+physical gate binding is checked independently of the new HTTPS transport origin.
+The daemon holds an OS lock across startup and shutdown, stops accepting new reads,
+and joins active streams and driver operations before releasing ownership. A forced
+process kill can still leave stale durable read pins: they remain held pending
+explicit reconciliation, rather than being released merely because of a restart.
+
+The operational-builder joint probe passed with the actual driver and real
+`NativeEngine` HTTP requests against an isolated synthetic NodeODM server. Each
+initialize/upload/commit/download occurred once. The real Viewer accepted and
+retained the 22-byte synthetic archive before automatic worker archive cleanup.
+The three-byte input and empty ZIP prove transport, not photogrammetry quality.
+All owned fixture resources were removed. This extends the previous process-crash
+probe; it does not claim the operational daemon itself has been deployed.
+
+TreeDar admission now verifies bounded LAS/LAZ geometry, projected metre units,
+declared vertical datum, classified ground coverage and a trusted acquisition
+receipt. A filename or point-cloud header alone cannot prove LiDAR provenance.
+LAZ count assurance additionally requires an authenticated source count; decoder
+EOF alone is not an independent count proof. The actual cached TreeDar CLI passed
+an isolated synthetic 4,555-point test: all three known crowns were recovered at
+12, 15 and 18 metres, with finite projected output rasters. This is synthetic
+geometry qualification, not genuine sensor acquisition or an integrated TreeDar
+worker path. TreeDar availability remains disabled until that integration exists.
+
+See `evidence/reference-operational-20261027.json` for this source checkpoint.
+Outstanding deployment work includes the NAS broker HTTPS mount, input-retention
+receipts before input-cache deletion, exact owned engine-task cleanup, runtime
+PKI/service installation and production Viewer ingestion. No real photo trial was
+started; Beau will choose a smaller dataset separately.
 
 Missing delivery acknowledgements retain results. Disk pressure stops intake.
 Production priority, the shared execution fence and maintenance gates apply to
