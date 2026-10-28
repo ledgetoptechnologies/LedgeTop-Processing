@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from . import reference_protocol as p
 from .node_gate import NodeGate, GateError
+from . import reference_native_archive as native_archive
 
 
 class WorkerHeld(ValueError):
@@ -106,115 +107,23 @@ class ReferenceEngineWorker:
             db.execute('UPDATE executions SET phase=? WHERE job=?', (phase, job_id))
 
     def _part_fd(self, row, part, *, create=False):
-        flags = os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
-        if create:
-            flags |= os.O_CREAT | os.O_EXCL
-        descriptor = os.open(part, flags, 0o600)
-        try:
-            observed, current = os.fstat(descriptor), part.lstat()
-            if (not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1
-                    or (observed.st_dev, observed.st_ino) != (current.st_dev, current.st_ino)
-                    or (os.name != 'nt' and observed.st_uid != os.geteuid())
-                    or (not create and (str(observed.st_dev), str(observed.st_ino)) !=
-                        (row['part_dev'], row['part_ino']))):
-                raise WorkerHeld('archive cache ownership changed')
-            return descriptor
-        except Exception:
-            os.close(descriptor)
-            raise
+        try:return native_archive.part_fd(row,part,create=create)
+        except native_archive.ArchiveHeld as error:raise WorkerHeld(str(error)) from None
+
+    def _cache_checkpoint(self,job,device,inode,expected):
+        with self._db() as db:
+            db.execute("UPDATE executions SET phase='archive_pending',part_dev=?,part_ino=?,archive_expected_size=? WHERE job=?",
+                (device,inode,expected,job))
 
     def _download_archive(self, row, reservation, part, budget):
-        """One bounded GET per poll, rewriting only our durably bound cache.
-
-        The caller just confirmed the exact engine job is completed. A new GET
-        must open successfully before any incomplete bytes are truncated. An
-        orphan created before its inode journal commit stays held; it cannot be
-        justified as this controller's cache. No engine mutation is retried.
-        """
-        relative = 'jobs/' + reservation + '/.archive.part'
-        if row['phase'] == 'archive_pending':
-            descriptor = self._part_fd(row, part)
-            try:
-                size = os.fstat(descriptor).st_size
-            finally:
-                os.close(descriptor)
-            expected = row['archive_expected_size']
-            if expected is not None and size == int(expected) and 0 < size <= budget and zipfile.is_zipfile(part):
-                return self._file(reservation, relative)[1:]
-        elif part.exists():
-            raise WorkerHeld('unbound archive cache requires reconciliation')
-        # Keep the old bytes intact if the authoritative local source is offline.
-        with self.engine.download(row['job']) as response:
-            headers = getattr(response, 'headers', {})
-            declared = headers.get('Content-Length')
-            if declared is not None:
-                if (not isinstance(declared, str) or not re.fullmatch(r'[0-9]{1,16}', declared)
-                        or not 0 < int(declared) <= budget):
-                    raise WorkerHeld('archive declared length exceeds output budget')
-                declared = int(declared)
-            create = row['phase'] != 'archive_pending'
-            if create:
-                self._phase(row['job'], 'archive_open_pending')
-            descriptor = self._part_fd(row, part, create=create)
-            try:
-                observed = os.fstat(descriptor)
-                # Empty-file identity must be durable before the first byte.
-                os.fsync(descriptor)
-                if create and os.name != 'nt':
-                    directory_fd = os.open(part.parent, os.O_RDONLY | os.O_DIRECTORY)
-                    try:
-                        os.fsync(directory_fd)
-                    finally:
-                        os.close(directory_fd)
-                with self._db() as db:
-                    db.execute("""UPDATE executions SET phase='archive_pending',part_dev=?,part_ino=?,
-                      archive_expected_size=? WHERE job=?""", (str(observed.st_dev), str(observed.st_ino),
-                      str(declared) if declared is not None else None, row['job']))
-                with os.fdopen(os.dup(descriptor), 'wb') as output:
-                    output.truncate(0)
-                    output.seek(0)
-                    count = 0
-                    while chunk := response.read(min(1024 * 1024, budget - count + 1)):
-                        count += len(chunk)
-                        if count > budget:
-                            raise WorkerHeld('archive exceeds scratch output budget')
-                        output.write(chunk)
-                    output.flush()
-                    os.fsync(output.fileno())
-                    if declared is not None and count != declared:
-                        raise WorkerHeld('archive response was truncated')
-            finally:
-                os.close(descriptor)
-        _, size, sha = self._file(reservation, relative)
-        check = self._part_fd(self._row(row['job']), part)
-        os.close(check)
-        if not size or size > budget or not zipfile.is_zipfile(part):
-            raise WorkerHeld('invalid or oversized engine archive')
-        return size, sha
+        try:return native_archive.download_archive(self.engine,row,reservation,part,budget,
+            relative='jobs/'+reservation+'/.archive.part',file=self._file,phase=self._phase,
+            checkpoint=self._cache_checkpoint,read_row=self._row)
+        except native_archive.ArchiveHeld as error:raise WorkerHeld(str(error)) from None
 
     def _file(self, reservation, relative, expected_size=None, expected_sha=None):
-        self.ledger._owned_path(reservation, relative)
-        path = self.ledger.root / relative
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
-        try:
-            st = os.fstat(descriptor)
-            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-                raise WorkerHeld('owned regular input required')
-            digest = hashlib.sha256()
-            with os.fdopen(os.dup(descriptor), 'rb') as stream:
-                while chunk := stream.read(1024 * 1024):
-                    digest.update(chunk)
-            after, current = os.fstat(descriptor), path.lstat()
-            if ((st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) !=
-                    (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-                    or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)):
-                raise WorkerHeld('owned file changed during verification')
-            if ((expected_size is not None and st.st_size != expected_size)
-                    or (expected_sha is not None and digest.hexdigest() != expected_sha)):
-                raise WorkerHeld('input integrity changed')
-            return path, st.st_size, digest.hexdigest()
-        finally:
-            os.close(descriptor)
+        try:return native_archive.owned_file(self.ledger,reservation,relative,expected_size,expected_sha)
+        except native_archive.ArchiveHeld as error:raise WorkerHeld(str(error)) from None
 
     def start(self, job, *, reservation_id, input_paths):
         """A ready, already claimed job and externally admitted scratch are required."""
