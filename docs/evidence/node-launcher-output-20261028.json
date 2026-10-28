@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Strict known Node launcher banner handling for real NodeODX image",
+  "fullLinuxRegression": {
+    "command": "python -B -m unittest discover -s tests",
+    "total": 829,
+    "passed": 825,
+    "skipped": 4,
+    "seconds": 85.689,
+    "exitCode": 0,
+    "skipReason": "Four fixed Node probe checks require Node, absent in cached Python test image",
+    "warnings": [
+      "One intentional multithreaded fork-ownership test DeprecationWarning"
+    ]
+  },
+  "actualNodeChecks": {
+    "command": "python -B -m unittest tests.test_update_qualifier.ActualProbeTests",
+    "passed": 4,
+    "skipped": 0,
+    "seconds": 0.487,
+    "exitCode": 0
+  },
+  "actualMainDiagnostic": {
+    "imageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "apiStatus": 200,
+    "optionsStatus": 200,
+    "apiVersion": "2.4.0",
+    "engine": "odx",
+    "engineVersion": "3.8.5",
+    "optionsCount": 80,
+    "optionsBytes": 20843,
+    "nodeLauncherVersion": "14.21.3",
+    "npmLauncherVersion": "6.14.18",
+    "issue": "Known NVM version banner precedes the strict JSON probe document",
+    "qualificationSucceeded": false,
+    "noTaskEndpointsCalled": true
+  },
+  "failedAttemptClosure": {
+    "operationId": "f43a17aa4d7ab40b31987a67aea1036fe4ff24c73e27297aefc8daac746c93cd",
+    "containerId": "0379fd087225c4a10d74b19eeda6cbdd19a89697f988cb3d3bf4b5828f416680",
+    "containerRemoved": true,
+    "stopOutcomeReconciledByInspection": true,
+    "closureSha256": "2bd2b2c763cfb092b0badf2e2f7cfe290e97556a48216d4f723e06d89e4afa7a",
+    "heldJournalsPreserved": true,
+    "qualificationSucceeded": false,
+    "installedMainUnchanged": true
+  },
+  "newPolicy": {
+    "launcherStdoutMode": "node-or-nvm-use-banner-v1",
+    "allowedPrefix": "One exact leading ASCII NVM node/npm semver banner, LF or CRLF, at most 96 bytes, immediately followed by strict JSON",
+    "unknownRepeatedAnsiOrExtraOutput": "rejected",
+    "rawOutputPersisted": false,
+    "typedPrefixAndHashSealed": true,
+    "fixedProbeUnchanged": true
+  },
+  "candidateBuild": {
+    "created": "2026-10-28T07:23:40.779424238Z",
+    "configDigest": "sha256:2dca9adae8525b8a112e125504e0e5e467c32a353299037ad6be04c8c63f4c26",
+    "installedConfigDigest": "sha256:edbead282137468d7fe91103587e1d2177545cf93119fa0dca94af6207424365",
+    "sameEngineVersionAsInstalled": true,
+    "newerEngineVersionClaimed": false
+  },
+  "review": "Independent final frozen parser/evidence review found no blocking findings",
+  "automaticUpdatesEnabled": false,
+  "nasCommandsExecuted": false,
+  "newLauncherPolicyHostAccepted": false,
+  "sourceSha256": {
+    "processing/update_qualifier.py": "eb0e68052f2068989054b124b4d416e544600f29112304fc0fb2cc9778c0de08",
+    "tests/test_update_qualifier.py": "a9a8ba9b46374c530daaa4936fe80b9598c59e2af35b0d4bb24693f96ebdbf56",
+    "docs/update-qualifier.md": "1c97688111505642186ca54f491b50a51bb39a23c8a24f09e47c9986327db798"
+  }
+}

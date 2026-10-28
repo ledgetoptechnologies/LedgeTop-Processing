@@ -83,6 +83,24 @@ qualification policy hash; an earlier read-only-profile journal is not replayed
 or silently converted. A fresh reviewed context is allowed only after separate
 proof closes the prior failed attempt. Its held journal and evidence remain.
 
+The separately frozen `launcher_stdout_mode` accepts only
+`node-or-nvm-use-banner-v1`. The probe output must be raw JSON or exactly one
+anchored ASCII NVM launcher line, `Now using node v<semver> (npm v<semver>)`,
+ending in LF or CRLF and at most 96 bytes, immediately followed by the JSON
+object. Node/npm versions are individually bounded. ANSI output, diagnostics,
+unknown prefixes, multiple banners, extra blank lines after a banner, malformed
+versions, and trailing output are rejected. No arbitrary lines are searched,
+trimmed, or discarded. The fixed GET probe itself is unchanged.
+
+Evidence records `launcherStdoutMode`, `launcherPrefixKind`, typed
+`launcherNodeVersion`/`launcherNpmVersion` (null for raw JSON), and the exact
+`launcherPrefixSha256`; the raw banner/stdout is not retained. These launcher
+versions are distinct from the actual engine version reported by `/info`.
+The new mode changes the policy hash. An earlier held launcher attempt is not
+replayed or declared successful; it needs separate owned-container closure and
+a fresh explicit policy context before another attempt. This compatibility
+change is not evidence that newer engine software was installed.
+
 The only exec command runs a fixed Node.js constant. It makes internal
 `GET http://127.0.0.1:3000/info` and `GET /options` requests. It cannot submit,
 upload, commit, cancel or remove a processing task. There are byte bounds,

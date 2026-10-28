@@ -50,6 +50,29 @@ WRITE_PATHS=('/var/www/data','/var/www/tmp','/var/www/logs','/tmp')
 REQUEST_FIELDS={'schemaVersion','operationId','nodeId','engineId','authorityId','candidateId','repository',
     'manifestDigest','configDigest','localImageId','platform','previousImageId','hostGeneration','supervisorPolicySha256',
     'qualifierId','qualificationPolicySha256','receiptDirectory','requestSha256'}
+_NUM=r'(?:0|[1-9][0-9]*)'
+_PRE=r'(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+_SEMVER=re.compile(_NUM+r'\.'+_NUM+r'\.'+_NUM+r'(?:-'+_PRE+r'(?:\.'+_PRE+r')*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\Z')
+_BANNER=re.compile(r'\ANow using node v(?P<node>[0-9A-Za-z.+-]{1,32}) \(npm v(?P<npm>[0-9A-Za-z.+-]{1,32})\)\r?\n')
+
+
+def parse_launcher_stdout(value):
+    """Parse JSON or exactly one approved, anchored and <=96-byte NVM banner."""
+    if type(value) is not str or len(value.encode())>1024*1024:raise QualifierHeld('invalid_launcher_stdout')
+    prefix='';node=npm=None;kind='raw-json'
+    match=_BANNER.match(value)
+    if match:
+        prefix=match.group(0);node,npm=match.group('node','npm')
+        if len(prefix.encode())>96 or not _SEMVER.fullmatch(node) or not _SEMVER.fullmatch(npm):
+            raise QualifierHeld('invalid_launcher_stdout')
+        value=value[len(prefix):]
+        # No extra line, whitespace prefix, second banner or diagnostic text.
+        if not value.startswith('{'):raise QualifierHeld('invalid_launcher_stdout')
+        kind='nvm-use-banner'
+    try:wire=_load(value)
+    except Exception:raise QualifierHeld('invalid_launcher_stdout') from None
+    return wire,dict(launcherPrefixKind=kind,launcherNodeVersion=node,launcherNpmVersion=npm,
+        launcherPrefixSha256=hashlib.sha256(prefix.encode()).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -63,6 +86,7 @@ class StartupPolicy:
     supervisor_state_root:str
     run_user:str
     filesystem_mode:str='ephemeral-node-defaults-v1'
+    launcher_stdout_mode:str='node-or-nvm-use-banner-v1'
     write_paths:tuple[str,...]=WRITE_PATHS
     working_directory:str='/var/www'
     node_executable:str='/usr/bin/node'
@@ -73,6 +97,7 @@ class StartupPolicy:
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',self.qualifier_id):raise QualifierError('invalid_qualifier_identity')
         if self.node_id not in ('main','cluster') or self.expected_engine not in ('odm','odx'):raise QualifierError('explicit_node_and_engine_required')
         if self.filesystem_mode!='ephemeral-node-defaults-v1':raise QualifierError('reviewed_filesystem_mode_required')
+        if self.launcher_stdout_mode!='node-or-nvm-use-banner-v1':raise QualifierError('reviewed_launcher_stdout_mode_required')
         try:
             if str(uuid.UUID(self.authority_id))!=self.authority_id:raise ValueError()
         except Exception:raise QualifierError('exact_authority_required') from None
@@ -277,7 +302,7 @@ class StartupQualifier:
                     binding=value['binding'],specSha256=_sha(dict(user=c['User'],workingDir=c['WorkingDir'],entrypoint=c['Entrypoint'],cmd=c['Cmd'],host=h)))
 
     def _probe(self,row,request):
-        raw=_load(self._command(['exec',row['container'],self.policy.node_executable,'-e',PROBE],timeout=70))
+        raw,prefix=parse_launcher_stdout(self._command(['exec',row['container'],self.policy.node_executable,'-e',PROBE],timeout=70))
         if type(raw) is not dict or set(raw)!={'schemaVersion','info','options'} or type(raw['schemaVersion']) is not int or raw['schemaVersion']!=1:
             raise QualifierHeld('invalid_startup_probe_wire')
         if type(raw['info']) is not str or len(raw['info'].encode())>65536 or type(raw['options']) is not str or len(raw['options'].encode())>262144:
@@ -288,6 +313,7 @@ class StartupQualifier:
         return dict(schemaVersion=1,scope='startup-api-options-only-v1',requestSha256=request['requestSha256'],
             probeSha256=PROBE_SHA,engine=info['engine'],apiVersion=info['version'],engineVersion=info['engineVersion'],
             filesystemMode=self.policy.filesystem_mode,
+            launcherStdoutMode=self.policy.launcher_stdout_mode,**prefix,
             configDigest=request['configDigest'],manifestDigest=request['manifestDigest'],localImageId=request['localImageId'],
             imageIdKind=_load(row['defaults'])['imageIdKind'],
             optionsSha256=_sha(sorted(options,key=lambda value:value['name'])),optionsCount=len(options),
@@ -329,11 +355,13 @@ class StartupQualifier:
     def _evidence(self,evidence,request,completed):
         keys={'schemaVersion','scope','requestSha256','probeSha256','engine','apiVersion','engineVersion','optionsSha256',
             'optionsCount','reconstructionQualified','gpuInitializationQualified','gpuKernelsQualified','noTasksSubmitted',
-            'noProductionMounts','noPublishedPorts','postProbeRunningConfirmed','configDigest','manifestDigest','localImageId','imageIdKind','filesystemMode'}
+            'noProductionMounts','noPublishedPorts','postProbeRunningConfirmed','configDigest','manifestDigest','localImageId','imageIdKind','filesystemMode',
+            'launcherStdoutMode','launcherPrefixKind','launcherNodeVersion','launcherNpmVersion','launcherPrefixSha256'}
         if completed:keys|={'containerId','containerSpecSha256','defaultStartupSha256','stopped','removed','tmpfsOutputsDisposed','containerWritableLayerDisposed'}
         if (type(evidence) is not dict or set(evidence)!=keys or type(evidence['schemaVersion']) is not int or evidence['schemaVersion']!=1
                 or evidence['scope']!='startup-api-options-only-v1' or evidence['requestSha256']!=request['requestSha256']
                 or evidence['filesystemMode']!=self.policy.filesystem_mode
+                or evidence['launcherStdoutMode']!=self.policy.launcher_stdout_mode
                 or evidence['probeSha256']!=PROBE_SHA or evidence['engine']!=self.policy.expected_engine
                 or any(evidence[key]!=request[key] for key in ('configDigest','manifestDigest','localImageId'))
                 or evidence['imageIdKind'] not in ('config','manifest')
@@ -345,6 +373,19 @@ class StartupQualifier:
                 or not re.fullmatch(r'[a-f0-9]{64}',evidence['optionsSha256'])
                 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',evidence['engineVersion'])):
             raise QualifierHeld('startup_evidence_changed')
+        if evidence['launcherPrefixKind']=='raw-json':
+            if (evidence['launcherNodeVersion'] is not None or evidence['launcherNpmVersion'] is not None
+                    or evidence['launcherPrefixSha256']!=hashlib.sha256(b'').hexdigest()):raise QualifierHeld('launcher_evidence_changed')
+        elif evidence['launcherPrefixKind']=='nvm-use-banner':
+            node,npm=evidence['launcherNodeVersion'],evidence['launcherNpmVersion']
+            if (type(node) is not str or type(npm) is not str or not 1<=len(node)<=32 or not 1<=len(npm)<=32
+                    or not _SEMVER.fullmatch(node) or not _SEMVER.fullmatch(npm)):
+                raise QualifierHeld('launcher_evidence_changed')
+            prefix='Now using node v'+node+' (npm v'+npm+')'
+            prefixes=[(prefix+ending).encode() for ending in ('\n','\r\n')]
+            if not any(len(value)<=96 and hashlib.sha256(value).hexdigest()==evidence['launcherPrefixSha256'] for value in prefixes):
+                raise QualifierHeld('launcher_evidence_changed')
+        else:raise QualifierHeld('launcher_evidence_changed')
         if completed and (evidence['defaultStartupSha256']!=self.policy.startup_spec_sha256
                 or any(evidence[key] is not True for key in ('stopped','removed','tmpfsOutputsDisposed','containerWritableLayerDisposed'))):
             raise QualifierHeld('startup_evidence_changed')

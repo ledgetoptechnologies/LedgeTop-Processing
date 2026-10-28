@@ -13,7 +13,8 @@ from unittest.mock import patch
 import uuid
 
 from processing.update_registry import DockerRegistry,RegistryPolicy,RegistryChannel,_json,_sha
-from processing.update_qualifier import StartupPolicy,StartupQualifier,QualifierError,QualifierHeld,PROBE,PROBE_SHA,startup_spec,WRITE_PATHS
+from processing.update_qualifier import (StartupPolicy,StartupQualifier,QualifierError,QualifierHeld,PROBE,PROBE_SHA,
+    startup_spec,WRITE_PATHS,parse_launcher_stdout)
 from processing.update_supervisor import UpdateSupervisor,SupervisorPolicy
 from tests import test_update_registry as registry_fixture
 from tests import test_update_supervisor as supervisor_fixture
@@ -28,6 +29,7 @@ class FakeDocker:
         self.id='9'*64;self.running=False;self.removed=False;self.created=False;self.binding=None
         self.exit_code=0
         self.mismatch={};self.faults={};self.wire=None;self.engine='test-engine';self.after=None
+        self.stdout_prefix=''
         self.info=dict(version='2.3.1',engine='odx',engineVersion='3.8.3')
         self.options=[dict(name='numeric-limit',type='int',value=7,min=1,max=20),dict(name='bool-flag',type='bool',value=False)]
 
@@ -57,10 +59,10 @@ class FakeDocker:
             result=_json(self.inspect())
         elif args[:2]==['container','ls']:result='' if self.removed or not self.created else self.id
         elif kind=='create':
-            self.created=True;self.started=False;self.removed=False
+            self.created=True;self.started=False;self.running=False;self.removed=False
             self.binding=args[args.index('--label')+1].split('=',1)[1];result=self.id
         elif kind=='start':self.running=True;self.started=True;result=self.id
-        elif kind=='exec':result=self.wire if self.wire is not None else _json(dict(schemaVersion=1,info=_json(self.info),options=_json(self.options)))
+        elif kind=='exec':result=self.stdout_prefix+(self.wire if self.wire is not None else _json(dict(schemaVersion=1,info=_json(self.info),options=_json(self.options))))
         elif kind=='stop':self.running=False;result=self.id
         elif kind=='rm':self.removed=True;result=self.id
         else:return self.registry(command,timeout=timeout,max_bytes=max_bytes)
@@ -261,6 +263,59 @@ class QualifierTests(unittest.TestCase):
         for mode in ('read-only','writable','ephemeral-node-defaults-v2',''):
             with self.subTest(mode=mode),self.assertRaises(QualifierError):replace(self.policy,filesystem_mode=mode)
 
+    def test_launcher_stdout_policy_is_frozen_and_changes_policy_hash(self):
+        for mode in ('strip-lines','raw','node-or-nvm-use-banner-v2',''):
+            with self.subTest(mode=mode),self.assertRaises(QualifierError):replace(self.policy,launcher_stdout_mode=mode)
+        old_policy=asdict(self.policy);old_policy.pop('launcher_stdout_mode')
+        old_hash=_sha(dict(policy=old_policy,registryPolicy=asdict(self.registry.policy),probeSha256=PROBE_SHA,
+            scope='startup-api-options-only-v1'))
+        self.assertNotEqual(old_hash,self.qualifier.policy_sha256)
+
+    def test_exact_single_nvm_banner_allows_startup_and_stores_only_typed_metadata(self):
+        for index,ending in enumerate(('\n','\r\n')):
+            with self.subTest(ending=ending):
+                path=self.root/('banner'+str(index));path.mkdir(mode=0o700)
+                qualifier=StartupQualifier(path/'qualifier.sqlite',self.policy,registry=self.registry,runner=self.docker)
+                self.docker.stdout_prefix='Now using node v14.21.3 (npm v6.14.18)'+ending
+                receipt=qualifier.qualify(self.request)
+                self.assertEqual(receipt['engineVersion'],self.docker.info['engineVersion'])
+                with qualifier._exclusive():row=qualifier._row(self.request['requestSha256'])
+                evidence=json.loads(row['evidence'])
+                self.assertEqual(evidence['launcherStdoutMode'],'node-or-nvm-use-banner-v1')
+                self.assertEqual(evidence['launcherPrefixKind'],'nvm-use-banner')
+                self.assertEqual(evidence['launcherNodeVersion'],'14.21.3')
+                self.assertEqual(evidence['launcherNpmVersion'],'6.14.18')
+                self.assertNotIn(b'Now using node',(path/'qualifier.sqlite').read_bytes())
+                self.assertEqual(qualifier.lookup(self.request),receipt)
+
+    def test_unknown_multiple_ansi_or_unbounded_launcher_prefix_never_passes(self):
+        good='Now using node v14.21.3 (npm v6.14.18)\n'
+        prefixes=['Warning: do-not-print\n',good+good,'\x1b[32m'+good,good+'\n',
+            'Now using node v014.21.3 (npm v6.14.18)\n','Now using node v14.21 (npm v6.14.18)\n',
+            'Now using node v14.21.3 (npm v6.14.18)\r','Now using node v'+'1'*100+' (npm v6.14.18)\n',
+            good+'diagnostic\n']
+        for index,prefix in enumerate(prefixes):
+            with self.subTest(prefix=index):
+                path=self.root/('badbanner'+str(index));path.mkdir(mode=0o700)
+                qualifier=StartupQualifier(path/'qualifier.sqlite',self.policy,registry=self.registry,runner=self.docker)
+                self.docker.stdout_prefix=prefix;before=len(self.docker.mutations())
+                with self.assertRaises(QualifierHeld) as error:qualifier.qualify(self.request)
+                self.assertNotIn('do-not-print',str(error.exception))
+                self.assertEqual(self.docker.mutations()[before:],['create','start','exec'])
+                self.assertNotIn(b'do-not-print',(path/'qualifier.sqlite').read_bytes())
+                with self.assertRaises(QualifierHeld):qualifier.lookup(self.request)
+
+    def test_launcher_evidence_versions_and_prefix_hash_are_immutable(self):
+        self.docker.stdout_prefix='Now using node v14.21.3 (npm v6.14.18)\n'
+        self.qualifier.qualify(self.request)
+        with self.qualifier._exclusive():
+            row=self.qualifier._row(self.request['requestSha256']);evidence=json.loads(row['evidence'])
+            evidence['launcherNodeVersion']='15.0.0'
+            self.qualifier._phase(row['id'],'completed',evidence=evidence)
+        before=list(self.docker.mutations())
+        with self.assertRaises(QualifierHeld):self.open().lookup(self.request)
+        self.assertEqual(self.docker.mutations(),before)
+
     def test_writable_layer_disposal_cannot_be_claimed_before_exact_id_absence(self):
         self.docker.faults['rm']='before'
         with self.assertRaises(QualifierHeld):self.qualifier.qualify(self.request)
@@ -400,7 +455,7 @@ class QualifierTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('node'),'existing Node.js required; no package installation')
 class ActualProbeTests(unittest.TestCase):
-    def execute(self,trickle):
+    def execute(self,trickle,prefix=''):
         # Actual fixed source, real loopback HTTP, dependency-injected port/timer
         # scaling only. No Docker, production origin, credential or image used.
         harness=r'''
@@ -411,12 +466,13 @@ const server=http.createServer((req,res)=>{
  if(TRICKLE){res.write(' ');setInterval(()=>res.write(' '),5);return;}
  res.end(req.url==='/info'?JSON.stringify({engine:'odx',version:'2.3.1',engineVersion:'3.8.3'}):JSON.stringify([{name:'n',type:'int',value:7}]));
 });server.listen(0,'127.0.0.1',()=>{
+ process.stdout.write(JSON.parse(process.argv[2]));
  const wrapped={get:(options,callback)=>http.get({...options,port:server.address().port},callback)};
  vm.runInNewContext(source,{require:name=>{if(name!=='http')process.exit(10);return wrapped;},
  process,Buffer,Date,setTimeout:(fn,ms)=>setTimeout(fn,ms===65000?65:ms)});
  server.unref();
 });'''.replace('TRICKLE','true' if trickle else 'false')
-        return subprocess.run([shutil.which('node'),'-e',harness,json.dumps(PROBE)],stdout=subprocess.PIPE,
+        return subprocess.run([shutil.which('node'),'-e',harness,json.dumps(PROBE),json.dumps(prefix)],stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,timeout=3,check=False)
 
     def test_actual_fixed_probe_successful_get_wire_without_task_post(self):
@@ -431,6 +487,23 @@ const server=http.createServer((req,res)=>{
         self.assertEqual(result.returncode,2)
         self.assertLess(time.monotonic()-start,2)
         self.assertEqual(result.stdout,b'');self.assertEqual(result.stderr,b'')
+
+    def test_actual_node_launcher_banner_before_unchanged_probe_get_wire(self):
+        for ending in ('\n','\r\n'):
+            result=self.execute(False,'Now using node v14.21.3 (npm v6.14.18)'+ending)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+            wire,prefix=parse_launcher_stdout(result.stdout.decode())
+            self.assertEqual(json.loads(wire['info'])['engine'],'odx')
+            self.assertEqual(json.loads(wire['options'])[0]['value'],7)
+            self.assertEqual(prefix['launcherPrefixKind'],'nvm-use-banner')
+            self.assertEqual(prefix['launcherNodeVersion'],'14.21.3')
+
+    def test_actual_node_unknown_or_multiple_prefix_before_valid_probe_wire_is_denied(self):
+        good='Now using node v14.21.3 (npm v6.14.18)\n'
+        for prefix in ('unknown launcher output\n',good+good,'\x1b[32m'+good):
+            result=self.execute(False,prefix)
+            self.assertEqual(result.returncode,0,result.stderr.decode())
+            with self.assertRaises(QualifierHeld):parse_launcher_stdout(result.stdout.decode())
 
 
 if __name__=='__main__':unittest.main()
