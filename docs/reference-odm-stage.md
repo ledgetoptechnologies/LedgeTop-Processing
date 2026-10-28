@@ -129,3 +129,12 @@ state/scratch ancestor publication and hold its owner lease throughout. This
 controller does not authenticate a NAS acquisition issuer or renew an expired
 transfer/provenance grant. Existing Viewer storage/provenance ownership is
 unchanged. Combined processing must stay unadvertised until those paths pass.
+
+The native attempt now checkpoints its exact earlier allocation baseline before
+any engine mutation or archive write. Archive growth is charged on top of that
+baseline, preserving preallocated control costs through restarts. This changes
+the dedicated stage journal schema; older journals are not silently migrated.
+Recovery control provisioning must precede stage issue and must separately keep
+capacity reserved for control bytes that have not yet materialized. This archive
+counter change alone does not supply that provisioning or permit retroactive
+control charges to already executing legacy attempts.

@@ -102,6 +102,27 @@ class NativeODMStageTests(unittest.TestCase):
         with self.ledger._transaction() as db:return dict(self.ledger._reservation(db,'parent-reservation'))
     def counts(self):return self.fixture.counts()
 
+    def test_archive_growth_preserves_prior_control_allocation_across_restart(self):
+        control=self.ledger.root/'jobs/parent-reservation/retained-control.bin'
+        control.write_bytes(b'control-retained');control.chmod(0o600)
+        baseline=self.reservation()['allocated']+control.stat().st_size
+        self.ledger.record_allocated('parent-reservation',baseline)
+        self.advance();self.stage=self.open()
+        self.stage.tick(self.claim['jobId']);self.reconcile()
+        self.assertEqual(self.reservation()['allocated'],baseline+len(ARCHIVE))
+        self.stage=self.open();self.stage.tick(self.claim['jobId'])
+        self.assertEqual(self.reservation()['allocated'],baseline+len(ARCHIVE))
+        self.assertEqual(control.read_bytes(),b'control-retained')
+        self.assertEqual(self.counts()['initialize'],1)
+
+    def test_invalid_checkpointed_allocation_baseline_holds_without_engine_action(self):
+        self.advance();before=self.counts()
+        with closing(sqlite3.connect(self.stage.path)) as db:
+            db.execute('UPDATE native_stage_executions SET allocation_base=0');db.commit()
+        with self.assertRaisesRegex(NativeStageHeld,'baseline'):
+            self.stage.tick(self.claim['jobId'])
+        self.assertEqual(self.counts(),before)
+
     def test_real_native_http_has_one_attempt_and_retains_whole_parent_fence_and_reservation(self):
         self.assertEqual(self.advance()['state'],'executing');self.assertIsNone(self.stage.lookup(self.intent()))
         proof=self.stage.tick(self.claim['jobId']);self.assertEqual(proof['objects'][0]['role'],'odm_archive')

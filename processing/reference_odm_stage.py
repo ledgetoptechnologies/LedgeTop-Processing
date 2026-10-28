@@ -133,7 +133,8 @@ SCHEMA=(
     'CREATE TABLE native_stage_binding(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)',
     '''CREATE TABLE native_stage_executions(job TEXT PRIMARY KEY,attempt TEXT UNIQUE NOT NULL,intent TEXT NOT NULL,
        paths TEXT NOT NULL,runtime_container TEXT NOT NULL,phase TEXT NOT NULL,part_dev TEXT,part_ino TEXT,
-       archive_expected_size TEXT,archive_size INTEGER,archive_sha TEXT,proof TEXT)''')
+       archive_expected_size TEXT,archive_size INTEGER,archive_sha TEXT,proof TEXT,
+       allocation_base INTEGER NOT NULL)''')
 PHASES=('prepared','initialize_pending','upload_pending','commit_pending','processing','archive_open_pending','archive_pending','archive_ready','terminal_proof')
 
 
@@ -343,6 +344,9 @@ class NativeODMStage:
         if row is None:raise NativeStageHeld('unknown_native_stage_attempt')
         row=dict(row)
         if row['phase'] not in PHASES or (row['phase']=='terminal_proof')!=(row['proof'] is not None):raise NativeStageHeld('native_stage_phase_changed')
+        parent=json.loads(row['intent'])['parentBinding'];base=row['allocation_base']
+        if type(base) is not int or not parent['inputBytes']<=base<=parent['inputBytes']+parent['outputBudget']:
+            raise NativeStageHeld('native_allocation_baseline_changed')
         return row
 
     def _phase(self,job,phase,**values):
@@ -354,7 +358,11 @@ class NativeODMStage:
 
     def _allocated(self,parent,size):
         current=self._reservation(parent)
-        self.ledger.record_allocated(parent['reservationId'],max(current['allocated'],parent['inputBytes']+size))
+        # Freeze all earlier retained allocations before this attempt writes.
+        # Using inputBytes here would let archive growth consume control bytes.
+        baseline=self._row(parent['jobId'])['allocation_base']
+        if current['allocated']<baseline:raise NativeStageHeld('native_allocation_baseline_changed')
+        self.ledger.record_allocated(parent['reservationId'],max(current['allocated'],baseline+size))
 
     def _paths(self,parent):
         base='jobs/'+parent['reservationId']+'/odm-stage'
@@ -394,7 +402,8 @@ class NativeODMStage:
             with NodeGate(self.policy.engine_id) as gate:
                 self._check();self._gate(gate,parent);self._reservation(parent,mutation=True)
                 if self._runtime()!=runtime:raise NativeStageHeld('native_runtime_changed_during_admission')
-                with self._db() as db:db.execute("INSERT INTO native_stage_executions VALUES(?,?,?,?,?,'prepared',NULL,NULL,NULL,NULL,NULL,NULL)",(job,intent['attemptId'],encoded(intent),encoded(paths),runtime['containerId']))
+                baseline=self._reservation(parent,mutation=True)['allocated']
+                with self._db() as db:db.execute("INSERT INTO native_stage_executions VALUES(?,?,?,?,?,'prepared',NULL,NULL,NULL,NULL,NULL,NULL,?)",(job,intent['attemptId'],encoded(intent),encoded(paths),runtime['containerId'],baseline))
                 directory.mkdir(mode=0o700);self._sync(directory);self._sync(source)
                 self.ledger.set_engine_state(parent['reservationId'],'engine_started')
                 try:
