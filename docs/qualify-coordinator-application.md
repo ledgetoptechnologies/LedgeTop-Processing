@@ -2,8 +2,13 @@
 
 `ops.qualify_coordinator_application` is a separate qualifier, not an updater,
 activator, backup restorer or NAS tool. It has no SSH interface. The implementation
-has only been exercised with synthetic local state/configuration. Running it
-against the installed private configuration remains a separately reviewed action.
+passed synthetic local tests and one separately reviewed run against the actual
+cluster private configuration and a consistent state copy. That run preserved
+all logical state through old/candidate/old application lifecycles, then removed
+only its unused owned copy. See the
+[actual configuration evidence](evidence/coordinator-private-config-qualified-20261028.json).
+The live coordinator was not replaced; future runs remain separate reviewed
+actions with fresh bindings.
 
 It accepts a closed `QualificationBinding`: the reviewed `IncrementalBinding`
 fields plus `candidate_image`, an exact expected local Docker `engine_id`, and

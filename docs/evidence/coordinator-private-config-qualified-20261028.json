@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "status": "actual-private-config-state-copy-qualified-and-test-copy-cleaned",
+  "sourceCommit": "ef9c09fb88d42df8d5a948bdd608ecbf2b302abe",
+  "sourceArchiveSha256": "94d6d20f5aaf10dffdd2b3da2fffaa51f25d284e24a2a4d427a549498257bfc3",
+  "sourceFilesVerified": 483,
+  "hostPythonFilesCompiled": 247,
+  "hostInertImports": 4,
+  "candidateImage": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+  "candidateApplicationSource": "6bbd468e1177746cb695e43195e75355b0681f23",
+  "predecessorImage": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+  "predecessorApplicationSource": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+  "actualHost": "cluster192.168.50.89",
+  "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+  "observedAt": "2026-10-28T23:42:16.376677+00:00",
+  "executions": 1,
+  "phases": [
+    "consistent-readonly-snapshot",
+    "actual-old-app",
+    "actual-candidate-app",
+    "actual-old-rollback-app"
+  ],
+  "expandedBindingSha256": "1565e340cafb64521d795d5fc522dd0f741042b26e6e5d06d18ce8fc2f61d5ad",
+  "receiptReconciliation": "One successful execution. Initial local comparison used an unexpanded preview; saved binding/receipt were read back against dataclass-expanded fixed defaults without rerunning phases.",
+  "sourceHelperExportedPins": {
+    "ops/qualify_coordinator_application.py": "76d079295385cb4f752f9f10b6820902d347ffdd8c79d93fa23610b593774517",
+    "ops/incremental_coordinator_binding.py": "da740e8b98db81ec6f196422810113247975054988ddb9f2f1dd114b2682b8c0"
+  },
+  "sourceExportNote": "Actual staged bytes verified against archive; exported helper text is LF-equivalent to reviewed source. No source permission changes.",
+  "checks": {
+    "actualPrivateConfigUsedOnHost": true,
+    "privateBytesExported": false,
+    "schema1Preserved": true,
+    "optionalRecoveryEnabled": false,
+    "realNativeTlsRoleChecks": true,
+    "cleanListenersAndOsLockRelease": true,
+    "allLogicalRowsAndAuthorityPreserved": true,
+    "original12TerminalJobs": true,
+    "original2OwnedMaintenanceRows": true,
+    "actualPrivateConfigDigestUnchanged": true,
+    "actualEnvironmentDigestCheckedInHelpers": true,
+    "isolatedNetwork": "none",
+    "hostPortsPublished": false,
+    "liveVolumeOnlyReadOnlyInSnapshotHelper": true,
+    "noStateRestored": true
+  },
+  "liveCoordinator": {
+    "container": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+    "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+    "source": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+    "authority": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "running": true,
+    "restarts": 0,
+    "soleLiveVolumeOwner": true
+  },
+  "cleanup": {
+    "exactOwnedCopyRemoved": true,
+    "noCopyContainersPresent": true,
+    "originalVolumeDifferent": true,
+    "intentPersistedBeforeRemoval": true,
+    "imageAndInactiveSourceRetainedForUpgrade": true
+  },
+  "remoteEffects": "Qualified candidate image cached; exact inactive source staged; isolated test containers/state copy created and test copy removed. Live service/state/config/gates unchanged.",
+  "runtimeActivated": false,
+  "nasConfigurationOrDataFilesChanged": false,
+  "githubActionsRun": false,
+  "packagesPublished": false,
+  "remaining": [
+    "Separately release and stage existing updater helper after fresh physical/immutable preflight.",
+    "Acquire both real host gates, owned drain receipts, offline backup, actual upgrade verification and exact owned reopen.",
+    "Full active goal retains NAS/Viewer reference assembly, private workers/full modes, durable custody/cleanup and UI acceptance."
+  ],
+  "fullGoalComplete": false
+}
