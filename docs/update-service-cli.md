@@ -41,6 +41,20 @@ also refuses an existing SQLite database containing another component's tables.
 
 ## Bootstrap and operation
 
+Main-node runtime acceptance on 2026-10-28 is recorded in
+[the installation receipt](evidence/main-update-service-20261028.json): frozen
+source `020c15c`, validated legacy-book closure, unchanged current image, one
+no-change discovery, throttled later ticks, and enabled deterministic user timer.
+The cluster node's recurring updater is not installed. This acceptance does not
+prove NAS delivery, real processing, or a future image update.
+
+As `bkoltz` on main, inspect the installed timer with
+`systemctl --user status ledgetop-processing-image-updates.timer` and recent runs
+with `journalctl --user -u ledgetop-processing-image-updates.service -n 30`.
+`systemctl --user disable --now ledgetop-processing-image-updates.timer` stops
+future timer invocations; it does not cancel an already running update. Preserve
+its journals and inspect an in-progress service before taking further action.
+
 Run `bootstrap` explicitly before normal service use. It reconciles every
 configured legacy capacity book against actual definite cached-artifact proof,
 records closure in the canonical per-Engine budget and leaves the old books and
