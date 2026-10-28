@@ -16,13 +16,14 @@ commit. See [reference-claim-recovery.md](reference-claim-recovery.md). This API
 is not configured in the installed runtime. Worker recovery, final mixed-pipeline
 delivery and outer-v2 integration still require qualification.
 
-The frozen source `2be08b5904e38e98a76b57bd22cc0c78e6338682` passed 1,202 Linux
-tests, with four Node probes skipped there, and seven separate Windows checks.
-All 364 source files were independently reread in inactive folders on both PCs.
-All 227 Python files compile under the hosts' Python 3.10/3.14, and inert
+The frozen source `dd4fa53823b9bab15fdb1564c4db341be1626c0c` passed 1,232 Linux
+tests, with five environment-specific skips there, and 31 separate Windows checks
+covering those skips. All 451 source files were independently reread in inactive
+folders on both PCs. All 231 Python files compile under the hosts' Python 3.10/3.14, and inert
 controller imports passed. Containers and updater working directories remained
 unchanged. Evidence is in
-[recovery-publication-qualification-20261028.json](evidence/recovery-publication-qualification-20261028.json).
+[accounting-candidate-qualification-20261028.json](evidence/accounting-candidate-qualification-20261028.json).
+The previous 2be08b5 qualification remains historical evidence.
 
 The concrete worker client now bounds retained history, atomically charges
 additive control space and retains capacity for future metadata writes. Normal
@@ -30,8 +31,17 @@ engine admission verifies the actual published control files and their format,
 identity and current history. See
 [reference-worker-recovery.md](reference-worker-recovery.md). Its combined-worker
 factory preparation remains unwired. Defaults also cap prepared parents at 64;
-control retirement/export and old-code downgrade protection are deployment
-gates, not completed automation.
+control retirement/export and full owner/config migration remain deployment
+gates. A monotonic accounting marker now makes the archived pre-control allocator
+refuse coherent charged state at cold startup. This does not fence an old process
+already running or protect externally corrupted state.
+
+The isolated outer-v2 candidate now has bounded standard-library lexical,
+structural and named metadata digest validation. It is unagreed and inactive;
+32 semantic/authentication/archive/lifecycle negative vectors remain deferred.
+Structural validation cannot authorize engine execution or catalog acceptance.
+Metadata-only source reauthorization and sealed at-start admission are still
+needed for processing that outlasts its original payload grant.
 
 Native ODM and TreeDar execution controllers, the concrete parent guard, native
 bundle writer/publication and recovery client have source qualification. The
