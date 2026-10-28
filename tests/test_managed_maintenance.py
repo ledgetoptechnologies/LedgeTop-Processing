@@ -29,10 +29,19 @@ class ManagedMaintenanceTests(unittest.TestCase):
             {'jobs': []} if path.endswith('/jobs') else
             {'authorityId': 'authority'} if path.endswith('/authority') else {'node': self.node})
         self.ingress = MagicMock()
-        self.ingress.config = {'backendPort': 13004, 'backendName': 'owned', 'engineId': 'engine'}
+        self.ingress.root=self.root/'ingress'
+        self.ingress.config = {'backendPort': 13004,'backendName':'owned','engineId':'engine',
+            'proxyName':'owned-proxy','proxyImage':'sha256:'+'c'*64,'listenPort':3001}
         self.ingress.docker.return_value = json.dumps([{'Id': 'exact-backend'}])
+        self.ingress.inspect.return_value={'Id':'owned-proxy'}
+        self.ingress.workers.return_value={2}
+        self.ingress.backend.return_value={'engine':'odx','engineVersion':'pin','version':'2.4.0'}
+        self.ingress.http.return_value=(200,self.ingress.backend.return_value)
+        self.ingress.change.side_effect=self.change
         self.adapter = MagicMock()
-        self.adapter.inspect.return_value = {'Id': 'exact-backend'}
+        self.adapter.inspect.return_value = {'Id': 'exact-backend','Image':self.old}
+        self.adapter.healthy.return_value=True
+        self.adapter.serving.return_value=True
         self.gate = MagicMock()
         self.gate.snapshot.return_value = {'reservation': None, 'nodeId': 'main',
             'coordinatorOrigin': self.api.origin, 'authorityId': 'authority'}
@@ -47,7 +56,17 @@ class ManagedMaintenanceTests(unittest.TestCase):
         stack.enter_context(patch('ops.node_maintenance.ComposeNode', return_value=self.adapter))
         gate = stack.enter_context(patch('ops.node_maintenance.NodeGate'))
         gate.return_value.__enter__.return_value = self.gate
+        stack.enter_context(patch('ops.node_maintenance.deferred_receipt',return_value=dict(oldImage=self.old,reservedRevision=1,
+            nodeId='main',planId='original-plan',targetImage=self.new)))
+        stack.enter_context(patch('ops.node_maintenance.finalize_deferred',side_effect=lambda *args,**kwargs:
+            dict(status='succeeded',nodeId='main',**kwargs['result'])))
         return stack
+
+    def change(self,closed,**kwargs):
+        state=dict(state='closed' if closed else 'open',containerId='owned-proxy',oldWorkers=[],
+            expectedBackendImage=None if closed else self.new)
+        save(self.ingress.root/'state.json',state)
+        return dict(state=state['state'],containerId='owned-proxy',oldWorkersDrained=True)
 
     def test_unresolved_host_reservation_never_updates_or_reopens(self):
         self.gate.snapshot.return_value['reservation'] = {'receiptId': 'unresolved'}
@@ -75,6 +94,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
         def change(closed, **kwargs):
             if not closed:
                 self.assertEqual(json.loads((self.root / 'compose.json').read_text())['services']['node']['image'], self.new)
+            return self.change(closed,**kwargs)
         self.ingress.change.side_effect = change
         with self.context(), patch('ops.node_maintenance.execute', return_value={'status': 'succeeded', 'image': self.new}) as execute:
             self.assertEqual(run(self.root, self.api, MagicMock(), self.receipt, 0)['ingress'], 'open')
