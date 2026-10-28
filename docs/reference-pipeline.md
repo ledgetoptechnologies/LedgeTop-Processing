@@ -1,8 +1,12 @@
 # Reference pipeline implementation checkpoint
 
 This is an additive, opt-in successor to the existing multipart Viewer provider.
-It is not enabled in the installed provider. Real-data testing is paused until
-Beau supplies a smaller dataset.
+The coordinator TLS API is installed at `https://192.168.50.89:18443` under the
+original queue authority. The existing Viewer provider still uses its unchanged
+native endpoint at port 3005; reference workers, NAS broker and reference Viewer
+client are not activated. Real-data testing is paused until Beau supplies a
+smaller dataset. See `evidence/reference-installed-20261028.json` for the bounded
+installed acceptance and remaining limitations.
 
 ## Implemented source foundations
 
@@ -17,7 +21,8 @@ Beau supplies a smaller dataset.
   object acceptance, pins and fenced cleanup intentions. It performs no transfers,
   engine calls or physical deletion.
 - `reference_api.py` and `reference_http.py` provide authenticated metadata routes
-  on an explicit loopback/TLS listener. No autostart or live enablement is installed.
+  on an explicit loopback/TLS listener. The coordinator's opt-in TLS listener is
+  installed; downstream worker intake and clients remain inactive.
 - `reference_transfer.py` verifies scoped grants and streams bounded HTTPS input
   objects with checksum verification, sync and exclusive publication. Redirects
   and caller-selected origins are refused. The store persists grants privately
@@ -56,21 +61,21 @@ Beau supplies a smaller dataset.
 
 ## Remaining integration and acceptance
 
-1. Install the opt-in TLS runtime configuration and current option discovery on
-   the coordinator while retaining the existing native API and queue authority.
-2. Mount the implemented Viewer storage broker on the actual NAS HTTPS route and
+1. Mount the implemented Viewer storage broker on the actual NAS HTTPS route and
    connect reservation-scoped transfers. Waiting jobs retain metadata only.
-3. Install the private worker daemon with persistent scratch and exact existing
+2. Install the private worker daemon with persistent scratch and exact existing
    engine/gate bindings. Never replay uncertain engine mutations automatically.
-4. Connect the qualified Viewer acceptance/receipt components to the production
+3. Connect the qualified Viewer acceptance/receipt components to the production
    ingestion closure and verify its actual storage durability barriers.
-5. Wire the separate input-retention receipt to enforced NAS retention and worker
+4. Wire the separate input-retention receipt to enforced NAS retention and worker
    input cleanup; qualify opt-in exact engine-task cleanup on the installed path.
    Missing files, downloads and age are not ACKs.
-6. Repeat relevant synthetic failure/recovery checks against the installed path
+5. Wire TreeDar into host-driver selection with authenticated NAS provenance and
+   sequential mixed-pipeline support before enabling its capability.
+6. Repeat relevant synthetic failure/recovery checks against the complete installed path
    before enabling real data; the isolated source checks do not prove deployment.
 
-Source acceptance: the latest full 572-test checkpoint passes in an isolated Linux container
+Source acceptance: the latest full 587-test checkpoint passes in an isolated Linux container
 with network disabled and a read-only source mount. Linux also exercises the
 symlink checks that Windows skips without symlink privileges. Tests include real loopback HTTP, metadata grant
 replay, transfer corruption/expiry and completion-commit crash windows. These

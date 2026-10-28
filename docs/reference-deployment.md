@@ -1,4 +1,37 @@
-# Reference runtime deployment preflight
+# Reference runtime installation and preflight
+
+## Current installation — October 28, 2026
+
+The sole coordinator now runs source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`,
+image `sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9`.
+Its existing name, authority, state volume, native credentials and Viewer endpoint
+`http://192.168.50.89:3005` are preserved. The private reference TLS API is now
+installed at `https://192.168.50.89:18443`, with staging-only Viewer credentials
+and separate worker roles. Dynamic options and role separation passed actual TLS
+checks; TreeDar and Gaussian availability remain false.
+
+Operation `2879e3a1f83a` drained both nodes, stopped the original owner, made and
+verified an offline state backup, started the replacement, and reopened only its
+own maintenance plans after health/authority/history verification. There is one
+running owner of the original volume. All 12 historical jobs (10 succeeded,
+2 failed) are preserved, with no new or active jobs. The original container is
+retained stopped as `ledgetop-processing-prototype-c3fcb3a-pre-reference-e2ccf48`.
+The private backup and checkpoint are under
+`reference-e2ccf48/coordinator-install-20261028-v2` in the operator root.
+
+Independent host checks passed. Windows and main-PC clients verified the private
+CA and authenticated boundary (unauthenticated requests returned 401); native
+health and the main SSH tunnel remain healthy. Both engine images and generation-1
+gates are unchanged, and legacy ClusterODX remains stopped. See
+[installed evidence](evidence/reference-installed-20261028.json).
+
+Reference worker/result daemons, NAS broker, reference Viewer client, input or
+engine-task cleanup and real-data processing are **not** activated. NAS SSH as
+`bkoltz` is rejected; the NAS account/management connection remains a requested
+owner detail. This installation qualifies coordinator infrastructure, not the
+complete NAS-backed processing pipeline.
+
+## Historical preflight — October 27, 2026
 
 This records the read-only October 27, 2026 preflight as `bkoltz` on cluster
 `192.168.50.89` and main `192.168.50.88`. No deployment configuration, certificates,
@@ -6,12 +39,12 @@ credentials, services, containers, gate bindings or task data were changed.
 Only process/container metadata, filesystem metadata, health, engine info/options
 and read-only queue state were inspected. No processing task was submitted.
 
-The source qualification in [reference-pipeline.md](reference-pipeline.md) is not
-an installed-runtime or production-ingestion qualification. The NAS broker HTTPS
-mount and its production configuration were not installed or verified in this
-preflight. No real-photo trial is authorized by these instructions.
+The earlier source qualification in [reference-pipeline.md](reference-pipeline.md)
+was separate from installation. The current limited installed acceptance is above;
+the NAS broker HTTPS mount and production ingestion are still unqualified.
+No real-photo trial is authorized by these instructions.
 
-## Verified installed state
+## Verified state before cutover
 
 | Item | Cluster `.89` | Main `.88` |
 | --- | --- | --- |
@@ -149,6 +182,16 @@ a timeout or forced kill does not authorize another owner or removal of stale
 read pins. Uncertain engine mutation and gate receipts remain for reconciliation.
 
 ## Rollback and retained data
+
+Use the current reviewed helper identified by
+`reference-e2ccf48/operator/reviewed-helper.json`, not the historical activation
+snapshot. Completed-install rollback first refuses changed or unverifiable job
+history, active work or reference rows without stopping the current replacement.
+After graceful stop, a separate read-only volume census fences an admission that
+raced the initial check. If that census changes or cannot be verified, only the
+exact replacement may resume; old startup and plan cancellation remain blocked
+for inspection. The patched helper was staged separately; no live rollback ran.
+All 15 migration regressions and the final 587-test Linux suite passed.
 
 Before admitting reference jobs, rollback is a drained stop of the new workers
 and sole coordinator, followed by the recorded original image/environment/native

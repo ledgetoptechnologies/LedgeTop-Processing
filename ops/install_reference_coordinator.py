@@ -478,16 +478,133 @@ def recover_candidate(root,state):
     return item
 
 
+def completed_rollback_precheck(state):
+    """Refuse post-install downgrade unless the installed owner is still unused.
+
+    This deliberately performs no checkpoint writes or Docker mutations. The
+    original binary cannot serve reference jobs, including terminal jobs whose
+    queue slot has already been released. The prepared baseline predates the
+    reference schema, so *any* reference row blocks this downgrade.
+    """
+    try:
+        identifier=state['newContainerId']
+        if not re.fullmatch(r'[0-9a-f]{64}',identifier):
+            raise CutoverStopped('replacement_identity_unavailable')
+        current=inspected(NAME)
+        def exact_owner(item):
+            return (item['Id']==identifier and item['Name']=='/'+NAME
+                and item['Image']==state['image']
+                and (item['Config'].get('Labels') or {}).get('org.ledgetop.reference.cutover')==state['operation']
+                and item['State']['Running'] is True
+                and item['State']['Health']['Status']=='healthy')
+        if not exact_owner(current):
+            raise CutoverStopped('installed_primary_changed')
+        facts(current,reference=True)
+        sole_owner(identifier)
+        _env,api,_operator=local_clients()
+        if activity(api)!=state['history']:
+            raise CutoverStopped('installed_history_changed')
+        query="""import json,sqlite3
+db=sqlite3.connect('file:/prototype-state/jobs.sqlite3?mode=ro',uri=True)
+try:
+ print(json.dumps({'referenceJobs':db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0]}))
+finally: db.close()
+"""
+        counts=json.loads(docker('exec','--user','10001:10001',identifier,'python','-c',query))
+        if (set(counts)!={'referenceJobs'} or type(counts['referenceJobs']) is not int
+                or counts['referenceJobs']!=0):
+            raise CutoverStopped('reference_history_prevents_downgrade')
+        # Recheck identity after the network/database reads. Never recover a
+        # candidate by label or modify the checkpoint during this preflight.
+        if not exact_owner(inspected(NAME)):
+            raise CutoverStopped('installed_primary_changed')
+    except Exception:
+        raise CutoverStopped('completed_rollback_precheck_failed') from None
+
+
+OFFLINE_ROLLBACK_CENSUS = """import json,sqlite3,hashlib,stat
+from pathlib import Path
+from collections import Counter
+p=Path('/source/jobs.sqlite3');s=p.lstat()
+assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid==10001
+assert not any(Path(str(p)+suffix).exists() for suffix in ('-wal','-shm','-journal'))
+db=sqlite3.connect('file:/source/jobs.sqlite3?mode=ro&immutable=1',uri=True);db.row_factory=sqlite3.Row
+try:
+ assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+ authority=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
+ rows=[];statuses=[]
+ for r in db.execute('SELECT * FROM jobs ORDER BY id'):
+  statuses.append(r['status'])
+  rows.append(dict(id=r['id'],requestId=r['request_id'],environment=r['environment'],profile=r['profile'],
+   status=r['status'],workerId=r['worker_id'],nodeId=r['node_id'],heldReason=r['held_reason'],
+   result=json.loads(r['result']) if r['result'] else None,createdAt=r['created_at'],updatedAt=r['updated_at']))
+ assert not any(s in ('queued','running','held') for s in statuses)
+ native=db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE removed=0').fetchone()[0]
+ reference=db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0]
+ history=dict(count=len(rows),statusCounts=dict(Counter(statuses)),sha256=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest())
+ print(json.dumps(dict(authorityId=authority,history=history,nativeViewerTasks=native,referenceJobs=reference)))
+finally: db.close()
+"""
+
+
+def offline_rollback_precheck(state):
+    """Census the stopped owner's volume without constructing a Queue."""
+    if docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():
+        raise CutoverStopped('offline_volume_still_owned')
+    result=json.loads(docker('run','--rm','--pull=never','--network','none','--read-only',
+        '--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
+        '--mount','type=volume,src='+VOLUME+',dst=/source,readonly','--entrypoint','python',
+        state['image'],'-c',OFFLINE_ROLLBACK_CENSUS))
+    if result!=dict(authorityId=AUTHORITY,history=state['history'],nativeViewerTasks=0,referenceJobs=0):
+        raise CutoverStopped('offline_downgrade_baseline_changed')
+
+
+def retain_replacement(root,state,candidate):
+    """On unsafe downgrade, resume only our exact original-name replacement."""
+    healthy=False
+    try:
+        item=inspected(candidate)
+        if (item['Id']!=state['newContainerId'] or item['Name']!='/'+NAME or item['Image']!=state['image']
+                or (item['Config'].get('Labels') or {}).get('org.ledgetop.reference.cutover')!=state['operation']):
+            raise CutoverStopped('replacement_identity_changed')
+        facts(item,reference=True)
+        if not item['State']['Running']:
+            docker('start',candidate)
+        _env,api,_operator=local_clients()
+        health(api,container_id=candidate)
+        sole_owner(candidate)
+        healthy=True
+    except Exception:
+        pass
+    checkpoint(root,state,'rollback_needs_inspection',sameVolumeRetained=True,
+        downgradeRefused=True,replacementHealthVerified=healthy)
+    return state
+
+
 def rollback(root,state):
     """Stop only our replacement, restore only the recorded old identity/name."""
-    checkpoint(root,state,'rollback_pending')
+    completed_origin=state['phase']=='completed' or state.get('rollbackFromCompleted') is True
+    if completed_origin:
+        completed_rollback_precheck(state)
+    # Retain the origin across interrupted retries; changing the phase must
+    # never turn a post-install rollback into initial activation recovery.
+    checkpoint(root,state,'rollback_pending',**({'rollbackFromCompleted':True} if completed_origin else {}))
     item=recover_candidate(root,state)
     if item is not None:
         candidate=item['Id']
+        started=(item['State']['Running'] or state.get('replacementStarted') is True
+            or bool(item['State'].get('StartedAt') and not item['State']['StartedAt'].startswith('0001-')))
+        if started:
+            checkpoint(root,state,'rollback_pending',replacementStarted=True)
         if item['State']['Running']:
             docker('stop','--time','-1',candidate,timeout=None)
         if inspected(candidate)['State']['Running']:
             raise CutoverStopped('replacement_not_confirmed_stopped')
+        if started:
+            try:
+                offline_rollback_precheck(state)
+            except Exception:
+                return retain_replacement(root,state,candidate)
         if item['Name']=='/'+NAME:
             docker('rename',candidate,state['failedName'])
     old=inspected(state['old']['containerId'])
