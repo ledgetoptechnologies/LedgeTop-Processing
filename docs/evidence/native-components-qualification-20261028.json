@@ -1,0 +1,258 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T19:39:20.130230+00:00",
+  "status": "source-qualified-and-inactive-staging-verified",
+  "source": {
+    "sourceCommit": "c60834cd156b7ec073ab381c0d9cde4ecee12bd3",
+    "archiveSha256": "f84611a970fe2d7df0b695591ed10c53aa9894bddf171ddd238d0d7931e4f9f8",
+    "archiveBytes": 4116480
+  },
+  "sourceFiles": 353,
+  "sourcePins": {
+    "processing/reference_parent_guard.py": "f89b5c6620f27f1c03103e44b7e7226f1af5bba2a5ad3bfdb15862f8af3fbeac",
+    "processing/reference_treedar_bundle.py": "8b7c09254acf4debde1ceb788f0f9f9956744ecd72d3b225e7d07e50f014c4ea",
+    "processing/reference_treedar_stage.py": "0ea6caa3e5700542209e1facf967cbe8e32d19de880dbab27cfbdd324464567f",
+    "ops/private_worker_directory.py": "60d6bab48b8cb244c5e52934b8af3326fdd8d095d1939657a87bd3ad48434d40",
+    "ops/reference_worker_daemon.py": "ea56e0456a4619df52d3087bd00432b356578781e45103cfe93c1d2e868eeaba",
+    "contracts/treedar-bundle-v1.contract.json": "0b11c0b8958fbfcb170b42fe6e61a07d95b17a7140d905137f760e74d6ec8b34"
+  },
+  "tests": {
+    "linux": {
+      "total": 1104,
+      "passed": 1100,
+      "skipped": 4,
+      "seconds": 139.297,
+      "exitCode": 0,
+      "resourceWarningsAsErrors": true,
+      "skipReason": "Four actual Node probes are not executable in cached Linux image without Node; passed separately."
+    },
+    "windows": {
+      "total": 7,
+      "passed": 7,
+      "skipped": 0,
+      "seconds": 0.562,
+      "exitCode": 0,
+      "scope": "Four actual Node update probes plus three pure bundle-manifest checks."
+    }
+  },
+  "independentReview": {
+    "parentGuardTests": 17,
+    "bundleTests": 23,
+    "treeStageTests": 30,
+    "result": "Final frozen source pins independently verified and cleared in their stated source scopes.",
+    "fixedFindings": [
+      "Private directory permissions drifting during fsync.",
+      "TreeDar RAW/proof file-count mismatch between seal and read.",
+      "Terminal exit-code/schema mismatch: complete evidence now validates before durable publication.",
+      "Proof file wrongly constrained by RAW cap instead of its separate proof allowance.",
+      "Actual Docker environment overrides and inherited OCI labels require exact merged pins.",
+      "Bundle census previously materialized unlimited names before checking limits.",
+      "Bundle preflight hashing previously read a growing source until EOF before checking bounds."
+    ]
+  },
+  "actualContainerPolicyProbe": {
+    "status": "actual-stopped-container-policy-inspected",
+    "imageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb",
+    "containerId": "355b6ffcfb262c67015a30f6dd6be6c231151babe15b096fcf7db202ee301666",
+    "neverStarted": true,
+    "environment": {
+      "baseKeys": [
+        "GPG_KEY",
+        "HOME",
+        "MPLCONFIGDIR",
+        "PATH",
+        "PIP_NO_CACHE_DIR",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONUNBUFFERED",
+        "PYTHON_SHA256",
+        "PYTHON_VERSION"
+      ],
+      "actualKeys": [
+        "GPG_KEY",
+        "HOME",
+        "MPLCONFIGDIR",
+        "PATH",
+        "PIP_NO_CACHE_DIR",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONPATH",
+        "PYTHONUNBUFFERED",
+        "PYTHON_SHA256",
+        "PYTHON_VERSION"
+      ],
+      "overridesMergeByKey": true,
+      "concatenationWouldDuplicateKeys": [
+        "PYTHONDONTWRITEBYTECODE"
+      ]
+    },
+    "actual": {
+      "mounts": [],
+      "tmpfs": {
+        "/tmp": "rw,nosuid,nodev,mode=1777"
+      },
+      "securityOpt": [
+        "no-new-privileges"
+      ],
+      "capDrop": [
+        "ALL"
+      ],
+      "pidsLimit": null,
+      "ipcMode": "private",
+      "restartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      },
+      "workingDir": "/",
+      "entrypoint": [
+        "/usr/local/bin/python"
+      ],
+      "cmd": [
+        "-B",
+        "-m",
+        "processing.treedar_engine",
+        "--inside"
+      ]
+    },
+    "ownedContainerRemoved": true
+  },
+  "crossLanguage": {
+    "viewerReferenceCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+    "viewerModuleRawSha256": "4f0f538df106e626e4ab374009f2ad118e72489322a484e2d676cbeef7d5550d",
+    "viewerProtocolCanonicalSha256": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159",
+    "originalExpectedBindingSha256": "d51bb5a63c48c56a0aa9b174c3ecb311ca16b0ccea7722067816880cf60a2665",
+    "probeSha256": "e6fc3321c1ae998864ad99986d56a795f70217de99e67092517e297487ee8c8b",
+    "nativeCli": {
+      "points": 8925,
+      "nTrees": 2,
+      "files": 16,
+      "rawBytes": 71059,
+      "scope": "Actual cached TreeDar0.0.1 CLI over deterministic invented LAS; five rasters report COG layout."
+    },
+    "finalBoundedProducerAndViewer": {
+      "status": "actual-python-bundle-accepted-by-pinned-viewer-safezip",
+      "archive": {
+        "byteSize": 76284,
+        "sha256": "08780cf1f4ac18922fb6e0a9230a533358e2c744640044006ee8e28cf2b6e311"
+      },
+      "manifestSha256": "f2cbfc3aac703ff7fd36c70438ed48cb51bae8cc3e15ca90d43ca558c82d7049",
+      "nativeFiles": 16,
+      "rawBytes": 71059,
+      "rejected": [
+        "canopy-height-relabelled-as-dem",
+        "unknown-native-file",
+        "source-lidar-byte-rebinding",
+        "unknown-top-level-field",
+        "duplicate-wire-generation",
+        "archive-sha-mismatch",
+        "full-archive-cross-job-binding",
+        "archive-budget"
+      ],
+      "sourceAndArchiveRetained": true,
+      "scope": "Local synthetic native TreeDar outputs only; no acquisition proof, outer result transport, durable ingestion acceptance or runtime deployment."
+    },
+    "failedHarnessAttempt": "First emitter invocation supplied normalized metadata to the raw-wire validator and was refused before output creation. New five-field wire fixture passed; original refusal log retained.",
+    "productionPublication": false,
+    "outerV2Agreed": false,
+    "genuineAcquisitionQualified": false
+  },
+  "independentStagingReadback": [
+    {
+      "node": "cluster",
+      "sourceCommit": "c60834cd156b7ec073ab381c0d9cde4ecee12bd3",
+      "archiveSha256": "f84611a970fe2d7df0b695591ed10c53aa9894bddf171ddd238d0d7931e4f9f8",
+      "verifiedFiles": 353,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/node-odx-gpu",
+          "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+          "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "running": true,
+          "startedAt": "2026-10-28T16:54:13.176495987Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/ledgetop-processing-prototype-c3fcb3a",
+          "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+          "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+          "running": true,
+          "startedAt": "2026-10-28T15:04:54.798609898Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/clusterodx",
+          "id": "e6d4da528e44c40f23816561187eea66f862dd36e870307d1cde12b57c39dc1a",
+          "image": "sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd",
+          "running": false,
+          "startedAt": "2026-10-28T00:22:55.543397097Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/cluster-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 19:37:49 UTC] ; stop_time=[Wed 2026-10-28 19:37:49 UTC] ; pid=392606 ; code=exited ; status=0 }"
+      }
+    },
+    {
+      "node": "main",
+      "sourceCommit": "c60834cd156b7ec073ab381c0d9cde4ecee12bd3",
+      "archiveSha256": "f84611a970fe2d7df0b695591ed10c53aa9894bddf171ddd238d0d7931e4f9f8",
+      "verifiedFiles": 353,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/ledgetop-main-processing-nodeodx-1",
+          "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+          "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+          "running": true,
+          "startedAt": "2026-10-28T15:24:31.019864573Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/dcgm_exporter",
+          "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+          "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+          "running": true,
+          "startedAt": "2026-10-27T21:19:37.266076107Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/node_exporter",
+          "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+          "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+          "running": true,
+          "startedAt": "2026-10-26T22:58:44.651792853Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 19:37:18 UTC] ; stop_time=[Wed 2026-10-28 19:37:18 UTC] ; pid=441934 ; code=exited ; status=0 }"
+      }
+    }
+  ],
+  "retainedInvariants": [
+    "Original parent identifiers, manifest, pipeline, claim, reservation and physical receipt remain intact across intermediate attempts.",
+    "No replay of uncertain native initialize/upload/commit or Docker create/start mutations.",
+    "Whole parent inputs and retained ODM baseline remain allocated; TreeDar RAW/control/proof are counted monotonically.",
+    "Partial bundle writer retains sources, intent and partial bytes and does not publish or settle the parent.",
+    "No finalization, outbox, cleanup, capability, factory or installed service change from the new components."
+  ],
+  "remaining": [
+    "Agree and implement versioned outer transport/proofs for ODM-only, TreeDar-only and combined jobs with Viewer owner.",
+    "Real durable bundle publication/recovery journal and trusted production publication guard; account every retained copy and partial on failure.",
+    "Once-only final delivery facade, worker/coordinator/Viewer durable acknowledgement chain, exact safe cleanup and reader/source retention.",
+    "Qualified factory/router/driver composition, genuine-LiDAR issuer/input/provenance readers and metadata-only reauthorization after long ODM.",
+    "Automatic original-claim stage continuation after coordinator restart: a read-only held snapshot cannot authorize a new stage by itself.",
+    "Installed HTTPS worker/coordinator identity and source/runtime epoch adoption; existing updater recipes pin older deployment identities and cannot be replayed unchanged.",
+    "Typed dynamically discovered enum/string options and large-manifest behavior require an agreed contract beyond current numeric/boolean v1.",
+    "Beau-controlled NAS access preflight and installed synthetic acceptance; real-photo trial remains paused for his chosen smaller dataset.",
+    "Viewer hierarchy assignment/editing, subgroup breadcrumbs/search/navigation and browser/mobile/visual/runtime revamp acceptance remain owner-coordinated."
+  ],
+  "productionRuntimeChanged": false,
+  "combinedCapabilityEnabled": false,
+  "gaussianSplatsEnabled": false,
+  "legacyClusterOdxStarted": false,
+  "fullGoalComplete": false
+}
