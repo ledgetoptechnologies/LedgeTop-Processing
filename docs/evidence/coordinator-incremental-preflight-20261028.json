@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T23:07:23.174274+00:00",
+  "status": "local-candidate-and-pure-incremental-validator-qualified-only",
+  "sourceCommit": "cfc9f5435a0c0cc506eb8c122f2f09f4e2ea3ec2",
+  "sourceReviewPins": {
+    "docs/coordinator-incremental-upgrade-plan.md": "b2bbb1d9618fddba7fbe6238baac133ee799b0246a56a616b5e182caba87456b",
+    "ops/incremental_coordinator_binding.py": "84a5db6676c612be08c6779899bba19ad430508a674262531509da97839cefee",
+    "tests/fixtures/coordinator_671/.gitattributes": "06fd629c1864df04195e598378f56219ed03598f67288447920dd7211c2cc3e3",
+    "tests/fixtures/coordinator_671/__init__.py": "e65e4b7926ddcab4b0965e3d58f37d50c09050560c581e29c3c5ec790b2d245c",
+    "tests/fixtures/coordinator_671/fixture.attrs": "da81a7a85a56bb495f5cbc56970e371cc28bdfa7ebb80d8e49d2986711b3c28d",
+    "tests/fixtures/coordinator_671/maintenance.py": "3db441879818e08a0009b052cee678d0bfad5e418be57682dc559a0c57e0e85c",
+    "tests/fixtures/coordinator_671/prototype.py": "a54d932429756956f1d6b46258e5ec834717bda90d08fb307edb9c723bd2fc8d",
+    "tests/test_incremental_coordinator_binding.py": "bf083880822069aa37946fc23b2597325bb5e2b0ecdc1cdfda2b9dd1bbfedd52"
+  },
+  "candidateImage": {
+    "image": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+    "sourceCommit": "6bbd468e1177746cb695e43195e75355b0681f23",
+    "archiveSha256": "5b36d3f1dc9bd05475a3e9b5b7440f53a89f3e6e92e89a76d307bb8dbe7b7b75",
+    "proof": {
+      "python": "3.13.17",
+      "uid": 10001,
+      "verifiedFiles": 63,
+      "importedModules": {
+        "processing.app": "/app/processing/app.py",
+        "processing.reference_runtime": "/app/processing/reference_runtime.py",
+        "processing.reference_http": "/app/processing/reference_http.py",
+        "processing.reference_store": "/app/processing/reference_store.py"
+      },
+      "bindMounts": false,
+      "liveConfiguration": false,
+      "startedServices": false
+    },
+    "runtimeActivated": false,
+    "remoteEffects": false
+  },
+  "tests": {
+    "candidateStartup": {
+      "passed": 22,
+      "seconds": 0.973,
+      "processingImportRoot": "/app/processing",
+      "scope": "Reference runtime/startup/schema1/shutdown; no live private configuration."
+    },
+    "finalValidator": {
+      "authorPassed": 10,
+      "authorSeconds": 0.136,
+      "independentPassed": 10,
+      "independentSeconds": 0.143,
+      "image": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+      "network": "none",
+      "readOnly": true,
+      "resourceWarningsAsErrors": true
+    },
+    "earlierRelated": {
+      "passed": 40,
+      "seconds": 17.057,
+      "scope": "Earlier eight-case validator plus unchanged historical strict updater; final bounded-directory/WAL changes separately covered by final ten candidate tests."
+    }
+  },
+  "observedRuntime": {
+    "source": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+    "container": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+    "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+    "authority": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "terminalHistory": 12,
+    "existingOwnedMaintenanceRows": 2,
+    "activeJobs": 0,
+    "configSchema": 1,
+    "recoveryBindingsPresent": false,
+    "schemaSha256": "1f4bc730fb0242e380f6eaeef1a2b197bd883c17377c082a87a18238c4f2b80e",
+    "databaseHeader": "4096-byte pages, DELETE write/read versions1/1",
+    "updaterSource": "020c15c79577aff83af388fe476451ceca545518"
+  },
+  "proved": [
+    "Actual candidate contains exact63 frozen6bb Processing files; imports resolve inside /app with no bind mounts or live config.",
+    "Bounded exact-schema predecessor671 Queue/Maintenance and candidate Queue cold reopen preserve representative terminal/owned history.",
+    "Full old owned rows remain unchanged; only exact operation rows and node revision/plan/image CAS transitions are admitted.",
+    "Directory census stops at fifth entry; unsupported/WAL/short SQLite physical headers fail before SQLite can create sidecars."
+  ],
+  "remaining": [
+    "Existing stale-ID executor/gate bridge integration into an explicit incremental profile is not yet qualified.",
+    "Actual full application/private-config/state-copy migration and rollback closure, live gate possession and sole-volume-owner checks remain required.",
+    "No coordinator stop/rename/start, maintenance plan or worker activation is authorized merely by these source receipts.",
+    "Viewer/NAS assembly, full modes, metadata custody/reauthorization and UI acceptance remain under the full active goal."
+  ],
+  "remoteRuntimeChanged": false,
+  "remoteMaintenanceChanged": false,
+  "remoteConfigChanged": false,
+  "nasChanged": false,
+  "packagePublished": false,
+  "githubActionsRun": false
+}
