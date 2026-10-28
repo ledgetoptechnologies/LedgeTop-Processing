@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from unittest.mock import patch
 from contextlib import redirect_stderr
 from http.server import ThreadingHTTPServer
@@ -24,8 +25,9 @@ from processing.reference_http import create_reference_http_server
 from processing.config import Config, from_environment
 from processing.prototype import Queue, REFERENCE_PROFILE, VIEWER_PROFILE
 from processing.reference_runtime import (
-    ReferenceRuntime, RuntimeConfigurationError, discovered_policy, load_reference_settings,
+    ReferenceRuntime, ReferenceSettings, RuntimeConfigurationError, discovered_policy, load_reference_settings,
 )
+from processing.reference_recovery import RecoveryNodeBinding
 
 
 class FakeServer:
@@ -108,6 +110,118 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertIsNone(handler.reference_listener)
         self.assertNotIn(REFERENCE_PROFILE, handler.prototype_queue.allowed_profiles)
         self.assertIn(VIEWER_PROFILE, handler.prototype_queue.allowed_profiles)
+
+    def recovery_config(self,authority='11111111-1111-4111-8111-111111111111'):
+        value=copy.deepcopy(self.value);value['schemaVersion']=2
+        value['recoveryBindings']={node:dict(engineId='physical-'+node,authorityId=authority,
+            coordinatorOrigin='http://127.0.0.1:18080',gateGeneration=1,outputBudget=1000)
+            for node in self.config.prototype_node_ids}
+        return value
+
+    def test_schema2_loads_closed_frozen_bindings_and_legacy_settings_default_is_none(self):
+        legacy=self.settings();self.assertIsNone(legacy.recovery_bindings)
+        self.assertIsNone(ReferenceSettings(legacy.listener,legacy.viewer_bearers,legacy.workers,legacy.stream_budget).recovery_bindings)
+        self.value=self.recovery_config();self.write_config();loaded=self.settings()
+        self.assertEqual(set(loaded.recovery_bindings),{'cluster','main'})
+        self.assertTrue(all(type(value) is RecoveryNodeBinding for value in loaded.recovery_bindings.values()))
+        self.assertEqual(loaded.recovery_bindings['main'].engine_id,'physical-main')
+        self.value['recoveryBindings']['main']['outputBudget']=2
+        self.assertEqual(loaded.recovery_bindings['main'].output_budget,1000)
+
+    def test_schema2_configuration_rejects_unknown_missing_coverage_versions_and_types(self):
+        original=self.recovery_config()
+        changes=[lambda v:v.update(schemaVersion=True),lambda v:v.update(schemaVersion=2.0),lambda v:v.update(schemaVersion=3),
+            lambda v:v.pop('recoveryBindings'),lambda v:v.update(recoveryBindings=None),lambda v:v.update(recoveryBindings={}),
+            lambda v:v['recoveryBindings'].pop('main'),lambda v:v['recoveryBindings'].update(other=v['recoveryBindings']['main']),
+            lambda v:v.update(extra=True),lambda v:v['recoveryBindings']['main'].update(nodeId='main'),
+            lambda v:v['recoveryBindings']['main'].update(authorityId='22222222-2222-4222-8222-222222222222')]
+        for key in ('engineId','authorityId','coordinatorOrigin','gateGeneration','outputBudget'):
+            changes.append(lambda v,key=key:v['recoveryBindings']['main'].pop(key))
+        for key,bad in [('engineId',True),('engineId','bad engine'),('authorityId','bad'),('authorityId',False),
+            ('coordinatorOrigin','https://worker.example/'),('coordinatorOrigin','https://user:pass@worker.example'),
+            ('coordinatorOrigin','https://worker.example/path'),('gateGeneration',True),('gateGeneration',1.0),
+            ('gateGeneration',0),('outputBudget',False),('outputBudget',1.0),('outputBudget',0)]:
+            changes.append(lambda v,key=key,bad=bad:v['recoveryBindings']['main'].update({key:bad}))
+        for change in changes:
+            self.value=copy.deepcopy(original);change(self.value);self.write_config()
+            with self.subTest(change=change),self.assertRaises(RuntimeConfigurationError):self.settings()
+        self.value=copy.deepcopy(original);self.value['schemaVersion']=1;self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
+
+    def test_invalid_schema2_is_rejected_before_queue_or_listener_creation(self):
+        self.value=self.recovery_config();self.value['recoveryBindings'].pop('main');self.write_config()
+        config=replace(self.config,reference_config_path=str(self.path))
+        with patch('processing.app.Queue',side_effect=AssertionError('Queue must not open')),patch('processing.reference_runtime.create_reference_http_server',side_effect=AssertionError('listener must not open')):
+            with self.assertRaises(RuntimeConfigurationError):make_handler(config)
+        self.assertFalse(Path(config.prototype_state_dir).exists())
+
+    def test_legacy_runtime_does_not_create_recovery_tables(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        runtime=self.runtime(queue);self.assertIsNone(runtime.control.worker.recovery)
+        with queue._db() as db:
+            tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertFalse(any(name.startswith('reference_recovery_') for name in tables))
+
+    @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
+    def test_schema2_authority_mismatch_fails_before_tls_services_or_listener_and_closes_queue(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
+        actual=queue.authority_id;queue.close();self.value=self.recovery_config();self.write_config()
+        self.assertNotEqual(actual,self.value['recoveryBindings']['main']['authorityId'])
+        config=replace(self.config,viewer_enabled=False,reference_config_path=str(self.path))
+        with patch('processing.reference_runtime.ssl.SSLContext.load_cert_chain',side_effect=AssertionError('no TLS assembly')),patch('processing.reference_runtime.create_reference_http_server',side_effect=AssertionError('no listener')):
+            with self.assertRaises(RuntimeConfigurationError):make_handler(config)
+        reopened=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(reopened.close)
+        self.assertEqual(reopened.authority_id,actual)
+        with reopened._db() as db:self.assertFalse(db.execute("SELECT name FROM sqlite_master WHERE name GLOB 'reference_recovery_*'").fetchall())
+
+    @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
+    def test_configured_handler_finishes_recovery_factory_before_any_listener_or_dispatcher_start(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);authority=queue.authority_id;queue.close()
+        self.value=self.recovery_config(authority);self.write_config();config=replace(self.config,reference_config_path=str(self.path))
+        first,second=self.tls_patches()
+        with first,second:handler=make_handler(config)
+        self.addCleanup(handler.prototype_queue.close);self.addCleanup(handler.viewer_service.close)
+        runtime=handler.reference_listener
+        self.assertIsNone(runtime._server);self.assertIsNone(runtime._thread);self.assertIsNone(handler.viewer_service._thread)
+        self.assertIsNotNone(runtime.control.worker.recovery)
+        with handler.prototype_queue._db() as db:
+            startup=db.execute('SELECT * FROM reference_recovery_startup WHERE singleton=1').fetchone()
+            self.assertEqual(startup['epoch_id'],handler.prototype_queue.startup_id)
+            self.assertEqual(startup['authority_id'],authority)
+
+    def test_direct_settings_cannot_bypass_recovery_binding_type_or_node_coverage(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        settings=self.settings()
+        for bindings in ({},{'cluster':{}},{'cluster':{},'main':{}},[]):
+            with self.subTest(bindings=bindings),self.assertRaises(RuntimeConfigurationError):
+                ReferenceRuntime(queue,self.config,replace(settings,recovery_bindings=bindings))
+
+    @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
+    def test_configured_recovery_routes_resume_original_claim_and_same_epoch_reassembly_does_not_rehold(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        self.value=self.recovery_config(queue.authority_id);self.write_config();runtime=self.runtime(queue)
+        fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
+        from processing import reference_protocol as protocol
+        checked=protocol.validate_submission(fixture['submission'],environment='staging',capability_fingerprint=fixture['submission']['capabilityFingerprint'])
+        job=runtime.store.submit(checked)[0];identity=self.value['workers']['cluster']
+        claim=runtime.store.claim(job['jobId'],node_id='cluster',worker_id=identity['workerId'],worker_instance_id=identity['instanceId'],claim_request_id='original-runtime-claim')
+        runtime.store.reserve(job['jobId'],fixture['transferRequest'],node_id='cluster');runtime.store.update_phase(job['jobId'],'fetching');runtime.store.update_phase(job['jobId'],'processing')
+        queue.close();queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        runtime=self.runtime(queue);prefix='/ltds/worker/v1/jobs/'+job['jobId']+'/'
+        headers={'Authorization':'Bearer '+identity['bearer'],'X-Claim-Token':claim['claimToken']}
+        def call(method,suffix,body=b'',protected=True):return runtime.api.handle(method,prefix+suffix,headers,body,protected_transport=protected)
+        self.assertEqual(call('GET','recovery-state',protected=False).status,503)
+        state=call('GET','recovery-state');self.assertEqual(state.status,200,state.body);state=state.body
+        self.assertTrue(state['eligible']);self.assertEqual(state['claim']['heldReason'],'coordinator_restart')
+        binding=state['physicalBinding'];parent={key:state['claim'][key] for key in ('jobId','generation','environment','nodeId','workerId','workerInstanceId','authorityId','claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest')}
+        parent.update(engineId=binding['engine_id'],coordinatorOrigin=binding['coordinator_origin'],gateGeneration=binding['gate_generation'],outputBudget=binding['output_budget'],inputBytes=state['reservation']['inputBytes'],reservationId=state['reservation']['reservationId'],gateReceiptId='a'*32)
+        request=dict(schemaVersion=1,requestId=str(uuid.uuid4()),coordinatorEpoch=state['coordinatorEpoch'],expectedNodeRevision=state['node']['revision'],parentBinding=parent,transferRequestSha256=state['reservation']['transferRequestSha256'],workerEvidenceSha256='e'*64)
+        resumed=call('POST','recover',protocol.canonical_json(request));self.assertEqual(resumed.status,200,resumed.body)
+        self.assertEqual(queue.get(job['jobId'])['status'],'running');epoch=queue.startup_id
+        second=self.runtime(queue);self.assertEqual(queue.startup_id,epoch);self.assertEqual(queue.get(job['jobId'])['status'],'running')
+        receipt=second.api.handle('GET',prefix+'recovery-receipts/'+request['requestId'],headers,protected_transport=True)
+        self.assertEqual(receipt.status,200);self.assertEqual(receipt.body,resumed.body)
+        self.assertEqual(second.store.get(job['jobId'],private=True)['claimToken'],claim['claimToken'])
 
     def test_explicit_runtime_shares_exact_native_queue_authority_and_global_slot(self):
         config = replace(self.config, reference_config_path=str(self.path))

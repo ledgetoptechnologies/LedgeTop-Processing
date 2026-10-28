@@ -22,6 +22,7 @@ from .reference_http import create_reference_http_server
 from .reference_result_proxy import ResultProxy
 from .reference_store import ReferenceStore
 from .reference_tls import verified_client_context
+from .reference_recovery import RecoveryNodeBinding
 
 MAX_CONFIG_BYTES = 64 * 1024
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
@@ -38,6 +39,7 @@ class ReferenceSettings:
     viewer_bearers: dict
     workers: dict
     stream_budget: dict
+    recovery_bindings: dict | None = None
 
 
 def _file(path, *, private):
@@ -71,9 +73,10 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        p._closed(value, ("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget"), "runtime configuration")
-        if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
+        fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
+        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -120,8 +123,20 @@ def load_reference_settings(path, config):
         if type(budget["maxConcurrent"]) is not int or not 1 <= budget["maxConcurrent"] <= 16:
             raise RuntimeConfigurationError("invalid stream concurrency budget")
         p._integer(budget["maxObjectBytes"], "stream object budget")
+        recovery = None
+        if value["schemaVersion"] == 2:
+            configured=value["recoveryBindings"]
+            if type(configured) is not dict or set(configured)!=set(config.prototype_node_ids):
+                raise RuntimeConfigurationError("recovery bindings must exactly cover configured nodes")
+            recovery={}
+            for node,physical in configured.items():
+                p._closed(physical,("engineId","authorityId","coordinatorOrigin","gateGeneration","outputBudget"),"trusted recovery binding")
+                recovery[node]=RecoveryNodeBinding(node,physical["engineId"],physical["authorityId"],
+                    physical["coordinatorOrigin"],physical["gateGeneration"],physical["outputBudget"])
+            if len({binding.authority_id for binding in recovery.values()})!=1:
+                raise RuntimeConfigurationError("recovery nodes must share one configured authority")
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget))
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -186,6 +201,19 @@ class ReferenceRuntime:
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
         try:
+            recovery=settings.recovery_bindings
+            if recovery is not None:
+                if (type(recovery) is not dict or set(recovery)!=set(config.prototype_node_ids)
+                        or set(recovery)!=set(queue.node_ids)):
+                    raise RuntimeConfigurationError("recovery binding coverage changed")
+                for node,physical in recovery.items():
+                    if (type(physical) is not RecoveryNodeBinding or physical.node_id!=node
+                            or physical.authority_id!=queue.authority_id):
+                        raise RuntimeConfigurationError("recovery queue authority mismatch")
+                    # Recheck even direct settings callers before any listener
+                    # or feature startup can expose the configured authority.
+                    RecoveryNodeBinding(**vars(physical))
+                recovery=dict(recovery)
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
@@ -202,7 +230,8 @@ class ReferenceRuntime:
             placeholder = p.digest({"runtime": "discovery_required"})
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,
-                options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False)
+                options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
+                recovery_bindings=recovery)
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))
