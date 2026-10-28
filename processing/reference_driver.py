@@ -7,6 +7,7 @@ optional exact-object cleanup continue after slot release.
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -45,6 +46,13 @@ class DriverHeld(ValueError):
 
 class DriverWait(ValueError):
     pass
+
+
+class DriverStepLease:
+    def __init__(self,driver):self.driver=driver;self.pid=os.getpid();self.thread=threading.get_ident();self.lock=driver._lock
+    def check(self,driver):
+        if self.driver is not driver or self.pid!=os.getpid() or self.thread!=threading.get_ident() or getattr(driver,'_active_step',None) is not self or self.lock is not driver._lock or not self.lock.locked():raise DriverHeld('actual_driver_step_required')
+        driver._state_owner.check(driver.path.parent)
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -114,7 +122,12 @@ class ReferenceDriver:
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
-                 execution_router=None, provenance_client=None, state_owner=None):
+                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None):
+        self._combined_policy=combined_policy;self._combined_policy_initial=combined_policy;self.combined_preparation=None;self._combined_preparation_initial=None;self._active_step=None
+        if combined_policy is not None:
+            from .reference_combined_preparation import CombinedPreparationPolicy
+            from ops.reference_worker_daemon import DaemonStateLock
+            if type(combined_policy) is not CombinedPreparationPolicy or type(state_owner) is not DaemonStateLock or execution_router is not None or provenance_client is not None:raise ValueError('separate owned combined preparation profile required')
         if state_owner is not None:
             state_owner.check(Path(state_path).absolute().parent)
         self._state_owner=state_owner
@@ -188,6 +201,7 @@ class ReferenceDriver:
         finally:
             os.close(descriptor)
         self._open = build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=ssl_context)).open
+        self._initial_open=self._open;self._ssl_context=ssl_context
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS driver_jobs (
               created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
@@ -206,17 +220,22 @@ class ReferenceDriver:
             if execution_router is not None:
                 settings['executionRouting'] = dict(mode='per-job-v1', path=str(execution_router.path),
                     provenancePath=str(provenance_client.path) if provenance_client is not None else None)
+            if combined_policy is not None:
+                from dataclasses import asdict
+                settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
             binding = p.canonical_json(settings).decode()
             old = db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
             if execution_router is not None and old is None and db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
                 raise ValueError('unbound legacy driver claims require reconciliation')
             if old and old[0] != binding:
                 previous = json.loads(old[0])
-                if (execution_router is None or 'executionRouting' in previous
+                if combined_policy is not None and 'combinedPreparation' not in previous and previous=={key:value for key,value in settings.items() if key!='combinedPreparation'} and not db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
+                    db.execute('UPDATE driver_binding SET binding=? WHERE singleton=1',(binding,))
+                elif (execution_router is None or 'executionRouting' in previous
                         or previous != {key:value for key,value in settings.items() if key != 'executionRouting'}
                         or db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone()):
                     raise ValueError('worker driver ownership changed')
-                db.execute('UPDATE driver_binding SET binding=? WHERE singleton=1', (binding,))
+                else:db.execute('UPDATE driver_binding SET binding=? WHERE singleton=1', (binding,))
             if execution_router is not None:
                 # A route must precede any engine intent. Enabling routing may
                 # not silently adopt an existing legacy worker execution.
@@ -243,16 +262,37 @@ class ReferenceDriver:
             db.execute('INSERT OR IGNORE INTO driver_engine_pin VALUES(1,?)', (worker.version,))
         self.sender = ReferenceSender(outbox, self.origin, bearer_token=worker_bearer,
             claim_binding_provider=self._claim_binding, ssl_context=ssl_context, timeout=10)
+        if combined_policy is not None:
+            from .reference_combined_preparation import CombinedParentPreparation
+            self.combined_preparation=CombinedParentPreparation(self,combined_policy,runtime_probe=combined_runtime_probe)
+            self._combined_preparation_initial=self.combined_preparation
+
+    def _storage(self):
+        if self._combined_policy is not self._combined_policy_initial:raise DriverHeld('combined_profile_identity_changed')
+        if self._combined_policy is None:return
+        maximum=self._combined_policy.driver_page_cap*4096
+        if self.path.exists() and self.path.stat().st_size>maximum:raise DriverHeld('combined_driver_storage_cap')
+        if any(os.path.lexists(str(self.path)+suffix) for suffix in ('-wal','-shm')):raise DriverHeld('combined_driver_rollback_required')
+        rollback=Path(str(self.path)+'-journal')
+        if os.path.lexists(rollback):
+            info=rollback.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size>2*maximum:raise DriverHeld('combined_driver_rollback_cap')
 
     @contextmanager
     def _db(self):
+        self._storage()
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA synchronous=FULL')
         try:
+            if self._combined_policy is not None:
+                cap=self._combined_policy.driver_page_cap
+                if db.execute('PRAGMA page_size').fetchone()[0]!=4096 or db.execute('PRAGMA page_count').fetchone()[0]>cap:raise DriverHeld('combined_driver_storage_format')
+                if db.execute('PRAGMA max_page_count='+str(cap)).fetchone()[0]!=cap:raise DriverHeld('combined_driver_storage_cap')
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 yield db
+                self._storage()
         finally:
             db.close()
 
@@ -310,7 +350,7 @@ class ReferenceDriver:
         raw = {key: submission[key] for key in ('schemaVersion', 'submissionId', 'manifest', 'pipeline', 'capabilityFingerprint')}
         kind = self._pipeline_kind(submission)
         checked = p.validate_submission(raw, environment=job['environment'],
-            capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar') if self.execution_router else ('odm',),
+            capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar') if self.execution_router or self._combined_policy else ('odm',),
             allowed_odm_options=self.worker.allowed_options)
         if (job['environment'] not in self.allowed_environments or job['nodeId'] != self.node_id
                 or p.canonical_json(checked) != p.canonical_json(submission)
@@ -329,6 +369,10 @@ class ReferenceDriver:
                          and abs(value) <= p.MAX_SAFE_INTEGER and math.isfinite(value)))
             if not valid:
                 raise DriverHeld('engine_option_type_mismatch')
+        if self._combined_policy is not None and self._pipeline_kind(submission)!='combined':raise DriverHeld('combined_prepare_profile_only')
+        if self._combined_policy is not None:
+            from .reference_pipeline import _submission
+            _submission(submission,job['environment'])
 
     @staticmethod
     def _pipeline_kind(submission):
@@ -347,6 +391,9 @@ class ReferenceDriver:
         for key in ('manifestSha256', 'pipelineDigest'):
             p._hash(hint[key], key)
         kind = hint['kind']
+        if self.combined_preparation is not None:
+            if kind=='combined':return hint
+            raise DriverHeld('combined_prepare_profile_only')
         if kind not in ('odm', 'treedar'):
             raise DriverHeld('unsupported_execution_pipeline')
         if kind == 'treedar' and (self.execution_router.treedar_worker is None or self.provenance_client is None):
@@ -357,6 +404,7 @@ class ReferenceDriver:
         return self.execution_router.worker_for(job_id, for_execution=for_execution) if self.execution_router else self.worker
 
     def _kind(self, job_id):
+        if self.combined_preparation is not None and self.combined_preparation.is_combined(job_id):return 'combined'
         return self.execution_router.kind_for(job_id) if self.execution_router else 'odm'
 
     def _apply_acceptance(self, job_id, receipts):
@@ -365,6 +413,8 @@ class ReferenceDriver:
 
     def _bind_claim(self, claim, data):
         self._validate_job(claim)
+        if self._pipeline_kind(claim['submission'])=='combined' and self.combined_preparation is not None:
+            self._advice(claim,data.get('execution'));return
         if self.execution_router is not None:
             hint = self._advice(claim, data.get('execution'))
             if hint['kind'] != self._pipeline_kind(claim['submission']):
@@ -463,10 +513,16 @@ class ReferenceDriver:
             if self._state_owner is not None:
                 try:self._state_owner.check(self.path.parent)
                 except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
-            try:
-                background = self._background()
-            except Exception:
-                background = {'state': 'background_retry'}
+            self._active_step=DriverStepLease(self)
+            if self._combined_policy_initial is not None:
+                if self.combined_preparation is not self._combined_preparation_initial or self._combined_policy is not self._combined_policy_initial:raise DriverHeld('combined_profile_identity_changed')
+                self.combined_preparation.before_step(self._active_step)
+                background={'state':'background_disabled_in_preparation_profile'}
+            else:
+                try:
+                    background = self._background()
+                except Exception:
+                    background = {'state': 'background_retry'}
             result = self._step()
             return background if result['state'] == 'idle' and background['state'] == 'completed' else result
         except DriverHeld as error:
@@ -475,9 +531,13 @@ class ReferenceDriver:
             return {'state': 'retry_wait', 'reason': str(error)}
         except (RouteConflict, TreeDarHeld):
             return {'state': 'held', 'reason': 'execution_reconciliation_required'}
-        except Exception:
+        except Exception as error:
+            if self.combined_preparation is not None:
+                from .reference_combined_preparation import CombinedPreparationHeld
+                if isinstance(error,CombinedPreparationHeld):return {'state':'held','reason':str(error)}
             return {'state': 'retry_wait', 'reason': 'driver_step_unavailable'}
         finally:
+            self._active_step=None
             self._lock.release()
 
     def _background(self):
@@ -609,7 +669,7 @@ class ReferenceDriver:
             if head['environment'] not in self.allowed_environments:
                 raise DriverHeld('worker_environment_not_enabled')
             data = {}
-            if self.execution_router is not None:
+            if self.execution_router is not None or self.combined_preparation is not None:
                 data['execution'] = self._advice(head, next_job.get('execution'))
             job_id = head['jobId']
             p._slug(job_id, 'job ID')
@@ -621,7 +681,7 @@ class ReferenceDriver:
         job_id, request_id, stage = row['job'], row['claim_request'], row['stage']
         data = json.loads(row['data'])
         if stage == 'claim_pending':
-            if self.execution_router is not None:
+            if self.execution_router is not None or self.combined_preparation is not None:
                 self._advice(data.get('execution', {}), data.get('execution'))
             if not self._ready():
                 return {'state': 'not_ready', 'jobId': job_id}
@@ -631,6 +691,19 @@ class ReferenceDriver:
             if claim['status'] != 'running':
                 raise DriverHeld('unstarted_claim_requires_reconciliation')
             self._bind_claim(claim, data)
+            if self.combined_preparation is not None:
+                if 'reservation' in data and 'originalCombinedClaim' not in data:raise DriverHeld('combined_claim_intent_binding_missing')
+                original={key:claim[key] for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest')}
+                original['claimTokenSha256']=hashlib.sha256(claim['claimToken'].encode()).hexdigest()
+                if 'originalCombinedClaim' in data and p.canonical_json(data['originalCombinedClaim'])!=p.canonical_json(original):raise DriverHeld('original_combined_claim_response_changed')
+                data['originalCombinedClaim']=original
+                if 'reservation' not in data:
+                    data['reservation']=dict(reservationId='driver-'+secrets.token_hex(16),generation=claim['generation'],expiresAt=datetime.fromtimestamp(self.clock()+self.transfer_ttl,timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z'),manifestSha256=claim['manifestSha256'],byteBudget=min(p.MAX_SAFE_INTEGER,3*claim['submission']['manifest']['totalBytes']),nonce=secrets.token_hex(16))
+                    if len(p.canonical_json(data))>self._combined_policy.max_intent_bytes:raise DriverHeld('bounded_combined_claim_intent_required')
+                    self._save(job_id,'claim_pending',data)
+                self.ledger.reserve(job_id=job_id,generation=claim['generation'],reservation_id=data['reservation']['reservationId'],manifest_sha256=claim['manifestSha256'],input_bytes=claim['submission']['manifest']['totalBytes'],output_budget=self.output_budget,environment=claim['environment'],ttl_seconds=self.transfer_ttl,worker_ready=True)
+                data['claim']=claim;self._save(job_id,'reservation_pending',data)
+                return {'state':'reservation_pending','jobId':job_id}
             data['claim'] = claim
             self._save(job_id, 'claimed', data)
             return {'state': 'claimed', 'jobId': job_id}
@@ -702,6 +775,9 @@ class ReferenceDriver:
             data['inputPaths'] = paths
             self._save(job_id, 'processing_pending', data)
             return {'state': 'processing_pending', 'jobId': job_id}
+        if stage in ('execution_pending','combined_prepared_held') and self._kind(job_id)=='combined':
+            result=self.combined_preparation.prepare(job_id,lease=self._active_step)
+            self._save(job_id,'combined_prepared_held',data);return result
         if stage == 'execution_pending':
             adapter = self._adapter(job_id, for_execution=True)
             exists = False

@@ -202,9 +202,12 @@ def validate_stage_proof(value,*,intent,policy):
 
 
 class PipelineJournal:
-    def __init__(self,path,policy,*,verify_provenance):
+    def __init__(self,path,policy,*,verify_provenance,storage_page_cap=0):
         if os.name!='posix' or type(policy) is not PipelinePolicy or not callable(verify_provenance):raise PipelineHeld('fixed_linux_stage_policy_required')
         self.policy,self.verify_provenance=policy,verify_provenance
+        p._integer(storage_page_cap,'pipeline storage page cap',allow_zero=True)
+        if storage_page_cap and not 16<=storage_page_cap<=16384:raise PipelineHeld('bounded_pipeline_storage_required')
+        self.storage_page_cap=storage_page_cap;self._storage_page_cap=storage_page_cap
         self.policy_sha256=p.digest(asdict(policy));self._pid=os.getpid();self._mutex=threading.RLock();self._busy=False
         self.path=Path(path).absolute();self.root=self.path.parent
         if self.path.resolve()!=self.path or any(part.is_symlink() for part in (self.path,*self.path.parents)):
@@ -221,6 +224,8 @@ class PipelineJournal:
         self._path_identity=self._create(self.path);self._lock_identity=self._create(self.lock_path)
         self._binding=encoded(dict(protocol=VERSION,policy=asdict(policy),path=str(self.path),rootIdentity=self._root_identity,
             databaseIdentity=self._path_identity,lockIdentity=self._lock_identity))
+        if storage_page_cap:
+            self._binding=encoded(dict(json.loads(self._binding),storagePageCap=storage_page_cap))
         with self._operation(),self._db() as db:
             names={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if names-{'pipeline_binding','pipeline_parents','pipeline_stages'}:raise PipelineHeld('dedicated_pipeline_journal_required')
@@ -251,10 +256,22 @@ class PipelineJournal:
     def _check(self):
         if self._pid!=os.getpid():raise PipelineHeld('pipeline_process_changed')
         root=self.root.stat()
-        if (p.digest(asdict(self.policy))!=self.policy_sha256 or self.root.resolve()!=self.root or stat.S_IMODE(root.st_mode)!=0o700
+        if (self.storage_page_cap!=self._storage_page_cap or p.digest(asdict(self.policy))!=self.policy_sha256 or self.root.resolve()!=self.root or stat.S_IMODE(root.st_mode)!=0o700
                 or root.st_uid!=os.geteuid() or (root.st_dev,root.st_ino)!=self._root_identity
                 or self._file(self.path)!=self._path_identity or self._file(self.lock_path)!=self._lock_identity):
             raise PipelineHeld('pipeline_identity_changed')
+        if self.storage_page_cap:
+            maximum=self.storage_page_cap*4096
+            if self.path.stat().st_size>maximum or any(os.path.lexists(str(self.path)+suffix) for suffix in ('-wal','-shm')):raise PipelineHeld('pipeline_storage_cap_or_mode_changed')
+            rollback=Path(str(self.path)+'-journal')
+            if os.path.lexists(rollback):
+                info=rollback.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size>2*maximum:raise PipelineHeld('pipeline_rollback_cap_exceeded')
+            if self.path.stat().st_size:
+                descriptor=os.open(self.path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                try:header=os.read(descriptor,32)
+                finally:os.close(descriptor)
+                if header[:16]!=b'SQLite format 3\0' or header[16:20]!=b'\x10\x00\x01\x01' or int.from_bytes(header[28:32],'big')>self.storage_page_cap:raise PipelineHeld('pipeline_storage_format_changed')
 
     @contextmanager
     def _operation(self):
@@ -273,12 +290,19 @@ class PipelineJournal:
 
     @contextmanager
     def _db(self):
-        self._check();db=sqlite3.connect(self.path,timeout=5);db.row_factory=sqlite3.Row
+        self._check()
+        if self.storage_page_cap and self.path.stat().st_size>self.storage_page_cap*4096:raise PipelineHeld('pipeline_storage_cap_exceeded')
+        db=sqlite3.connect(self.path,timeout=5);db.row_factory=sqlite3.Row
         try:
+            if self.storage_page_cap:
+                if db.execute('PRAGMA page_size').fetchone()[0]!=4096 or db.execute('PRAGMA page_count').fetchone()[0]>self.storage_page_cap:raise PipelineHeld('pipeline_storage_format_changed')
+                if db.execute('PRAGMA max_page_count='+str(self.storage_page_cap)).fetchone()[0]!=self.storage_page_cap:raise PipelineHeld('pipeline_storage_cap_exceeded')
             if db.execute('PRAGMA journal_mode').fetchone()[0]!='delete':raise PipelineHeld('pipeline_journal_mode_changed')
             db.execute('PRAGMA synchronous=FULL');db.execute('BEGIN IMMEDIATE')
             if getattr(self,'_initialized',False):self._schema(db)
-            yield db;self._check();self._commit(db)
+            yield db;self._check()
+            if self.storage_page_cap and db.execute('PRAGMA page_count').fetchone()[0]>self.storage_page_cap:raise PipelineHeld('pipeline_storage_cap_exceeded')
+            self._commit(db)
         except BaseException:db.rollback();raise
         finally:db.close()
 

@@ -37,16 +37,18 @@ class RecoveryPolicy:
     max_row_bytes:int=8192
     max_serialized_bytes:int=131072
     max_db_pages:int=64
+    preparation_allowance:int=0
 
     def __post_init__(self):
-        for value in asdict(self).values():p._integer(value,'bounded recovery policy')
+        for key,value in asdict(self).items():p._integer(value,'bounded recovery policy',allow_zero=key=='preparation_allowance')
         if (not 1<=self.per_job_attempts<=self.global_attempts<=64 or not 16<=self.max_db_pages<=256
                 or self.global_attempts>self.max_db_pages or not 4096<=self.max_row_bytes<=16384
                 or not self.max_row_bytes<=self.max_serialized_bytes<=self.max_db_pages*2048):raise WorkerRecoveryHeld('bounded_recovery_policy_required')
+        p._integer(self.control_allowance,'total recovery control allowance')
     @property
     def sha256(self):return p.digest(asdict(self))
     @property
-    def control_allowance(self):return 4*self.max_db_pages*4096+65536
+    def control_allowance(self):return 4*self.max_db_pages*4096+65536+self.preparation_allowance
 
 
 SCHEMA=(
@@ -75,7 +77,7 @@ class OriginalClaimRecovery:
         self._pid=os.getpid();self._mutex=threading.Lock();self._busy=False;self._initialized=False
         self._root_identity=_private(self.root,directory=True)[1];self._files={}
         self._scope=dict(protocol='ltds-original-claim-recovery-worker-v2',parentPolicy=self.guard.binding,policy=asdict(policy),
-            transportPolicy=self.client.policy.sha256,root=str(self.root),rootIdentity=list(self._root_identity),path=str(self.path),lockPath=str(self.lock_path))
+            transportPolicy=self.client.policy.sha256,root=str(self.root),rootIdentity=list(self._root_identity),path=str(self.path),lockPath=str(self.lock_path),pipelineStoragePageCap=self.journal.storage_page_cap)
         self.scope_sha256=p.digest(self._scope)
         publications=self.ledger.control_scope_publications(self.scope_sha256,self.policy.global_attempts)
         try:
@@ -429,7 +431,7 @@ def validate_published_control(guard,parent,receipt):
     if (scope['root']!=str(root) or scope['rootIdentity']!=list(_private(root,directory=True)[1])
             or path.parent!=root or lock!=path.with_name(path.name+'.lock') or not path.is_absolute()
             or path.resolve()!=path or lock.resolve()!=lock or scope['parentPolicy']!=guard.binding
-            or scope['transportPolicy']!=guard.client.policy.sha256):raise WorkerRecoveryHeld('published_control_scope_changed')
+            or scope['transportPolicy']!=guard.client.policy.sha256 or scope['pipelineStoragePageCap']!=guard.journal.storage_page_cap):raise WorkerRecoveryHeld('published_control_scope_changed')
     policy=RecoveryPolicy(**scope['policy'])
     reader=OriginalClaimRecovery(path,parent_guard=guard,policy=policy)
     if not reader._initialized or reader._binding!=encoded(descriptor):raise WorkerRecoveryHeld('published_control_owner_changed')

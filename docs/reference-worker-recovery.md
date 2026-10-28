@@ -1,9 +1,10 @@
 # Original worker claim recovery
 
 `processing.reference_worker_recovery.OriginalClaimRecovery` is an inactive,
-explicit client of the optional worker claim-recovery service. It is not wired
-into any daemon/factory, advertised capability, processing node or runtime
-update. It does not claim a job, renew a lease, acquire another reservation,
+explicit client of the optional worker claim-recovery service. A source-only
+combined preparation constructor now composes it; no daemon configuration,
+advertised capability, processing node or runtime update is enabled. It does not
+claim a job, renew a lease, acquire another reservation,
 start an engine, create an outbox, release a physical receipt or clean files.
 
 The client currently applies to the original **main-node combined ODM→TreeDar
@@ -62,6 +63,17 @@ Operational defaults are eight attempts per job, 64 globally, 8 KiB per row,
 128 KiB total serialized records, 4096-byte pages and 64 database pages. Control
 allowance is `4 × maximum database bytes + 64 KiB` (1,114,112 bytes by default),
 covering database, rollback coexistence and retained typed publication metadata.
+The explicit `preparation_allowance` defaults to zero and is added to that
+formula. The default-off combined preparation profile requires a separately
+bounded allowance for its entire driver/pipeline databases and rollback files;
+see `reference-combined-preparation.md`. That allowance is additive to the
+original parent budget and cannot consume either engine-stage maximum.
+
+This policy field changes serialization/digests even when zero. The closed
+publication scope also includes `pipelineStoragePageCap`. Existing published
+descriptors from the earlier ABI fail closed; no automatic migration or rollback
+is qualified. Default-zero standalone behavior does not imply byte-identical
+recovery metadata compatibility.
 SQL COUNT/SUM/MAX preflight precedes row fetch; rows, mutations, SQLite pages and
 rollback sidecars are bounded. Independent limits can hold before the attempt
 maximum. Tests provision this additive budget up front. No history is pruned;

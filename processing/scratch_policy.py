@@ -68,10 +68,11 @@ class ScratchLedger:
         def closed(item,keys):
             if type(item) is not dict or set(item)!=set(keys):raise PolicyConflict('closed control publication required')
         closed(value,('scope','files','anchorReservation','anchorChargeId'))
-        scope=value['scope'];closed(scope,('protocol','parentPolicy','policy','transportPolicy','root','rootIdentity','path','lockPath'))
+        scope=value['scope'];closed(scope,('protocol','parentPolicy','policy','transportPolicy','root','rootIdentity','path','lockPath','pipelineStoragePageCap'))
+        _integer(scope['pipelineStoragePageCap'],'control pipeline page cap')
         if scope['protocol']!='ltds-original-claim-recovery-worker-v2':raise PolicyConflict('control publication protocol differs')
-        closed(scope['policy'],('per_job_attempts','global_attempts','max_row_bytes','max_serialized_bytes','max_db_pages'))
-        for number in scope['policy'].values():_integer(number,'control publication limit',1)
+        closed(scope['policy'],('per_job_attempts','global_attempts','max_row_bytes','max_serialized_bytes','max_db_pages','preparation_allowance'))
+        for key,number in scope['policy'].items():_integer(number,'control publication limit',0 if key=='preparation_allowance' else 1)
         closed(scope['parentPolicy'],('policySha256','nodeId','workerId','workerInstanceId','authorityId','engineId','coordinatorOrigin','gateGeneration'))
         for key,item in scope['parentPolicy'].items():
             if key=='gateGeneration':_integer(item,'control gate generation',1)

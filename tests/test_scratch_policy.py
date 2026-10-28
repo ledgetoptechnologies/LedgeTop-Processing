@@ -108,7 +108,7 @@ class ScratchPolicyTests(unittest.TestCase):
         self.reserve();self.ledger.record_allocated('r1',100)
         path=str(self.root/'recovery.sqlite');lock=path+'.lock'
         descriptor=dict(scope=dict(protocol='ltds-original-claim-recovery-worker-v2',parentPolicy=dict(policySha256='a'*64,nodeId='main',workerId='worker',workerInstanceId='instance',authorityId='authority',engineId='engine',coordinatorOrigin='http://127.0.0.1:1',gateGeneration=1),
-            policy=dict(per_job_attempts=8,global_attempts=64,max_row_bytes=8192,max_serialized_bytes=131072,max_db_pages=64),transportPolicy='d'*64,root=str(self.root),rootIdentity=[1,2],path=path,lockPath=lock),files={path:[1,3],lock:[1,4]},anchorReservation='r1',anchorChargeId='control-one')
+            policy=dict(per_job_attempts=8,global_attempts=64,max_row_bytes=8192,max_serialized_bytes=131072,max_db_pages=64,preparation_allowance=0),pipelineStoragePageCap=0,transportPolicy='d'*64,root=str(self.root),rootIdentity=[1,2],path=path,lockPath=lock),files={path:[1,3],lock:[1,4]},anchorReservation='r1',anchorChargeId='control-one')
         digest=lambda value:hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
         scope=digest(descriptor['scope']);self.control(scope_sha256=scope)
         values=dict(charge_id='control-one',scope_sha256=scope,parent_binding_sha256='c'*64,publication_descriptor=descriptor)
