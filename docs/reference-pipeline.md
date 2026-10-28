@@ -8,6 +8,27 @@ client are not activated. Real-data testing is paused until Beau supplies a
 smaller dataset. See `evidence/reference-installed-20261028.json` for the bounded
 installed acceptance and remaining limitations.
 
+## Current integration boundary, October 28
+
+The latest committed source adds optional original-claim restart continuation
+with atomic epoch/receipt transactions and coordinator lease protection through
+commit. See [reference-claim-recovery.md](reference-claim-recovery.md). This API
+is not configured in the installed runtime. Worker recovery, final mixed-pipeline
+delivery and outer-v2 integration still require qualification.
+
+Native ODM and TreeDar execution controllers, the concrete parent guard and
+native bundle validator/writer have source qualification. The TreeDar controller
+prepares its private RAW directory before launch. Local publication and worker
+recovery are being integrated separately; their presence in a worktree does not
+mean they are deployed or capable of settling the parent pipeline.
+
+Existing image-update discovery services on both PCs remain installed on their
+qualified source, independently of these inactive components. Their working
+directories must not be changed to newer source without migration acceptance.
+The current shared Hub note is
+`ledge-top-processing/orchestration/reference-pipeline-20261027.md`; historical
+test counts below describe their named source checkpoints.
+
 ## Implemented source foundations
 
 - `reference_protocol.py` validates bounded metadata, canonical manifests,
@@ -341,11 +362,12 @@ were drained and only owned plans reopened; test data/container were removed.
 The image cache and inactive source stage remain, with existing services and
 coordinator unchanged. Evidence is in `evidence/main-treedar-bootstrap-20261028.json`.
 
-NAS broker/provenance issuer and retention enforcement are still incomplete in
-source as well as installation. Viewer confirmed its owning chat is blocked and
-requires a direct human resume before that work continues. Claude's UI findings
-remain open. Automatic container update detection/supervision, combined sequential
-ODM-to-TreeDar processing, live acceptance and the selected smaller real-data trial
+NAS broker/provenance issuer, retention enforcement and the agreed outer-v2
+transport are still incomplete in source as well as installation. The Viewer
+chat is active and owns that integration; its existing protected release gate
+does not establish processing acceptance. Claude's workspace changes have source
+review, while browser/mobile and installed acceptance remain open. Combined
+sequential ODM-to-TreeDar final delivery and the selected smaller real-data trial
 are still pending; TreeDar/Gaussian capabilities remain disabled.
 
 ## Coordinated ownership

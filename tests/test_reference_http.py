@@ -16,11 +16,51 @@ from processing.reference_protocol import MAX_BODY_BYTES
 from processing.reference_protocol import digest
 from processing.reference_store import ReferenceStore, PROFILE
 from processing.reference_failure import FailureOutbox, make_failure
+from processing.reference_binary import BinaryResponse
 
 
 STAGING = "synthetic-http-staging-token"
 PRODUCTION = "synthetic-http-production-token"
 WORKER = 'synthetic-http-worker-token'
+
+
+class BinaryHeadOrderingTests(unittest.TestCase):
+    def serve(self, stream):
+        class API:
+            def handle(self, *args, **kwargs):
+                return BinaryResponse(stream, 200, {'Content-Type':'application/zip','Content-Length':'22'})
+        server=create_reference_http_server(API())
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.02})
+        thread.start()
+        self.addCleanup(lambda:(server.shutdown(),server.server_close(),thread.join(2)))
+        return server
+
+    def test_head_success_waits_for_reader_close(self):
+        entered,release=threading.Event(),threading.Event();calls=[]
+        class Stream:
+            def close(self):
+                calls.append('close');entered.set()
+                if not release.wait(3):raise RuntimeError('test close timed out')
+        server=self.serve(Stream())
+        with socket.create_connection(server.server_address,timeout=2) as client:
+            try:
+                client.sendall(b'HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                self.assertTrue(entered.wait(2));client.settimeout(0.05)
+                with self.assertRaises(socket.timeout):client.recv(4096)
+                release.set();client.settimeout(2)
+                self.assertIn(b'200 OK',client.recv(4096))
+                self.assertEqual(calls,['close'])
+            finally:release.set()
+
+    def test_uncertain_head_close_never_sends_success_or_retries_close(self):
+        calls=[]
+        class Stream:
+            def close(self):calls.append('close');raise OSError('synthetic close uncertainty')
+        server=self.serve(Stream())
+        with socket.create_connection(server.server_address,timeout=2) as client:
+            client.sendall(b'HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n')
+            self.assertEqual(client.recv(4096),b'')
+        self.assertEqual(calls,['close'])
 
 
 class ReferenceHTTPTests(unittest.TestCase):

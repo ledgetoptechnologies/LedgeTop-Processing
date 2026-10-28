@@ -84,6 +84,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         def _binary(self, response):
             # Only trusted adapters create this envelope. Never forward upstream
             # cookies, credentials, redirects or arbitrary response headers.
+            close_attempted = False
             try:
                 length = response.headers.get('Content-Length', '')
                 mime = response.headers.get('Content-Type', '')
@@ -91,6 +92,12 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                         or mime not in ('application/zip', 'application/octet-stream')):
                     self._error(500, 'invalid_binary_response')
                     return
+                if self.command == 'HEAD':
+                    # A HEAD has no body/descriptor lifetime after metadata is
+                    # validated. Complete pin release before publishing success.
+                    # Never replay a close whose outcome is uncertain.
+                    close_attempted = True
+                    response.stream.close()
                 self.send_response(response.status)
                 self.send_header('Content-Type', mime)
                 self.send_header('Content-Length', str(length))
@@ -116,7 +123,8 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 # or mark delivery accepted. The consumer verifies length/hash.
                 self.close_connection = True
             finally:
-                response.stream.close()
+                if not close_attempted:
+                    response.stream.close()
 
         def _error(self, status, code):
             self._reply(Response(status, {"error": code}))
