@@ -1,6 +1,7 @@
 """Actual existing updater/HTTP/SQLite, with Docker+SSH fixture boundaries only."""
-from contextlib import ExitStack,redirect_stdout
+from contextlib import ExitStack,redirect_stdout,redirect_stderr,nullcontext
 import copy
+from dataclasses import asdict,replace
 import io
 import json
 import os
@@ -8,8 +9,9 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch,Mock
 import uuid
+from types import SimpleNamespace
 
 from ops import update_reference_coordinator as m
 from ops.incremental_coordinator_binding import IncrementalBinding,volume_census,digest
@@ -27,6 +29,10 @@ from tests import test_coordinator_update_controller as controller_fixture
 from ops.coordinator_gate_bridge import LocalGate,BridgeGateClient,incremental_helper_digest
 from processing.node_gate import NodeGate
 from ops.native_node_fixture import NativeNodeFixture
+
+
+TARGET='sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b'
+PREDECESSOR_IMAGE='sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249'
 
 
 @unittest.skipUnless(os.name=='posix','Linux owned updater fixture')
@@ -48,7 +54,7 @@ class IncrementalUpdateTests(unittest.TestCase):
             self.queue.cancel_node(node,dict(expectedRevision=value['revision'],planId=value['planId']))
         base=volume_census(self.volume,authority=m.AUTHORITY,uid=os.geteuid())
         app=dict(PROCESSING_API_TOKEN=TOKEN,PROCESSING_PROTOTYPE_OPERATOR_TOKEN=f.OPERATOR,PROCESSING_REFERENCE_CONFIG=m.legacy.CONFIG_PATH)
-        self.incremental_profile=IncrementalBinding('1'*64,'sha256:'+'2'*64,'671fd2a6bde40088bdfad91ccf67eab45ee3d8d7','6bbd468e1177746cb695e43195e75355b0681f23',m.AUTHORITY,m.digest(app),'a'*64,'5'*64,f.MAIN,'f'*64,'sha256:'+'f'*64,base['tables']['jobs']['sha256'],digest(base['ownedRows']),digest(base['schema']))
+        self.incremental_profile=IncrementalBinding('1'*64,PREDECESSOR_IMAGE,'671fd2a6bde40088bdfad91ccf67eab45ee3d8d7','6bbd468e1177746cb695e43195e75355b0681f23',m.AUTHORITY,m.digest(app),'a'*64,'5'*64,f.MAIN,'f'*64,'sha256:'+'f'*64,base['tables']['jobs']['sha256'],digest(base['ownedRows']),digest(base['schema']))
         self.prior_rows=base['ownedRows']
         self.server=start_server(self.handler);self.stack.callback(self.server.server_close);self.stack.callback(self.server.shutdown)
         origin='http://127.0.0.1:'+str(self.server.server_port);self.api,self.operator=Client(origin,TOKEN),Client(origin,f.OPERATOR)
@@ -57,10 +63,8 @@ class IncrementalUpdateTests(unittest.TestCase):
         self.updater=m.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda _:None,incremental_binding=self.incremental_profile,helper_source_commit='d'*40)
         self.stack.enter_context(patch.object(m,'copy_backup',side_effect=self.backup))
         self.stack.enter_context(patch.object(m,'owned_api_probe',return_value={'operatorLookupVerified':True}))
-        self.state=self.updater.prepare(f.TARGET,self.incremental_profile.candidate_source,f.MAIN)
-        # Production flag stays false. Exercise the inactive new control path
-        # only against this actual local HTTP/SQLite + synthetic Docker fixture.
-        self.stack.enter_context(patch.object(m,'INCREMENTAL_ACTIVATION_REVIEWED',True))
+        self.state=self.updater.prepare(TARGET,self.incremental_profile.candidate_source,f.MAIN)
+        # Real release predicate, actual local HTTP/SQLite, synthetic Docker only.
 
     def backup(self,transport,root,state):
         target=root/'copied-volume';shutil.copytree(self.volume,target)
@@ -129,11 +133,65 @@ class IncrementalUpdateTests(unittest.TestCase):
             with self.assertRaises(m.Stopped):self.updater.activate(self.state)
         self.assertEqual(self.transport.calls,[]);self.assertEqual(self.state['plans'],{})
 
+    def test_known_pair_release_predicate_and_cli_arguments_are_exact(self):
+        self.assertTrue(m.incremental_release_reviewed(self.incremental_profile,TARGET,self.incremental_profile.candidate_source))
+        for field,value in (('predecessor_source','0'*40),('predecessor_image','sha256:'+'0'*64),('candidate_source','0'*40)):
+            with self.subTest(field=field):
+                profile=replace(self.incremental_profile,**{field:value})
+                self.assertFalse(m.incremental_release_reviewed(profile,TARGET,profile.candidate_source))
+        self.assertFalse(m.incremental_release_reviewed(self.incremental_profile,'sha256:'+'0'*64,self.incremental_profile.candidate_source))
+        self.assertFalse(m.incremental_release_reviewed(self.incremental_profile,TARGET,'0'*40))
+        with patch.object(m,'INCREMENTAL_ACTIVATION_REVIEWED',False):
+            self.assertFalse(m.incremental_release_reviewed(self.incremental_profile,TARGET,self.incremental_profile.candidate_source))
+
+    def test_actual_cli_uses_same_pair_predicate_before_loading_or_executing_update(self):
+        config=self.root/'gate-config.json';config.write_text('{}')
+        # Only the CLI account/lock and constructed executor are fixtures. The
+        # real argument parser, profile constructor and release predicate run.
+        for action in ('activate','rollback'):
+            for field in ('known','predecessor_source','predecessor_image','candidate_source','candidate_image'):
+                with self.subTest(action=action,field=field):
+                    profile=self.incremental_profile
+                    if field in ('predecessor_source','candidate_source'):profile=replace(profile,**{field:'0'*40})
+                    if field=='predecessor_image':profile=replace(profile,predecessor_image='sha256:'+'0'*64)
+                    image='sha256:'+'0'*64 if field=='candidate_image' else TARGET
+                    executor=Mock();executor.load.return_value=self.state
+                    executor.activate.return_value=self.state;executor.rollback.return_value=self.state
+                    argv=[action,'--image',image,'--source-commit',profile.candidate_source,'--receipt-dir',str(self.operation),'--verified-main-image',f.MAIN,'--gate-config',str(config),'--incremental-profile',json.dumps(asdict(profile)),'--helper-source-commit','d'*40]
+                    host=SimpleNamespace(operation_lock=nullcontext,private_file=lambda p:Path(p))
+                    with patch.object(m,'legacy',host),patch.object(m.os,'geteuid',return_value=1000),patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='bkoltz')),patch.object(m.socket,'gethostname',return_value='cluster'),patch.object(m,'GateFactory',return_value=self.gates),patch.object(m,'ReferenceCoordinatorUpdate',return_value=executor),redirect_stderr(io.StringIO()):
+                        result=m.main(argv)
+                    self.assertEqual(result,0 if field=='known' else 2)
+                    if field=='known':getattr(executor,action).assert_called_once_with(self.state)
+                    else:
+                        executor.load.assert_not_called();executor.activate.assert_not_called();executor.rollback.assert_not_called()
+        self.assertEqual(self.transport.calls,[]);self.assertEqual(self.state['plans'],{})
+
+    def test_each_unqualified_pair_refuses_direct_activation_and_rollback_before_effects(self):
+        original=self.incremental_profile
+        cases=(('predecessor_source','0'*40),('predecessor_image','sha256:'+'0'*64),
+               ('candidate_source','0'*40),('candidate_image','sha256:'+'0'*64))
+        for index,(field,value) in enumerate(cases):
+            with self.subTest(field=field):
+                self.incremental_profile=replace(original,**{field:value}) if field!='candidate_image' else original
+                target=value if field=='candidate_image' else TARGET
+                self.gates.incremental_binding=self.incremental_profile
+                transport=self.make_transport();operation=self.root/('wrong-'+str(index));operation.mkdir(mode=0o700)
+                updater=m.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=transport,cluster_probe=lambda _:None,incremental_binding=self.incremental_profile,helper_source_commit='d'*40)
+                state=updater.prepare(target,self.incremental_profile.candidate_source,f.MAIN)
+                # Both real entry points validate the real prepared checkpoint;
+                # no validate/guard mocks substitute for the release boundary.
+                with self.assertRaisesRegex(m.Stopped,'incremental_application_migration_review_required'):updater.activate(state)
+                with self.assertRaisesRegex(m.Stopped,'incremental_application_migration_review_required'):updater.rollback(state)
+                self.assertEqual(transport.calls,[]);self.assertEqual(state['plans'],{})
+                self.assertEqual(len(volume_census(self.volume,authority=m.AUTHORITY,uid=os.geteuid())['ownedRows']),2)
+        self.incremental_profile=original;self.gates.incremental_binding=original
+
     def test_foreign_volume_owner_after_full_pending_intent_blocks_before_owned_post(self):
         save=self.updater.save;request=self.operator.json;posts=[]
         def changed(state,phase=None,**fields):
             save(state,phase,**fields)
-            if phase=='schedule_pending':self.transport.containers['0'*64]=self.transport.container('0'*64,f.TARGET,'foreign-volume-owner',True)
+            if phase=='schedule_pending':self.transport.containers['0'*64]=self.transport.container('0'*64,TARGET,'foreign-volume-owner',True)
         def observed(method,route,payload=None,**kwargs):
             if method=='POST' and route.endswith('/schedule-owned'):posts.append(payload)
             return request(method,route,payload,**kwargs)

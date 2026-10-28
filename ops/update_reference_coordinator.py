@@ -45,13 +45,30 @@ MODE = 'reference-to-reference-v1'
 # Follow-up census compatibility includes the existing TerminalService table;
 # its reference_* zero-row admission fence remains unchanged.
 ACTIVATION_REVIEWED = True
-INCREMENTAL_ACTIVATION_REVIEWED = False
+# Qualified only by the actual private-config/state-copy evidence0354562.
+# This is not a generic approval of future coordinator images or worker ABIs.
+INCREMENTAL_ACTIVATION_REVIEWED = True
+QUALIFIED_INCREMENTAL_PAIR = (
+    '671fd2a6bde40088bdfad91ccf67eab45ee3d8d7',
+    'sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249',
+    '6bbd468e1177746cb695e43195e75355b0681f23',
+    'sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b',
+)
 INCREMENTAL_MODE='reference-incremental-v1'
 class Stopped(ValueError):pass
 
 
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def incremental_release_reviewed(profile,candidate_image,candidate_source):
+    """One qualified application/image pair; read-only preparation is separate."""
+    return (INCREMENTAL_ACTIVATION_REVIEWED is True
+        and type(profile) is incremental.IncrementalBinding
+        and profile.candidate_source==candidate_source
+        and (profile.predecessor_source,profile.predecessor_image,
+             candidate_source,candidate_image)==QUALIFIED_INCREMENTAL_PAIR)
 
 
 def incremental_census_source():
@@ -635,7 +652,7 @@ class ReferenceCoordinatorUpdate:
 
     def activate(self,state):
         self.validate(state)
-        if self.incremental_binding and not INCREMENTAL_ACTIVATION_REVIEWED:raise Stopped('incremental_application_migration_review_required')
+        if self.incremental_binding and not incremental_release_reviewed(self.incremental_binding,state['image'],state['sourceCommit']):raise Stopped('incremental_application_migration_review_required')
         if state['phase']!='prepared':raise Stopped('prepared_operation_only_no_replay')
         self.original(state);_env,api,operator=self.t.local_clients();self.activity(state,api)
         self.compare(state,self.census(state),state['baseline'])
@@ -726,7 +743,7 @@ class ReferenceCoordinatorUpdate:
 
     def rollback(self,state):
         self.validate(state)
-        if self.incremental_binding and not INCREMENTAL_ACTIVATION_REVIEWED:raise Stopped('incremental_application_migration_review_required')
+        if self.incremental_binding and not incremental_release_reviewed(self.incremental_binding,state['image'],state['sourceCommit']):raise Stopped('incremental_application_migration_review_required')
         if state.get('reopeningStarted') or state.get('pendingPlan'):raise Stopped('reopen_or_schedule_uncertainty_prevents_rollback')
         with self.gate_factory() as gates:
             self.check(state,gates);item=self.candidate(state)
@@ -836,7 +853,7 @@ def main(argv=None):
             updater=ReferenceCoordinatorUpdate(root,gate_factory=factory,incremental_binding=profile,helper_source_commit=args.helper_source_commit)
             if args.action=='prepare':state=updater.prepare(args.image,args.source_commit,args.verified_main_image)
             else:
-                if not ACTIVATION_REVIEWED or (profile and args.action!='reconcile-schedule' and not INCREMENTAL_ACTIVATION_REVIEWED):raise Stopped('source_review_required_before_activation')
+                if not ACTIVATION_REVIEWED or (profile and args.action!='reconcile-schedule' and not incremental_release_reviewed(profile,args.image,args.source_commit)):raise Stopped('source_review_required_before_activation')
                 state=updater.load()
                 if (state['image'],state['sourceCommit'],state['engineImages']['main'])!=(args.image,args.source_commit,args.verified_main_image):raise Stopped('prepared_argument_binding_changed')
                 state=updater.activate(state) if args.action=='activate' else updater.reconcile_schedule(state) if args.action=='reconcile-schedule' else updater.rollback(state)

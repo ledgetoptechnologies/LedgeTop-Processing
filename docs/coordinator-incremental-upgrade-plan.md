@@ -1,8 +1,10 @@
 # Incremental coordinator upgrade: 671→6bb
 
 The incremental profile is integrated into the existing updater and bridge,
-with activation disabled. No remote Docker, maintenance, configuration, systemd
-or NAS mutation has occurred. The historical strict mode retains its defaults.
+with source release scoped to the exact qualified source/image pair below.
+Isolated on-cluster copied-state qualification created and removed its own test
+containers and state copy. The production coordinator, maintenance, configuration,
+systemd and NAS data remain unchanged. The historical strict mode retains its defaults.
 
 ## Read-only observed predecessor
 
@@ -73,11 +75,23 @@ schema, history and state remain compared. Read-only observations are not live
 gate possession, durable mutation intents or authorization to replay requests.
 
 The new component is now wired into the existing updater and bridge through an
-explicit incremental profile. `INCREMENTAL_ACTIVATION_REVIEWED` remains false;
-the historical strict default and its constants remain unchanged. Independent
-source review and 90 focused checks qualify the inactive integration; actual
-private-config/state-copy qualification remains required before remote
-preparation/activation.
+explicit incremental profile. `INCREMENTAL_ACTIVATION_REVIEWED` is now true only
+in conjunction with the shared exact-pair predicate: predecessor source `671fd2a6bde40088bdfad91ccf67eab45ee3d8d7`
+and image `sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249`,
+candidate source `6bbd468e1177746cb695e43195e75355b0681f23` and image
+`sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b`.
+Direct activation, direct rollback and the CLI use the same predicate; a true
+flag alone cannot release another pair. The historical strict default and its
+constants remain unchanged. Independent source review and 90 focused checks
+qualified the integration. Commit `0354562` records the actual private-config,
+consistent state-copy and old/candidate/old application qualification in
+[evidence/coordinator-private-config-qualified-20261028.json](evidence/coordinator-private-config-qualified-20261028.json),
+SHA256 `1ca90d2502392f2dca7cd32f6971c7b44aab1b35372926fb6571dfa5567f242f`.
+One successful execution preserved all original rows, authority and private
+configuration; its exact disposable copy was removed. This source release is
+not runtime activation: fresh immutable/physical preflight, both real host gates,
+owned drains, offline backup, health/state verification and exact owned reopen
+remain required. Other application pairs and optional worker ABIs remain unqualified.
 No NAS dependency has been identified for this coordinator-only upgrade.
 
 ## Required reviewed execution sequence
@@ -207,15 +221,23 @@ reconciliation, uncommitted unknown refusal, create/start uncertainty and the
 existing explicit rollback flow. They also execute the actual serialized backup
 program over a temporary four-receipt state, and an actual local OS gate with
 the real synthetic backend HTTP service. Main probe and controller tests verify
-explicit CIDs and helper/candidate source separation. A test-only override of
-the false release constant exercises these inactive branches; it grants no
-production permission. Real private configuration and on-cluster state-copy
-qualification remain separate from synthetic application migration evidence.
+explicit CIDs and helper/candidate source separation. These tests now use the
+qualified source/image strings with the real release predicate; Docker and SSH boundaries remain synthetic. Wrong predecessor or
+candidate source/image is refused at direct activation, direct rollback and CLI
+boundaries before execution. Real private-config/state-copy qualification is
+recorded separately in the evidence above; none of these tests activates runtime.
 
-The final integration passed 90 focused tests with no skips in the actual
+The earlier inactive integration passed 90 focused tests with no skips in the actual
 candidate image (Python 3.13, UID 10001), independently rerun in 32.113 seconds
 with network isolation, a read-only root and ResourceWarnings treated as errors.
 Independent source review also exercised the real three-process incremental
 gate handshake and foreign-volume-owner refusal after the FULL-saved pending
 intent. These checks qualify host helper flow and synthetic Docker/SSH
 boundaries; they do not acquire installed gates or activate the candidate.
+
+The subsequent known-pair release passed 93 focused tests with no skips in the
+same actual candidate image, independently rerun in 34.043 seconds. Three new
+independently reviewed regressions cover the shared release predicate, each
+wrong source/image at direct activation and rollback, and the real CLI refusal
+before executor action. This source release still requires fresh installed
+physical gates, immutable preflight, owned drains and verified backup/cutover.

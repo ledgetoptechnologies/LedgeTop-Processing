@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "status": "source-release-for-exact-qualified-coordinator-pair-only",
+  "sourcePins": {
+    "ops/update_reference_coordinator.py": "d52ad1f9c0ba03725018b46c24a0491bd98e306947fb7a3b28db9be4b0faa253",
+    "tests/test_incremental_coordinator_update.py": "577eeb7f27e88798c875b38a370130e908a2b693dafc58a191f267b0a89527fd",
+    "tests/test_reference_coordinator_update.py": "8ee709877b0d45ba0a4efabe24ed44c1ef0da85149f2d9a41f1025e499e08009",
+    "docs/coordinator-incremental-upgrade-plan.md": "cd91ac4ef646d930d119f30786c0b0dbad9535731be0605626d4f9a9984de1ce"
+  },
+  "testedPins": {
+    "ops/update_reference_coordinator.py": "d52ad1f9c0ba03725018b46c24a0491bd98e306947fb7a3b28db9be4b0faa253",
+    "tests/test_incremental_coordinator_update.py": "577eeb7f27e88798c875b38a370130e908a2b693dafc58a191f267b0a89527fd",
+    "tests/test_reference_coordinator_update.py": "8ee709877b0d45ba0a4efabe24ed44c1ef0da85149f2d9a41f1025e499e08009",
+    "docs/coordinator-incremental-upgrade-plan.md": "7a3ae06872909c1138aac2edabaead4adddea0aec2649001612fe0ec3baf8b46"
+  },
+  "documentationAfterTests": "Plan intro and final-count wording corrected after tests; source/test bytes unchanged.",
+  "qualifiedPair": {
+    "predecessorSource": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+    "predecessorImage": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+    "candidateSource": "6bbd468e1177746cb695e43195e75355b0681f23",
+    "candidateImage": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b"
+  },
+  "priorActualPrivateQualification": {
+    "evidenceCommit": "0354562",
+    "path": "docs/evidence/coordinator-private-config-qualified-20261028.json",
+    "sha256": "1ca90d2502392f2dca7cd32f6971c7b44aab1b35372926fb6571dfa5567f242f",
+    "executions": 1,
+    "testCopyRemoved": true
+  },
+  "checks": [
+    "One shared predicate requires the explicit release and all four exact source/image values.",
+    "Direct activate, direct rollback and real CLI reject each wrong source/image before owned schedule or Docker mutations.",
+    "Strict historical mode/default constants preserved.",
+    "Synthetic Docker fixture now uses requested image; historical target defaults unchanged."
+  ],
+  "tests": {
+    "authorTotal": 93,
+    "authorSkipped": 0,
+    "independentTotal": 93,
+    "independentSkipped": 0,
+    "independentSeconds": 34.043,
+    "independentImage": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+    "independentReviewNewRegressions": 3,
+    "independentReviewSeconds": 1.779,
+    "network": "none",
+    "readOnlyRoot": true,
+    "resourceWarningsAsErrors": true
+  },
+  "sourceReleasedOnlyForNamedPair": true,
+  "actualActivationExecuted": false,
+  "freshPreflightObservations": "Main and cluster IDs/images unchanged, both idle, generation1/unreserved observations, history12 and owned2; actual leased fences still required.",
+  "remaining": [
+    "Stage exact released helper source on both hosts and bind actual archive helper digest.",
+    "Fresh prepared checkpoint, acquire both actual physical gate leases, owned drains, offline backup, cutover and exact owned reopen.",
+    "Full active Processing/Viewer/NAS/modes/custody/UI objective remains incomplete."
+  ],
+  "fullGoalComplete": false
+}

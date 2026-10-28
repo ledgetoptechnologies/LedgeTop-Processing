@@ -150,7 +150,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 self.calls.append(args)
                 if self.hook:self.hook(action)
                 if action=='create':
-                    item=self.container(NEW_ID,TARGET,module.NAME,False)
+                    item=self.container(NEW_ID,args[-1],module.NAME,False)
                     item['Config']['Labels'][module.LABEL]=owner.state['operation'];self.containers[NEW_ID]=item
                     result=NEW_ID
                 elif action=='rename':self.containers[args[1]]['Name']='/'+args[2];result=''
