@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -33,6 +34,9 @@ class Queue(Maintenance):
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
             raise ValueError("node_ids must be unique configured slugs including cluster")
+        self._creator_pid = os.getpid()
+        self._lifecycle_lock = threading.RLock()
+        self._database_users = 0
         self.node_ids = tuple(node_ids)
         if treedar_node_ids is None:
             # Isolated legacy fixtures retain their original node capabilities.
@@ -70,6 +74,9 @@ class Queue(Maintenance):
             except OSError:
                 self._lock.close()
                 raise RuntimeError("prototype state already owned") from None
+        # One ownership period, generated only after the OS lease is acquired.
+        # Optional recovery persists this epoch with its restart overlay.
+        self.startup_id = str(uuid.uuid4())
         self.path = root / "jobs.sqlite3"
         with self._db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
@@ -90,7 +97,12 @@ class Queue(Maintenance):
             self._init_maintenance(db)
 
     def close(self):
-        self._lock.close()
+        if os.getpid() != self._creator_pid:
+            raise RuntimeError('coordinator process changed')
+        with self._lifecycle_lock:
+            if self._database_users:
+                raise RuntimeError('coordinator transaction still active')
+            self._lock.close()
 
     def node_profiles(self, node_id):
         return sorted(profile for profile in self.allowed_profiles
@@ -101,14 +113,27 @@ class Queue(Maintenance):
 
     @contextmanager
     def _db(self):
-        db = sqlite3.connect(self.path, timeout=10)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA synchronous=FULL")
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        # Check the PID before acquiring an inherited mutex after fork. Keep
+        # close() from releasing the authority lease until COMMIT/ROLLBACK ends.
+        if os.getpid() != self._creator_pid:
+            raise RuntimeError('coordinator process changed')
+        with self._lifecycle_lock:
+            if self._lock.closed:
+                raise RuntimeError('coordinator ownership closed')
+            db = sqlite3.connect(self.path, timeout=10)
+            db.row_factory = sqlite3.Row
+            self._database_users += 1
+            try:
+                db.execute("PRAGMA synchronous=FULL")
+                with db:
+                    yield db
+                    if os.getpid() != self._creator_pid or self._lock.closed:
+                        raise RuntimeError('coordinator ownership changed before commit')
+            finally:
+                try:
+                    db.close()
+                finally:
+                    self._database_users -= 1
 
     def public(self, row):
         return {"id": row["id"], "requestId": row["request_id"],

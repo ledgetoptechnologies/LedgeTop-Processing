@@ -112,7 +112,7 @@ class TreeStageTests(unittest.TestCase):
     def actions(self):return [args[0] for args in self.docker.calls if args[0] in ('create','start','stop','rm')]
     def finish(self,exit_code=0):
         self.docker.container['State']=dict(Status='exited',Running=False,ExitCode=exit_code)
-        output=Path(next(x['Source'] for x in self.docker.container['Mounts'] if x['Destination']=='/output'));run=output/'run';run.mkdir(mode=0o700)
+        output=Path(next(x['Source'] for x in self.docker.container['Mounts'] if x['Destination']=='/output'));run=output/'run';run.mkdir(mode=0o700,exist_ok=True)
         (run/'trees.csv').write_text('synthetic,native\n');(run/'trees.csv').chmod(0o600)
         (output/'proof.json').write_text('{}');(output/'proof.json').chmod(0o600)
 
@@ -129,6 +129,18 @@ class TreeStageTests(unittest.TestCase):
         task=json.loads(Path(next(x['Source'] for x in self.docker.container['Mounts'] if x['Destination']=='/control/task.json')).read_text())
         self.assertEqual(task['job'],{k:self.intent['parentBinding'][k] for k in ('jobId','generation','environment','manifestSha256','pipelineDigest')})
         self.assertEqual(task['inputObject']['id'],'original-lidar');self.assertFalse(task['allowSynthetic'])
+
+    def test_raw_root_is_private_and_published_before_any_engine_mutation(self):
+        import stat
+        observed=[]
+        def inspect(action):
+            if action in ('create','start'):
+                row=self.stage._row(self.host.claim['jobId']);prep=json.loads(row['preparation'])
+                raw=Path(prep['output'])/'run'
+                observed.append((action,stat.S_IMODE(raw.stat().st_mode)))
+        self.docker.before=inspect
+        self.begin()
+        self.assertEqual(observed,[('create',0o700),('start',0o700)])
 
     def test_lost_create_reply_only_inspects_and_never_starts_discovered_container(self):
         self.docker.fail='create'
@@ -201,7 +213,7 @@ class TreeStageTests(unittest.TestCase):
 
     def test_running_files_are_charged_monotonically_without_finalizing(self):
         self.begin();before=self.host.reservation()['allocated'];output=Path(next(x['Source'] for x in self.docker.container['Mounts'] if x['Destination']=='/output'))
-        run=output/'run';run.mkdir(mode=0o755);path=run/'growing.tif';path.write_bytes(b'x'*1000);path.chmod(0o644)
+        run=output/'run';run.mkdir(mode=0o700,exist_ok=True);path=run/'growing.tif';path.write_bytes(b'x'*1000);path.chmod(0o644)
         self.assertEqual(self.stage.tick(self.host.claim['jobId'])['observed'],'running');high=self.host.reservation()['allocated'];self.assertGreater(high,before)
         path.write_bytes(b'x');self.stage.tick(self.host.claim['jobId']);self.assertEqual(self.host.reservation()['allocated'],high)
         self.assertIsNone(self.stage.read_evidence(self.intent));self.assertEqual(self.actions(),['create','start'])

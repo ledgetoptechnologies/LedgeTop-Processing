@@ -167,6 +167,10 @@ class ReferenceStore:
             used += db.execute('SELECT COALESCE(SUM(length(CAST(failure_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0) FROM reference_worker_failures').fetchone()[0]
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
             used += db.execute('SELECT COALESCE(SUM(length(CAST(receipt_json AS BLOB))),0) FROM reference_terminal_acceptances').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_recovery_receipts'").fetchone():
+            used += db.execute('''SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(epoch_id)+length(request_sha256)
+                +length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0)
+                FROM reference_recovery_receipts''').fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
@@ -311,6 +315,13 @@ class ReferenceStore:
         This envelope is evidence for a host guard, not execution authorization.
         In particular, a held or terminal parent cannot start another stage.
         """
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            return self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
+                worker_instance_id=worker_instance_id, claim_token=claim_token)
+
+    def _claim_snapshot(self, db, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
+        """Same authenticated observation inside an existing transaction."""
         self.queue._known_node(node_id)
         protocol._uuid(job_id, 'jobId')
         protocol._slug(worker_id, 'worker ID')
@@ -319,54 +330,52 @@ class ReferenceStore:
                 or not 1 <= len(claim_token) <= 128):
             raise Conflict('owned worker claim required')
         supplied_hash = hashlib.sha256(claim_token.encode()).hexdigest()
-        with self.queue._db() as db:
-            db.execute('BEGIN')
-            authority = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
-            row = db.execute('''SELECT r.*,j.status AS queue_status,j.environment AS queue_environment,
-                j.node_id AS queue_node,j.worker_id AS queue_worker,j.claim_hash AS queue_claim_hash,
-                j.held_reason,c.request_id AS claim_request,c.node_id AS claim_node,
-                c.worker_id AS claim_worker,c.instance_id AS claim_instance,c.token AS claim_token
-                FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
-                JOIN reference_claims c ON c.job_id=r.job_id WHERE r.job_id=? AND j.profile=?''',
-                (job_id, PROFILE)).fetchone()
-            if (not authority or authority['authority_id'] != self.queue.authority_id or row is None
-                    or (row['node_id'], row['queue_node'], row['claim_node']) != (node_id,) * 3
-                    or (row['queue_worker'], row['claim_worker']) != (worker_id,) * 2
-                    or row['claim_instance'] != worker_instance_id
-                    or type(row['claim_token']) is not str
-                    or not row['claim_token'].isascii()
-                    or not hmac.compare_digest(row['claim_token'], claim_token)
-                    or type(row['queue_claim_hash']) is not str
-                    or not row['queue_claim_hash'].isascii()
-                    or not hmac.compare_digest(row['queue_claim_hash'], supplied_hash)
-                    or row['environment'] != row['queue_environment']):
-                raise Conflict('owned worker claim required')
-            try:
-                protocol._integer(row['generation'], 'generation')
-                protocol._environment(row['environment'])
-                protocol._slug(row['claim_request'], 'claim request ID')
-                protocol._hash(row['manifest_sha'], 'manifest digest')
-                protocol._hash(row['pipeline_digest'], 'pipeline digest')
-                _reason(row['held_reason'])
-                submission = json.loads(row['input_json'])
-                if (row['phase'] not in PHASES
-                        or row['queue_status'] not in ('running', 'held', 'succeeded', 'failed', 'cancelled')
-                        or row['queue_status'] != 'held' and row['held_reason'] is not None
-                        or submission['environment'] != row['environment']
-                        or submission['manifestSha256'] != row['manifest_sha']
-                        or submission['pipelineDigest'] != row['pipeline_digest']
-                        or protocol.manifest_sha256(submission['manifest']) != row['manifest_sha']
-                        or protocol.digest(submission['pipeline']) != row['pipeline_digest']):
-                    raise ValueError()
-            except (KeyError, TypeError, ValueError):
-                raise Conflict('persisted claim binding unavailable') from None
-            return dict(schemaVersion=1, protocol='ltds-parent-claim-v1',
-                authorityId=authority['authority_id'], jobId=job_id, generation=row['generation'],
-                environment=row['environment'], nodeId=node_id, workerId=worker_id,
-                workerInstanceId=worker_instance_id, claimRequestId=row['claim_request'],
-                claimTokenSha256=supplied_hash, manifestSha256=row['manifest_sha'],
-                pipelineDigest=row['pipeline_digest'], status=row['queue_status'],
-                executionPhase=row['phase'], heldReason=row['held_reason'])
+        authority = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
+        row = db.execute('''SELECT r.*,j.status AS queue_status,j.environment AS queue_environment,
+            j.node_id AS queue_node,j.worker_id AS queue_worker,j.claim_hash AS queue_claim_hash,
+            j.held_reason,c.request_id AS claim_request,c.node_id AS claim_node,
+            c.worker_id AS claim_worker,c.instance_id AS claim_instance,c.token AS claim_token
+            FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
+            JOIN reference_claims c ON c.job_id=r.job_id WHERE r.job_id=? AND j.profile=?''',
+            (job_id, PROFILE)).fetchone()
+        if (not authority or authority['authority_id'] != self.queue.authority_id or row is None
+                or (row['node_id'], row['queue_node'], row['claim_node']) != (node_id,) * 3
+                or (row['queue_worker'], row['claim_worker']) != (worker_id,) * 2
+                or row['claim_instance'] != worker_instance_id
+                or type(row['claim_token']) is not str
+                or not row['claim_token'].isascii()
+                or not hmac.compare_digest(row['claim_token'], claim_token)
+                or type(row['queue_claim_hash']) is not str
+                or not row['queue_claim_hash'].isascii()
+                or not hmac.compare_digest(row['queue_claim_hash'], supplied_hash)
+                or row['environment'] != row['queue_environment']):
+            raise Conflict('owned worker claim required')
+        try:
+            protocol._integer(row['generation'], 'generation')
+            protocol._environment(row['environment'])
+            protocol._slug(row['claim_request'], 'claim request ID')
+            protocol._hash(row['manifest_sha'], 'manifest digest')
+            protocol._hash(row['pipeline_digest'], 'pipeline digest')
+            _reason(row['held_reason'])
+            submission = json.loads(row['input_json'])
+            if (row['phase'] not in PHASES
+                    or row['queue_status'] not in ('running', 'held', 'succeeded', 'failed', 'cancelled')
+                    or row['queue_status'] != 'held' and row['held_reason'] is not None
+                    or submission['environment'] != row['environment']
+                    or submission['manifestSha256'] != row['manifest_sha']
+                    or submission['pipelineDigest'] != row['pipeline_digest']
+                    or protocol.manifest_sha256(submission['manifest']) != row['manifest_sha']
+                    or protocol.digest(submission['pipeline']) != row['pipeline_digest']):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise Conflict('persisted claim binding unavailable') from None
+        return dict(schemaVersion=1, protocol='ltds-parent-claim-v1',
+            authorityId=authority['authority_id'], jobId=job_id, generation=row['generation'],
+            environment=row['environment'], nodeId=node_id, workerId=worker_id,
+            workerInstanceId=worker_instance_id, claimRequestId=row['claim_request'],
+            claimTokenSha256=supplied_hash, manifestSha256=row['manifest_sha'],
+            pipelineDigest=row['pipeline_digest'], status=row['queue_status'],
+            executionPhase=row['phase'], heldReason=row['held_reason'])
 
     def update_phase(self, job_id, phase, *, expected_phase=None, error=None):
         _reason(error)

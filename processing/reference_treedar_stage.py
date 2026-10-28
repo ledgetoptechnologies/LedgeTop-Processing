@@ -309,7 +309,12 @@ class TreeDarNativeStage:
                 engineVersion=self.policy.config.engine_version,timeoutSeconds=self.policy.config.timeout_seconds,maxFiles=self.policy.max_files)
             if len(p.canonical_json(task))>self.policy.control_budget:raise TreeStageHeld('tree_control_budget_exceeded')
             with self._db() as db:db.execute('INSERT INTO tree_stage_attempts VALUES(?,?,?,?,?,NULL,NULL)',(job,intent['attemptId'],encoded(intent),encoded(prep),'prepare_pending'))
-            directory.mkdir(mode=0o700);_sync_directory(directory.parent);_write_new(Path(prep['control']),task)
+            directory.mkdir(mode=0o700)
+            # TreeDar's mkdir(exist_ok=True) preserves this private RAW root;
+            # publication need not chmod or copy terminal engine outputs later.
+            raw=directory/'run';raw.mkdir(mode=0o700)
+            _sync_directory(raw);_sync_directory(directory);_sync_directory(directory.parent)
+            _write_new(Path(prep['control']),task)
             self._phase(job,'prepared');self._charge(parent,baseline,Path(prep['control']).stat().st_size)
             # Hashing/provenance can take time. Recheck outside Gate; then hold
             # the physical lease across final runtime checks and each mutation.

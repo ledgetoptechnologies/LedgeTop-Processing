@@ -19,7 +19,7 @@ PREFIX = "/ltds/worker/v1"
 
 
 class ReferenceWorkerAPI:
-    def __init__(self, store, receiver, *, bearer_workers):
+    def __init__(self, store, receiver, *, bearer_workers, recovery_bindings=None):
         if type(bearer_workers) is not dict or not bearer_workers:
             raise ValueError("explicit private worker bearer configuration required")
         workers = {}
@@ -38,6 +38,10 @@ class ReferenceWorkerAPI:
         from .reference_terminal import TerminalService
         self.terminal = TerminalService(store)
         self._workers = MappingProxyType(workers)
+        self.recovery = None
+        if recovery_bindings is not None:
+            from .reference_recovery import ClaimRecoveryService
+            self.recovery = ClaimRecoveryService(store, recovery_bindings)
 
     @staticmethod
     def _header(headers, name):
@@ -167,6 +171,24 @@ class ReferenceWorkerAPI:
                 if payload[field] not in ('fetching', 'processing'):
                     raise ValueError('worker may only advance transfer and processing phases')
                 return Response(200, self.store.update_phase(job_id, payload[field]))
+            recovery = re.fullmatch(re.escape(PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(recovery-state|recover|recovery-receipts/([a-f0-9-]{36}))', path) if type(path) is str else None
+            if recovery:
+                if self.recovery is None:
+                    return self._error(404, 'not_found')
+                token = self._header(headers, 'X-Claim-Token')
+                if token is None or not 1 <= len(token) <= 128:
+                    return self._error(401, 'claim_authentication_required')
+                job_id, operation, request_id = recovery.groups()
+                if method == 'GET' and body:
+                    return self._error(400, 'invalid_request')
+                if method == 'GET' and operation == 'recovery-state':
+                    return Response(200, self.recovery.state(job_id, identity=identity, claim_token=token))
+                if method == 'GET' and request_id:
+                    receipt = self.recovery.receipt(job_id, request_id, identity=identity, claim_token=token)
+                    return Response(200, receipt) if receipt is not None else self._error(404, 'receipt_unavailable')
+                if method == 'POST' and operation == 'recover':
+                    return Response(200, self.recovery.resume(job_id, protocol.decode_submission(body), identity=identity, claim_token=token))
+                return self._error(404, 'not_found')
             match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance|terminal-acceptance|claim-state)", path) if type(path) is str else None
             if method == "GET" and match:
                 claim_token = self._header(headers, "X-Claim-Token")

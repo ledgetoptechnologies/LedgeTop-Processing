@@ -52,6 +52,11 @@ container discovered by its exact deterministic name, but never starts a
 discovered created container. Unknown outcomes remain retained for explicit
 reconciliation. No stop, remove, pull or cancellation operation exists here.
 
+Preparation creates and syncs the private mode-0700 `run/` RAW root before Docker
+creation. The existing CLI preserves it, so publication can use the actual
+terminal files directly without changing their permissions or making an extra
+RAW copy.
+
 The cached immutable image launches the existing fixed
 `processing.treedar_engine --inside` bootstrap. Every executed processing import
 in its SOURCE_FILES list is SHA-pinned and individually mounted read-only; the
