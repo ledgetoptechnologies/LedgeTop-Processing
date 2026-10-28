@@ -25,10 +25,10 @@ WORKER = 'synthetic-http-worker-token'
 
 
 class BinaryHeadOrderingTests(unittest.TestCase):
-    def serve(self, stream):
+    def serve(self, stream, length='22'):
         class API:
             def handle(self, *args, **kwargs):
-                return BinaryResponse(stream, 200, {'Content-Type':'application/zip','Content-Length':'22'})
+                return BinaryResponse(stream, 200, {'Content-Type':'application/zip','Content-Length':length})
         server=create_reference_http_server(API())
         thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.02})
         thread.start()
@@ -61,6 +61,116 @@ class BinaryHeadOrderingTests(unittest.TestCase):
             client.sendall(b'HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n')
             self.assertEqual(client.recv(4096),b'')
         self.assertEqual(calls,['close'])
+
+
+class BinaryBodyOrderingTests(unittest.TestCase):
+    serve = BinaryHeadOrderingTests.serve
+
+    def test_get_withholds_final_byte_until_reader_close_finishes(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        class Stream:
+            def chunks(self):
+                yield b'a'
+                yield b''
+                yield b'bc'
+            def close(self):
+                calls.append('close'); entered.set()
+                if not release.wait(3): raise OSError('synthetic close timeout')
+        server = self.serve(Stream(), '3')
+        with socket.create_connection(server.server_address, timeout=2) as client:
+            try:
+                client.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                self.assertTrue(entered.wait(2))
+                received = b''
+                while b'\r\n\r\n' not in received or len(received.split(b'\r\n\r\n', 1)[1]) < 2:
+                    part = client.recv(4096); self.assertTrue(part); received += part
+                self.assertEqual(received.split(b'\r\n\r\n', 1)[1], b'ab')
+                client.settimeout(0.05)
+                with self.assertRaises(socket.timeout): client.recv(4096)
+                release.set(); client.settimeout(2)
+                remainder = b''
+                while part := client.recv(4096): remainder += part
+                self.assertEqual(remainder, b'c')
+                self.assertEqual(calls, ['close'])
+            finally:
+                release.set()
+
+    def test_failed_get_close_leaves_incomplete_body_and_is_not_retried(self):
+        for body in (b'a', b'abc'):
+            with self.subTest(bytes=len(body)):
+                calls = []
+                class Stream:
+                    def chunks(self): yield body
+                    def close(self):
+                        calls.append('close'); raise OSError('synthetic close uncertainty')
+                server = self.serve(Stream(), str(len(body)))
+                connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+                try:
+                    connection.request('GET', '/')
+                    response = connection.getresponse()
+                    with self.assertRaises(http.client.IncompleteRead) as failure: response.read()
+                    self.assertEqual(failure.exception.partial, body[:-1])
+                    self.assertEqual(calls, ['close'])
+                finally:
+                    connection.close()
+
+    def test_late_iterator_failure_extra_bytes_and_truncation_cannot_complete(self):
+        for mode in ('late_failure', 'extra', 'truncated'):
+            with self.subTest(mode=mode):
+                calls = []
+                class Stream:
+                    def chunks(self):
+                        yield b'ab' if mode == 'truncated' else b'abc'
+                        if mode == 'late_failure': raise OSError('synthetic late validation failure')
+                        if mode == 'extra': yield b'd'
+                    def close(self): calls.append('close')
+                server = self.serve(Stream(), '3')
+                connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+                try:
+                    connection.request('GET', '/')
+                    response = connection.getresponse()
+                    with self.assertRaises(http.client.IncompleteRead) as failure: response.read()
+                    self.assertEqual(failure.exception.partial, b'a' if mode == 'truncated' else b'ab')
+                    self.assertEqual(calls, ['close'])
+                finally:
+                    connection.close()
+
+    def test_empty_get_waits_for_empty_eof_and_close_before_headers(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        class Stream:
+            def chunks(self):
+                yield b''
+            def close(self):
+                calls.append('close'); entered.set()
+                if not release.wait(3): raise OSError('synthetic close timeout')
+        server = self.serve(Stream(), '0')
+        with socket.create_connection(server.server_address, timeout=2) as client:
+            try:
+                client.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                self.assertTrue(entered.wait(2)); client.settimeout(0.05)
+                with self.assertRaises(socket.timeout): client.recv(4096)
+                release.set(); client.settimeout(2)
+                self.assertIn(b'200 OK', client.recv(4096))
+                self.assertEqual(calls, ['close'])
+            finally:
+                release.set()
+
+    def test_empty_get_rejects_extra_bytes_or_late_failure_before_success(self):
+        for mode in ('extra', 'late_failure'):
+            with self.subTest(mode=mode):
+                calls = []
+                class Stream:
+                    def chunks(self):
+                        if mode == 'extra': yield b'x'
+                        else: raise OSError('synthetic late empty validation failure')
+                    def close(self): calls.append('close')
+                server = self.serve(Stream(), '0')
+                with socket.create_connection(server.server_address, timeout=2) as client:
+                    client.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                    self.assertEqual(client.recv(4096), b'')
+                self.assertEqual(calls, ['close'])
 
 
 class ReferenceHTTPTests(unittest.TestCase):

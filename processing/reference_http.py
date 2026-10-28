@@ -85,6 +85,11 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             # Only trusted adapters create this envelope. Never forward upstream
             # cookies, credentials, redirects or arbitrary response headers.
             close_attempted = False
+            def close_once():
+                nonlocal close_attempted
+                if not close_attempted:
+                    close_attempted = True
+                    response.stream.close()
             try:
                 length = response.headers.get('Content-Length', '')
                 mime = response.headers.get('Content-Type', '')
@@ -96,8 +101,14 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                     # A HEAD has no body/descriptor lifetime after metadata is
                     # validated. Complete pin release before publishing success.
                     # Never replay a close whose outcome is uncertain.
-                    close_attempted = True
-                    response.stream.close()
+                    close_once()
+                elif int(length) == 0:
+                    # An empty GET completes at its headers; validate EOF and
+                    # release its reader before making that success observable.
+                    for chunk in response.stream.chunks():
+                        if not isinstance(chunk, bytes) or chunk:
+                            raise ValueError('nonempty zero-length binary stream')
+                    close_once()
                 self.send_response(response.status)
                 self.send_header('Content-Type', mime)
                 self.send_header('Content-Length', str(length))
@@ -109,22 +120,33 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                     if value is not None and isinstance(value, str) and all(0x20 <= ord(c) <= 0x7e for c in value):
                         self.send_header(key, value)
                 self.end_headers()
-                if self.command != 'HEAD':
+                if self.command != 'HEAD' and int(length):
                     count = 0
+                    pending = b''
                     for chunk in response.stream.chunks():
                         if not isinstance(chunk, bytes) or count + len(chunk) > int(length):
                             raise ValueError('invalid binary stream')
                         count += len(chunk)
-                        self.wfile.write(chunk)
+                        if not chunk:
+                            continue
+                        if pending:
+                            self.wfile.write(pending)
+                        self.wfile.write(chunk[:-1])
+                        pending = chunk[-1:]
                     if count != int(length):
                         raise ValueError('truncated binary stream')
+                    # A complete Content-Length body is observable success.
+                    # Retain one byte until EOF validation and reader release
+                    # finish, including failures raised after the final yield.
+                    close_once()
+                    if pending:
+                        self.wfile.write(pending)
             except Exception:
                 # Headers may already be sent: close, never append a JSON error
                 # or mark delivery accepted. The consumer verifies length/hash.
                 self.close_connection = True
             finally:
-                if not close_attempted:
-                    response.stream.close()
+                close_once()
 
         def _error(self, status, code):
             self._reply(Response(status, {"error": code}))
