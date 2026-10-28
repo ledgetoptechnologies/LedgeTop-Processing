@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T22:26:54.277165+00:00",
+  "status": "source-qualified-and-inactive-staging-verified",
+  "source": {
+    "sourceCommit": "6bbd468e1177746cb695e43195e75355b0681f23",
+    "archiveSha256": "5b36d3f1dc9bd05475a3e9b5b7440f53a89f3e6e92e89a76d307bb8dbe7b7b75",
+    "archiveBytes": 5283840
+  },
+  "sourceFiles": 460,
+  "reviewedFilePins": {
+    "processing/reference_combined_preparation.py": "2be8d88f86f0a2f54c1e7d4f2198ab8751223e0e8c9db8c1018042527457eec5",
+    "processing/reference_driver.py": "1ab9068caab325b496cb686191826f92982adefd6b46f37dbe13189ffe045daf",
+    "processing/reference_pipeline.py": "cd1bebe197d6c0e0ce6d2a58cb50fba6c01251bcbdee12e45f94b668ca9941af",
+    "processing/scratch_policy.py": "6010bc7015f84b415560e20adcf32d766eecf231b7fe92f830cdbfffa5431221",
+    "tests/test_reference_combined_preparation.py": "39d156f898c3f1947ae495fb688d771f21462f3ec83acc869b2cc736c0ca6df7",
+    "tests/test_scratch_policy.py": "391fae427959166401bec34e02362f6039daca87284664bd21095d792b2fcef6",
+    "docs/reference-combined-preparation.md": "facaec187c5c3f997357b57f3b5d45af68e658bc6f3006faf3fb67e7c22efe0f",
+    "tests/test_reference_combined_preparation_review.py": "d408dbe1b208ec44bba786cfd23b4d15afff3d07c34991669aee18817e9c3220",
+    "docs/reference-worker-recovery.md": "be8f1e7ee29726eea3214399f61b26358d05ce0f408223e2ce820305db7957aa",
+    "processing/reference_worker_recovery.py": "63df271ab3a0481f1e0304dbe2681c3355f82f195bb4574589aaa8a2d690012a"
+  },
+  "httpReviewedFilePins": {
+    "processing/reference_http.py": "093c9926b66847795c0598aa71188e48e33dc51b08adc5a15a5d89f15c2efea2",
+    "tests/test_reference_http.py": "fe09b1bdde58acb5b80369856f8a8e3bbaaed0e1c6ce5c76cb3123056bc4af8e"
+  },
+  "gitBlobPins": {
+    "processing/reference_combined_preparation.py": "2be8d88f86f0a2f54c1e7d4f2198ab8751223e0e8c9db8c1018042527457eec5",
+    "processing/reference_driver.py": "8a17dec9adf3e6f97f78b988c88ad98677a78c31dfb5830cb63deb7152cd9a32",
+    "processing/reference_pipeline.py": "cd1bebe197d6c0e0ce6d2a58cb50fba6c01251bcbdee12e45f94b668ca9941af",
+    "processing/scratch_policy.py": "6010bc7015f84b415560e20adcf32d766eecf231b7fe92f830cdbfffa5431221",
+    "tests/test_reference_combined_preparation.py": "39d156f898c3f1947ae495fb688d771f21462f3ec83acc869b2cc736c0ca6df7",
+    "tests/test_scratch_policy.py": "068c2debf490c8f121528b83c00657de752bc6a8b4ab54d84a145cc1e625e904",
+    "docs/reference-combined-preparation.md": "facaec187c5c3f997357b57f3b5d45af68e658bc6f3006faf3fb67e7c22efe0f",
+    "tests/test_reference_combined_preparation_review.py": "d408dbe1b208ec44bba786cfd23b4d15afff3d07c34991669aee18817e9c3220",
+    "docs/reference-worker-recovery.md": "be8f1e7ee29726eea3214399f61b26358d05ce0f408223e2ce820305db7957aa",
+    "processing/reference_worker_recovery.py": "63df271ab3a0481f1e0304dbe2681c3355f82f195bb4574589aaa8a2d690012a",
+    "processing/reference_http.py": "093c9926b66847795c0598aa71188e48e33dc51b08adc5a15a5d89f15c2efea2",
+    "tests/test_reference_http.py": "fe09b1bdde58acb5b80369856f8a8e3bbaaed0e1c6ce5c76cb3123056bc4af8e"
+  },
+  "textEncoding": "Exact review/Git blob/archive digests are distinct where configured text EOL differs; LF-normalized equivalence was also verified for these .py/.md files only.",
+  "archivePins": {
+    "processing/reference_combined_preparation.py": "c38d65fbfb4cc0ab5c6b83c7a98b2992ad22b40b5cecffcf94241d4e34d2caa3",
+    "processing/reference_driver.py": "1ab9068caab325b496cb686191826f92982adefd6b46f37dbe13189ffe045daf",
+    "processing/reference_pipeline.py": "6cbf6781b8890f226f3fcbd3c3de3151972c784e0e4896f3193e102108c1c1e3",
+    "processing/scratch_policy.py": "c7297978c8ea834d050461f1fbb4d184938cd89c4aee69747215e665f3c48c08",
+    "tests/test_reference_combined_preparation.py": "aacca2dbb967b8116453c352caf299255dae062ca24cecffc239e364bdbfebc8",
+    "tests/test_scratch_policy.py": "391fae427959166401bec34e02362f6039daca87284664bd21095d792b2fcef6",
+    "docs/reference-combined-preparation.md": "1081b204e7b21978df351214fbff855c6e7805c8d9d6253f99aaa2daeeb786df",
+    "tests/test_reference_combined_preparation_review.py": "01545aa54f53447c6c7aa3b68d6e9692bff0b0e675583bc3e95ac079e7f51e7c",
+    "docs/reference-worker-recovery.md": "419ccf836a0454a1a14cf66579fc50f9c53471a9309b6e8b6b29dc7667d5d13c",
+    "processing/reference_worker_recovery.py": "3836d1084a824c26f192fe9ef31aebd9c9317f99db5e5a8b49568e57419073a2",
+    "processing/reference_http.py": "bb4ef12d7482a763e4b55ff6aebbe4cb8af279ed160eea9dd10c9af2305c61ba",
+    "tests/test_reference_http.py": "181ceae2e9667238a4e5951fd7094fb203b1739d2378233d16ed0ae38f87c273"
+  },
+  "tests": {
+    "linux": {
+      "total": 1278,
+      "passed": 1273,
+      "skipped": 5,
+      "seconds": 212.748,
+      "resourceWarningsAsErrors": true
+    },
+    "windows": {
+      "total": 68,
+      "passed": 68,
+      "skipped": 0,
+      "modules": [
+        "tests.test_update_qualifier.ActualProbeTests",
+        "tests.test_reference_treedar_bundle.ManifestTests",
+        "tests.test_reference_v2_candidate",
+        "tests.test_reference_metadata_journal",
+        "tests.test_reference_http"
+      ]
+    },
+    "focusedPreparation": {
+      "passed": 178,
+      "seconds": 50.536
+    },
+    "independentPreparation": {
+      "passed": 16,
+      "seconds": 10.832
+    },
+    "independentHTTP": {
+      "linuxPassed": 55,
+      "windowsPassed": 17
+    }
+  },
+  "preparation": {
+    "sourceCommit": "8dcfec66984f46db3d24329ca4d3f0e6bb72679d",
+    "scope": "Actual driver/Queue/TLS WorkerAPI/BrokerClient/ledger/gate/recovery preparation; backend HTTP/Docker inspection and declared abc LiDAR are synthetic fixtures.",
+    "successfulState": "combined_prepared_held",
+    "engineStarts": 0,
+    "invariants": [
+      "Same original claim request/token, reservation and physical receipt survive tested lost replies and prepared coordinator restart.",
+      "Driver and pipeline DB/rollback allowance is explicit and additive; live profile/endpoint/transport drift fails before action.",
+      "Legacy background completion/cleanup is disabled in this opt-in preparation profile."
+    ],
+    "limits": [
+      "No scientific/source-custody acceptance, Native/TreeDar execution or final delivery is granted.",
+      "Default-zero recovery descriptor ABI changes; old published controls require separately qualified migration.",
+      "64-charge/history caps and retirement/export remain production gates."
+    ]
+  },
+  "httpCompletion": {
+    "sourceCommit": "6bbd468e1177746cb695e43195e75355b0681f23",
+    "failedPriorCommit": "8dcfec66984f46db3d24329ca4d3f0e6bb72679d",
+    "failedPriorTotal": 1273,
+    "failedPriorTest": "test_binary_result_http_scopes_auth_and_closes_stream_lease",
+    "fix": "Hold one final byte until exact stream EOF/length validation and reader close succeed. HEAD and empty GET finish release before success headers.",
+    "uncertainty": "Explicit close is attempted once; close/late validation failure leaves an incomplete response. Prior failed full-run artifact is retained."
+  },
+  "inactiveStages": [
+    {
+      "node": "cluster",
+      "sourceCommit": "6bbd468e1177746cb695e43195e75355b0681f23",
+      "archiveSha256": "5b36d3f1dc9bd05475a3e9b5b7440f53a89f3e6e92e89a76d307bb8dbe7b7b75",
+      "verifiedFiles": 460,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/node-odx-gpu",
+          "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+          "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "running": true,
+          "startedAt": "2026-10-28T16:54:13.176495987Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/ledgetop-processing-prototype-c3fcb3a",
+          "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+          "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+          "running": true,
+          "startedAt": "2026-10-28T15:04:54.798609898Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/clusterodx",
+          "id": "e6d4da528e44c40f23816561187eea66f862dd36e870307d1cde12b57c39dc1a",
+          "image": "sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd",
+          "running": false,
+          "startedAt": "2026-10-28T00:22:55.543397097Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/cluster-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 22:25:44 UTC] ; stop_time=[Wed 2026-10-28 22:25:44 UTC] ; pid=416660 ; code=exited ; status=0 }"
+      }
+    },
+    {
+      "node": "main",
+      "sourceCommit": "6bbd468e1177746cb695e43195e75355b0681f23",
+      "archiveSha256": "5b36d3f1dc9bd05475a3e9b5b7440f53a89f3e6e92e89a76d307bb8dbe7b7b75",
+      "verifiedFiles": 460,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/ledgetop-main-processing-nodeodx-1",
+          "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+          "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+          "running": true,
+          "startedAt": "2026-10-28T15:24:31.019864573Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/dcgm_exporter",
+          "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+          "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+          "running": true,
+          "startedAt": "2026-10-27T21:19:37.266076107Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/node_exporter",
+          "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+          "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+          "running": true,
+          "startedAt": "2026-10-26T22:58:44.651792853Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 22:26:16 UTC] ; stop_time=[Wed 2026-10-28 22:26:16 UTC] ; pid=462227 ; code=exited ; status=0 }"
+      }
+    }
+  ],
+  "hostPythonCompatibility": [
+    {
+      "node": "cluster",
+      "python": "3.14.4",
+      "compiledFiles": 236,
+      "imported": [
+        "processing.reference_worker_recovery",
+        "processing.reference_treedar_publication",
+        "processing.reference_runtime",
+        "processing.reference_v2_candidate",
+        "processing.reference_metadata_journal",
+        "processing.reference_combined_preparation"
+      ],
+      "constructedControllers": false,
+      "runtimeChanged": false
+    },
+    {
+      "node": "main",
+      "python": "3.10.12",
+      "compiledFiles": 236,
+      "imported": [
+        "processing.reference_worker_recovery",
+        "processing.reference_treedar_publication",
+        "processing.reference_runtime",
+        "processing.reference_v2_candidate",
+        "processing.reference_metadata_journal",
+        "processing.reference_combined_preparation"
+      ],
+      "constructedControllers": false,
+      "runtimeChanged": false
+    }
+  ],
+  "remaining": [
+    "Full combined and standalone v2 engine/final transport composition, agreed cross-language wire acceptance and deferred semantic/auth/archive/lifecycle gates.",
+    "Real NAS broker mounting, issuer/authentication/custody/purge enforcement and durable metadata reauthorization/sealed admission.",
+    "Producer/accepted-copy receipts, final ACK/cleanup, control retirement and owner/config/state migration with installed synthetic acceptance.",
+    "Viewer release/Claude UI owner confirmation, hierarchy/UI/browser/mobile/runtime acceptance.",
+    "Real-photo trial remains paused pending Beau choosing a smaller dataset; no 310-photo task."
+  ],
+  "runtimeActivated": false,
+  "packagePublished": false,
+  "githubActionsRun": false,
+  "nasMutated": false,
+  "userTreeDarDirectoryModified": false
+}

@@ -13,24 +13,35 @@ installed acceptance and remaining limitations.
 The latest committed source adds optional original-claim restart continuation
 with atomic epoch/receipt transactions and coordinator lease protection through
 commit. See [reference-claim-recovery.md](reference-claim-recovery.md). This API
-is not configured in the installed runtime. Worker recovery, final mixed-pipeline
-delivery and outer-v2 integration still require qualification.
+is not configured in the installed runtime. Installed worker assembly, final
+mixed-pipeline delivery and outer-v2 integration remain unfinished.
 
-The frozen source `dd4fa53823b9bab15fdb1564c4db341be1626c0c` passed 1,232 Linux
-tests, with five environment-specific skips there, and 31 separate Windows checks
-covering those skips. All 451 source files were independently reread in inactive
-folders on both PCs. All 231 Python files compile under the hosts' Python 3.10/3.14, and inert
+The frozen source `6bbd468e1177746cb695e43195e75355b0681f23` passed 1,273 Linux
+tests, with five environment-specific skips there, and 68 separate Windows checks
+covering those skips and the new metadata/HTTP checks. All 460 source files were
+independently reread in inactive folders on both PCs. All 236 Python files compile
+under the hosts' Python 3.10/3.14, and inert
 controller imports passed. Containers and updater working directories remained
 unchanged. Evidence is in
-[accounting-candidate-qualification-20261028.json](evidence/accounting-candidate-qualification-20261028.json).
-The previous 2be08b5 qualification remains historical evidence.
+[combined-preparation-qualification-20261028.json](evidence/combined-preparation-qualification-20261028.json).
+Previous dd4/2be qualifications remain historical evidence. The intermediate
+8dc full-run HTTP lease-ordering failure is retained; the final snapshot withholds
+one last body byte until stream validation and reader release succeed.
+
+An explicit constructor-only preparation profile now composes the actual driver,
+claim/download path, physical gate, PipelineJournal and recovery controls. Tested
+lost replies and a prepared coordinator restart preserve the original claim,
+reservation and receipt. See
+[reference-combined-preparation.md](reference-combined-preparation.md). Its only
+successful state is `combined_prepared_held`: no engine/scientific/final delivery
+permission, installed daemon profile or complete processing workflow is enabled.
 
 The concrete worker client now bounds retained history, atomically charges
 additive control space and retains capacity for future metadata writes. Normal
 engine admission verifies the actual published control files and their format,
 identity and current history. See
-[reference-worker-recovery.md](reference-worker-recovery.md). Its combined-worker
-factory preparation remains unwired. Defaults also cap prepared parents at 64;
+[reference-worker-recovery.md](reference-worker-recovery.md). Installed daemon
+assembly and engine/final-transport composition remain unwired. Defaults also cap prepared parents at 64;
 control retirement/export and full owner/config migration remain deployment
 gates. A monotonic accounting marker now makes the archived pre-control allocator
 refuse coherent charged state at cold startup. This does not fence an old process
