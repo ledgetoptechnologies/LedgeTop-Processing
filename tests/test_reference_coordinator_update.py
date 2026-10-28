@@ -78,18 +78,22 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
 
     def make_transport(self):
         owner=self
+        profile=getattr(owner,'incremental_profile',None)
+        old_id=profile.predecessor_container if profile else module.OLD_ID
+        old_image=profile.predecessor_image if profile else module.OLD_IMAGE
+        old_source=profile.predecessor_source if profile else module.OLD_SOURCE
         class Transport:
             save=staticmethod(module.legacy.save);private_file=staticmethod(module.legacy.private_file)
             def __init__(self):
                 self.calls=[];self.loss=None;self.hook=None
                 self.application={'PROCESSING_API_TOKEN':TOKEN,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OPERATOR,
                     'PROCESSING_REFERENCE_CONFIG':module.legacy.CONFIG_PATH}
-                self.old=self.container(module.OLD_ID,module.OLD_IMAGE,module.NAME,True)
-                self.containers={module.OLD_ID:self.old,
+                self.old=self.container(old_id,old_image,module.NAME,True)
+                self.containers={old_id:self.old,
                     '6'*64:self.container('6'*64,'sha256:'+'6'*64,'historical-native-untouched',False)}
             def image(self,image):
-                version=module.OLD_SOURCE if image==module.OLD_IMAGE else SOURCE
-                defaults=['PATH=/old/default'] if image==module.OLD_IMAGE else ['PATH=/new/default']
+                version=old_source if image==old_image else profile.candidate_source if profile else SOURCE
+                defaults=['PATH=/old/default'] if image==old_image else ['PATH=/new/default']
                 return dict(Id=image,Config=dict(Env=defaults,Labels={'org.opencontainers.image.revision':version},
                     User='10001:10001',WorkingDir='/app',Cmd=['python','-m','processing.app'],Entrypoint=None,Healthcheck={'Test':['CMD','health']}))
             def container(self,identifier,image,name,running):
@@ -130,10 +134,17 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                     if any(str(value).startswith('label=') for value in args):return '\n'.join(item['Id'] for item in self.containers.values() if item['Config']['Labels'].get(module.LABEL)==owner.state['operation'])
                     return ''
                 if action in ('run','exec'):
-                    if args[-1]==module.TLS_CENSUS:return json.dumps([{'path':'runtime.json','uid':10001,'mode':0o600,'sha256':'a'*64}])
+                    if args[-1]==module.TLS_CENSUS:
+                        files=[{'path':'runtime.json','uid':10001,'mode':0o600,'sha256':'a'*64}]
+                        return json.dumps(dict(files=files)) if profile else json.dumps(files)
                     if action=='run':
                         assert '--network' in args and args[args.index('--network')+1]=='none'
                         assert 'type=volume,src='+module.VOLUME+',dst=/source,readonly' in args
+                    if profile:
+                        program=args[-1].replace(repr('/source' if action=='run' else '/prototype-state'),repr(str(owner.volume)))
+                        stream=io.StringIO()
+                        with redirect_stdout(stream):exec(compile(program,'<serialized-incremental-census>','exec'),{'__name__':'__main__'})
+                        return stream.getvalue()
                     return json.dumps(module.volume_census(owner.volume,uid=os.geteuid(),offline=action=='run'))
                 assert owner.gates.live and not owner.gates.dead
                 self.calls.append(args)

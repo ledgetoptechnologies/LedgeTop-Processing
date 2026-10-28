@@ -1,8 +1,8 @@
 # Incremental coordinator upgrade: 671→6bb
 
-This is a review plan and source-only validation component, not an activation
-command. No remote Docker, maintenance, configuration, systemd or NAS mutation
-has occurred. The old strict updater and gate bridge remain unchanged.
+The incremental profile is integrated into the existing updater and bridge,
+with activation disabled. No remote Docker, maintenance, configuration, systemd
+or NAS mutation has occurred. The historical strict mode retains its defaults.
 
 ## Read-only observed predecessor
 
@@ -72,9 +72,12 @@ intent; a target-image match or active row alone is insufficient. All other
 schema, history and state remain compared. Read-only observations are not live
 gate possession, durable mutation intents or authorization to replay requests.
 
-The new component is not yet wired to an incremental executor or bridge with
-current immutable backend identities. That source integration, independent
-review and qualification are required before remote preparation/activation.
+The new component is now wired into the existing updater and bridge through an
+explicit incremental profile. `INCREMENTAL_ACTIVATION_REVIEWED` remains false;
+the historical strict default and its constants remain unchanged. Independent
+source review and 90 focused checks qualify the inactive integration; actual
+private-config/state-copy qualification remains required before remote
+preparation/activation.
 No NAS dependency has been identified for this coordinator-only upgrade.
 
 ## Required reviewed execution sequence
@@ -156,3 +159,63 @@ reopen tests, not a full old-image/app/private-config migration qualification.
 Full application startup over an isolated qualified state copy and rollback
 closure remain execution-profile gates. None of this is installed acceptance
 or permission to activate.
+
+## Explicit existing-updater integration
+
+`ReferenceCoordinatorUpdate(..., incremental_binding=..., helper_source_commit=...)`
+selects the new profile; omitting both retains the historical schema2 checkpoint
+and strict predecessor/census path. Incremental checkpoints use schema3 and
+`reference-incremental-v1`, binding the entire profile, exact helper source
+commit and critical helper digest separately from the candidate application
+source/image. No predecessor constants are monkeypatched. `RunSpec` boots the
+helper source bundle while preserving candidate `--source-commit`; its explicit
+profile is passed as closed nonsecret metadata to both owned SSH children.
+
+The incremental helper digest covers the actual updater, controller, bridge,
+historical installation transport, census validator, NodeGate, Maintenance,
+ContainerUpdate read inspectors and fixed native HTTP client. The bootstrap
+checks the staged manifest's helper commit and the actual digest. Main's real
+probe uses the profile's immutable current container/image for every inspect,
+upload and processing census command; its old fixed CID remains only the
+historical default. Cluster's actual LocalGate probe checks its profile CID,
+image and native idle state on every fresh physical fence check. The configured
+Docker Engine/generation/authority proof remains required on both hosts.
+
+The existing updater's prepare/activate/rollback lifecycle is reused. Incremental
+census, comparison and backup use the reviewed checker, including the retained
+two historical rows and exactly this operation's two new receipts. Every distinct
+Docker mutation also rechecks the actual current sole/offline volume census,
+TLS/private config and both fences. The serialized offline backup uses the same
+bounded checker before copying, fsyncs the copy, and compares full original and
+copied logical state. It does not restore or reinterpret the database.
+
+Each owned scheduling intent includes its stable request UUID, complete body and
+original node observation, FULL-saved before POST. A lost acknowledgement reads
+that exact `/schedule-owned/{requestId}` receipt and checks its complete body,
+checksum, current node CAS and full old/new history before proceeding. Missing,
+conflicting or uncertain lookup holds without another POST. The explicit
+`reconcile-schedule` action can later perform receipt-only reconciliation of a
+saved pre-Docker pending schedule; it cannot create a new request or run Docker
+transitions. Only a fully matched pending receipt restores the prepared phase,
+and subsequent activation still requires the independent release gate. Existing
+acknowledged plans are reused only when their exact node state remains bound.
+
+The new integration tests execute the actual existing updater methods against
+local HTTP/Queue/SQLite, with synthetic Docker/SSH boundaries. They cover full
+activation flow, old/new owned history, lost POST/GET replies, explicit receipt
+reconciliation, uncommitted unknown refusal, create/start uncertainty and the
+existing explicit rollback flow. They also execute the actual serialized backup
+program over a temporary four-receipt state, and an actual local OS gate with
+the real synthetic backend HTTP service. Main probe and controller tests verify
+explicit CIDs and helper/candidate source separation. A test-only override of
+the false release constant exercises these inactive branches; it grants no
+production permission. Real private configuration and on-cluster state-copy
+qualification remain separate from synthetic application migration evidence.
+
+The final integration passed 90 focused tests with no skips in the actual
+candidate image (Python 3.13, UID 10001), independently rerun in 32.113 seconds
+with network isolation, a read-only root and ResourceWarnings treated as errors.
+Independent source review also exercised the real three-process incremental
+gate handshake and foreign-volume-owner refusal after the FULL-saved pending
+intent. These checks qualify host helper flow and synthetic Docker/SSH
+boundaries; they do not acquire installed gates or activate the candidate.

@@ -18,7 +18,7 @@ import uuid
 
 from ops.coordinator_gate_bridge import (BridgeBinding,BridgeError,BridgeEOF,BridgeGateClient,
     GateSet,LocalGate,RootRelay,MainEngineProbe,MAIN_CONTAINER_ID,MAIN_CONTAINER_NAME,MAIN_INSPECT_TEMPLATE,
-    helper_digest,_Pipe,_common,_main_http_json)
+    helper_digest,incremental_helper_digest,_Pipe,_common,_main_http_json)
 from processing.node_gate import NodeGate,GateBusy,canonical_gate_path
 
 
@@ -98,6 +98,11 @@ class BridgeTests(unittest.TestCase):
             self.assert_free(binding)
             self.assertEqual((canonical_gate_path(binding.engine_id)/'gate.json').read_bytes(),self.original[binding.engine_id])
         with self.assertRaises(BridgeError):relay.run()
+
+    def test_actual_incremental_pipe_client_and_root_relay_qualify_expanded_code_closure(self):
+        self.main=replace(self.main,helper_sha256=incremental_helper_digest())
+        self.cluster=replace(self.cluster,helper_sha256=incremental_helper_digest())
+        self.test_actual_pipe_relay_holds_both_gates_and_closes_only_own_contexts()
 
     def test_main_holder_death_aborts_relay_and_executor_not_stale_ready(self):
         main=self.start_holder();cluster,ready,release=self.start_executor(wait=True)
@@ -350,6 +355,23 @@ class MainProbeTests(unittest.TestCase):
         self.uploads='.gitignore\n'
         self.top='PID COMMAND\n1 /sbin/docker-init -- /usr/bin/node /var/www/index.js\n2 /bin/bash /usr/bin/node /var/www/index.js\n3 /usr/bin/node /var/www/index.js\n'
         self.assertEqual(self.run_probe(),'fixture-main')
+
+    def test_explicit_incremental_cid_is_used_for_all_actual_probe_commands(self):
+        current='a'*64
+        self.probe=MainEngineProbe(self.image,expected_container=current,executable=sys.executable,endpoint='unix:///fixture.sock',timeout_seconds=.5)
+        self.container['id']=current
+        self.assertEqual(self.run_probe(),'fixture-main')
+        for args in self.calls:
+            if args[0]=='container':self.assertEqual(args[-1],current)
+            if args[0] in ('exec','top'):self.assertEqual(args[1],current)
+        self.container['id']=MAIN_CONTAINER_ID
+        with self.assertRaises(BridgeError):self.run_probe()
+
+    def test_explicit_probe_identity_drift_or_empty_container_cannot_fall_back_to_historical(self):
+        with self.assertRaises(BridgeError):MainEngineProbe(self.image,expected_container='')
+        self.probe.expected_container='a'*64
+        with self.assertRaises(BridgeError):self.run_probe()
+        self.assertEqual(self.calls,[])
 
     def test_foreign_container_name_image_stopped_unhealthy_or_invalid_pid_refused(self):
         for key,value in (('id','9'*64),('name','/peer'),('image','sha256:'+'9'*64),('running',False),('pid',0),('pid',True),('health','unhealthy')):

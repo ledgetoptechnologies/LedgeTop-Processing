@@ -48,6 +48,21 @@ def helper_digest():
         separators=(',',':')).encode()).hexdigest()
 
 
+def incremental_helper_digest():
+    """Pin the complete non-stdlib update/bridge/inspection execution closure."""
+    root=Path(__file__).resolve().parents[1]
+    names=('ops/coordinator_gate_bridge.py','ops/run_coordinator_update_bridge.py',
+        'ops/update_reference_coordinator.py','ops/install_reference_coordinator.py',
+        'ops/incremental_coordinator_binding.py','processing/node_gate.py',
+        'processing/maintenance.py','processing/container_update.py','processing/odx_smoke_worker.py')
+    return hashlib.sha256(json.dumps({name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in names},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _qualified_helper(expected):
+    if expected==helper_digest() or expected==incremental_helper_digest():return
+    raise BridgeError('qualified_helper_code_changed')
+
+
 @dataclass(frozen=True)
 class BridgeBinding:
     engine_id:str
@@ -302,19 +317,22 @@ def _main_http_json(route,deadline,limit=65536):
 
 class MainEngineProbe(DockerEngineProbe):
     """Fresh fixed main container/image and idle API proof, no credentials."""
-    def __init__(self,expected_image,*,executable='/usr/bin/docker',endpoint='unix:///run/docker.sock',timeout_seconds=10):
+    def __init__(self,expected_image,*,expected_container=None,executable='/usr/bin/docker',endpoint='unix:///run/docker.sock',timeout_seconds=10):
         if type(expected_image) is not str or not re.fullmatch(r'sha256:[a-f0-9]{64}',expected_image):
             raise BridgeError('immutable_main_image_required')
         super().__init__(executable,endpoint,timeout_seconds=timeout_seconds)
-        self.expected_image=expected_image
+        self.expected_image=expected_image;self.expected_container=MAIN_CONTAINER_ID if expected_container is None else expected_container
+        if type(self.expected_container) is not str or not re.fullmatch('[a-f0-9]{64}',self.expected_container):raise BridgeError('immutable_main_container_required')
+        self._expected=(self.expected_image,self.expected_container)
 
     def __call__(self):
         try:
+            if (self.expected_image,self.expected_container)!=self._expected:raise ValueError()
             deadline=time.monotonic()+self.timeout
             identity=self._engine_identity(deadline)
-            value=_strict_json(self._output(['container','inspect','--format',MAIN_INSPECT_TEMPLATE,MAIN_CONTAINER_ID],deadline))
+            value=_strict_json(self._output(['container','inspect','--format',MAIN_INSPECT_TEMPLATE,self.expected_container],deadline))
             if (type(value) is not dict or set(value)!={'id','name','image','running','pid','health'}
-                    or value['id']!=MAIN_CONTAINER_ID or value['name']!=MAIN_CONTAINER_NAME or value['image']!=self.expected_image
+                    or value['id']!=self.expected_container or value['name']!=MAIN_CONTAINER_NAME or value['image']!=self.expected_image
                     or value['running'] is not True or type(value['pid']) is not int or value['pid']<=0
                     or value['health'] not in (None,'healthy')):raise ValueError()
             info=_main_http_json('/info',deadline)
@@ -332,16 +350,16 @@ class MainEngineProbe(DockerEngineProbe):
         except Exception:raise BridgeError('main_container_or_idle_proof_unavailable') from None
 
     def _uploads_idle(self,deadline):
-        raw=self._output(['exec',MAIN_CONTAINER_ID,'/bin/ls','-A','/var/www/tmp'],deadline)
+        raw=self._output(['exec',self.expected_container,'/bin/ls','-A','/var/www/tmp'],deadline)
         if raw=='':return
         if raw!='.gitignore\n':raise BridgeError('main_unfinished_uploads')
         path='/var/www/tmp/.gitignore'
-        if (self._output(['exec',MAIN_CONTAINER_ID,'/usr/bin/stat','-c','%F %s',path],deadline)!='regular file 1\n'
-                or self._output(['exec',MAIN_CONTAINER_ID,'/bin/cat',path],deadline)!='*'):
+        if (self._output(['exec',self.expected_container,'/usr/bin/stat','-c','%F %s',path],deadline)!='regular file 1\n'
+                or self._output(['exec',self.expected_container,'/bin/cat',path],deadline)!='*'):
             raise BridgeError('main_upload_placeholder_unproven')
 
     def _processing_idle(self,deadline):
-        rows=self._output(['top',MAIN_CONTAINER_ID,'-eo','pid,args'],deadline).splitlines()
+        rows=self._output(['top',self.expected_container,'-eo','pid,args'],deadline).splitlines()
         if not rows or rows[0].split() not in (['PID','COMMAND'],['PID','ARGS']):raise BridgeError('main_process_inventory_unproven')
         server=wrapper=init=0;pids=set()
         for row in rows[1:]:
@@ -396,7 +414,8 @@ class LocalGate:
 
     def check(self):
         if self.pid!=os.getpid():raise BridgeError('local_gate_owner_changed')
-        if self._identity()!=self.identity or helper_digest()!=self.binding.helper_sha256:raise BridgeError('local_gate_identity_changed')
+        _qualified_helper(self.binding.helper_sha256)
+        if self._identity()!=self.identity:raise BridgeError('local_gate_identity_changed')
         if self.engine_probe()!=self.binding.engine_id:raise BridgeError('physical_docker_engine_changed')
         state=self.gate.snapshot();expected=self.binding.public()
         if (any(state.get(key)!=expected[key] for key in ('engineId','nodeId','authorityId','coordinatorOrigin','generation'))
@@ -467,7 +486,7 @@ class BridgeGateClient:
         self._owner()
         if self.base is not None:raise BridgeError('bridge_client_already_entered')
         try:
-            if helper_digest()!=self.binding.helper_sha256:raise BridgeError('bridge_helper_source_changed')
+            _qualified_helper(self.binding.helper_sha256)
             self.base=_validate(self.channel.read(time.monotonic()+self.timeout),self.binding,self.operation_id,
                 self.session_nonce,'main-gate-ready')
             self.check();return self
@@ -482,7 +501,7 @@ class BridgeGateClient:
             self._owner()
             if self.base is None:raise BridgeError('bridge_client_not_entered')
             try:
-                if helper_digest()!=self.binding.helper_sha256:raise BridgeError('bridge_helper_source_changed')
+                _qualified_helper(self.binding.helper_sha256)
                 nonce=self.nonce_factory();_hash(nonce)
                 if nonce==self.previous:raise BridgeError('bridge_nonce_reused')
                 sequence=self.sequence+1;deadline=time.monotonic()+self.timeout
@@ -568,7 +587,7 @@ class RootRelay:
         if self.pid!=os.getpid() or self.used:raise BridgeError('relay_cannot_be_replayed')
         self.used=True;success=False
         try:
-            if helper_digest()!=self.binding.helper_sha256:raise BridgeError('bridge_helper_source_changed')
+            _qualified_helper(self.binding.helper_sha256)
             base=_validate(self.main_pipe.read(time.monotonic()+self.timeout,self._alive),self.binding,self.operation_id,
                 self.session_nonce,'main-gate-ready')
             self.cluster_pipe.write(base,time.monotonic()+self.timeout,self._alive)

@@ -10,6 +10,7 @@ import unittest
 from ops import run_coordinator_update_bridge as controller
 from ops.coordinator_gate_bridge import BridgeError, helper_digest
 from processing.node_gate import GateError
+from ops.incremental_coordinator_binding import IncrementalBinding
 
 
 def configuration():
@@ -31,6 +32,23 @@ def specification(**changes):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_incremental_helper_bundle_and_current_cid_are_separate_from_candidate_app(self):
+        profile=IncrementalBinding('1'*64,'sha256:'+'2'*64,'3'*40,'4'*40,controller.AUTHORITY,'5'*64,'6'*64,'7'*64,'sha256:'+'8'*64,'9'*64,'sha256:'+'a'*64,'b'*64,'c'*64,'d'*64)
+        spec=specification(source_commit=profile.candidate_source,main_image=profile.main_image,helper_source_commit='e'*40,incremental_binding=profile)
+        config=configuration()
+        for node in ('cluster','main'):config[node]['helperSha256']=controller.incremental_helper_digest()
+        for node in ('cluster','main'):
+            argv=controller.ssh_argv(node,spec,config);payload=json.loads(shlex.split(argv[-1])[4])
+            self.assertTrue(payload['source'].endswith('/reference-'+'e'*40+'/source'))
+            self.assertNotIn('/reference-'+profile.candidate_source+'/',payload['source'])
+            self.assertEqual(payload['incrementalBinding']['predecessor_container'],profile.predecessor_container)
+            if node=='main':self.assertEqual(payload['expectedMainContainer'],profile.main_container)
+            else:
+                arguments=payload['arguments'];self.assertEqual(arguments[arguments.index('--source-commit')+1],profile.candidate_source)
+                self.assertEqual(arguments[arguments.index('--helper-source-commit')+1],'e'*40)
+                self.assertIn('--incremental-profile',arguments)
+        with self.assertRaises(BridgeError):specification(incremental_binding=profile)
+
     def test_remote_commands_are_one_quoted_static_program_and_closed_json(self):
         spec = specification(); config = configuration()
         for node in ('main', 'cluster'):
