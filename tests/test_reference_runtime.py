@@ -1,15 +1,26 @@
 import copy
 from dataclasses import replace
 import json
+import http.client
+import io
 import os
 from pathlib import Path
 import ssl
+import signal
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
+from contextlib import redirect_stderr
+from http.server import ThreadingHTTPServer
 
-from processing.app import make_handler
+from processing.app import make_handler, CoordinatorService
+from processing.reference_binary import BinaryResponse
+from processing.reference_http import create_reference_http_server
 from processing.config import Config, from_environment
 from processing.prototype import Queue, REFERENCE_PROFILE, VIEWER_PROFILE
 from processing.reference_runtime import (
@@ -243,6 +254,240 @@ class ReferenceRuntimeTests(unittest.TestCase):
             config = from_environment()
             self.assertEqual(config.reference_config_path, str(self.path))
             self.assertNotIn(str(self.path), repr(config))
+
+    def supervised_handler(self):
+        config = replace(self.config, viewer_enabled=False, reference_config_path=str(self.path))
+        first, second = self.tls_patches()
+        with first, second:
+            handler = make_handler(config)
+        self.addCleanup(handler.prototype_queue.close)
+        return handler
+
+    def wait_for(self, condition):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if condition():
+                return
+            threading.Event().wait(0.01)
+        self.fail('coordinator lifecycle condition not reached')
+
+    def test_coordinator_shutdown_joins_native_and_reference_handlers_before_queue_unlock(self):
+        handler = self.supervised_handler()
+        native_entered, native_release = threading.Event(), threading.Event()
+        reference_entered, reference_release, reference_closed = threading.Event(), threading.Event(), threading.Event()
+        original_get = handler.do_GET
+
+        def blocked_get(request):
+            if request.path == '/blocked':
+                native_entered.set()
+                native_release.wait(timeout=6)
+                request._reply(200, {'ok': True})
+            else:
+                original_get(request)
+
+        handler.do_GET = blocked_get
+
+        class Stream:
+            def chunks(self):
+                reference_entered.set()
+                reference_release.wait(timeout=6)
+                yield b'abc'
+
+            def close(self):
+                reference_closed.set()
+
+        class Adapter:
+            def handle(self, *_args, **_kwargs):
+                return BinaryResponse(Stream(), headers={'Content-Type':'application/octet-stream','Content-Length':'3'})
+
+        reference_servers = []
+
+        def reference_factory(*_args, **_kwargs):
+            server = create_reference_http_server(Adapter())
+            reference_servers.append(server)
+            return server
+
+        handler.reference_listener._server_factory = reference_factory
+        native = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        service = CoordinatorService(native, handler)
+        stop, exits, errors = threading.Event(), [], []
+        running = threading.Thread(target=lambda: exits.append(service.run(stop)))
+        running.start()
+        self.wait_for(service.healthy)
+
+        def consume(server, path):
+            connection = http.client.HTTPConnection(*server.server_address, timeout=6)
+            try:
+                connection.request('GET', path)
+                response = connection.getresponse()
+                response.read()
+            except Exception as error:
+                errors.append(type(error).__name__)
+            finally:
+                connection.close()
+
+        clients = [threading.Thread(target=consume, args=(native,'/blocked')),
+                   threading.Thread(target=consume, args=(reference_servers[0],'/result'))]
+        for client in clients:
+            client.start()
+        try:
+            self.assertTrue(native_entered.wait(timeout=3))
+            self.assertTrue(reference_entered.wait(timeout=3))
+            stop.set()
+            self.wait_for(lambda: service.health()['state'] == 'draining')
+            self.assertFalse(service.healthy())
+            self.wait_for(lambda: not service.health()['referenceAlive'])
+            with self.assertRaises(RuntimeError):
+                Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+            native_release.set()
+            self.assertTrue(running.is_alive())
+            self.assertFalse(reference_closed.is_set())
+            with self.assertRaises(RuntimeError):
+                Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+            reference_release.set()
+            running.join(timeout=3)
+            for client in clients:
+                client.join(timeout=3)
+            self.assertFalse(running.is_alive())
+            self.assertTrue(reference_closed.is_set())
+            self.assertEqual(exits, [0])
+            self.assertEqual(errors, [])
+            self.assertEqual(service.health()['state'], 'stopped')
+            reopened = Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+            reopened.close()
+        finally:
+            native_release.set()
+            reference_release.set()
+            stop.set()
+            running.join(timeout=7)
+            for client in clients:
+                client.join(timeout=7)
+
+    def test_reference_listener_failure_fails_supervision_without_healthy_native_endpoint(self):
+        handler = self.supervised_handler()
+        fail = threading.Event()
+
+        class FailingServer(FakeServer):
+            def serve_forever(self, **kwargs):
+                fail.wait(timeout=4)
+                raise RuntimeError('private-test-credential /private/file')
+
+        handler.reference_listener._server_factory = lambda *_args, **_kwargs: FailingServer()
+        native = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        service = CoordinatorService(native, handler)
+        stop, exits = threading.Event(), []
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            running = threading.Thread(target=lambda: exits.append(service.run(stop)))
+            running.start()
+            try:
+                self.wait_for(service.healthy)
+                fail.set()
+                running.join(timeout=3)
+                self.assertFalse(running.is_alive())
+                self.assertEqual(exits, [2])
+                self.assertFalse(service.healthy())
+                self.assertEqual(service.health()['reason'], 'reference_listener_failed')
+                self.assertNotIn('private-test-credential', json.dumps(service.health()))
+                self.assertNotIn('/private/file', json.dumps(service.health()))
+            finally:
+                fail.set()
+                stop.set()
+                running.join(timeout=5)
+        self.assertEqual(errors.getvalue(), '')
+
+    def test_dispatcher_inflight_work_is_joined_past_legacy_close_timeout_before_queue_unlock(self):
+        config = replace(self.config, viewer_enabled=False)
+        handler = make_handler(config)
+        self.addCleanup(handler.prototype_queue.close)
+        entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+
+        class Dispatcher:
+            def __init__(self):
+                self._stop = threading.Event()
+
+            def start(self):
+                def work():
+                    entered.set()
+                    self._stop.wait()
+                    release.wait(timeout=5)
+                self._thread = threading.Thread(target=work)
+                self._thread.start()
+
+            def close(self):
+                self._stop.set()
+                self._thread.join(timeout=0.01)
+                closed.set()
+
+        handler.viewer_service = Dispatcher()
+        native = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        service = CoordinatorService(native, handler)
+        stop, exits = threading.Event(), []
+        running = threading.Thread(target=lambda: exits.append(service.run(stop)))
+        running.start()
+        try:
+            self.assertTrue(entered.wait(timeout=3))
+            self.wait_for(service.healthy)
+            stop.set()
+            self.assertTrue(closed.wait(timeout=3))
+            self.assertTrue(running.is_alive())
+            with self.assertRaises(RuntimeError):
+                Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+            release.set()
+            running.join(timeout=3)
+            self.assertEqual(exits, [0])
+        finally:
+            release.set()
+            stop.set()
+            running.join(timeout=6)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'actual POSIX SIGTERM semantics')
+    def test_main_sigterm_exits_cleanly_and_preserves_default_native_health_contract(self):
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        state = self.root / 'signal-state'
+        token = 'synthetic-signal-token-' + 'x' * 32
+        environment = {key: os.environ[key] for key in ('PATH','PYTHONDONTWRITEBYTECODE') if key in os.environ}
+        environment.update(PROCESSING_API_TOKEN=token, PROCESSING_BIND_HOST='127.0.0.1',
+                           PROCESSING_PORT=str(port), PROCESSING_PROTOTYPE_STATE_DIR=str(state))
+        process = subprocess.Popen([sys.executable, '-m', 'processing.app'],
+            cwd=Path(__file__).resolve().parents[1], env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 4
+            health = None
+            while time.monotonic() < deadline and process.poll() is None:
+                connection = http.client.HTTPConnection('127.0.0.1', port, timeout=0.2)
+                try:
+                    connection.request('GET', '/healthz')
+                    response = connection.getresponse()
+                    body = json.loads(response.read())
+                    if response.status == 200:
+                        health = body
+                        break
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+                threading.Event().wait(0.02)
+            self.assertIsNotNone(health)
+            self.assertEqual(health['status'], 'ok')
+            self.assertEqual(health['mode'], 'routing_probe')
+            self.assertFalse(health['viewerEnabled'])
+            with self.assertRaises(RuntimeError):
+                Queue(state)
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=4)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(stderr, '')
+            self.assertNotIn(token, stdout)
+            reopened = Queue(state)
+            reopened.close()
+        finally:
+            if process.poll() is None:
+                process.kill()  # Only this test-created routing-only subprocess.
+                process.communicate(timeout=4)
 
 
 if __name__ == "__main__":

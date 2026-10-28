@@ -70,7 +70,7 @@ Beau supplies a smaller dataset.
 6. Repeat relevant synthetic failure/recovery checks against the installed path
    before enabling real data; the isolated source checks do not prove deployment.
 
-Source acceptance: the latest full 543-test checkpoint passes in an isolated Linux container
+Source acceptance: the latest full 572-test checkpoint passes in an isolated Linux container
 with network disabled and a read-only source mount. Linux also exercises the
 symlink checks that Windows skips without symlink privileges. Tests include real loopback HTTP, metadata grant
 replay, transfer corruption/expiry and completion-commit crash windows. These
@@ -258,6 +258,23 @@ Node validators share the additive source-retention fixture exactly; an independ
 isolated Linux run passed all 23 Node protocol/retention tests. Evidence and source
 hashes are in `evidence/reference-readiness-20261027.json`. This remains source
 qualification and inactive source staging, not completion of runtime acceptance.
+
+The subsequent source checkpoint passed all 572 Linux tests with no skips.
+`treedar_delivery.py` now projects exact controller terminal proofs into the
+existing result/failure outboxes, result serving and Viewer acceptance interfaces.
+It persists and validates the coordinator acknowledgement before physical gate
+release. Restart recovery may use only the exact retained gate tombstone; it
+cannot alter a newer reservation. If a later completion overwrites that sole
+tombstone before the local delivered checkpoint, recovery remains held for
+reconciliation. General host-driver selection and combined pipelines are still
+unwired, and TreeDar availability remains disabled.
+
+The coordinator now supervises both listeners, handles SIGTERM by requesting a
+graceful drain, joins active handlers and the Viewer dispatcher, and releases the
+queue lock last. Actual Linux signal and blocked-stream tests cover that ordering.
+Unexpected listener failure makes health unavailable and exits with a sanitized
+failure. Private TLS/configuration provisioners also passed actual Linux/OpenSSL
+checks; deployment preparation is recorded in `reference-deployment.md`.
 
 Missing delivery acknowledgements retain results. Disk pressure stops intake.
 Production priority, the shared execution fence and maintenance gates apply to

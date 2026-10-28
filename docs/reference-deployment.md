@@ -194,8 +194,71 @@ Independent re-reading verified all 50 file hashes on each host. The source is
 inactive: no Docker build/pull/run, configuration or PKI generation, unit install,
 gate change or listener activation occurred. Current installations remain intact.
 
+A second authorized source-only stage placed commit
+`10a3848b5da0fa591fd8be7ef642e122bb1f1724` at
+`/home/bkoltz/.local/share/ledgetop-processing-reference/reference-10a3848/source`
+on both hosts, retaining the earlier staged version. This archive again contained
+only `processing/`, `ops/` and `Dockerfile`: 55 files, 696,320 bytes, SHA256
+`1a664b77b90812f1ff8d9fa18e081c1476f043bb9fbc8719853ad264569a2c5a`.
+The same exclusive extraction, private ownership and per-file verification checks
+passed. The transferred archives were removed after verification, and a second
+independent read verified all 55 extracted hashes on each host.
+
+The newer version's adjacent `staging-receipt.json` has SHA256
+`05ff31e16f34c5c68575c8b78a8621423884256fdfa920b6e0c604acee43da1b` on cluster and
+`72c0a63ed48a28095d00f4e8df3d5b357d0751aca0794e1c001e4e6d7f249959` on main.
+Both reference ports remained unbound after staging. No Docker build/run,
+credentials, PKI, configuration, units or gates were changed by that source stage.
+
+Read-only recreation inspection also confirmed that the 24 keys in the existing
+private native runtime environment file exactly match the running container,
+without reporting their values. Preserve its bridge network, init process,
+`unless-stopped` restart, read-only root, UID/GID 10001, dropped capabilities,
+`no-new-privileges`, 64-process limit, 0.5 CPU, 256 MiB memory, 512 MiB memory/swap
+total, private IPC, 64 MiB shared memory, JSON-file logging, native ports, state
+volume and inherited healthcheck. Its default hostname is a generated container
+identity, not a gate or queue authority.
+
+The exact pinned Python base image from `Dockerfile`,
+`python:3.13-slim-bookworm@sha256:e32be0e55814a08977501ca863271d9bd02443710db8f2afaf8372e2c4508530`,
+was present locally on cluster as Linux/amd64. Docker client/server were 29.1.3;
+Buildx was absent. A future authorized local build can use the cached base with
+`--pull=false --network=none`, after selecting a supported local builder. Builder
+execution was not tested and no image was built or pulled in this inspection.
+
 An additional read-only host check imported `processing.reference_driver`,
 `processing.reference_runtime`, `processing.treedar_admission` and
 `ops.reference_worker_daemon` from that staged source using each host's actual
 `python3 -B` (cluster 3.14.4, main 3.10.12). Both passed. No configuration was
 loaded, daemon started, database opened or bytecode written by that import check.
+
+## Private TLS and configuration preparation
+
+The reviewed `ops/provision_reference_tls.py` was executed on cluster in the new
+`reference-10a3848/tls` private directory. It created a Processing-only CA and
+separate coordinator, cluster-worker and main-worker server certificates. The
+leaf SANs bind their actual `.89`/`.88` addresses and loopback; leaf certificates
+expire January 26, 2027. Renewal is still an installation responsibility, not an
+enabled automatic service. The CA certificate SHA256 is
+`d35b9882b6f7244ecc09ff934ddb524a27fb2080ac4350087c5b96529a636318`.
+No machine trust store was changed. The CA private key stayed on cluster; only
+the main leaf key/certificate and public CA were transferred to main over SSH.
+Main verified the certificate chain, IP SAN, matching private key and mode/owner.
+
+Each host's worker TLS copy is UID 1000 with directory 0700/files 0600. The
+cluster coordinator mount copy is numeric UID/GID 10001, with the same private
+modes. Public CA material was also copied to the local Codex artifact directory
+for future endpoint-scoped Viewer trust; no private key was copied there.
+
+`ops/provision_reference_config.py` created five distinct new role credentials
+in private cluster files and generated the staging-only reference runtime JSON.
+It does not generate a NAS broker route or worker intake configuration. The
+author copy remains UID 1000; the separate mount copy is UID 10001. No generated
+credential values appear in this record. Native credentials remain unchanged.
+
+An initial network-disabled image build from private staged source succeeded,
+but its UID-10001 import check failed: Docker's plain `COPY` retained root-owned
+0600 files and 0700 directories. That inert image was rejected before cutover.
+The Dockerfile now explicitly copies the package with numeric owner 10001; the
+replacement image must pass actual as-user imports and configuration validation
+before replacing the live coordinator. This does not loosen host source modes.
