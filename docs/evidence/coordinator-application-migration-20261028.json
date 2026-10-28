@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "status": "synthetic-actual-image-application-migration-qualified-only",
+  "observedAt": "2026-10-28T23:15:33.121929+00:00",
+  "sourcePins": {
+    "tests/test_coordinator_application_migration.py": "6e1df69df1a86d4cd0823e147326ca44caeb0d9aab22c02c3b60cd97ff627b85",
+    "docs/coordinator-application-migration.md": "838a96d849b6a891766280e2ac0da3713ed34abcc941dc3a0ed497d341419651"
+  },
+  "predecessorSource": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+  "candidateSource": "6bbd468e1177746cb695e43195e75355b0681f23",
+  "predecessorImage": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+  "candidateImage": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+  "imageFileCounts": {
+    "predecessor": 49,
+    "candidate": 63
+  },
+  "rawAndLfEquivalentSourceMapsRequired": true,
+  "tests": {
+    "authorPassed": 1,
+    "authorSeconds": 4.158,
+    "independentPassed": 1,
+    "independentSeconds": 4.172,
+    "defaultExplicitSkips": 1,
+    "optIn": "MIGRATION_IMAGE_ORACLE=1",
+    "resourceWarningsAsErrors": true
+  },
+  "independentPhases": {
+    "migration": "actual-old-image_to_candidate_to_actual-old-image",
+    "reports": [
+      {
+        "authority": "052585b6-e6e3-4610-809c-a8611a17ca77",
+        "sourceCommit": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+        "loadedProcessingModules": 27,
+        "logicalSha256": "203f7a4b45108ad40b34281cf3952ece592ef5c2ac30c7ffe4e5422fdd0928e1",
+        "configurationSha256": "519b06db81d5a2d89fb8984a9e2f9afc9beebd30b85873b8be79904cf04b7235",
+        "backendRequests": 0,
+        "backendMutations": 0
+      },
+      {
+        "authority": "052585b6-e6e3-4610-809c-a8611a17ca77",
+        "nativeClosed": true,
+        "tlsClosed": true,
+        "statePreserved": true,
+        "workerRecoveryEnabled": false,
+        "applicationModule": "/app/processing/app.py",
+        "sourceCommit": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+        "loadedProcessingModules": 27,
+        "logicalSha256": "203f7a4b45108ad40b34281cf3952ece592ef5c2ac30c7ffe4e5422fdd0928e1",
+        "configurationSha256": "519b06db81d5a2d89fb8984a9e2f9afc9beebd30b85873b8be79904cf04b7235",
+        "backendRequests": 4,
+        "backendMutations": 0
+      },
+      {
+        "authority": "052585b6-e6e3-4610-809c-a8611a17ca77",
+        "nativeClosed": true,
+        "tlsClosed": true,
+        "statePreserved": true,
+        "workerRecoveryEnabled": false,
+        "applicationModule": "/app/processing/app.py",
+        "sourceCommit": "6bbd468e1177746cb695e43195e75355b0681f23",
+        "loadedProcessingModules": 34,
+        "logicalSha256": "203f7a4b45108ad40b34281cf3952ece592ef5c2ac30c7ffe4e5422fdd0928e1",
+        "configurationSha256": "519b06db81d5a2d89fb8984a9e2f9afc9beebd30b85873b8be79904cf04b7235",
+        "backendRequests": 4,
+        "backendMutations": 0
+      },
+      {
+        "authority": "052585b6-e6e3-4610-809c-a8611a17ca77",
+        "nativeClosed": true,
+        "tlsClosed": true,
+        "statePreserved": true,
+        "workerRecoveryEnabled": false,
+        "applicationModule": "/app/processing/app.py",
+        "sourceCommit": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+        "loadedProcessingModules": 27,
+        "logicalSha256": "203f7a4b45108ad40b34281cf3952ece592ef5c2ac30c7ffe4e5422fdd0928e1",
+        "configurationSha256": "519b06db81d5a2d89fb8984a9e2f9afc9beebd30b85873b8be79904cf04b7235",
+        "backendRequests": 4,
+        "backendMutations": 0
+      }
+    ]
+  },
+  "isolation": {
+    "network": "none",
+    "hostPortsPublished": false,
+    "readOnlyRoot": true,
+    "newLocalSyntheticVolumeOnly": true,
+    "qualifierVolumeRemains": false,
+    "privateConfigOrStateExported": false
+  },
+  "scope": [
+    "Actual image predecessor seed then full predecessor/candidate/predecessor CoordinatorService cold lifecycles with verified /app imports.",
+    "All logical schema/table rows, 12 terminal jobs, 2 prior owned receipts, authority and synthetic private config preserved.",
+    "Native/TLS listener authentication, dynamic options against idle fixture, disabled TreeDar/Gaussian/recovery, dispatcher shutdown, OS state-lock exclusion and release checked.",
+    "No backend mutation; local test volume removed. Exact old image read by SSH export; live service/state/config untouched."
+  ],
+  "remaining": [
+    "Actual cluster private-config/state-copy migration qualification.",
+    "Existing updater/bridge incremental executor integration and independent source review.",
+    "Fresh physical gate leases, sole-owner/preflight and authorized live activation/rollback acceptance.",
+    "Full goal: NAS/Viewer assembly, full processing modes, durable custody/cleanup and UI acceptance."
+  ],
+  "remoteRuntimeChanged": false,
+  "remoteStateChanged": false,
+  "nasChanged": false,
+  "runtimeActivated": false,
+  "fullGoalComplete": false
+}
