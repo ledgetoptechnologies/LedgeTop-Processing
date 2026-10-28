@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "status": "isolated-qualifier-source-qualified-not-live-private-config-acceptance",
+  "sourcePins": {
+    "docs/qualify-coordinator-application.md": "0f086581025a31b96253f1f30044b37e0214d7f561ae7eb3649820d53e3047f0",
+    "ops/qualify_coordinator_application.py": "0fa920ae097ddf2ed44c2df74bf561b8e93a1e0f9526be8c55cbc57d6f94320d",
+    "tests/test_qualify_coordinator_application.py": "0699414bffe2f8015c50395d11cebfa9a7d77ee1447af8c0349ff1cc3c0b225b"
+  },
+  "tests": {
+    "authorFocusedPassed": 14,
+    "authorFocusedSeconds": 0.245,
+    "authorImageOraclePassed": 3,
+    "authorImageOracleSeconds": 7.439,
+    "rootFocusedPassed": 14,
+    "rootFocusedSeconds": 0.233,
+    "rootActualImageOraclePassed": 3,
+    "rootActualImageOracleSeconds": 7.28,
+    "independentSourceReview": "Final exact v3 pins clear; 14 focused cases and separate actual-image nonempty initializer regression passed. Three default actual-image skips in reviewer Python-only suite are not coverage.",
+    "resourceWarningsAsErrors": true
+  },
+  "sourceReviewClosed": [
+    "Explicit local Docker executable/socket and expected engine ID; context/TLS redirect environment ignored.",
+    "Unique owned local volume inspected before initializer and every phase; exact label/driver/options/mount/CreatedAt bound.",
+    "Bounded empty-root/nonlink/directory/root0:0/held inode check precedes chmod/chown; actual nonempty-volume sentinel unchanged on refusal.",
+    "Declared application keynames-only descriptor binds actual helper environment hash; private env file complete fingerprint rechecked.",
+    "Exactly two SHA-pinned helper sources streamed over bounded stdin; no source/private operation directory mounts or permission relaxation.",
+    "Live source volume only read-only; consistent SQLite backup/full source-before-after/copy logical comparison; private TLS/config stay on host.",
+    "Actual old/candidate/old helper lifecycle uses isolated copied state with networknone/no hostports; full logical/authority/config hashes and clean listeners/lock release.",
+    "Every mutation has durable one-shot intent; uncertain outcome retains copy/evidence without replay or cleanup."
+  ],
+  "imagePair": {
+    "predecessor": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+    "candidate": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b"
+  },
+  "actualInstalledPrivateConfigExecuted": false,
+  "liveStateWritable": false,
+  "runtimeActivated": false,
+  "nasChanged": false,
+  "remaining": [
+    "Stage exact committed source and verify host exported bytes/compile/import closure.",
+    "Execute isolated actual private-config/state-copy gate on cluster, keeping private bytes there and inspecting exact outcome before cleanup.",
+    "Refresh actual physical/preflight identities and separately release/execute existing updater activation.",
+    "Full active objective remains: Viewer/NAS assembly, full modes, custody/cleanup and UI/runtime acceptance."
+  ],
+  "fullGoalComplete": false
+}
