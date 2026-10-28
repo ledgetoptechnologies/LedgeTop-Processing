@@ -10,7 +10,7 @@ from processing.viewer_service import NativeEngine
 from tests.test_reference_results import ResultsFixture
 
 
-class EngineCacheCleanupTests(ResultsFixture, unittest.TestCase):
+class EngineCacheCleanupFixture(ResultsFixture):
     def setUp(self):
         super().setUp()
         self.present, self.code, self.wrong_uuid = True, 40, False
@@ -78,6 +78,8 @@ class EngineCacheCleanupTests(ResultsFixture, unittest.TestCase):
         self.metadata_ack()
         return self.viewer_acceptance()
 
+
+class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
     def test_success_exact_owned_cache_removed_once_worker_files_retained(self):
         proof = self.admitted()
         before = self.archive.read_bytes()
@@ -168,20 +170,6 @@ class EngineCacheCleanupTests(ResultsFixture, unittest.TestCase):
         self.assertEqual(self.cleanup.remove(self.job['jobId'])['state'], 'uncertain')
         self.assertEqual(self.remove_calls, [])
 
-    def test_grace_and_pins_defer_with_durable_proof_then_reconcile_without_viewer_poll(self):
-        proof = self.admitted()
-        now = self.ledger.clock()
-        self.ledger.grace = 10
-        self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['reason'], 'acceptance_grace_not_elapsed')
-        self.assertEqual(self.cleanup.pending(), [self.job['jobId']])
-        self.ledger.clock = lambda: now + 11
-        self.ledger.set_pin('reservation-1', self.object['id'], 'reader', kind='read', state='uncertain')
-        self.assertEqual(self.cleanup.reconcile_one()['reason'], 'active_or_uncertain_result_pins')
-        self.ledger.set_pin('reservation-1', self.object['id'], 'reader', kind='read', state='released')
-        self.assertEqual(self.cleanup.reconcile_one()['state'], 'removed')
-        self.assertEqual(self.cleanup.pending(), [])
-        self.assertEqual(self.cleanup.reconcile_one(), {'state':'idle'})
-
     def test_remove_requires_explicit_success_and_readonly_absence_confirmation(self):
         proof = self.admitted()
         with patch.object(self.native, 'action', return_value={}):
@@ -204,6 +192,23 @@ class EngineCacheCleanupTests(ResultsFixture, unittest.TestCase):
             gate.handover('cluster','http://127.0.0.1:8000',self.authority,1,old_worker_stopped=True,note='synthetic maintenance')
         self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['reason'], 'physical_gate_binding_changed')
         self.assertEqual(self.remove_calls, [])
+
+
+class EngineCacheCleanupGraceTests(EngineCacheCleanupFixture, unittest.TestCase):
+    cleanup_grace_seconds = 10
+
+    def test_grace_and_pins_defer_with_durable_proof_then_reconcile_without_viewer_poll(self):
+        proof = self.admitted()
+        now = self.ledger.clock()
+        self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['reason'], 'acceptance_grace_not_elapsed')
+        self.assertEqual(self.cleanup.pending(), [self.job['jobId']])
+        self.ledger.clock = lambda: now + 11
+        self.ledger.set_pin('reservation-1', self.object['id'], 'reader', kind='read', state='uncertain')
+        self.assertEqual(self.cleanup.reconcile_one()['reason'], 'active_or_uncertain_result_pins')
+        self.ledger.set_pin('reservation-1', self.object['id'], 'reader', kind='read', state='released')
+        self.assertEqual(self.cleanup.reconcile_one()['state'], 'removed')
+        self.assertEqual(self.cleanup.pending(), [])
+        self.assertEqual(self.cleanup.reconcile_one(), {'state':'idle'})
 
 
 if __name__ == '__main__':

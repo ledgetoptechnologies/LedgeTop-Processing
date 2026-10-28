@@ -18,6 +18,8 @@ from tests.test_reference_engine_worker import FakeNativeEngine
 
 
 class ResultsFixture:
+    cleanup_grace_seconds = 0
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -29,7 +31,8 @@ class ResultsFixture:
         scratch = self.root / 'scratch'
         scratch.mkdir(mode=0o700)
         self.ledger = ScratchLedger(self.root / 'ledger.sqlite', scratch,
-            capacity_probe=lambda _: 1_000_000, safety_floor_bytes=0, cleanup_grace_seconds=0)
+            capacity_probe=lambda _: 1_000_000, safety_floor_bytes=0,
+            cleanup_grace_seconds=self.cleanup_grace_seconds)
         self.outbox = WorkerOutbox(self.root / 'outbox' / 'outbox.sqlite')
         self.engine = FakeNativeEngine()
         raw = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
