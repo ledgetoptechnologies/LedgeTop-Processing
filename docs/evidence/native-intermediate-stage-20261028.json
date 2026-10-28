@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T18:54:12.769392+00:00",
+  "status": "native-intermediate-source-qualified-and-inactive-staging-verified",
+  "source": {
+    "sourceCommit": "9e1bb13e653f9b60a03b3c4193992d70bfc07d01",
+    "archiveSha256": "841a01aaac2861b0b8f2fea4ddd639442c7980a25dbbe48169fdfa6e688dfa3c",
+    "archiveBytes": 3880960
+  },
+  "sourceFiles": 335,
+  "reviewedSourceHashes": {
+    "processing/reference_odm_stage.py": "0781e9bb7e943da0705e0e287704ccbc16f8c64f98afebea3cd3ad25c9cc794d",
+    "processing/reference_native_archive.py": "a22bf83f282feab536b87dcf2fa7782b5f875c51788fe51cf7faa933add5fe80",
+    "processing/reference_engine_worker.py": "921ccc6b068192838b068236bdcc3f11c8976d3d153b08c275f41b7c15cab338",
+    "tests/test_reference_odm_stage.py": "7db08b8b2dc4b0db1a0f6021410d8e1051df70a6fbf761d46eea6ecc8d6aa951",
+    "docs/reference-odm-stage.md": "21835c28df7f5fae2375f873e5d913922a2dbba3d6f71336df77fc8da5935ea8",
+    "processing/reference_store.py": "ee71434842c60ccaef95d0c77c20121f7c997fd3ed1f030cf888490479a532fe",
+    "processing/reference_worker_api.py": "5d0ca5a627f16a66ee4a72d7c555193c35d2cde3a845921ece1ab94ad65e6635",
+    "tests/test_reference_claim_snapshot.py": "eefdbde275d8f9edf8416a8c49e0e1f64156aec3ee30333b858e6694b35b04c5",
+    "docs/reference-claim-snapshot.md": "aa2cee295b898452aa599fc538c4cb9a459f2c536b87956071ef25461be6433f"
+  },
+  "tests": {
+    "linux": {
+      "total": 1025,
+      "passed": 1021,
+      "skipped": 4,
+      "seconds": 123.171,
+      "exitCode": 0,
+      "resourceWarningsAsErrors": true,
+      "skipReason": "Four actual Node checks require Node absent from cached Linux image."
+    },
+    "windowsActualNode": {
+      "total": 4,
+      "passed": 4,
+      "skipped": 0,
+      "seconds": 0.461,
+      "exitCode": 0
+    }
+  },
+  "independentReview": {
+    "nativeStageTests": 26,
+    "standaloneWorkerAndPipelineTests": 44,
+    "result": "No blockers in frozen five-file Native intermediate scope; all raw source pins matched.",
+    "scope": "Synthetic actual NativeEngine HTTP; Docker inspection simulated; no real reconstruction."
+  },
+  "nativeInvariants": [
+    "Adopts exact preexisting parent reservation and physical gate receipt; never creates a child job.",
+    "FULL mutation intent before once-only initialize/upload/commit; uncertain initialization/upload retained, no replay.",
+    "Readonly lookup seals evidence only; tick collects native terminal status/archive without parent finalization.",
+    "Fresh owner/claim callback and immutable Docker/Compose/image/container/API checks before admission.",
+    "All original parent inputs plus retained ODM archive monotonically allocated; no parent outbox, terminal, ACK, gate release or cleanup."
+  ],
+  "claimObservation": {
+    "commit": "7d58f65",
+    "tests": 8,
+    "scope": "Authenticated read-only current coordinator Queue/ReferenceStore claim-state, no claim replay or database writes; source-only API."
+  },
+  "independentStagingReadback": [
+    {
+      "node": "cluster",
+      "sourceCommit": "9e1bb13e653f9b60a03b3c4193992d70bfc07d01",
+      "archiveSha256": "841a01aaac2861b0b8f2fea4ddd639442c7980a25dbbe48169fdfa6e688dfa3c",
+      "verifiedFiles": 335,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/node-odx-gpu",
+          "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+          "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "running": true,
+          "startedAt": "2026-10-28T16:54:13.176495987Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/ledgetop-processing-prototype-c3fcb3a",
+          "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+          "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+          "running": true,
+          "startedAt": "2026-10-28T15:04:54.798609898Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/clusterodx",
+          "id": "e6d4da528e44c40f23816561187eea66f862dd36e870307d1cde12b57c39dc1a",
+          "image": "sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd",
+          "running": false,
+          "startedAt": "2026-10-28T00:22:55.543397097Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/cluster-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 18:52:19 UTC] ; stop_time=[Wed 2026-10-28 18:52:19 UTC] ; pid=386150 ; code=exited ; status=0 }"
+      }
+    },
+    {
+      "node": "main",
+      "sourceCommit": "9e1bb13e653f9b60a03b3c4193992d70bfc07d01",
+      "archiveSha256": "841a01aaac2861b0b8f2fea4ddd639442c7980a25dbbe48169fdfa6e688dfa3c",
+      "verifiedFiles": 335,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/ledgetop-main-processing-nodeodx-1",
+          "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+          "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+          "running": true,
+          "startedAt": "2026-10-28T15:24:31.019864573Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/dcgm_exporter",
+          "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+          "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+          "running": true,
+          "startedAt": "2026-10-27T21:19:37.266076107Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/node_exporter",
+          "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+          "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+          "running": true,
+          "startedAt": "2026-10-26T22:58:44.651792853Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 18:52:53 UTC] ; stop_time=[Wed 2026-10-28 18:52:53 UTC] ; pid=436809 ; code=exited ; status=0 }"
+      }
+    }
+  ],
+  "viewerBundleReview": {
+    "status": "four-new-files-frozen-uncommitted-independently-reviewed",
+    "receiptPath": "C:\\Users\\fstor\\.codex\\artifacts\\viewer-treedar-bundle-v1-20261028\\receipt.json",
+    "receiptSha256": "7ca1e7baa4381de5f5b557cd98201ab61c562ed33b4b418024f26cd19f86c768",
+    "independentTests": 48,
+    "scope": "Standalone draft archive/manifest validator only; no outer result role or integration."
+  },
+  "remaining": [
+    "Concrete production parent guard/fresh original provenance admission.",
+    "Real TreeDar intermediate controller and versioned native artifact producer.",
+    "Viewer owner agreement for outer versioned result transport; legacy v1 roles cannot carry real native TreeDar artifacts.",
+    "Once-only final delivery facade, factory/router composition and complete worker-to-coordinator-to-Viewer durable acceptance.",
+    "Durable factory ancestor provisioning/owner lease; migration/runtime epoch adoption.",
+    "NAS issuer/source retention and bounded safe cleanup; Beau-only NAS preflight pending.",
+    "Installed mixed runtime acceptance and Beau-selected smaller real dataset; no real photo run currently authorized.",
+    "Claude UI browser/merge/runtime acceptance remains Viewer-owned, source-only checks are not deployment acceptance."
+  ],
+  "runtimeChanged": false,
+  "combinedCapabilityEnabled": false,
+  "gaussianSplatsEnabled": false,
+  "legacyClusterOdxStarted": false,
+  "fullGoalComplete": false
+}
