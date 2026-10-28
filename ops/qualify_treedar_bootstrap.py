@@ -18,7 +18,9 @@ from tests.test_treedar_admission import write_projected_forest
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--synthetic', action='store_true', required=True)
-    parser.parse_args()
+    parser.add_argument('--processing-host-test', action='store_true',
+                        help='Record an operator-managed run on a processing host')
+    args = parser.parse_args()
     if not Path('/.dockerenv').is_file():
         raise ValueError('isolated synthetic container required')
     for name in ('/input', '/control', '/output'):
@@ -58,7 +60,7 @@ def main():
     print(json.dumps(dict(passed=True,actualBootstrap=True,actualTreeDarCli=True,
         syntheticOnly=True,genuineAcquisition=False,engineVersion=__version__,inputPoints=facts['pointCount'],
         knownCrowns=3,recoveredCrowns=len(trees),outputObjects=len(proof['objects']),
-        outputHashesVerified=True,processingHostsTouched=False)),flush=True)
+        outputHashesVerified=True,processingHostsTouched=args.processing_host_test)),flush=True)
 
 
 if __name__ == '__main__':
