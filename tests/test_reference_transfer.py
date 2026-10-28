@@ -60,6 +60,15 @@ class ReferenceTransferTests(unittest.TestCase):
         self.job["submission"]["manifest"]["objects"][0]["sha256"] = "0" * 64
         self.assertEqual(grant.objects[0].sha256, hashlib.sha256(b"abc").hexdigest())
 
+    def test_retry_allowance_is_bounded_separately_from_final_input_bytes(self):
+        for budget in (3, 4, 9):
+            self.raw['byteBudget'] = self.job['transferRequest']['byteBudget'] = budget
+            self.assertEqual(sum(o.byte_size for o in self.grant().objects), 3)
+        for budget in (2, 10, p.MAX_SAFE_INTEGER):
+            self.raw['byteBudget'] = self.job['transferRequest']['byteBudget'] = budget
+            with self.assertRaises(TransferError):
+                self.grant()
+
     def test_every_grant_identity_field_is_bound(self):
         mutations = dict(reservationId="wrong", generation=2,
             expiresAt="2031-01-01T00:00:00Z", manifestSha256="0"*64,

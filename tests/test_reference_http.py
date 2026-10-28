@@ -9,6 +9,7 @@ import unittest
 
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
+from processing.reference_control import ReferenceControlAPI
 from processing.reference_http import create_reference_http_server
 from processing.reference_protocol import MAX_BODY_BYTES
 from processing.reference_store import ReferenceStore, PROFILE
@@ -16,6 +17,7 @@ from processing.reference_store import ReferenceStore, PROFILE
 
 STAGING = "synthetic-http-staging-token"
 PRODUCTION = "synthetic-http-production-token"
+WORKER = 'synthetic-http-worker-token'
 
 
 class ReferenceHTTPTests(unittest.TestCase):
@@ -26,7 +28,8 @@ class ReferenceHTTPTests(unittest.TestCase):
         self.store = ReferenceStore(self.queue)
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
                                   "contracts/reference-v1.contract.json").read_text())
-        self.api = ReferenceAPI(self.store, bearer_tokens={STAGING: "staging", PRODUCTION: "production"},
+        self.api = ReferenceControlAPI(self.store, viewer_bearers={STAGING: "staging", PRODUCTION: "production"},
+            worker_bearers={WORKER: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
             capability_fingerprint=self.fixture["capabilities"]["capabilityFingerprint"],
             options_fingerprint=self.fixture["capabilities"]["engines"]["odm"]["optionsFingerprint"])
         self.server = create_reference_http_server(self.api, request_timeout=0.2)
@@ -77,6 +80,9 @@ class ReferenceHTTPTests(unittest.TestCase):
         self.assertEqual(status, 201)
         status, replay, _ = self.request("POST", "/ltds/v1/jobs", self.fixture["submission"])
         self.assertEqual((status, replay), (200, job))
+        recovery = '/ltds/v1/jobs/by-submission/' + self.fixture['submission']['submissionId']
+        self.assertEqual(self.request('GET', recovery)[:2], (200, job))
+        self.assertEqual(self.request('GET', recovery, token=PRODUCTION)[0], 404)
         path = "/ltds/v1/jobs/" + job["jobId"]
         self.assertEqual(self.request("GET", path)[:2], (200, job))
         self.assertEqual(self.request("GET", path, token=PRODUCTION)[:2], (404, {"error": "not_found"}))
@@ -104,6 +110,25 @@ class ReferenceHTTPTests(unittest.TestCase):
         changed = {**grant, 'token': 'different-synthetic-grant-token'}
         self.assertEqual(self.request('POST', path + '/transfer-grants', changed)[0], 409)
         self.assertEqual(self.store.private_transfer_grant(job['jobId']), grant)
+
+    def test_private_claim_is_accessible_only_through_separate_worker_identity(self):
+        _, job, _ = self.request('POST', '/ltds/v1/jobs', self.fixture['submission'])
+        route = '/ltds/worker/v1/claim'
+        payload = dict(jobId=job['jobId'], claimRequestId='private-claim-1')
+        self.assertEqual(self.request('POST', route, payload)[0], 401)
+        status, claim, _ = self.request('POST', route, payload, token=WORKER)
+        self.assertEqual(status, 200)
+        self.assertEqual(claim['jobId'], job['jobId'])
+        self.assertIsNotNone(claim['claimToken'])
+        self.assertEqual(self.request('POST', route, payload, token=WORKER)[:2], (200, claim))
+        public = self.request('GET', '/ltds/v1/jobs/' + job['jobId'])[1]
+        self.assertNotIn(claim['claimToken'], json.dumps(public))
+        self.assertEqual(self.request('GET', '/ltds/v1/capabilities', token=WORKER)[0], 401)
+
+    def test_duplicate_private_claim_headers_fail_before_adapter(self):
+        status, body, _ = self.raw(b'GET /ltds/worker/v1/jobs/job-1/transfer-grant HTTP/1.1\r\n'
+            b'Host: localhost\r\nX-Claim-Token: first\r\nx-claim-token: second\r\n\r\n')
+        self.assertEqual((status, body), (400, {'error': 'duplicate_header'}))
 
     def test_plaintext_wildcard_and_external_bind_fail_before_listening(self):
         for host in ("0.0.0.0", "192.0.2.1", "::"):

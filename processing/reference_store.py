@@ -192,6 +192,15 @@ class ReferenceStore:
         with self.queue._db() as db:
             return self._record(self._row(db, job_id), private)
 
+    def find_submission(self, submission_id, *, environment):
+        """Recover a lost submit response without issuing another execution."""
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._environment(environment)
+        with self.queue._db() as db:
+            row = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=? AND environment=?',
+                             (submission_id, environment)).fetchone()
+            return self._public(self._row(db, row[0])) if row else None
+
     def list(self, *, private=False):
         with self.queue._db() as db:
             ids = [row[0] for row in db.execute("SELECT job_id FROM reference_jobs ORDER BY created_at,job_id")]
@@ -311,8 +320,10 @@ class ReferenceStore:
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference job cannot be reserved in this phase")
             submission = json.loads(row["input_json"])
-            if (transfer_request["generation"], transfer_request["manifestSha256"], transfer_request["byteBudget"]) != (
-                    row["generation"], row["manifest_sha"], submission["manifest"]["totalBytes"]):
+            total_bytes = submission['manifest']['totalBytes']
+            if ((transfer_request['generation'], transfer_request['manifestSha256']) != (
+                    row['generation'], row['manifest_sha']) or not total_bytes <= transfer_request['byteBudget'] <=
+                    min(protocol.MAX_SAFE_INTEGER, 3 * total_bytes)):
                 raise Conflict("transfer reservation identity mismatch")
             self._quota(db, len(encoded.encode("utf-8")))
             db.execute("UPDATE reference_jobs SET phase='awaiting_transfer',node_id=?,transfer_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
@@ -441,6 +452,14 @@ class ReferenceStore:
             db.execute("INSERT INTO reference_outbox(identity,kind,payload_json,digest) VALUES(?,?,?,?)",
                        (identity, kind, encoded, content_digest))
             return True
+
+    def acceptance_receipts(self, job_id):
+        """PRIVATE worker relay; metadata receipts grant no unverified deletion."""
+        with self.queue._db() as db:
+            row = self._row(db, job_id)
+            receipts = [json.loads(item[0]) for item in db.execute(
+                'SELECT receipt_json FROM reference_acceptances WHERE job_id=? ORDER BY receipt_id', (job_id,))]
+            return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed'}
 
     def pending_outbox(self, *, now=None, limit=100):
         if type(limit) is not int or not 1 <= limit <= 1000:

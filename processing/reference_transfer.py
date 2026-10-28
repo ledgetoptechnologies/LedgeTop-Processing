@@ -74,7 +74,8 @@ def validate_grant(grant, *, job, clock=time.time):
     manifest = job["submission"]["manifest"]
     if (manifest["sha256"] != grant["manifestSha256"]
             or p.manifest_sha256(manifest) != manifest["sha256"]
-            or manifest["totalBytes"] != grant["byteBudget"]):
+            or not manifest['totalBytes'] <= grant['byteBudget'] <=
+                min(p.MAX_SAFE_INTEGER, 3 * manifest['totalBytes'])):
         raise TransferError("persisted input manifest mismatch")
     objects = []
     for obj in manifest["objects"]:
@@ -86,7 +87,7 @@ def validate_grant(grant, *, job, clock=time.time):
     if (type(ids) is not list or any(type(item) is not str for item in ids)
             or len(set(ids)) != len(ids) or set(ids) != {obj.id for obj in objects}
             or len(objects) != len({obj.id for obj in objects})
-            or sum(obj.byte_size for obj in objects) != grant["byteBudget"]):
+            or sum(obj.byte_size for obj in objects) != manifest['totalBytes']):
         raise TransferError("grant object closure mismatch")
     p._string(grant["expiresAt"], "grant expiry", 40)
     try:

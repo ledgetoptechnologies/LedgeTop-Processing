@@ -60,6 +60,18 @@ class ReferenceStoreTests(unittest.TestCase):
                        resultManifestSha256=result["resultManifestSha256"])
         return receipt
 
+    def test_retry_transfer_budget_has_explicit_three_copy_ceiling(self):
+        job, _ = self.store.submit(self.submission)
+        self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+                         worker_instance_id='instance', claim_request_id='claim-budget')
+        transfer = copy.deepcopy(self.fixture['transferRequest'])
+        for budget in (2, 10):
+            transfer['byteBudget'] = budget
+            with self.assertRaises(Conflict):
+                self.store.reserve(job['jobId'], transfer, node_id='cluster')
+        transfer['byteBudget'] = 9
+        self.assertEqual(self.store.reserve(job['jobId'], transfer, node_id='cluster')['phase'], 'awaiting_transfer')
+
     def test_disabled_profile_fails_closed(self):
         self.queue.allowed_profiles.remove(PROFILE)
         with self.assertRaises(ValueError):

@@ -102,6 +102,10 @@ class ReferenceAPI:
         if method == "GET" and path == protocol.PREFIX + "/capabilities":
             return Response(200, self._capabilities(environment))
         try:
+            lookup = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/by-submission/([0-9a-f-]{36})', path)
+            if method == 'GET' and lookup:
+                job = self.store.find_submission(lookup[1], environment=environment)
+                return Response(200, job) if job else self._error(404, 'not_found')
             if method == "POST" and path == protocol.PREFIX + "/jobs":
                 payload = protocol.decode_submission(body)
                 validated = protocol.validate_submission(payload, environment=environment,

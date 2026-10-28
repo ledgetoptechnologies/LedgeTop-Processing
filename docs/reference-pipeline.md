@@ -26,6 +26,18 @@ Beau supplies a smaller dataset.
   file paths. `reference_delivery.py` authenticates the durable execution claim,
   commits completion and returns a replayable coordinator metadata receipt.
   This receipt cannot authorize cleanup or replace Viewer acceptance.
+- `reference_worker_api.py` fixes each private bearer to a configured worker and
+  node identity. `reference_control.py` assembles separate Viewer/worker routes;
+  the credentials cannot overlap. Reservation and phase updates require the
+  exact durable worker claim. `reference_sender.py` sends only stored completion
+  records and verifies an exact durable receipt before marking delivery complete.
+- `reference_engine_worker.py` connects reserved, verified local photo inputs to
+  the existing NativeEngine adapter, shared physical NodeGate and durable outbox.
+  Mutation intents commit before HTTP calls; uncertain initialization/upload
+  outcomes retain the fence. Original result ZIPs remain local after delivery.
+- `scratch_cleanup.py` provides Linux-only exact-object cleanup with a durable
+  quarantine journal and directory sync. Missing files alone never prove removal.
+  Windows fails closed; no live cleanup or worker daemon is enabled.
 - `contracts/reference-v1.contract.json` is the identical Python/Viewer fixture.
   Its SHA-256 with LF line endings is
   `2c49ff86b8e20384c400ff56c8365418e643108aa9e6c29b46e938554e989b37`.
@@ -46,11 +58,45 @@ Beau supplies a smaller dataset.
    expiry, production priority, small-node-first routing and maintenance with
    synthetic fixtures before enabling the reference path or running real data.
 
-Source acceptance: the full 336-test suite passes in an isolated Linux container
+Source acceptance: the full 391-test checkpoint passes in an isolated Linux container
 with network disabled and a read-only source mount. Linux also exercises the
 symlink checks that Windows skips without symlink privileges. Tests include real loopback HTTP, metadata grant
 replay, transfer corruption/expiry and completion-commit crash windows. These
 are synthetic checks, not NAS hardware power-loss or installed runtime evidence.
+
+Viewer source qualification is separate: its pinned `3e39f647` four-file reference
+test run returned 59 passes and one platform-opposite skip in cached Node 24 on
+Linux. An earlier broker source-change test failed once and passed later; that
+failure remains unresolved pending a deterministic fix by Viewer. Both runs
+passed the real file/directory sync and abrupt-process-exit receipt tests.
+
+Transfer `byteBudget` is a bounded wire allowance including retries: between
+the manifest's total input bytes and `min(2^53-1, 3 * totalBytes)`. Successful
+input files still have the exact manifest byte counts and hashes. This allowance
+is separate from the worker's input-plus-output scratch capacity reservation.
+
+## Worker integration contract
+
+The deployment driver must configure the actual loopback engine origin, physical
+engine ID, coordinator authority/gate generation and a separate worker bearer.
+It must reserve scratch before exposing a transfer request, fetch only through
+the scoped broker grant, and pass verified reservation-owned input paths to the
+engine controller. No submitted path or engine origin is trusted.
+
+The private API supports claim, reservation, transfer/processing phase, grant,
+result receipt and Viewer-acceptance relay operations. Public submission lookup
+by immutable submission UUID recovers a lost response without creating another
+execution. Uncertain initialization/upload outcomes and orphaned gate ownership
+remain held for reconciliation; a completed engine's interrupted archive transfer
+retries the same bounded cache without rerunning the engine.
+
+After coordinator metadata acknowledgement, the worker may release its engine
+fence. It independently validates relayed Viewer receipts against its persisted
+manifest and derives accepted object coverage locally. Cleanup still requires
+terminal state, exact accepted objects, no active/uncertain pins and grace.
+Engine task removal, failed/cancelled terminal receipts, reservation renewal,
+result streaming and automatic daemon wiring remain integration work; a retained
+engine task may intentionally block the existing strict maintenance census.
 
 Missing delivery acknowledgements retain results. Disk pressure stops intake.
 Production priority, the shared execution fence and maintenance gates apply to
