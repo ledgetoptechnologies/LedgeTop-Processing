@@ -24,7 +24,8 @@ class Response:
 
 class ReferenceAPI:
     def __init__(self, store, *, bearer_tokens, capability_fingerprint,
-                 options_fingerprint, allowed_odm_options=(), treedar_available=False):
+                 options_fingerprint, allowed_odm_options=(), treedar_available=False,
+                 result_proxy=None):
         protocol._hash(capability_fingerprint, "capability fingerprint")
         protocol._hash(options_fingerprint, "options fingerprint")
         if type(bearer_tokens) is not dict or not bearer_tokens:
@@ -45,6 +46,7 @@ class ReferenceAPI:
         self.options_fingerprint = options_fingerprint
         self.allowed_odm_options = options
         self.treedar_available = treedar_available
+        self.result_proxy = result_proxy
 
     def _authenticate(self, headers):
         if not hasattr(headers, "items"):
@@ -102,6 +104,19 @@ class ReferenceAPI:
         if method == "GET" and path == protocol.PREFIX + "/capabilities":
             return Response(200, self._capabilities(environment))
         try:
+            binary = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/results/([A-Za-z0-9][A-Za-z0-9_-]{0,127})', path)
+            if method == 'GET' and binary:
+                job = self._job(binary[1], environment, private=True)
+                if job is None:
+                    return self._error(404, 'not_found')
+                if self.result_proxy is None or job['resultManifest'] is None:
+                    return self._error(409, 'result_not_ready')
+                if binary[2] not in {obj['id'] for obj in job['resultManifest']['objects']}:
+                    return self._error(404, 'not_found')
+                public = self._job(binary[1], environment)
+                stream = self.result_proxy.open(public, job['resultManifest'], binary[2])
+                from .reference_binary import BinaryResponse
+                return BinaryResponse(stream, headers=stream.headers)
             lookup = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/by-submission/([0-9a-f-]{36})', path)
             if method == 'GET' and lookup:
                 job = self.store.find_submission(lookup[1], environment=environment)

@@ -90,6 +90,8 @@ class ReferenceWorkerAPI:
         if identity is None:
             return self._error(401, "unauthorized")
         try:
+            if method == 'GET' and path == PREFIX + '/next':
+                return Response(200, {'job': self.store.next_for_node(identity['node_id'])})
             if method == "POST" and path == PREFIX + "/claim":
                 payload = protocol.decode_submission(body)
                 protocol._closed(payload, ("jobId", "claimRequestId"), "claim")

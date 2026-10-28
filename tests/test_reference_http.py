@@ -1,5 +1,6 @@
 import http.client
 import copy
+import hashlib
 import json
 from pathlib import Path
 import socket
@@ -12,6 +13,7 @@ from processing.reference_api import ReferenceAPI
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_http import create_reference_http_server
 from processing.reference_protocol import MAX_BODY_BYTES
+from processing.reference_protocol import digest
 from processing.reference_store import ReferenceStore, PROFILE
 
 
@@ -129,6 +131,46 @@ class ReferenceHTTPTests(unittest.TestCase):
         status, body, _ = self.raw(b'GET /ltds/worker/v1/jobs/job-1/transfer-grant HTTP/1.1\r\n'
             b'Host: localhost\r\nX-Claim-Token: first\r\nx-claim-token: second\r\n\r\n')
         self.assertEqual((status, body), (400, {'error': 'duplicate_header'}))
+
+    def test_binary_result_http_scopes_auth_and_closes_stream_lease(self):
+        _, job, _ = self.request('POST', '/ltds/v1/jobs', self.fixture['submission'])
+        self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance', claim_request_id='binary-claim')
+        self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')
+        self.store.update_phase(job['jobId'], 'fetching')
+        self.store.update_phase(job['jobId'], 'processing')
+        archive = b'PK\x05\x06' + bytes(18)  # Valid empty synthetic ZIP; transport only.
+        manifest = copy.deepcopy(self.fixture['resultManifest'])
+        manifest.update(jobId=job['jobId'], pipelineDigest=job['pipelineDigest'])
+        manifest['objects'][0].update(role='odm_archive', byteSize=len(archive), sha256=hashlib.sha256(archive).hexdigest())
+        manifest['resultManifestSha256'] = digest({k:v for k,v in manifest.items() if k != 'resultManifestSha256'})
+        self.store.set_result_manifest(job['jobId'], manifest)
+        closed, calls = [], []
+        class Stream:
+            headers = {'Content-Type': 'application/zip', 'Content-Length': str(len(archive)),
+                       'Set-Cookie': 'must-not-forward'}
+            def chunks(self):
+                yield archive[:4]
+                yield archive[4:]
+            def close(self):
+                closed.append(True)
+        class Proxy:
+            def open(self, public, result, object_id):
+                calls.append(public)
+                return Stream()
+        self.api.viewer.result_proxy = Proxy()
+        route = '/ltds/v1/jobs/' + job['jobId'] + '/results/result-1'
+        self.assertEqual(self.request('GET', route, token=PRODUCTION)[0], 404)
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        connection.request('GET', route, headers={'Authorization': 'Bearer ' + STAGING})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.read(), archive)
+        self.assertEqual(response.getheader('Content-Type'), 'application/zip')
+        self.assertIsNone(response.getheader('Set-Cookie'))
+        connection.close()
+        self.assertTrue(closed)
+        self.assertNotIn('claimToken', calls[0])
 
     def test_plaintext_wildcard_and_external_bind_fail_before_listening(self):
         for host in ("0.0.0.0", "192.0.2.1", "::"):

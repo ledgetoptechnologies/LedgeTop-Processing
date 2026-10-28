@@ -8,6 +8,7 @@ import socket
 import ssl
 
 from .reference_api import Response
+from .reference_binary import BinaryResponse
 from .reference_protocol import MAX_BODY_BYTES
 
 
@@ -62,6 +63,9 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
 
         def _reply(self, response):
             self.close_connection = True
+            if isinstance(response, BinaryResponse):
+                self._binary(response)
+                return
             try:
                 encoded = json.dumps(response.body, ensure_ascii=True, allow_nan=False,
                                      separators=(",", ":")).encode("utf-8")
@@ -76,6 +80,43 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                     self.wfile.write(encoded)
             except (OSError, ValueError):
                 pass
+
+        def _binary(self, response):
+            # Only trusted adapters create this envelope. Never forward upstream
+            # cookies, credentials, redirects or arbitrary response headers.
+            try:
+                length = response.headers.get('Content-Length', '')
+                mime = response.headers.get('Content-Type', '')
+                if (response.status not in (200, 206) or not re.fullmatch(r'[0-9]{1,20}', str(length))
+                        or mime not in ('application/zip', 'application/octet-stream')):
+                    self._error(500, 'invalid_binary_response')
+                    return
+                self.send_response(response.status)
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(length))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Connection', 'close')
+                for key in ('Content-Range', 'Accept-Ranges', 'X-Result-Sha256', 'X-Result-Manifest-Sha256'):
+                    value = response.headers.get(key)
+                    if value is not None and isinstance(value, str) and all(0x20 <= ord(c) <= 0x7e for c in value):
+                        self.send_header(key, value)
+                self.end_headers()
+                if self.command != 'HEAD':
+                    count = 0
+                    for chunk in response.stream.chunks():
+                        if not isinstance(chunk, bytes) or count + len(chunk) > int(length):
+                            raise ValueError('invalid binary stream')
+                        count += len(chunk)
+                        self.wfile.write(chunk)
+                    if count != int(length):
+                        raise ValueError('truncated binary stream')
+            except Exception:
+                # Headers may already be sent: close, never append a JSON error
+                # or mark delivery accepted. The consumer verifies length/hash.
+                self.close_connection = True
+            finally:
+                response.stream.close()
 
         def _error(self, status, code):
             self._reply(Response(status, {"error": code}))

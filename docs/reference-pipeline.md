@@ -38,6 +38,17 @@ Beau supplies a smaller dataset.
 - `scratch_cleanup.py` provides Linux-only exact-object cleanup with a durable
   quarantine journal and directory sync. Missing files alone never prove removal.
   Windows fails closed; no live cleanup or worker daemon is enabled.
+- `reference_results.py` and `reference_result_api.py` serve exact local result
+  objects under configured read policy, authenticated bindings and active ledger
+  pins. `reference_result_proxy.py` streams those bytes through the coordinator
+  without retaining a second archive. It withholds the final chunk until size
+  and SHA verification succeed. HTTP closes streams and releases read leases on
+  success, errors and disconnects; it never appends JSON to a binary response.
+- `reference_failure.py` provides separate durable failed/cancelled records,
+  receipts and retry outboxes without fake output manifests. Success and failure
+  seals are mutually exclusive in the queue transaction. Failure bytes count
+  against the global metadata quota. Public failure/Viewer acceptance wiring
+  remains pending the shared terminal-failure contract.
 - `contracts/reference-v1.contract.json` is the identical Python/Viewer fixture.
   Its SHA-256 with LF line endings is
   `2c49ff86b8e20384c400ff56c8365418e643108aa9e6c29b46e938554e989b37`.
@@ -58,7 +69,7 @@ Beau supplies a smaller dataset.
    expiry, production priority, small-node-first routing and maintenance with
    synthetic fixtures before enabling the reference path or running real data.
 
-Source acceptance: the full 391-test checkpoint passes in an isolated Linux container
+Source acceptance: the full 435-test checkpoint passes in an isolated Linux container
 with network disabled and a read-only source mount. Linux also exercises the
 symlink checks that Windows skips without symlink privileges. Tests include real loopback HTTP, metadata grant
 replay, transfer corruption/expiry and completion-commit crash windows. These
@@ -69,6 +80,20 @@ test run returned 59 passes and one platform-opposite skip in cached Node 24 on
 Linux. An earlier broker source-change test failed once and passed later; that
 failure remains unresolved pending a deterministic fix by Viewer. Both runs
 passed the real file/directory sync and abrupt-process-exit receipt tests.
+
+The subsequent Viewer `e30504c1` source fixed the broker source-change issue with
+deterministic same-stat block-hash regressions. Its six reference/HTTP/harness
+suites passed 79 tests with one opposite-platform skip on Linux. This supersedes
+the earlier unresolved broker result, rather than relying on the earlier green
+rerun alone.
+
+An actual cross-language TLS probe used the real Viewer `ReferenceProvider` and
+Python control API with a fresh generated test CA inside isolated containers.
+Discovery, submit, status, UUID lookup, exact duplicate submit and credential
+environment isolation passed. The helper container and certificate volume were
+removed and their absence verified. No host trust settings changed. Helpers:
+`ops/reference_tls_fixture.py` and `ops/reference_viewer_tls_probe.cjs`. This
+proves metadata transport, not engine execution or the complete payload pipeline.
 
 Transfer `byteBudget` is a bounded wire allowance including retries: between
 the manifest's total input bytes and `min(2^53-1, 3 * totalBytes)`. Successful

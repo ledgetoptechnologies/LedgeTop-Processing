@@ -151,6 +151,8 @@ class ReferenceStore:
             used += db.execute(f"SELECT COALESCE(SUM(length(CAST({column} AS BLOB))),0) FROM {table}").fetchone()[0]
         used += db.execute("""SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(node_id)+
           length(worker_id)+length(instance_id)+length(token)),0) FROM reference_claims""").fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone():
+            used += db.execute('SELECT COALESCE(SUM(length(CAST(failure_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0) FROM reference_worker_failures').fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
@@ -213,6 +215,32 @@ class ReferenceStore:
         if phase not in PHASES or (phase != row["phase"] and phase not in PHASES[row["phase"]]):
             raise Conflict("invalid reference phase transition")
 
+    def _required_node(self, submission):
+        requires_main = (submission['pipeline']['treedar']['requested']
+            or submission['manifest']['inputCounts']['images'] > self.local_max_photos
+            or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
+        return self.main_node_id if requires_main else 'cluster'
+
+    def next_for_node(self, node_id):
+        """PRIVATE worker discovery; advisory only, claim remains atomic."""
+        self.queue._known_node(node_id)
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.queue._refresh_nodes(db)
+            if (self.queue._node(db, node_id)['state'] not in ('active', 'scheduled')
+                    or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()):
+                return None
+            head = db.execute("SELECT id,profile FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
+            if not head or head['profile'] != PROFILE or PROFILE not in self.queue.node_profiles(node_id):
+                return None
+            row = self._row(db, head['id'])
+            submission = json.loads(row['input_json'])
+            if self._required_node(submission) != node_id:
+                return None
+            if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:
+                return None
+            return self._public(row)
+
     def claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
         """PRIVATE worker API: atomically persist ownership and replay envelope.
 
@@ -247,10 +275,7 @@ class ReferenceStore:
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference phase cannot be claimed")
             submission = json.loads(row["input_json"])
-            requires_main = (submission['pipeline']['treedar']['requested']
-                or submission['manifest']['inputCounts']['images'] > self.local_max_photos
-                or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
-            required_node = self.main_node_id if requires_main else 'cluster'
+            required_node = self._required_node(submission)
             if node_id != required_node:
                 return None
             if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:
@@ -366,6 +391,10 @@ class ReferenceStore:
             return json.loads(row[0]) if row else None
 
     def _seal_result(self, db, row, result, *, allow_recovery):
+        failure_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
+        if failure_table and db.execute('SELECT 1 FROM reference_worker_failures WHERE job_id=? AND generation=?',
+                                       (row['job_id'], row['generation'])).fetchone():
+            raise Conflict('execution already has a sealed failure')
         checked = protocol.validate_result_manifest(result, job_id=row["job_id"], generation=row["generation"],
             environment=row["environment"], pipeline_digest=row["pipeline_digest"])
         encoded = _json(checked)

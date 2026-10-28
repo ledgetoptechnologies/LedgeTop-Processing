@@ -85,7 +85,10 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.assertNotIn(WORKER, json.dumps(claim))
 
     def test_owned_worker_reserves_and_advances_only_permitted_phases(self):
+        ready = self.request('GET', '/next')
+        self.assertEqual(ready.body['job']['jobId'], self.job['jobId'])
         claim = self.claim()
+        self.assertEqual(self.request('GET', '/next').body, {'job': None})
         path = '/jobs/' + self.job['jobId']
         body = dict(claimToken=claim['claimToken'], transferRequest=self.fixture['transferRequest'])
         self.assertEqual(self.request('POST', path + '/reservation', body, token=OTHER).status, 409)
