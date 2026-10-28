@@ -1,6 +1,30 @@
 # Reference runtime installation and preflight
 
-## Current installation — October 28, 2026
+## Latest verified installation — October 28, 2026
+
+The accepted coordinator cutover is source
+`671fd2a6bde40088bdfad91ccf67eab45ee3d8d7`, image
+`sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249`.
+See [cutover evidence](evidence/coordinator-cutover-20261028.json). The later
+[inactive staging verification](evidence/combined-preparation-qualification-20261028.json)
+independently checked the same running container/image/start/restart metadata.
+The native Viewer endpoint at `http://192.168.50.89:3005` and private reference
+API at `https://192.168.50.89:18443` are preserved. Legacy ClusterODX is stopped.
+
+Both recurring image updaters remain on source
+`020c15c79577aff83af388fe476451ceca545518`. The qualified reference implementation
+`6bbd468e1177746cb695e43195e75355b0681f23` is copied to inactive directories on
+both PCs. It has not replaced the coordinator, workers or updater working
+directories. Its constructor-only combined preparation profile ends held before
+engine/scientific/final-delivery permission.
+
+Reference worker/result daemons, NAS broker and production Viewer reference
+integration remain unactivated. An isolated Node/Python synthetic handoff test
+does not mount these routes in the Viewer app. Beau controls all TrueNAS commands,
+configuration, permissions and storage changes; NAS SSH access is not requested.
+Real-photo testing remains paused until Beau selects a smaller dataset.
+
+## Historical reference API installation — e2ccf48
 
 The sole coordinator now runs source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`,
 image `sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9`.
@@ -35,9 +59,10 @@ persisted Viewer provider configuration. It does not prove the NAS broker mount
 or production application integration.
 
 Reference worker/result daemons, NAS broker, reference Viewer client, input or
-engine-task cleanup and real-data processing are **not** activated. NAS SSH as
-`bkoltz` is rejected; the NAS account/management connection remains a requested
-owner detail. This installation qualifies coordinator infrastructure, not the
+engine-task cleanup and real-data processing were **not** activated. NAS SSH as
+`bkoltz` was rejected at that preflight. Beau subsequently reserved all NAS actions
+to himself; this is not an outstanding access request. That installation qualified
+coordinator infrastructure, not the
 complete NAS-backed processing pipeline.
 
 ## Actual main-PC TreeDar bootstrap qualification
