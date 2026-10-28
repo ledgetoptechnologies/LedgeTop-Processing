@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T19:09:04.757402+00:00",
+  "status": "native-synthetic-cli-and-output-checks-passed",
+  "imageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb",
+  "engineVersion": "0.0.1",
+  "durationSeconds": 1.981,
+  "pointCount": 8925,
+  "nTrees": 2,
+  "inputBytes": 303838,
+  "nativeFiles": 16,
+  "outputBytes": 71059,
+  "nativeProofSha256": "6554ab68e7b04507ffbaad3f4ea3ca88dbd86d22172b6444cd439e561ae8b3f1",
+  "summarySha256": "d87d60ac4328ff2904cc646b57b338079f430ade5c45b359875ea100c2d0452f",
+  "generatorSha256": "73405f36a11c3c7bb1d4dfbde8adbef2aceba8b916d6db66b997fb2938c0937c",
+  "files": [
+    {
+      "nativePath": "area_types.csv",
+      "role": "area_types_template",
+      "format": "csv",
+      "byteSize": 20,
+      "sha256": "358ba7c8c65e9f13dc0f2b084e42ce93549d1910b0b269b9b633fa380aaee2e1"
+    },
+    {
+      "nativePath": "areas.png",
+      "role": "area_map_preview",
+      "format": "png",
+      "byteSize": 11545,
+      "sha256": "00793708059af890a6ac0f40e68c305659a3ab9054ca2650e23f2794433d8064"
+    },
+    {
+      "nativePath": "areas.tif",
+      "role": "area_labels",
+      "format": "cog",
+      "byteSize": 1664,
+      "sha256": "96105bc0c1f41fa7b296e6216c48fca95de2c5ec8b69f57b81d9fe1e7c78c764"
+    },
+    {
+      "nativePath": "chm.tif",
+      "role": "canopy_height",
+      "format": "cog",
+      "byteSize": 4126,
+      "sha256": "46f410593c6089e5c3347f8ea783950130e6da00a7e41cae862eb5cd5d314936"
+    },
+    {
+      "nativePath": "chm_raw.tif",
+      "role": "canopy_height_unfiltered",
+      "format": "cog",
+      "byteSize": 4125,
+      "sha256": "480b6ad3971e2645a102f4f9b4bf92142cdd5f812a5e529f21d6c5b2701cd142"
+    },
+    {
+      "nativePath": "crowns.tif",
+      "role": "crown_labels",
+      "format": "cog",
+      "byteSize": 1752,
+      "sha256": "f0425fd0075f40b1bd47991d245901cb2bf4ab3091cc850187699a9cdbf0234f"
+    },
+    {
+      "nativePath": "dtm.tif",
+      "role": "ground_model",
+      "format": "cog",
+      "byteSize": 2945,
+      "sha256": "dcef2ab667b7ccdc2f4251f48b0b844552904a22b1dbf7fe04935308d740fc53"
+    },
+    {
+      "nativePath": "manifest.json",
+      "role": "engine_manifest",
+      "format": "json",
+      "byteSize": 2290,
+      "sha256": "1c2f4344558493d3e0344330a8c945543b9718747c2571f7e5ab2382cd361b51"
+    },
+    {
+      "nativePath": "qc.json",
+      "role": "quality_report",
+      "format": "json",
+      "byteSize": 1248,
+      "sha256": "45476921ba4d5cbb9303623592577c64573443c3adb54c868f954ee014a25b7d"
+    },
+    {
+      "nativePath": "report.html",
+      "role": "report",
+      "format": "html",
+      "byteSize": 29717,
+      "sha256": "6c6d8fedb14be11104b46a63be1deefddfdc6928c1658996e5bcd391c4f26e22"
+    },
+    {
+      "nativePath": "summary.json",
+      "role": "run_summary",
+      "format": "json",
+      "byteSize": 447,
+      "sha256": "5cf390a68aca3604e9cb08f68f44dcba81b9b3395a49f713f85c7f57b1f83ee1"
+    },
+    {
+      "nativePath": "tree_areas.csv",
+      "role": "tree_areas",
+      "format": "csv",
+      "byteSize": 22,
+      "sha256": "a9b933e975e5b6f020b4c2190ca3b158278bd542d94c889f54f593749c889432"
+    },
+    {
+      "nativePath": "tree_features.csv",
+      "role": "tree_features",
+      "format": "csv",
+      "byteSize": 576,
+      "sha256": "18ac92e06da986837c9797efeb4a5086586bd4190ea3cff07c5e7da00d3418e9"
+    },
+    {
+      "nativePath": "tree_map.geojson",
+      "role": "crowns",
+      "format": "geojson",
+      "byteSize": 2212,
+      "sha256": "36bba4d54a0d5c8cd9bc850c62bbbde103cb46eb5199c2b7244f179c15877645"
+    },
+    {
+      "nativePath": "tree_map.png",
+      "role": "preview",
+      "format": "png",
+      "byteSize": 8238,
+      "sha256": "f1854822c446e2274d6ec9766e9c094250ad0fd975d6f79861e15af6e508f0e7"
+    },
+    {
+      "nativePath": "trees.csv",
+      "role": "tree_table",
+      "format": "csv",
+      "byteSize": 132,
+      "sha256": "9f3d4f7f68d784d99481c1a4215dcf912ff069e9d6fad9f6212f831a9f4f1ff3"
+    }
+  ],
+  "rasters": [
+    {
+      "name": "dtm.tif",
+      "shape": [
+        41,
+        41
+      ],
+      "crs": "EPSG:32616"
+    },
+    {
+      "name": "chm.tif",
+      "shape": [
+        41,
+        41
+      ],
+      "crs": "EPSG:32616"
+    },
+    {
+      "name": "chm_raw.tif",
+      "shape": [
+        41,
+        41
+      ],
+      "crs": "EPSG:32616"
+    },
+    {
+      "name": "crowns.tif",
+      "shape": [
+        41,
+        41
+      ],
+      "crs": "EPSG:32616"
+    }
+  ],
+  "validation": "Actual cached TreeDar CLI produced required12 native outputs, same finite 41x41 geometry/CRS and matching version/point count; all16 emitted files match known native vocabulary.",
+  "scope": "Generated synthetic LAS only; not genuine acquisition, production performance, admission provenance, worker/controller integration, outer result transport or Viewer ingestion.",
+  "realClientData": false,
+  "realQueueUsed": false,
+  "productionRuntimeChanged": false,
+  "temporaryContainerRemoved": true,
+  "retainedSyntheticEvidence": "C:\\Users\\fstor\\.codex\\artifacts\\processing-treedar-native-synthetic-20261028",
+  "fullGoalComplete": false
+}
