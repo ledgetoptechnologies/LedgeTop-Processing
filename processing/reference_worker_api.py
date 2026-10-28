@@ -167,11 +167,15 @@ class ReferenceWorkerAPI:
                 if payload[field] not in ('fetching', 'processing'):
                     raise ValueError('worker may only advance transfer and processing phases')
                 return Response(200, self.store.update_phase(job_id, payload[field]))
-            match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance|terminal-acceptance)", path) if type(path) is str else None
+            match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance|terminal-acceptance|claim-state)", path) if type(path) is str else None
             if method == "GET" and match:
                 claim_token = self._header(headers, "X-Claim-Token")
                 if claim_token is None or not 1 <= len(claim_token) <= 128:
                     return self._error(401, "claim_authentication_required")
+                if match[2] == 'claim-state':
+                    if body:
+                        return self._error(400, 'invalid_request')
+                    return Response(200, self.store.claim_snapshot(match[1], **identity, claim_token=claim_token))
                 if match[2] == 'acceptance':
                     self._owned_job(match[1], identity, claim_token)
                     return Response(200, self.store.acceptance_receipts(match[1]))
