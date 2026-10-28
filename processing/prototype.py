@@ -23,11 +23,12 @@ SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 PROFILE = "treedar-synthetic-v1"
 PHOTO_PROFILE = "odx-photo-smoke-v1"
 VIEWER_PROFILE = "odm-viewer-v1"
+REFERENCE_PROFILE = "reference-pipeline-v1"
 
 
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
-                 treedar_node_ids=None, viewer_enabled=False, clock=None):
+                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
@@ -45,6 +46,8 @@ class Queue(Maintenance):
         self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
         if viewer_enabled:
             self.allowed_profiles.add(VIEWER_PROFILE)
+        if reference_enabled:
+            self.allowed_profiles.add(REFERENCE_PROFILE)
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
@@ -128,6 +131,8 @@ class Queue(Maintenance):
 
     def submit(self, payload):
         self.fields(payload, ("requestId", "environment", "profile"))
+        if payload['profile'] == REFERENCE_PROFILE:
+            raise ValueError('reference submissions require the reference metadata API')
         self.slug(payload["requestId"])
         if (payload["environment"] not in ("production", "staging")
                 or not isinstance(payload["profile"], str) or payload["profile"] not in self.allowed_profiles):
@@ -183,6 +188,10 @@ class Queue(Maintenance):
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
+                return None
+            if row['profile'] == REFERENCE_PROFILE:
+                # Reference claims also persist an idempotent private envelope
+                # and enforce input-dependent routing in ReferenceStore.claim.
                 return None
             if expected_job is not None and row['id'] != expected_job:
                 return None

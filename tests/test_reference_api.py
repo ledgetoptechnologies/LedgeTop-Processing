@@ -1,0 +1,155 @@
+import copy
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from processing import reference_protocol as p
+from processing.prototype import Queue
+from processing.reference_api import ReferenceAPI
+from processing.reference_store import ReferenceStore, PROFILE
+
+
+STAGING = "synthetic-staging-token-0001"
+PRODUCTION = "synthetic-production-token-0002"
+
+
+class ReferenceAPITests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.queue = Queue(self.directory.name)
+        self.queue.allowed_profiles.add(PROFILE)
+        self.store = ReferenceStore(self.queue)
+        self.fixture = json.loads((Path(__file__).resolve().parents[1] /
+                                  "contracts/reference-v1.contract.json").read_text())
+        self.api = self.make_api()
+
+    def tearDown(self):
+        self.queue.close()
+        self.directory.cleanup()
+
+    def make_api(self, **kwargs):
+        return ReferenceAPI(kwargs.pop("store", self.store),
+            bearer_tokens={STAGING: "staging", PRODUCTION: "production"},
+            capability_fingerprint=self.fixture["capabilities"]["capabilityFingerprint"],
+            options_fingerprint=self.fixture["capabilities"]["engines"]["odm"]["optionsFingerprint"],
+            allowed_odm_options={"pc-quality", "projection"}, **kwargs)
+
+    def request(self, method, path, body=None, *, token=STAGING, protected=True, headers=None, api=None):
+        return (api or self.api).handle(method, "/ltds/v1" + path,
+            headers if headers is not None else {"Authorization": "Bearer " + token},
+            b"" if body is None else json.dumps(body).encode(), protected_transport=protected)
+
+    def submit(self):
+        response = self.request("POST", "/jobs", self.fixture["submission"])
+        self.assertEqual(response.status, 201)
+        return response.body
+
+    def ready(self):
+        job = self.submit()
+        binding = dict(node_id="cluster", worker_id="worker", worker_instance_id="instance", claim_request_id="claim-1")
+        claim = self.store.claim(job["jobId"], **binding)
+        self.store.reserve(job["jobId"], self.fixture["transferRequest"], node_id="cluster")
+        self.store.update_phase(job["jobId"], "fetching")
+        self.store.update_phase(job["jobId"], "processing")
+        result = copy.deepcopy(self.fixture["resultManifest"])
+        result.update(jobId=job["jobId"], pipelineDigest=job["pipelineDigest"])
+        result["resultManifestSha256"] = p.digest({k: v for k, v in result.items() if k != "resultManifestSha256"})
+        self.store.record_worker_result(job["jobId"], result, claim_token=claim["claimToken"], **binding)
+        self.queue.complete(job["jobId"], {"claimToken": claim["claimToken"], "status": "succeeded", "result": {}})
+        self.store.update_phase(job["jobId"], "awaiting_acceptance")
+        return job, result, claim["claimToken"]
+
+    def test_transport_auth_and_capabilities(self):
+        self.assertEqual(self.request("GET", "/capabilities", protected=False).status, 503)
+        spoofed = {"Authorization": "Bearer " + STAGING, "X-Forwarded-Proto": "https"}
+        self.assertEqual(self.request("GET", "/capabilities", protected=False, headers=spoofed).status, 503)
+        for headers in ({}, {"Authorization": "Bearer wrong"},
+                        {"Authorization": "Bearer " + STAGING, "authorization": "Bearer " + PRODUCTION}):
+            self.assertEqual(self.request("GET", "/capabilities", headers=headers).status, 401)
+        response = self.request("GET", "/capabilities")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, self.fixture["capabilities"])
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_submission_idempotency_environment_scoping_and_no_private_data(self):
+        job = self.submit()
+        replay = self.request("POST", "/jobs", self.fixture["submission"])
+        self.assertEqual((replay.status, replay.body["jobId"]), (200, job["jobId"]))
+        path = "/jobs/" + job["jobId"]
+        self.assertEqual(self.request("GET", path).body, job)
+        for suffix, method in (("", "GET"), ("/results", "GET"), ("/acceptance", "POST")):
+            response = self.request(method, path + suffix, {}, token=PRODUCTION)
+            self.assertEqual((response.status, response.body), (404, {"error": "not_found"}))
+        self.assertEqual(self.request("GET", "/jobs/unknown").status, 404)
+        self.assertEqual(self.request("GET", path + "/results").status, 409)
+        encoded = json.dumps(job)
+        for private in ("claimToken", "submission", "input_json", STAGING, PRODUCTION):
+            self.assertNotIn(private, encoded)
+
+    def test_bounded_duplicate_decode_and_safe_errors(self):
+        for body in (b'{"schemaVersion":1,"schemaVersion":1}', b"{" * 100,
+                     b" " * (p.MAX_BODY_BYTES + 1)):
+            response = self.api.handle("POST", "/ltds/v1/jobs", {"Authorization": "Bearer " + STAGING},
+                                       body, protected_transport=True)
+            self.assertEqual((response.status, response.body), (400, {"error": "invalid_request"}))
+        payload = copy.deepcopy(self.fixture["submission"])
+        payload["environment"] = "production"
+        self.assertEqual(self.request("POST", "/jobs", payload).status, 400)
+
+    def test_disabled_pipelines_stale_capabilities_and_options(self):
+        for mutate in (lambda body: body["pipeline"]["gaussian_splat"].update(requested=True),
+                       lambda body: body["pipeline"]["treedar"].update(requested=True),
+                       lambda body: body.update(capabilityFingerprint="0" * 64),
+                       lambda body: body["pipeline"]["odm"].update(options={"unknown-option": True}),
+                       lambda body: body["pipeline"]["odm"].update(options={"projection": "https://secret/path"})):
+            body = copy.deepcopy(self.fixture["submission"])
+            mutate(body)
+            self.assertEqual(self.request("POST", "/jobs", body).status, 400)
+        self.assertEqual(self.store.list(), [])
+
+    def test_quota_conflicts_are_safe_and_atomic(self):
+        api = self.make_api(store=ReferenceStore(self.queue, max_metadata_bytes=1))
+        response = self.request("POST", "/jobs", self.fixture["submission"], api=api)
+        self.assertEqual((response.status, response.body), (409, {"error": "reference_conflict"}))
+        self.assertEqual(self.queue.list(), [])
+
+    def test_unexpected_internal_error_never_returns_exception_or_credentials(self):
+        with patch.object(self.store, "submit", side_effect=RuntimeError(STAGING + " C:/private/path")):
+            response = self.request("POST", "/jobs", self.fixture["submission"])
+        self.assertEqual((response.status, response.body), (500, {"error": "internal_error"}))
+        self.assertNotIn(STAGING, json.dumps(response.body))
+
+    def test_result_and_partial_acceptance_routes_and_worker_privacy(self):
+        job, result, claim_token = self.ready()
+        path = "/jobs/" + job["jobId"]
+        self.assertEqual(self.request("GET", path + "/results").body, result)
+        receipt = copy.deepcopy(self.fixture["acceptance"])
+        receipt.update(jobId=job["jobId"], pipelineDigest=job["pipelineDigest"],
+                       resultManifestSha256=result["resultManifestSha256"])
+        accepted = self.request("POST", path + "/acceptance", receipt)
+        self.assertEqual(accepted.status, 200)
+        self.assertFalse(accepted.body["fullyAccepted"])
+        self.assertFalse(self.request("POST", path + "/acceptance", receipt).body["created"])
+        receipt["acceptedAt"] = "2026-10-28T12:00:00Z"
+        self.assertEqual(self.request("POST", path + "/acceptance", receipt).status, 409)
+        combined = json.dumps([self.request("GET", path).body, accepted.body,
+                               self.request("GET", path + "/results").body])
+        for secret in (claim_token, STAGING, PRODUCTION, "claimToken", "executionPhase", "submission"):
+            self.assertNotIn(secret, combined)
+
+    def test_explicit_treedar_availability_does_not_prove_file_contents(self):
+        api = self.make_api(treedar_available=True)
+        self.assertTrue(self.request("GET", "/capabilities", api=api).body["engines"]["treedar"]["available"])
+        body = copy.deepcopy(self.fixture["submission"])
+        body["manifest"]["objects"][0].update(kind="lidar", name="cloud.las")
+        body["manifest"]["inputCounts"].update(images=0, lidarObjects=1)
+        body["manifest"]["sha256"] = p.manifest_sha256(body["manifest"])
+        body["pipeline"]["treedar"].update(requested=True, inputObjectIds=["image-1"], provenanceReceiptId="provenance-1")
+        self.assertEqual(self.request("POST", "/jobs", body).status, 400)
+        self.assertEqual(self.request("POST", "/jobs", body, api=api).status, 201)
+
+
+if __name__ == "__main__":
+    unittest.main()
