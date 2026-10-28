@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T22:41:04.278805+00:00",
+  "status": "isolated-cross-language-odm-handoff-qualified",
+  "testSourceCommit": "3c51644e028b8f15c19a7572d2e6f720e9c869bb",
+  "sourceReviewPins": {
+    "tests/test_reference_joint_flow.py": "ae5cf6066cc299936961d06fb4c15fdcb9081bd533d6365d6b9ff43377c34a6a",
+    "docs/reference-joint-flow.md": "491830de4b32d50caa37f1f17e89b7228911a6b40ad514c1f6b327bbe4ca64fe",
+    "tests/snapshot_reference_joint_viewer.py": "a1b8a28308e18765a6426d54286e4ab2147169d5a7d0d9a1b12a5f34f3fe0bea"
+  },
+  "viewerSourceCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+  "viewerGitPins": {
+    "server/referenceProtocol.js": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159",
+    "server/referenceProvider.js": "3440ecb8b9523252ec6bdf1dcede3b341125c645b4f204951a1ae760b14aec7c",
+    "server/referenceCaTransport.js": "3ea6ed955d40727d0c8d2bdc6d7f34fbb39c4802c130534da81c51465a3c9d19",
+    "server/referenceTransferBroker.js": "7aca3037d72a728443c645b9358b0fe4daf301d2879c62a3020fe8a736df7361",
+    "server/referenceHttp.js": "b0e249ace9ce78953c9ddd50127076426f9237c283f0f079d2837d77fe042474",
+    "server/referenceAcceptance.js": "5c2c2908eed79283a655456fdc68de88449bcfe33a085b9d26dff63c910248fa",
+    "server/referenceSourceRetention.js": "515e6ebb511aba4797f3999dd67733006f3fbf9be39a5fd3c8cfc16b4aaf9c3e",
+    "test/helpers/reference-joint-harness.cjs": "a3a81a630c724d1d9952b369fea9aadcf8ac71c01b3bcc0165a3e32e27c02a0e",
+    "test/fixtures/reference-v1.contract.json": "2c49ff86b8e20384c400ff56c8365418e643108aa9e6c29b46e938554e989b37"
+  },
+  "image": "sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0",
+  "execution": {
+    "authorPassed": 4,
+    "authorSeconds": 2.014,
+    "independentPassed": 4,
+    "independentSeconds": 2.352,
+    "network": "none with actual loopback TLS",
+    "readOnly": true,
+    "cpus": 2,
+    "memory": "2g",
+    "pids": 128,
+    "resourceWarningsAsErrors": true,
+    "defaultPythonOnlySuite": "4 explicit skips without the pinned Node snapshot; not counted as execution coverage"
+  },
+  "runtimeSource": {
+    "unchangedFrom": "6bbd468e1177746cb695e43195e75355b0681f23",
+    "pathsChecked": [
+      "processing",
+      "ops",
+      "contracts"
+    ],
+    "baseQualificationEvidence": "docs/evidence/combined-preparation-qualification-20261028.json",
+    "baseLinuxPassed": 1273,
+    "baseWindowsPassed": 68,
+    "repeatFullSuite": false,
+    "reason": "Only test/exporter/documentation files changed; runtime source diff is empty."
+  },
+  "exercised": [
+    "Actual Node Provider/TransferBroker/HTTP/AcceptanceLedger and Python Queue/ControlAPI/WorkerAPI/ReferenceDriver/BrokerClient/NativeEngine HTTP fixture/outbox/result proxy/acceptance/cleanup.",
+    "Exact durable accepted result bytes; receipt replay after Node exits86 following acceptance ledger commit.",
+    "Lost worker completion acknowledgement after actual coordinator transaction; identical sealed outbox envelope replay.",
+    "Actual coordinator TLS listener/thread and Queue shutdown after backend starts; worker seals and retains completion offline through failed deliveries.",
+    "Same TLS port/cert, Queue path/authority and original held claim return; original token/reservation/gate/payload survive without engine rerun.",
+    "Producer result/native-cache cleanup only after acceptance; worker inputs and Viewer fixture source remain byte-identical.",
+    "One original reservation and 9-byte grant budget with3bytes spent, zero reserved/inflight bytes and no leaked reader pins."
+  ],
+  "viewerSourceAudit": {
+    "sha256": "d6303ceb5f327b2dda24e1bb00077a7a5e8756fd4360f447253440b7f342662b",
+    "commit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+    "consumers": [
+      "server/index.js:163 legacy createProcessingApi mount",
+      "server/processingWorker.js:19 always NodeOdmProvider",
+      "server/providerHealth.js:4 NodeOdmProvider probe",
+      "server/worker.js imports legacy processOne, no reference outbox pump"
+    ],
+    "missing": [
+      "reference provider app config/registry/health selection",
+      "TLS broker mount with actual trusted transport policy",
+      "authoritative reservation verification and grant mint lifecycle",
+      "original submission+grant uncertain outcome reconciliation in app state",
+      "streamed accepted-managed-copy ingestion and geometry verification linkage",
+      "durable acceptance ack outbox pump lifecycle",
+      "actual source-retention issuer and all purge-path pins",
+      "observed deployed build/config/TLS/paths/access/capacity evidence"
+    ],
+    "operatorBoundary": "Beau alone controls TrueNAS. No ACL/chown request from numeric UID; operator steps only after actual app/runtime readiness."
+  },
+  "limits": [
+    "Backend uses abc synthetic image and fixed empty ZIP; no photogrammetry, genuine LiDAR or geometry validation.",
+    "Node published:false; no actual project/catalog/client authorization, production Viewer wiring or NAS mount is qualified.",
+    "Process failure/restart tested on isolated temporary filesystem; no physical power-loss, host reboot or TrueNAS durability proof.",
+    "Source-retention validator supplies no actual issuer/purge exclusion; both original sources are retained.",
+    "Combined outer-v2, metadata reauthorization, producer/copy receipts, final lifecycle/control retirement and installed acceptance remain unfinished."
+  ],
+  "runtimeActivated": false,
+  "remoteStagePerformed": false,
+  "packagePublished": false,
+  "githubActionsRun": false,
+  "nasMutated": false,
+  "viewerProtectedFilesEdited": false
+}

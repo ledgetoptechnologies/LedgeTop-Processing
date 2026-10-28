@@ -28,6 +28,28 @@ Previous dd4/2be qualifications remain historical evidence. The intermediate
 8dc full-run HTTP lease-ordering failure is retained; the final snapshot withholds
 one last body byte until stream validation and reader release succeed.
 
+An additional isolated reference-v1 ODM handoff now passes four cross-language
+tests against nine immutable Viewer `867dd3f` dependencies. Actual Node
+broker/provider/acceptance modules communicate with the Python driver over TLS.
+The cases include Node failure after acceptance commit and an actual coordinator
+listener/Queue outage while the worker finishes. Original work survives and
+producer result cleanup follows acceptance. See
+[reference-joint-flow.md](reference-joint-flow.md) and
+[joint handoff evidence](evidence/joint-reference-handoff-20261028.json).
+These are separately executed opt-in tests, not default-suite skip coverage.
+Runtime source is unchanged from the fully qualified `6bbd468` snapshot; only
+tests/exporter/documentation were added, so the full suite was not repeated.
+The backend and tiny input are synthetic, and Node returns `published:false`.
+No real geometry, project publication, NAS issuer or production mount is proved.
+
+Read-only inspection of that Viewer branch found the reference modules consumed
+only by tests/helper. Its app still selects the legacy provider in
+`processingWorker.js`/`providerHealth.js` and mounts the legacy processing API.
+Reference app/provider selection, broker/ingestion/ACK-pump wiring and source
+custody/purge enforcement need actual assembly and deployment. NAS configuration
+alone cannot finish this. The Viewer owner retains that work after its protected
+release; Beau retains every NAS command/configuration/permission decision.
+
 An explicit constructor-only preparation profile now composes the actual driver,
 claim/download path, physical gate, PipelineJournal and recovery controls. Tested
 lost replies and a prepared coordinator restart preserve the original claim,
