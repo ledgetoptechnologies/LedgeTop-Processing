@@ -85,6 +85,26 @@ class UpdatePipelineTests(unittest.TestCase):
         self.assertEqual(self.supervisor.advance(identifier),result)
         self.assertIsNone(self.supervisor.discover())
 
+    def test_manifest_store_whole_pipeline_keeps_config_and_runtime_identity_distinct(self):
+        artifact_config=engine_fixture.NEW
+        descriptor={key:self.docker.registry.selected['Descriptor'][key] for key in ('mediaType','digest','size')}
+        runtime_id=descriptor['digest']
+        self.docker.registry.image.update(Id=runtime_id,Descriptor=descriptor)
+        self.docker.mismatch['image']=runtime_id
+        # The host fixture's expected transport target follows this store's
+        # runtime ID; the registry's immutable config blob remains unchanged.
+        with patch.object(engine_fixture,'NEW',runtime_id):
+            identifier=self.staged()
+            self.supervisor.advance(identifier)
+            request=json.loads(self.supervisor._row(identifier)['qualification_request'])
+            self.assertEqual(request['configDigest'],artifact_config)
+            self.assertEqual(request['localImageId'],runtime_id)
+            self.assertNotEqual(request['configDigest'],request['localImageId'])
+            result=self.finish(identifier)
+            self.assertEqual(result['completion']['imageId'],runtime_id)
+            self.assertEqual(result['completion']['configDigest'],artifact_config)
+            self.assertIsNone(self.supervisor.discover())
+
     def test_lost_qualification_remove_ack_reconciles_without_docker_replay(self):
         identifier=self.staged();self.docker.faults['rm']='after'
         with self.assertRaises(SupervisorHeld):self.supervisor.advance(identifier)

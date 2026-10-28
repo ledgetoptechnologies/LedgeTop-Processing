@@ -1,8 +1,9 @@
 """Fixed-policy image discovery and staging, never qualification or deployment.
 
 The selected linux/amd64 manifest digest is the registry pull identity. Its
-config digest is the expected *different semantic identity* of the local image;
-RepoDigests are never treated as image IDs. Docker's existing credential helper
+config digest identifies the configuration blob. A local runtime image ID is
+proved separately: classic stores expose the config digest, while containerd
+stores can expose a manifest digest with a matching descriptor. Docker's existing credential helper
 is used without reading/exporting credentials. No tag pulls, registry writes,
 pruning, TLS overrides, global context changes, or service commands exist here.
 
@@ -314,8 +315,9 @@ class DockerRegistry:
         after=self._entries(reference,source.repository)
         fingerprint=lambda entries:_sha(sorted(entries,key=lambda item:_json(item)))
         if fingerprint(after)!=fingerprint(entries):raise RegistryError('tag_changed_during_discovery')
-        candidate=dict(schemaVersion=1,channel=channel,repository=source.repository,tag=source.tag,platform='linux/amd64',
-            manifestDigest=digest,configDigest=item['configDigest'],localImageId=item['configDigest'],
+        candidate=dict(schemaVersion=2,channel=channel,repository=source.repository,tag=source.tag,platform='linux/amd64',
+            manifestDigest=digest,configDigest=item['configDigest'],
+            manifestDescriptor={key:item['descriptor'][key] for key in ('mediaType','digest','size')},
             compressedBytes=item['compressedBytes'],descriptorSetSha256=fingerprint(entries))
         candidate['candidateId']=_sha(candidate)
         with self._db() as db:db.execute('INSERT OR IGNORE INTO registry_candidates VALUES(?,?)',(candidate['candidateId'],_json(candidate)))
@@ -323,16 +325,24 @@ class DockerRegistry:
 
     def _candidate(self,candidate):
         fields={'schemaVersion','channel','repository','tag','platform','manifestDigest','configDigest',
-            'localImageId','compressedBytes','descriptorSetSha256','candidateId'}
-        if type(candidate) is not dict or set(candidate)!=fields or type(candidate.get('candidateId')) is not str:
+            'compressedBytes','descriptorSetSha256','candidateId'}
+        if type(candidate) is not dict or type(candidate.get('schemaVersion')) is not int:
+            raise RegistryError('persisted_candidate_required')
+        version=candidate['schemaVersion']
+        # V1's guessed localImageId was merely a config alias. Retain exact
+        # old records for inspection-only reconciliation, never runtime proof.
+        if version==1:fields=fields|{'localImageId'}
+        elif version==2:fields=fields|{'manifestDescriptor'}
+        if (version not in (1,2) or set(candidate)!=fields or type(candidate.get('candidateId')) is not str
+                or (version==1 and candidate['localImageId']!=candidate['configDigest'])):
             raise RegistryError('persisted_candidate_required')
         source=self.channels.get(candidate['channel']) if type(candidate['channel']) is str else None
-        if (source is None or type(candidate['schemaVersion']) is not int or candidate['schemaVersion']!=1
+        if (source is None
                 or candidate['repository']!=source.repository or candidate['tag']!=source.tag or candidate['platform']!='linux/amd64'
-                or candidate['localImageId']!=candidate['configDigest']
                 or candidate['candidateId']!=_sha({key:value for key,value in candidate.items() if key!='candidateId'})):
             raise RegistryError('persisted_candidate_required')
         _digest(candidate['manifestDigest']);_digest(candidate['configDigest']);_integer(candidate['compressedBytes'])
+        if version==2:self._descriptor(candidate['manifestDescriptor'],candidate['manifestDigest'])
         if not re.fullmatch(r'[a-f0-9]{64}',candidate['descriptorSetSha256']):raise RegistryError('persisted_candidate_required')
         with self._db() as db:row=db.execute('SELECT value FROM registry_candidates WHERE id=?',(candidate['candidateId'],)).fetchone()
         if not row or row[0]!=_json(candidate):raise RegistryError('persisted_candidate_required')
@@ -347,13 +357,44 @@ class DockerRegistry:
         return _sha(dict(repository=candidate['repository'],manifestDigest=candidate['manifestDigest'],
             configDigest=candidate['configDigest'],platform=candidate['platform'],engineId=self.policy.engine_id))
 
+    def _descriptor(self,value,digest):
+        if (type(value) is not dict or set(value)!={'mediaType','digest','size'}
+                or value['mediaType'] not in IMAGE_MEDIA or value['digest']!=digest
+                or not 1<=_integer(value['size'])<=self.policy.max_output_bytes):
+            raise RegistryError('local_manifest_descriptor_changed')
+        return value
+
+    def _selected_descriptor(self,candidate):
+        if candidate['schemaVersion']==2:return candidate['manifestDescriptor']
+        # A legacy candidate did not save the selected descriptor. Recover only
+        # from the same immutable child and verify its raw hash/config/platform;
+        # never infer a descriptor from the local store or the moving tag.
+        entries=self._entries(candidate['repository']+'@'+candidate['manifestDigest'],candidate['repository'])
+        if (len(entries)!=1 or entries[0]['configDigest']!=candidate['configDigest']
+                or entries[0]['descriptor']['platform']!={'os':'linux','architecture':'amd64'}):
+            raise RegistryError('immutable_manifest_changed')
+        return {key:entries[0]['descriptor'][key] for key in ('mediaType','digest','size')}
+
     def _inspect(self,candidate):
         reference=candidate['repository']+'@'+candidate['manifestDigest']
-        template='{"Id":{{json .Id}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"RepoDigests":{{json .RepoDigests}},"Size":{{json .Size}}}'
-        image=_load(self._command(['image','inspect','--format',template,reference]))
-        if not isinstance(image,dict) or set(image)!={'Id','Os','Architecture','RepoDigests','Size'}:raise RegistryError('invalid_local_image_metadata')
-        if image['Id']!=candidate['configDigest'] or (image['Os'],image['Architecture'])!=('linux','amd64'):
+        # Full JSON supports older CLI types lacking Descriptor; select only
+        # bounded identity fields and never persist/print Config or Env.
+        raw=_load(self._command(['image','inspect','--format','{{json .}}',reference]))
+        fields={'Id','Os','Architecture','RepoDigests','Size'}
+        if not isinstance(raw,dict) or not fields<=set(raw):raise RegistryError('invalid_local_image_metadata')
+        image={key:raw[key] for key in fields}
+        if (image['Os'],image['Architecture'])!=('linux','amd64'):
             raise RegistryError('local_config_or_platform_changed')
+        descriptor=raw.get('Descriptor')
+        if descriptor is not None:
+            self._descriptor(descriptor,candidate['manifestDigest'])
+            if descriptor!=self._selected_descriptor(candidate):
+                raise RegistryError('local_manifest_descriptor_changed')
+        if image['Id']==candidate['configDigest']:
+            identity_kind='config'
+        elif image['Id']==candidate['manifestDigest'] and descriptor is not None:
+            identity_kind='manifest'
+        else:raise RegistryError('local_image_identity_unproven')
         repos=image['RepoDigests']
         if not isinstance(repos,list) or not 1<=len(repos)<=64:raise RegistryError('local_repository_digest_missing')
         normalized=[]
@@ -363,7 +404,16 @@ class DockerRegistry:
         if reference not in normalized:raise RegistryError('local_repository_digest_missing')
         if _integer(image['Size'])>self.policy.staging_reservation_bytes:raise RegistryError('local_image_exceeds_reservation')
         return dict(candidateId=candidate['candidateId'],repository=candidate['repository'],manifestDigest=candidate['manifestDigest'],
-            imageId=image['Id'],platform='linux/amd64',localSize=image['Size'],engineId=self.policy.engine_id)
+            configDigest=candidate['configDigest'],imageId=image['Id'],imageIdKind=identity_kind,
+            platform='linux/amd64',localSize=image['Size'],engineId=self.policy.engine_id)
+
+    def matches_local_image(self,candidate,image_id):
+        """Only verified cached metadata can prove an already adopted image."""
+        self._candidate(candidate);_digest(image_id);self._engine()
+        try:metadata=self._inspect(candidate)
+        except RegistryError:
+            self._engine();return False
+        self._engine();return metadata['imageId']==image_id
 
     def _finish(self,identifier,state,metadata=None):
         with self._db() as db:db.execute('UPDATE registry_staging SET state=?,metadata=? WHERE id=?',(state,_json(metadata) if metadata else None,identifier))

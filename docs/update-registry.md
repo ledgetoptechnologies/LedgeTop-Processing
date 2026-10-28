@@ -16,10 +16,31 @@ selected Linux/amd64 child manifest by its immutable digest and raw bytes, then
 reads the tag again to detect changed descriptor mappings. The returned candidate
 must remain exactly equal to the persisted discovery record.
 
-The registry manifest digest and Docker config/image ID have different meanings.
-Only `repository@manifestDigest` is pulled; `configDigest` is checked against the
-local image ID after staging. The immutable reference, platform, repository
-digest and local engine identity must all match.
+The registry manifest digest, configuration-blob digest and local runtime image
+ID have different meanings. Only `repository@manifestDigest` is pulled.
+Discovery schema 2 saves the exact selected child's descriptor (media type,
+digest and size) and configuration digest; it does not guess a local image ID.
+Staging reads the actual Docker ID. A classic-store ID must equal the config
+digest; a manifest-backed ID must equal the selected manifest digest and have
+an exactly matching local descriptor. Platform, immutable repository digest and
+local engine identity must also match. Staged metadata carries `configDigest`,
+actual `imageId`, and explicit `imageIdKind` (`config` or `manifest`).
+Docker's [containerd image-store implementation](https://github.com/moby/moby/blob/master/daemon/containerd/image_inspect.go)
+reports the target descriptor digest as its image ID; this behavior was also
+observed on the main processing host during the first real staging attempt.
+
+`matches_local_image(candidate, image_id)` can prove an already adopted image
+only through this verified local mapping, never by comparing an artifact digest
+to a runtime pin. Its unavailable or invalid cached proof returns `False`; it
+does not stage or qualify anything.
+
+Legacy discovery schema 1 stored a guessed `localImageId` config alias. Exact
+old records remain readable for inspection-only reconciliation, but that alias
+is never runtime proof. Recover their missing descriptor only from the same
+immutable child with verified raw hash, config and platform. The pull identity
+does not change across this correction, so an uncertain pull cannot be replayed
+by converting its candidate record. Existing supervisor/qualifier receipts
+without the new required runtime identity must not be reinterpreted as success.
 
 Before `stage(candidate)` pulls, the capacity callback must durably reserve the
 configured amount, idempotently for that candidate. A pull intent is committed

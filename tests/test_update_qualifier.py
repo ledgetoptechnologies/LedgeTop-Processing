@@ -36,7 +36,7 @@ class FakeDocker:
             Tmpfs={path:'rw,nosuid,nodev,mode=1777' for path in WRITE_PATHS},PortBindings={},RestartPolicy={'Name':'no'},
             AutoRemove=False,CapDrop=['ALL'],SecurityOpt=['no-new-privileges'],Binds=None,Devices=[],DeviceRequests=None,
             PidMode='',IpcMode='private',NanoCpus=0,Memory=0,PidsLimit=None,LogConfig={'Type':'none'})
-        value=dict(id=self.id,image=registry_fixture.CONFIG,running=self.running,status='running' if self.running else 'exited' if self.started else 'created',
+        value=dict(id=self.id,image=self.registry.image['Id'],running=self.running,status='running' if self.running else 'exited' if self.started else 'created',
             pid=4321 if self.running else 0,exitCode=self.exit_code,binding=self.binding,
             config=dict(User='0:0',WorkingDir='/var/www',Entrypoint=self.defaults['Entrypoint'],Cmd=self.defaults['Cmd']),host=host,mounts=[])
         for key,item in self.mismatch.items():
@@ -94,7 +94,7 @@ class QualifierTests(unittest.TestCase):
             path=path/component;path.mkdir(mode=0o700,exist_ok=True)
         value=dict(schemaVersion=1,operationId=operation,nodeId='main',engineId='test-engine',authorityId=self.authority,
             candidateId=self.candidate['candidateId'],repository=self.candidate['repository'],manifestDigest=self.candidate['manifestDigest'],
-            configDigest=self.candidate['configDigest'],platform='linux/amd64',previousImageId=supervisor_fixture.OLD,hostGeneration=0,
+            configDigest=self.candidate['configDigest'],localImageId=self.docker.registry.image['Id'],platform='linux/amd64',previousImageId=supervisor_fixture.OLD,hostGeneration=0,
             supervisorPolicySha256='f'*64,qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.qualifier.policy_sha256,
             receiptDirectory=str(path))
         return dict(value,requestSha256=_sha(value))
@@ -116,6 +116,54 @@ class QualifierTests(unittest.TestCase):
         self.assertEqual((self.root/'qualifier.sqlite').read_bytes(),before)
         self.assertEqual(self.open().qualify(self.request),receipt)
         self.assertEqual(self.docker.mutations(),['create','start','exec','stop','rm'])
+
+    def manifest_store(self):
+        self.docker.registry.image.update(Id=self.candidate['manifestDigest'],Descriptor={
+            key:self.docker.registry.selected['Descriptor'][key] for key in ('mediaType','digest','size')})
+        metadata=self.registry.reconcile(self.candidate)
+        self.assertEqual(metadata['imageIdKind'],'manifest')
+        self.request=self.make_request()
+        return metadata
+
+    def test_manifest_store_uses_actual_local_manifest_id_and_retains_config_descriptor(self):
+        metadata=self.manifest_store()
+        receipt=self.qualifier.qualify(self.request)
+        self.assertEqual(receipt['localImageId'],self.candidate['manifestDigest'])
+        self.assertEqual(receipt['configDigest'],registry_fixture.CONFIG)
+        self.assertNotEqual(receipt['localImageId'],receipt['configDigest'])
+        self.assertEqual(UpdateSupervisor._receipt(receipt,self.request,'qualification'),receipt)
+        create=next(args for args in self.docker.calls if args[0]=='create')
+        self.assertEqual(create[-1],metadata['imageId'])
+        defaults=[args for args in self.docker.calls if args[:2]==['image','inspect'] and '.Config.User' in args[3]]
+        self.assertTrue(defaults);self.assertTrue(all(args[-1]==metadata['imageId'] for args in defaults))
+        with self.qualifier._exclusive():
+            row=self.qualifier._row(self.request['requestSha256'])
+        self.assertEqual(json.loads(row['stopped'])['image'],metadata['imageId'])
+        evidence=json.loads(row['evidence'])
+        self.assertEqual(evidence['imageIdKind'],'manifest')
+        self.assertEqual(evidence['configDigest'],registry_fixture.CONFIG)
+        self.assertEqual(evidence['localImageId'],metadata['imageId'])
+        self.assertEqual(self.open().lookup(self.request),receipt)
+
+    def test_manifest_store_does_not_silently_alias_config_as_runtime_image(self):
+        self.manifest_store()
+        request=dict(self.request,localImageId=self.candidate['configDigest'])
+        request['requestSha256']=_sha({key:value for key,value in request.items() if key!='requestSha256'})
+        with self.assertRaises(QualifierHeld):self.qualifier.qualify(request)
+        self.assertEqual(self.docker.mutations(),[])
+        self.docker.mismatch={'image':self.candidate['configDigest']}
+        with self.assertRaises(QualifierHeld):self.qualifier.qualify(self.request)
+        self.assertEqual(self.docker.mutations(),['create'])
+
+    def test_manifest_id_without_matching_descriptor_is_not_runtime_proof(self):
+        actual={key:self.docker.registry.selected['Descriptor'][key] for key in ('mediaType','digest','size')}
+        for descriptor in (None,dict(actual,digest='sha256:'+'e'*64),dict(actual,size=actual['size']+1),
+                dict(actual,mediaType='application/vnd.oci.image.index.v1+json')):
+            with self.subTest(descriptor=descriptor):
+                self.docker.registry.image.update(Id=self.candidate['manifestDigest'],Descriptor=descriptor)
+                self.request=self.make_request()
+                with self.assertRaises(QualifierHeld):self.qualifier.qualify(self.request)
+        self.assertEqual(self.docker.mutations(),[])
 
     def test_create_has_no_mount_port_gpu_or_processing_resource_caps(self):
         self.qualifier.qualify(self.request)

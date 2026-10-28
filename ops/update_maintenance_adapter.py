@@ -26,7 +26,7 @@ from ops import node_maintenance as managed
 
 
 COMMON=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest',
-        'configDigest','supervisorPolicySha256','hostGeneration')
+        'configDigest','localImageId','supervisorPolicySha256','hostGeneration')
 REQUEST={'schemaVersion',*COMMON,'repository','platform','previousImageId','qualifierId',
          'qualificationPolicySha256','receiptDirectory','qualificationSha256','requestSha256'}
 
@@ -179,7 +179,7 @@ class UpdateMaintenanceAdapter:
         if request['requestSha256']!=digest({key:value for key,value in request.items() if key!='requestSha256'}):
             raise MaintenanceAdapterHeld('supervisor_request_changed')
         for key in ('operationId','candidateId','supervisorPolicySha256','qualificationPolicySha256','qualificationSha256','requestSha256'):sha(request[key])
-        for key in ('manifestDigest','configDigest','previousImageId'):sha(request[key],True)
+        for key in ('manifestDigest','configDigest','localImageId','previousImageId'):sha(request[key],True)
         identity(request['qualifierId'])
         if (any(request[key]!=self.binding[key] for key in ('nodeId','authorityId','engineId'))
                 or type(request['hostGeneration']) is not int or not 0<=request['hostGeneration']<=2**53-1
@@ -244,7 +244,7 @@ class UpdateMaintenanceAdapter:
                     or any(node.get(key)!=receipt[key] for key in ('drainAt','notBefore','afterJobId'))):
                 raise MaintenanceAdapterHeld('owned_plan_is_no_longer_current')
         value=dict(schemaVersion=1,requestSha256=request['requestSha256'],**{key:request[key] for key in COMMON},
-            planId=receipt['planId'],previousImageId=request['previousImageId'],targetImageId=request['configDigest'],
+            planId=receipt['planId'],previousImageId=request['previousImageId'],targetImageId=request['localImageId'],
             qualificationSha256=request['qualificationSha256'])
         value=UpdateSupervisor._receipt(seal_receipt(value,'planSha256'),request,'schedule')
         if row['receipt'] is not None and row['receipt']!=canonical(value):raise MaintenanceAdapterHeld('sealed_plan_changed')
@@ -261,14 +261,14 @@ class UpdateMaintenanceAdapter:
                 if row['request']!=canonical(request):raise MaintenanceAdapterHeld('schedule_cycle_already_bound')
                 return self._plan(row)[0]
             if self._host()['imageId']!=request['previousImageId']:raise MaintenanceAdapterHeld('previous_image_changed')
-            _,_,adapter=self._context(request['receiptDirectory']);adapter.image(request['configDigest'])
+            _,_,adapter=self._context(request['receiptDirectory']);adapter.image(request['localImageId'])
             node=self.api.json('GET','/v1/prototype/nodes/'+self.binding['nodeId'])['node']
             if node['state']!='active':raise MaintenanceAdapterHeld('node_already_has_maintenance')
             now=aware(self.clock())
             wire=dict(schemaVersion=1,requestId=str(uuid.uuid4()),authorityId=self.binding['authorityId'],expectedRevision=node['revision'],
                 drainAt=(now+timedelta(seconds=self.window.drain_after_seconds)).isoformat().replace('+00:00','Z'),
                 notBefore=(now+timedelta(seconds=self.window.not_before_after_seconds)).isoformat().replace('+00:00','Z'),
-                afterJobId=None,targetImage=request['configDigest'])
+                afterJobId=None,targetImage=request['localImageId'])
             with self._db(write=True) as db:
                 existing=db.execute('SELECT * FROM schedule_intents WHERE operation=? AND generation=?',
                     (request['operationId'],request['hostGeneration'])).fetchone()
@@ -308,7 +308,7 @@ class UpdateMaintenanceAdapter:
         if self._host()['imageId']!=request['previousImageId']:raise MaintenanceAdapterHeld('previous_image_changed')
         node=self.api.json('GET','/v1/prototype/nodes/'+self.binding['nodeId'])['node']
         if (node.get('id')!=self.binding['nodeId'] or node.get('planId')!=plan['planId']
-                or node.get('targetImage')!=request['configDigest'] or node['state'] not in ('scheduled','draining')):
+                or node.get('targetImage')!=request['localImageId'] or node['state'] not in ('scheduled','draining')):
             raise MaintenanceAdapterHeld('frozen_plan_not_eligible')
         if node['state']!='draining' or stamp(node['notBefore'])>aware(self.clock()):return False
         jobs=self.api.json('GET','/v1/prototype/jobs')['jobs']
@@ -345,7 +345,7 @@ class UpdateMaintenanceAdapter:
                     (request['requestSha256'],request['operationId'],request['hostGeneration'],canonical(request)))
             try:
                 result=managed.run(self.root,self.api,self.operator,Path(request['receiptDirectory']),self.window.wait_seconds,
-                    self.window.drain_seconds,expected_plan_id=request['plan']['planId'],expected_target=request['configDigest'])
+                    self.window.drain_seconds,expected_plan_id=request['plan']['planId'],expected_target=request['localImageId'])
             except Exception:raise MaintenanceAdapterHeld('managed_run_requires_read_only_reconciliation') from None
             if result.get('status')!='succeeded':raise MaintenanceAdapterHeld('issued_run_has_no_successful_completion')
             value=self._completion(request)
@@ -363,12 +363,12 @@ class UpdateMaintenanceAdapter:
         state=read_json(root/'managed-update.json');private=read_json(root/'update.json')
         if state.get('stage')!='completed' or private.get('stage')!='completed':return None
         settings,ingress,adapter=self._context(root)
-        expected=dict(healthy=True,image=request['configDigest'],previousImage=request['previousImageId'],
-            composePinUpdateRequired=False,persistentComposePin=request['configDigest'],ingress='open')
+        expected=dict(healthy=True,image=request['localImageId'],previousImage=request['previousImageId'],
+            composePinUpdateRequired=False,persistentComposePin=request['localImageId'],ingress='open')
         if (state.get('binding')!=managed.operation_binding(self.api,settings,ingress,adapter.args)
-                or state.get('planId')!=request['plan']['planId'] or state.get('targetImage')!=request['configDigest']
-                or state.get('oldImage')!=request['previousImageId'] or state.get('persistentComposePin')!=request['configDigest']
-                or private.get('planId')!=request['plan']['planId'] or private.get('targetImage')!=request['configDigest']
+                or state.get('planId')!=request['plan']['planId'] or state.get('targetImage')!=request['localImageId']
+                or state.get('oldImage')!=request['previousImageId'] or state.get('persistentComposePin')!=request['localImageId']
+                or private.get('planId')!=request['plan']['planId'] or private.get('targetImage')!=request['localImageId']
                 or private.get('nodeId')!=self.binding['nodeId'] or private.get('oldImage')!=request['previousImageId']
                 or private.get('status')!='succeeded' or private.get('finishResult')!=expected
                 or state.get('result')!=dict(status='succeeded',nodeId=self.binding['nodeId'],**expected)):
@@ -376,14 +376,14 @@ class UpdateMaintenanceAdapter:
         self._authority();node=self.api.json('GET','/v1/prototype/nodes/'+self.binding['nodeId'])['node']
         if not finish_matches(node,private,expected):raise MaintenanceAdapterHeld('coordinator_finish_not_proven')
         source=read_json(self.root/'compose.json')
-        if (source['services'][settings['service']]['image']!=request['configDigest']
+        if (source['services'][settings['service']]['image']!=request['localImageId']
                 or managed.compose_base(source,settings['service'])!=state['composeBaseSha256']
-                or self._host()['imageId']!=request['configDigest'] or not adapter.serving(request['configDigest'])):
+                or self._host()['imageId']!=request['localImageId'] or not adapter.serving(request['localImageId'])):
             raise MaintenanceAdapterHeld('durable_host_pin_not_proven')
         managed.owned_open_proof(ingress,state)
         value=dict(schemaVersion=1,requestSha256=request['requestSha256'],**{key:request[key] for key in COMMON},
             planId=request['plan']['planId'],planSha256=request['plan']['planSha256'],previousImageId=request['previousImageId'],
-            targetImageId=request['configDigest'],qualificationSha256=request['qualificationSha256'],imageId=request['configDigest'],
+            targetImageId=request['localImageId'],qualificationSha256=request['qualificationSha256'],imageId=request['localImageId'],
             healthy=True,hostPinDurable=True,ingressOpen=True,coordinatorFinished=True)
         value=UpdateSupervisor._receipt(seal_receipt(value,'completionSha256'),request,'run')
         if row['receipt'] is not None and row['receipt']!=canonical(value):raise MaintenanceAdapterHeld('sealed_completion_changed')

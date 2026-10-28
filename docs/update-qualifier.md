@@ -41,10 +41,21 @@ supporting another layout requires a separate explicit review.
 
 ## Isolation and lifecycle
 
-The actual `DockerRegistry.inspect_staged` proves previously definite staging
-and the live local config ID, immutable repository manifest digest, platform and
-physical Docker Engine identity. Qualification never pulls an image, promotes
-an unknown pull, or confuses a manifest digest with a local image ID.
+The actual `DockerRegistry.inspect_staged` proves previously definite staging,
+the immutable repository manifest/config descriptors, platform, physical Docker
+Engine identity, and the **actual** local Docker image ID. Classic stores may
+report the config digest as `.Id`; Docker's containerd store can report the
+manifest digest instead, requiring its exact matching manifest `Descriptor`.
+The registry proves this mapping; the qualifier never guesses a local ID from a
+config or manifest digest. Staged metadata records both `configDigest` and
+`imageIdKind: config|manifest` beside actual `imageId`.
+
+Supervisor requests and qualification receipts must include `localImageId` from
+that actual staged `imageId`, separately from artifact `configDigest`. Creation,
+default-image inspection, container-image checks and terminal-stop proof all use
+`localImageId`. Evidence retains all three identities and the proven image-ID
+kind. A config digest is never silently substituted when the runtime reports a
+manifest ID. Qualification never pulls or promotes an unknown pull.
 
 A private OS-exclusive lease and FULL SQLite journal protect one local
 qualification at a time. The exact supervisor request, policy, candidate,
@@ -52,7 +63,7 @@ physical node/engine/authority, host generation, and own receipt directory are
 bound before Docker mutation. Every create, start, exec, stop and removal has a
 durable intent first. Repeated calls never replay a nonterminal mutation.
 
-The candidate uses its exact config image ID with `--pull never`, network
+The candidate uses its exact proven local image ID with `--pull never`, network
 `none`, no ports, no mounts, no Docker socket, no production credentials, no GPU
 device requests, read-only root, all capabilities dropped, and no new
 privileges. Its only writable paths are private tmpfs at `/var/www/data`,

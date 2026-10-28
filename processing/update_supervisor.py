@@ -238,9 +238,12 @@ class UpdateSupervisor:
             if rank>=2:
                 staged=_load(row['staged'])
                 expected=dict(candidateId=candidate['candidateId'],repository=candidate['repository'],manifestDigest=candidate['manifestDigest'],
-                    imageId=candidate['configDigest'],platform='linux/amd64',engineId=self.engine_id)
-                if set(staged)!=set(expected)|{'localSize'} or any(staged[key]!=value for key,value in expected.items()):raise ValueError()
+                    configDigest=candidate['configDigest'],platform='linux/amd64',engineId=self.engine_id)
+                if set(staged)!=set(expected)|{'localSize','imageId','imageIdKind'} or any(staged[key]!=value for key,value in expected.items()):raise ValueError()
                 if _integer(staged['localSize'])>self.policy.capacity_bytes:raise ValueError()
+                _digest(staged['imageId'])
+                if (staged['imageIdKind'] not in ('config','manifest')
+                        or staged['imageId']!=candidate[{'config':'configDigest','manifest':'manifestDigest'}[staged['imageIdKind']]]):raise ValueError()
             previous=row['base_image']
             for kind,minimum in (('qualification',3),('schedule',5),('run',7)):
                 if rank<minimum:continue
@@ -255,7 +258,7 @@ class UpdateSupervisor:
     def _validate_request(self,row,candidate,request,kind,previous):
         expected=dict(schemaVersion=1,operationId=row['id'],nodeId=self.policy.node_id,engineId=self.engine_id,
             authorityId=self.policy.authority_id,candidateId=candidate['candidateId'],repository=candidate['repository'],
-            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],platform='linux/amd64',
+            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],localImageId=_load(row['staged'])['imageId'],platform='linux/amd64',
             previousImageId=request.get('previousImageId'),supervisorPolicySha256=self.policy_sha256,
             hostGeneration=row['generation'],
             qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.policy.qualification_policy_sha256,
@@ -320,7 +323,10 @@ class UpdateSupervisor:
                     raise SupervisorHeld('prior_update_requires_reconciliation')
             current,generation=self._current_state();self._host(current)
             candidate=self.registry.discover(self.policy.channel)
-            if candidate['configDigest']==current:return None
+            try:matches=self.registry.matches_local_image(candidate,current)
+            except Exception:raise SupervisorHeld('cached_local_image_identity_unavailable') from None
+            if type(matches) is not bool:raise SupervisorHeld('explicit_local_image_match_required')
+            if matches:return None
             self._host(current)
             target=_sha(dict(nodeId=self.policy.node_id,engineId=self.engine_id,repository=candidate['repository'],
                 manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],
@@ -337,7 +343,7 @@ class UpdateSupervisor:
         candidate=_load(row['candidate'])
         request=dict(schemaVersion=1,operationId=row['id'],nodeId=self.policy.node_id,engineId=self.engine_id,
             authorityId=self.policy.authority_id,candidateId=candidate['candidateId'],repository=candidate['repository'],
-            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],platform=candidate['platform'],
+            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],localImageId=_load(row['staged'])['imageId'],platform=candidate['platform'],
             previousImageId=row['base_image'],hostGeneration=row['generation'],supervisorPolicySha256=self.policy_sha256,
             qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.policy.qualification_policy_sha256,
             receiptDirectory=self._directory(row['id'],kind))
@@ -348,7 +354,7 @@ class UpdateSupervisor:
 
     @staticmethod
     def _receipt(value,request,kind):
-        common=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','supervisorPolicySha256','hostGeneration')
+        common=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','localImageId','supervisorPolicySha256','hostGeneration')
         base={'schemaVersion','requestSha256',*common}
         extra={'qualification':{'qualifierId','qualificationPolicySha256','passed','engineVersion','evidenceSha256','qualificationSha256'},
             'schedule':{'planId','previousImageId','targetImageId','qualificationSha256','planSha256'},
@@ -357,6 +363,7 @@ class UpdateSupervisor:
         field={'qualification':'qualificationSha256','schedule':'planSha256','run':'completionSha256'}[kind]
         try:
             if type(value) is not dict or set(value)!=base|extra:raise ValueError()
+            _digest(request['localImageId'])
             value=_load(_json(value))
             if (type(value['schemaVersion']) is not int or value['schemaVersion']!=1
                     or type(value['hostGeneration']) is not int
@@ -368,10 +375,10 @@ class UpdateSupervisor:
                 _slug(value['engineVersion']);_hash(value['evidenceSha256'])
             else:
                 _uuid(value['planId'])
-                if (value['previousImageId']!=request['previousImageId'] or value['targetImageId']!=request['configDigest']
+                if (value['previousImageId']!=request['previousImageId'] or value['targetImageId']!=request['localImageId']
                         or value['qualificationSha256']!=request['qualificationSha256']):raise ValueError()
                 if kind=='run' and (value['planId']!=request['plan']['planId'] or value['planSha256']!=request['plan']['planSha256']
-                        or value['imageId']!=request['configDigest']
+                        or value['imageId']!=request['localImageId']
                         or any(value[key] is not True for key in ('healthy','hostPinDurable','ingressOpen','coordinatorFinished'))):raise ValueError()
             return value
         except Exception:raise SupervisorHeld('exact_bound_'+kind+'_receipt_required') from None

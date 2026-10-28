@@ -17,7 +17,7 @@ from processing.update_supervisor import (UpdateSupervisor,SupervisorPolicy,Supe
 from tests import test_update_registry as registry_fixture
 
 
-COMMON=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','supervisorPolicySha256','hostGeneration')
+COMMON=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','localImageId','supervisorPolicySha256','hostGeneration')
 OLD='sha256:'+'a'*64
 
 
@@ -57,12 +57,12 @@ class DurableAdapters:
             field='qualificationSha256'
         elif kind=='schedule':
             value.update(planId=str(uuid.uuid4()),previousImageId=request['previousImageId'],
-                targetImageId=request['configDigest'],qualificationSha256=request['qualificationSha256'])
+                targetImageId=request['localImageId'],qualificationSha256=request['qualificationSha256'])
             field='planSha256'
         else:
             value.update(planId=request['plan']['planId'],planSha256=request['plan']['planSha256'],
-                previousImageId=request['previousImageId'],targetImageId=request['configDigest'],
-                qualificationSha256=request['qualificationSha256'],imageId=request['configDigest'],
+                previousImageId=request['previousImageId'],targetImageId=request['localImageId'],
+                qualificationSha256=request['qualificationSha256'],imageId=request['localImageId'],
                 healthy=True,hostPinDurable=True,ingressOpen=True,coordinatorFinished=True)
             field='completionSha256'
         if fault=='mismatch':value['authorityId']=str(uuid.uuid4())
@@ -71,7 +71,7 @@ class DurableAdapters:
         value=seal_receipt(value,field)
         with self.db() as db:
             db.execute('INSERT OR REPLACE INTO receipts VALUES(?,?,?)',(kind,request['requestSha256'],_json(value)))
-            if kind=='run':db.execute('UPDATE host SET image=? WHERE id=1',(request['configDigest'],))
+            if kind=='run':db.execute('UPDATE host SET image=? WHERE id=1',(request['localImageId'],))
         if self.callback:self.callback(kind,request)
         if fault=='after':raise OSError('private response lost')
         return value
@@ -399,6 +399,63 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(self.supervisor._current_state(),(registry_fixture.CONFIG,4))
         # Immutable B image was staged only once; C and A each stage once.
         self.assertEqual(len([call for call in self.docker.calls if call[0]=='pull']),3)
+
+    def test_containerd_manifest_local_id_flows_through_all_bound_receipts(self):
+        descriptor=self.docker.selected['Descriptor']
+        local=descriptor['digest']
+        self.docker.image.update(Id=local,Descriptor={key:descriptor[key] for key in ('mediaType','digest','size')})
+        identifier=self.discover();self.through(identifier,'completed')
+        row=self.supervisor._row(identifier)
+        metadata=json.loads(row['staged'])
+        self.assertEqual((metadata['configDigest'],metadata['imageId'],metadata['imageIdKind']),
+            (registry_fixture.CONFIG,local,'manifest'))
+        self.assertNotEqual(local,registry_fixture.CONFIG)
+        for name in ('qualification_request','qualification_receipt','schedule_request','plan','run_request','completion'):
+            value=json.loads(row[name])
+            self.assertEqual(value['configDigest'],registry_fixture.CONFIG)
+            self.assertEqual(value['localImageId'],local)
+            for key in ('targetImageId','imageId'):
+                if key in value:self.assertEqual(value[key],local)
+        self.assertEqual(self.supervisor._current(),local)
+        self.restart()
+        self.assertIsNone(self.supervisor.discover())
+        self.assertEqual(self.backend.count('run'),1)
+
+    def test_runtime_receipt_cannot_substitute_artifact_config_for_manifest_local_id(self):
+        descriptor=self.docker.selected['Descriptor']
+        self.docker.image.update(Id=descriptor['digest'],Descriptor={key:descriptor[key] for key in ('mediaType','digest','size')})
+        identifier=self.discover();self.through(identifier,'scheduled')
+        row=self.supervisor._row(identifier);request=self.supervisor._request(row,'run')
+        value=self.backend.mutate('run',request)
+        for key in ('localImageId','targetImageId','imageId'):
+            changed=dict(value);changed.pop('completionSha256');changed[key]=registry_fixture.CONFIG
+            changed=seal_receipt(changed,'completionSha256')
+            with self.assertRaises(SupervisorHeld):self.supervisor._receipt(changed,request,'run')
+
+    def test_config_digest_equal_to_current_does_not_skip_verified_manifest_runtime(self):
+        # A config ID in current state cannot substitute for a verified cache
+        # lookup whose actual runtime ID is the distinct manifest ID.
+        with self.supervisor._db() as db:
+            db.execute('UPDATE supervisor_current SET image=? WHERE id=1',(registry_fixture.CONFIG,))
+        with self.backend.db() as db:db.execute('UPDATE host SET image=? WHERE id=1',(registry_fixture.CONFIG,))
+        descriptor=self.docker.selected['Descriptor']
+        self.docker.image.update(Id=descriptor['digest'],Descriptor={key:descriptor[key] for key in ('mediaType','digest','size')})
+        identifier=self.discover()
+        self.assertEqual(self.supervisor._row(identifier)['base_image'],registry_fixture.CONFIG)
+        self.through(identifier,'completed')
+        self.assertEqual(self.supervisor._current(),descriptor['digest'])
+        self.assertEqual(self.backend.count('run'),1)
+
+    def test_old_staged_metadata_without_runtime_identity_is_never_reinterpreted(self):
+        identifier=self.discover();self.through(identifier,'staged')
+        with self.supervisor._db() as db:
+            staged=json.loads(db.execute('SELECT staged FROM supervisor_operations WHERE id=?',(identifier,)).fetchone()[0])
+            staged.pop('configDigest');staged.pop('imageIdKind')
+            db.execute('UPDATE supervisor_operations SET staged=? WHERE id=?',(_json(staged),identifier))
+        self.restart()
+        for call in (lambda:self.supervisor.status(identifier),lambda:self.supervisor.advance(identifier)):
+            with self.assertRaises(SupervisorHeld):call()
+        self.assertEqual(self.backend.count('qualification'),0)
 
     def test_staging_lost_response_reconciles_actual_registry_without_pull_replay(self):
         identifier=self.discover();self.docker.error=TimeoutError()

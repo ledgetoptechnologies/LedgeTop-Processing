@@ -71,8 +71,9 @@ class RegistryTests(unittest.TestCase):
 
     def test_discovery_refetches_immutable_platform_digest_distinct_from_config(self):
         candidate=self.registry.discover('test')
-        self.assertNotEqual(candidate['manifestDigest'],candidate['localImageId'])
-        self.assertEqual(candidate['localImageId'],candidate['configDigest'])
+        self.assertNotEqual(candidate['manifestDigest'],candidate['configDigest'])
+        self.assertEqual(candidate['schemaVersion'],2)
+        self.assertNotIn('localImageId',candidate)
         self.assertEqual(candidate['compressedBytes'],1123)
         self.assertEqual(self.docker.calls,[['manifest','inspect','--verbose',REPO+':approved-test'],
             ['manifest','inspect','--verbose',REPO+'@'+candidate['manifestDigest']],
@@ -112,6 +113,51 @@ class RegistryTests(unittest.TestCase):
             self.registry.inspect_staged(candidate)
         self.assertEqual(self.docker.calls,[])
         with self.registry._db() as db:self.assertEqual(db.execute('SELECT state FROM registry_staging').fetchone()[0],'held')
+
+    def test_manifest_store_runtime_id_is_separate_from_config_with_descriptor_proof(self):
+        candidate=self.registry.discover('test')
+        descriptor={key:self.docker.selected['Descriptor'][key] for key in ('mediaType','digest','size')}
+        self.docker.image.update(Id=candidate['manifestDigest'],Descriptor=descriptor)
+        self.assertTrue(self.registry.matches_local_image(candidate,candidate['manifestDigest']))
+        self.assertFalse(self.registry.matches_local_image(candidate,candidate['configDigest']))
+        self.assertEqual(self.admissions,[])
+        metadata=self.registry.stage(candidate)
+        self.assertEqual(metadata['imageId'],candidate['manifestDigest'])
+        self.assertEqual(metadata['imageIdKind'],'manifest')
+        self.assertEqual(metadata['configDigest'],candidate['configDigest'])
+        self.assertNotEqual(metadata['imageId'],metadata['configDigest'])
+        self.assertEqual(self.registry.inspect_staged(candidate),metadata)
+
+    def test_manifest_id_without_matching_descriptor_is_not_runtime_proof(self):
+        candidate=self.registry.discover('test')
+        self.docker.image['Id']=candidate['manifestDigest']
+        for descriptor in (None,{},dict(mediaType='application/vnd.oci.image.manifest.v1+json',
+                digest=candidate['configDigest'],size=100),
+                dict(candidate['manifestDescriptor'],size=candidate['manifestDescriptor']['size']+1),
+                dict(candidate['manifestDescriptor'],mediaType='application/vnd.docker.distribution.manifest.v2+json')):
+            self.docker.image['Descriptor']=descriptor
+            self.assertFalse(self.registry.matches_local_image(candidate,candidate['manifestDigest']))
+            with self.assertRaises(RegistryError):self.registry._inspect(candidate)
+
+    def test_classic_store_proves_config_runtime_identity_without_descriptor(self):
+        candidate=self.registry.discover('test')
+        self.assertTrue(self.registry.matches_local_image(candidate,CONFIG))
+        metadata=self.registry.stage(candidate)
+        self.assertEqual(metadata['imageIdKind'],'config')
+        self.assertEqual(metadata['imageId'],CONFIG)
+
+    def test_legacy_candidate_unknown_pull_reconciles_manifest_store_without_second_pull(self):
+        candidate=self.registry.discover('test')
+        legacy=dict(candidate,schemaVersion=1,localImageId=candidate['configDigest'])
+        legacy.pop('manifestDescriptor')
+        legacy['candidateId']=hashlib.sha256(_json({key:value for key,value in legacy.items() if key!='candidateId'}).encode()).hexdigest()
+        with self.registry._db() as db:db.execute('INSERT INTO registry_candidates VALUES(?,?)',(legacy['candidateId'],_json(legacy)))
+        self.docker.image.update(Id=candidate['manifestDigest'],Descriptor={key:self.docker.selected['Descriptor'][key] for key in ('mediaType','digest','size')})
+        self.docker.error=TimeoutError('pull response lost')
+        with self.assertRaises(RegistryHeld):self.registry.stage(legacy)
+        self.assertEqual(self.registry.reconcile(legacy)['imageId'],candidate['manifestDigest'])
+        self.assertEqual(len([args for args in self.docker.calls if args[0]=='pull']),1)
+        with self.registry._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM registry_staging').fetchone()[0],1)
 
     def test_stage_rejects_forged_or_nonpersisted_candidate(self):
         candidate=self.registry.discover('test')

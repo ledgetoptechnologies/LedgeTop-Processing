@@ -51,7 +51,7 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
     def request(self,kind,plan=None):
         value=dict(schemaVersion=1,operationId=self.operation,nodeId='cluster',engineId='synthetic-engine',
             authorityId=self.host.fixture.queue.authority_id,candidateId='b'*64,repository='registry.example/namespace/engine',
-            manifestDigest='sha256:'+'d'*64,configDigest=update_fixture.NEW,platform='linux/amd64',
+            manifestDigest='sha256:'+'d'*64,configDigest=update_fixture.NEW,localImageId=update_fixture.NEW,platform='linux/amd64',
             previousImageId=update_fixture.OLD,hostGeneration=0,supervisorPolicySha256='c'*64,
             qualifierId='separate-qualifier',qualificationPolicySha256='e'*64,qualificationSha256='f'*64,
             receiptDirectory=str(self.receipts/self.operation/kind))
@@ -168,6 +168,31 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
             with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.inspect_host()
         with patch.object(self.api,'token','changed-private-credential'):
             with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.inspect_host()
+        self.assertEqual(self.host.adapter.calls,[])
+
+    def test_manifest_runtime_id_is_scheduled_pinned_and_finished_without_using_config_id(self):
+        # Fake host replacement target is the actual local manifest ID; the
+        # registry config blob is a different artifact identity.
+        self.schedule_request['configDigest']='sha256:'+'2'*64
+        self.schedule_request['requestSha256']=module.digest({key:value for key,value in self.schedule_request.items() if key!='requestSha256'})
+        plan=self.adapter.schedule(self.schedule_request)
+        request=dict(self.schedule_request,receiptDirectory=str(self.receipts/self.operation/'run'),plan=plan)
+        request['requestSha256']=module.digest({key:value for key,value in request.items() if key!='requestSha256'})
+        self.assertEqual(plan['targetImageId'],update_fixture.NEW)
+        self.assertEqual(self.host.fixture.queue.get_node('cluster')['targetImage'],update_fixture.NEW)
+        self.assertTrue(self.adapter.ready_to_run(request))
+        result=self.adapter.run(request)
+        self.assertEqual(result['configDigest'],'sha256:'+'2'*64)
+        self.assertEqual((result['localImageId'],result['targetImageId'],result['imageId']),
+            (update_fixture.NEW,update_fixture.NEW,update_fixture.NEW))
+        self.assertEqual(self.host.adapter.calls,[update_fixture.NEW])
+        self.assertEqual(self.adapter.lookup_completion(request),result)
+
+    def test_missing_local_image_identity_cannot_fall_back_to_config_digest(self):
+        request=dict(self.schedule_request);request.pop('localImageId')
+        request['requestSha256']=module.digest({key:value for key,value in request.items() if key!='requestSha256'})
+        with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.schedule(request)
+        self.assertEqual(self.host.fixture.queue.get_node('cluster')['state'],'active')
         self.assertEqual(self.host.adapter.calls,[])
 
     def test_managed_success_response_loss_reconstructs_read_only_completion(self):

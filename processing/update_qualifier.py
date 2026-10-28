@@ -48,7 +48,7 @@ function get(path,limit){return new Promise((resolve,reject)=>{
 PROBE_SHA=hashlib.sha256(PROBE.encode()).hexdigest()
 WRITE_PATHS=('/var/www/data','/var/www/tmp','/var/www/logs','/tmp')
 REQUEST_FIELDS={'schemaVersion','operationId','nodeId','engineId','authorityId','candidateId','repository',
-    'manifestDigest','configDigest','platform','previousImageId','hostGeneration','supervisorPolicySha256',
+    'manifestDigest','configDigest','localImageId','platform','previousImageId','hostGeneration','supervisorPolicySha256',
     'qualifierId','qualificationPolicySha256','receiptDirectory','requestSha256'}
 
 
@@ -201,7 +201,8 @@ class StartupQualifier:
             request=_load(_json(request))
             for key in ('operationId','candidateId','supervisorPolicySha256','requestSha256'):
                 if not re.fullmatch(r'[a-f0-9]{64}',request[key]):raise ValueError()
-            _digest(request['manifestDigest']);_digest(request['configDigest']);_digest(request['previousImageId']);_integer(request['hostGeneration'])
+            _digest(request['manifestDigest']);_digest(request['configDigest']);_digest(request['localImageId'])
+            _digest(request['previousImageId']);_integer(request['hostGeneration'])
             directory=Path(self.policy.supervisor_state_root)/'receipts'/request['operationId']/'qualification'
             if (type(request['schemaVersion']) is not int or request['schemaVersion']!=1 or request['nodeId']!=self.policy.node_id
                     or request['engineId']!=self.policy.engine_id or request['authorityId']!=self.policy.authority_id
@@ -256,7 +257,7 @@ class StartupQualifier:
                 and all(isinstance(item,dict) and item.get('Type')=='tmpfs' and item.get('Source') in ('',None)
                     and item.get('RW') is True for item in mounts))
         if (set(value)!={'id','image','running','status','pid','exitCode','binding','config','host','mounts'}
-                or value['id']!=row['container'] or value['image']!=request['configDigest'] or value['binding']!=request['requestSha256']
+                or value['id']!=row['container'] or value['image']!=request['localImageId'] or value['binding']!=request['requestSha256']
                 or type(value['running']) is not bool or type(value['pid']) is not int or type(value['exitCode']) is not int
                 or value['status'] not in ('created','running','exited','dead')
                 or c.get('User')!=self.policy.run_user or c.get('WorkingDir')!=self.policy.working_directory
@@ -284,6 +285,8 @@ class StartupQualifier:
             raise QualifierHeld('actual_engine_dialect_or_version_changed')
         return dict(schemaVersion=1,scope='startup-api-options-only-v1',requestSha256=request['requestSha256'],
             probeSha256=PROBE_SHA,engine=info['engine'],apiVersion=info['version'],engineVersion=info['engineVersion'],
+            configDigest=request['configDigest'],manifestDigest=request['manifestDigest'],localImageId=request['localImageId'],
+            imageIdKind=_load(row['defaults'])['imageIdKind'],
             optionsSha256=_sha(sorted(options,key=lambda value:value['name'])),optionsCount=len(options),
             reconstructionQualified=False,gpuInitializationQualified=False,gpuKernelsQualified=False,
             noTasksSubmitted=True,noProductionMounts=True,noPublishedPorts=True)
@@ -299,7 +302,7 @@ class StartupQualifier:
         evidence=_load(row['evidence']) if row['evidence'] else None
         self._evidence(evidence,request,row['state']=='completed')
         if (row['state'] not in ('remove_intent','completed') or not re.fullmatch(r'[a-f0-9]{64}',row['container'] or '')
-                or not stopped or stopped.get('id')!=row['container'] or stopped.get('image')!=request['configDigest']
+                or not stopped or stopped.get('id')!=row['container'] or stopped.get('image')!=request['localImageId']
                 or stopped.get('binding')!=request['requestSha256'] or stopped.get('running') is not False or stopped.get('pid')!=0
                 or type(stopped.get('pid')) is not int or stopped.get('status') not in ('exited','dead')
                 or not re.fullmatch(r'[a-f0-9]{64}',stopped.get('specSha256',''))
@@ -311,7 +314,7 @@ class StartupQualifier:
             raise QualifierHeld('sealed_qualification_evidence_changed')
         evidence=dict(evidence,containerId=row['container'],containerSpecSha256=stopped['specSha256'],
                       defaultStartupSha256=self.policy.startup_spec_sha256,stopped=True,removed=True,tmpfsOutputsDisposed=True)
-        common=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','supervisorPolicySha256','hostGeneration')
+        common=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','localImageId','supervisorPolicySha256','hostGeneration')
         receipt=seal_receipt(dict(schemaVersion=1,requestSha256=request['requestSha256'],**{key:request[key] for key in common},
             qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.policy_sha256,passed=True,
             engineVersion=evidence['engineVersion'],evidenceSha256=_sha(evidence)),'qualificationSha256')
@@ -322,11 +325,15 @@ class StartupQualifier:
     def _evidence(self,evidence,request,completed):
         keys={'schemaVersion','scope','requestSha256','probeSha256','engine','apiVersion','engineVersion','optionsSha256',
             'optionsCount','reconstructionQualified','gpuInitializationQualified','gpuKernelsQualified','noTasksSubmitted',
-            'noProductionMounts','noPublishedPorts','postProbeRunningConfirmed'}
+            'noProductionMounts','noPublishedPorts','postProbeRunningConfirmed','configDigest','manifestDigest','localImageId','imageIdKind'}
         if completed:keys|={'containerId','containerSpecSha256','defaultStartupSha256','stopped','removed','tmpfsOutputsDisposed'}
         if (type(evidence) is not dict or set(evidence)!=keys or type(evidence['schemaVersion']) is not int or evidence['schemaVersion']!=1
                 or evidence['scope']!='startup-api-options-only-v1' or evidence['requestSha256']!=request['requestSha256']
                 or evidence['probeSha256']!=PROBE_SHA or evidence['engine']!=self.policy.expected_engine
+                or any(evidence[key]!=request[key] for key in ('configDigest','manifestDigest','localImageId'))
+                or evidence['imageIdKind'] not in ('config','manifest')
+                or (evidence['imageIdKind']=='config' and evidence['localImageId']!=evidence['configDigest'])
+                or (evidence['imageIdKind']=='manifest' and evidence['localImageId']!=evidence['manifestDigest'])
                 or any(evidence[key] is not False for key in ('reconstructionQualified','gpuInitializationQualified','gpuKernelsQualified'))
                 or any(evidence[key] is not True for key in ('noTasksSubmitted','noProductionMounts','noPublishedPorts','postProbeRunningConfirmed'))
                 or not 1<=_integer(evidence['optionsCount'])<=2048
@@ -345,7 +352,10 @@ class StartupQualifier:
                 if row['request']!=_json(request):raise QualifierHeld('qualification_request_rebound')
                 if row['state']=='completed':return self._finish(row,request)
                 raise QualifierHeld('prior_qualification_requires_inspection')
-            self.registry.inspect_staged(candidate);self._engine();defaults=self._defaults(request['configDigest'])
+            staged=self.registry.inspect_staged(candidate)
+            if staged['imageId']!=request['localImageId'] or staged['configDigest']!=request['configDigest']:
+                raise QualifierHeld('staged_runtime_image_binding_changed')
+            self._engine();defaults=dict(self._defaults(request['localImageId']),imageIdKind=staged['imageIdKind'])
             with self._db() as db:
                 if db.execute("SELECT 1 FROM qualifications WHERE state!='completed'").fetchone():raise QualifierHeld('prior_qualification_requires_inspection')
                 name='ltds-startup-'+identifier[:32]
@@ -356,7 +366,7 @@ class StartupQualifier:
                 '--user',self.policy.run_user,'--workdir',self.policy.working_directory,'--restart','no',
                 '--log-driver','none','--env','HOME=/tmp']
             for path in self.policy.write_paths:args+=['--tmpfs',path+':rw,nosuid,nodev,mode=1777']
-            args+=[request['configDigest']]
+            args+=[request['localImageId']]
             container=self._command(args).strip()
             if not re.fullmatch(r'[a-f0-9]{64}',container):raise QualifierHeld('container_create_identity_unknown')
             self._phase(identifier,'created',container=container);row=self._row(identifier)

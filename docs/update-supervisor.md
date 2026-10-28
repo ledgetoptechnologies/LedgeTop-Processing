@@ -28,7 +28,8 @@ a reentrant callback cannot close or start another operation. The lease file and
 journals are retained, including after uncertain operations.
 
 - `discover()` inspects only the frozen channel and records one operation, or
-  returns `None` when the exact candidate config image is already adopted.
+  returns `None` only when registry read-only cached-image verification proves
+  that the candidate's actual local Docker image ID is already adopted.
 - `advance(operation_id)` attempts one next stage: stage, qualify, schedule, run.
   Each external mutation has a FULL SQLite intent committed first.
 - `reconcile(operation_id)` uses only registry inspection or an adapter's
@@ -55,7 +56,7 @@ an owned qualification receipt directory. Its `requestSha256` excludes itself.
 
 The closed successful qualification receipt has `schemaVersion:1`,
 `requestSha256`, `operationId`, `nodeId`, `engineId`, `authorityId`, `candidateId`,
-`manifestDigest`, `configDigest`, `supervisorPolicySha256`, `hostGeneration`,
+`manifestDigest`, `configDigest`, `localImageId`, `supervisorPolicySha256`, `hostGeneration`,
 `qualifierId`, `qualificationPolicySha256`, `passed:true`, bounded
 `engineVersion`, `evidenceSha256`, and `qualificationSha256`. The final field is
 the canonical SHA256 of all other receipt fields. `seal_receipt(value, field)`
@@ -106,8 +107,25 @@ An adapter must use the existing sole coordinator's maintenance authority and
 the existing managed local-container update/finalization behavior. It must not
 create another scheduler, choose a peer plan, update the sole coordinator as if
 it were a processing node, or release unrelated gates. It must preserve main's
-processing resource settings. Target/current pins are immutable image IDs;
-registry manifest digests and local config IDs remain distinct.
+processing resource settings. `manifestDigest` identifies the selected registry
+manifest and `configDigest` identifies its configuration blob. Neither alone
+predicts Docker's actual runtime ID: classic storage may report the config ID,
+while containerd-backed storage may report the manifest ID. Staging must verify
+the actual local ID against immutable cached artifact evidence. Its metadata
+contains `configDigest`, `imageId`, and `imageIdKind` (`config` or `manifest`).
+The supervisor derives mandatory request/receipt `localImageId` from that
+persisted `imageId`. All target/current/previous runtime pins, schedule targets,
+qualification containers, and completion image checks use actual local IDs;
+`configDigest` remains artifact identity. A matching digest guess never skips
+staging or proves adoption.
+
+New registry discovery candidates use schema version 2 and omit the old guessed
+`localImageId`; legacy version 1 candidate evidence can remain readable in held
+registry journals, but its guessed ID is never runtime proof. Old supervisor
+staged metadata or issued requests without the mandatory runtime identity are
+refused rather than silently reinterpreted. Such never-deployed supervisor
+journals require explicit inspection and a fresh bound journal, with uncertain
+operations retained; this is not an automatic journal migration.
 
 The real scheduling adapter must persist its exact request ID, dynamic
 timestamps, expected coordinator revision, and complete schedule body before a

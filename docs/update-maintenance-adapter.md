@@ -22,7 +22,7 @@ The adapter's public `binding` is the exact four-field supervisor binding:
 `inspect_host()`, `schedule(request)`, `lookup_schedule(request)`,
 `ready_to_run(request)`, `run(request)`, and `lookup_completion(request)`.
 Requests and sealed plan/completion receipts use the existing supervisor
-protocol, including `hostGeneration`. Each request's directory must already be
+protocol, including `hostGeneration` and mandatory `localImageId`. Each request's directory must already be
 the private exact `receipts/{operationId}/{schedule|run}` supplied by the
 supervisor. Arbitrary operation directories are refused.
 
@@ -39,6 +39,12 @@ may supply rotated credentials for the same configured roles and origin.
 local Docker engine identity, actual private backend image, authoritative Compose
 image pin, fixed expected NodeODM dialect/layout, serving health, and ingress
 identity. It returns only `nodeId`, `authorityId`, `engineId`, and `imageId`.
+`configDigest` is the registry manifest's configuration blob, while `localImageId`
+is the actual verified Docker runtime ID supplied by staging. They can differ
+on containerd-backed Docker. The adapter uses only `localImageId` for cached
+runtime image checks, coordinator targets, replacement, Compose pins, and
+completion comparisons, while preserving both identities in sealed receipts.
+Missing `localImageId` is rejected; no config-digest fallback is permitted.
 The existing managed configuration supplies backend port/token and explicit
 `odx` or `odm` layout; this adapter introduces no resource limits or overrides.
 
