@@ -39,6 +39,10 @@ class RegistryHeld(RegistryError):
     """A possibly completed pull is fenced; inspect instead of replaying it."""
 
 
+class RegistryNotStaged(RegistryHeld):
+    """Only a proven missing artifact record with no unresolved pull."""
+
+
 DIGEST=re.compile(r'sha256:[a-f0-9]{64}\Z')
 TAG=re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z')
 NAME=re.compile(r'[a-z0-9][a-z0-9_.-]{0,62}\Z')
@@ -465,6 +469,40 @@ class DockerRegistry:
         self._engine();metadata=self._inspect(candidate);self._engine()
         if row['metadata']!=_json(metadata):raise RegistryHeld('staged_metadata_changed')
         return metadata
+
+    def inspect_staged_artifact(self,candidate):
+        """Read-only definite artifact proof across candidate observations.
+
+        A tag/index observation can change candidateId without changing the
+        immutable pull. The saved metadata's own candidate must still be known,
+        closed and bound to that same pull; no unknown pull is promoted here.
+        """
+        self._candidate(candidate);identifier=self._pull_id(candidate)
+        with self._db() as db:
+            row=db.execute('SELECT state,metadata FROM registry_staging WHERE id=?',(identifier,)).fetchone()
+            unknown=db.execute("SELECT 1 FROM registry_staging WHERE state!='staged'").fetchone()
+        if row is None:
+            if unknown:raise RegistryHeld('pull_outcome_requires_reconciliation')
+            raise RegistryNotStaged('no_prior_staging_record')
+        if row['state']!='staged':raise RegistryHeld('definite_staged_image_required')
+        try:
+            saved=_load(row['metadata'])
+            fields={'candidateId','repository','manifestDigest','configDigest','imageId','imageIdKind','platform','localSize','engineId'}
+            if type(saved) is not dict or set(saved)!=fields or type(saved['candidateId']) is not str:
+                raise ValueError()
+            with self._db() as db:
+                stored=db.execute('SELECT value FROM registry_candidates WHERE id=?',(saved['candidateId'],)).fetchone()
+            if stored is None:raise ValueError()
+            prior=_load(stored['value']);self._candidate(prior)
+            if self._pull_id(prior)!=identifier:raise ValueError()
+            self._engine();metadata=self._inspect(candidate);self._engine()
+            stable=lambda value:{key:item for key,item in value.items() if key!='candidateId'}
+            if stable(metadata)!=stable(saved):raise ValueError()
+            with self._db() as db:
+                after=db.execute('SELECT state,metadata FROM registry_staging WHERE id=?',(identifier,)).fetchone()
+            if after is None or tuple(after)!=tuple(row):raise ValueError()
+            return metadata
+        except Exception:raise RegistryHeld('staged_artifact_proof_changed') from None
 
     def reconcile(self,candidate):
         self._candidate(candidate);identifier=self._pull_id(candidate)

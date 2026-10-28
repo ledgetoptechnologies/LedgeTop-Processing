@@ -316,6 +316,15 @@ class UpdateSupervisor:
             return dict(operationId=identifier,nodeId=row['node'],state=row['state'],candidate=_load(row['candidate']),
                 plan=_load(row['plan']) if row['plan'] else None,completion=_load(row['completion']) if row['completion'] else None)
 
+    def pending(self):
+        """Read one validated unresolved operation under the existing owner lease."""
+        self.check()
+        with self._mutex:
+            with self._db() as db:
+                rows=db.execute("SELECT id FROM supervisor_operations WHERE state!='completed' LIMIT 2").fetchall()
+            if len(rows)>1:raise SupervisorHeld('ambiguous_pending_update_operations')
+            return self.status(rows[0]['id']) if rows else None
+
     def discover(self):
         with self._operation():
             with self._db() as db:

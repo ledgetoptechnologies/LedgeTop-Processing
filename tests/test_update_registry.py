@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from processing.update_registry import (DockerRegistry,RegistryChannel,RegistryPolicy,
-    RegistryError,RegistryHeld,_json,_run)
+    RegistryError,RegistryHeld,RegistryNotStaged,_json,_run)
 
 
 REPO='docker.io/example/engine'
@@ -113,6 +113,54 @@ class RegistryTests(unittest.TestCase):
             self.registry.inspect_staged(candidate)
         self.assertEqual(self.docker.calls,[])
         with self.registry._db() as db:self.assertEqual(db.execute('SELECT state FROM registry_staging').fetchone()[0],'held')
+
+    def changed_observation(self):
+        self.docker.tags=0
+        self.docker.first=[self.docker.selected,entry(config='sha256:'+'e'*64,platform=dict(os='unknown',architecture='unknown'))]
+        return self.registry.discover('test')
+
+    def test_artifact_proof_accepts_new_observation_only_without_rewriting_saved_metadata(self):
+        candidate=self.registry.discover('test');metadata=self.registry.stage(candidate)
+        alias=self.changed_observation()
+        self.assertNotEqual(candidate['candidateId'],alias['candidateId'])
+        self.assertEqual(self.registry._pull_id(candidate),self.registry._pull_id(alias))
+        before=self.registry.path.read_bytes();calls=len(self.docker.calls)
+        with self.assertRaises(RegistryHeld):self.registry.inspect_staged(alias)
+        proof=self.registry.inspect_staged_artifact(alias)
+        self.assertEqual(proof,dict(metadata,candidateId=alias['candidateId']))
+        self.assertEqual(self.registry.path.read_bytes(),before)
+        self.assertFalse(any(call[0]=='pull' for call in self.docker.calls[calls:]))
+        with self.registry._db() as db:
+            self.assertEqual(json.loads(db.execute('SELECT metadata FROM registry_staging').fetchone()[0])['candidateId'],candidate['candidateId'])
+
+    def test_artifact_missing_type_is_distinct_from_global_unknown_pull(self):
+        candidate=self.registry.discover('test')
+        with self.assertRaises(RegistryNotStaged):self.registry.inspect_staged_artifact(candidate)
+        other=self.registry._pull_id(dict(candidate,configDigest='sha256:'+'e'*64))
+        with self.registry._db() as db:db.execute("INSERT INTO registry_staging VALUES(?,'pull_pending',NULL)",(other,))
+        try:self.registry.inspect_staged_artifact(candidate)
+        except RegistryHeld as error:self.assertNotIsInstance(error,RegistryNotStaged)
+        else:self.fail('unknown pull was mistaken for a new artifact')
+
+    def test_artifact_proof_cannot_adopt_missing_or_changed_saved_candidate(self):
+        candidate=self.registry.discover('test');metadata=self.registry.stage(candidate);alias=self.changed_observation()
+        with self.registry._db() as db:
+            changed=dict(metadata,candidateId='f'*64)
+            db.execute('UPDATE registry_staging SET metadata=?',(_json(changed),))
+        with patch.object(self.registry,'reconcile',side_effect=AssertionError('read-only proof cannot reconcile')):
+            with self.assertRaises(RegistryHeld):self.registry.inspect_staged_artifact(alias)
+        with self.registry._db() as db:
+            db.execute('UPDATE registry_staging SET metadata=?',(_json(metadata),))
+            db.execute('UPDATE registry_candidates SET value=? WHERE id=?',(_json(dict(candidate,configDigest='sha256:'+'e'*64)),candidate['candidateId']))
+        with self.assertRaises(RegistryHeld):self.registry.inspect_staged_artifact(alias)
+
+    def test_artifact_proof_does_not_accept_runtime_or_stable_metadata_drift(self):
+        candidate=self.registry.discover('test');metadata=self.registry.stage(candidate);alias=self.changed_observation()
+        self.docker.image['Size']+=1
+        with self.assertRaises(RegistryHeld):self.registry.inspect_staged_artifact(alias)
+        self.docker.image['Size']-=1
+        self.docker.image['Id']='sha256:'+'e'*64
+        with self.assertRaises(RegistryHeld):self.registry.inspect_staged_artifact(alias)
 
     def test_manifest_store_runtime_id_is_separate_from_config_with_descriptor_proof(self):
         candidate=self.registry.discover('test')
