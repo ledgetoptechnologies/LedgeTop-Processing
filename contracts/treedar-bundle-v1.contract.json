@@ -1,0 +1,318 @@
+{
+  "fixtureVersion": 1,
+  "scope": "Synthetic positive bodies exercise archive/metadata integrity only. Native role vocabulary is from cached TreeDar0.0.1; no GeoTIFF/algorithm/genuine-acquisition claim.",
+  "nativeVocabulary": {
+    "area_types.csv": [
+      "area_types_template",
+      "csv"
+    ],
+    "areas.png": [
+      "area_map_preview",
+      "png"
+    ],
+    "areas.tif": [
+      "area_labels",
+      "cog"
+    ],
+    "chm.tif": [
+      "canopy_height",
+      "cog"
+    ],
+    "chm_raw.tif": [
+      "canopy_height_unfiltered",
+      "cog"
+    ],
+    "classify/classify_report.json": [
+      "classifier_report",
+      "json"
+    ],
+    "classify/final_test_predictions.csv": [
+      "final_test_predictions",
+      "csv"
+    ],
+    "classify/predictions.csv": [
+      "tree_type_predictions",
+      "csv"
+    ],
+    "crowns.tif": [
+      "crown_labels",
+      "cog"
+    ],
+    "dtm.tif": [
+      "ground_model",
+      "cog"
+    ],
+    "labels.csv": [
+      "labels",
+      "csv"
+    ],
+    "manifest.json": [
+      "engine_manifest",
+      "json"
+    ],
+    "ortho_rgb.tif": [
+      "orthophoto_point_colour",
+      "cog"
+    ],
+    "qc.json": [
+      "quality_report",
+      "json"
+    ],
+    "report.html": [
+      "report",
+      "html"
+    ],
+    "summary.json": [
+      "run_summary",
+      "json"
+    ],
+    "tree_areas.csv": [
+      "tree_areas",
+      "csv"
+    ],
+    "tree_features.csv": [
+      "tree_features",
+      "csv"
+    ],
+    "tree_ids.csv": [
+      "lasting_tree_ids",
+      "csv"
+    ],
+    "tree_map.geojson": [
+      "crowns",
+      "geojson"
+    ],
+    "tree_map.png": [
+      "preview",
+      "png"
+    ],
+    "trees.csv": [
+      "tree_table",
+      "csv"
+    ]
+  },
+  "expected": {
+    "binding": {
+      "jobId": "00000000-0000-4000-8000-000000000123",
+      "generation": 1,
+      "environment": "staging",
+      "inputManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sourceLidar": {
+        "objectId": "original-lidar",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "provenanceReceiptId": "trusted-source-receipt"
+      }
+    },
+    "engineVersion": "0.0.1"
+  },
+  "limits": {
+    "maxArchiveBytes": 67108864,
+    "maxRawBytes": 67108864,
+    "maxFiles": 64,
+    "maxManifestBytes": 131072,
+    "maxControlProofBytes": 65536,
+    "maxValidationDiskBytes": 167772160
+  },
+  "payloadsBase64": {
+    "area_types.csv": "c3ludGhldGljOmFyZWFfdHlwZXMuY3N2OmFyZWFfdHlwZXNfdGVtcGxhdGUK",
+    "areas.png": "c3ludGhldGljOmFyZWFzLnBuZzphcmVhX21hcF9wcmV2aWV3Cg==",
+    "areas.tif": "c3ludGhldGljOmFyZWFzLnRpZjphcmVhX2xhYmVscwo=",
+    "chm.tif": "c3ludGhldGljOmNobS50aWY6Y2Fub3B5X2hlaWdodAo=",
+    "chm_raw.tif": "c3ludGhldGljOmNobV9yYXcudGlmOmNhbm9weV9oZWlnaHRfdW5maWx0ZXJlZAo=",
+    "classify/classify_report.json": "c3ludGhldGljOmNsYXNzaWZ5L2NsYXNzaWZ5X3JlcG9ydC5qc29uOmNsYXNzaWZpZXJfcmVwb3J0Cg==",
+    "classify/final_test_predictions.csv": "c3ludGhldGljOmNsYXNzaWZ5L2ZpbmFsX3Rlc3RfcHJlZGljdGlvbnMuY3N2OmZpbmFsX3Rlc3RfcHJlZGljdGlvbnMK",
+    "classify/predictions.csv": "c3ludGhldGljOmNsYXNzaWZ5L3ByZWRpY3Rpb25zLmNzdjp0cmVlX3R5cGVfcHJlZGljdGlvbnMK",
+    "crowns.tif": "c3ludGhldGljOmNyb3ducy50aWY6Y3Jvd25fbGFiZWxzCg==",
+    "dtm.tif": "c3ludGhldGljOmR0bS50aWY6Z3JvdW5kX21vZGVsCg==",
+    "labels.csv": "c3ludGhldGljOmxhYmVscy5jc3Y6bGFiZWxzCg==",
+    "manifest.json": "c3ludGhldGljOm1hbmlmZXN0Lmpzb246ZW5naW5lX21hbmlmZXN0Cg==",
+    "ortho_rgb.tif": "c3ludGhldGljOm9ydGhvX3JnYi50aWY6b3J0aG9waG90b19wb2ludF9jb2xvdXIK",
+    "qc.json": "c3ludGhldGljOnFjLmpzb246cXVhbGl0eV9yZXBvcnQK",
+    "report.html": "c3ludGhldGljOnJlcG9ydC5odG1sOnJlcG9ydAo=",
+    "summary.json": "c3ludGhldGljOnN1bW1hcnkuanNvbjpydW5fc3VtbWFyeQo=",
+    "tree_areas.csv": "c3ludGhldGljOnRyZWVfYXJlYXMuY3N2OnRyZWVfYXJlYXMK",
+    "tree_features.csv": "c3ludGhldGljOnRyZWVfZmVhdHVyZXMuY3N2OnRyZWVfZmVhdHVyZXMK",
+    "tree_ids.csv": "c3ludGhldGljOnRyZWVfaWRzLmNzdjpsYXN0aW5nX3RyZWVfaWRzCg==",
+    "tree_map.geojson": "c3ludGhldGljOnRyZWVfbWFwLmdlb2pzb246Y3Jvd25zCg==",
+    "tree_map.png": "c3ludGhldGljOnRyZWVfbWFwLnBuZzpwcmV2aWV3Cg==",
+    "trees.csv": "c3ludGhldGljOnRyZWVzLmNzdjp0cmVlX3RhYmxlCg=="
+  },
+  "manifest": {
+    "schemaVersion": 1,
+    "format": "ltds-treedar-bundle-v1",
+    "binding": {
+      "jobId": "00000000-0000-4000-8000-000000000123",
+      "generation": 1,
+      "environment": "staging",
+      "inputManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sourceLidar": {
+        "objectId": "original-lidar",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "provenanceReceiptId": "trusted-source-receipt"
+      }
+    },
+    "engineVersion": "0.0.1",
+    "files": [
+      {
+        "nativePath": "area_types.csv",
+        "role": "area_types_template",
+        "format": "csv",
+        "byteSize": 45,
+        "sha256": "46813931ac749ed6624e9768d322cc6cdff3111f792fdf17539445326b43df60"
+      },
+      {
+        "nativePath": "areas.png",
+        "role": "area_map_preview",
+        "format": "png",
+        "byteSize": 37,
+        "sha256": "3fff4ae39176446583f556aa4d249c24de4d22d47a33ec9489e9d59895b1afc6"
+      },
+      {
+        "nativePath": "areas.tif",
+        "role": "area_labels",
+        "format": "cog",
+        "byteSize": 32,
+        "sha256": "cbf748734c046d71819f14b9fb4fa3c7ee07028ee4c125ec8a4c2f98eb504870"
+      },
+      {
+        "nativePath": "chm.tif",
+        "role": "canopy_height",
+        "format": "cog",
+        "byteSize": 32,
+        "sha256": "a9bcdc3cffd126dfce8493fe250184574460f11dddc8d0d2b5d61f6daf97db29"
+      },
+      {
+        "nativePath": "chm_raw.tif",
+        "role": "canopy_height_unfiltered",
+        "format": "cog",
+        "byteSize": 47,
+        "sha256": "4e10f1aeb2355e3e32333c3b8668a8fa9c957f580658bb4856321505464edb38"
+      },
+      {
+        "nativePath": "classify/classify_report.json",
+        "role": "classifier_report",
+        "format": "json",
+        "byteSize": 58,
+        "sha256": "97b861aa7b594408a99f17f93a8d0ee8b0e453cf94338c652a9250e1700bdf50"
+      },
+      {
+        "nativePath": "classify/final_test_predictions.csv",
+        "role": "final_test_predictions",
+        "format": "csv",
+        "byteSize": 69,
+        "sha256": "60c3cf118a1709a9c7cecaf8524e62740afab25e25809af2851f569d97b35122"
+      },
+      {
+        "nativePath": "classify/predictions.csv",
+        "role": "tree_type_predictions",
+        "format": "csv",
+        "byteSize": 57,
+        "sha256": "7ac7cf26e0c8083415a4def0824927fb6e0f6ca4098eeb31f1af5b1151897cb3"
+      },
+      {
+        "nativePath": "crowns.tif",
+        "role": "crown_labels",
+        "format": "cog",
+        "byteSize": 34,
+        "sha256": "29d74bd161623fb97c1693606f605590744d006222dadf3afc4e240e7c548ef0"
+      },
+      {
+        "nativePath": "dtm.tif",
+        "role": "ground_model",
+        "format": "cog",
+        "byteSize": 31,
+        "sha256": "565d65118692458180cf7e95e7ba3510de4ad87a7d489d03c74726c382232969"
+      },
+      {
+        "nativePath": "labels.csv",
+        "role": "labels",
+        "format": "csv",
+        "byteSize": 28,
+        "sha256": "41bd3875e4223acfdc8f18189b6ff7dbbf8336e25c95c02fb71f9274e3926b04"
+      },
+      {
+        "nativePath": "manifest.json",
+        "role": "engine_manifest",
+        "format": "json",
+        "byteSize": 40,
+        "sha256": "6f8cbb5f980ac014b55c2fca8a65aa37bee16c357e0470133603e1591a2d55c2"
+      },
+      {
+        "nativePath": "ortho_rgb.tif",
+        "role": "orthophoto_point_colour",
+        "format": "cog",
+        "byteSize": 48,
+        "sha256": "63e78a1fcefbd67e462aa160940eb01904f9b4cf2dd9a1dbd86a1d6051d9c3dc"
+      },
+      {
+        "nativePath": "qc.json",
+        "role": "quality_report",
+        "format": "json",
+        "byteSize": 33,
+        "sha256": "57830f91ce91d2ee09cd83ca65964e1155c409b890fb75ddb36d698962d89faa"
+      },
+      {
+        "nativePath": "report.html",
+        "role": "report",
+        "format": "html",
+        "byteSize": 29,
+        "sha256": "dc24eb14b41663d518400212d862ea95963be9d1f00b5ffe7ce0f1dbb5fd54d5"
+      },
+      {
+        "nativePath": "summary.json",
+        "role": "run_summary",
+        "format": "json",
+        "byteSize": 35,
+        "sha256": "0333585f4432bfad63bec4b7bf5096ee051a34de51b57bcaee4a37af8db83f4e"
+      },
+      {
+        "nativePath": "tree_areas.csv",
+        "role": "tree_areas",
+        "format": "csv",
+        "byteSize": 36,
+        "sha256": "d90f42496e23472a3addd3415b49621811ea8dbf940ea135aae2209a98ba0914"
+      },
+      {
+        "nativePath": "tree_features.csv",
+        "role": "tree_features",
+        "format": "csv",
+        "byteSize": 42,
+        "sha256": "f93a2ef762eaff17269fca7bd35d4078e9c9a98633f8b3ea3a985014d32eaa50"
+      },
+      {
+        "nativePath": "tree_ids.csv",
+        "role": "lasting_tree_ids",
+        "format": "csv",
+        "byteSize": 40,
+        "sha256": "b351c2e1a2b0856a588e82675faa5e11d1a1ba6564d8169a0a46694251b84943"
+      },
+      {
+        "nativePath": "tree_map.geojson",
+        "role": "crowns",
+        "format": "geojson",
+        "byteSize": 34,
+        "sha256": "8322a09a6e9eb99bac1cc20985046721243168c6a4439453add98e1539363561"
+      },
+      {
+        "nativePath": "tree_map.png",
+        "role": "preview",
+        "format": "png",
+        "byteSize": 31,
+        "sha256": "d20ec522714040788c162d777bddb20919d5adcddfd43ada4c8895f2dcb467a4"
+      },
+      {
+        "nativePath": "trees.csv",
+        "role": "tree_table",
+        "format": "csv",
+        "byteSize": 31,
+        "sha256": "a7c0f62c8ae5d3c81769770673b07f259eafe7c21635c7fa48d1502993091e1b"
+      }
+    ],
+    "rawBytes": 869,
+    "manifestSha256": "6e020c27c937f1cd9b177ccb69f4119644fbe40a217a092f778f6d7ce1e6065d"
+  }
+}
