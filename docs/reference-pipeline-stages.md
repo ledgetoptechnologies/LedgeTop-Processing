@@ -75,7 +75,14 @@ foundation does not infer that a missing task permits a safe retry.
 
 Terminal proof validation checks the exact JSON-typed parent/stage identities,
 input IDs, runtime/version, terminal outcome, digest and existing result-object
-schema. Success objects use disjoint `odm-` and `treedar-` namespaces and must fit
+schema. The stage boundary additionally enforces the actual Viewer v1 wire roles:
+`pointcloud`, `mesh`, `orthophoto`, `dem`, `report`, `tree_inventory` and
+`odm_archive`. ODM success must include exactly one positive-byte `odm_archive`;
+TreeDar success must include none. Only `report` may have zero bytes. These checks
+are stricter than the legacy general Python result validator and apply before a
+stage proof can be committed. The final manifest therefore has the one archive
+required by Viewer's `requestedEngines: ['odm', 'treedar']` binding.
+Success objects use disjoint `odm-` and `treedar-` namespaces and must fit
 their stage's data budget. Each intent additionally reserves half the parent
 object-count allowance and an explicit UTF-8 metadata allowance, including space
 for the other stage and final-manifest header. Thus a successful first stage
@@ -122,7 +129,9 @@ as acquired only by a test verifier. It exercises ordering and immutable parent
 selection, one final wire closure, global exclusivity, lost mutation replies and
 commit acknowledgements, restart-held reconciliation, failures/cancellation,
 provenance revocation/relabel refusal, guard loss, strict proof types, combined
-metadata budgets, filesystem ownership, foreign databases and fork/lease refusal.
+metadata budgets, required archive/known-role/zero-byte rules, filesystem
+ownership, foreign databases and fork/lease refusal. The maximum-object combined
+fixture contains one positive ODM archive and only valid report objects.
 It also checks missing-root refusal without directory or file creation, and real
 fsync calls for the preexisting root and parent before constructor return.
 It does not establish genuine acquisition, LiDAR geometry, real processing,
@@ -133,3 +142,23 @@ composition and physical-fence handoff, authentic NAS provenance issuance,
 enforced source retention, final result streaming/ACK integration and installed
 failure/recovery qualification. Combined processing must remain unadvertised
 until those paths are implemented and accepted.
+
+## Paired Viewer wire probe
+
+The Python tests alone cannot establish compatibility with Viewer's stricter
+result policy. Emit an actual journal closure in the isolated Linux test
+environment with `python -B -m tests.emit_reference_pipeline_result`. Save its
+synthetic JSON output and validate it on a Node 24 machine:
+
+```text
+node tests/reference_pipeline_wire_probe.cjs combined-fixture.json /trusted/referenceProtocol.cjs 17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159
+```
+
+The trusted module is the actual Viewer `server/referenceProtocol.js` from
+Reference commit `867dd3f26c16203b5fdceec3af1671846ffa208c`, saved as CommonJS.
+The probe checks its canonical LF source hash before loading it; it does not
+download code or contact Viewer. Its expected identity comes from the original
+synthetic Queue claim, with both engines requested. It verifies the real combined
+manifest, then rehashes five invalid variants and requires rejection at the
+specific archive, byte-size, role or engine-version boundary. It changes neither
+repository nor runtime and proves no archive geometry or ingestion acceptance.

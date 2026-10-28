@@ -33,7 +33,8 @@ class SyntheticStage:
 
     def proof(self,intent,*,outcome='succeeded',objects=None):
         parent,stage=intent['parentBinding'],intent['stage']
-        if objects is None:objects=[dict(id=self.stage+'-report',role='report',byteSize=3,sha256=hashlib.sha256(b'abc').hexdigest())] if outcome=='succeeded' else []
+        role='odm_archive' if self.stage=='odm' else 'report'
+        if objects is None:objects=[dict(id=self.stage+('-archive' if self.stage=='odm' else '-report'),role=role,byteSize=3,sha256=hashlib.sha256(b'abc').hexdigest())] if outcome=='succeeded' else []
         return module.seal_stage_proof(dict(schemaVersion=1,planSha256=intent['planSha256'],intentSha256=intent['intentSha256'],
             jobId=parent['jobId'],generation=parent['generation'],environment=parent['environment'],inputManifestSha256=parent['manifestSha256'],
             pipelineDigest=parent['pipelineDigest'],stageId=self.stage,engineVersion=stage['engineVersion'],runtimeSha256=stage['runtimeSha256'],
@@ -157,7 +158,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.advance('treedar')['state'],'ready_final')
         final=self.journal.final_result(self.claim['jobId'])
         self.assertEqual(final['engineVersions'],{'odm':'3.8.5','treedar':'0.0.1'})
-        self.assertEqual([obj['id'] for obj in final['objects']],['odm-report','treedar-report'])
+        self.assertEqual([obj['id'] for obj in final['objects']],['odm-archive','treedar-report'])
         self.assertEqual(final['pipelineDigest'],self.claim['pipelineDigest'])
         p.validate_result_manifest(final,job_id=self.claim['jobId'],generation=1,environment='staging',pipeline_digest=self.claim['pipelineDigest'])
         # Internal closure is not an external completion or cleanup permission.
@@ -257,7 +258,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_namespace_parent_runtime_terminal_and_budget_proof_mismatches_are_not_sealed(self):
         def wrong(intent,proof):
-            value=dict(proof);value.pop('proofSha256');value['objects']=[dict(id='treedar-foreign',role='report',byteSize=3,sha256='a'*64)]
+            value=copy.deepcopy(proof);value.pop('proofSha256');value['objects'][0]['id']='treedar-foreign'
             return module.seal_stage_proof(value)
         self.odm.invalid=wrong
         with self.assertRaises(module.PipelineHeld):self.advance('odm')
@@ -293,28 +294,59 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(module.PipelineHeld):
             module.validate_stage_proof(module.seal_stage_proof(proof),intent=intent,policy=self.policy)
 
-    def test_each_stage_reserves_parent_object_count_and_utf8_metadata_space(self):
+    def test_each_stage_reserves_parent_object_count_and_metadata_space(self):
         self.odm.pending=True;self.advance('odm')
         with closing(sqlite3.connect(self.odm.path)) as db:
             intent=json.loads(db.execute('SELECT intent FROM actions').fetchone()[0])
-        def objects(count,role='report'):
-            return [dict(id='odm-'+str(index).zfill(6)+'x'*115,role=role,byteSize=0,sha256='a'*64) for index in range(count)]
+        def objects(count):
+            result=[dict(id='odm-'+str(index).zfill(6)+'x'*115,role='report',byteSize=0,sha256='a'*64) for index in range(count)]
+            result[0].update(role='odm_archive',byteSize=1)
+            return result
         count_overflow=self.odm.proof(intent,objects=objects(intent['stage']['outputObjectLimit']+1))
         with self.assertRaises(module.PipelineHeld):
             module.validate_stage_proof(count_overflow,intent=intent,policy=self.policy)
-        metadata_overflow=self.odm.proof(intent,objects=objects(4000,'\U0001f333'*80))
-        self.assertGreater(len(p.canonical_json(metadata_overflow['objects']))-2,intent['stage']['outputMetadataBudget'])
-        self.assertLess(len(p.canonical_json(metadata_overflow)),p.MAX_BODY_BYTES)
-        with self.assertRaises(module.PipelineHeld):
-            module.validate_stage_proof(metadata_overflow,intent=intent,policy=self.policy)
-        accepted=self.odm.proof(intent,objects=objects(1000,'\U0001f333'*80))
+        accepted=self.odm.proof(intent,objects=objects(1000))
         self.assertEqual(module.validate_stage_proof(accepted,intent=intent,policy=self.policy),accepted)
+
+    def test_odm_success_requires_one_positive_archive_and_only_known_wire_roles(self):
+        self.odm.pending=True;self.advance('odm')
+        with closing(sqlite3.connect(self.odm.path)) as db:
+            intent=json.loads(db.execute('SELECT intent FROM actions').fetchone()[0])
+        def obj(identifier,role,size=1):return dict(id=identifier,role=role,byteSize=size,sha256='a'*64)
+        archive=obj('odm-archive','odm_archive')
+        cases=[[],[obj('odm-report','report')],[archive,obj('odm-second-archive','odm_archive')],
+            [obj('odm-empty-archive','odm_archive',0)],
+            [archive,obj('odm-unknown','not_a_viewer_role')],[archive,obj('odm-dsm','dsm')],
+            [archive,obj('odm-unicode','\U0001f333'*80)],
+            [archive,obj('odm-empty-inventory','tree_inventory',0)]]
+        for objects in cases:
+            with self.subTest(objects=objects),self.assertRaises(module.PipelineHeld):
+                module.validate_stage_proof(self.odm.proof(intent,objects=objects),intent=intent,policy=self.policy)
+        valid=[archive]+[obj('odm-'+role,role,0 if role=='report' else 1)
+            for role in ('pointcloud','mesh','orthophoto','dem','report','tree_inventory')]
+        proof=self.odm.proof(intent,objects=valid)
+        self.assertEqual(module.validate_stage_proof(proof,intent=intent,policy=self.policy),proof)
+
+    def test_tree_success_forbids_odm_archive_and_zero_bytes_except_report(self):
+        self.advance('odm');self.tree.pending=True;self.advance('treedar')
+        with closing(sqlite3.connect(self.tree.path)) as db:
+            intent=json.loads(db.execute('SELECT intent FROM actions').fetchone()[0])
+        def obj(role,size=1):return dict(id='treedar-'+role,role=role,byteSize=size,sha256='a'*64)
+        cases=[[obj('odm_archive')],[obj('unknown')]]
+        cases.extend([[obj(role,0)] for role in ('pointcloud','mesh','orthophoto','dem','tree_inventory')])
+        for objects in cases:
+            with self.subTest(objects=objects),self.assertRaises(module.PipelineHeld):
+                module.validate_stage_proof(self.tree.proof(intent,objects=objects),intent=intent,policy=self.policy)
+        valid=[obj(role,0 if role=='report' else 1) for role in ('pointcloud','mesh','orthophoto','dem','report','tree_inventory')]
+        proof=self.tree.proof(intent,objects=valid)
+        self.assertEqual(module.validate_stage_proof(proof,intent=intent,policy=self.policy),proof)
 
     def test_two_maximum_count_stage_closures_fit_one_existing_wire_manifest(self):
         count=p.MAX_OBJECTS//2
         for stage,adapter in (('odm',self.odm),('treedar',self.tree)):
             adapter.pending=True;self.advance(stage)
-            objects=[dict(id=stage+'-'+str(index).zfill(6)+'x'*70,role='\U0001f333'*40,byteSize=0,sha256='a'*64) for index in range(count)]
+            objects=[dict(id=stage+'-'+str(index).zfill(6)+'x'*70,role='report',byteSize=0,sha256='a'*64) for index in range(count)]
+            if stage=='odm':objects[0].update(role='odm_archive',byteSize=1)
             adapter.complete(objects=objects)
             self.journal.reconcile(self.claim['jobId'],stage,adapter,self.guard)
         final=self.journal.final_result(self.claim['jobId'])

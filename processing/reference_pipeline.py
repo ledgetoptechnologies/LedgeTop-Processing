@@ -24,6 +24,7 @@ from .treedar_admission import AdmissionPolicy,_provenance
 
 VERSION='reference-sequential-v1'
 STAGES=('odm','treedar')
+RESULT_ROLES=frozenset(('pointcloud','mesh','orthophoto','dem','report','tree_inventory','odm_archive'))
 RAW_SUBMISSION=('schemaVersion','submissionId','manifest','pipeline','capabilityFingerprint')
 SCHEMA=(
     'CREATE TABLE IF NOT EXISTS pipeline_binding(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)',
@@ -170,7 +171,10 @@ def validate_stage_proof(value,*,intent,policy):
                 pipelineDigest=parent['pipelineDigest'],engineVersions={stage['stageId']:stage['engineVersion']},objects=value['objects'])
             result['resultManifestSha256']=p.digest(result)
             p.validate_result_manifest(result,job_id=parent['jobId'],generation=parent['generation'],environment=parent['environment'],pipeline_digest=parent['pipelineDigest'])
-            if (len(value['objects'])>stage['outputObjectLimit']
+            archives=sum(obj['role']=='odm_archive' for obj in value['objects'])
+            if (archives!=(1 if stage['stageId']=='odm' else 0)
+                    or any(obj['role'] not in RESULT_ROLES or obj['byteSize']==0 and obj['role']!='report' for obj in value['objects'])
+                    or len(value['objects'])>stage['outputObjectLimit']
                     or len(p.canonical_json(value['objects']))-2>stage['outputMetadataBudget']
                     or any(not obj['id'].startswith(stage['stageId']+'-') for obj in value['objects'])
                     or sum(obj['byteSize'] for obj in value['objects'])>stage['outputBudget']):raise ValueError()
