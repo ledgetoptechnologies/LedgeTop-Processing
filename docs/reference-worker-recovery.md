@@ -80,10 +80,37 @@ silently reinterpret published state; deployment migration is unfinished. The
 paired NativeODM change captures actual allocation before its own writes and
 adds archive bytes to that baseline, retaining controls. TreeDar later freezes
 that retained baseline. Neither component is deployed by this qualification.
-Old ScratchLedger code must not reopen a control-enabled ledger: it ignores
-these retained holds and would undercount future capacity. Ledger-code rollback
-is forbidden until a monotonic accounting-version/downgrade fence and migration
-are qualified. No concurrent old daemon or safe old-code rollback is claimed.
+Host allocator accounting now has a monotonic cold-open fence. The first typed
+control charge atomically adds `accountingVersion: 1` to the existing strict
+`metadata.config`, together with its receipt, counter movement and retained hold.
+Ordinary legacy/default-zero activity leaves the original config unchanged.
+There is no cached accounting-version attribute: new transactions and read-only
+control/guard snapshots check current exact config and stream-qualify every
+retained receipt/reservation allowance before trusting its capacity hold.
+Unknown versions, missing markers/config, removed records or lowered holds fail
+before admission; attempted in-transaction marker removal rolls back. Future
+control retirement must preserve a qualified monotonic accounting history and
+cannot erase the marker to reopen an old allocator.
+
+The actual pre-control ScratchLedger from commit
+`c60834cd156b7ec073ab381c0d9cde4ecee12bd3` is archived byte-for-byte under
+`tests/fixtures/scratch_policy_c60834c`, with SHA-pinned provenance and Git
+attributes preserving its original bytes. Its unchanged strict config comparison
+refuses a coherent charged ledger on cold reopen; regression tests confirm the
+entire database bytes/schema/rows remain unchanged. The same old module still
+opens an ordinary uncharged legacy ledger. New code cold-reopens charged state
+and reconciles an exact first-charge receipt after a lost reply without charging
+twice.
+
+This proves ordinary **cold reopen of coherent marked state**, not universal
+rollback safety after database corruption or external marker removal. Unmodified
+old code cannot recognize a marker it never understood once someone removes it.
+Installed owner/supervisor checks, source migration and corruption handling must
+still be qualified before deployment; new code refuses those incoherent states.
+An already-loaded old allocator cannot be retrofitted by this marker. Actual
+DaemonStateLock ownership must exclude mixed old/new daemons, and host allocator
+rollback remains a controlled deployment operation. A NodeODM/TreeDar backend
+image rollback is separate from rolling back the host ledger allocator.
 
 ## Concrete authority and local evidence
 

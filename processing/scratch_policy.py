@@ -26,6 +26,7 @@ import unicodedata
 
 
 MAX_INTEGER = 2**53 - 1
+ACCOUNTING_VERSION = 1
 CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
  reservation TEXT PRIMARY KEY,charge_id TEXT NOT NULL UNIQUE,scope TEXT NOT NULL,
  identity TEXT NOT NULL CHECK(length(CAST(identity AS BLOB))<=4096),
@@ -146,9 +147,11 @@ class ScratchLedger:
             db.execute("INSERT OR IGNORE INTO job_environments SELECT DISTINCT job,environment FROM reservations")
             config = _json(dict(root=str(self.root), floor=self.floor, grace=self.grace))
             previous = db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
-            if previous and previous[0] != config:
-                raise PolicyConflict("ledger root or policy settings changed")
+            if previous is None and any(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is not None for table in
+                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges')):
+                raise PolicyConflict('existing accounting configuration missing')
             db.execute("INSERT OR IGNORE INTO metadata VALUES('config',?)", (config,))
+            self.validate_accounting(db)
             self._observe_clock(db)
         if os.name != "nt":
             os.chmod(self.path, 0o600)
@@ -161,19 +164,55 @@ class ScratchLedger:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
             if not bootstrap:
+                self.validate_accounting(db)
                 # Persist observations before business validation can roll back.
                 # Both phases hold SQLite's writer lock; a newer observation
                 # between phases is picked up by _now in the business phase.
                 self._expire(db, self._observe_clock(db))
                 db.commit()
                 db.execute("BEGIN IMMEDIATE")
+                self.validate_accounting(db)
             yield db
+            self.validate_accounting(db)
             db.commit()
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+
+    def validate_accounting(self,db):
+        """Live exact config/receipt invariant, including read-only snapshots.
+
+        No cached version flag: the first control charge latches its marker in
+        the same transaction as the receipt, counter and retained capacity hold.
+        """
+        base=dict(root=str(self.root),floor=self.floor,grace=self.grace)
+        config=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
+        count=db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0]
+        if config is None:raise PolicyConflict('accounting configuration missing')
+        if config[0]==_json(base):
+            if count:raise PolicyConflict('control accounting marker missing')
+            return base
+        versioned=dict(base,accountingVersion=ACCOUNTING_VERSION)
+        if config[0]!=_json(versioned):raise PolicyConflict('unknown accounting version or ledger policy')
+        if not count:raise PolicyConflict('latched control accounting records missing')
+        # SQL checks precede materialization. Each yielded row has fixed bounded
+        # fields; qualify all retained allowances before admission trusts SUM.
+        oversized=db.execute('''SELECT 1 FROM control_charges WHERE
+            typeof(reservation)!='text' OR length(CAST(reservation AS BLOB))>128 OR
+            typeof(charge_id)!='text' OR length(CAST(charge_id AS BLOB))>128 OR
+            typeof(scope)!='text' OR length(CAST(scope AS BLOB))!=64 OR
+            typeof(identity)!='text' OR length(CAST(identity AS BLOB))>4096 OR
+            typeof(receipt)!='text' OR length(CAST(receipt AS BLOB))>8192 OR
+            (publication IS NOT NULL AND (typeof(publication)!='text' OR length(CAST(publication AS BLOB))>16384)) OR
+            typeof(bytes)!='integer' OR bytes<=0 LIMIT 1''').fetchone()
+        if oversized:raise PolicyConflict('bounded control accounting records required')
+        cursor=db.execute('SELECT * FROM control_charges ORDER BY reservation')
+        for row in cursor:
+            reservation=self._reservation(db,row['reservation'])
+            self._control(row,reservation)
+        return versioned
 
     def _reservation(self, db, reservation_id):
         row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
@@ -286,7 +325,8 @@ class ScratchLedger:
         db=sqlite3.connect(self.path.absolute().as_uri()+'?mode=ro',uri=True)
         db.row_factory=sqlite3.Row
         try:
-            db.execute('BEGIN');row=db.execute('SELECT * FROM control_charges WHERE reservation=?',(reservation_id,)).fetchone()
+            db.execute('BEGIN');self.validate_accounting(db)
+            row=db.execute('SELECT * FROM control_charges WHERE reservation=?',(reservation_id,)).fetchone()
             return self._control(row,self._reservation(db,reservation_id))
         finally:db.close()
 
@@ -295,7 +335,8 @@ class ScratchLedger:
         _sha(scope_sha256);_integer(maximum,'control scope cap',1)
         db=sqlite3.connect(self.path.absolute().as_uri()+'?mode=ro',uri=True);db.row_factory=sqlite3.Row
         try:
-            db.execute('BEGIN');count,largest=db.execute('SELECT COUNT(*),COALESCE(MAX(length(CAST(publication AS BLOB))),0) FROM control_charges WHERE scope=?',(scope_sha256,)).fetchone()
+            db.execute('BEGIN');self.validate_accounting(db)
+            count,largest=db.execute('SELECT COUNT(*),COALESCE(MAX(length(CAST(publication AS BLOB))),0) FROM control_charges WHERE scope=?',(scope_sha256,)).fetchone()
             if count>maximum or largest>16384:raise PolicyConflict('control scope cap exceeded')
             values=[row[0] for row in db.execute('SELECT publication FROM control_charges WHERE scope=? AND publication IS NOT NULL LIMIT ?',(scope_sha256,maximum+1))]
             result=[]
@@ -331,6 +372,7 @@ class ScratchLedger:
             receipt['receiptSha256']=hashlib.sha256(_json(receipt).encode()).hexdigest()
             db.execute('UPDATE reservations SET allocated=?,remaining=remaining-? WHERE id=?',(target,allowance_bytes,reservation_id))
             db.execute('INSERT INTO control_charges VALUES(?,?,?,?,?,?,NULL)',(reservation_id,charge_id,scope_sha256,_json(identity),_json(receipt),allowance_bytes))
+            db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=ACCOUNTING_VERSION)),))
             return dict(receipt,publicationSha256=None,publicationDescriptor=None)
 
     def publish_control_charge(self,reservation_id,*,charge_id,scope_sha256,parent_binding_sha256,publication_descriptor):

@@ -300,12 +300,12 @@ class ProductionParentGuard:
 
     def _reservation(self,parent,*,mutation,recovering=False):
         with _readonly_sqlite(Path(self.ledger.path).absolute()) as db:
+            self.ledger.validate_accounting(db)
             row=db.execute('SELECT * FROM reservations WHERE id=?',(parent['reservationId'],)).fetchone()
-            metadata={r['key']:r['value'] for r in db.execute("SELECT key,value FROM metadata WHERE key IN ('clock','config')")}
+            metadata={r['key']:r['value'] for r in db.execute("SELECT key,value FROM metadata WHERE key='clock'")}
             if row is None:raise ParentGuardHeld('parent_reservation_unavailable')
-            row=dict(row);settings=_private_json(row['settings']);configured=_private_json(metadata['config'])
-        if (not exact(configured,dict(root=str(self.ledger.root),floor=self.ledger.floor,grace=self.ledger.grace))
-                or not exact({k:settings[k] for k in ('job_id','generation','reservation_id','manifest_sha256','input_bytes','output_budget','environment')},
+            row=dict(row);settings=_private_json(row['settings'])
+        if (not exact({k:settings[k] for k in ('job_id','generation','reservation_id','manifest_sha256','input_bytes','output_budget','environment')},
                     dict(job_id=parent['jobId'],generation=parent['generation'],reservation_id=parent['reservationId'],manifest_sha256=parent['manifestSha256'],input_bytes=parent['inputBytes'],output_budget=parent['outputBudget'],environment=parent['environment']))
                 or not exact([row['job'],row['generation'],row['environment']],[parent['jobId'],parent['generation'],parent['environment']])):raise ParentGuardHeld('parent_reservation_binding_changed')
         for key in ('allocated','remaining'):p._integer(row[key],'parent allocation',allow_zero=True)

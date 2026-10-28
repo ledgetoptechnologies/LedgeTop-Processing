@@ -7,6 +7,8 @@ import sqlite3
 import hashlib
 import json
 import copy
+import importlib.util
+from contextlib import closing
 
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 
@@ -121,6 +123,96 @@ class ScratchPolicyTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:receipts=list(executor.map(lambda _:self.control(),range(2)))
         self.assertEqual(receipts[0],receipts[1])
         with self.ledger._transaction() as db:self.assertEqual(self.ledger._reservation(db,'r1')['allocated'],150)
+
+    def legacy_module(self):
+        folder=Path(__file__).parent/'fixtures'/'scratch_policy_c60834c'
+        source=folder/'legacy_scratch_policy.py';raw=source.read_bytes();attributes=json.loads((folder/'fixture.attrs').read_text())
+        expected='770381c4115148cad3e31d58d282abe3c665ad8d185f716a5b4057202ac36e88'
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),expected);self.assertEqual(len(raw),25324)
+        self.assertEqual(attributes['sha256'],expected);self.assertEqual(attributes['byteSize'],len(raw))
+        self.assertEqual(attributes['sourceCommit'],'c60834cd156b7ec073ab381c0d9cde4ecee12bd3')
+        self.assertEqual(attributes['gitBlob'],'85092a8db5395e7529effc63b0ef20a97509f03a')
+        self.assertTrue(attributes['preserveExactBytes'])
+        spec=importlib.util.spec_from_file_location('archived_scratch_policy_c60834c',source)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+
+    def old_open(self,module):
+        return module.ScratchLedger(self.ledger.path,self.root,capacity_probe=lambda _:self.free,clock=lambda:self.now,safety_floor_bytes=100,cleanup_grace_seconds=10)
+
+    def config(self):
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:return json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
+
+    def dump(self):
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:return '\n'.join(db.iterdump())
+
+    def test_actual_pinned_old_allocator_still_opens_nocharge_legacy_config(self):
+        module=self.legacy_module();self.reserve();self.ledger.record_allocated('r1',100)
+        self.assertNotIn('accountingVersion',self.config());old=self.old_open(module)
+        old.reserve(job_id='old-job',generation=1,reservation_id='old-res',manifest_sha256='d'*64,input_bytes=1,output_budget=0,environment='staging',ttl_seconds=20,worker_ready=True)
+        self.assertNotIn('accountingVersion',self.config())
+
+    def test_actual_pinned_old_cold_allocator_refuses_charged_state_without_any_db_changes(self):
+        module=self.legacy_module();self.reserve();self.ledger.record_allocated('r1',100);self.control()
+        self.assertEqual(self.config()['accountingVersion'],1);before=self.ledger.path.read_bytes();dump=self.dump()
+        with self.assertRaises(module.PolicyConflict):self.old_open(module)
+        self.assertEqual(self.ledger.path.read_bytes(),before);self.assertEqual(self.dump(),dump)
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:self.assertEqual(db.execute('SELECT COUNT(*) FROM reservations').fetchone()[0],1)
+
+    def test_marker_receipt_counter_and_hold_rollback_together_before_commit(self):
+        self.reserve();self.ledger.record_allocated('r1',100);original=self.ledger._transaction
+        from contextlib import contextmanager
+        @contextmanager
+        def fail():
+            with original() as db:
+                yield db
+                raise OSError('synthetic first-charge rollback')
+        with patch.object(self.ledger,'_transaction',fail),self.assertRaises(OSError):self.control()
+        self.assertNotIn('accountingVersion',self.config());self.assertIsNone(self.ledger.read_control_charge('r1'))
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:
+            self.assertEqual(db.execute('SELECT allocated,remaining FROM reservations').fetchone(),(100,300))
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0],0)
+        self.old_open(self.legacy_module())
+
+    def test_new_reopen_and_preexisting_new_instance_survive_first_charge_lost_ack(self):
+        self.reserve();self.ledger.record_allocated('r1',100);other=self.open();original=self.ledger.prepare_control_charge;receipts=[]
+        def lose(*args,**kwargs):receipts.append(original(*args,**kwargs));raise OSError('lost first-charge ACK')
+        with patch.object(self.ledger,'prepare_control_charge',side_effect=lose),self.assertRaises(OSError):self.control()
+        self.assertEqual(other.read_control_charge('r1'),receipts[0]);self.ledger=self.open()
+        self.assertEqual(self.control(),receipts[0]);self.assertEqual(self.config()['accountingVersion'],1)
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:self.assertEqual(db.execute('SELECT allocated,remaining FROM reservations').fetchone(),(150,250))
+
+    def test_missing_or_unknown_accounting_marker_blocks_all_admission_before_clock_writes(self):
+        self.reserve();self.ledger.record_allocated('r1',100);self.control();coherent=self.config()
+        variants=[{k:v for k,v in coherent.items() if k!='accountingVersion'},dict(coherent,accountingVersion=2),dict(coherent,accountingVersion=True),dict(coherent,accountingVersion='1'),None]
+        for value in variants:
+            with self.subTest(value=value):
+                with closing(sqlite3.connect(self.ledger.path)) as db,db:
+                    if value is None:db.execute("DELETE FROM metadata WHERE key='config'")
+                    else:db.execute("UPDATE metadata SET value=? WHERE key='config'",(json.dumps(value,sort_keys=True,separators=(',',':')),))
+                before=self.ledger.path.read_bytes();dump=self.dump();self.now+=1
+                with self.assertRaises(PolicyConflict):self.reserve(job_id='blocked',reservation_id='blocked')
+                with self.assertRaises(PolicyConflict):self.ledger.read_control_charge('r1')
+                with self.assertRaises(PolicyConflict):self.ledger.control_scope_publications('b'*64,8)
+                with self.assertRaises(PolicyConflict):self.open()
+                self.assertEqual(before,self.ledger.path.read_bytes());self.assertEqual(dump,self.dump())
+                with closing(sqlite3.connect(self.ledger.path)) as db,db:db.execute("INSERT OR REPLACE INTO metadata VALUES('config',?)",(json.dumps(coherent,sort_keys=True,separators=(',',':')),))
+
+    def test_attempted_in_transaction_marker_removal_is_rolled_back(self):
+        self.reserve();self.ledger.record_allocated('r1',100);self.control();coherent=self.config()
+        with self.assertRaises(PolicyConflict):
+            with self.ledger._transaction() as db:
+                value=dict(coherent);del value['accountingVersion']
+                db.execute("UPDATE metadata SET value=? WHERE key='config'",(json.dumps(value,sort_keys=True,separators=(',',':')),))
+        self.assertEqual(self.config(),coherent);self.assertIsNotNone(self.ledger.read_control_charge('r1'))
+
+    def test_valid_marker_does_not_hide_lowered_hold_or_missing_control_records(self):
+        self.reserve();self.ledger.record_allocated('r1',100);self.control()
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:db.execute('UPDATE control_charges SET bytes=1')
+        before=self.ledger.path.read_bytes();self.now+=1
+        with self.assertRaises(PolicyConflict):self.reserve(job_id='blocked',reservation_id='blocked')
+        self.assertEqual(before,self.ledger.path.read_bytes())
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:db.execute('DELETE FROM control_charges')
+        with self.assertRaises(PolicyConflict):self.open()
 
     def test_expired_retry_preserves_job_environment_after_restart(self):
         self.reserve()
