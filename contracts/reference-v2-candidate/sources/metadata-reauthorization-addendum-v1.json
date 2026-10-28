@@ -1,0 +1,264 @@
+{
+  "proposalVersion": 1,
+  "status": [
+    "PROPOSED",
+    "UNAGREED",
+    "NOTWIRECOMPATIBLE",
+    "NOTACTIVATED"
+  ],
+  "baseProposal": {
+    "file": "contract-proposal-v3.json",
+    "sha256": "23918d2263a91ca6c91501fd35bdf52fb60826c2ab6c33e06596b37688671be5"
+  },
+  "scope": "Separate metadata-only original-source reauthorization design. No interface, validator, credentials, provisioning, issuer, factory or runtime changes. Does not delay current Viewer release.",
+  "observedProblem": {
+    "immutableAcquisitionReceipt": "Actual closed LiDAR acquisition provenance receipt contains no expiry field. Do not describe it as an expiring receipt or reseal/change its ID/hash to refresh authority.",
+    "actualClient": "Pinned52b7 LidarProvenanceClient authenticates metadata reads using original ValidatedGrant.token and refuses expired grant before/during/after read. verify requires exact persisted immutable receipt, usable=true, fetched age within configured freshness<=300seconds AND current time before original grant_expires.",
+    "longJob": "A long ODM/TreeDar stage can outlive original payload transfer grant. Repeating existing fetch/verify cannot provide independent metadata refresh after expiry. Current PipelineJournal, TreeDar stage and publication recheck that verifier; no claim current implementation already solves this.",
+    "custody": "Cached hash plus stat identity of a mutable file is not original-source custody proof. Real immutable managed custody or purge-path pins enforced by an authorized issuer remain activation gates."
+  },
+  "encoding": {
+    "policy": "All fieldsets and discriminated variants closed, all listed fields required; reject unknown/missing/duplicate keys. Reuse v3 sourced UUID/slug/integer/time/hash grammars and metadata canonicalization/limits, not a new generic serialization.",
+    "selfDigests": "intentSha256 and receiptSha256 each hash canonical UTF8 complete corresponding structured record with ONLY that own top-level field omitted. Nested hashes and object ordering remain included. Physical sha256 hashes exact original bytes without canonicalization. SealedStageAdmission.admissionSha256 follows same single-own-field omission.",
+    "limits": "Whole metadata message<=4194304bytes, arrays<=10000, nonnegative safe integers<=9007199254740991; positive fields explicitly noted. A concrete finite ControlBudgetPolicy is committed before any issue; no unlimited fallback. Metadata history capacity counts measured canonical serialized records, exact object counts, retry attempts and ledger bytes, not an aggregate guess.",
+    "newTypeNames": "ltds-original-metadata-reauthorization-v1-proposed, immutable_metadata_intent, metadata_authorization_receipt. Concrete proposed spelling is an engineering paired decision; NAS owner chooses actual storage/custody/retention authority, not JSON field spellings."
+  },
+  "fieldsets": {
+    "ImmutableMetadataIntent": {
+      "schemaVersion": "literal1",
+      "protocol": "ltds-original-metadata-reauthorization-v1-proposed",
+      "receiptType": "immutable_metadata_intent",
+      "operationId": "stable slug, persisted before first issue; reused byte-for-byte through uncertain response and retry",
+      "round": "positive safe integer; advance only after previous round durably resolved authorized/denied or explicitly reconciled not-issued",
+      "purpose": "next_stage_admission|custody_observation|publication_authority_check; exactly one, no cross-purpose replay",
+      "parentBinding": "v3 Binding with original parent jobId/generation/environment/inputManifestSha256/pipelineDigest/parentClaimId",
+      "planSha256": "exact immutable approved full requested-stage plan digest",
+      "stageDefinitionSha256": "exact immutable next/current stage definition digest including original input and admitted engine/worker/reservation binding",
+      "stage": "v3 StageBinding, exact original continuation and admitted worker identities",
+      "predecessorProofSha256": "exact durably settled preceding-stage proof digest; null only for no predecessor under original plan",
+      "originalAcquisition": "OriginalReceiptIdentity; unchanged genuine-source provenance receipt, no new expiry or refresh ID",
+      "originalCustody": "OriginalReceiptIdentity for independently authenticated actual custody proof",
+      "originalObjects": "ASCII-sorted OriginalObject array, exact original genuine LiDAR subset under input manifest",
+      "originalTransferDigest": "exact immutable ORIGINAL transfer-grant/transfer-intent digest, never a bearer or resealed replacement",
+      "payloadBudgetLedgerId": "UNCHANGED original durable cumulative payload-byte ledger identity",
+      "payloadBudgetLedgerRevision": "observed monotonic revision, cannot reset cumulative consumed/reserved bytes",
+      "issuerPolicySha256": "exact approved issuer original-source/custody policy digest",
+      "controlBudgetLedgerId": "exact separately provisioned bounded metadata-only budget/history ledger",
+      "controlChargeId": "durable preissue charge bound to exact operation/round/intent bytes and ledger; no double charge on same-key replay",
+      "requestedAt": "canonical UTC milliseconds, immutable after persistence",
+      "intentSha256": "canonical structured self-digest"
+    },
+    "OriginalReceiptIdentity": {
+      "receiptId": "exact original immutable slug ID",
+      "receiptSha256": "hash of exact canonical original receipt bytes under its original agreed domain; no reseal",
+      "issuerId": "expected configured issuer identity, VERIFIED from authenticated channel/policy, never trusted from declaration alone",
+      "issuerPolicySha256": "exact original issuer policy digest bound to source proof"
+    },
+    "OriginalObject": {
+      "objectId": "exact original manifest slug ID",
+      "sha256": "exact original LAS/LAZ physical byte hash",
+      "byteSize": "positive safe integer exact original file bytes",
+      "controlledObjectId": "opaque immutable managed NAS identity verified by custody issuer, never worker/client path",
+      "acquisitionReceiptId": "unchanged original acquisition receipt ID",
+      "custodyPhysicalReceiptId": "exact independently verified original physical-custody receipt",
+      "mediaType": "application/vnd.las|application/vnd.laz"
+    },
+    "AuthorizedResponse": {
+      "schemaVersion": "literal1",
+      "protocol": "ltds-original-metadata-reauthorization-v1-proposed",
+      "receiptType": "metadata_authorization_receipt",
+      "decision": "literal authorized",
+      "receiptId": "globally role-distinct stable issuer receipt for this operation/round, immutable on exact replay",
+      "operationId": "exact intent operationId",
+      "round": "exact intent round",
+      "intentSha256": "exact immutable request body digest",
+      "purpose": "exact intent purpose",
+      "parentBinding": "exact original intent parentBinding",
+      "planSha256": "exact intent plan digest",
+      "stageDefinitionSha256": "exact intent stage definition digest",
+      "predecessorProofSha256": "exact intent predecessor proof or null",
+      "originalAcquisition": "exact OriginalReceiptIdentity from intent, unchanged",
+      "originalCustody": "exact OriginalReceiptIdentity from intent, unchanged",
+      "originalObjects": "exact canonical intent OriginalObject array, no subset/change",
+      "originalTransferDigest": "exact original intent digest, not renewed transfer",
+      "payloadBudgetLedgerId": "exact UNCHANGED original ledger",
+      "payloadBudgetLedgerRevision": "exact checked revision bound to intent; concurrent changes require reconciliation, not reset",
+      "issuerPolicySha256": "exact requested and currently approved policy",
+      "authenticatedActorBindingSha256": "issuer-generated digest of independently authenticated caller/worker/coordinator credential actor binding; verifier compares trusted channel identity, not caller-declared actor field",
+      "custodyRevision": "monotonic authoritative custody state revision checked",
+      "revocationRevision": "monotonic authoritative access/revocation state revision checked",
+      "checkedAt": "fresh issuer UTC milliseconds",
+      "metadataExpiresAt": "bounded metadata-authority deadline later than checkedAt under policy; does NOT alter original acquisition/custody identity or payload expiry/budget",
+      "controlChargeId": "exact request preissue charge",
+      "receiptSha256": "canonical structured self-digest; authentication still requires trusted issuer verification"
+    },
+    "DeniedResponse": {
+      "schemaVersion": "literal1",
+      "protocol": "ltds-original-metadata-reauthorization-v1-proposed",
+      "receiptType": "metadata_authorization_receipt",
+      "decision": "literal denied",
+      "receiptId": "globally role-distinct stable issuer receipt for exact operation/round",
+      "operationId": "exact intent operationId",
+      "round": "exact intent round",
+      "intentSha256": "exact immutable request digest covering ALL parent/plan/stage/predecessor/source/transfer/budget bindings",
+      "purpose": "exact intent purpose",
+      "authenticatedActorBindingSha256": "trusted issuer-authenticated actor binding, not caller declaration",
+      "custodyRevision": "authoritative state revision checked; 0 only if issuer explicitly cannot resolve state and denial reason is issuer_unavailable",
+      "revocationRevision": "authoritative state revision checked; same unavailable constraint",
+      "checkedAt": "issuer UTC milliseconds",
+      "metadataExpiresAt": "literal null; denial grants no metadata authority",
+      "denialCode": "source_revoked|source_missing|custody_unverified|actor_denied|policy_changed|binding_mismatch|budget_exhausted|issuer_unavailable",
+      "controlChargeId": "exact request preissue charge",
+      "receiptSha256": "canonical structured self-digest",
+      "parentBinding": "exact original intent Binding",
+      "planSha256": "exact intent approved plan digest",
+      "stageDefinitionSha256": "exact intent stage definition digest",
+      "predecessorProofSha256": "exact intent predecessor proof or null",
+      "originalAcquisition": "exact unchanged OriginalReceiptIdentity",
+      "originalCustody": "exact unchanged OriginalReceiptIdentity",
+      "originalObjects": "exact canonical original intent object closure",
+      "originalTransferDigest": "exact original transfer digest, no reseal",
+      "payloadBudgetLedgerId": "exact UNCHANGED original ledger",
+      "payloadBudgetLedgerRevision": "exact intent observation, never resets ledger",
+      "issuerPolicySha256": "exact intent requested policy; policy_changed is denial, no automatic replacement"
+    },
+    "ControlBudgetPolicy": {
+      "policySha256": "exact approved bounded metadata control policy digest",
+      "maxRounds": "explicit positive finite safe integer per original parent",
+      "maxAttemptsPerRound": "explicit positive finite safe integer including exact replay and lookup requests",
+      "maxIntentBytes": "explicit positive<=4194304",
+      "maxResponseBytes": "explicit positive<=4194304",
+      "maxHistoryRecords": "explicit positive finite exact durable row count limit",
+      "maxHistoryBytes": "explicit positive finite measured canonical record byte cap including intents,responses,lookup/retry records and receipt proofs",
+      "maxConcurrentRequests": "explicit positive finite per issuer/parent limit",
+      "metadataFreshnessSeconds": "explicit positive<=300 preferred inherited bound; final value paired before activation",
+      "reservedControlDiskReceiptId": "actual separately enforced capacity hold for entire bounded control history/outbox coexistence"
+    },
+    "ControlJournalEntry": {
+      "schemaVersion": "literal1",
+      "operationId": "exact immutable intent operation",
+      "round": "exact immutable intent round",
+      "intentSha256": "exact immutable intent digest",
+      "intentBytes": "measured canonical serialized intent byte length",
+      "chargeId": "preissue durable unique control charge",
+      "state": "prepared|issued|outcome_unknown|authorized|denied|not_issued_reconciled|held",
+      "attemptCount": "exact monotonically charged wire/lookup attempts; no reset on crash",
+      "responseReceiptId": "exact verified response receipt ID or null before resolution",
+      "responseSha256": "exact verified response structured digest or null before resolution",
+      "responseBytes": "exact persisted canonical response bytes,0 before response",
+      "actorVerificationReceiptId": "trusted issuer/channel actor verification receipt or null before response",
+      "policySha256": "exact ControlBudgetPolicy digest",
+      "previousRoundReceiptSha256": "exact preceding resolved receipt or not-issued reconciliation evidence digest; null only round1"
+    },
+    "SealedStageAdmission": {
+      "schemaVersion": "literal1 proposed",
+      "receiptType": "sealed_stage_metadata_admission",
+      "receiptId": "stable slug assigned before stage mutation",
+      "stage": "exact StageBinding",
+      "planSha256": "exact original plan",
+      "stageDefinitionSha256": "exact original stage definition",
+      "intentSha256": "exact admitted immutable metadata intent",
+      "metadataAuthorizationReceiptId": "exact at-start authorized response ID",
+      "metadataAuthorizationReceiptSha256": "exact immutable at-start response digest",
+      "originalAcquisition": "exact unchanged OriginalReceiptIdentity",
+      "originalCustody": "exact unchanged OriginalReceiptIdentity",
+      "authenticatedActorBindingSha256": "verified issuer/channel actor binding",
+      "custodyRevision": "exact checked at-start authoritative revision",
+      "revocationRevision": "exact checked at-start authoritative revision",
+      "admittedAt": "time immediately before permitted stage start",
+      "admissionSha256": "canonical structured self-digest omitting only admissionSha256"
+    }
+  },
+  "authoritySeparation": {
+    "metadataClient": "Distinct typed metadata-only issuer client, authentication scope and durable journal; neither accept nor forward original payload transfer bearer. Fixed configured issuer route and identity, no client-selected URL, proxy/redirect or credential transfer.",
+    "noNewProvisioning": "This proposal does not select/create credentials, issuer service, endpoints, permissions, secrets or storage pins. Actual authority integration and custody enforcement require paired evidence before activation.",
+    "payload": "Metadata response never issues payload-read permission, raises payload byte allowance, renews expiresAt, changes reservation, replaces transfer grant or resets accounting. Original expired payload grant remains expired.",
+    "actors": "Expected coordinator/worker actor derives from authenticated configured issuer/channel and original trusted plan. Caller input actor strings or self-hashed actor binding cannot authorize anything. An actor mismatch is denied even if request/source hashes match.",
+    "nextStage": "Fresh authorized metadata response, exact original intent, currently valid metadata deadline AND current authoritative parent/admission/revocation state required immediately before NEXT heavy stage. Persist sealed StageAdmission linking exact receipt/intent before mutation; no stale cached success or expired original payload-token workaround.",
+    "historicalStageEvidence": "Once a stage starts, its sealed at-start admission receipt and original acquisition identity remain immutable evidence through execution/result validation. Metadata TTL passage does not rewrite bundle sourceLidar/provenanceReceiptId, acquisition hash, stage intent or reauthorization IDs, nor automatically invalidate truthful past execution evidence. Any already-pinned admission/reauthorization IDs in immutable bundle/result metadata remain exact. Current native bundle v1 closed fieldset is not silently extended; new admission link is a separately versioned immutable sidecar/receipt until paired schema agreement.",
+    "currentRevocation": "TTL freshness is not real revocation checking. Enforce current authenticated revocation/parent authority independently; a real revocation may hold/cancel under agreed parent policy even while a historical metadata receipt was valid. Never interpret historical admission as permission to continue all later actions.",
+    "publication": "Publication requires separate CURRENT authorized publication/catalog authority and exact accepted product closure, including current revocation policy. Source metadata reauthorization or historical valid admission alone cannot publish after revocation. Publication checks must not rewrite historical bundle identity.",
+    "custody": "Actual original-source retention/purge pins or immutable managed copy plus authorized issuer physical receipt remain mandatory. A current metadata hash/stat match of a mutable path cannot substitute. Source absent/replaced/unpinned is denied/held, not silently regenerated from ODM output."
+  },
+  "durableSequence": [
+    "Recover original parent/plan/stage/predecessor/acquisition/custody/source/transfer/ledger identities and prior resolved rounds. Bound plan and original source stay unchanged.",
+    "Reserve and durably charge exact bounded control intent/response/history capacity before issue; persist canonical immutable intent+digest, stable operationId/round/charge and expected actor/issuer binding. Charge retries/lookups against same finite history policy before dispatch.",
+    "Issue through distinct metadata-only authenticated issuer client. Persist issued intent before request; no original payload token and no payload budget/TTL side effect.",
+    "On transport loss or crash set outcome_unknown. Authoritatively lookup exact operationId+round+intent digest; if explicitly supported idempotence permits, replay identical ORIGINAL canonical body under same key. Different body/key or new round cannot resolve ambiguity. Never treat timeout as denial or grant.",
+    "Verify exact request/response binding, trusted issuer+actor authentication, original identities, state revisions, policy/time and capacity. Durably persist original immutable response plus actor verification and budget records before authorized use. Denied is durable no-authority; no last-green cache fallback.",
+    "New round only after prior authorized/denied or authoritative not-issued reconciliation is durable, under remaining finite budget. Do not overwrite history or roll back counters/revisions on restart. Budget/history/issuer capacity exhaustion holds before issuing more requests.",
+    "Before next stage recheck current parent/claim/admission/revocation authority and metadata freshness; seal original admission link and dispatch once. Capture stage outcome under that immutable identity. Current revoke/cancel policy is enforced separately during execution.",
+    "After actual ALL heavy execution settlement, heavy slots may release under v3 rules while disk/control/outbox/custody capacity holds remain until accepted delivery and authorized cleanup. Metadata outage does not justify deleting source/results or retaining heavy slot indefinitely after full safe settlement.",
+    "Before publication use separate current publication authority. Result acceptance verifies historical immutable source/admission binding and actual product bytes, without resealing provenance to pass expired cache checks. Cleanup/release follows exact original custody/acceptance/pin policy, not metadata TTL."
+  ],
+  "proposedTestVectors": [
+    {
+      "case": "long_ODM_original_payload_expired",
+      "input": "Original acquisition/custody IDs unchanged; payload expired; distinct metadata issuer currently authorizes exact source",
+      "expect": "Fresh metadata receipt may authorize next-stage admission only; payload grant stays expired and cumulative byte ledger unchanged"
+    },
+    {
+      "case": "old_client_after_expiry",
+      "input": "Existing LidarProvenanceClient with expired ValidatedGrant.token",
+      "expect": "Fails closed; no claim existing client provides new metadata-only authority"
+    },
+    {
+      "case": "unknown_response",
+      "input": "Issuer commits response, network reply lost",
+      "expect": "Same operation/round/intent lookup or proven identical same-key replay; no new operation/round or extra payload budget"
+    },
+    {
+      "case": "same_key_changed_body",
+      "input": "Same operationId/round with different stage/source/predecessor/ledger/purpose",
+      "expect": "Conflict/hold; never issue replacement authorization"
+    },
+    {
+      "case": "new_round_while_unknown",
+      "input": "Prior round outcome_unknown",
+      "expect": "Reject before issue; reconcile exact prior intent first"
+    },
+    {
+      "case": "forged_actor",
+      "input": "Correct body hashes but caller-declared actor differs from authenticated channel/plan",
+      "expect": "Denied; self-hashed actor declaration cannot authorize"
+    },
+    {
+      "case": "physical_source_changed",
+      "input": "Same old receipt ID but object bytes/physical receipt/custody revision changed",
+      "expect": "Denied/hold; no rebind original receipt and no original identity replacement"
+    },
+    {
+      "case": "TTL_after_stage_start",
+      "input": "Valid sealed admission at start; metadata deadline later passes; actual completed products match immutable source/admission",
+      "expect": "Preserve historical admission and bundle identity; current revoke/parent policy checked separately; do not reseal source receipt"
+    },
+    {
+      "case": "revoked_before_publish",
+      "input": "Historical admission valid but current authoritative revocation denies publication",
+      "expect": "Hold publication; retain truthful result evidence/custody, no publication from old green cache"
+    },
+    {
+      "case": "finite_history_exhausted",
+      "input": "Next metadata attempt would exceed exact count/byte/round/control-disk policy",
+      "expect": "Hold before issue and preserve remaining custody/outbox capacity; no budget counter reset"
+    },
+    {
+      "case": "mutable_file_hash_stat_only",
+      "input": "File currently matches source SHA/stat but has no enforced immutable custody or purge pin receipt",
+      "expect": "Cannot activate or authorize next stage; hash/stat observation is not custody proof"
+    },
+    {
+      "case": "metadata_denied",
+      "input": "Canonical denied receipt with metadataExpiresAt:null and exact request digest",
+      "expect": "Persist denial and no authority; do not retry as a new round automatically or fall back to cached success"
+    }
+  ],
+  "pairedReviewQuestions": [
+    "Accept exact closed intent/authorized/denied fields and immutable round+operation semantics with inherited grammars/canonicalization?",
+    "Which actual metadata-only issuer/client authentication verifies original custody and current revocation independently from expired payload grants, without provisioning anything through this proposal?",
+    "Pair durable preissue finite control budget/history reservations, exact outcome lookup/same-key replay and actor-verification evidence; define deployed policy values before activation.",
+    "Pair next-stage current admission, historical sealed stage identity, separate ongoing revocation/cancel policy and separate publication authority so TTL refresh never rewrites original bundle lineage.",
+    "Provide actual enforced original custody/purge pin or immutable-copy evidence; cached hash/stat and matching receipt strings are insufficient."
+  ],
+  "validationClaim": "Test vectors are design proposals only. No validator implemented or run, no test-pass claim, no existing client repaired or runtime enabled."
+}

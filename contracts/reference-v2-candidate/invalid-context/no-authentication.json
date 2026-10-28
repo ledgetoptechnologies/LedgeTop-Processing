@@ -1,0 +1,6 @@
+{
+  "base": "valid/combined.json",
+  "physicalRetentionVerified": false,
+  "status": "SYNTHETIC_NEGATIVE_CONTEXT",
+  "trustedCustodyIssuerAuthenticated": false
+}

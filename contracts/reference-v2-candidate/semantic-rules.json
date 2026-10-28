@@ -1,0 +1,201 @@
+{
+  "notExpressibleBySchemaAlone": [
+    "strict JSON token/UTF8 decoding",
+    "cross-record identity and membership",
+    "safe cumulative byte arithmetic",
+    "semantic geospatial/product closure",
+    "trusted issuer/actor/receipt authenticity",
+    "live revocation/custody/capacity and OS ownership",
+    "durable lifecycle/replay state"
+  ],
+  "requiredOrdering": {
+    "allOtherIdentitySets": "ASCII full identity",
+    "custodyObjects": "ASCII objectId",
+    "eptEntries": "ASCII relativePath",
+    "inputObjects": "preserve original manifest order",
+    "memberRefs": "ASCII relativePath",
+    "productOutcomes": "ASCII engine/product",
+    "requestedProducts": "ASCII product",
+    "resultObjects": "ASCII id"
+  },
+  "reviewOnlyLimits": {
+    "maxArrayMembers": 10000,
+    "maximumDepth": 32,
+    "maximumSafeInteger": 9007199254740991,
+    "maximumStageCount": 2,
+    "metadataBytes": 4194304
+  },
+  "rules": [
+    {
+      "id": "STRICT_JSON",
+      "phase": "lexical",
+      "requirement": "Bound raw bytes to4194304 and depth32 before decode; reject malformed UTF8/BOM, duplicate or escaped duplicate keys, unpaired Unicode surrogates, trailing data, nonfinite numbers, negative zero and unsafe keys at every depth."
+    },
+    {
+      "id": "TIME_CANONICAL",
+      "phase": "semantic",
+      "requirement": "Times must parse and round-trip as real UTC Gregorian timestamps at exact millisecond precision; format/date annotations alone are not authority. Fresh metadata expiry is later than checkedAt and within admitted freshness policy; no clock rollback or expired next-stage authority."
+    },
+    {
+      "id": "INTEGER_TOKENS",
+      "phase": "lexical",
+      "requirement": "Integer fields require unsigned decimal JSON integer tokens within safe bounds; reject bool,1.0,1e0,-0 and values>9007199254740991. Options may use separately admitted finite floating numbers; they are not a public digest domain."
+    },
+    {
+      "id": "CLOSED_FIELDS",
+      "phase": "schema",
+      "requirement": "Every record requires all named fields and rejects unknown fields. Nullable fields are explicit. Unknown protocol/version and downgrade are rejected."
+    },
+    {
+      "id": "BASENAME_SAFETY",
+      "phase": "semantic",
+      "requirement": "Original basenames are ASCII printable1..255 with nonempty stem/extension; reject separators/:<>\"|?*, leading dot/space, trailing dot/space and reserved CON/PRN/AUX/NUL/COM1..9/LPT1..9 stems, case-insensitively."
+    },
+    {
+      "id": "ARCHIVE_PATH_SAFETY",
+      "phase": "semantic",
+      "requirement": "Archive paths are relative forward-slash paths; no empty/dot/dotdot segments, absolute/drive/UNC/control forms, links/special entries, duplicate/case collisions or unlisted members."
+    },
+    {
+      "id": "MANIFEST_CLOSURE",
+      "phase": "semantic",
+      "requirement": "Original IDs unique; basenames unique case-insensitively; objectCount/counts/positive safe sum exact. Original order/IDs/names/hashes/byte sizes are immutable. Requested LiDAR subset is exact, genuine and positive; derived ODM cloud cannot replace it."
+    },
+    {
+      "id": "OPAQUE_PIPELINE_DIGEST",
+      "phase": "authority",
+      "requirement": "pipelineDigest is opaque server-approved request identity copied from authenticated original context. No caller-computed options canonicalization, float algorithm or client self-hash can establish it."
+    },
+    {
+      "id": "SERVER_APPROVED_OPTIONS",
+      "phase": "authority",
+      "requirement": "Options and vocabulary fingerprint must match the authenticated admitted engine catalog and server-approved pipeline. A schema-shaped options object is not admission."
+    },
+    {
+      "id": "MODE_PLAN",
+      "phase": "semantic",
+      "requirement": "odm_only requests one ODM stage; treedar_only requests one TreeDar stage; combined requests ODM then TreeDar under one original parent. Exact sorted products/inputs, stages/ordinals and Gaussian false must agree with original plan."
+    },
+    {
+      "id": "ORIGINAL_BINDING",
+      "phase": "authority",
+      "requirement": "Every nested binding equals trusted original job/generation/environment/input-manifest/pipeline/parent-claim identity. Credential establishes environment/actor. Stage binding equals admitted worker/image/reservation/receipt/continuation; IDs supplied by worker are not proof."
+    },
+    {
+      "id": "ROLE_FORMAT",
+      "phase": "semantic",
+      "requirement": "odm_archive:zip, treedar_bundle:zip, orthophoto:geotiff, pointcloud:zip, mesh:glb, dem:geotiff, report:pdf. Exactly one positive ODM archive on ODM success and one TreeDar bundle on TreeDar success; unrequested engines produce none. No tree_inventory/CHM relabel."
+    },
+    {
+      "id": "RESULT_ENGINE",
+      "phase": "semantic",
+      "requirement": "A stage result has exactly that stage engine version and original products only, not both requested engines or another stage results. IDs unique/ASCII ordered; requested products match required flags and outcomes."
+    },
+    {
+      "id": "PRODUCT_TARGETS",
+      "phase": "semantic",
+      "requirement": "available has nonempty exact validated targets; failed/not_produced have no targets; not_produced optional may have null evidence. Required unavailable prevents parent completion. Every target/container/hash/size/member/closure matches its SAME stage immutable manifest. No mandatory standalone duplicate product artifact."
+    },
+    {
+      "id": "MEMBER_CLOSURE",
+      "phase": "semantic",
+      "requirement": "ZIP member references match actual admitted closure descriptor, expanded bytes/hash/path and exact dependencies. Synthetic transport bytes do not prove report/pointcloud/mesh/geospatial semantics. Plain-file targets have null closure and no members; zip products require a real agreed closure descriptor."
+    },
+    {
+      "id": "ZERO_EXPANDED_MEMBER",
+      "phase": "semantic",
+      "requirement": "Original sources and physical artifacts remain positive. Zero-byte expanded EPT/archive metadata entries require explicit semantic closure/policy justification; no blanket zero allowance and no empty product/ZIP success."
+    },
+    {
+      "id": "PRODUCT_EVIDENCE_PHASE",
+      "phase": "authority",
+      "requirement": "ProductOutcome.evidenceReceiptId and ProductTarget.validationReceiptId refer to authenticated PREUPLOAD worker semantic validation, not future NAS ingestion acceptance. NAS accepted-copy validation is separate."
+    },
+    {
+      "id": "CUSTODY_AUTHORITY",
+      "phase": "authority",
+      "requirement": "Original NAS custody is independently authenticated immutable-object/purge-pin evidence for exact original subset. Matching strings/hash/stat or claimed genuine flags alone authorize nothing. Producer result custody exists before manifest/upload and binds exact retained physical bytes."
+    },
+    {
+      "id": "DISTINCT_RECEIPT_ROLES",
+      "phase": "semantic",
+      "requirement": "Producer custody, NAS accepted-copy custody, acquisition, acceptance/storage/ACK and terminal receipt roles remain distinct. AcceptedArtifact.producerCustodyReceiptId is original Artifact.physicalReceiptId; its physicalReceiptId is a different managed accepted-copy receipt."
+    },
+    {
+      "id": "PARTIAL_SAME_MANIFEST",
+      "phase": "semantic",
+      "requirement": "Partial acceptance references one exact binding/resultSetId/resultManifestSha256. Every accepted ID/hash/size/stage/worker/reservation matches that manifest and original producer receipt. Never union receipts from different result manifests/stages to invent closure."
+    },
+    {
+      "id": "ACCEPTANCE_AUTHORITY",
+      "phase": "authority",
+      "requirement": "NAS acceptance follows durable exact-copy byte/directory barriers and semantic validation, plus committed receipt/outbox. Upload/HTTP success alone is not acceptance. IDs must resolve through fixed authenticated trusted services."
+    },
+    {
+      "id": "SOURCE_REAUTH_INTENT",
+      "phase": "semantic",
+      "requirement": "Metadata request retains original parent/plan/stage/predecessor/acquisition/custody/objects/transfer/ledger identities; stable operation+round+intent bytes and purpose. Changed body under same key conflicts; no new round while outcome unknown."
+    },
+    {
+      "id": "SOURCE_REAUTH_AUTHORITY",
+      "phase": "authority",
+      "requirement": "Distinct metadata-only fixed issuer/actor authorization; do not forward expired payload bearer. Exact authenticated response binding, current custody/revocation/policy and valid bounded metadata deadline before NEXT heavy stage. No new payload permission/expiry/budget/claim."
+    },
+    {
+      "id": "SOURCE_REAUTH_DENIAL",
+      "phase": "semantic",
+      "requirement": "Denied response has null expiry and exact original request bindings; no old-green fallback. Zero custody/revocation revision only with issuer_unavailable. Immutable round histories/counts/bytes remain charged through restart."
+    },
+    {
+      "id": "HISTORICAL_ADMISSION",
+      "phase": "lifecycle",
+      "requirement": "Seal authorized at-start receipt/intent/source identities before engine mutation. Later metadata TTL expiry does not invalidate truthful sealed execution/output or rewrite native bundle/source identity. Ongoing current revocation/parent policy remains separate."
+    },
+    {
+      "id": "CURRENT_PUBLICATION",
+      "phase": "authority",
+      "requirement": "Catalog/publication requires separate CURRENT authenticated publication authority and accepted product closure. Historical source admission alone cannot authorize publication after current denial/revocation. Metadata publication_authority_check is not itself a catalog publish credential."
+    },
+    {
+      "id": "FINITE_CONTROL_BUDGET",
+      "phase": "budget",
+      "requirement": "Preissue reserve/charge exact finite rounds/attempts/canonical bytes/history/concurrency/control disk holds; retry/lookup same operation counts monotonically. Unknown issuer outcome uses exact lookup or explicitly proven identical replay; no counter reset or new key."
+    },
+    {
+      "id": "EXECUTION_SETTLEMENT",
+      "phase": "lifecycle",
+      "requirement": "ALL original requested heavy stages must actually stop/settle with verified stop, custody and safe disk-budget receipts before authoritative heavy/global CPU/GPU release. Intermediate ODM alone in combined is insufficient. Requested cancel/timeouts are not stop evidence."
+    },
+    {
+      "id": "DELIVERY_SEPARATE",
+      "phase": "lifecycle",
+      "requirement": "Execution settled/heavy released is distinct from Viewer acceptance/publication/parent delivery completion. Viewer outage retains bytes, original custody, disk/control/outbox holds while safely settled heavy capacity may release."
+    },
+    {
+      "id": "PARENT_COMPLETION",
+      "phase": "authority",
+      "requirement": "Parent completion requires exact original stage result references and all required products durably accepted and published. Optional unavailable outputs do not fabricate success; stage/partial/worker receipts cannot independently manufacture parent completion."
+    },
+    {
+      "id": "CLEANUP_AUTHORITY",
+      "phase": "authority",
+      "requirement": "Cleanup ACK requires exact authenticated parent terminal delivery, accepted closure and pin-free producer subset. Never delete originals, accepted managed copies, unaccepted output or unknown paths; missing ACK retains data. Original-source release is a separate issuer decision."
+    },
+    {
+      "id": "SAFE_CAPACITY",
+      "phase": "budget",
+      "requirement": "Positive explicit per-admission archive/raw/expanded member/count/control/disk policies must account all simultaneous original, producer RAW/ZIP, transfer/expansion/accepted copies and outboxes by actual filesystem; no compressed-size substitute or reservation reset."
+    },
+    {
+      "id": "STRUCTURED_DIGEST",
+      "phase": "semantic",
+      "requirement": "Canonical safe-integer metadata uses UTF8/ASCII-key sorting/no whitespace/array order; omit ONLY the designated own top-level self-digest. Never omit nested physical sha256. Only named domains apply."
+    },
+    {
+      "id": "SUMMARY_NOT_AUTHORITY",
+      "phase": "authority",
+      "requirement": "Superseded v3 SourceMetadataReauthorization compact summary is excluded from root message union; full addendum receipt is required. Owners must remove or explicitly pair any future derived view."
+    }
+  ],
+  "status": "UNAGREED_DECLARATIVE_NO_VALIDATOR"
+}

@@ -1,0 +1,37 @@
+{
+  "status": "CODEC_ONLY_NOT_AUTHORITY",
+  "vectors": [
+    {
+      "canonicalUtf8Base64": "eyJsYWJlbCI6IsOp8J+MsiIsIm5lc3RlZCI6eyJzaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIn19",
+      "sha256": "42cc6e8082b20bf4de2a86c5f43fd3ce80c580d04bb0f25c21103b45b1736032",
+      "value": {
+        "label": "é🌲",
+        "nested": {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "canonicalUtf8Base64": "eyJjb3VudCI6OTAwNzE5OTI1NDc0MDk5MSwib3JkZXJlZCI6WzMsMiwxXX0=",
+      "sha256": "274281833a45a2eaaff40707700b0dccc2d876d7505b84eea9b943cf4eb50c83",
+      "value": {
+        "count": 9007199254740991,
+        "ordered": [
+          3,
+          2,
+          1
+        ]
+      }
+    },
+    {
+      "canonicalUtf8Base64": "eyJjaGlsZCI6eyJzaGEyNTYiOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIn0sInNoYTI1NiI6Im91dGVyLWZpZWxkLWlzLW5vdC1vbWl0dGVkLXdpdGhvdXQtZG9tYWluIn0=",
+      "sha256": "dcb3dbb32d6dd5227c9946713b59f50c48d2e490cc9518819a40c27348cebedf",
+      "value": {
+        "child": {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "sha256": "outer-field-is-not-omitted-without-domain"
+      }
+    }
+  ]
+}

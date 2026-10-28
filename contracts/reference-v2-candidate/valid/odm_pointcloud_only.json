@@ -1,0 +1,717 @@
+{
+  "artifacts": [
+    {
+      "byteSize": 208,
+      "bytesBase64": "UEsDBBQAAAAAAAAAIQAY9chkEgAAABIAAAAuAAAAb2RtX2dlb3JlZmVyZW5jaW5nL29kbV9nZW9yZWZlcmVuY2VkX21vZGVsLnh5ejAgMCAwCjEgMCAxCjAgMSAyClBLAQIUAxQAAAAAAAAAIQAY9chkEgAAABIAAAAuAAAAAAAAAAAAAACAgQAAAABvZG1fZ2VvcmVmZXJlbmNpbmcvb2RtX2dlb3JlZmVyZW5jZWRfbW9kZWwueHl6UEsFBgAAAAABAAEAXAAAAF4AAAAAAA==",
+      "id": "odm-file",
+      "semanticScope": "Synthetic bytes; ZIP transport/member/hash consistency only, not genuine processing or geospatial quality.",
+      "sha256": "97649796e25f9dc51d60e781ecd79eb8e9d96b035972786eb582bc27fd199d51"
+    }
+  ],
+  "closureDescriptors": [
+    {
+      "artifactId": "odm-file",
+      "descriptor": {
+        "files": [
+          {
+            "byteSize": 18,
+            "closureId": "pointcloud-closure",
+            "memberId": "pointcloud-member",
+            "relativePath": "odm_georeferencing/odm_georeferenced_model.xyz",
+            "sha256": "86f885daa8913eec419a0c1ff2eb600cdaa4e4126297aab0b9442b1f26cb401e"
+          }
+        ],
+        "format": "ltds-odm-closure-v1-proposed",
+        "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+        "manifestSha256": "3d7df0d3af4bf3d445f7ae87ff1ea8482684b266031813c7c445f5df803dbfcf",
+        "rawBytes": 18,
+        "schemaVersion": 1,
+        "stage": {
+          "binding": {
+            "environment": "staging",
+            "generation": 1,
+            "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+            "jobId": "00000000-0000-4000-8000-000000000005",
+            "parentClaimId": "original-parent-claim-odm_only",
+            "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+          },
+          "continuationId": "continuation-odm",
+          "engine": "odm",
+          "reservationId": "parent-reservation",
+          "reservationReceiptId": "reservation-proof",
+          "stageId": "stage-odm",
+          "stageOrdinal": 1,
+          "workerId": "worker-main",
+          "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+        }
+      }
+    }
+  ],
+  "documents": [
+    {
+      "type": "Submission",
+      "value": {
+        "capabilityFingerprint": "9728ebd31d7b6a7656ba5bd9601246a8d99e80a8f268983237d498dd67cb8eb0",
+        "contractFingerprint": "f4b261d235224bac3de60641ae1db801362ce1a8878ef067640aa67596153d18",
+        "inputManifest": {
+          "id": "inputs-odm_only",
+          "inputCounts": {
+            "images": 1,
+            "lidarObjects": 0,
+            "points": 0
+          },
+          "objectCount": 1,
+          "objects": [
+            {
+              "byteSize": 32,
+              "id": "photo-1",
+              "kind": "image",
+              "mediaType": "image/jpeg",
+              "name": "image-1.jpg",
+              "sha256": "48b2c4b19aabe45849f293a45c201b5af43c86421cd5c124c03d53f2e660b002"
+            }
+          ],
+          "revision": 1,
+          "sha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "totalBytes": 32
+        },
+        "pipeline": {
+          "gaussian_splat": {
+            "requested": false
+          },
+          "mode": "odm_only",
+          "odm": {
+            "options": {},
+            "optionsFingerprint": "1d469f9048c880a6a240f932f11ba28cb5b274d866b46e4f4f2b353ee15c385e",
+            "requested": true,
+            "requestedProducts": [
+              {
+                "product": "pointcloud",
+                "required": true
+              }
+            ]
+          },
+          "treedar": {
+            "bundleContract": null,
+            "inputObjectIds": [],
+            "provenanceReceiptId": null,
+            "requested": false,
+            "requestedProducts": []
+          }
+        },
+        "protocol": "ltds-reference-outer-v2-proposed",
+        "schemaVersion": 2,
+        "submissionId": "00000000-0000-4000-8000-000000000005"
+      }
+    },
+    {
+      "type": "ProducerCustodyReceipt",
+      "value": {
+        "byteSize": 208,
+        "issuerId": "fixture-worker-custody-issuer",
+        "objectId": "odm-file",
+        "physicalObjectId": "producer-object-odm",
+        "receiptId": "producer-odm",
+        "receiptType": "producer_result_custody",
+        "reservationId": "parent-reservation",
+        "retainUntil": "accepted_copy_ack_or_authorized_release",
+        "retainedAt": "2026-10-28T12:00:00.000Z",
+        "schemaVersion": 2,
+        "sha256": "97649796e25f9dc51d60e781ecd79eb8e9d96b035972786eb582bc27fd199d51",
+        "stage": {
+          "binding": {
+            "environment": "staging",
+            "generation": 1,
+            "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+            "jobId": "00000000-0000-4000-8000-000000000005",
+            "parentClaimId": "original-parent-claim-odm_only",
+            "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+          },
+          "continuationId": "continuation-odm",
+          "engine": "odm",
+          "reservationId": "parent-reservation",
+          "reservationReceiptId": "reservation-proof",
+          "stageId": "stage-odm",
+          "stageOrdinal": 1,
+          "workerId": "worker-main",
+          "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+        },
+        "verificationReceiptId": "worker-custody-check-odm"
+      }
+    },
+    {
+      "type": "ResultManifest",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000005",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+        },
+        "engineVersions": {
+          "odm": "3.8.5"
+        },
+        "objects": [
+          {
+            "artifactManifestSha256": "3d7df0d3af4bf3d445f7ae87ff1ea8482684b266031813c7c445f5df803dbfcf",
+            "byteSize": 208,
+            "format": "zip",
+            "id": "odm-file",
+            "physicalKind": "file",
+            "physicalReceiptId": "producer-odm",
+            "productKeys": [
+              "pointcloud"
+            ],
+            "role": "odm_archive",
+            "sha256": "97649796e25f9dc51d60e781ecd79eb8e9d96b035972786eb582bc27fd199d51",
+            "sourceObjectIds": [
+              "photo-1"
+            ],
+            "stage": {
+              "binding": {
+                "environment": "staging",
+                "generation": 1,
+                "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+                "jobId": "00000000-0000-4000-8000-000000000005",
+                "parentClaimId": "original-parent-claim-odm_only",
+                "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+              },
+              "continuationId": "continuation-odm",
+              "engine": "odm",
+              "reservationId": "parent-reservation",
+              "reservationReceiptId": "reservation-proof",
+              "stageId": "stage-odm",
+              "stageOrdinal": 1,
+              "workerId": "worker-main",
+              "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+            }
+          }
+        ],
+        "products": [
+          {
+            "engine": "odm",
+            "evidenceReceiptId": "worker-outcome-odm",
+            "product": "pointcloud",
+            "required": true,
+            "state": "available",
+            "targets": [
+              {
+                "artifactByteSize": 208,
+                "artifactId": "odm-file",
+                "artifactSha256": "97649796e25f9dc51d60e781ecd79eb8e9d96b035972786eb582bc27fd199d51",
+                "closureManifestSha256": "3d7df0d3af4bf3d445f7ae87ff1ea8482684b266031813c7c445f5df803dbfcf",
+                "memberRefs": [
+                  {
+                    "byteSize": 18,
+                    "closureId": "pointcloud-closure",
+                    "closureManifestSha256": "3d7df0d3af4bf3d445f7ae87ff1ea8482684b266031813c7c445f5df803dbfcf",
+                    "memberId": "pointcloud-member",
+                    "relativePath": "odm_georeferencing/odm_georeferenced_model.xyz",
+                    "sha256": "86f885daa8913eec419a0c1ff2eb600cdaa4e4126297aab0b9442b1f26cb401e"
+                  }
+                ],
+                "validationReceiptId": "worker-product-validation-odm"
+              }
+            ]
+          }
+        ],
+        "resultManifestSha256": "5a6ab2b7fabbb9c44e6886b1a1652224ef90462801869109a821593e4f538758",
+        "resultSetId": "results-odm",
+        "schemaVersion": 2,
+        "stage": {
+          "binding": {
+            "environment": "staging",
+            "generation": 1,
+            "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+            "jobId": "00000000-0000-4000-8000-000000000005",
+            "parentClaimId": "original-parent-claim-odm_only",
+            "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+          },
+          "continuationId": "continuation-odm",
+          "engine": "odm",
+          "reservationId": "parent-reservation",
+          "reservationReceiptId": "reservation-proof",
+          "stageId": "stage-odm",
+          "stageOrdinal": 1,
+          "workerId": "worker-main",
+          "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+        }
+      }
+    },
+    {
+      "type": "PartialAcceptance",
+      "value": {
+        "acceptedArtifacts": [
+          {
+            "byteSize": 208,
+            "id": "odm-file",
+            "physicalReceiptId": "nas-copy-odm",
+            "producerCustodyReceiptId": "producer-odm",
+            "reservationId": "parent-reservation",
+            "sha256": "97649796e25f9dc51d60e781ecd79eb8e9d96b035972786eb582bc27fd199d51",
+            "stageId": "stage-odm",
+            "validationReceiptId": "nas-ingestion-validation-odm",
+            "workerId": "worker-main"
+          }
+        ],
+        "acceptedAt": "2026-10-28T12:00:00.000Z",
+        "ackOperationId": "acceptance-ack-odm",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000005",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+        },
+        "receiptId": "acceptance-odm",
+        "receiptType": "partial_result_acceptance",
+        "resultManifestSha256": "5a6ab2b7fabbb9c44e6886b1a1652224ef90462801869109a821593e4f538758",
+        "resultSetId": "results-odm",
+        "schemaVersion": 2,
+        "storageReceiptId": "nas-storage-odm",
+        "validationVersion": "candidate-fixture-only"
+      }
+    },
+    {
+      "type": "ExecutionSettledReceipt",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000005",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+        },
+        "coordinatorSettlementOperationId": "execution-settlement-operation",
+        "diskBudgetReceiptId": "synthetic-current-disk-budget",
+        "producerCustodyReceiptIds": [
+          "producer-odm"
+        ],
+        "receiptId": "execution-settled",
+        "receiptType": "execution_settled",
+        "requestedStageIds": [
+          "stage-odm"
+        ],
+        "retainedDiskReservationIds": [
+          "parent-reservation",
+          "delivery-disk-hold"
+        ],
+        "schemaVersion": 2,
+        "settledAt": "2026-10-28T13:00:00.000Z",
+        "settledStages": [
+          {
+            "engineExecutionId": "synthetic-execution-odm",
+            "engineStopReceiptId": "synthetic-stop-odm",
+            "resultCustodyReceiptIds": [
+              "producer-odm"
+            ],
+            "settledAt": "2026-10-28T12:00:00.000Z",
+            "stage": {
+              "binding": {
+                "environment": "staging",
+                "generation": 1,
+                "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+                "jobId": "00000000-0000-4000-8000-000000000005",
+                "parentClaimId": "original-parent-claim-odm_only",
+                "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+              },
+              "continuationId": "continuation-odm",
+              "engine": "odm",
+              "reservationId": "parent-reservation",
+              "reservationReceiptId": "reservation-proof",
+              "stageId": "stage-odm",
+              "stageOrdinal": 1,
+              "workerId": "worker-main",
+              "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+            },
+            "terminalState": "succeeded"
+          }
+        ]
+      }
+    },
+    {
+      "type": "HeavyCapacityReleaseReceipt",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000005",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+        },
+        "executionSettledReceiptId": "execution-settled",
+        "operationId": "heavy-release-operation",
+        "receiptId": "heavy-release",
+        "receiptType": "heavy_capacity_release",
+        "releasedAt": "2026-10-28T13:00:01.000Z",
+        "releasedCpuGpuSlotIds": [
+          "global-heavy-slot"
+        ],
+        "remainingDiskHoldIds": [
+          "parent-reservation",
+          "delivery-disk-hold"
+        ],
+        "schemaVersion": 2
+      }
+    },
+    {
+      "type": "ParentCompletion",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000005",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+        },
+        "completionSha256": "434ede61f2837b1359918708b2da0bc25804401880d313347721e156535decc0",
+        "mode": "odm_only",
+        "publicationReceiptIds": [
+          "synthetic-catalog-odm"
+        ],
+        "requestedProductsDigest": "695cf4cf6d204e42cb35fe0181d98fab90b4680e80948b1934576f4812e88a85",
+        "schemaVersion": 2,
+        "stageResults": [
+          {
+            "acceptanceReceiptIds": [
+              "acceptance-odm"
+            ],
+            "requiredArtifactIds": [
+              "odm-file"
+            ],
+            "resultManifestSha256": "5a6ab2b7fabbb9c44e6886b1a1652224ef90462801869109a821593e4f538758",
+            "resultSetId": "results-odm",
+            "stage": {
+              "binding": {
+                "environment": "staging",
+                "generation": 1,
+                "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+                "jobId": "00000000-0000-4000-8000-000000000005",
+                "parentClaimId": "original-parent-claim-odm_only",
+                "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+              },
+              "continuationId": "continuation-odm",
+              "engine": "odm",
+              "reservationId": "parent-reservation",
+              "reservationReceiptId": "reservation-proof",
+              "stageId": "stage-odm",
+              "stageOrdinal": 1,
+              "workerId": "worker-main",
+              "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+            }
+          }
+        ],
+        "terminalReceiptId": "synthetic-parent-delivery-terminal"
+      }
+    },
+    {
+      "type": "CleanupAck",
+      "value": {
+        "acceptanceReceiptIds": [
+          "acceptance-odm"
+        ],
+        "acknowledgedAt": "2026-10-28T14:00:00.000Z",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000005",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+        },
+        "cleanupOperationId": "cleanup-operation-odm",
+        "physicalReceiptIds": [
+          "producer-odm"
+        ],
+        "producerObjectIds": [
+          "odm-file"
+        ],
+        "receiptId": "cleanup-ack-odm",
+        "receiptType": "producer_cleanup_ack",
+        "resultManifestSha256": "5a6ab2b7fabbb9c44e6886b1a1652224ef90462801869109a821593e4f538758",
+        "schemaVersion": 2,
+        "terminalReceiptId": "synthetic-parent-delivery-terminal"
+      }
+    }
+  ],
+  "expectedContext": {
+    "admittedStages": [
+      {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000005",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+        },
+        "continuationId": "continuation-odm",
+        "engine": "odm",
+        "reservationId": "parent-reservation",
+        "reservationReceiptId": "reservation-proof",
+        "stageId": "stage-odm",
+        "stageOrdinal": 1,
+        "workerId": "worker-main",
+        "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+      }
+    ],
+    "archiveLimits": {
+      "maxArchiveBytes": 1048576,
+      "maxControlProofBytes": 65536,
+      "maxExpandedBytes": 1048576,
+      "maxExpandedMembers": 64,
+      "maxManifestBytes": 65536,
+      "maxRawBytes": 1048576,
+      "maxRetainedCopyBytes": 8388608,
+      "maxValidationDiskBytes": 8388608
+    },
+    "authenticationEvidence": null,
+    "authorityPolicy": {
+      "atStart": "Fresh metadata and current parent/revocation check required before next heavy engine.",
+      "historicalValidation": "Sealed at-start admission remains evidence after metadata TTL; source receipt and bundle identity unchanged.",
+      "outage": "Retain all disk/custody/outbox holds; release heavy capacity only after ALL requested execution settled.",
+      "publication": "Separate CURRENT publication/catalog authority required; historical source authorization is insufficient."
+    },
+    "expectedActorBindingSha256": "36a4c7b88462c5e08066e89ef11c34b79d63b36d004c66d38a12dec86e70894c",
+    "limitsScope": "Explicit invented finite TEST CONTEXT values, not approved deployment policy.",
+    "nasAcceptedValidationReceiptIds": [
+      "nas-ingestion-validation-odm"
+    ],
+    "originalBinding": {
+      "environment": "staging",
+      "generation": 1,
+      "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+      "jobId": "00000000-0000-4000-8000-000000000005",
+      "parentClaimId": "original-parent-claim-odm_only",
+      "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+    },
+    "originalSubmission": {
+      "capabilityFingerprint": "9728ebd31d7b6a7656ba5bd9601246a8d99e80a8f268983237d498dd67cb8eb0",
+      "contractFingerprint": "f4b261d235224bac3de60641ae1db801362ce1a8878ef067640aa67596153d18",
+      "inputManifest": {
+        "id": "inputs-odm_only",
+        "inputCounts": {
+          "images": 1,
+          "lidarObjects": 0,
+          "points": 0
+        },
+        "objectCount": 1,
+        "objects": [
+          {
+            "byteSize": 32,
+            "id": "photo-1",
+            "kind": "image",
+            "mediaType": "image/jpeg",
+            "name": "image-1.jpg",
+            "sha256": "48b2c4b19aabe45849f293a45c201b5af43c86421cd5c124c03d53f2e660b002"
+          }
+        ],
+        "revision": 1,
+        "sha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+        "totalBytes": 32
+      },
+      "pipeline": {
+        "gaussian_splat": {
+          "requested": false
+        },
+        "mode": "odm_only",
+        "odm": {
+          "options": {},
+          "optionsFingerprint": "1d469f9048c880a6a240f932f11ba28cb5b274d866b46e4f4f2b353ee15c385e",
+          "requested": true,
+          "requestedProducts": [
+            {
+              "product": "pointcloud",
+              "required": true
+            }
+          ]
+        },
+        "treedar": {
+          "bundleContract": null,
+          "inputObjectIds": [],
+          "provenanceReceiptId": null,
+          "requested": false,
+          "requestedProducts": []
+        }
+      },
+      "protocol": "ltds-reference-outer-v2-proposed",
+      "schemaVersion": 2,
+      "submissionId": "00000000-0000-4000-8000-000000000005"
+    },
+    "payload": {
+      "consumedBytes": 32,
+      "cumulativeByteBudget": 96,
+      "ledgerId": "unchanged-payload-ledger",
+      "originalPayloadExpiresAt": "2026-10-28T11:00:00.000Z",
+      "revision": 7
+    },
+    "pipelineDigestOwnership": "Opaque server-provided fixed digest, not computed from options.",
+    "planDigestScope": "Canonical fixture plan/stage metadata is supplied for consistency checks only; production plan digests remain authenticated original references, not a new public client derivation.",
+    "syntheticApprovedPlan": {
+      "binding": {
+        "environment": "staging",
+        "generation": 1,
+        "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+        "jobId": "00000000-0000-4000-8000-000000000005",
+        "parentClaimId": "original-parent-claim-odm_only",
+        "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+      },
+      "mode": "odm_only",
+      "schemaVersion": 1,
+      "stages": [
+        {
+          "inputObjects": [
+            {
+              "byteSize": 32,
+              "id": "photo-1",
+              "kind": "image",
+              "mediaType": "image/jpeg",
+              "name": "image-1.jpg",
+              "sha256": "48b2c4b19aabe45849f293a45c201b5af43c86421cd5c124c03d53f2e660b002"
+            }
+          ],
+          "requestedProducts": [
+            {
+              "product": "pointcloud",
+              "required": true
+            }
+          ],
+          "stage": {
+            "binding": {
+              "environment": "staging",
+              "generation": 1,
+              "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+              "jobId": "00000000-0000-4000-8000-000000000005",
+              "parentClaimId": "original-parent-claim-odm_only",
+              "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+            },
+            "continuationId": "continuation-odm",
+            "engine": "odm",
+            "reservationId": "parent-reservation",
+            "reservationReceiptId": "reservation-proof",
+            "stageId": "stage-odm",
+            "stageOrdinal": 1,
+            "workerId": "worker-main",
+            "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+          }
+        }
+      ]
+    },
+    "treeDarLimits": {
+      "maxArchiveBytes": 1048576,
+      "maxControlProofBytes": 65536,
+      "maxFiles": 64,
+      "maxManifestBytes": 65536,
+      "maxRawBytes": 1048576,
+      "maxValidationDiskBytes": 8388608
+    },
+    "trustModel": "IDs/digests represent expected externally authenticated facts ONLY. Absent real trusted endpoints/receipts these records authorize nothing.",
+    "workerValidationReceiptIds": [
+      "worker-outcome-odm",
+      "worker-product-validation-odm"
+    ]
+  },
+  "fixtureVersion": 1,
+  "mode": "odm_only",
+  "originalAcquisitionRecord": null,
+  "originalPayloads": [
+    {
+      "bytesBase64": "U1lOVEhFVElDLU5PVC1TRU5TT1I6aW1hZ2UtMS5qcGc=",
+      "objectId": "photo-1"
+    }
+  ],
+  "outageSnapshot": {
+    "diskHoldsRetained": true,
+    "executionSettledReceipt": {
+      "binding": {
+        "environment": "staging",
+        "generation": 1,
+        "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+        "jobId": "00000000-0000-4000-8000-000000000005",
+        "parentClaimId": "original-parent-claim-odm_only",
+        "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+      },
+      "coordinatorSettlementOperationId": "execution-settlement-operation",
+      "diskBudgetReceiptId": "synthetic-current-disk-budget",
+      "producerCustodyReceiptIds": [
+        "producer-odm"
+      ],
+      "receiptId": "execution-settled",
+      "receiptType": "execution_settled",
+      "requestedStageIds": [
+        "stage-odm"
+      ],
+      "retainedDiskReservationIds": [
+        "parent-reservation",
+        "delivery-disk-hold"
+      ],
+      "schemaVersion": 2,
+      "settledAt": "2026-10-28T13:00:00.000Z",
+      "settledStages": [
+        {
+          "engineExecutionId": "synthetic-execution-odm",
+          "engineStopReceiptId": "synthetic-stop-odm",
+          "resultCustodyReceiptIds": [
+            "producer-odm"
+          ],
+          "settledAt": "2026-10-28T12:00:00.000Z",
+          "stage": {
+            "binding": {
+              "environment": "staging",
+              "generation": 1,
+              "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+              "jobId": "00000000-0000-4000-8000-000000000005",
+              "parentClaimId": "original-parent-claim-odm_only",
+              "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+            },
+            "continuationId": "continuation-odm",
+            "engine": "odm",
+            "reservationId": "parent-reservation",
+            "reservationReceiptId": "reservation-proof",
+            "stageId": "stage-odm",
+            "stageOrdinal": 1,
+            "workerId": "worker-main",
+            "workerImageDigest": "a12e40dec2a78a164016f4fe456df7a80c23f197139bdd9a64b434431e37eca8"
+          },
+          "terminalState": "succeeded"
+        }
+      ]
+    },
+    "heavyCapacityReleaseReceipt": {
+      "binding": {
+        "environment": "staging",
+        "generation": 1,
+        "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+        "jobId": "00000000-0000-4000-8000-000000000005",
+        "parentClaimId": "original-parent-claim-odm_only",
+        "pipelineDigest": "99f924a2b9f987831fb8d1e85bdc2eb4d034cdacf9a6247df899b7d32de42fb7"
+      },
+      "executionSettledReceiptId": "execution-settled",
+      "operationId": "heavy-release-operation",
+      "receiptId": "heavy-release",
+      "receiptType": "heavy_capacity_release",
+      "releasedAt": "2026-10-28T13:00:01.000Z",
+      "releasedCpuGpuSlotIds": [
+        "global-heavy-slot"
+      ],
+      "remainingDiskHoldIds": [
+        "parent-reservation",
+        "delivery-disk-hold"
+      ],
+      "schemaVersion": 2
+    },
+    "originalSourceCustodyRetained": false,
+    "outboxRetained": true,
+    "parentDeliveryState": "pending",
+    "viewerAccepted": false
+  },
+  "scope": "Golden structural/hash/lifecycle relationships only; no acquisition, engine execution, custody, issuer authentication, semantic processing, NAS acceptance or publication actually occurred.",
+  "status": "SYNTHETIC_EXPECTED_CONTEXT_NOT_AUTHORITY",
+  "timingScope": "Documents are separate lifecycle snapshots, not evidence of one instantaneous state; fixture trust is modeled, never real."
+}

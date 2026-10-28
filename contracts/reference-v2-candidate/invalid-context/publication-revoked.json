@@ -1,0 +1,8 @@
+{
+  "base": "valid/combined.json",
+  "currentPublicationAuthorized": false,
+  "historicalAdmissionValid": true,
+  "retainResultsAndOutbox": true,
+  "revocationState": "denied",
+  "status": "SYNTHETIC_NEGATIVE_CONTEXT"
+}

@@ -1,0 +1,6 @@
+{
+  "base": "valid/support-records.json",
+  "durableMinimumAttemptCount": 1,
+  "ledgerResetAllowed": false,
+  "status": "SYNTHETIC_NEGATIVE_CONTEXT"
+}

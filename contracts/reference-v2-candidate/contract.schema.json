@@ -1,0 +1,3163 @@
+{
+  "$defs": {
+    "AcceptedArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "id": {
+          "$ref": "#/$defs/Slug"
+        },
+        "physicalReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "producerCustodyReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "reservationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "stageId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "validationReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        }
+      },
+      "required": [
+        "id",
+        "sha256",
+        "byteSize",
+        "stageId",
+        "workerId",
+        "reservationId",
+        "physicalReceiptId",
+        "validationReceiptId",
+        "producerCustodyReceiptId"
+      ],
+      "type": "object"
+    },
+    "ArchiveAdmissionLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "maxArchiveBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxControlProofBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxExpandedBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxExpandedMembers": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxManifestBytes": {
+          "maximum": 4194304,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxRawBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxRetainedCopyBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxValidationDiskBytes": {
+          "$ref": "#/$defs/Positive"
+        }
+      },
+      "required": [
+        "maxArchiveBytes",
+        "maxRawBytes",
+        "maxExpandedMembers",
+        "maxExpandedBytes",
+        "maxManifestBytes",
+        "maxControlProofBytes",
+        "maxValidationDiskBytes",
+        "maxRetainedCopyBytes"
+      ],
+      "type": "object"
+    },
+    "ArchiveMemberReference": {
+      "additionalProperties": false,
+      "properties": {
+        "byteSize": {
+          "$ref": "#/$defs/Natural"
+        },
+        "closureId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "closureManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "memberId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "relativePath": {
+          "$ref": "#/$defs/ArchivePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "memberId",
+        "relativePath",
+        "byteSize",
+        "sha256",
+        "closureManifestSha256",
+        "closureId"
+      ],
+      "type": "object"
+    },
+    "ArchivePath": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_./-]"
+      },
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*$",
+      "type": "string",
+      "x-semanticRules": [
+        "ARCHIVE_PATH_SAFETY"
+      ]
+    },
+    "Artifact": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "odm_archive"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "format": {
+                "const": "zip"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "treedar_bundle"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "format": {
+                "const": "zip"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "orthophoto"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "format": {
+                "const": "geotiff"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "pointcloud"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "format": {
+                "const": "zip"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "mesh"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "format": {
+                "const": "glb"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "dem"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "format": {
+                "const": "geotiff"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "report"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "format": {
+                "const": "pdf"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "zip"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifactManifestSha256": {
+                "$ref": "#/$defs/Sha256"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "geotiff"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifactManifestSha256": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "glb"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifactManifestSha256": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "pdf"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifactManifestSha256": {
+                "const": null
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "artifactManifestSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "format": {
+          "enum": [
+            "zip",
+            "geotiff",
+            "glb",
+            "pdf"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/Slug"
+        },
+        "physicalKind": {
+          "const": "file"
+        },
+        "physicalReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "productKeys": {
+          "items": {
+            "$ref": "#/$defs/Product"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "role": {
+          "enum": [
+            "odm_archive",
+            "treedar_bundle",
+            "orthophoto",
+            "pointcloud",
+            "mesh",
+            "dem",
+            "report"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "sourceObjectIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        }
+      },
+      "required": [
+        "id",
+        "stage",
+        "role",
+        "format",
+        "byteSize",
+        "sha256",
+        "artifactManifestSha256",
+        "physicalReceiptId",
+        "sourceObjectIds",
+        "productKeys",
+        "physicalKind"
+      ],
+      "type": "object"
+    },
+    "AuthorizedResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "authenticatedActorBindingSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "checkedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "controlChargeId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "custodyRevision": {
+          "$ref": "#/$defs/Positive"
+        },
+        "decision": {
+          "const": "authorized"
+        },
+        "intentSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "issuerPolicySha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "metadataExpiresAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "originalAcquisition": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "originalCustody": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "originalObjects": {
+          "items": {
+            "$ref": "#/$defs/OriginalObject"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "originalTransferDigest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "parentBinding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "payloadBudgetLedgerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "payloadBudgetLedgerRevision": {
+          "$ref": "#/$defs/Natural"
+        },
+        "planSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "predecessorProofSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "const": "ltds-original-metadata-reauthorization-v1-proposed"
+        },
+        "purpose": {
+          "$ref": "#/$defs/Purpose"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "receiptType": {
+          "const": "metadata_authorization_receipt"
+        },
+        "revocationRevision": {
+          "$ref": "#/$defs/Positive"
+        },
+        "round": {
+          "$ref": "#/$defs/Positive"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "stageDefinitionSha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "protocol",
+        "receiptType",
+        "receiptId",
+        "operationId",
+        "round",
+        "intentSha256",
+        "purpose",
+        "parentBinding",
+        "planSha256",
+        "stageDefinitionSha256",
+        "predecessorProofSha256",
+        "originalAcquisition",
+        "originalCustody",
+        "originalObjects",
+        "originalTransferDigest",
+        "payloadBudgetLedgerId",
+        "payloadBudgetLedgerRevision",
+        "issuerPolicySha256",
+        "authenticatedActorBindingSha256",
+        "custodyRevision",
+        "revocationRevision",
+        "checkedAt",
+        "controlChargeId",
+        "receiptSha256",
+        "decision",
+        "metadataExpiresAt"
+      ],
+      "type": "object"
+    },
+    "Basename": {
+      "maxLength": 255,
+      "minLength": 3,
+      "not": {
+        "pattern": "[^!-~]"
+      },
+      "pattern": "^[!-~]+\\.[!-~]+$",
+      "type": "string",
+      "x-semanticRules": [
+        "BASENAME_SAFETY"
+      ]
+    },
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "generation": {
+          "$ref": "#/$defs/Positive"
+        },
+        "inputManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "jobId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "parentClaimId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "pipelineDigest": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "jobId",
+        "generation",
+        "environment",
+        "inputManifestSha256",
+        "pipelineDigest",
+        "parentClaimId"
+      ],
+      "type": "object"
+    },
+    "CleanupAck": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptanceReceiptIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "acknowledgedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "cleanupOperationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "physicalReceiptIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "producerObjectIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "producer_cleanup_ack"
+        },
+        "resultManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "terminalReceiptId": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "binding",
+        "resultManifestSha256",
+        "acceptanceReceiptIds",
+        "producerObjectIds",
+        "physicalReceiptIds",
+        "terminalReceiptId",
+        "cleanupOperationId",
+        "acknowledgedAt"
+      ],
+      "type": "object"
+    },
+    "ControlBudgetPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "maxAttemptsPerRound": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxConcurrentRequests": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxHistoryBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxHistoryRecords": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxIntentBytes": {
+          "maximum": 4194304,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxResponseBytes": {
+          "maximum": 4194304,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxRounds": {
+          "$ref": "#/$defs/Positive"
+        },
+        "metadataFreshnessSeconds": {
+          "maximum": 300,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "policySha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "reservedControlDiskReceiptId": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "policySha256",
+        "maxRounds",
+        "maxAttemptsPerRound",
+        "maxIntentBytes",
+        "maxResponseBytes",
+        "maxHistoryRecords",
+        "maxHistoryBytes",
+        "maxConcurrentRequests",
+        "metadataFreshnessSeconds",
+        "reservedControlDiskReceiptId"
+      ],
+      "type": "object"
+    },
+    "ControlJournalEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "actorVerificationReceiptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attemptCount": {
+          "$ref": "#/$defs/Natural"
+        },
+        "chargeId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "intentBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "intentSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "policySha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "previousRoundReceiptSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responseBytes": {
+          "$ref": "#/$defs/Natural"
+        },
+        "responseReceiptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "responseSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "round": {
+          "$ref": "#/$defs/Positive"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "issued",
+            "outcome_unknown",
+            "authorized",
+            "denied",
+            "not_issued_reconciled",
+            "held"
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "round",
+        "intentSha256",
+        "intentBytes",
+        "chargeId",
+        "state",
+        "attemptCount",
+        "responseReceiptId",
+        "responseSha256",
+        "responseBytes",
+        "actorVerificationReceiptId",
+        "policySha256",
+        "previousRoundReceiptSha256"
+      ],
+      "type": "object"
+    },
+    "CustodyObject": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisitionReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "controlledObjectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "genuineLasLaz": {
+          "const": true
+        },
+        "mediaType": {
+          "enum": [
+            "application/vnd.las",
+            "application/vnd.laz"
+          ]
+        },
+        "objectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "photogrammetryDerived": {
+          "const": false
+        },
+        "physicalReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "objectId",
+        "controlledObjectId",
+        "byteSize",
+        "sha256",
+        "mediaType",
+        "acquisitionReceiptId",
+        "physicalReceiptId",
+        "genuineLasLaz",
+        "photogrammetryDerived"
+      ],
+      "type": "object"
+    },
+    "DeniedResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "authenticatedActorBindingSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "checkedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "controlChargeId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "custodyRevision": {
+          "$ref": "#/$defs/Natural"
+        },
+        "decision": {
+          "const": "denied"
+        },
+        "denialCode": {
+          "enum": [
+            "source_revoked",
+            "source_missing",
+            "custody_unverified",
+            "actor_denied",
+            "policy_changed",
+            "binding_mismatch",
+            "budget_exhausted",
+            "issuer_unavailable"
+          ]
+        },
+        "intentSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "issuerPolicySha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "metadataExpiresAt": {
+          "const": null
+        },
+        "operationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "originalAcquisition": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "originalCustody": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "originalObjects": {
+          "items": {
+            "$ref": "#/$defs/OriginalObject"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "originalTransferDigest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "parentBinding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "payloadBudgetLedgerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "payloadBudgetLedgerRevision": {
+          "$ref": "#/$defs/Natural"
+        },
+        "planSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "predecessorProofSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "const": "ltds-original-metadata-reauthorization-v1-proposed"
+        },
+        "purpose": {
+          "$ref": "#/$defs/Purpose"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "receiptType": {
+          "const": "metadata_authorization_receipt"
+        },
+        "revocationRevision": {
+          "$ref": "#/$defs/Natural"
+        },
+        "round": {
+          "$ref": "#/$defs/Positive"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "stageDefinitionSha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "protocol",
+        "receiptType",
+        "receiptId",
+        "operationId",
+        "round",
+        "intentSha256",
+        "purpose",
+        "parentBinding",
+        "planSha256",
+        "stageDefinitionSha256",
+        "predecessorProofSha256",
+        "originalAcquisition",
+        "originalCustody",
+        "originalObjects",
+        "originalTransferDigest",
+        "payloadBudgetLedgerId",
+        "payloadBudgetLedgerRevision",
+        "issuerPolicySha256",
+        "authenticatedActorBindingSha256",
+        "custodyRevision",
+        "revocationRevision",
+        "checkedAt",
+        "controlChargeId",
+        "receiptSha256",
+        "decision",
+        "metadataExpiresAt",
+        "denialCode"
+      ],
+      "type": "object"
+    },
+    "Engine": {
+      "enum": [
+        "odm",
+        "treedar"
+      ]
+    },
+    "EngineVersion": {
+      "maxLength": 128,
+      "minLength": 1,
+      "not": {
+        "pattern": "[^A-Za-z0-9_.+-]"
+      },
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.+-]*$",
+      "type": "string"
+    },
+    "Environment": {
+      "enum": [
+        "production",
+        "staging"
+      ]
+    },
+    "EptClosureEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "byteSize": {
+          "$ref": "#/$defs/Natural"
+        },
+        "relativePath": {
+          "$ref": "#/$defs/ArchivePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "relativePath",
+        "byteSize",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "ExecutionSettledReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "coordinatorSettlementOperationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "diskBudgetReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "producerCustodyReceiptIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "execution_settled"
+        },
+        "requestedStageIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "retainedDiskReservationIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "settledAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "settledStages": {
+          "items": {
+            "$ref": "#/$defs/SettledStage"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "binding",
+        "requestedStageIds",
+        "settledStages",
+        "producerCustodyReceiptIds",
+        "retainedDiskReservationIds",
+        "diskBudgetReceiptId",
+        "coordinatorSettlementOperationId",
+        "settledAt"
+      ],
+      "type": "object"
+    },
+    "HeavyCapacityReleaseReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "executionSettledReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "heavy_capacity_release"
+        },
+        "releasedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "releasedCpuGpuSlotIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "remainingDiskHoldIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schemaVersion": {
+          "const": 2
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "binding",
+        "executionSettledReceiptId",
+        "releasedCpuGpuSlotIds",
+        "remainingDiskHoldIds",
+        "operationId",
+        "releasedAt"
+      ],
+      "type": "object"
+    },
+    "ImmutableMetadataIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "controlBudgetLedgerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "controlChargeId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "intentSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "issuerPolicySha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "originalAcquisition": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "originalCustody": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "originalObjects": {
+          "items": {
+            "$ref": "#/$defs/OriginalObject"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "originalTransferDigest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "parentBinding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "payloadBudgetLedgerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "payloadBudgetLedgerRevision": {
+          "$ref": "#/$defs/Natural"
+        },
+        "planSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "predecessorProofSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "const": "ltds-original-metadata-reauthorization-v1-proposed"
+        },
+        "purpose": {
+          "$ref": "#/$defs/Purpose"
+        },
+        "receiptType": {
+          "const": "immutable_metadata_intent"
+        },
+        "requestedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "round": {
+          "$ref": "#/$defs/Positive"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        },
+        "stageDefinitionSha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "protocol",
+        "receiptType",
+        "operationId",
+        "round",
+        "purpose",
+        "parentBinding",
+        "planSha256",
+        "stageDefinitionSha256",
+        "predecessorProofSha256",
+        "originalAcquisition",
+        "originalCustody",
+        "originalObjects",
+        "originalTransferDigest",
+        "payloadBudgetLedgerId",
+        "payloadBudgetLedgerRevision",
+        "issuerPolicySha256",
+        "stage",
+        "controlBudgetLedgerId",
+        "controlChargeId",
+        "requestedAt",
+        "intentSha256"
+      ],
+      "type": "object"
+    },
+    "InputCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "images": {
+          "$ref": "#/$defs/Natural"
+        },
+        "lidarObjects": {
+          "$ref": "#/$defs/Natural"
+        },
+        "points": {
+          "$ref": "#/$defs/Natural"
+        }
+      },
+      "required": [
+        "images",
+        "lidarObjects",
+        "points"
+      ],
+      "type": "object"
+    },
+    "InputManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Slug"
+        },
+        "inputCounts": {
+          "$ref": "#/$defs/InputCounts"
+        },
+        "objectCount": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "objects": {
+          "items": {
+            "$ref": "#/$defs/InputObject"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "revision": {
+          "$ref": "#/$defs/Positive"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/Positive"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "sha256",
+        "totalBytes",
+        "objectCount",
+        "inputCounts",
+        "objects"
+      ],
+      "type": "object"
+    },
+    "InputObject": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "image"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mediaType": {
+                "enum": [
+                  "image/jpeg",
+                  "image/png",
+                  "image/tiff"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "lidar"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mediaType": {
+                "enum": [
+                  "application/vnd.las",
+                  "application/vnd.laz"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "auxiliary"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mediaType": {
+                "enum": [
+                  "application/octet-stream",
+                  "application/json",
+                  "text/plain",
+                  "text/csv"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "id": {
+          "$ref": "#/$defs/Slug"
+        },
+        "kind": {
+          "enum": [
+            "image",
+            "lidar",
+            "auxiliary"
+          ]
+        },
+        "mediaType": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/tiff",
+            "application/vnd.las",
+            "application/vnd.laz",
+            "application/octet-stream",
+            "application/json",
+            "text/plain",
+            "text/csv"
+          ]
+        },
+        "name": {
+          "$ref": "#/$defs/Basename"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "byteSize",
+        "sha256",
+        "kind",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxItems": 256,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "maxProperties": 256,
+          "type": "object"
+        }
+      ],
+      "x-note": "Finite values only; strict lexical policy rejects unsafe keys/invalid Unicode/depth before schema evaluation."
+    },
+    "Natural": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "OdmArchiveClosureEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "closureId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "memberId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "relativePath": {
+          "$ref": "#/$defs/ArchivePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "memberId",
+        "relativePath",
+        "byteSize",
+        "sha256",
+        "closureId"
+      ],
+      "type": "object"
+    },
+    "OdmArchiveClosureManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "items": {
+            "$ref": "#/$defs/OdmArchiveClosureEntry"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "format": {
+          "const": "ltds-odm-closure-v1-proposed"
+        },
+        "inputManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "rawBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "format",
+        "stage",
+        "inputManifestSha256",
+        "files",
+        "rawBytes",
+        "manifestSha256"
+      ],
+      "type": "object"
+    },
+    "OdmRequest": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "requested": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "options": {
+                "maxProperties": 0
+              },
+              "requestedProducts": {
+                "items": {
+                  "$ref": "#/$defs/ProductRequest"
+                },
+                "maxItems": 0,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "requested": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "requestedProducts": {
+                "items": {
+                  "$ref": "#/$defs/ProductRequest"
+                },
+                "maxItems": 10000,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "options": {
+          "$ref": "#/$defs/Options"
+        },
+        "optionsFingerprint": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "requested": {
+          "type": "boolean"
+        },
+        "requestedProducts": {
+          "items": {
+            "$ref": "#/$defs/ProductRequest"
+          },
+          "maxItems": 10000,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "requested",
+        "options",
+        "optionsFingerprint",
+        "requestedProducts"
+      ],
+      "type": "object"
+    },
+    "Options": {
+      "additionalProperties": false,
+      "maxProperties": 256,
+      "patternProperties": {
+        "^[a-z][a-z0-9-]{0,79}$": {
+          "$ref": "#/$defs/JsonValue"
+        }
+      },
+      "type": "object",
+      "x-semanticRules": [
+        "SERVER_APPROVED_OPTIONS",
+        "OPAQUE_PIPELINE_DIGEST"
+      ]
+    },
+    "OriginalLidarCustodyProof": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "issuerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "objects": {
+          "items": {
+            "$ref": "#/$defs/CustodyObject"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "original_lidar_custody"
+        },
+        "retainedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "retentionGuarantee": {
+          "const": "until_explicit_release_ack"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "storageReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "validationVersion": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "storageReceiptId",
+        "binding",
+        "issuerId",
+        "objects",
+        "retentionGuarantee",
+        "retainedAt",
+        "validationVersion"
+      ],
+      "type": "object"
+    },
+    "OriginalObject": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisitionReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "controlledObjectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "custodyPhysicalReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "mediaType": {
+          "enum": [
+            "application/vnd.las",
+            "application/vnd.laz"
+          ]
+        },
+        "objectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "objectId",
+        "sha256",
+        "byteSize",
+        "controlledObjectId",
+        "acquisitionReceiptId",
+        "custodyPhysicalReceiptId",
+        "mediaType"
+      ],
+      "type": "object"
+    },
+    "OriginalObjectBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "controlledObjectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "objectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "physicalReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "objectId",
+        "byteSize",
+        "sha256",
+        "controlledObjectId",
+        "physicalReceiptId"
+      ],
+      "type": "object"
+    },
+    "OriginalReceiptIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "issuerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "issuerPolicySha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptSha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "receiptId",
+        "receiptSha256",
+        "issuerId",
+        "issuerPolicySha256"
+      ],
+      "type": "object"
+    },
+    "ParentCompletion": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "completionSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "mode": {
+          "enum": [
+            "odm_only",
+            "treedar_only",
+            "combined"
+          ]
+        },
+        "publicationReceiptIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "requestedProductsDigest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "stageResults": {
+          "items": {
+            "$ref": "#/$defs/StageResultReference"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "terminalReceiptId": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "binding",
+        "mode",
+        "stageResults",
+        "requestedProductsDigest",
+        "publicationReceiptIds",
+        "terminalReceiptId",
+        "completionSha256"
+      ],
+      "type": "object"
+    },
+    "PartialAcceptance": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptedArtifacts": {
+          "items": {
+            "$ref": "#/$defs/AcceptedArtifact"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "acceptedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "ackOperationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "partial_result_acceptance"
+        },
+        "resultManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resultSetId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "storageReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "validationVersion": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "storageReceiptId",
+        "binding",
+        "resultSetId",
+        "resultManifestSha256",
+        "acceptedArtifacts",
+        "acceptedAt",
+        "validationVersion",
+        "ackOperationId"
+      ],
+      "type": "object"
+    },
+    "Pipeline": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "odm_only"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "odm": {
+                "properties": {
+                  "requested": {
+                    "const": true
+                  }
+                }
+              },
+              "treedar": {
+                "properties": {
+                  "requested": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "treedar_only"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "odm": {
+                "properties": {
+                  "requested": {
+                    "const": false
+                  }
+                }
+              },
+              "treedar": {
+                "properties": {
+                  "requested": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "combined"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "odm": {
+                "properties": {
+                  "requested": {
+                    "const": true
+                  }
+                }
+              },
+              "treedar": {
+                "properties": {
+                  "requested": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "gaussian_splat": {
+          "additionalProperties": false,
+          "properties": {
+            "requested": {
+              "const": false
+            }
+          },
+          "required": [
+            "requested"
+          ],
+          "type": "object"
+        },
+        "mode": {
+          "enum": [
+            "odm_only",
+            "treedar_only",
+            "combined"
+          ]
+        },
+        "odm": {
+          "$ref": "#/$defs/OdmRequest"
+        },
+        "treedar": {
+          "$ref": "#/$defs/TreeDarRequest"
+        }
+      },
+      "required": [
+        "mode",
+        "odm",
+        "treedar",
+        "gaussian_splat"
+      ],
+      "type": "object"
+    },
+    "PointcloudZipManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "items": {
+            "$ref": "#/$defs/EptClosureEntry"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "format": {
+          "const": "ltds-ept-bundle-v1-proposed"
+        },
+        "inputManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "rawBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "format",
+        "stage",
+        "inputManifestSha256",
+        "files",
+        "rawBytes",
+        "manifestSha256"
+      ],
+      "type": "object"
+    },
+    "Positive": {
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "ProducerCustodyReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "byteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "issuerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "objectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "physicalObjectId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "producer_result_custody"
+        },
+        "reservationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "retainUntil": {
+          "const": "accepted_copy_ack_or_authorized_release"
+        },
+        "retainedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        },
+        "verificationReceiptId": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "stage",
+        "issuerId",
+        "objectId",
+        "byteSize",
+        "sha256",
+        "physicalObjectId",
+        "reservationId",
+        "retainedAt",
+        "retainUntil",
+        "verificationReceiptId"
+      ],
+      "type": "object"
+    },
+    "Product": {
+      "enum": [
+        "orthophoto",
+        "pointcloud",
+        "mesh",
+        "dsm",
+        "dtm",
+        "report",
+        "native_bundle"
+      ]
+    },
+    "ProductOutcome": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "available"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidenceReceiptId": {
+                "$ref": "#/$defs/Slug"
+              },
+              "targets": {
+                "items": {
+                  "$ref": "#/$defs/ProductTarget"
+                },
+                "maxItems": 10000,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidenceReceiptId": {
+                "$ref": "#/$defs/Slug"
+              },
+              "targets": {
+                "items": {
+                  "$ref": "#/$defs/ProductTarget"
+                },
+                "maxItems": 0,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "not_produced"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "items": {
+                  "$ref": "#/$defs/ProductTarget"
+                },
+                "maxItems": 0,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "engine": {
+                "const": "treedar"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "product": {
+                "const": "native_bundle"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "engine": {
+                "const": "odm"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "product": {
+                "enum": [
+                  "orthophoto",
+                  "pointcloud",
+                  "mesh",
+                  "dsm",
+                  "dtm",
+                  "report"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "engine": {
+          "$ref": "#/$defs/Engine"
+        },
+        "evidenceReceiptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "product": {
+          "$ref": "#/$defs/Product"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "available",
+            "not_produced",
+            "failed"
+          ]
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ProductTarget"
+          },
+          "maxItems": 10000,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "engine",
+        "product",
+        "state",
+        "required",
+        "evidenceReceiptId",
+        "targets"
+      ],
+      "type": "object"
+    },
+    "ProductRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "product": {
+          "enum": [
+            "orthophoto",
+            "pointcloud",
+            "mesh",
+            "dsm",
+            "dtm",
+            "report"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "product",
+        "required"
+      ],
+      "type": "object"
+    },
+    "ProductTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactByteSize": {
+          "$ref": "#/$defs/Positive"
+        },
+        "artifactId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "closureManifestSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memberRefs": {
+          "items": {
+            "$ref": "#/$defs/ArchiveMemberReference"
+          },
+          "maxItems": 10000,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "validationReceiptId": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "artifactId",
+        "artifactSha256",
+        "artifactByteSize",
+        "closureManifestSha256",
+        "memberRefs",
+        "validationReceiptId"
+      ],
+      "type": "object"
+    },
+    "Purpose": {
+      "enum": [
+        "next_stage_admission",
+        "custody_observation",
+        "publication_authority_check"
+      ]
+    },
+    "ResultManifest": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": {
+                  "engine": {
+                    "const": "odm"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engineVersions": {
+                "additionalProperties": false,
+                "properties": {
+                  "odm": {
+                    "$ref": "#/$defs/EngineVersion"
+                  }
+                },
+                "required": [
+                  "odm"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": {
+                  "engine": {
+                    "const": "treedar"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "engineVersions": {
+                "additionalProperties": false,
+                "properties": {
+                  "treedar": {
+                    "$ref": "#/$defs/EngineVersion"
+                  }
+                },
+                "required": [
+                  "treedar"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "engineVersions": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "odm": {
+                  "$ref": "#/$defs/EngineVersion"
+                }
+              },
+              "required": [
+                "odm"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "treedar": {
+                  "$ref": "#/$defs/EngineVersion"
+                }
+              },
+              "required": [
+                "treedar"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "objects": {
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "products": {
+          "items": {
+            "$ref": "#/$defs/ProductOutcome"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "resultManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resultSetId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "binding",
+        "stage",
+        "resultSetId",
+        "engineVersions",
+        "objects",
+        "products",
+        "resultManifestSha256"
+      ],
+      "type": "object"
+    },
+    "SealedStageAdmission": {
+      "additionalProperties": false,
+      "properties": {
+        "admissionSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "admittedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "authenticatedActorBindingSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "custodyRevision": {
+          "$ref": "#/$defs/Positive"
+        },
+        "intentSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "metadataAuthorizationReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "metadataAuthorizationReceiptSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "originalAcquisition": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "originalCustody": {
+          "$ref": "#/$defs/OriginalReceiptIdentity"
+        },
+        "planSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "sealed_stage_metadata_admission"
+        },
+        "revocationRevision": {
+          "$ref": "#/$defs/Positive"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        },
+        "stageDefinitionSha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "stage",
+        "planSha256",
+        "stageDefinitionSha256",
+        "intentSha256",
+        "metadataAuthorizationReceiptId",
+        "metadataAuthorizationReceiptSha256",
+        "originalAcquisition",
+        "originalCustody",
+        "authenticatedActorBindingSha256",
+        "custodyRevision",
+        "revocationRevision",
+        "admittedAt",
+        "admissionSha256"
+      ],
+      "type": "object"
+    },
+    "SettledStage": {
+      "additionalProperties": false,
+      "properties": {
+        "engineExecutionId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "engineStopReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "resultCustodyReceiptIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "settledAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        },
+        "terminalState": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        }
+      },
+      "required": [
+        "stage",
+        "engineExecutionId",
+        "terminalState",
+        "engineStopReceiptId",
+        "resultCustodyReceiptIds",
+        "settledAt"
+      ],
+      "type": "object"
+    },
+    "Sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Slug": {
+      "maxLength": 128,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+      "type": "string"
+    },
+    "SourceMetadataReauthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "checkedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "metadataExpiresAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "metadataOperationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "originalCustodyReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "originalObjects": {
+          "items": {
+            "$ref": "#/$defs/OriginalObjectBinding"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "payloadBudgetLedgerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "original_source_reauthorization"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "receiptId",
+        "stage",
+        "originalCustodyReceiptId",
+        "originalObjects",
+        "checkedAt",
+        "metadataExpiresAt",
+        "metadataOperationId",
+        "payloadBudgetLedgerId"
+      ],
+      "type": "object",
+      "x-status": "Superseded compact v3 summary; not an accepted authority message. Full addendum AuthorizedResponse is required; paired owners must decide whether to remove this redundant type."
+    },
+    "StageBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "continuationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "engine": {
+          "$ref": "#/$defs/Engine"
+        },
+        "reservationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "reservationReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "stageId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "stageOrdinal": {
+          "maximum": 2,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workerId": {
+          "$ref": "#/$defs/WorkerId"
+        },
+        "workerImageDigest": {
+          "$ref": "#/$defs/Sha256"
+        }
+      },
+      "required": [
+        "binding",
+        "stageId",
+        "stageOrdinal",
+        "engine",
+        "workerId",
+        "workerImageDigest",
+        "reservationId",
+        "reservationReceiptId",
+        "continuationId"
+      ],
+      "type": "object"
+    },
+    "StageContinuation": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "continuationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "nextStage": {
+          "$ref": "#/$defs/StageBinding"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "originalCustodyReceiptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payloadBudgetLedgerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "previousResultManifestSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previousStageId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reauthorizationReceiptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "dispatched",
+            "outcome_unknown",
+            "result_observed",
+            "accepted",
+            "held"
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "binding",
+        "continuationId",
+        "previousStageId",
+        "nextStage",
+        "previousResultManifestSha256",
+        "originalCustodyReceiptId",
+        "reauthorizationReceiptId",
+        "payloadBudgetLedgerId",
+        "state",
+        "operationId"
+      ],
+      "type": "object"
+    },
+    "StageResultReference": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptanceReceiptIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "requiredArtifactIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "resultManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resultSetId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "stage": {
+          "$ref": "#/$defs/StageBinding"
+        }
+      },
+      "required": [
+        "stage",
+        "resultSetId",
+        "resultManifestSha256",
+        "requiredArtifactIds",
+        "acceptanceReceiptIds"
+      ],
+      "type": "object"
+    },
+    "Submission": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilityFingerprint": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "contractFingerprint": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "inputManifest": {
+          "$ref": "#/$defs/InputManifest"
+        },
+        "pipeline": {
+          "$ref": "#/$defs/Pipeline"
+        },
+        "protocol": {
+          "const": "ltds-reference-outer-v2-proposed"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "submissionId": {
+          "$ref": "#/$defs/SubmissionUUID"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "protocol",
+        "submissionId",
+        "inputManifest",
+        "pipeline",
+        "capabilityFingerprint",
+        "contractFingerprint"
+      ],
+      "type": "object"
+    },
+    "SubmissionUUID": {
+      "maxLength": 36,
+      "minLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "Time": {
+      "format": "date-time",
+      "maxLength": 24,
+      "minLength": 24,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+      "type": "string"
+    },
+    "TreeDarBundleLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "maxArchiveBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxControlProofBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxFiles": {
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxManifestBytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxRawBytes": {
+          "$ref": "#/$defs/Positive"
+        },
+        "maxValidationDiskBytes": {
+          "$ref": "#/$defs/Positive"
+        }
+      },
+      "required": [
+        "maxArchiveBytes",
+        "maxRawBytes",
+        "maxFiles",
+        "maxManifestBytes",
+        "maxControlProofBytes",
+        "maxValidationDiskBytes"
+      ],
+      "type": "object"
+    },
+    "TreeDarRequest": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "requested": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "bundleContract": {
+                "const": null
+              },
+              "inputObjectIds": {
+                "items": {
+                  "$ref": "#/$defs/Slug"
+                },
+                "maxItems": 0,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "provenanceReceiptId": {
+                "const": null
+              },
+              "requestedProducts": {
+                "items": {
+                  "const": "native_bundle"
+                },
+                "maxItems": 0,
+                "minItems": 0,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "requested": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "bundleContract": {
+                "const": "ltds-treedar-bundle-v1"
+              },
+              "inputObjectIds": {
+                "items": {
+                  "$ref": "#/$defs/Slug"
+                },
+                "maxItems": 10000,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "provenanceReceiptId": {
+                "$ref": "#/$defs/Slug"
+              },
+              "requestedProducts": {
+                "items": {
+                  "const": "native_bundle"
+                },
+                "maxItems": 1,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "bundleContract": {
+          "anyOf": [
+            {
+              "const": "ltds-treedar-bundle-v1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputObjectIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "provenanceReceiptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Slug"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested": {
+          "type": "boolean"
+        },
+        "requestedProducts": {
+          "items": {
+            "const": "native_bundle"
+          },
+          "maxItems": 1,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "requested",
+        "inputObjectIds",
+        "provenanceReceiptId",
+        "bundleContract",
+        "requestedProducts"
+      ],
+      "type": "object"
+    },
+    "UUID": {
+      "maxLength": 36,
+      "minLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "WorkerId": {
+      "maxLength": 64,
+      "not": {
+        "pattern": "[^A-Za-z0-9_-]"
+      },
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:ltds:reference-v2:candidate:review-only",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Schema-style review artifact, not installed validation or authority. Lexical/semantic/authentication rules are additionally mandatory.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Submission"
+    },
+    {
+      "$ref": "#/$defs/OriginalLidarCustodyProof"
+    },
+    {
+      "$ref": "#/$defs/ProducerCustodyReceipt"
+    },
+    {
+      "$ref": "#/$defs/ResultManifest"
+    },
+    {
+      "$ref": "#/$defs/PartialAcceptance"
+    },
+    {
+      "$ref": "#/$defs/ParentCompletion"
+    },
+    {
+      "$ref": "#/$defs/StageContinuation"
+    },
+    {
+      "$ref": "#/$defs/CleanupAck"
+    },
+    {
+      "$ref": "#/$defs/PointcloudZipManifest"
+    },
+    {
+      "$ref": "#/$defs/ExecutionSettledReceipt"
+    },
+    {
+      "$ref": "#/$defs/HeavyCapacityReleaseReceipt"
+    },
+    {
+      "$ref": "#/$defs/ImmutableMetadataIntent"
+    },
+    {
+      "$ref": "#/$defs/AuthorizedResponse"
+    },
+    {
+      "$ref": "#/$defs/DeniedResponse"
+    },
+    {
+      "$ref": "#/$defs/SealedStageAdmission"
+    }
+  ],
+  "title": "Unagreed reference outer-v2 candidate plus metadata addendum",
+  "x-maximumDepth": 32,
+  "x-sourcePins": {
+    "contract-proposal-v3.json": "23918d2263a91ca6c91501fd35bdf52fb60826c2ab6c33e06596b37688671be5",
+    "metadata-reauthorization-addendum-v1.json": "502491feee2f8e52df49e87ce51e0f26a2fa3c2e0b6ed9431b8423f794358242"
+  },
+  "x-status": [
+    "UNAGREED",
+    "NOTWIRECOMPATIBLE",
+    "NOTACTIVATED"
+  ],
+  "x-unsafeKeys": [
+    "__proto__",
+    "prototype",
+    "constructor"
+  ],
+  "x-wholeMessageBytes": 4194304
+}
