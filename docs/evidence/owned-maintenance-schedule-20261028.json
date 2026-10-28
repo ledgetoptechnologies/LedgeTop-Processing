@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Owned scheduling API and begin-before-ingress update integration, with source-only supervisor regression",
+  "fullRegression": {
+    "command": "python -B -m unittest discover -s tests",
+    "environment": "isolated cached Linux container; no network; read-only repository",
+    "passed": 761,
+    "skipped": 0,
+    "seconds": 73.881,
+    "exitCode": 0,
+    "warnings": [
+      "One DeprecationWarning for intentional os.fork() ownership-guard test in a multithreaded test process"
+    ]
+  },
+  "windowsVerification": {
+    "command": "python -B -m unittest tests.test_owned_maintenance_schedule",
+    "passed": 10,
+    "skipped": 0,
+    "seconds": 5.807,
+    "exitCode": 0
+  },
+  "review": "Independent source review found no remaining blocking defects after begin-before-close and post-drain idle fixes; Windows test database handles explicitly closed",
+  "runtimeChanged": false,
+  "nasCommandsExecuted": false,
+  "imagesPulledOrPublished": false,
+  "automaticUpdatesEnabled": false,
+  "coveredFailures": [
+    "Lost scheduling HTTP response after commit and coordinator restart",
+    "Concurrent identical schedules produce one plan",
+    "Changed request bindings and operator-only receipt authentication",
+    "Schedule plus receipt insertion transaction rollback",
+    "Cancellation or peer reschedule before begin cannot close ingress",
+    "Lost begin token response cannot close ingress or repeat replacement",
+    "Failed reserved ingress close cannot trigger replacement or rollback",
+    "New engine work registered during ingress drain cannot be replaced",
+    "Lost final pin, ingress or finish checkpoints do not replay Docker",
+    "Repeated image adoption uses durable host generation and source-only supervisor receipts"
+  ],
+  "remaining": [
+    "Production maintenance adapter and isolated engine qualifier are not installed",
+    "Qualification needs physical/global execution admission",
+    "No live release channel, maintenance timer or automatic update acceptance enabled",
+    "NAS broker/source retention and full Viewer handoff acceptance remain incomplete"
+  ],
+  "sourceSha256": {
+    "processing/maintenance.py": "957dc7172cb97577c26817ab95d6980c14d9520e7f37278c43dfd7ecc1010077",
+    "processing/app.py": "b05ce7e135138f0fb51aebad80fafb0084ca157cc7e372380d673844269d7e29",
+    "processing/container_update.py": "57391c030487647d90459c66d39f1b232dfdc58f4c1b01ca9a1025f5af4ed121",
+    "ops/node_maintenance.py": "8e2e13300b131e5b9de5bf5659d0715e306574b2a6a2b3655e8244746e97239a",
+    "processing/update_supervisor.py": "05294051bf80dec23ae7455293e63eb00775887370dd40f7b66f2f7a08316070",
+    "tests/test_owned_maintenance_schedule.py": "a281980f707c0561677729dc3a3e48bec0a20d8693d13cdb1d7a3b011e0dc2d8",
+    "tests/test_container_update.py": "67056561bdeed4b74cc264190a6cedf77aadfd0cb43e18a416cd76e7cecd1222",
+    "tests/test_managed_maintenance.py": "22bb2de0b7b7ab635b38c6a014029c2b651f57c3636bc5169826cf983dd22f82",
+    "tests/test_managed_update_finalization.py": "758753c6ff1a352e0a3ab3b91b4b1992e8930338f45a2ca6a0d13bd6904b3780",
+    "tests/test_update_supervisor.py": "843ffa5a3b8620e4fc2799a00dc66d70330347c4ec7c286853dd1aa3ddb85c36",
+    "docs/owned-maintenance-schedule.md": "b593d86fe7ce418b8935a5b2cc3a3c46d659c42a456e91597c7808b6f516085e",
+    "docs/managed-update-finalization.md": "e535a02f2bdfd03e028e24b6af7bfa8dd3ed4c920853a6508d831a463b924e3e",
+    "docs/update-supervisor.md": "424ae9a4fd56fb7a141b39df92acf35ebea582c21ee4cd53345a99f16cdbe5a2"
+  }
+}

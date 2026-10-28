@@ -24,7 +24,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
         save(self.root / 'compose.json', {'services': {'node': {'image': self.old}}})
         self.api = MagicMock(origin='http://127.0.0.1:18080')
         self.node = {'state': 'draining', 'notBefore': '2020-01-01T00:00:00Z',
-                     'planId': 'original-plan', 'targetImage': self.new}
+                     'planId': 'original-plan', 'targetImage': self.new,'revision':1}
         self.api.json.side_effect = lambda method, path: (
             {'jobs': []} if path.endswith('/jobs') else
             {'authorityId': 'authority'} if path.endswith('/authority') else {'node': self.node})
@@ -68,6 +68,13 @@ class ManagedMaintenanceTests(unittest.TestCase):
         save(self.ingress.root/'state.json',state)
         return dict(state=state['state'],containerId='owned-proxy',oldWorkersDrained=True)
 
+    def executed(self,result):
+        def invoke(*args,**kwargs):
+            self.node.update(state='updating',revision=2)
+            kwargs['on_reserved'](dict(nodeId='main',planId='original-plan',targetImage=self.new,reservedRevision=2))
+            return result
+        return invoke
+
     def test_unresolved_host_reservation_never_updates_or_reopens(self):
         self.gate.snapshot.return_value['reservation'] = {'receiptId': 'unresolved'}
         with self.context(), patch('ops.node_maintenance.execute') as execute:
@@ -85,7 +92,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
         self.ingress.change.assert_not_called()
 
     def test_failed_update_keeps_ingress_closed_and_old_persistent_pin(self):
-        with self.context(), patch('ops.node_maintenance.execute', return_value={'status': 'failed'}):
+        with self.context(), patch('ops.node_maintenance.execute', side_effect=self.executed({'status': 'failed'})):
             self.assertEqual(run(self.root, self.api, MagicMock(), self.receipt, 0)['ingress'], 'closed')
         self.ingress.change.assert_called_once_with(True, seconds=60)
         self.assertEqual(json.loads((self.root / 'compose.json').read_text())['services']['node']['image'], self.old)
@@ -96,7 +103,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
                 self.assertEqual(json.loads((self.root / 'compose.json').read_text())['services']['node']['image'], self.new)
             return self.change(closed,**kwargs)
         self.ingress.change.side_effect = change
-        with self.context(), patch('ops.node_maintenance.execute', return_value={'status': 'succeeded', 'image': self.new}) as execute:
+        with self.context(), patch('ops.node_maintenance.execute', side_effect=self.executed({'status': 'succeeded', 'image': self.new})) as execute:
             self.assertEqual(run(self.root, self.api, MagicMock(), self.receipt, 0)['ingress'], 'open')
             with self.assertRaises(GateError):
                 run(self.root, self.api, MagicMock(), self.receipt, 0)
@@ -113,7 +120,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
         self.api.json.side_effect = api
         with self.context(), patch('ops.node_maintenance.NodeGate') as host, \
                 patch('ops.node_maintenance.time.sleep') as sleep, \
-                patch('ops.node_maintenance.execute', return_value={'status': 'succeeded', 'image': self.new}) as execute:
+                patch('ops.node_maintenance.execute', side_effect=self.executed({'status': 'succeeded', 'image': self.new})) as execute:
             host.return_value.__enter__.side_effect = [GateBusy('busy'), self.gate]
             self.assertEqual(run(self.root, self.api, MagicMock(), self.receipt, 60)['status'], 'succeeded')
             self.assertEqual(sleep.call_count, 2)

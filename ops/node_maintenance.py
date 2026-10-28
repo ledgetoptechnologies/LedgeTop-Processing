@@ -139,10 +139,17 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
     return result
 
 
-def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
+def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_plan_id=None,expected_target=None):
     settings = json.loads((root / 'maintenance.json').read_text())
-    ingress = Ingress(root / 'ingress')
     node_id = settings['nodeId']
+    if (expected_plan_id is None)!=(expected_target is None):
+        raise GateError('frozen plan and target must be supplied together')
+    def fence(value):
+        if expected_plan_id is not None and (value.get('planId')!=expected_plan_id or value.get('targetImage')!=expected_target):
+            raise GateError('expected maintenance plan or target changed')
+    if expected_plan_id is not None:
+        fence(api.json('GET','/v1/prototype/nodes/'+node_id)['node'])
+    ingress = Ingress(root / 'ingress')
     args=adapter_args(root,settings,ingress)
     adapter = ComposeNode(args, receipt)
     deadline = time.monotonic() + wait_seconds
@@ -154,10 +161,12 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
             if (state.get('binding')!=binding or state.get('stage') not in ('ingress_closed','update_returned',
                     'compose_pin_pending','compose_pinned','ingress_open_pending','finish_pending','completed')):
                 raise GateError('frozen managed operation binding changed')
+            fence(state)
             private=deferred_receipt(receipt,node_id,expected_plan_id=state['planId'],expected_target=state['targetImage'])
             final=dict(healthy=True,image=state['targetImage'],previousImage=private['oldImage'],
                 composePinUpdateRequired=False,persistentComposePin=state['targetImage'],ingress='open')
             node=api.json('GET','/v1/prototype/nodes/'+node_id)['node']
+            fence(node)
             if finish_matches(node,private,final):
                 return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,already_finished=True)
             if (node.get('state')!='updating' or node.get('revision')!=private['reservedRevision']
@@ -172,11 +181,17 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
                 if (current['reservation'] is not None or current['nodeId']!=node_id
                         or current['coordinatorOrigin']!=api.origin or current['authorityId']!=authority):
                     raise GateError('host gate binding/reservation mismatch')
+                current_node=api.json('GET','/v1/prototype/nodes/'+node_id)['node']
+                fence(current_node)
+                if (current_node.get('state')!='updating' or current_node.get('revision')!=private['reservedRevision']
+                        or current_node.get('planId')!=state['planId'] or current_node.get('targetImage')!=state['targetImage']):
+                    raise GateError('frozen operation changed while acquiring host gate')
                 return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds)
         if (receipt/'update.json').exists():
             raise GateError('unbound update receipt requires inspection')
         while True:
             node = api.json('GET', '/v1/prototype/nodes/' + node_id)['node']
+            fence(node)
             if node['state'] not in ('scheduled', 'draining'):
                 return {'status': 'not_eligible', 'nodeState': node['state']}
             due = datetime.fromisoformat(node['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)
@@ -206,23 +221,31 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
                     or binding['coordinatorOrigin'] != api.origin or binding['authorityId'] != authority):
                 raise GateError('host gate binding/reservation mismatch')
             current = api.json('GET', '/v1/prototype/nodes/' + node_id)['node']
+            fence(current)
             if current['planId'] != node['planId'] or current['targetImage'] != node['targetImage']:
                 raise GateError('maintenance plan changed while closing ingress')
-            state['stage'] = 'ingress_close_pending'
-            save(receipt / 'managed-update.json', state)
-            closed=ingress.change(True, seconds=drain_seconds)
-            if (type(closed) is not dict or closed.get('state')!='closed' or closed.get('oldWorkersDrained') is not True
-                    or type(closed.get('containerId')) is not str):
-                raise GateError('owned ingress close was not proven')
-            state.update(stage='ingress_closed',closedIngress=closed)
-            save(receipt / 'managed-update.json', state)
+            def close_reserved(reserved):
+                current=api.json('GET','/v1/prototype/nodes/'+node_id)['node']
+                fence(current)
+                if (current.get('state')!='updating' or current.get('revision')!=reserved['reservedRevision']
+                        or current.get('planId')!=state['planId'] or current.get('targetImage')!=state['targetImage']
+                        or reserved['nodeId']!=node_id or reserved['planId']!=state['planId']
+                        or reserved['targetImage']!=state['targetImage']):
+                    raise GateError('owned reservation changed before ingress close')
+                state['stage']='ingress_close_pending';save(receipt/'managed-update.json',state)
+                closed=ingress.change(True,seconds=drain_seconds)
+                if (type(closed) is not dict or closed.get('state')!='closed' or closed.get('oldWorkersDrained') is not True
+                        or type(closed.get('containerId')) is not str):
+                    raise GateError('owned ingress close was not proven')
+                state.update(stage='ingress_closed',closedIngress=closed)
+                save(receipt/'managed-update.json',state)
             result = execute(api, operator, adapter, node_id, receipt,
                 wait_seconds=max(0, deadline - time.monotonic()), health_seconds=30,
-                expected_plan_id=node['planId'], expected_target=node['targetImage'],defer_finish=True)
+                expected_plan_id=node['planId'], expected_target=node['targetImage'],defer_finish=True,on_reserved=close_reserved)
             state.update(stage='update_returned', result=result)
             save(receipt / 'managed-update.json', state)
             if result['status'] != 'succeeded':
-                return {**result, 'ingress': 'closed'}
+                return {**result,'ingress':'closed' if state.get('closedIngress') else 'unchanged'}
             return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds)
 
 

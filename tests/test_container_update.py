@@ -246,6 +246,20 @@ class MaintenanceUpdateTests(unittest.TestCase):
         self.assertEqual(self.queue.get_node('cluster')['state'],'held')
         self.assertEqual(self.adapter.calls,[NEW])
 
+    def test_busy_after_reserved_callback_never_replaces_or_rolls_back(self):
+        self.plan()
+        def drained(reserved):
+            self.assertEqual(self.queue.get_node('cluster')['state'],'updating')
+            receipt=json.loads((self.work/'update.json').read_text())
+            self.assertIn('updateToken',receipt)
+            self.assertNotIn('updateToken',reserved)
+            self.adapter.busy=True
+        with self.assertRaises(UpdateError):
+            execute(self.api,self.operator,self.adapter,'cluster',self.work,health_seconds=0,
+                defer_finish=True,on_reserved=drained)
+        self.assertEqual(self.adapter.calls,[])
+        self.assertEqual(self.queue.get_node('cluster')['state'],'updating')
+
 
 class ComposeBoundaryTests(unittest.TestCase):
     def setUp(self):

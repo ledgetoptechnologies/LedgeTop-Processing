@@ -46,8 +46,8 @@ class ManagedFinalizationTests(unittest.TestCase):
                 state=json.loads((self.root/'state.json').read_text())
                 return (200,self.backend(update_fixture.NEW)) if state['state']=='open' else (503,None)
             def change(self,closed,expected=None,seconds=60):
+                owner.assertEqual(owner.fixture.queue.get_node('cluster')['state'],'updating')
                 if not closed:
-                    owner.assertEqual(owner.fixture.queue.get_node('cluster')['state'],'updating')
                     owner.assertEqual(json.loads((owner.root/'compose.json').read_text())['services']['node']['image'],update_fixture.NEW)
                     self.opens+=1
                 state=dict(state='closed' if closed else 'opening' if self.unknown_open else 'open',
@@ -57,9 +57,16 @@ class ManagedFinalizationTests(unittest.TestCase):
                 if not closed and (self.fail_open or self.unknown_open):raise GateError('synthetic lost ingress response')
                 return dict(state=state['state'],oldWorkersDrained=True,containerId='owned-proxy')
         self.ingress=Ingress()
+        save(self.ingress.root/'state.json',dict(state='open',containerId='owned-proxy',oldWorkers=[],expectedBackendImage=update_fixture.OLD))
         inspect=self.adapter.inspect
         self.adapter.inspect=lambda:dict(inspect(),Id='owned-backend')
         self.adapter.serving=lambda image:self.adapter.current==image and not (self.adapter.bad_health and image==update_fixture.NEW)
+        replace=self.adapter.replace
+        def closed_before_replace(image):
+            self.assertEqual(json.loads((self.ingress.root/'state.json').read_text())['state'],'closed')
+            self.assertEqual(self.fixture.queue.get_node('cluster')['state'],'updating')
+            replace(image)
+        self.adapter.replace=closed_before_replace
         def compose(args,receipt):
             self.assertEqual(args.node_origin,'http://127.0.0.1:25001')
             self.assertEqual(args.expected_engine,'odm')
@@ -83,6 +90,64 @@ class ManagedFinalizationTests(unittest.TestCase):
         self.assertNotIn(self.ingress.config['backendToken'],json.dumps(result))
         self.assertEqual(self.run_update(),result)
         self.assertEqual(self.ingress.opens,1)
+
+    def test_expected_plan_fence_refuses_peer_plan_replacement_before_run(self):
+        before=self.fixture.queue.get_node('cluster')
+        self.operator.json('POST','/v1/prototype/nodes/cluster/cancel',dict(planId=before['planId'],expectedRevision=before['revision']))
+        peer=self.fixture.plan()
+        self.assertNotEqual(peer['planId'],before['planId'])
+        with self.assertRaises(GateError):
+            maintenance.run(self.root,self.api,self.operator,self.receipt,0,
+                expected_plan_id=before['planId'],expected_target=update_fixture.NEW)
+        self.assertEqual(self.adapter.calls,[])
+        self.assertEqual(json.loads((self.ingress.root/'state.json').read_text())['state'],'open')
+        self.assertFalse((self.receipt/'managed-update.json').exists())
+        self.assertEqual(self.fixture.queue.get_node('cluster')['planId'],peer['planId'])
+        self.assertEqual(json.loads((self.root/'compose.json').read_text())['services']['node']['image'],update_fixture.OLD)
+
+    def begin_cancel(self,reschedule):
+        original=self.operator.json
+        def raced(method,route,payload=None):
+            if route.endswith('/begin'):
+                node=self.fixture.queue.get_node('cluster')
+                original('POST','/v1/prototype/nodes/cluster/cancel',dict(planId=node['planId'],expectedRevision=node['revision']))
+                if reschedule:self.fixture.plan()
+            return original(method,route,payload)
+        with patch.object(self.operator,'json',side_effect=raced):
+            with self.assertRaises(SmokeError):self.run_update()
+        self.assertEqual(self.adapter.calls,[])
+        self.assertEqual(json.loads((self.ingress.root/'state.json').read_text())['state'],'open')
+        self.assertEqual(json.loads((self.root/'compose.json').read_text())['services']['node']['image'],update_fixture.OLD)
+
+    def test_cancel_only_racing_begin_cannot_close_ingress(self):self.begin_cancel(False)
+
+    def test_cancel_and_peer_plan_racing_begin_cannot_close_ingress(self):self.begin_cancel(True)
+
+    def test_lost_begin_ack_leaves_ingress_open_and_never_repeats_begin_or_docker(self):
+        original=self.operator.json;begins=[]
+        def lost(method,route,payload=None):
+            value=original(method,route,payload)
+            if route.endswith('/begin'):
+                begins.append(route);raise SmokeError('synthetic lost begin token')
+            return value
+        with patch.object(self.operator,'json',side_effect=lost):
+            with self.assertRaises(SmokeError):self.run_update()
+        with self.assertRaises(GateError):self.run_update()
+        self.assertEqual(len(begins),1)
+        self.assertEqual(self.fixture.queue.get_node('cluster')['state'],'updating')
+        self.assertEqual(json.loads((self.ingress.root/'state.json').read_text())['state'],'open')
+        self.assertEqual(self.adapter.calls,[])
+
+    def test_failed_reserved_ingress_close_holds_without_replace_or_rollback(self):
+        original=self.ingress.change
+        def failed(closed,**kwargs):
+            result=original(closed,**kwargs)
+            if closed:raise GateError('synthetic unknown close result')
+            return result
+        with patch.object(self.ingress,'change',side_effect=failed):
+            with self.assertRaises(GateError):self.run_update()
+        self.assertEqual(self.adapter.calls,[])
+        self.assertEqual(self.fixture.queue.get_node('cluster')['state'],'updating')
 
     def test_lost_checkpoint_after_durable_pin_only_resumes_finalization(self):
         original=maintenance.save

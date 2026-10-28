@@ -105,8 +105,9 @@ timestamps, expected coordinator revision, and complete schedule body before a
 POST. A lost response requires a durable owned-request receipt lookup. Plain
 node GET with a matching target does **not** prove ownership. The legacy
 maintenance schedule API generates a plan UUID without caller correlation;
-that API alone cannot satisfy this recovery contract. An owned scheduling
-endpoint is separate integration work. Before run, the adapter must verify the
+that API alone cannot satisfy this recovery contract. The source now provides
+an [owned scheduling endpoint](owned-maintenance-schedule.md), but it must be
+installed and connected by the production adapter before use. Before run, the adapter must verify the
 coordinator still exposes its exact frozen plan/revision and not a later peer
 plan. Run and completion lookup must use only the supplied own receipt directory
 and actual managed finalization evidence; credentials/update tokens stay private

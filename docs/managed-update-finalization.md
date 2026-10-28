@@ -34,6 +34,14 @@ adds no CPU, RAM, or PID limits to main and does not remove cluster settings.
 
 ## Success ordering
 
+Existing jobs drain while ingress remains open. Before closing ingress, the
+runner acquires the exact coordinator begin CAS and saves its private update
+token and revision durably. A trusted `on_reserved` callback then closes and
+drains only that ingress. A final engine-idle check follows the drain, before
+any replacement intent. Lost begin responses, cancellation, failed drain, or
+new engine work leave replacement unissued; callback failures cannot trigger
+a rollback that recreates the old container.
+
 `execute(..., defer_finish=True)` leaves definite replacement success in private
 `update.json` at `finalization_pending`. The coordinator node remains `updating`;
 the update token stays only in that private receipt. The default standalone

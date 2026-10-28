@@ -247,10 +247,13 @@ def wait_healthy(adapter, image, seconds):
 
 
 def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
-            health_seconds=30, poll_seconds=3, *, expected_plan_id=None, expected_target=None,defer_finish=False):
+            health_seconds=30, poll_seconds=3, *, expected_plan_id=None, expected_target=None,defer_finish=False,
+            on_reserved=None):
     path = root / 'update.json'
     if type(defer_finish) is not bool:
         raise UpdateError('explicit completion policy required')
+    if on_reserved is not None and not callable(on_reserved):
+        raise UpdateError('trusted reservation callback required')
     if path.exists() or path.is_symlink():
         raise UpdateError('existing update receipt; never replay an uncertain update')
     deadline = time.monotonic() + wait_seconds
@@ -286,6 +289,16 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
     save(path, receipt)
     if not adapter.idle():
         raise UpdateError('engine changed after reservation; leave gate for inspection')
+    if on_reserved is not None:
+        receipt['stage']='reserved_hook_pending';save(path,receipt)
+        # Deliberately outside replacement/rollback handling: an uncertain
+        # ingress drain must never recreate either container or finish success.
+        on_reserved(dict(nodeId=node_id,planId=receipt['planId'],targetImage=target,
+            reservedRevision=receipt['reservedRevision']))
+        if not adapter.idle():
+            raise UpdateError('engine changed while reserved ingress drained; inspect without replacement')
+        receipt.update(stage='reserved_ready',reservationCallbackCompleted=True)
+        save(path,receipt)
     try:
         receipt['stage'] = 'replace_pending'
         save(path, receipt)
