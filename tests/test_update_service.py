@@ -224,6 +224,26 @@ class ServiceTests(unittest.TestCase):
         self.supervisor.close()
         with self.assertRaises(SupervisorError):self.service.tick()
 
+    def test_foreign_sqlite_schema_is_refused_before_any_service_table_creation(self):
+        path=self.root/'foreign.sqlite'
+        db=sqlite3.connect(path)
+        try:
+            db.execute('CREATE TABLE foreign_progress(id INTEGER PRIMARY KEY,value TEXT NOT NULL)')
+            db.execute("INSERT INTO foreign_progress VALUES(1,'unchanged')");db.commit()
+            before_schema=db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name').fetchall()
+        finally:db.close()
+        os.chmod(path,0o600);before=path.read_bytes()
+        with self.assertRaisesRegex(ServiceHeld,'unrelated_service_journal_schema'):
+            UpdateService(path,supervisor=self.supervisor,config_id='fixture-v1',code_binding_sha256='c'*64,
+                capacity_admitter=self.admit,capacity_releaser=self.release,
+                idle_probe=lambda status:True,can_schedule=lambda status:True)
+        self.assertEqual(path.read_bytes(),before)
+        db=sqlite3.connect(path)
+        try:
+            self.assertEqual(db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name').fetchall(),before_schema)
+            self.assertEqual(db.execute('SELECT * FROM foreign_progress').fetchall(),[(1,'unchanged')])
+        finally:db.close()
+
     @unittest.skipUnless(os.name=='posix','actual fork PID guard')
     def test_forked_service_refuses_before_inherited_mutex_and_cannot_unlock_owner(self):
         reader,writer=os.pipe()

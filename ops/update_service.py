@@ -27,6 +27,13 @@ def policy_map(value,policy_type):
     return dict(closed(value,(field.name for field in fields(policy_type))))
 
 
+def absolute_config_path(value):
+    if (type(value) is not str or not value or any(c in value for c in '\r\n\0')
+            or not Path(value).is_absolute() or str(Path(value))!=value or '..' in Path(value).parts):
+        raise ServiceConfigurationError('literal_absolute_state_path_required')
+    return Path(value)
+
+
 def code_binding_sha256():
     """Pin executable project sources, excluding data, docs and generated caches."""
     root=Path(__file__).resolve().parents[1];files={}
@@ -91,7 +98,7 @@ def parse_configuration(raw):
     from processing.update_registry import RegistryPolicy,RegistryChannel
     from processing.update_qualifier import StartupPolicy
     from processing.update_supervisor import SupervisorPolicy
-    from processing.update_capacity import CapacityPolicy
+    from processing.update_capacity import CapacityPolicy,canonical_capacity_path
     from ops.update_maintenance_adapter import ScheduleWindow
     raw=json.loads(canonical(raw))
     closed(raw,('schemaVersion','serviceId','codeBindingSha256','registry','qualification','maintenance','supervisor','capacity','service'))
@@ -128,6 +135,14 @@ def parse_configuration(raw):
     for key,minimum,maximum in (('discoveryIntervalSeconds',60,604800),('errorCooldownSeconds',1,86400),('maxTransitions',1,8)):
         value=raw['service'][key]
         if type(value) is not int or not minimum<=value<=maximum:raise ServiceConfigurationError('bounded_service_settings_required')
+    states=[absolute_config_path(raw[key]['statePath']) for key in ('registry','qualification','supervisor','service')]
+    states.append(absolute_config_path(raw['maintenance']['statePath']))
+    sidecars={Path(str(path)+suffix) for path in states for suffix in ('.lock','-journal','-wal','-shm')}
+    forbidden=(absolute_config_path(raw['maintenance']['managedRoot']),Path(__file__).resolve().parents[1],canonical_capacity_path(registry.engine_id).parent)
+    if (len(set(states))!=len(states) or set(states)&sidecars
+            or any(path.is_relative_to(folder) for path in states for folder in forbidden)
+            or {Path(p) for p in capacity.legacy_capacity_journals}&(set(states)|sidecars)):
+        raise ServiceConfigurationError('dedicated_disjoint_state_paths_required')
     return Configuration(raw,registry,startup,supervisor,capacity,window)
 
 

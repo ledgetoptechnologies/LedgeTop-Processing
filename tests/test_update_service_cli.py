@@ -15,7 +15,7 @@ from ops import update_service as module
 from processing.update_registry import RegistryPolicy,RegistryChannel,RegistryNotStaged,RegistryHeld
 from processing.update_qualifier import StartupPolicy,PROBE_SHA
 from processing.update_supervisor import SupervisorPolicy
-from processing.update_capacity import CapacityPolicy
+from processing.update_capacity import CapacityPolicy,canonical_capacity_path
 from ops.update_maintenance_adapter import ScheduleWindow
 from processing.node_gate import NodeGate
 from processing.container_update import UpdateError
@@ -81,6 +81,17 @@ class ConfigurationTests(unittest.TestCase):
             raw=copy.deepcopy(self.raw);raw['service'][key]=value;cases.append(raw)
         for raw in cases:
             with self.subTest(raw=raw),self.assertRaises(ValueError):module.parse_configuration(raw)
+
+    def test_state_files_cannot_alias_other_journals_locks_or_managed_configuration(self):
+        cases=[]
+        raw=copy.deepcopy(self.raw);raw['registry']['statePath']=str(canonical_capacity_path('sibling-engine')/'capacity.sqlite3');cases.append(raw)
+        raw=copy.deepcopy(self.raw);raw['maintenance']['statePath']=raw['qualification']['statePath'];cases.append(raw)
+        raw=copy.deepcopy(self.raw);raw['maintenance']['statePath']=raw['supervisor']['statePath']+'.lock';cases.append(raw)
+        raw=copy.deepcopy(self.raw);raw['registry']['statePath']=str(self.root/'managed'/'maintenance.env');cases.append(raw)
+        raw=copy.deepcopy(self.raw);raw['capacity']['policy']['legacy_capacity_journals']=[raw['registry']['statePath']];cases.append(raw)
+        for raw in cases:
+            with self.subTest(raw=raw),self.assertRaisesRegex(ValueError,'dedicated_disjoint_state_paths_required'):
+                module.parse_configuration(raw)
 
     def test_private_json_rejects_duplicate_nan_oversize_hardlink_and_public_mode(self):
         for index,text in enumerate(('{"a":1,"a":2}','{"a":NaN}','x'*65537)):

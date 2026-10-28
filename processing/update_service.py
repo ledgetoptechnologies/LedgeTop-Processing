@@ -53,6 +53,9 @@ class UpdateService:
             if self.path.is_symlink():raise ServiceError('private_service_journal_required')
             fd=os.open(self.path,os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600);os.close(fd)
             with self._db() as db:
+                allowed={'service_binding','service_discovery','service_capacity_releases'}
+                names={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")}
+                if not names<=allowed:raise ServiceHeld('unrelated_service_journal_schema')
                 db.execute('CREATE TABLE IF NOT EXISTS service_binding(id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)')
                 db.execute('''CREATE TABLE IF NOT EXISTS service_discovery (
                     id INTEGER PRIMARY KEY CHECK(id=1),highwater REAL NOT NULL,next_due REAL NOT NULL,

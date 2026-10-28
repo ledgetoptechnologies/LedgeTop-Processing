@@ -34,6 +34,10 @@ not the current adopted image: the supervisor's durable current-image record
 remains authoritative across generations. The new capacity and service policies
 have separate bindings. The CLI checks cross-component node, authority, engine,
 paths, channel, capacity and qualification hashes before executing a tick.
+State files must be distinct from one another and their lock/SQLite sidecars,
+outside managed configuration, executable sources and the entire canonical
+image-staging namespace, including other Engine directories. The service journal
+also refuses an existing SQLite database containing another component's tables.
 
 ## Bootstrap and operation
 
