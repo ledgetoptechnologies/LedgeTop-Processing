@@ -37,10 +37,22 @@ producer result cleanup follows acceptance. See
 [reference-joint-flow.md](reference-joint-flow.md) and
 [joint handoff evidence](evidence/joint-reference-handoff-20261028.json).
 These are separately executed opt-in tests, not default-suite skip coverage.
-Runtime source is unchanged from the fully qualified `6bbd468` snapshot; only
-tests/exporter/documentation were added, so the full suite was not repeated.
+At that joint-test checkpoint, runtime source was unchanged from the qualified
+`6bbd468` snapshot; the full suite was not repeated for the test, exporter and
+documentation changes. The later incremental-upgrade helper is a separate delta.
 The backend and tiny input are synthetic, and Node returns `published:false`.
 No real geometry, project publication, NAS issuer or production mount is proved.
+
+The coordinator-only upgrade now has a locally built exact `6bbd468` image and
+an independently tested incremental history validator. The actual image passed
+22 startup/schema1/shutdown tests; all 63 packaged Processing files matched the
+frozen source. The final validator passed 10 independent tests and preserves
+the two existing owned-maintenance rows. See the
+[incremental upgrade plan](coordinator-incremental-upgrade-plan.md) and
+[preflight evidence](evidence/coordinator-incremental-preflight-20261028.json).
+Existing updater/bridge integration, complete application/state/configuration
+migration, rollback and fresh live gate checks still precede activation. The
+installed coordinator and updater directories have not changed in this work.
 
 Read-only inspection of that Viewer branch found the reference modules consumed
 only by tests/helper. Its app still selects the legacy provider in
