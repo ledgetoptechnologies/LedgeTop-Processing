@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-28T07:23:30.039807+00:00",
+  "purpose": "Source qualification of managed TreeDar runtime migration with retained results and crash-safe factory ownership",
+  "baseCommit": "bf78e9de36abc8ba276779837848dfdb95be9479",
+  "sourceHashScope": "Exact working-tree bytes mounted read-only during qualification; Git may normalize line endings",
+  "sourceHashes": {
+    "processing/treedar_runtime.py": "e335b97b763a0de747b31d22c77e8b93c62614743be40389fcf6465ec7c75eb0",
+    "processing/treedar_delivery.py": "914dc1273c60fd7e7d46a838435de77bb4aa2f64f78fc2a0646dfedbaebcefc0",
+    "processing/reference_execution.py": "4294f855b65932beef6da806f8f3d639c7b8a0a8cd561663cd896d9ccd86f6bc",
+    "processing/reference_driver.py": "3cac1368b534486f1c6db4a778f9d77d9b3078eeecf5b67b11c081451e36899f",
+    "ops/reference_worker_daemon.py": "e712e39b4233670caaabc73f32e3babbfac957e7169eec17b99848d57ec8924a",
+    "tests/test_treedar_runtime.py": "ce7cb5b6882d60dbbd5dfe7a9bd923e23552e3031559e6f0f980965cc4a295dd",
+    "tests/test_reference_treedar_factory_migration.py": "77a55ede329887ff7e27980d8e30349993f1e60f09291ce9f1fa514a31c9819b",
+    "tests/test_reference_worker_daemon_routing.py": "b0a956eb2ba8db3b81f372a22e87fd07f75d5bac6138ec3733e6be822a517cb0"
+  },
+  "tests": {
+    "fullLinux": {
+      "count": 688,
+      "passed": 688,
+      "skipped": 0,
+      "seconds": 58.094,
+      "network": "none",
+      "sourceMount": "read-only",
+      "temporaryFixtures": "container tmpfs removed on exit",
+      "imageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb"
+    },
+    "coreFocused": {
+      "count": 33,
+      "passed": 33
+    },
+    "consumerFocused": {
+      "count": 101,
+      "passed": 101,
+      "seconds": 9.376
+    },
+    "coveredPaths": [
+      "Actual composed factory/driver with SQLite queue, native HTTP fixture and controlled Docker transport",
+      "Old success/failure metadata-ACKed but Viewer-unaccepted artifacts and exact receipt acceptance after new runtime",
+      "Historical reads without old source/image or old controller execution; original engineVersions retained",
+      "New TreeDar and ODM jobs bind and execute once",
+      "Same active runtime recovers pending/uncertain start after restart with one total Docker start",
+      "Different runtime rejects pending gate, unknown stages, orphan controller/route/outbox/reservation evidence",
+      "Before/after FULL commit failure and exact CAS pointer reread; stale actors rejected",
+      "Actual frozen pre-managed constructor works before/failed publication and refuses after successful fresh/legacy managed publication",
+      "Symmetric pointer/marker/original evidence validation; exact v1 binding or JSON-null absence retained",
+      "Reader pin preservation and read-only historical controller/driver/router/outbox/ledger census",
+      "Owner lease retained through real blocked driver stage plus HTTP handler/reader drain"
+    ]
+  },
+  "review": {
+    "independentSource": "No blocking findings in frozen core or consumer code; full Linux execution gate subsequently passed",
+    "engineBootstrapSourceChanged": false,
+    "actualMainHostBootstrapEvidence": "main-treedar-bootstrap-20261028.json"
+  },
+  "runtime": {
+    "managedMigrationDeployed": false,
+    "installedCoordinatorCore": "e2ccf489ab41160acff3f90e2b4bcd568f72cf24",
+    "workerServicesActivated": false,
+    "nasIssuerInstalled": false,
+    "treeDarCapability": false,
+    "gaussianCapability": false,
+    "realDataProcessed": false,
+    "actualMainHostThisTurn": "Qualified image cache/source staging and ephemeral synthetic bootstrap only; existing services unchanged and both own drain plans reopened"
+  },
+  "remaining": [
+    "NAS SSH account/management connection and authenticated broker/provenance/source-retention implementation plus installation",
+    "Viewer owning blocked chat requires direct human resume; Claude UI/hierarchy findings open",
+    "Upgrade coordinator private execution-advice API and qualify worker/result services plus Viewer ingestion",
+    "Combined sequential ODM-to-TreeDar stage/final acceptance contract",
+    "Automatic registry update detection, release qualification and scheduled update supervision",
+    "User-selected smaller real-data trial"
+  ]
+}

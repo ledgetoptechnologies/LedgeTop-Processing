@@ -26,7 +26,157 @@ class RouteConflict(ValueError):
     """Unknown or immutable execution binding cannot safely be selected."""
 
 
+def _migration_rows(path, query):
+    """Read a quiescent journal without opening a component's write context."""
+    path=Path(path).absolute()
+    if not os.path.lexists(path):return []
+    if path.resolve()!=path or any(item.is_symlink() for item in (path,*path.parents)):
+        raise RouteConflict('migration_journal_unavailable')
+    info=path.stat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+            or (os.name!='nt' and (info.st_uid!=os.geteuid() or info.st_mode & 0o077))
+            or any(os.path.lexists(str(path)+suffix) for suffix in ('-wal','-shm','-journal'))):
+        raise RouteConflict('migration_journal_unavailable')
+    db=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
+    db.row_factory=sqlite3.Row
+    try:return [dict(row) for row in db.execute(query)]
+    finally:db.close()
+
+
 class ExecutionRouter:
+    @staticmethod
+    def migration_census(path, *, driver_path, physical_binding, odm_worker, failure_outbox, delivery_db, current_envelope):
+        """Closed read-only driver/route census under external exclusive owners."""
+        from .reference_driver import ReferenceDriver
+        drivers=ReferenceDriver.migration_census(driver_path,physical_binding=physical_binding)
+        rows=_migration_rows(path,'SELECT * FROM execution_routes ORDER BY job')
+        routes={row['job']:row for row in rows}
+        if len(routes)!=len(rows) or set(routes)!=set(drivers['jobs']):
+            raise RouteConflict('migration_driver_route_set_changed')
+        bindings=_migration_rows(path,'SELECT value FROM router_binding WHERE id=1')
+        if rows and len(bindings)!=1:raise RouteConflict('migration_router_binding_unavailable')
+        if bindings:
+            stored=json.loads(bindings[0]['value'])
+            if any(stored.get(key)!=physical_binding[key] for key in
+                    ('nodeId','workerId','engineId','authorityId','origin','gateGeneration')):
+                raise RouteConflict('migration_router_binding_changed')
+        projections={row['job']:dict(row) for row in delivery_db.execute('SELECT * FROM executions')}
+        odm_rows={row['job']:row for row in _migration_rows(odm_worker.path,'SELECT * FROM executions')}
+        expected_odm={job for job,row in routes.items() if row['kind']=='odm'}
+        if set(odm_rows)!=expected_odm:raise RouteConflict('migration_orphan_odm_intent')
+        tree_jobs={job for job,row in routes.items() if row['kind']=='treedar'}
+        if set(projections)!=tree_jobs:raise RouteConflict('migration_orphan_tree_projection')
+        storage=dict(reservations=_migration_rows(odm_worker.ledger.path,'SELECT * FROM reservations'),
+            success=_migration_rows(odm_worker.outbox.path,'SELECT * FROM completions'),
+            failure=_migration_rows(failure_outbox.path,'SELECT * FROM completions'),
+            successReceipts=_migration_rows(odm_worker.outbox.path,'SELECT * FROM durable_receipts'),
+            failureReceipts=_migration_rows(failure_outbox.path,'SELECT * FROM durable_receipts'))
+        for reserved in storage['reservations']:
+            if reserved['state']=='expired':continue
+            driver=drivers['jobs'].get(reserved['job'])
+            if (driver is None or reserved['state']!='terminal'
+                    or (reserved['generation'],reserved['environment'])!=(
+                        driver['binding']['generation'],driver['binding']['environment'])
+                    or json.loads(reserved['settings'])['manifest_sha256']!=driver['binding']['manifestSha256']):
+                raise RouteConflict('migration_orphan_scratch_reservation')
+        for key,field in (('success','outboxId'),('failure','failureOutboxId')):
+            expected={driver[field] for driver in drivers['jobs'].values() if driver[field] is not None}
+            if {record['id'] for record in storage[key]}!=expected:
+                raise RouteConflict('migration_orphan_terminal_outbox')
+            if {receipt['outbox'] for receipt in storage[key+'Receipts']}!=expected:
+                raise RouteConflict('migration_orphan_durable_receipt')
+            for record in storage[key]:
+                driver=drivers['jobs'].get(record['job'])
+                if (driver is None or record['id']!=driver[field] or record['state']!='acknowledged'
+                        or (record['generation'],record['environment'])!=(
+                            driver['binding']['generation'],driver['binding']['environment'])):
+                    raise RouteConflict('migration_terminal_outbox_not_closed')
+        jobs={}
+        for job_id,route in routes.items():
+            driver=drivers['jobs'][job_id]
+            binding=json.loads(route['binding']);runtime=json.loads(route['runtime'])
+            if binding!=driver['binding'] or route['kind']!=driver['kind']:
+                raise RouteConflict('migration_route_claim_changed')
+            if route['kind']=='odm':
+                ExecutionRouter._migration_odm_closed(route,driver,odm_rows[job_id],odm_worker,storage)
+                continue
+            if route['kind']!='treedar':raise RouteConflict('migration_pipeline_unavailable')
+            p._closed(runtime,('engineVersion','imageId','sourceSha256','workerJournal','controllerJournal'),'runtime')
+            local=projections[job_id]
+            if (local['phase']!='delivered' or json.loads(local['identity'])['job']!=binding
+                    or local['outcome'] not in ('succeeded','failed')):
+                raise RouteConflict('migration_tree_not_delivered')
+            succeeded=local['outcome']=='succeeded'
+            if (driver['outboxId']!=local['outbox_id'] or driver['failureOutboxId']!=local['failure_outbox_id']
+                    or (driver['stage']=='awaiting_acceptance' and not succeeded)
+                    or (driver['stage']=='awaiting_failure_acceptance' and succeeded)
+                    or (succeeded and driver['failureSha256'] is not None)
+                    or (not succeeded and driver['failureSha256']!=p.digest(json.loads(local['failure_json'])))):
+                raise RouteConflict('migration_tree_driver_seal_changed')
+            jobs[job_id]=dict(binding=binding,runtime=runtime,stage=driver['stage'],
+                outboxId=driver['outboxId'],failureOutboxId=driver['failureOutboxId'])
+        return dict(schemaVersion=1,jobs=jobs,driverSha256=drivers['sha256'],routerSha256=p.digest(rows))
+
+    @staticmethod
+    def _migration_odm_closed(route,driver,local,worker,storage):
+        """Validate terminal ODM metadata without updating outbox clock state."""
+        binding=json.loads(route['binding']);identity=json.loads(local['identity'])
+        if (any(identity['job'].get(key)!=value for key,value in binding.items())
+                or local['phase'] not in ('delivered','failure_delivered')):
+            raise RouteConflict('migration_odm_not_delivered')
+        reserved=[row for row in storage['reservations']
+                  if row['id']==identity['reservation']]
+        if (len(reserved)!=1 or reserved[0]['state']!='terminal'
+                or (reserved[0]['job'],reserved[0]['generation'],reserved[0]['environment'])!=(
+                    binding['jobId'],binding['generation'],binding['environment'])):
+            raise RouteConflict('migration_odm_ledger_not_terminal')
+        succeeded=local['phase']=='delivered'
+        if ((driver['stage']=='awaiting_acceptance' and not succeeded)
+                or (driver['stage']=='awaiting_failure_acceptance' and succeeded)
+                or (succeeded and (driver['failureOutboxId'] is not None or driver['failureSha256'] is not None))
+                or (not succeeded and driver['outboxId'] is not None)):
+            raise RouteConflict('migration_driver_outcome_changed')
+        identifier=driver['outboxId'] if succeeded else driver['failureOutboxId']
+        records=[row for row in storage['success' if succeeded else 'failure'] if row['id']==identifier]
+        if len(records)!=1:raise RouteConflict('migration_odm_ack_unavailable')
+        record=records[0];payload=json.loads(record['payload'])
+        if (record['state']!='acknowledged' or not record['receipt'] or record['attempts']<1
+                or record['digest']!=p.digest(payload)):
+            raise RouteConflict('migration_odm_ack_unavailable')
+        receipt=json.loads(record['receipt'])
+        durable=[row for row in storage['successReceipts' if succeeded else 'failureReceipts'] if row['outbox']==identifier]
+        if len(durable)!=1 or durable[0]['payload']!=record['receipt']:
+            raise RouteConflict('migration_durable_ack_unavailable')
+        if succeeded:
+            from .worker_outbox import _id
+            result=p.validate_result_manifest(json.loads(local['result']),job_id=binding['jobId'],
+                generation=binding['generation'],environment=binding['environment'],pipeline_digest=binding['pipelineDigest'])
+            expected=dict(jobId=binding['jobId'],generation=binding['generation'],environment=binding['environment'],
+                inputManifestSha256=binding['manifestSha256'],pipelineDigest=binding['pipelineDigest'],
+                resultManifestSha256=result['resultManifestSha256'])
+            required={'type','durable','receiptId','storageReceiptId','outboxId','payloadSha256','acceptedObjectIds',*expected}
+            _id(receipt.get('receiptId'));_id(receipt.get('storageReceiptId'))
+            if (set(receipt)!=required or type(receipt.get('generation')) is not int
+                    or durable[0]['id']!=receipt['receiptId'] or durable[0]['storage_id']!=receipt['storageReceiptId']
+                    or local['outbox_id']!=identifier or identifier!=p.digest(expected)
+                    or payload!=dict(**expected,resultManifest=result,terminalState='succeeded')
+                    or result['engineVersions']!={'odm':json.loads(route['runtime'])['engineVersion']}
+                    or receipt.get('type')!='durable-result-receipt' or receipt.get('durable') is not True
+                    or receipt.get('outboxId')!=identifier or receipt.get('payloadSha256')!=record['digest']
+                    or any(receipt.get(key)!=value for key,value in expected.items())
+                    or sorted(receipt.get('acceptedObjectIds',[]))!=sorted(obj['id'] for obj in result['objects'])):
+                raise RouteConflict('migration_odm_ack_binding_changed')
+        else:
+            from .reference_failure import _envelope,_receipt
+            envelope=dict(outboxId=identifier,payloadSha256=record['digest'],payload=payload)
+            failure=_envelope(envelope)
+            validate_failure(failure,job_id=binding['jobId'],generation=binding['generation'],
+                environment=binding['environment'],input_manifest_sha256=binding['manifestSha256'],pipeline_digest=binding['pipelineDigest'])
+            if (p.canonical_json(receipt)!=p.canonical_json(_receipt(envelope,failure))
+                    or durable[0]['id']!=receipt.get('receiptId') or durable[0]['storage_id']!=receipt.get('receiptId')
+                    or driver['failureSha256']!=p.digest(failure)):
+                raise RouteConflict('migration_failure_ack_binding_changed')
+
     def __init__(self,path,odm_worker,treedar_worker=None,*,failure_outbox):
         if (not isinstance(odm_worker,ReferenceEngineWorker) or isinstance(odm_worker,TreeDarDelivery)
                 or not isinstance(odm_worker.engine,NativeEngine) or not isinstance(failure_outbox,FailureOutbox)):
@@ -65,9 +215,9 @@ class ExecutionRouter:
             db.execute('CREATE TABLE IF NOT EXISTS router_binding (id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)')
             db.execute('''CREATE TABLE IF NOT EXISTS execution_routes (
                 job TEXT PRIMARY KEY,binding TEXT NOT NULL,kind TEXT NOT NULL,runtime TEXT NOT NULL)''')
-            # Router versions belong to individual jobs. Idle ODM upgrades can
-            # retain accepted reads; TreeDar's controller/delivery journals still
-            # pin their full runtime and require a future migration design.
+            # Versions belong to individual jobs. ODM retains accepted reads;
+            # managed TreeDar epochs retain sealed historical projections.
+            # Unmanaged TreeDar journals continue to pin their complete runtime.
             encoded=p.canonical_json(dict(nodeId=self.node_id,workerId=self.worker_id,engineId=self.engine_id,
                 authorityId=self.authority_id,origin=self.origin,gateGeneration=self.gate_generation,
                 ledger=str(self.ledger.path),outbox=str(self.outbox.path),failureOutbox=str(failure_outbox.path),
@@ -100,6 +250,8 @@ class ExecutionRouter:
         worker=self.odm_worker if kind=='odm' else self.treedar_worker
         if worker is None:
             raise RouteConflict('requested_execution_not_configured')
+        if kind=='treedar' and worker.runtime_manager is not None:
+            return worker.runtime_descriptor()
         p._string(worker.version,'actual engine version',128)
         if kind=='odm':
             return dict(engineVersion=worker.version,engineOrigin=worker.engine.origin,workerJournal=str(worker.path))
@@ -160,6 +312,8 @@ class ExecutionRouter:
                     if worker_db.execute('SELECT 1 FROM executions WHERE job=?',(job['jobId'],)).fetchone():
                         raise RouteConflict('legacy_execution_requires_explicit_adoption')
                 if kind=='treedar':
+                    if selected.runtime_manager is not None:
+                        selected.runtime_manager.assert_active(self._runtime(kind))
                     with selected.controller._db() as engine_db:
                         if engine_db.execute('SELECT 1 FROM treedar_executions WHERE job=?',(job['jobId'],)).fetchone():
                             raise RouteConflict('legacy_execution_requires_explicit_adoption')
@@ -226,8 +380,14 @@ class ExecutionRouter:
         if worker is None:
             raise RouteConflict('routed_worker_unavailable')
         if json.loads(route['runtime'])!=self._runtime(route['kind']):
-            if for_execution or not self._retained(route,worker):
+            if for_execution:
                 raise RouteConflict('pending_execution_runtime_binding_changed')
+            if route['kind']=='treedar' and worker.runtime_manager is not None:
+                worker=worker.retained_view(job_id,json.loads(route['runtime']))
+            if not self._retained(route,worker):
+                raise RouteConflict('pending_execution_runtime_binding_changed')
+        if for_execution and route['kind']=='treedar' and worker.runtime_manager is not None:
+            worker.runtime_manager.assert_active(json.loads(route['runtime']))
         return worker
 
     def _row(self,job_id):

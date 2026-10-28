@@ -8,6 +8,7 @@ import socket
 import ssl
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -147,9 +148,10 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             (driver.worker.engine_id,driver.worker.authority_id,driver.worker.gate_generation,driver.worker.origin))
         self.assertIsNone(tree.controller.config.timeout_seconds)
         self.assertIs(self.listeners[-1].results.worker,router)
-        self.assertEqual([call[0] for call in self.docker_calls],['info','image'])
-        for name in ('execution-routes.sqlite','lidar-provenance.sqlite','treedar-controller.sqlite','treedar-delivery.sqlite'):
+        self.assertEqual([call[0] for call in self.docker_calls],['info','image']*2)
+        for name in ('execution-routes.sqlite','lidar-provenance.sqlite','treedar-delivery.sqlite'):
             self.assertEqual((self.state/name).stat().st_mode & 0o777,0o600)
+        self.assertEqual(tree.controller.path.stat().st_mode & 0o777,0o600)
         with NodeGate(self.config['engineId']) as gate:
             self.assertIsNone(gate.snapshot()['reservation'])
         api=self.listeners[-1]
@@ -179,15 +181,22 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         self.assertFalse(any(self.backend.counts().values()))
         self.assertEqual(self.docker_calls,[])
 
-    def test_source_pin_and_runtime_changes_refuse_before_claim_or_container_mutation(self):
+    def test_live_owner_blocks_runtime_changes_and_idle_migration_retains_old_journal(self):
         self.route()
-        driver,_=self.build(provision=True)
+        driver,server=self.build(provision=True)
+        old=driver.execution_router.treedar_worker.controller
         changed=self.load()
         changed['executionRouting']['treedar']['imageId']='sha256:'+'c'*64
-        with self.assertRaises(TreeDarHeld):self.build(changed)
+        with self.assertRaises(ValueError):self.build(changed)
         self.assertEqual(len(self.listeners),1)
-        self.assertEqual([call[0] for call in self.docker_calls],['info','image'])
+        server.server_close()
+        replacement,_=self.build(changed)
+        self.assertNotEqual(old.path,replacement.execution_router.treedar_worker.controller.path)
+        self.assertTrue(old.path.exists())
+        self.assertEqual(old.config.image_id,'sha256:'+'b'*64)
+        self.assertEqual([call[0] for call in self.docker_calls],['info','image']*4)
         with driver._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM driver_jobs').fetchone()[0],0)
+        self.assertEqual(driver.step(),{'state':'held','reason':'worker_state_owner_unavailable'})
 
     def test_same_main_configuration_reopens_the_existing_journals_without_handover(self):
         self.route()
@@ -203,7 +212,7 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             self.assertEqual(state['generation'],1)
             self.assertEqual(state['authorityId'],self.config['authorityId'])
             self.assertIsNone(state['reservation'])
-        self.assertEqual([call[0] for call in self.docker_calls],['info','image','info','image'])
+        self.assertEqual([call[0] for call in self.docker_calls],['info','image']*3)
 
     def test_wrong_source_pin_refuses_without_container_mutation(self):
         self.route()
@@ -263,4 +272,65 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         server.server_close()
         with patch.object(daemon.sys,'platform','win32'):
             with self.assertRaisesRegex(ValueError,'requires Linux'):daemon.build_worker(settings)
+
+    def test_direct_server_close_waits_for_live_driver_stage_and_fences_stale_driver(self):
+        driver,server=self.build(provision=True)
+        entered,release,closed=threading.Event(),threading.Event(),threading.Event()
+        def blocked():
+            entered.set();release.wait(3)
+            return {'state':'idle'}
+        driver._step=blocked
+        active=threading.Thread(target=driver.step)
+        active.start();self.assertTrue(entered.wait(2))
+        closer=threading.Thread(target=lambda:(server.server_close(),closed.set()))
+        closer.start()
+        try:
+            self.assertFalse(closed.wait(0.05))
+            with self.assertRaises(ValueError):self.build()
+        finally:
+            release.set();active.join(3);closer.join(3)
+        self.assertTrue(closed.is_set())
+        replacement,_=self.build()
+        self.assertIsNotNone(replacement)
+        self.assertEqual(driver.step(),{'state':'held','reason':'worker_state_owner_unavailable'})
+
+    def test_worker_service_joins_driver_before_releasing_factory_owner(self):
+        serving,shutdown=threading.Event(),threading.Event()
+        def listener(api,*args,**kwargs):
+            self.listeners.append(api)
+            def serve_forever(**kwargs):serving.set();shutdown.wait(3)
+            return SimpleNamespace(server_close=lambda:None,serve_forever=serve_forever,shutdown=shutdown.set)
+        with patch.object(self,'listener',side_effect=listener):driver,server=self.build(provision=True)
+        entered,release,stop=threading.Event(),threading.Event(),threading.Event()
+        def step():
+            entered.set();release.wait(3)
+            return {'state':'idle'}
+        # Deliberately bypass the driver mutex here: service join ordering must
+        # independently retain ownership even for a custom bounded driver.
+        driver.step=step
+        service=daemon.WorkerService(driver,server,poll_seconds=0.1)
+        result=[];thread=threading.Thread(target=lambda:result.append(service.run(stop)))
+        thread.start();self.assertTrue(entered.wait(2));self.assertTrue(serving.wait(2));stop.set()
+        try:
+            thread.join(0.05);self.assertTrue(thread.is_alive())
+            with self.assertRaises(ValueError):self.build()
+        finally:
+            release.set();thread.join(3)
+        self.assertEqual(result,[0])
+        replacement,_=self.build()
+        self.assertIsNotNone(replacement)
+
+    def test_state_owner_check_rejects_replaced_lock_path_and_wrong_root(self):
+        root=self.root/'owner'
+        with daemon.DaemonStateLock(root) as owner:
+            self.assertIs(owner.check(root),owner)
+            with self.assertRaises(ValueError):owner.check(self.root/'other')
+            path=root/'worker-daemon.lock';saved=root/'original-lock'
+            path.rename(saved)
+            try:
+                path.write_bytes(b'');path.chmod(0o600)
+                with self.assertRaises(ValueError):owner.check(root)
+            finally:
+                path.unlink();saved.rename(path)
+            self.assertIs(owner.check(root),owner)
 

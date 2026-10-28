@@ -53,11 +53,71 @@ class _NoRedirects(HTTPRedirectHandler):
 
 
 class ReferenceDriver:
+    @staticmethod
+    def migration_census(path, *, physical_binding):
+        """Read-only closed driver history; never instantiate or resume a driver."""
+        path = Path(path).absolute()
+        if not os.path.lexists(path):
+            return {'jobs': {}, 'sha256': p.digest([])}
+        if path.resolve() != path or any(item.is_symlink() for item in (path,*path.parents)):
+            raise DriverHeld('migration_driver_journal_unavailable')
+        info = path.stat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (os.name != 'nt' and (info.st_uid != os.geteuid() or info.st_mode & 0o077))
+                or any(os.path.lexists(str(path)+suffix) for suffix in ('-wal','-shm','-journal'))):
+            raise DriverHeld('migration_driver_journal_unavailable')
+        db = sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute('BEGIN')
+            rows = db.execute('SELECT job,stage,data FROM driver_jobs ORDER BY job').fetchall()
+            binding = db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
+            if rows and not binding:
+                raise DriverHeld('migration_driver_binding_unavailable')
+            if binding:
+                binding = json.loads(binding[0])
+                expected = {key:physical_binding[key] for key in ('nodeId','workerId','engineId','authorityId','gateGeneration')}
+                expected['gateOrigin'] = physical_binding['origin']
+                if any(binding.get(key) != value for key,value in expected.items()):
+                    raise DriverHeld('migration_driver_binding_changed')
+            jobs = {}
+            for row in rows:
+                if row['stage'] not in ('completed','awaiting_acceptance','awaiting_failure_acceptance'):
+                    raise DriverHeld('migration_driver_not_terminal')
+                data = json.loads(row['data'])
+                claim = data['claim']
+                if claim['jobId'] != row['job']:
+                    raise DriverHeld('migration_driver_identity_changed')
+                identity = ExecutionRouter._identity(claim)
+                if identity['nodeId'] != physical_binding['nodeId']:
+                    raise DriverHeld('migration_driver_identity_changed')
+                submission = claim['submission']
+                raw = {key:submission[key] for key in ('schemaVersion','submissionId','manifest','pipeline','capabilityFingerprint')}
+                checked = p.validate_submission(raw, environment=identity['environment'],
+                    capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm','treedar'),
+                    allowed_odm_options=set(raw['pipeline']['odm']['options']))
+                if (p.canonical_json(checked) != p.canonical_json(submission)
+                        or checked['manifestSha256'] != identity['manifestSha256']
+                        or checked['pipelineDigest'] != identity['pipelineDigest']):
+                    raise DriverHeld('migration_driver_submission_changed')
+                kind = ReferenceDriver._pipeline_kind(submission)
+                if kind not in ('odm','treedar'):
+                    raise DriverHeld('migration_driver_pipeline_unavailable')
+                jobs[row['job']] = dict(binding=identity,kind=kind,stage=row['stage'],
+                    outboxId=data.get('outboxId'),failureOutboxId=data.get('failureOutboxId'),
+                    failureSha256=p.digest(data['failure']) if data.get('failure') is not None else None)
+            return {'jobs':jobs,'sha256':p.digest(jobs)}
+        finally:
+            db.close()
+
     def __init__(self, worker, ledger, outbox, broker, coordinator_origin, worker_bearer,
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
-                 execution_router=None, provenance_client=None):
+                 execution_router=None, provenance_client=None, state_owner=None):
+        if state_owner is not None:
+            state_owner.check(Path(state_path).absolute().parent)
+        self._state_owner=state_owner
         if not isinstance(worker.engine, NativeEngine) or not isinstance(broker, BrokerClient):
             raise ValueError('actual native engine and broker client required')
         if worker.ledger is not ledger or worker.outbox is not outbox or not isinstance(failure_outbox, FailureOutbox):
@@ -394,9 +454,15 @@ class ReferenceDriver:
 
     def step(self):
         """Perform one bounded stage; never return private metadata or paths."""
+        if self._state_owner is not None:
+            try:self._state_owner.check(self.path.parent)
+            except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
         if not self._lock.acquire(blocking=False):
             return {'state': 'busy'}
         try:
+            if self._state_owner is not None:
+                try:self._state_owner.check(self.path.parent)
+                except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
             try:
                 background = self._background()
             except Exception:

@@ -53,10 +53,12 @@ an atomic transaction with a remote issuer's later revocations.
 Per-job execution routes persist the immutable claim and engine version/source
 pins before transfer or engine intent. The router permits old accepted artifacts
 to be read after an idle ODM upgrade; a changed runtime cannot resume an old
-execution. TreeDar's controller and delivery journals still pin their full
-configuration globally. Reopening those journals with a different image/source
-is rejected. A future TreeDar upgrade needs an explicit historical-adapter and
-journal migration strategy; automatic TreeDar upgrades are not ready.
+execution. TreeDar controllers and unmanaged delivery journals retain their
+immutable configuration pins. The managed worker factory now uses a new
+controller journal per runtime and a stable delivery journal with per-job epochs.
+Closed, idle activation preserves historical reads without loading an old
+executable; see [reference-treedar-runtime.md](reference-treedar-runtime.md).
+Automatic update detection and supervision are still not enabled.
 Unbound legacy claims cannot be silently adopted. TreeDar-only routing is main
 node only; combined ODM-to-TreeDar jobs remain rejected until their sequential
 stage and final acceptance contract is implemented. Public TreeDar capability

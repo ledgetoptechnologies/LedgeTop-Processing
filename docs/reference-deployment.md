@@ -84,9 +84,11 @@ install an issuer route or advertise a TreeDar capability.
 
 This is source preparation only. It cannot activate the NAS-backed path without
 an actual authenticated broker, trusted provenance issuer and qualified Viewer
-acceptance/storage route. Cleanup remains explicitly opt-in. TreeDar runtime
-journals still reject changed image/source/version; automatic TreeDar upgrades
-need a separate reviewed migration and retained-reader design.
+acceptance/storage route. Cleanup remains explicitly opt-in. TreeDar controller
+journals still reject changed configuration. The managed factory uses separate
+versioned controllers and a stable delivery journal for closed idle migrations
+and retained reads; see [reference-treedar-runtime.md](reference-treedar-runtime.md).
+Automatic update detection and scheduled supervision remain uninstalled.
 
 Routed workers also require the coordinator's private execution-advice response
 introduced in source `ad74795`. The currently installed `e2ccf489` coordinator

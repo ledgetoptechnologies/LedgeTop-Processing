@@ -323,6 +323,31 @@ qualification. Details are in [reference-readers.md](reference-readers.md) and
 `evidence/reference-readers-20261028.json`. This source is not deployed; NAS
 integration and runtime acceptance remain pending.
 
+## Managed TreeDar runtime source checkpoint
+
+The managed factory now preserves one delivery journal while using immutable
+controller journals per runtime. Closed idle activation retains old result and
+receipt access without an old executable. Exact-runtime restart can recover a
+pending job without activating a new runtime or repeating an uncertain launch.
+Atomic downgrade fencing rejects pre-managed code after publication. Factory
+ownership spans driver and reader drain. Details are in
+[reference-treedar-runtime.md](reference-treedar-runtime.md).
+
+All 688 isolated Linux tests passed without skips; independent source review
+found no blocking issues. This migration remains source-qualified, not installed.
+Separately, TreeDar's actual bootstrap ran successfully on main with 4,555
+synthetic points, three recovered crowns and 16 hash-verified outputs. Both nodes
+were drained and only owned plans reopened; test data/container were removed.
+The image cache and inactive source stage remain, with existing services and
+coordinator unchanged. Evidence is in `evidence/main-treedar-bootstrap-20261028.json`.
+
+NAS broker/provenance issuer and retention enforcement are still incomplete in
+source as well as installation. Viewer confirmed its owning chat is blocked and
+requires a direct human resume before that work continues. Claude's UI findings
+remain open. Automatic container update detection/supervision, combined sequential
+ODM-to-TreeDar processing, live acceptance and the selected smaller real-data trial
+are still pending; TreeDar/Gaussian capabilities remain disabled.
+
 ## Coordinated ownership
 
 The existing **Viewer** chat owns the storage broker, Viewer adapter, durable

@@ -24,14 +24,31 @@ class TreeDarDelivery(ReferenceEngineWorker):
     worker implementation. start/poll/acknowledge never use its NodeODM execution
     code. A separate private journal holds delivery projections, not a second queue.
     """
-    def __init__(self, path, *, controller, outbox, failure_outbox):
+    def __init__(self, path, *, controller=None, outbox, failure_outbox, runtime_manager=None):
         self.controller = controller
-        self.ledger, self.outbox, self.failure_outbox = controller.ledger, outbox, failure_outbox
-        config = controller.config
+        self.runtime_manager = runtime_manager
+        if runtime_manager is not None:
+            from .treedar_runtime import TreeDarRuntimeManager
+            if (not isinstance(runtime_manager,TreeDarRuntimeManager)
+                    or runtime_manager.path!=Path(path).absolute()
+                    or runtime_manager.outbox is not outbox or runtime_manager.failure_outbox is not failure_outbox
+                    or (controller is not None and controller.ledger is not runtime_manager.ledger)):
+                raise WorkerHeld('exact_delivery_runtime_manager_required')
+            self.ledger=runtime_manager.ledger
+            binding=runtime_manager.physical
+            self.engine_id,self.node_id,self.worker_id=(binding[key] for key in ('engineId','nodeId','workerId'))
+            self.authority_id,self.origin,self.gate_generation=(binding[key] for key in ('authorityId','origin','gateGeneration'))
+            self.version=controller.config.engine_version if controller else None
+        elif controller is None:
+            raise WorkerHeld('configured_delivery_controller_required')
+        else:
+            self.ledger = controller.ledger
+            config = controller.config
+            self.engine_id, self.node_id, self.worker_id = config.engine_id, config.node_id, config.worker_id
+            self.authority_id, self.origin = config.authority_id, config.coordinator_origin
+            self.gate_generation, self.version = config.gate_generation, config.engine_version
+        self.outbox, self.failure_outbox = outbox,failure_outbox
         self.engine = controller
-        self.engine_id, self.node_id, self.worker_id = config.engine_id, config.node_id, config.worker_id
-        self.authority_id, self.origin = config.authority_id, config.coordinator_origin
-        self.gate_generation, self.version = config.gate_generation, config.engine_version
         self.path = Path(path).absolute()
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(item.is_symlink() for item in (self.path, *self.path.parents)):
@@ -56,6 +73,8 @@ class TreeDarDelivery(ReferenceEngineWorker):
                 phase TEXT NOT NULL, result TEXT, outbox_id TEXT,
                 proof TEXT NOT NULL, outcome TEXT NOT NULL,
                 failure_json TEXT, failure_outbox_id TEXT)''')
+            if runtime_manager is not None:
+                return
             db.execute('CREATE TABLE IF NOT EXISTS delivery_binding (id INTEGER PRIMARY KEY CHECK(id=1),value TEXT NOT NULL)')
             binding = p.canonical_json(dict(controllerPath=str(controller.path),nodeId=self.node_id,
                 workerId=self.worker_id,engineId=self.engine_id,authorityId=self.authority_id,
@@ -67,7 +86,75 @@ class TreeDarDelivery(ReferenceEngineWorker):
                 raise WorkerHeld('delivery_controller_binding_changed')
             db.execute('INSERT OR IGNORE INTO delivery_binding VALUES(1,?)',(binding,))
 
+    def runtime_descriptor(self):
+        if self.controller is not None:
+            from .treedar_runtime import runtime_descriptor
+            return runtime_descriptor(self.controller,self.path)
+        if self.runtime_manager is not None:
+            snapshot=self.runtime_manager.snapshot()
+            if snapshot is None:
+                raise WorkerHeld('treedar_runtime_not_active')
+            return snapshot['runtime']
+        raise WorkerHeld('configured_delivery_controller_required')
+
+    def _active_controller(self,job_id=None):
+        if self.controller is None:
+            raise WorkerHeld('active_treedar_controller_required')
+        if self.runtime_manager is None:
+            # Fence an already-constructed legacy actor after explicit upgrade.
+            # The factory lease excludes other processes; this closes stale
+            # in-process references without weakening strict legacy binding.
+            with self._db() as db:
+                exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='treedar_runtime_active'").fetchone()
+                if exists and db.execute('SELECT 1 FROM treedar_runtime_active WHERE id=1').fetchone():
+                    raise WorkerHeld('managed_treedar_runtime_required')
+        if self.runtime_manager is not None:
+            from .treedar_runtime import runtime_descriptor
+            runtime=runtime_descriptor(self.controller,self.path)
+            self.runtime_manager.assert_active(runtime)
+            if job_id is not None and self.runtime_manager.runtime_for_job(job_id)[0]!=runtime:
+                raise WorkerHeld('job_requires_retired_treedar_runtime')
+
+    def _row(self,job_id):
+        row=super()._row(job_id)
+        if self.runtime_manager is not None:
+            runtime,binding=self.runtime_manager.runtime_for_job(job_id)
+            identity=json.loads(row['identity'])
+            proof=json.loads(row['proof'])
+            if (identity['job']!=binding or identity['proofSha256']!=p.digest(proof)
+                    or proof.get('imageId')!=runtime['imageId'] or proof.get('engineTerminal') is not True
+                    or proof.get('job')!={key:value for key,value in binding.items() if key!='nodeId'}
+                    or proof.get('status')!=row['outcome']):
+                raise WorkerHeld('sealed_delivery_runtime_changed')
+            if row['result']:
+                result=p.validate_result_manifest(json.loads(row['result']),job_id=job_id,generation=binding['generation'],
+                    environment=binding['environment'],pipeline_digest=binding['pipelineDigest'])
+                if result!=proof.get('resultManifest') or result['engineVersions']!={'treedar':runtime['engineVersion']}:
+                    raise WorkerHeld('sealed_delivery_runtime_changed')
+            elif row['outcome']=='failed' and row['failure_json']:
+                expected=make_failure(job_id=job_id,generation=binding['generation'],environment=binding['environment'],
+                    input_manifest_sha256=binding['manifestSha256'],pipeline_digest=binding['pipelineDigest'],
+                    terminal_state='failed',error_code=proof['errorCode'])
+                if json.loads(row['failure_json'])!=expected:
+                    raise WorkerHeld('sealed_delivery_runtime_changed')
+        return row
+
+    def retained_view(self,job_id,expected_runtime):
+        if self.runtime_manager is None or self.runtime_manager.runtime_for_job(job_id)[0]!=expected_runtime:
+            raise WorkerHeld('retained_treedar_runtime_changed')
+        row=self._row(job_id)
+        if row['phase']!='delivered':
+            raise WorkerHeld('retained_treedar_metadata_ack_required')
+        self.runtime_manager.validate_retained_outbox(row)
+        from .treedar_runtime import _readonly
+        with _readonly(self.ledger.path) as db:
+            reservation=db.execute('SELECT state FROM reservations WHERE id=?',(json.loads(row['identity'])['reservation'],)).fetchone()
+            if reservation is None or reservation['state']!='terminal':
+                raise WorkerHeld('retained_treedar_terminal_required')
+        return self
+
     def start(self, job, *, reservation_id, input_paths, provenance, allow_synthetic=False):
+        self._active_controller()
         pipeline = job['submission']['pipeline']
         if (pipeline['odm']['requested'] or not pipeline['treedar']['requested']
                 or pipeline['gaussian_splat']['requested']
@@ -78,6 +165,9 @@ class TreeDarDelivery(ReferenceEngineWorker):
         obj = next((obj for obj in job['submission']['manifest']['objects'] if obj['id']==object_id),None)
         if obj is None:
             raise WorkerHeld('treedar_input_object_unavailable')
+        if self.runtime_manager is not None:
+            from .treedar_runtime import runtime_descriptor
+            self.runtime_manager.pin_job(job,runtime_descriptor(self.controller,self.path))
         return self.controller.start(job,reservation_id=reservation_id,input_object=obj,
             input_relative_path=input_paths[object_id],provenance=provenance,allow_synthetic=allow_synthetic)
 
@@ -130,7 +220,7 @@ class TreeDarDelivery(ReferenceEngineWorker):
     def _outbox(self,row):
         return (self.outbox,row['outbox_id']) if row['outcome']=='succeeded' else (self.failure_outbox,row['failure_outbox_id'])
 
-    def _bound_outbox(self,row):
+    def _bound_outbox(self,row,completion_record=None):
         box,identifier=self._outbox(row)
         if not identifier:
             raise WorkerHeld('terminal_outbox_not_durable')
@@ -148,7 +238,7 @@ class TreeDarDelivery(ReferenceEngineWorker):
             binding={key:failure[key] for key in FAILURE_BINDING}
             expected=dict(failure=failure,engineTerminal=True)
             local={}
-        completion=box.get(identifier)
+        completion=box.get(identifier) if completion_record is None else completion_record
         if (identifier!=p.digest(binding) or completion['digest']!=p.digest(expected)
                 or p.canonical_json(completion['payload'])!=p.canonical_json(expected)
                 or completion['local_metadata']!=local):
@@ -157,6 +247,19 @@ class TreeDarDelivery(ReferenceEngineWorker):
 
     def poll(self, job_id):
         """Idempotently project terminal proof, register results, and queue metadata."""
+        if self.runtime_manager is None:
+            self._active_controller()
+        if self.runtime_manager is not None:
+            try:
+                row=self._row(job_id)
+            except WorkerHeld as error:
+                if str(error)!='unknown local execution':
+                    raise
+            else:
+                if row['phase']=='delivered':
+                    self.retained_view(job_id,self.runtime_manager.runtime_for_job(job_id)[0])
+                    return self._bound_outbox(row)[1]
+            self._active_controller(job_id)
         proof = self.controller.poll(job_id)
         if proof is None:
             return None
@@ -218,6 +321,7 @@ class TreeDarDelivery(ReferenceEngineWorker):
         box.acknowledge(identifier,completion_record['receipt'])
         if row['phase']=='delivered':
             return
+        self._active_controller(job_id)
         completion = self._completion(row)
         with NodeGate(self.engine_id) as gate:
             self.controller._gate(gate)

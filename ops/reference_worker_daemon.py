@@ -43,6 +43,7 @@ OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabl
                       'executionRouting'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
+_STATE_OWNERS = {}
 
 
 def _execution_routing(config):
@@ -80,10 +81,14 @@ def _execution_routing(config):
 class DaemonStateLock:
     """One daemon owns this state root until its driver/readers finish draining."""
     def __init__(self, state_root):
-        self.root = state_root
+        self.root = Path(state_root).absolute()
         self._stream = None
+        self._creator_pid = os.getpid()
+        self._identity = self._root_identity = None
 
     def __enter__(self):
+        if self._creator_pid != os.getpid():
+            raise ValueError('worker state owner process changed')
         if self._stream is not None:
             raise ValueError('worker state already owned')
         root = _directory(self.root)
@@ -113,6 +118,11 @@ class DaemonStateLock:
             else:
                 import fcntl
                 fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._identity = (observed.st_dev, observed.st_ino)
+            current_root = root.stat()
+            self._root_identity = (current_root.st_dev, current_root.st_ino)
+            self.check(root)
+            _STATE_OWNERS[str(root)] = self
             return self
         except Exception:
             if self._stream is not None:
@@ -124,7 +134,10 @@ class DaemonStateLock:
                 os.close(descriptor)
 
     def __exit__(self, *_args):
+        if self._creator_pid != os.getpid():
+            raise ValueError('worker state owner process changed')
         if self._stream is not None:
+            self.check(self.root)
             try:
                 if os.name == 'nt':
                     import msvcrt
@@ -133,6 +146,35 @@ class DaemonStateLock:
             finally:
                 self._stream.close()
                 self._stream = None
+                if _STATE_OWNERS.get(str(self.root)) is self:
+                    del _STATE_OWNERS[str(self.root)]
+
+    def check(self, root=None):
+        """Validate the live capability before state migration or activation."""
+        # No inherited mutex may be acquired before checking the process.
+        if self._creator_pid != os.getpid() or self._stream is None:
+            raise ValueError('worker state owner unavailable')
+        try:
+            if root is not None and Path(root).absolute() != self.root:
+                raise ValueError('worker state root differs')
+            if self.root.resolve() != self.root or any(part.is_symlink() for part in (self.root,*self.root.parents)):
+                raise ValueError('worker state root changed')
+            directory = self.root.stat()
+            path = self.root/'worker-daemon.lock'
+            observed,current = os.fstat(self._stream.fileno()),path.lstat()
+            if (not stat.S_ISDIR(directory.st_mode)
+                    or (directory.st_dev,directory.st_ino) != self._root_identity
+                    or not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1
+                    or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                    or (observed.st_dev,observed.st_ino) != self._identity
+                    or (current.st_dev,current.st_ino) != self._identity
+                    or os.get_inheritable(self._stream.fileno())
+                    or (os.name != 'nt' and (directory.st_uid != os.geteuid() or directory.st_mode & 0o077
+                        or observed.st_uid != os.geteuid() or stat.S_IMODE(observed.st_mode) != 0o600))):
+                raise ValueError('worker state owner identity changed')
+        except Exception:
+            raise ValueError('worker state owner unavailable') from None
+        return self
 
 
 class WorkerService:
@@ -214,6 +256,10 @@ class WorkerService:
                         except BaseException:
                             self._failed('listener_drain_failed', stop)
                     self._server_thread.join()
+                # Factory ownership is released by server_close. Finish the
+                # last bounded driver mutation before allowing a new factory.
+                if driver_started:
+                    self._driver_thread.join()
                 try:
                     self.server.server_close()
                 except BaseException:
@@ -330,11 +376,28 @@ def _directory(value):
 
 
 def build_worker(config):
-    """Build explicit components; verify the existing gate and actual version."""
+    """Own state/readers until the returned server has fully drained and closed."""
     if not sys.platform.startswith('linux'):
         raise ValueError('owned result reader daemon requires Linux')
+    owner=DaemonStateLock(config['stateRoot'])
+    owner.__enter__()
+    resources={}
+    try:
+        return _build_worker(config,owner,resources)
+    except BaseException:
+        # Stop at the first uncertain drain/release. Strong ownership registries
+        # retain later leases until explicit reconciliation or process death.
+        if resources.get('serverClose') is not None:resources['serverClose']()
+        if resources.get('session') is not None:resources['session'].close()
+        owner.__exit__(None,None,None)
+        raise
+
+
+def _build_worker(config,owner,resources):
+    """Construct under the factory's mandatory state-root ownership capability."""
     routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
+    owner.check(root)
     with NodeGate(config['engineId']) as gate:
         state = gate.snapshot()
         if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
@@ -352,6 +415,10 @@ def build_worker(config):
         raise ValueError('actual engine version differs from configured pin')
     ledger = ScratchLedger(root / 'scratch.sqlite', scratch, safety_floor_bytes=config['safetyFloor'],
                            cleanup_grace_seconds=config['cleanupGrace'])
+    from processing.reference_readers import ReaderSession
+    session=ReaderSession(ledger)
+    session.__enter__()
+    resources['session']=session
     outbox, failures = WorkerOutbox(root / 'outbox.sqlite'), FailureOutbox(root / 'failure-outbox.sqlite')
     worker = ReferenceEngineWorker(root / 'worker.sqlite', ledger=ledger, outbox=outbox, engine=engine,
         engine_id=config['engineId'], node_id=config['nodeId'], authority_id=config['authorityId'],
@@ -366,67 +433,80 @@ def build_worker(config):
             from processing.reference_provenance import LidarProvenanceClient
             from processing.treedar_delivery import TreeDarDelivery
             from processing.treedar_engine import TreeDarConfig, TreeDarEngine
+            from processing.treedar_runtime import TreeDarRuntimeManager, runtime_descriptor
             tree = routing['treedar']
             provenance = LidarProvenanceClient(broker, state_path=root/'lidar-provenance.sqlite')
-            controller = TreeDarEngine(root/'treedar-controller.sqlite', ledger=ledger,
-                config=TreeDarConfig(docker_executable=TREEDAR_DOCKER_EXECUTABLE,
+            physical=dict(nodeId=worker.node_id,workerId=worker.worker_id,engineId=worker.engine_id,
+                authorityId=worker.authority_id,origin=worker.origin,gateGeneration=worker.gate_generation)
+            manager=TreeDarRuntimeManager(root/'treedar-delivery.sqlite',ledger=ledger,outbox=outbox,
+                failure_outbox=failures,physical_binding=physical,allow_legacy_v1=True)
+            previous=manager.snapshot()
+            tree_config=TreeDarConfig(docker_executable=TREEDAR_DOCKER_EXECUTABLE,
                     docker_socket=TREEDAR_DOCKER_SOCKET, image_id=tree['imageId'],
                     source_root=tree['sourceRoot'], source_sha256=tree['sourceSha256'],
                     engine_version=tree['engineVersion'], engine_id=config['engineId'],
                     authority_id=config['authorityId'], coordinator_origin=config['gateCoordinatorOrigin'],
                     gate_generation=config['gateGeneration'], worker_id=config['workerId'],
-                    uid=os.geteuid(), gid=os.getegid()), verify_provenance=provenance.verify)
+                    uid=os.geteuid(), gid=os.getegid())
+            controller = TreeDarEngine(manager.controller_path(tree_config),ledger=ledger,
+                config=tree_config,verify_provenance=provenance.verify)
             # Read-only local Docker/image/source census before new claims. No
             # pull, handover, container mutation or capability advertisement.
             controller._host()
             tree_worker = TreeDarDelivery(root/'treedar-delivery.sqlite', controller=controller,
-                outbox=outbox, failure_outbox=failures)
+                outbox=outbox,failure_outbox=failures,runtime_manager=manager)
+            candidate=runtime_descriptor(controller,tree_worker.path)
+            if previous is None or previous['runtime']!=candidate:
+                with NodeGate(config['engineId']) as gate:
+                    owner.check(root);session.check()
+                    manager.activate_runtime(controller,
+                        expected_epoch=previous['epochId'] if previous else None,
+                        expected_revision=previous['revision'] if previous else 0,
+                        owner=owner,reader_session=session,gate=gate,
+                        census=lambda db,envelope:ExecutionRouter.migration_census(root/'execution-routes.sqlite',
+                            driver_path=root/'driver.sqlite',physical_binding=physical,odm_worker=worker,
+                            failure_outbox=failures,delivery_db=db,current_envelope=envelope))
+            else:
+                manager.assert_active(candidate)
         router = ExecutionRouter(root/'execution-routes.sqlite', worker, tree_worker, failure_outbox=failures)
     driver = ReferenceDriver(worker, ledger, outbox, broker, config['coordinatorOrigin'], config['workerBearer'],
         state_path=root / 'driver.sqlite', ssl_context=client_tls, output_budget=config['outputBudget'],
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
-        execution_router=router, provenance_client=provenance,
+        execution_router=router, provenance_client=provenance,state_owner=owner,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
-    # The daemon owns one OS reader lease independently of its state-root lock.
-    # That also protects direct factory callers from overlapping reader owners.
-    from processing.reference_readers import ReaderSession
-    session = ReaderSession(ledger)
-    session.__enter__()
-    server = None
-    try:
-        permitted = frozenset(config['allowedEnvironments'])
-        result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker,
-            reader_session=session), bearer_readers={config['resultReadBearer']: dict(
-            node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
-            share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
-        server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        server_tls.load_cert_chain(config['serverCertFile'], config['serverKeyFile'])
-        server = create_reference_http_server(result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)
-        server.daemon_threads = False
-        server.block_on_close = True
-        original_close = server.server_close
-        close_lock = threading.Lock()
-        closed = False
-        def close_owned_readers():
-            nonlocal closed
-            with close_lock:
-                if closed:
-                    return
-                # Never release the lease in finally: a failed handler join is
-                # not evidence that all result descriptors have closed.
+    permitted = frozenset(config['allowedEnvironments'])
+    result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker,
+        reader_session=session), bearer_readers={config['resultReadBearer']: dict(
+        node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
+        share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.load_cert_chain(config['serverCertFile'], config['serverKeyFile'])
+    server = create_reference_http_server(result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)
+    original_close = server.server_close
+    resources['serverClose']=original_close
+    server.daemon_threads = False
+    server.block_on_close = True
+    close_lock = threading.Lock()
+    closed = False
+    def close_owned_readers():
+        nonlocal closed
+        if os.getpid()!=owner._creator_pid:
+            raise ValueError('worker state owner process changed')
+        with close_lock:
+            if closed:
+                return
+            with driver._lock:
+                owner.check(root)
+                # A failed join or lease close retains all later ownership.
                 original_close()
                 session.close()
+                owner.__exit__(None,None,None)
                 closed = True
-        server.server_close = close_owned_readers
-        return driver, server
-    except BaseException:
-        if server is not None:
-            server.server_close()
-        session.close()  # No listener/driver threads have been started here.
-        raise
+    server.server_close = close_owned_readers
+    return driver, server
 
 
 def main(argv=None):
@@ -436,19 +516,18 @@ def main(argv=None):
     server = None
     try:
         config = load_config(args.config)
-        with DaemonStateLock(config['stateRoot']):
-            driver, server = build_worker(config)
-            stop = threading.Event()
-            for name in ('SIGINT','SIGTERM'):
-                if hasattr(signal, name):
-                    signal.signal(getattr(signal, name), lambda *_args: stop.set())
-            service = WorkerService(driver, server, poll_seconds=config['pollSeconds'])
-            print('reference worker starting', flush=True)
-            result = service.run(stop)
-            server = None  # Service drained and closed before releasing state lock.
-            if result:
-                print('reference worker unavailable', file=sys.stderr, flush=True)
-            return result
+        driver, server = build_worker(config)
+        stop = threading.Event()
+        for name in ('SIGINT','SIGTERM'):
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), lambda *_args: stop.set())
+        service = WorkerService(driver, server, poll_seconds=config['pollSeconds'])
+        print('reference worker starting', flush=True)
+        result = service.run(stop)
+        server = None  # Factory ownership survives until successful full drain.
+        if result:
+            print('reference worker unavailable', file=sys.stderr, flush=True)
+        return result
     except Exception:
         print('reference worker unavailable', file=sys.stderr, flush=True)
         return 2
