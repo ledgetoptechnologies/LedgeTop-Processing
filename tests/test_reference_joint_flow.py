@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import HTTPSHandler,ProxyHandler,Request,build_opener
 
 from ops.native_node_fixture import NativeNodeFixture,ARCHIVE
@@ -74,6 +75,7 @@ class ReferenceJointFlowTests(unittest.TestCase):
     def setUp(self):
         self.stack=ExitStack();self.addCleanup(self.stack.close)
         self.root=Path(self.stack.enter_context(tempfile.TemporaryDirectory()));self.root.chmod(0o700)
+        self.servers={}
         self.owner=self.stack.enter_context(DaemonStateLock(self.root))
         self.stack.enter_context(patch('processing.node_gate.canonical_gate_path',return_value=self.root/'gate'))
         self.queue=Queue(self.root/'coordinator',reference_enabled=True);self.stack.callback(self.queue.close)
@@ -100,7 +102,8 @@ class ReferenceJointFlowTests(unittest.TestCase):
             finally:self.streams-=1
         proxy=ResultProxy({'cluster':worker_origin},worker_bearers={'cluster':READER},admit_read=admit,ssl_context=self.tls)
         frozen=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
-        self.control=ReferenceControlAPI(self.store,viewer_bearers={VIEWER:'staging'},worker_bearers={WORKER:dict(node_id='cluster',worker_id='joint-worker',worker_instance_id='joint-instance')},capability_fingerprint=frozen['capabilities']['capabilityFingerprint'],options_fingerprint=frozen['capabilities']['engines']['odm']['optionsFingerprint'],result_proxy=proxy)
+        self.control_options=dict(viewer_bearers={VIEWER:'staging'},worker_bearers={WORKER:dict(node_id='cluster',worker_id='joint-worker',worker_instance_id='joint-instance')},capability_fingerprint=frozen['capabilities']['capabilityFingerprint'],options_fingerprint=frozen['capabilities']['engines']['odm']['optionsFingerprint'],result_proxy=proxy)
+        self.control=ReferenceControlAPI(self.store,**self.control_options)
         self.drop_result_ack=False;self.completion_envelopes=[];test=self
         class ControlEndpoint:
             def handle(endpoint,method,path,headers,body,**kwargs):
@@ -112,7 +115,7 @@ class ReferenceJointFlowTests(unittest.TestCase):
                     if test.drop_result_ack and response.status==200:
                         test.drop_result_ack=False;return Response(503,{'error':'synthetic_lost_completion_ack'})
                 return response
-        self.control_origin=self.serve(ControlEndpoint())
+        self.control_endpoint=ControlEndpoint();self.control_origin=self.serve(self.control_endpoint)
         self.process=None;self.viewer_state=self.root/'viewer';self.stack.callback(self.stop_node)
         self.start_node()
         self.engine_cleanup=EngineCacheCleanup(self.worker,path=self.root/'engine-cleanup.sqlite')
@@ -120,13 +123,18 @@ class ReferenceJointFlowTests(unittest.TestCase):
         self.job=self.call('submit')['jobId']
         self.original_claim=None;self.original_receipt=None
 
-    def serve(self,api):
+    def serve(self,api,*,port=0):
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(self.cert,self.key)
-        server=create_reference_http_server(api,ssl_context=context)
+        server=create_reference_http_server(api,port=port,ssl_context=context)
         thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.05});thread.start()
-        def stop():server.shutdown();thread.join(5);server.server_close();self.assertFalse(thread.is_alive())
+        stopped=False
+        def stop():
+            nonlocal stopped
+            if stopped:return
+            server.shutdown();thread.join(5);server.server_close();self.assertFalse(thread.is_alive());stopped=True
         self.stack.callback(stop)
-        return 'https://127.0.0.1:'+str(server.server_port)
+        origin='https://127.0.0.1:'+str(server.server_port);self.servers[origin]=(server,thread,stop)
+        return origin
 
     def start_node(self,*,fail_after_commit=False):
         config=dict(keyPath=str(self.key),certPath=str(self.cert),controlEndpoint=self.control_origin,controlToken=VIEWER,fixtureControlToken=FIXTURE,environment='staging',host='127.0.0.1',port=0,fixtureRoot=str(self.viewer_state),failAfterLedgerCommit=fail_after_commit)
@@ -154,7 +162,7 @@ class ReferenceJointFlowTests(unittest.TestCase):
         request=Request(self.node_origin+'/fixture/'+action,headers={'Authorization':'Bearer '+FIXTURE,'Content-Type':'application/json'},data=None if action=='state' else b'{}',method='GET' if action=='state' else 'POST')
         with build_opener(ProxyHandler({}),HTTPSHandler(context=self.tls)).open(request,timeout=8) as response:return json.loads(response.read(4*1024**2))
 
-    def delivered(self):
+    def delivered(self,*,until='awaiting_acceptance'):
         for _ in range(50):
             self.call('pump');result=self.driver.step()
             self.assertNotEqual(result['state'],'held',result)
@@ -170,7 +178,7 @@ class ReferenceJointFlowTests(unittest.TestCase):
                     if self.original_receipt is None:self.original_receipt=receipt['receiptId']
                     else:self.assertEqual(receipt['receiptId'],self.original_receipt)
             with self.driver._db() as db:stage=db.execute('SELECT stage FROM driver_jobs WHERE job=?',(self.job,)).fetchone()
-            if private['phase']=='awaiting_acceptance' and stage[0]=='awaiting_acceptance':return
+            if stage[0]==until and (until!='awaiting_acceptance' or private['phase']=='awaiting_acceptance'):return
             # Advance only the explicit outbox retry clock, never expiration or
             # coordinator/engine time. No SQL retry-state rewrite or wall sleep.
             self.outbox_now+=10
@@ -178,8 +186,8 @@ class ReferenceJointFlowTests(unittest.TestCase):
 
     def assert_retained_before_acceptance(self):
         self.assertEqual(self.native_fixture.counts().get('remove',0),0)
-        self.assertEqual(len(list(self.ledger.root.glob('jobs/*/all.zip'))),1)
-        self.assertEqual(len(list(self.ledger.root.glob('jobs/*/*.input'))),1)
+        archives=list(self.ledger.root.glob('jobs/*/all.zip'));self.assertEqual(len(archives),1);self.assertEqual(archives[0].read_bytes(),ARCHIVE)
+        inputs=list(self.ledger.root.glob('jobs/*/*.input'));self.assertEqual(len(inputs),1);self.assertEqual(inputs[0].read_bytes(),b'abc')
         self.assertEqual(self.streams,0)
         with closing(sqlite3.connect(self.ledger.path)) as db:self.assertEqual(db.execute("SELECT COUNT(*) FROM pins WHERE state!='released'").fetchone()[0],0)
 
@@ -229,6 +237,54 @@ class ReferenceJointFlowTests(unittest.TestCase):
         self.drop_result_ack=True;self.delivered()
         self.assertEqual(len(self.completion_envelopes),2)
         self.assertEqual(self.completion_envelopes[0],self.completion_envelopes[1])
+        self.assert_retained_before_acceptance()
+        reply=self.call('ingest');self.assertTrue(reply['acknowledged']);self.assertFalse(reply['published'])
+        self.finish_and_check()
+
+    def test_coordinator_tls_outage_after_backend_start_retains_and_delivers_same_finished_job(self):
+        self.delivered(until='executing')
+        authority=self.queue.authority_id;original_claim=dict(self.original_claim)
+        with self.driver._db() as db:original_data=json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?',(self.job,)).fetchone()[0])
+        original_reservation=original_data['reservation']['reservationId']
+        with NodeGate('joint-engine') as gate:
+            original_gate=gate.snapshot();self.assertEqual(original_gate['reservation']['receiptId'],self.original_receipt)
+        self.assertEqual(self.native_fixture.counts()['initialize'],1);self.assertEqual(self.native_fixture.counts()['commit'],1)
+        # Fixture-only backend progression. The worker observes both states over
+        # its real NativeEngine HTTP connection; this performs no processing.
+        with self.native_fixture._db() as db:db.execute('UPDATE tasks SET status=20 WHERE uuid=?',(self.job,))
+        self.assertEqual(self.native.read('/task/'+self.job+'/info')['status']['code'],20)
+        server,thread,stop=self.servers[self.control_origin];port=server.server_port
+        stop();self.assertFalse(thread.is_alive());self.queue.close()
+        with self.assertRaises(HTTPError) as unavailable:self.call('pump')
+        self.assertEqual(unavailable.exception.code,409)
+        self.assertEqual(json.loads(unavailable.exception.read()),{'error':'transport_error'});unavailable.exception.close()
+        with self.native_fixture._db() as db:db.execute('UPDATE tasks SET status=40 WHERE uuid=?',(self.job,))
+        self.assertEqual(self.driver.step()['state'],'delivering')
+        with self.driver._db() as db:sealed_data=json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?',(self.job,)).fetchone()[0])
+        outbox_id=sealed_data['outboxId'];sealed=self.outbox.get(outbox_id)
+        self.assertEqual(sealed_data['reservation']['reservationId'],original_reservation)
+        self.assertEqual(sealed['state'],'pending');self.assertIsNone(sealed['receipt'])
+        self.assertEqual(sealed['payload']['jobId'],self.job)
+        self.assert_retained_before_acceptance()
+        with NodeGate('joint-engine') as gate:
+            offline_gate=gate.snapshot();self.assertEqual(offline_gate['reservation']['receiptId'],self.original_receipt)
+            self.assertEqual(offline_gate['reservation']['job'],original_gate['reservation']['job'])
+            self.assertIsNotNone(offline_gate['reservation']['completionDigest'])
+        for _ in range(2):
+            reply=self.driver.step();self.assertEqual(reply['state'],'delivering');self.outbox_now+=10
+            current=self.outbox.get(outbox_id);self.assertNotEqual(current['state'],'acknowledged');self.assertEqual(current['payload'],sealed['payload'])
+            with NodeGate('joint-engine') as gate:self.assertEqual(gate.snapshot(),offline_gate)
+            self.assert_retained_before_acceptance()
+        self.assertEqual(self.outbox.get(outbox_id)['attempts'],2)
+        self.queue=Queue(self.root/'coordinator',reference_enabled=True);self.stack.callback(self.queue.close)
+        self.store=ReferenceStore(self.queue);self.assertEqual(self.queue.authority_id,authority)
+        self.assertEqual(self.queue.get(self.job)['status'],'held')
+        self.assertEqual(self.store.get(self.job,private=True)['claimToken'],original_claim['claimToken'])
+        self.control=ReferenceControlAPI(self.store,**self.control_options)
+        self.assertEqual(self.serve(self.control_endpoint,port=port),self.control_origin)
+        self.delivered();self.assertEqual(self.original_claim,original_claim)
+        self.assertEqual(self.outbox.get(outbox_id)['state'],'acknowledged')
+        self.assertEqual(self.outbox.get(outbox_id)['payload'],sealed['payload'])
         self.assert_retained_before_acceptance()
         reply=self.call('ingest');self.assertTrue(reply['acknowledged']);self.assertFalse(reply['published'])
         self.finish_and_check()

@@ -24,7 +24,7 @@ the exact original claim request/token binding, one reservation and physical
 receipt, one nine-byte grant budget with three bytes spent and no leaked read
 pins, and one initialize/upload/commit/download/remove operation each.
 
-Three cases currently qualify:
+Four cases currently qualify:
 
 - Normal delivery: producer result/native cache remain before acceptance; Node
   persists the exact result bytes and durable acceptance/outbox before sending
@@ -37,6 +37,15 @@ Three cases currently qualify:
   The producer retains result/native cache while the coordinator still awaits
   acceptance. Restarting the helper over the same durable files replays the
   original receipt, then permits cleanup. No source file is deleted.
+- Coordinator outage: after the backend starts, its synthetic status is observed
+  as running, the actual coordinator TLS listener stops and Queue closes. The
+  fixture subsequently becomes terminal; the worker polls real backend HTTP,
+  caches the exact ZIP and seals its durable outbox while the coordinator is
+  unreachable. Repeated delivery failures retain the original physical receipt,
+  pending completion, outbox payload and byte-identical worker inputs/results.
+  The same Queue path reopens with the original authority and held claim; the
+  same TLS endpoint/port/certificate returns. The original token and outbox
+  deliver without another engine start, Node accepts, then cleanup proceeds.
 
 Source retention remains separate. `referenceSourceRetention.js` is pinned as
 reference material but the joint helper does not call it or supply an issuer.
@@ -71,7 +80,7 @@ at `/viewer`, working directory `/work` and
 python3 -B -W error::ResourceWarning -m unittest -v tests.test_reference_joint_flow
 ```
 
-Default Processing-only runs explicitly skip these three tests when the
+Default Processing-only runs explicitly skip these four tests when the
 snapshot opt-in is absent or the platform is not Linux. An opted-in missing,
 changed or wrong-version dependency fails; it never falls back to duplicated
 business code or installs dependencies. The normal cached Python-only test
