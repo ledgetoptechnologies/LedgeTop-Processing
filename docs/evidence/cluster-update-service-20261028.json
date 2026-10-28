@@ -1,0 +1,566 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T17:00:52.981351+00:00",
+  "status": "owned-update-and-recurring-service-accepted",
+  "sourceCommit": "020c15c79577aff83af388fe476451ceca545518",
+  "sourceArchiveSha256": "7db3e9cf38f2847ec0991ce3e4954bdf33cc0d98723e4a58722dd363db0a015b",
+  "sourceQualificationEvidence": "docs/evidence/main-update-service-20261028.json",
+  "preflight": {
+    "root": "/home/bkoltz/.local/share/ledgetop-processing-prototype/viewer-e82b795/cluster-node",
+    "mode": "0o700",
+    "uid": 1000,
+    "children": [
+      "compose.json",
+      "ingress",
+      "legacy-router-before.json",
+      "node-before.json",
+      "receipt.json"
+    ],
+    "parentChildren": [
+      "actual-node-wire.json",
+      "build.log",
+      "cluster-node",
+      "source"
+    ],
+    "composeKeys": [
+      "command",
+      "container_name",
+      "entrypoint",
+      "gpus",
+      "image",
+      "networks",
+      "ports",
+      "restart"
+    ],
+    "composePublic": {
+      "image": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+      "container_name": "node-odx-gpu",
+      "ports": [
+        {
+          "mode": "ingress",
+          "target": 3000,
+          "published": "13001",
+          "protocol": "tcp",
+          "host_ip": "127.0.0.1"
+        }
+      ],
+      "volumes": null,
+      "deploy": null,
+      "restart": "unless-stopped",
+      "networks": {
+        "default": null
+      },
+      "maxImages": "1000",
+      "backendTokenConfigured": true
+    },
+    "gateway": {
+      "proxyName": "ledgetop-cluster-processing-ingress",
+      "backendName": "node-odx-gpu",
+      "proxyImage": "sha256:84ed8c0dd296c188bfc24ed506f46589e9285fb0b11cf3a04d91d524d3067e11",
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "listenPort": 3001,
+      "backendPort": 13001,
+      "backendEngine": "odm",
+      "allowedClients": [
+        "192.168.50.89",
+        "172.17.0.0/16"
+      ]
+    },
+    "gatewayKeys": [
+      "allowedClients",
+      "backendEngine",
+      "backendName",
+      "backendPort",
+      "backendToken",
+      "engineId",
+      "listenPort",
+      "proxyImage",
+      "proxyName"
+    ],
+    "runtime": {
+      "id": "a7ff1ddebcd10225e570962d927becd1a5ac06882030e0dac5da4174a5f474cd",
+      "image": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+      "startedAt": "2026-10-27T21:54:12.675462547Z",
+      "running": true,
+      "restartCount": 0,
+      "labels": {
+        "com.docker.compose.config-hash": "56afff28bff5dffeb29078869aa36917284a939ba9917139c810d5b989726e97",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "ledgetop-cluster-node-private",
+        "com.docker.compose.project.config_files": "/home/bkoltz/.local/share/ledgetop-processing-prototype/viewer-e82b795/cluster-node/compose.json",
+        "com.docker.compose.project.working_dir": "/home/bkoltz/.local/share/ledgetop-processing-prototype/viewer-e82b795/cluster-node",
+        "com.docker.compose.service": "nodeodm",
+        "com.docker.compose.version": "2.40.3"
+      }
+    },
+    "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+    "dockerRoot": "/var/lib/docker",
+    "linger": "no"
+  },
+  "startupImage": {
+    "repoDigests": [
+      "opendronemap/nodeodm@sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9"
+    ],
+    "repoTags": [
+      "opendronemap/nodeodm:gpu"
+    ],
+    "startupSupported": true,
+    "startupSpecSha256": "0b60178d9c874a8b329cf795fd8f9c148b1c3be4fcc01fe8d23e1d53a0bc5c22",
+    "imageUser": "odm",
+    "imageWorkingDir": "/var/www",
+    "coordinatorId": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+    "coordinatorRunning": true,
+    "controlRolesPresent": true,
+    "disk": {
+      "path": "/var/lib/docker",
+      "device": 64512,
+      "inode": 17039407,
+      "fsId": 3773004692275412875,
+      "blockSize": 4096,
+      "totalBytes": 315926315008,
+      "freeBytes": 250034151424
+    }
+  },
+  "priorCapacityInventory": {
+    "capacityBooks": [],
+    "canonicalCapacityExists": false,
+    "maintenanceFiles": []
+  },
+  "preparation": {
+    "status": "prepared-not-installed",
+    "sourceCommit": "020c15c79577aff83af388fe476451ceca545518",
+    "configId": "25d0f9c403083109b0c6c5fae7ca84c4292a64aca82752dd57d14b99299b1eaa",
+    "codeBindingSha256": "fe01afff0ccdec36be9c663843f4b7613523f13e2b21b7e5e6764c86a73a84da",
+    "currentImage": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+    "qualifierPolicySha256": "4a564bb59ae1bc2e235f8e00ed753ef46779c6d3a89af76f7be45bbe0f46c55e",
+    "existingRolesReusedLocally": true,
+    "unitVerificationExit": 0,
+    "units": {
+      "ledgetop-processing-image-updates.service": "aa669dd5632d50ed53c1e12cc7f7c3d6de4c1170e3947e6c75d8306cc8d45975",
+      "ledgetop-processing-image-updates.timer": "5fecf386eea83eafa9be5200092bf8a1503d2c5daf656e034c873c00ddf9bb33"
+    }
+  },
+  "bootstrap": {
+    "configId": "25d0f9c403083109b0c6c5fae7ca84c4292a64aca82752dd57d14b99299b1eaa",
+    "legacyJournals": 0,
+    "serviceId": "cluster-image-updates-v1",
+    "status": "bootstrapped"
+  },
+  "initialStatus": {
+    "configId": "25d0f9c403083109b0c6c5fae7ca84c4292a64aca82752dd57d14b99299b1eaa",
+    "host": {
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "imageId": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+      "nodeId": "cluster"
+    },
+    "pending": null,
+    "serviceId": "cluster-image-updates-v1",
+    "status": "observed"
+  },
+  "firstTick": {
+    "nextDiscoveryAt": 1793228039.9874287,
+    "operationId": "9a075a76a4d9a37d6da0e1bdb1fef0bb22c9eb8b65d333aabcb7dfbbfef8108d",
+    "serviceId": "cluster-image-updates-v1",
+    "state": "completed",
+    "status": "completed",
+    "transitions": 5
+  },
+  "secondTick": {
+    "nextDiscoveryAt": 1793228039.9874287,
+    "operationId": null,
+    "serviceId": "cluster-image-updates-v1",
+    "state": null,
+    "status": "not_due",
+    "transitions": 0
+  },
+  "ownedUpdate": {
+    "status": {
+      "operationId": "9a075a76a4d9a37d6da0e1bdb1fef0bb22c9eb8b65d333aabcb7dfbbfef8108d",
+      "nodeId": "cluster",
+      "state": "completed",
+      "candidate": {
+        "candidateId": "03558155b7bae0d942b432de99ab69e62b059ef2d1482be1d259e3475c57929c",
+        "channel": "nodeodm-gpu",
+        "compressedBytes": 3952614323,
+        "configDigest": "sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072",
+        "descriptorSetSha256": "dcce69fa2408c6e6c49e13774019e7d51555e682e8d059619353f0cfbcf93b47",
+        "manifestDescriptor": {
+          "digest": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "mediaType": "application/vnd.oci.image.manifest.v1+json",
+          "size": 3921
+        },
+        "manifestDigest": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+        "platform": "linux/amd64",
+        "repository": "docker.io/opendronemap/nodeodm",
+        "schemaVersion": 2,
+        "tag": "gpu"
+      },
+      "plan": {
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "candidateId": "03558155b7bae0d942b432de99ab69e62b059ef2d1482be1d259e3475c57929c",
+        "configDigest": "sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072",
+        "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+        "hostGeneration": 0,
+        "localImageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+        "manifestDigest": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+        "nodeId": "cluster",
+        "operationId": "9a075a76a4d9a37d6da0e1bdb1fef0bb22c9eb8b65d333aabcb7dfbbfef8108d",
+        "planId": "1ba0f09b-2e70-43fd-8195-84261b45574c",
+        "planSha256": "34eca6638ad282d4843da42faaefc69b9b216c7fe01b365249d4183459206fc4",
+        "previousImageId": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+        "qualificationSha256": "2ec9a65c41e1f783b1cf02a8ee826b49f68736d624ae6c7103289ef9e06c953b",
+        "requestSha256": "bb9d937898c7d3d5b70c0b97558335743ed8cee515305ce078c3d8141c7dad03",
+        "schemaVersion": 1,
+        "supervisorPolicySha256": "92a84cd04e4fb8ba24f22e052f27354c017cf16dd506c0669fd74086cc868452",
+        "targetImageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6"
+      },
+      "completion": {
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "candidateId": "03558155b7bae0d942b432de99ab69e62b059ef2d1482be1d259e3475c57929c",
+        "completionSha256": "0fc6c7c6dd13b87641affd1b41a33efbc96d0536bbe587619c1ee86525d68838",
+        "configDigest": "sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072",
+        "coordinatorFinished": true,
+        "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+        "healthy": true,
+        "hostGeneration": 0,
+        "hostPinDurable": true,
+        "imageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+        "ingressOpen": true,
+        "localImageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+        "manifestDigest": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+        "nodeId": "cluster",
+        "operationId": "9a075a76a4d9a37d6da0e1bdb1fef0bb22c9eb8b65d333aabcb7dfbbfef8108d",
+        "planId": "1ba0f09b-2e70-43fd-8195-84261b45574c",
+        "planSha256": "34eca6638ad282d4843da42faaefc69b9b216c7fe01b365249d4183459206fc4",
+        "previousImageId": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+        "qualificationSha256": "2ec9a65c41e1f783b1cf02a8ee826b49f68736d624ae6c7103289ef9e06c953b",
+        "requestSha256": "9822d72d3c52813d9add61f640c040b4650903e026c3afe64b0db64f5750cf78",
+        "schemaVersion": 1,
+        "supervisorPolicySha256": "92a84cd04e4fb8ba24f22e052f27354c017cf16dd506c0669fd74086cc868452",
+        "targetImageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6"
+      }
+    },
+    "host": {
+      "nodeId": "cluster",
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "imageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6"
+    },
+    "pending": null,
+    "completion": {
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "candidateId": "03558155b7bae0d942b432de99ab69e62b059ef2d1482be1d259e3475c57929c",
+      "completionSha256": "0fc6c7c6dd13b87641affd1b41a33efbc96d0536bbe587619c1ee86525d68838",
+      "configDigest": "sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072",
+      "coordinatorFinished": true,
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "healthy": true,
+      "hostGeneration": 0,
+      "hostPinDurable": true,
+      "imageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+      "ingressOpen": true,
+      "localImageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+      "manifestDigest": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+      "nodeId": "cluster",
+      "operationId": "9a075a76a4d9a37d6da0e1bdb1fef0bb22c9eb8b65d333aabcb7dfbbfef8108d",
+      "planId": "1ba0f09b-2e70-43fd-8195-84261b45574c",
+      "planSha256": "34eca6638ad282d4843da42faaefc69b9b216c7fe01b365249d4183459206fc4",
+      "previousImageId": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+      "qualificationSha256": "2ec9a65c41e1f783b1cf02a8ee826b49f68736d624ae6c7103289ef9e06c953b",
+      "requestSha256": "9822d72d3c52813d9add61f640c040b4650903e026c3afe64b0db64f5750cf78",
+      "schemaVersion": 1,
+      "supervisorPolicySha256": "92a84cd04e4fb8ba24f22e052f27354c017cf16dd506c0669fd74086cc868452",
+      "targetImageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6"
+    },
+    "node": {
+      "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+      "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+      "running": true,
+      "startedAt": "2026-10-28T16:54:13.176495987Z",
+      "restartCount": 0,
+      "maxImages": "1000",
+      "composeImage": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6"
+    },
+    "backend": {
+      "engine": "odm",
+      "engineVersion": "3.6.2",
+      "version": "3.6.2",
+      "optionsCount": 82,
+      "taskCount": 0
+    },
+    "coordinator": {
+      "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+      "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+      "running": true,
+      "restartCount": 0
+    },
+    "gate": {
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "nodeId": "cluster",
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "generation": 1,
+      "reservation": null
+    },
+    "nodes": [
+      {
+        "id": "cluster",
+        "state": "active",
+        "revision": 9
+      },
+      {
+        "id": "main",
+        "state": "active",
+        "revision": 18
+      }
+    ],
+    "jobs": {
+      "count": 12,
+      "statuses": {
+        "succeeded": 10,
+        "failed": 2
+      }
+    },
+    "legacyClusterODX": "exited\n"
+  },
+  "qualificationCleanup": {
+    "qualification": [
+      {
+        "id": "a27c46d865186752f19690c051e5ed007de085ec49657f15431253fde2c74de1",
+        "state": "completed",
+        "name": "ltds-startup-a27c46d865186752f19690c051e5ed00",
+        "container": "5be10794b456d78c9e6a111c775ef2e200638c8dafc82bb20d7567c096919612",
+        "absent": true,
+        "genericInspectExit": 1,
+        "genericInspectStderr": "error: no such object: 5be10794b456d78c9e6a111c775ef2e200638c8dafc82bb20d7567c096919612\n",
+        "exactInspectExit": 1,
+        "receipt": {
+          "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+          "candidateId": "03558155b7bae0d942b432de99ab69e62b059ef2d1482be1d259e3475c57929c",
+          "configDigest": "sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072",
+          "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+          "engineVersion": "3.6.2",
+          "evidenceSha256": "15bb2f11a71d2945eaa520b1fe8b36789258fdf047cf8f601dc1693420fb56fb",
+          "hostGeneration": 0,
+          "localImageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "manifestDigest": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "nodeId": "cluster",
+          "operationId": "9a075a76a4d9a37d6da0e1bdb1fef0bb22c9eb8b65d333aabcb7dfbbfef8108d",
+          "passed": true,
+          "qualificationPolicySha256": "4a564bb59ae1bc2e235f8e00ed753ef46779c6d3a89af76f7be45bbe0f46c55e",
+          "qualificationSha256": "2ec9a65c41e1f783b1cf02a8ee826b49f68736d624ae6c7103289ef9e06c953b",
+          "qualifierId": "cluster-nodeodm-startup-v1",
+          "requestSha256": "a27c46d865186752f19690c051e5ed007de085ec49657f15431253fde2c74de1",
+          "schemaVersion": 1,
+          "supervisorPolicySha256": "92a84cd04e4fb8ba24f22e052f27354c017cf16dd506c0669fd74086cc868452"
+        }
+      }
+    ],
+    "supervisorCurrent": {
+      "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+      "generation": 1
+    },
+    "capacityReservations": [
+      {
+        "pull_id": "2cbed990fad636e7ed40445dee8d62d5599995f7ef3a722a53d7fda6f2b80639",
+        "binding": "{\"configDigest\":\"sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072\",\"engineId\":\"b557939c-6ac3-4e73-8b14-31caf7390f23\",\"manifestDigest\":\"sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6\",\"platform\":\"linux/amd64\",\"repository\":\"docker.io/opendronemap/nodeodm\"}",
+        "bytes": 68719476736,
+        "first_candidate_id": "03558155b7bae0d942b432de99ab69e62b059ef2d1482be1d259e3475c57929c",
+        "state": "released",
+        "release_proof": "{\"binding\":{\"configDigest\":\"sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072\",\"engineId\":\"b557939c-6ac3-4e73-8b14-31caf7390f23\",\"manifestDigest\":\"sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6\",\"platform\":\"linux/amd64\",\"repository\":\"docker.io/opendronemap/nodeodm\"},\"metadata\":{\"configDigest\":\"sha256:3dc12bea84c005f4d9112753628f61e99b08d41561fb195c32843f424840d072\",\"engineId\":\"b557939c-6ac3-4e73-8b14-31caf7390f23\",\"imageId\":\"sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6\",\"imageIdKind\":\"manifest\",\"localSize\":3952618244,\"manifestDigest\":\"sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6\",\"platform\":\"linux/amd64\",\"repository\":\"docker.io/opendronemap/nodeodm\"},\"proofSha256\":\"20e242902e46d572a82106cc4dd524eb842ba60d7f0fc2c16788c830a7169e2e\",\"pullId\":\"2cbed990fad636e7ed40445dee8d62d5599995f7ef3a722a53d7fda6f2b80639\",\"schemaVersion\":1}"
+      }
+    ],
+    "oldImageRetained": true
+  },
+  "installation": {
+    "status": "installed-enabled",
+    "sourceCommit": "020c15c79577aff83af388fe476451ceca545518",
+    "configId": "25d0f9c403083109b0c6c5fae7ca84c4292a64aca82752dd57d14b99299b1eaa",
+    "codeBindingSha256": "fe01afff0ccdec36be9c663843f4b7613523f13e2b21b7e5e6764c86a73a84da",
+    "units": {
+      "ledgetop-processing-image-updates.service": "aa669dd5632d50ed53c1e12cc7f7c3d6de4c1170e3947e6c75d8306cc8d45975",
+      "ledgetop-processing-image-updates.timer": "5fecf386eea83eafa9be5200092bf8a1503d2c5daf656e034c873c00ddf9bb33"
+    },
+    "originalLinger": "no",
+    "loaded": {
+      ".service": {
+        "FragmentPath": "/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.service",
+        "DropInPaths": "",
+        "WorkingDirectory": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/source",
+        "ExecStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/cluster-update-service.json ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+        "CPUQuotaPerSecUSec": "infinity",
+        "MemoryMax": "infinity",
+        "TasksMax": "51426"
+      },
+      ".timer": {
+        "FragmentPath": "/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.timer",
+        "DropInPaths": ""
+      }
+    },
+    "properties": {
+      ".service": "LoadState=loaded\nActiveState=activating\nSubState=start\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.service\nResult=success\nExecMainStartTimestamp=Wed 2026-10-28 16:58:35 UTC\nExecMainExitTimestamp=\nExecMainStatus=0",
+      ".timer": "LoadState=loaded\nActiveState=active\nSubState=running\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.timer\nNextElapseUSecMonotonic=infinity\nLastTriggerUSec=Wed 2026-10-28 16:58:35 UTC\nResult=success"
+    }
+  },
+  "finalVerification": {
+    "status": "verified",
+    "configId": "25d0f9c403083109b0c6c5fae7ca84c4292a64aca82752dd57d14b99299b1eaa",
+    "codeBindingSha256": "fe01afff0ccdec36be9c663843f4b7613523f13e2b21b7e5e6764c86a73a84da",
+    "pending": null,
+    "host": {
+      "nodeId": "cluster",
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "imageId": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6"
+    },
+    "backend": {
+      "engine": "odm",
+      "version": "3.6.2",
+      "optionsCount": 82,
+      "idle": true
+    },
+    "gate": {
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "nodeId": "cluster",
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "generation": 1,
+      "reservation": null
+    },
+    "nodes": [
+      {
+        "id": "cluster",
+        "state": "active",
+        "revision": 9
+      },
+      {
+        "id": "main",
+        "state": "active",
+        "revision": 18
+      }
+    ],
+    "jobs": {
+      "count": 12,
+      "statuses": {
+        "succeeded": 10,
+        "failed": 2
+      }
+    },
+    "discovery": {
+      "id": 1,
+      "highwater": 1793206715.9131894,
+      "next_due": 1793228039.9874287,
+      "state": "idle",
+      "last_started": 1793206434.9393034,
+      "last_finished": 1793206439.9874287,
+      "attempt": 1
+    },
+    "properties": {
+      ".service": "LoadState=loaded\nActiveState=inactive\nSubState=dead\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.service\nResult=success\nExecMainStartTimestamp=Wed 2026-10-28 16:58:35 UTC\nExecMainExitTimestamp=Wed 2026-10-28 16:58:35 UTC\nExecMainStatus=0",
+      ".timer": "LoadState=loaded\nActiveState=active\nSubState=waiting\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.timer\nNextElapseUSecMonotonic=3d 23h 28min 22.307415s\nLastTriggerUSec=Wed 2026-10-28 16:58:35 UTC\nResult=success"
+    },
+    "containers": [
+      {
+        "name": "/node-odx-gpu",
+        "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+        "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+        "running": true,
+        "startedAt": "2026-10-28T16:54:13.176495987Z",
+        "restartCount": 0
+      },
+      {
+        "name": "/ledgetop-processing-prototype-c3fcb3a",
+        "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+        "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+        "running": true,
+        "startedAt": "2026-10-28T15:04:54.798609898Z",
+        "restartCount": 0
+      },
+      {
+        "name": "/clusterodx",
+        "id": "e6d4da528e44c40f23816561187eea66f862dd36e870307d1cde12b57c39dc1a",
+        "image": "sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd",
+        "running": false,
+        "startedAt": "2026-10-28T00:22:55.543397097Z",
+        "restartCount": 0
+      }
+    ],
+    "linger": "yes",
+    "journal": "Starting ledgetop-processing-image-updates.service - LedgeTop Processing image update supervision...\n{\"nextDiscoveryAt\":1793228039.9874287,\"operationId\":null,\"serviceId\":\"cluster-image-updates-v1\",\"state\":null,\"status\":\"not_due\",\"transitions\":0}\nFinished ledgetop-processing-image-updates.service - LedgeTop Processing image update supervision.\nStarting ledgetop-processing-image-updates.service - LedgeTop Processing image update supervision...\n{\"nextDiscoveryAt\":1793228039.9874287,\"operationId\":null,\"serviceId\":\"cluster-image-updates-v1\",\"state\":null,\"status\":\"not_due\",\"transitions\":0}\nFinished ledgetop-processing-image-updates.service - LedgeTop Processing image update supervision."
+  },
+  "mainUnchanged": {
+    "containers": [
+      {
+        "name": "/ledgetop-main-processing-nodeodx-1",
+        "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+        "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+        "running": true,
+        "startedAt": "2026-10-28T15:24:31.019864573Z",
+        "restartCount": 0
+      },
+      {
+        "name": "/dcgm_exporter",
+        "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+        "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+        "running": true,
+        "startedAt": "2026-10-27T21:19:37.266076107Z",
+        "restartCount": 0
+      },
+      {
+        "name": "/node_exporter",
+        "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+        "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+        "running": true,
+        "startedAt": "2026-10-26T22:58:44.651792853Z",
+        "restartCount": 0
+      }
+    ],
+    "timer": "active",
+    "serviceExit": "0"
+  },
+  "limitations": [
+    "No photogrammetry reconstruction, real imagery or GPU kernels were tested.",
+    "Engine remains ODM3.6.2; image build changed, not reported engine version.",
+    "No busy-node live trial; actual replacement happened with no active jobs. Synthetic tests cover busy/drain/unknown outcome paths.",
+    "NAS broker, genuine-LiDAR issuer, source retention and complete Viewer runtime delivery/cleanup remain unfinished.",
+    "New cluster worker image/epoch must use 5ce31b; frozen historical coordinator updater pins are not reusable unchanged.",
+    "Raw backend token appeared once in an initial diagnostic command field; the saved diagnostic was sanitized before this evidence was written. No token is included in this record.",
+    "Initial independent absence probe expected capitalized generic Docker error and failed. Container-specific query proved absence; generic error is lowercase on this Docker version. Failed diagnostic retained separately."
+  ],
+  "artifactHashes": {
+    "bootstrap-intent.json": "ccd7f2e9f7983c4088f48298bb258ceae933d3bf9b7ca00a11c623d60d2b46f5",
+    "bootstrap-result.json": "bd69ab714a1022c8d14d767da5db9ba3a226e8e969540bc9209dce5d005763b5",
+    "bootstrap-stdout.json": "59328341db002131d92f4b2c78c91e4d9dd843eabce55f5b67012cb3f80d93ed",
+    "capacity-inventory.json": "254cf5f8bd5103a4d45c494f1d63e75558d227d2648c61448ef4ddafcb760614",
+    "cleanup-and-generation-v2.json": "79cc8fbe59453da1a73cf79386a60844b47b7860a5c8815d3b543da1789aa960",
+    "cleanup-and-generation.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "control_service.py": "9a1ef9ab4fb42f96859c2675f7eb99b802493e379ad258e44d3939e48e5fbc10",
+    "install-intent.json": "03c14c72d0a06f92da178a158781188d4bbc715327a9b38eac13eec6b0b9b819",
+    "install-result.json": "c579012e50f9fdcb780e1d2b21860c5be717c7bad2e5afac79e2eb6bdb8fb225",
+    "install-stdout.json": "64d6de0af621b9a45e39ec51c886abae129bf23cb75ef87c8c07f149df488d6a",
+    "install_cluster.py": "d09491c7dc0efa9ca1dab9289708ed6db2b95b39c39fd310b3ee935f632d7711",
+    "main-unchanged.json": "cf91d8a3e6fe3f6dcf1831eeb6b80dd0c34b74343424008cd4e245c09cd7914f",
+    "owned-update-verification.json": "434551873b6ed3f921cf4d1954ddb907cbd76775e12739e15d0185f264a87b60",
+    "prepare-intent.json": "fa4df7424dbf894dd1552ebcc171a3f08fd90c04ae2f73f4fc074463c7049a7b",
+    "prepare-result.json": "4bd5eb24747a7af1c61b2172ddbcc8a0b29fccc79b3d383b1a1a68a1cb3fadc1",
+    "prepare-stdout.json": "38d2d8c196a7838b127dbab9c99c6b8b268d8a0f22ca67564d629b8ef7d794cb",
+    "prepare_cluster.py": "a4fc2332f545cbe6b20c1b5aa16ce4bf750b5769ef35674b4e117da0e98413c6",
+    "read-only-preflight.json": "5153caa572cd1ee22e6d00b00cae46fe12cd846faedc23bbfe51260a24f99d56",
+    "startup-image-readonly.json": "4ceac7a2e52d7c8ccd6834cfee5987852e2274db42aa3fc774d740bcf83d6f8d",
+    "status-intent.json": "8ddaf932bb54b6154c4d6df1c9caf2cbb0b22d3b94a9daccd07d622b65f5ee30",
+    "status-result.json": "918349a938da05d4ba37ca087795970cca186c1d9283f1b7ae5e96952b39a77e",
+    "status-stdout.json": "2b1187311244ea35fac0b22145bd55d2f20ad8b4c86781aee474ce0b4712b403",
+    "tick-first-intent.json": "146f3f2fbbe408472d06d17b9c0d261a7677832072ca3dc0ba4a670bab963898",
+    "tick-first-result.json": "4f6868807f434d5e29d1aad8bb61645d5fbeac446b3df881bcfc1649dc2558c5",
+    "tick-first-stdout.json": "70125d2eba30f2afa31d816b02d6b59b6a8bf405ac227056c3ececd1ad389847",
+    "tick-second-intent.json": "3b084f62d390c8c8107b83314876a979f4f2bd34412ef7c4c55b5b749bced150",
+    "tick-second-result.json": "8523e2f5f3dea189918ca854d66cd03f4de82603813788a4b6c54cba6ac7b0ed",
+    "tick-second-stdout.json": "ad22ca5a9522f618a32abda5d536110a599681d46233141c9f1d544f42cac821",
+    "verify-intent.json": "accd9e935237e73195c4d2238728b6bac00d0e2aecdbe35d413ad826ab133902",
+    "verify-result.json": "3fbe5cf8bdfeafd98c3eefaccb809822ec04de12e81639a524b36b652faadc5a",
+    "verify-stdout.json": "f5926fab454b190f3467ea483cd9a0ac0888311cfecd63f84213ff0721306ccb",
+    "verify_cluster.py": "e1a52b7e4836d9fff2246a753a1cff36c64af3d9aef8e14f86ce9b40809bdf15"
+  }
+}

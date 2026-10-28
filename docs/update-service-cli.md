@@ -45,7 +45,12 @@ Main-node runtime acceptance on 2026-10-28 is recorded in
 [the installation receipt](evidence/main-update-service-20261028.json): frozen
 source `020c15c`, validated legacy-book closure, unchanged current image, one
 no-change discovery, throttled later ticks, and enabled deterministic user timer.
-The cluster node's recurring updater is not installed. This acceptance does not
+The cluster node's later [runtime acceptance](evidence/cluster-update-service-20261028.json)
+records its actual immutable-image replacement and enabled user timer. Cluster
+retains the existing NodeODM GPU channel and 1,000-photo cap; main retains NodeODX.
+The cluster update preserved the original baseline policy and adopted the new
+image in the journal. It enabled linger for the existing `bkoltz` account so its
+user timer survives logout. No NAS or OS update occurred. This acceptance does not
 prove NAS delivery, real processing, or a future image update.
 
 As `bkoltz` on main, inspect the installed timer with
