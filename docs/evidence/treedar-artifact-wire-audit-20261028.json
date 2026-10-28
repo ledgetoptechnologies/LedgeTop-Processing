@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T18:34:23.128331+00:00",
+  "status": "confirmed-unresolved-real-output-contract-mismatch",
+  "scope": "Native TreeDar role vocabulary compared with actual Viewer source validator; no processing",
+  "nativeRoles": {
+    "engineVersion": "0.0.1",
+    "roles": {
+      "area_types.csv": [
+        "area_types_template",
+        "csv"
+      ],
+      "areas.png": [
+        "area_map_preview",
+        "png"
+      ],
+      "areas.tif": [
+        "area_labels",
+        "cog"
+      ],
+      "chm.tif": [
+        "canopy_height",
+        "cog"
+      ],
+      "chm_raw.tif": [
+        "canopy_height_unfiltered",
+        "cog"
+      ],
+      "classify/classify_report.json": [
+        "classifier_report",
+        "json"
+      ],
+      "classify/final_test_predictions.csv": [
+        "final_test_predictions",
+        "csv"
+      ],
+      "classify/predictions.csv": [
+        "tree_type_predictions",
+        "csv"
+      ],
+      "crowns.tif": [
+        "crown_labels",
+        "cog"
+      ],
+      "dtm.tif": [
+        "ground_model",
+        "cog"
+      ],
+      "labels.csv": [
+        "labels",
+        "csv"
+      ],
+      "ortho_rgb.tif": [
+        "orthophoto_point_colour",
+        "cog"
+      ],
+      "qc.json": [
+        "quality_report",
+        "json"
+      ],
+      "report.html": [
+        "report",
+        "html"
+      ],
+      "summary.json": [
+        "run_summary",
+        "json"
+      ],
+      "tree_areas.csv": [
+        "tree_areas",
+        "csv"
+      ],
+      "tree_features.csv": [
+        "tree_features",
+        "csv"
+      ],
+      "tree_ids.csv": [
+        "lasting_tree_ids",
+        "csv"
+      ],
+      "tree_map.geojson": [
+        "crowns",
+        "geojson"
+      ],
+      "tree_map.png": [
+        "preview",
+        "png"
+      ],
+      "trees.csv": [
+        "tree_table",
+        "csv"
+      ]
+    }
+  },
+  "wireProbe": {
+    "schemaVersion": 1,
+    "cachedImageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb",
+    "nativeVersion": "0.0.1",
+    "viewerSourceCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+    "viewerProtocolSha256": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159",
+    "pythonGeneralValidatorAccepted": true,
+    "wholeRequiredResult": {
+      "accepted": false,
+      "code": "INVALID_PROTOCOL",
+      "path": "object.role"
+    },
+    "nativeFiles": [
+      {
+        "filename": "area_types.csv",
+        "nativeRole": "area_types_template",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "areas.png",
+        "nativeRole": "area_map_preview",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "areas.tif",
+        "nativeRole": "area_labels",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "chm.tif",
+        "nativeRole": "canopy_height",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "chm_raw.tif",
+        "nativeRole": "canopy_height_unfiltered",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "classify/classify_report.json",
+        "nativeRole": "classifier_report",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "classify/final_test_predictions.csv",
+        "nativeRole": "final_test_predictions",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "classify/predictions.csv",
+        "nativeRole": "tree_type_predictions",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "crowns.tif",
+        "nativeRole": "crown_labels",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "dtm.tif",
+        "nativeRole": "ground_model",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "labels.csv",
+        "nativeRole": "labels",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "manifest.json",
+        "nativeRole": "engine_manifest",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "ortho_rgb.tif",
+        "nativeRole": "orthophoto_point_colour",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "qc.json",
+        "nativeRole": "quality_report",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "report.html",
+        "nativeRole": "report",
+        "required": true,
+        "accepted": true
+      },
+      {
+        "filename": "summary.json",
+        "nativeRole": "run_summary",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "tree_areas.csv",
+        "nativeRole": "tree_areas",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "tree_features.csv",
+        "nativeRole": "tree_features",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "tree_ids.csv",
+        "nativeRole": "lasting_tree_ids",
+        "required": false,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "tree_map.geojson",
+        "nativeRole": "crowns",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "tree_map.png",
+        "nativeRole": "preview",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      },
+      {
+        "filename": "trees.csv",
+        "nativeRole": "tree_table",
+        "required": true,
+        "accepted": false,
+        "code": "INVALID_PROTOCOL",
+        "path": "object.role"
+      }
+    ],
+    "scope": "Native cached role vocabulary with synthetic positive byte/hash metadata only; no actual file geometry is claimed.",
+    "effects": "Image import/vocabulary read only. No engine processing, network service, host/Viewer/NAS change, or genuine-acquisition claim."
+  },
+  "auditProposal": {
+    "schemaVersion": 1,
+    "observedAt": "2026-10-28T18:13:08.612925+00:00",
+    "sourceHashes": {
+      "processing/treedar_engine.py": "2c1d6bf22e5e5153fc87bd01f78ce9104709132d64f7717ff408870316732678",
+      "processing/treedar_delivery.py": "914dc1273c60fd7e7d46a838435de77bb4aa2f64f78fc2a0646dfedbaebcefc0",
+      "tests/test_treedar_engine.py": "624a0171f80a049012e8297551858807387fa58b60e4e79d97a733f6f48eafd5",
+      "processing/scratch_policy.py": "770381c4115148cad3e31d58d282abe3c665ad8d185f716a5b4057202ac36e88"
+    },
+    "nativeRoleAcceptance": {
+      "total": 22,
+      "accepted": 1,
+      "requiredTotal": 12,
+      "requiredRejected": 11
+    },
+    "existingStandaloneDefect": {
+      "bootstrap": "treedar_engine.py:_inside emits ROLES[filename][0] and engine_manifest for manifest.json",
+      "host": "TreeDarEngine._collect forwards native role unchanged into general Python result validator",
+      "delivery": "TreeDarDelivery._project validates general Python result manifest and engine versions/no ODM archive, but does not apply Viewer finite role vocabulary",
+      "viewer": "ReferenceProvider.results calls actual Viewer validateResultManifest; native outputs fail object.role",
+      "testGap": "TreeDarEngineTests.output helper labels every required file report, hiding real native-role mismatch; bootstrap qualification verifies real geometry/hashes but never feeds actual native roles to Viewer."
+    },
+    "projectionDecision": {
+      "recommendation": "Agree a versioned TreeDar native-artifact bundle with Viewer, preferably an explicit treedar_archive role / treedar-artifact-bundle-v1 contract and bounded manifest. Preserve every native filename, role, format, byte count and hash inside the authenticated bundle; stream/retain/ACK the exact bundle, and derive typed Viewer assets only with explicit support.",
+      "v1Alternative": "If Viewer explicitly defines existing tree_inventory as the versioned opaque inventory-bundle format, it could carry that bundle without widening the v1 enum. Do not silently assume that meaning: negotiate format/capability and add a shared fixture before emission.",
+      "flatArtifactAlternative": "A versioned result metadata extension can instead retain separate native objects using a finite declared semantic role vocabulary and exact filename/media-type metadata in both validators and Viewer ingestion. Keep native canopy height/crown labels distinct from terrain DEM.",
+      "forbiddenShortcuts": [
+        "Do not map CHM/crown-label rasters to dem/orthophoto merely to satisfy the enum.",
+        "Do not relabel all binary outputs report and hide native semantics.",
+        "Do not widen only Python or only the new combined journal.",
+        "Do not rewrite sealed old results in place. New projection policy/source digest requires explicit runtime epoch/capability treatment."
+      ],
+      "requiredChecks": [
+        "Actual cached ROLES vocabulary fixture and real bootstrap artifact-manifest projection through the paired Viewer validator.",
+        "Positive/negative bundle closure: safe paths/no symlink/duplicate IDs/unlisted files/hash/size/count/byte bounds and deterministic manifest.",
+        "Viewer stores exact bytes durably before acceptance and supports exact receipt replay; no result/input cleanup before corresponding acceptance.",
+        "No TreeDar or combined capability until authentic provenance, actual adapter and Viewer ingestion are jointly accepted."
+      ]
+    },
+    "intermediateDesign": {
+      "parentAwareEntry": "Add a separate closed intermediate entrypoint; validate the untouched combined parent manifest/pipeline/digests and select only its exact original LiDAR object. Do not fabricate a TreeDar-only child job.",
+      "receiptAdoption": "Require the journal stage intent and exact existing parent physical gate receipt/job/worker/authority/generation, actual parent claim/request/instance and scratch reservation. Verify/adopt that receipt; do not reserve a new gate or bind a new job.",
+      "reservation": "Validate scratch input_bytes against whole parent manifest.totalBytes, not only LiDAR size. Adopt existing engine_started reservation and retain parent output budget. Allocate a stage-specific budget from the immutable plan.",
+      "allocation": "Freeze and verify allocationBase against actual monotonic ledger allocation plus retained original inputs/ODM stage outputs. Charge TreeDar output/proof/control contributions cumulatively; do not reset allocation to LiDARbytes+Treebytes. Do not mark parent terminal or free its remaining bytes in an intermediate poll.",
+      "identity": "Persist execution mode, parent/stage plan+intent+preceding proof hashes, adopted receipt, whole input bytes, allocation base, stage budget and original LiDAR binding before one Docker create/start attempt. Keep standalone identities/readers unchanged; unknown launch intents remain inspect-only.",
+      "observationVsWriters": "Split read-only terminal lookup/observation from deadline stop writers and final reservation settlement. Current poll can stop containers on deadline and marks scratch terminal, so cannot be used unchanged as lookup. A lookup must never start/stop/remove, settle scratch, prepare completion, create parent outbox or release the fence.",
+      "completion": "Real intermediate adapter verifies exact owned container terminal proof and retained output bytes, emits only a namespaced stage proof for PipelineJournal. Outer combined driver owns one final manifest/outbox, terminal settlement and coordinator ACK/gate release. TreeDarDelivery standalone poll/ack API is not the intermediate adapter.",
+      "leaseAndCleanup": "Keep the same parent global claim/fence across ODM\u2192TreeDar; preserve all original LiDAR/imagery and ODM outputs. Separate optional exact stopped-container cleanup from result/source acceptance lifecycle."
+    },
+    "scope": "Read-only cached-image vocabulary import and synthetic metadata probes, no actual TreeDar computation, host/Viewer/NAS change, genuine acquisition or deployed acceptance.",
+    "artifactHashes": {
+      "fixtures.json": "87eb2b8822c7c6cc48d02d2602404e71b635e9e3d466b75a96253d4e0cf6c18d",
+      "native-roles.json": "dbdac6819eeedda554cdf16340434e8b9a7cf067df13c3b58d1e5dd18eeba488",
+      "probe.cjs": "533a4441af34edbd60490eaf3bb01f0745433e5ef97ea6ca067b6cefed2bf2de",
+      "viewer-referenceProtocol.cjs": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159",
+      "wire-role-report.json": "79faeadc0d80a271f36dddfebe209fa7de04a23185d163c29c40a9126a3bd117"
+    }
+  },
+  "coordination": {
+    "owner": "Processing Root owns only four new standalone Viewer bundle-contract files after explicit ownership ACK; existing Viewer protocol/NAS/provider/runtime files remain reserved",
+    "outerTransport": "Unagreed: do not silently use legacy tree_inventory for a mixed scientific bundle or expand v1 role enum.",
+    "nextSourceLane": "Versioned bundle manifest/ZIP validation preserves exact native filenames, roles, formats and hashes; remains unintegrated/capability disabled."
+  },
+  "limitations": [
+    "Per-file payload bytes are synthetic metadata fixtures; no algorithm, GPU, genuine acquisition or archive ingestion was run.",
+    "This defect affects real TreeDar-only output roles as well as future combined output. Abstract report-only fixtures did not cover it.",
+    "Runtime TreeDar capability remains disabled. No Viewer production, NAS, credential or source-retention change occurred."
+  ]
+}
