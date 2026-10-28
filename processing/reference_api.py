@@ -47,6 +47,8 @@ class ReferenceAPI:
         self.allowed_odm_options = options
         self.treedar_available = treedar_available
         self.result_proxy = result_proxy
+        from .reference_terminal import TerminalService
+        self.terminal = TerminalService(store)
 
     def _authenticate(self, headers):
         if not hasattr(headers, "items"):
@@ -130,7 +132,7 @@ class ReferenceAPI:
                     available_engines=("odm", "treedar") if self.treedar_available else ("odm",))
                 job, created = self.store.submit(validated)
                 return Response(201 if created else 200, job)
-            match = re.fullmatch(re.escape(protocol.PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/results|/acceptance|/transfer-grants)?", path)
+            match = re.fullmatch(re.escape(protocol.PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/results|/acceptance|/transfer-grants|/terminal-outcome|/terminal-acceptance)?", path)
             if not match:
                 return self._error(404, "not_found")
             job_id, suffix = match.groups()
@@ -141,6 +143,11 @@ class ReferenceAPI:
                 return self._error(404, "not_found")
             if method == "GET" and suffix is None:
                 return Response(200, job)
+            if method == 'GET' and suffix == '/terminal-outcome':
+                return Response(200, self.terminal.outcome(job_id, environment))
+            if method == 'POST' and suffix == '/terminal-acceptance':
+                receipt = protocol.decode_submission(body)
+                return Response(200, self.terminal.accept(job_id, receipt, environment))
             if method == "GET" and suffix == "/results":
                 private = self._job(job_id, environment, private=True)
                 if private["resultManifest"] is None:

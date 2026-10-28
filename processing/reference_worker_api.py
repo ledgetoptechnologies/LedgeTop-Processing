@@ -32,6 +32,8 @@ class ReferenceWorkerAPI:
             protocol._slug(identity["worker_instance_id"], "worker instance ID")
             workers[token] = MappingProxyType(dict(identity))
         self.store, self.receiver = store, receiver
+        from .reference_failure import FailureReceiver
+        self.failure_receiver = FailureReceiver(store)
         self._workers = MappingProxyType(workers)
 
     @staticmethod
@@ -111,6 +113,12 @@ class ReferenceWorkerAPI:
                     raise ValueError("invalid claim token")
                 receipt = self.receiver.receive(payload["delivery"], **identity,
                     claim_request_id=payload["claimRequestId"], claim_token=token)
+                return Response(200, receipt)
+            if method == 'POST' and path == PREFIX + '/terminal-outcomes':
+                payload = protocol.decode_submission(body)
+                protocol._closed(payload, ('claimRequestId', 'claimToken', 'delivery'), 'worker terminal outcome')
+                receipt = self.failure_receiver.receive(payload['delivery'], **identity,
+                    claim_request_id=payload['claimRequestId'], claim_token=payload['claimToken'])
                 return Response(200, receipt)
             action = re.fullmatch(re.escape(PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(reservation|phase)', path) if type(path) is str else None
             if method == 'POST' and action:

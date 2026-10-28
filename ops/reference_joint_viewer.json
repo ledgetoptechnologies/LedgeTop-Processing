@@ -1,0 +1,12 @@
+{
+  "keyPath": "/tls/key.pem",
+  "certPath": "/tls/cert.pem",
+  "controlEndpoint": "https://processing:9443",
+  "controlToken": "synthetic-reference-staging-token",
+  "fixtureControlToken": "synthetic-reference-fixture-token",
+  "environment": "staging",
+  "host": "0.0.0.0",
+  "port": 9444,
+  "fixtureRoot": "/state/viewer",
+  "failAfterLedgerCommit": false
+}

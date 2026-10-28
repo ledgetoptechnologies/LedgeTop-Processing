@@ -15,6 +15,7 @@ from processing.reference_http import create_reference_http_server
 from processing.reference_protocol import MAX_BODY_BYTES
 from processing.reference_protocol import digest
 from processing.reference_store import ReferenceStore, PROFILE
+from processing.reference_failure import FailureOutbox, make_failure
 
 
 STAGING = "synthetic-http-staging-token"
@@ -171,6 +172,37 @@ class ReferenceHTTPTests(unittest.TestCase):
         connection.close()
         self.assertTrue(closed)
         self.assertNotIn('claimToken', calls[0])
+
+    def test_confirmed_cancelled_outcome_and_metadata_acceptance_over_http(self):
+        _, job, _ = self.request('POST', '/ltds/v1/jobs', self.fixture['submission'])
+        path = '/ltds/v1/jobs/' + job['jobId']
+        self.assertEqual(self.request('GET', path + '/terminal-outcome')[0], 409)
+        _, claim, _ = self.request('POST', '/ltds/worker/v1/claim',
+            {'jobId':job['jobId'],'claimRequestId':'cancel-claim'}, token=WORKER)
+        failure = make_failure(job_id=job['jobId'], generation=1, environment='staging',
+            input_manifest_sha256=job['manifestSha256'], pipeline_digest=job['pipelineDigest'],
+            terminal_state='cancelled', error_code='confirmed_engine_cancelled')
+        outbox = FailureOutbox(Path(self.directory.name) / 'failure-outbox.sqlite')
+        outbox.persist(failure, engine_terminal=True)
+        delivery = outbox.claim_next()
+        envelope = {k:delivery[k] for k in ('outboxId','payloadSha256','payload')}
+        status, acknowledgement, _ = self.request('POST', '/ltds/worker/v1/terminal-outcomes',
+            dict(claimRequestId='cancel-claim',claimToken=claim['claimToken'],delivery=envelope),token=WORKER)
+        self.assertEqual(status,200)
+        self.assertEqual(acknowledgement['type'],'durable-failure-receipt')
+        self.assertEqual(self.request('GET',path + '/terminal-outcome')[:2],(200,failure))
+        self.assertEqual(self.request('GET',path + '/terminal-outcome',token=PRODUCTION)[0],404)
+        public = self.request('GET',path)[1]
+        self.assertEqual((public['status'],public['phase'],public['resultManifestSha256']),('cancelled','awaiting_acceptance',None))
+        receipt = dict(schemaVersion=1,receiptId='terminal-receipt',storageReceiptId='terminal-storage',
+            jobId=job['jobId'],generation=1,environment='staging',inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'],failureSha256=failure['failureSha256'],
+            acceptedAt='2026-10-27T00:00:00.000Z',validationVersion='ltds-reference-v1')
+        status, accepted, _ = self.request('POST',path + '/terminal-acceptance',receipt)
+        self.assertEqual(status,200)
+        self.assertTrue(accepted['terminalAccepted'])
+        self.assertEqual((accepted['job']['status'],accepted['job']['phase']),('cancelled','completed'))
+        self.assertFalse(self.request('POST',path + '/terminal-acceptance',receipt)[1]['created'])
 
     def test_plaintext_wildcard_and_external_bind_fail_before_listening(self):
         for host in ("0.0.0.0", "192.0.2.1", "::"):

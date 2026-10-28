@@ -109,11 +109,16 @@ class ReferenceStore:
             # overlay; it neither authorizes replay nor erases worker progress.
 
     def _row(self, db, job_id):
-        row = db.execute("""SELECT r.*,j.status,j.claim_hash,j.held_reason,c.token AS private_claim_token,
+        has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
+        failure_columns = 'f.failure_json AS terminal_failure_json,f.delivery_state AS failure_delivery_state' if has_failure else 'NULL AS terminal_failure_json,NULL AS failure_delivery_state'
+        failure_join = 'LEFT JOIN reference_worker_failures f ON f.job_id=r.job_id AND f.generation=r.generation' if has_failure else ''
+        row = db.execute(f"""SELECT r.*,j.status,j.result AS queue_result,j.claim_hash,j.held_reason,c.token AS private_claim_token,
+          {failure_columns},
           g.grant_json AS private_grant_json
           FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
           LEFT JOIN reference_claims c ON c.job_id=r.job_id
           LEFT JOIN reference_transfer_grants g ON g.job_id=r.job_id
+          {failure_join}
           WHERE r.job_id=? AND j.profile=?""", (job_id, PROFILE)).fetchone()
         if row is None:
             raise Conflict("unknown reference job")
@@ -123,14 +128,21 @@ class ReferenceStore:
         result = json.loads(row["result_json"]) if row["result_json"] else None
         grant = json.loads(row['private_grant_json']) if row['private_grant_json'] else None
         recovering = row["status"] == "held" and row["held_reason"] == "coordinator_restart"
+        phase, status, error = ('held' if recovering else row['phase']), row['status'], ('coordinator_restart' if recovering else row['error'])
+        if row['terminal_failure_json'] and row['failure_delivery_state'] == 'awaiting_viewer_failure_acceptance' and status == 'failed':
+            failure = json.loads(row['terminal_failure_json'])
+            expected = {key: failure[key] for key in ('failureSha256', 'terminalState', 'errorCode')}
+            if row['queue_result'] and json.loads(row['queue_result']) == expected:
+                status, error = failure['terminalState'], failure['errorCode']
+                phase = 'completed' if row['phase'] == 'completed' else 'awaiting_acceptance'
         return {"jobId": row["job_id"], "generation": row["generation"],
-                "environment": row["environment"], "phase": "held" if recovering else row["phase"],
+                "environment": row["environment"], "phase": phase,
                 "manifestSha256": row["manifest_sha"], "pipelineDigest": row["pipeline_digest"],
-                "status": row["status"], "nodeId": row["node_id"],
+                "status": status, "nodeId": row["node_id"],
                 "transferRequest": json.loads(row["transfer_json"]) if row["transfer_json"] else None,
                 "transferGrantAcknowledgement": ({key: grant[key] for key in
                     ('reservationId', 'generation', 'manifestSha256', 'nonce')} | {'accepted': True}) if grant else None,
-                "error": "coordinator_restart" if recovering else row["error"],
+                "error": error,
                 "resultManifestSha256": result["resultManifestSha256"] if result else None}
 
     def _record(self, row, private):
@@ -153,6 +165,8 @@ class ReferenceStore:
           length(worker_id)+length(instance_id)+length(token)),0) FROM reference_claims""").fetchone()[0]
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone():
             used += db.execute('SELECT COALESCE(SUM(length(CAST(failure_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0) FROM reference_worker_failures').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
+            used += db.execute('SELECT COALESCE(SUM(length(CAST(receipt_json AS BLOB))),0) FROM reference_terminal_acceptances').fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
@@ -327,6 +341,8 @@ class ReferenceStore:
         protocol._integer(transfer_request["byteBudget"], "byteBudget")
         protocol._hash(transfer_request["manifestSha256"], "manifestSha256")
         protocol._string(transfer_request["expiresAt"], "expiresAt", 40)
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z', transfer_request['expiresAt']):
+            raise ValueError('transfer expiry must use UTC millisecond wire format')
         try:
             expiry = datetime.fromisoformat(transfer_request["expiresAt"].replace("Z", "+00:00"))
             if expiry.utcoffset() is None:
@@ -442,6 +458,15 @@ class ReferenceStore:
             checked = protocol.validate_acceptance(receipt, result_manifest=result,
                 input_manifest_sha256=row["manifest_sha"])
             encoded, receipt_digest = _json(checked), protocol.receipt_tombstone_digest(checked)
+            identities = {checked['receiptId'], checked['storageReceiptId']}
+            for existing in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances'):
+                prior = json.loads(existing['receipt_json'])
+                if existing['receipt_id'] != checked['receiptId'] and identities & {prior['receiptId'], prior['storageReceiptId']}:
+                    raise Conflict('acceptance identity already bound')
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
+                for existing in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_terminal_acceptances'):
+                    if identities & {existing['receipt_id'], existing['storage_receipt_id']}:
+                        raise Conflict('acceptance identity belongs to terminal metadata')
             old = db.execute("SELECT job_id,digest FROM reference_acceptances WHERE receipt_id=?", (checked["receiptId"],)).fetchone()
             if old and (old["job_id"], old["digest"]) != (job_id, receipt_digest):
                 raise Conflict("receipt ID already belongs to a different acceptance")

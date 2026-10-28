@@ -47,8 +47,9 @@ Beau supplies a smaller dataset.
 - `reference_failure.py` provides separate durable failed/cancelled records,
   receipts and retry outboxes without fake output manifests. Success and failure
   seals are mutually exclusive in the queue transaction. Failure bytes count
-  against the global metadata quota. Public failure/Viewer acceptance wiring
-  remains pending the shared terminal-failure contract.
+  against the global metadata quota. `reference_terminal.py` and the public API
+  expose confirmed terminal outcomes and exact durable metadata acceptance.
+  Cancelled jobs retain their actual public outcome; terminal ACKs accept no files.
 - `contracts/reference-v1.contract.json` is the identical Python/Viewer fixture.
   Its SHA-256 with LF line endings is
   `2c49ff86b8e20384c400ff56c8365418e643108aa9e6c29b46e938554e989b37`.
@@ -69,7 +70,7 @@ Beau supplies a smaller dataset.
    expiry, production priority, small-node-first routing and maintenance with
    synthetic fixtures before enabling the reference path or running real data.
 
-Source acceptance: the full 435-test checkpoint passes in an isolated Linux container
+Source acceptance: the full 450-test checkpoint passes in an isolated Linux container
 with network disabled and a read-only source mount. Linux also exercises the
 symlink checks that Windows skips without symlink privileges. Tests include real loopback HTTP, metadata grant
 replay, transfer corruption/expiry and completion-commit crash windows. These
@@ -95,6 +96,25 @@ removed and their absence verified. No host trust settings changed. Helpers:
 `ops/reference_tls_fixture.py` and `ops/reference_viewer_tls_probe.cjs`. This
 proves metadata transport, not engine execution or the complete payload pipeline.
 
+The subsequent joint fixture exercised the complete synthetic transport chain
+over real TLS: actual Viewer broker → reserved worker input → synthetic engine →
+pinned worker result → coordinator stream → actual Viewer client and durable
+acceptance ledger → receipt relay → exact worker archive cleanup. A second run
+restarted the coordinator after the worker outbox commit, then exited Viewer with
+code 86 after its ledger commit and before ACK. The worker retained its archive
+and offered zero cleanup candidates until Viewer restarted and replayed its exact
+receipt. Engine initialize/upload/commit/download counts stayed one each. The
+original 22-byte Viewer ZIP remained after worker cleanup. All exact test
+containers, volumes, certificate material and internal network were removed and
+their absence verified. See `evidence/reference-joint-20261027.json`.
+
+These runs used a synthetic engine, three-byte input and an empty valid ZIP.
+They prove transport/process recovery, not photogrammetry geometry, real TreeDar,
+NAS hardware durability or installed runtime readiness. Initial failures exposed
+microsecond-versus-millisecond expiry format and a ten-minute reservation outside
+the broker's five-minute policy; the fixture now emits millisecond UTC and uses
+240 seconds. Runtime policy configuration/negotiation remains explicit work.
+
 Transfer `byteBudget` is a bounded wire allowance including retries: between
 the manifest's total input bytes and `min(2^53-1, 3 * totalBytes)`. Successful
 input files still have the exact manifest byte counts and hashes. This allowance
@@ -119,8 +139,8 @@ After coordinator metadata acknowledgement, the worker may release its engine
 fence. It independently validates relayed Viewer receipts against its persisted
 manifest and derives accepted object coverage locally. Cleanup still requires
 terminal state, exact accepted objects, no active/uncertain pins and grace.
-Engine task removal, failed/cancelled terminal receipts, reservation renewal,
-result streaming and automatic daemon wiring remain integration work; a retained
+Engine task removal, real-engine failure/cancellation reporting, reservation renewal,
+NAS/runtime mounting and automatic daemon wiring remain integration work; a retained
 engine task may intentionally block the existing strict maintenance census.
 
 Missing delivery acknowledgements retain results. Disk pressure stops intake.

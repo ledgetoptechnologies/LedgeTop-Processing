@@ -72,6 +72,16 @@ class ReferenceStoreTests(unittest.TestCase):
         transfer['byteBudget'] = 9
         self.assertEqual(self.store.reserve(job['jobId'], transfer, node_id='cluster')['phase'], 'awaiting_transfer')
 
+    def test_wire_expiry_requires_viewer_compatible_utc_milliseconds(self):
+        job, _ = self.store.submit(self.submission)
+        self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance', claim_request_id='claim-expiry')
+        for value in ('2030-01-01T00:00:00.123456Z', '2030-01-01T00:00:00Z', '2030-01-01T00:00:00.000+00:00'):
+            transfer = {**self.fixture['transferRequest'], 'expiresAt': value}
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.store.reserve(job['jobId'], transfer, node_id='cluster')
+        self.assertEqual(self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')['phase'], 'awaiting_transfer')
+
     def test_disabled_profile_fails_closed(self):
         self.queue.allowed_profiles.remove(PROFILE)
         with self.assertRaises(ValueError):
@@ -168,6 +178,7 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.store.accept(job["jobId"], changed)
         changed["receiptId"] = "receipt-final"
+        changed['storageReceiptId'] = 'storage-final'
         changed["acceptedObjectIds"] = [obj["id"] for obj in result["objects"]]
         accepted = self.store.accept(job["jobId"], changed)
         self.assertTrue(accepted["fullyAccepted"])

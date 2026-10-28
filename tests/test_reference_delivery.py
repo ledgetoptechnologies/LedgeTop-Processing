@@ -77,6 +77,7 @@ class ReferenceDeliveryTests(unittest.TestCase):
             resultManifestSha256=self.result['resultManifestSha256'])
         self.assertFalse(self.store.accept(self.job['jobId'], acceptance)['fullyAccepted'])
         acceptance['receiptId'] = 'all-outputs'
+        acceptance['storageReceiptId'] = 'all-outputs-storage'
         acceptance['acceptedObjectIds'] = [o['id'] for o in self.result['objects']]
         self.assertTrue(self.store.accept(self.job['jobId'], acceptance)['fullyAccepted'])
 
