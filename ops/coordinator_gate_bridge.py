@@ -224,6 +224,8 @@ class DockerEngineProbe:
 
 MAIN_CONTAINER_ID='78be3d38659e2b698c7611b6b60fad46e7632ef96aa21898a7c2edafece093c1'
 MAIN_CONTAINER_NAME='/ledgetop-main-processing-nodeodx-1'
+MAIN_INSPECT_TEMPLATE=('{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},"running":{{json .State.Running}},'
+    '"pid":{{json .State.Pid}},"health":{{with index .State "Health"}}{{json (index . "Status")}}{{else}}null{{end}}}')
 
 
 def _strict_json(raw):
@@ -310,9 +312,7 @@ class MainEngineProbe(DockerEngineProbe):
         try:
             deadline=time.monotonic()+self.timeout
             identity=self._engine_identity(deadline)
-            template=('{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},"running":{{json .State.Running}},'
-                '"pid":{{json .State.Pid}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}}')
-            value=_strict_json(self._output(['container','inspect','--format',template,MAIN_CONTAINER_ID],deadline))
+            value=_strict_json(self._output(['container','inspect','--format',MAIN_INSPECT_TEMPLATE,MAIN_CONTAINER_ID],deadline))
             if (type(value) is not dict or set(value)!={'id','name','image','running','pid','health'}
                     or value['id']!=MAIN_CONTAINER_ID or value['name']!=MAIN_CONTAINER_NAME or value['image']!=self.expected_image
                     or value['running'] is not True or type(value['pid']) is not int or value['pid']<=0

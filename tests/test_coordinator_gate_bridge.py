@@ -17,7 +17,7 @@ from unittest.mock import patch
 import uuid
 
 from ops.coordinator_gate_bridge import (BridgeBinding,BridgeError,BridgeEOF,BridgeGateClient,
-    GateSet,LocalGate,RootRelay,MainEngineProbe,MAIN_CONTAINER_ID,MAIN_CONTAINER_NAME,
+    GateSet,LocalGate,RootRelay,MainEngineProbe,MAIN_CONTAINER_ID,MAIN_CONTAINER_NAME,MAIN_INSPECT_TEMPLATE,
     helper_digest,_Pipe,_common,_main_http_json)
 from processing.node_gate import NodeGate,GateBusy,canonical_gate_path
 
@@ -340,6 +340,9 @@ class MainProbeTests(unittest.TestCase):
         self.assertEqual(len(set(self.deadlines)),1)
         inspect=next(args for args in self.calls if args[:2]==['container','inspect'])
         self.assertEqual(inspect[-1],MAIN_CONTAINER_ID)
+        self.assertEqual(inspect[3],MAIN_INSPECT_TEMPLATE)
+        self.assertIn('{{with index .State "Health"}}{{json (index . "Status")}}{{else}}null{{end}}',inspect[3])
+        self.assertNotIn('.State.Health',inspect[3])
         self.assertFalse(any('Env' in arg or 'Cmd' in arg for arg in inspect))
         self.assertTrue(all(args[0] in ('info','container','exec','top') for args in self.calls))
 

@@ -111,7 +111,11 @@ class NodeGate:
         lock = self.root / 'gate.lock'
         if lock.is_symlink():
             raise GateError('invalid node gate lock')
-        self._stream = lock.open('a+b')
+        # New canonical locks must satisfy the live holder's private-file
+        # checks even on hosts whose normal umask permits group writes.
+        # Existing lock inodes and their modes are never replaced here.
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, 'O_BINARY', 0), 0o600)
+        self._stream = os.fdopen(descriptor, 'a+b')
         try:
             if os.name == 'nt':
                 import msvcrt
