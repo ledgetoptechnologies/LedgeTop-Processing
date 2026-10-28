@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Concrete isolated startup-only qualifier, real maintenance adapter and joint source pipeline",
+  "fullLinuxRegression": {
+    "command": "python -B -m unittest discover -s tests",
+    "environment": "isolated cached Linux container; no network; read-only repository",
+    "total": 806,
+    "passed": 804,
+    "skipped": 2,
+    "skipReason": "Two fixed-probe tests require Node.js, absent in cached Python/TreeDar test image",
+    "seconds": 84.317,
+    "exitCode": 0,
+    "warnings": [
+      "One intentional fork-ownership test DeprecationWarning in a multithreaded test process"
+    ]
+  },
+  "actualNodeVerification": {
+    "command": "python -B -m unittest tests.test_update_qualifier.ActualProbeTests",
+    "environment": "existing Windows Node.js24.16; real loopback HTTP",
+    "passed": 2,
+    "skipped": 0,
+    "seconds": 0.188,
+    "exitCode": 0,
+    "scope": [
+      "Fixed script GET /info and /options only",
+      "Hard watchdog terminates a continuously trickling GET response under scaled test timers"
+    ]
+  },
+  "jointPipelineVerification": {
+    "command": "python -B -m unittest tests.test_update_pipeline",
+    "passed": 5,
+    "skipped": 0,
+    "seconds": 2.852,
+    "exitCode": 0,
+    "realComponents": [
+      "DockerRegistry",
+      "StartupQualifier",
+      "UpdateSupervisor",
+      "UpdateMaintenanceAdapter",
+      "owned scheduling HTTP and SQLite",
+      "NodeGate",
+      "managed container finalization"
+    ],
+    "syntheticBoundaries": [
+      "Docker transport",
+      "ingress transport"
+    ]
+  },
+  "localDockerSpecProbe": {
+    "imageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb",
+    "created": true,
+    "started": false,
+    "exactOwnedContainerRemoved": true,
+    "imagePulled": false,
+    "confirmed": {
+      "mounts": [],
+      "tmpfsOptions": "rw,nosuid,nodev,mode=1777",
+      "securityOpt": [
+        "no-new-privileges"
+      ],
+      "ipcMode": "private",
+      "logDriver": "none"
+    },
+    "scope": "Container metadata serialization only, not a NodeODM/NodeODX startup acceptance"
+  },
+  "review": "Independent stable component and joint-pipeline review found no remaining blocking findings, including post-probe liveness and read-only completion recovery",
+  "processingPcsChanged": false,
+  "nasCommandsExecuted": false,
+  "nodeCandidatesStarted": false,
+  "registryLayersPulled": false,
+  "packagesPublished": false,
+  "automaticUpdatesEnabled": false,
+  "limitations": [
+    "Candidate qualification proves startup/API/options only; reconstruction, GPU initialization/kernels, accuracy and throughput are unqualified",
+    "Concrete adapters are source implementations, not installed background services",
+    "Installed coordinator e2ccf489 lacks owned scheduling API; reference-to-reference updater and actual host acceptance remain incomplete",
+    "NAS broker/provenance issuer/source-retention enforcement and durable Viewer handoff acceptance remain incomplete"
+  ],
+  "sourceSha256": {
+    "processing/update_qualifier.py": "98521b009d76b33a5973c454c0728546e6d247575f57baf0a6075228a452944c",
+    "ops/update_maintenance_adapter.py": "c6aa4f36ca1a3c20d6f1baa3ab12219b3c26b6b812f01cd95fc11acf252a0b25",
+    "tests/test_update_qualifier.py": "d8adbadb8c20d7dc1fafef0a1cac4df22d78a4b45376550b97524b2ee4be2b1d",
+    "tests/test_update_maintenance_adapter.py": "dce281e5fcb9409e0669f4ae6205ffe5aee190cc9c21d10ab39642a39bfbbd86",
+    "tests/test_update_pipeline.py": "ecc03749109e5c1c9bee1f852d02bc8611b9c8cc3805a4e9ea0daee41a9d49d5",
+    "docs/update-qualifier.md": "2de6fd09a98a3b0fe0a8a5b313bf50b516d74b9bdefe78b0b9ae9ce0d94d952d",
+    "docs/update-maintenance-adapter.md": "1d505b586727403693d80aa6e1e2733472a0a2d5d463421686ac6c541997b69f",
+    "docs/update-supervisor.md": "723b6638f0d0d493f4a14e4d3a94f3841cf010ed67eed06443403b553066457d",
+    "docs/reference-coordinator-update-plan.md": "3a0ead8c72e8aa88adabd5d1f0ae3d785d7a679987d511719571b31fec7d8404"
+  }
+}

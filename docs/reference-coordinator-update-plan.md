@@ -1,0 +1,62 @@
+# Installing the next reference coordinator
+
+The owned scheduling API is not installed in the current sole coordinator.
+Current observed container `7ebe34636518961ddb4398b545a6a73d0254a47a093b198cf5d2d8411345cd07`
+uses image `sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9`
+and source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`. Revalidate these facts before
+any operation. Source readiness does not prove installation.
+
+The historical `ops/install_reference_coordinator.py` cannot be reused unchanged.
+Its prepare and activation validators expect a native-only predecessor, reject
+the existing reference-config override, and its rollback selects native facts.
+Its backup/rollback guards also assume no reference jobs and only a narrow
+history census. Preserve its frozen prior-operation artifacts.
+
+## Required executor behavior
+
+1. Bind the exact current reference container, image, source, authority, state
+   volume and recipe. Preserve native ports 3005/18080, reference TLS port 18443,
+   the existing read-only TLS mount, native environment file and reference-config
+   path, UID 10001, security settings, resource settings and logging/network
+   configuration. Compare image defaults separately from unchanged application
+   overrides; never print environment values or regenerate credentials/PKI.
+2. Acquire one operation lock, record baseline public-history hash and a complete
+   logical database/file census, and drain both nodes using only exact owned
+   maintenance plans. The old API cannot look up owned scheduling requests:
+   persist its single legacy POST intent before sending and hold on a lost ACK,
+   without adopting a matching target or issuing another schedule.
+3. Hold the canonical physical gates on both processing hosts through live
+   contexts. A saved JSON attestation is insufficient. Verify their authority,
+   generation, engine and idle reservations and recheck live ownership before
+   mutations. Drain jobs, uploads, readers and both coordinator listeners.
+4. Stop the exact current coordinator gracefully; verify it stopped and no
+   running container owns the state volume. Compare the stopped database/file
+   census with the baseline, catching admissions that arrived while draining.
+   Make an offline, hashed, fsynced backup with verified numeric UID/modes and
+   SQLite integrity. Do not restore or delete state during update.
+5. Retain only this operation's exact predecessor under a unique name; leave the
+   older legacy container `6300…` untouched. Create/start one candidate once,
+   reconciling unknown responses by full identity, operation label and image.
+   Verify sole ownership, authority/history preservation, native/TLS health,
+   configuration roles and new API support without issuing a new live plan.
+   Reopen only this operation's exact maintenance plans after all checks.
+6. A rollback must first stop the exact candidate and prove no volume owner and
+   a compatible stopped-state census. New jobs, owned-schedule receipt rows,
+   claims or unknown schema/progress changes block downgrade. An empty additive
+   owned-schedule table can be explicitly allowlisted because the old reference
+   binary ignores it. If compatibility fails, retain/restart the exact new
+   candidate and keep nodes fenced; never restore the backup over new work.
+
+The executor and its live cross-host gate transport still need implementation
+and runtime acceptance. The current main/cluster worker images are not
+coordinator rollback targets.
+
+## Acceptance needed
+
+Use temporary SQLite and synthetic Docker/HTTP boundaries to test reference
+recipe and environment preservation, immutable predecessor selection, both-plan
+ownership, lost schedule/cancellation/stop/create/start responses, lost or busy
+gate holders, late admissions during drain, backup bytes and ownership, one
+volume owner, TLS-preserving rollback, and refusal to downgrade after new work
+or owned receipts. Include both online and stopped-state compatibility checks.
+Only then prepare an immutable source/image and an exact runtime operation.

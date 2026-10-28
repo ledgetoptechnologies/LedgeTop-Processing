@@ -122,8 +122,17 @@ plan. Run and completion lookup must use only the supplied own receipt directory
 and actual managed finalization evidence; credentials/update tokens stay private
 inside the adapter's existing receipts.
 
-Production adapters, process lifecycle installation, policy/channel approval,
-maintenance windows, sole-coordinator authentication, actual qualification
-execution admission, and end-to-end acceptance remain required. There is no
-claim of unattended runtime installation, automatic qualification, or live
-update availability from this source component alone.
+Concrete source adapters are now available: the
+[maintenance adapter](update-maintenance-adapter.md) connects owned scheduling
+and managed finalization, and the [startup qualifier](update-qualifier.md) checks
+only isolated startup/API/options behavior. `tests/test_update_pipeline.py`
+composes these with real journals, coordinator HTTP and the physical gate, using
+synthetic Docker/ingress transports. This does not prove a real image upgrade.
+
+Runtime composition/installation, approved policies/channels/windows,
+sole-coordinator authentication and end-to-end host acceptance remain required.
+Heavy processing qualification additionally needs the same global/physical
+execution admission and valid fixtures. The installed coordinator lacks the new
+owned-scheduling API; its [reference-to-reference update path](reference-coordinator-update-plan.md)
+must be completed before enabling the maintenance adapter there. No unattended
+runtime installation or live automatic update availability is claimed.
