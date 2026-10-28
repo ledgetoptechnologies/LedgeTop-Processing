@@ -21,6 +21,7 @@ from processing.app import make_handler
 from processing.config import Config
 from processing.odx_smoke_worker import Client
 from processing.reference_store import ReferenceStore
+from processing.reference_terminal import TerminalService
 from processing.viewer_tasks import TaskStore
 from tests.test_service import TOKEN,start_server
 
@@ -52,7 +53,9 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             prototype_node_ids=('cluster','main'),prototype_operator_token=OPERATOR))
         self.queue=self.handler.prototype_queue
         self.addCleanup(self.queue.close)
-        self.queue.allowed_profiles.add('reference-pipeline-v1');ReferenceStore(self.queue)
+        self.queue.allowed_profiles.add('reference-pipeline-v1')
+        self.store=ReferenceStore(self.queue)
+        self.terminal=TerminalService(self.store)
         TaskStore(self.queue,self.volume/'viewer-tasks');(self.volume/'viewer-spool').mkdir(mode=0o700)
         with self.queue._db() as db:
             db.execute('UPDATE coordinator_identity SET authority_id=?',(module.AUTHORITY,))
@@ -300,6 +303,39 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.assertRaises(AssertionError):self.updater.rollback(self.state)
         self.assertEqual(len(self.transport.calls),before)
         self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+
+    def terminal_receipt_row(self):
+        # Populate the actual service-owned schema. Even an isolated receipt
+        # row is forbidden by this updater's empty-reference baseline policy.
+        with self.queue._db() as db:
+            db.execute('INSERT INTO reference_terminal_acceptances VALUES(?,?,?,?,?,?)',
+                ('terminal-receipt','storage-receipt','synthetic-job',1,'a'*64,'{}'))
+
+    def test_real_terminal_service_empty_schema_is_hashed_and_preserved(self):
+        baseline=module.volume_census(self.volume,uid=os.geteuid())
+        self.assertEqual(baseline['tables']['reference_terminal_acceptances']['count'],0)
+        names=[row[1] for row in baseline['schema'] if row[2]=='reference_terminal_acceptances']
+        self.assertEqual(len(names),4)  # Table plus three actual UNIQUE indexes.
+        self.assertIn('reference_terminal_acceptances',names)
+        self.assertEqual(self.activate()['phase'],'completed')
+
+    def test_terminal_receipt_refuses_fresh_prepare_before_any_drain(self):
+        self.terminal_receipt_row()
+        fresh=self.root/'fresh-operation';fresh.mkdir(mode=0o700)
+        updater=module.ReferenceCoordinatorUpdate(fresh,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+        with self.assertRaises(AssertionError):updater.prepare(TARGET,SOURCE,MAIN)
+        checkpoint=json.loads((fresh/'checkpoint.json').read_text())
+        self.assertEqual((checkpoint['phase'],checkpoint['plans']),('preparing',{}))
+        self.assertEqual(self.transport.calls,[])
+        self.assertTrue(self.transport.old['State']['Running'])
+
+    def test_terminal_receipt_refuses_downgrade_before_any_candidate_stop(self):
+        self.fail_after_start();self.terminal_receipt_row()
+        before=len(self.transport.calls)
+        with self.assertRaises(AssertionError):self.updater.rollback(self.state)
+        self.assertEqual(len(self.transport.calls),before)
+        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
 
     def test_foreign_candidate_and_legacy_checkpoint_refused_without_mutation(self):
         self.fail_after_start();self.transport.containers[NEW_ID]['Config']['Labels'][module.LABEL]='foreign'

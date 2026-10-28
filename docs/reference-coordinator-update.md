@@ -114,6 +114,16 @@ rows, reference rows and owned-schedule rows fail closed. No job/receipt content
 are exported. Only system node rows are retained privately to prove exact CAS
 transitions.
 
+The existing reference schema includes `reference_terminal_acceptances`, created
+by the real `TerminalService`, including its three UNIQUE indexes. That known
+table is included in the full schema/row census and must be empty, like every
+other `reference_*` table. A terminal receipt blocks both fresh preparation and
+downgrade; this allowance does not permit new receipt history or unknown schema.
+The first actual prepare exposed its omission from the original synthetic
+fixture and held before draining. That held checkpoint is retained unchanged;
+the correction requires a fresh reviewed source/image/operation rather than
+resetting or reinterpreting the held operation.
+
 The old API lacks durable caller-correlated scheduling. Before each single
 legacy schedule POST the executor FULL-saves the exact payload. A lost response
 is held forever for explicit inspection: it never adopts a matching target,

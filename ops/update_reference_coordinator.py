@@ -40,6 +40,8 @@ MODE = 'reference-to-reference-v1'
 # Independent source review and frozen-source Linux/Windows plus actual dual-host
 # gate checks accepted source 890cd265c9ff9bad0e83aeddc1b096883200d335.
 # Explicit preparation, immutable argument binding and every live fence remain.
+# Follow-up census compatibility includes the existing TerminalService table;
+# its reference_* zero-row admission fence remains unchanged.
 ACTIVATION_REVIEWED = True
 class Stopped(ValueError):pass
 
@@ -133,7 +135,7 @@ def volume_census(root, *, uid=10001, offline=False):
     def sha(value):return hashlib.sha256(encode(value)).hexdigest()
     allowed={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','viewer_files','viewer_incarnations',
         'reference_jobs','reference_acceptances','reference_outbox','reference_claims','reference_worker_receipts',
-        'reference_transfer_grants','reference_worker_failures','owned_maintenance_schedules'}
+        'reference_transfer_grants','reference_worker_failures','reference_terminal_acceptances','owned_maintenance_schedules'}
     files=[]
     for path in sorted(root.rglob('*')):
         relative=path.relative_to(root).as_posix();info=path.lstat()
