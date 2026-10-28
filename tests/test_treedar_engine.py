@@ -177,6 +177,47 @@ class TreeDarEngineTests(unittest.TestCase):
         with NodeGate(self.config.engine_id) as gate:
             self.assertIsNotNone(gate.snapshot()['reservation'])
 
+    def test_provenance_expiry_during_preflight_refuses_before_gate_or_docker_mutation(self):
+        original_host=self.engine._host
+        for after,reason in ((120,'expired'),(90,'clock_rollback')):
+            with self.subTest(reason=reason):
+                self.now=100
+                observations=[]
+                def verify(receipt):
+                    observations.append(self.now)
+                    return receipt==self.provenance and 100<=self.now<110
+                def elapsed_preflight():
+                    original_host()
+                    self.now=after
+                self.engine.verifier=verify
+                with patch.object(self.engine,'_host',elapsed_preflight):
+                    with self.assertRaisesRegex(ValueError,'provenance_verification_failed'):
+                        self.start()
+                self.assertEqual(observations,[100,after])
+                with NodeGate(self.config.engine_id) as gate:
+                    self.assertIsNone(gate.snapshot()['reservation'])
+                with self.engine._db() as db:
+                    self.assertIsNone(db.execute('SELECT 1 FROM treedar_executions WHERE job=?',(self.job['jobId'],)).fetchone())
+                self.assertFalse(any(args[0] in ('create','start') for args in self.docker.calls))
+
+    def test_existing_launch_intent_does_not_repeat_new_admission_refresh(self):
+        observations=[]
+        def verify(receipt):
+            observations.append(self.now)
+            return receipt==self.provenance and len(observations)<=3
+        self.engine.verifier=verify
+        self.assertEqual(self.start(),'processing')
+        self.assertEqual(len(observations),2)
+        self.engine=self.open()
+        self.engine.verifier=verify
+        # Existing start retains the established initial validation, but never
+        # calls _host/new-admission refresh or repeats an engine mutation.
+        with patch.object(self.engine,'_host',side_effect=AssertionError('old intent readmitted')):
+            self.assertEqual(self.start(),'processing')
+        self.assertEqual(len(observations),3)
+        self.assertEqual(sum(args[0]=='create' for args in self.docker.calls),1)
+        self.assertEqual(sum(args[0]=='start' for args in self.docker.calls),1)
+
     def test_exact_stopped_success_proof_and_outputs_survive_replay(self):
         self.start()
         output=self.make_proof()

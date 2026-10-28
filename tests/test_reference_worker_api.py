@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
+from unittest.mock import patch
 
 from processing.prototype import Queue
 from processing.reference_delivery import DeliveryReceiver, BINDING
@@ -113,7 +115,7 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         ready = self.request('GET', '/next')
         self.assertEqual(ready.body['job']['jobId'], self.job['jobId'])
         claim = self.claim()
-        self.assertEqual(self.request('GET', '/next').body, {'job': None})
+        self.assertEqual(self.request('GET', '/next').body, {'job': None, 'execution': None})
         path = '/jobs/' + self.job['jobId']
         body = dict(claimToken=claim['claimToken'], transferRequest=self.fixture['transferRequest'])
         self.assertEqual(self.request('POST', path + '/reservation', body, token=OTHER).status, 409)
@@ -127,6 +129,82 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         for phase in ('completed', 'cancelled', 'held'):
             self.assertEqual(self.request('POST', path + '/phase',
                 dict(claimToken=claim['claimToken'], phase=phase)).status, 400)
+
+    def test_next_execution_is_private_advice_and_preserves_public_job(self):
+        before = self.store.get(self.job['jobId'])
+        response = self.request('GET', '/next')
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body['job'], before)
+        self.assertEqual(response.body['execution'], dict(kind='odm', **{key: before[key] for key in
+            ('jobId', 'generation', 'environment', 'manifestSha256', 'pipelineDigest')}))
+        self.assertEqual(self.store.get(self.job['jobId']), before)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_claims').fetchone()[0], 0)
+        serialized = json.dumps(response.body)
+        for private in ('submission', 'claimToken', 'provenanceReceiptId', WORKER, VIEWER):
+            self.assertNotIn(private, serialized)
+        self.assertEqual(self.request('GET', '/next', token=VIEWER).status, 401)
+        self.assertEqual(self.request('GET', '/next', protected=False).status, 503)
+
+    def test_next_changed_head_requests_retry_instead_of_misbinding_hint(self):
+        original = self.store.next_for_node
+        def changed(node_id):
+            job = original(node_id)
+            with self.queue._db() as db:
+                db.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (job['jobId'],))
+            return job
+        with patch.object(self.store, 'next_for_node', changed):
+            response = self.request('GET', '/next')
+        self.assertEqual(response.status, 409)
+        self.assertEqual(response.body, {'error': 'worker_conflict'})
+
+    def pipeline_submission(self, kind):
+        raw = copy.deepcopy(self.fixture['submission'])
+        raw['submissionId'] = str(uuid.uuid4())
+        if kind in ('treedar', 'combined'):
+            obj = raw['manifest']['objects'][0]
+            obj.update(kind='lidar', name='synthetic.las', mediaType='application/octet-stream')
+            raw['manifest']['inputCounts'].update(images=0, lidarObjects=1)
+            raw['pipeline']['treedar'].update(requested=True, inputObjectIds=[obj['id']],
+                                              provenanceReceiptId='synthetic-proof')
+            raw['pipeline']['odm']['requested'] = kind == 'combined'
+            raw['manifest']['sha256'] = digest({k: v for k, v in raw['manifest'].items() if k != 'sha256'})
+        return raw
+
+    def test_next_kinds_follow_stored_pipeline_and_fixed_node_global_head(self):
+        for kind in ('odm', 'treedar', 'combined'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                queue = Queue(directory, reference_enabled=True, node_ids=('cluster', 'main'))
+                try:
+                    store = ReferenceStore(queue)
+                    raw = self.pipeline_submission(kind)
+                    job = store.submit(validate_submission(raw, environment='staging',
+                        capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar')))[0]
+                    api = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers={
+                        WORKER: dict(node_id='cluster', worker_id='worker', worker_instance_id='cluster-1'),
+                        OTHER: dict(node_id='main', worker_id='worker', worker_instance_id='main-1')})
+                    node_token = WORKER if kind == 'odm' else OTHER
+                    def advice(token):
+                        return api.handle('GET', PREFIX+'/next', {'Authorization':'Bearer '+token}, protected_transport=True)
+                    response = advice(node_token)
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.body['execution']['kind'], kind)
+                    self.assertEqual(response.body['job'], job)
+                    other_token = OTHER if node_token == WORKER else WORKER
+                    self.assertEqual(advice(other_token).body, {'job':None, 'execution':None})
+                    # A production small job takes global priority over the
+                    # earlier staging main-only job, without claiming either.
+                    if kind != 'odm':
+                        small = self.pipeline_submission('odm')
+                        production = store.submit(validate_submission(small, environment='production',
+                            capability_fingerprint=small['capabilityFingerprint']))[0]
+                        self.assertEqual(advice(WORKER).body['job'], production)
+                        self.assertEqual(advice(OTHER).body, {'job':None, 'execution':None})
+                        self.assertEqual(store.get(job['jobId'])['status'], 'queued')
+                    with queue._db() as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_claims').fetchone()[0], 0)
+                finally:
+                    queue.close()
 
     def test_worker_can_relay_exact_partial_viewer_receipt_after_delivery(self):
         delivery = self.processing_result()

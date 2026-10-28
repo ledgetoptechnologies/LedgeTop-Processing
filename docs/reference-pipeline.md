@@ -285,6 +285,27 @@ Missing delivery acknowledgements retain results. Disk pressure stops intake.
 Production priority, the shared execution fence and maintenance gates apply to
 both submission modes; an already running staging job is allowed to finish.
 
+## Per-job engine routing source checkpoint
+
+The optional `ExecutionRouter` now binds each claimed job to its ODM or TreeDar
+adapter and exact runtime pins before reservation, transfer or engine mutation.
+The private worker discovery response includes an advisory execution descriptor;
+the driver validates the full authenticated claim again before using it. Retained
+success/failure acknowledgements and Viewer acceptance use the selected adapter.
+Crash tests cover uncertain engine starts and lost acknowledgement checkpoints.
+Default ODM behavior remains available without opting into routing. Combined
+ODM-plus-TreeDar execution still requires a sequential stage contract.
+
+The broker-bound provenance client rejects stale, revoked, missing or rebound
+receipts and rechecks freshness at final physical admission. Its exact wire and
+trust boundary are documented in [reference-provenance.md](reference-provenance.md).
+This checkpoint passed 634 isolated Linux tests with no skips and the actual
+synthetic TreeDar bootstrap. These additions are source qualification, not a live
+TreeDar capability or an installed NAS issuer. The installed coordinator remains
+on core source `e2ccf489`; current runtime evidence is in
+`evidence/reference-installed-20261028.json`. Earlier source-only deployment
+paragraphs above describe their historical checkpoints.
+
 ## Coordinated ownership
 
 The existing **Viewer** chat owns the storage broker, Viewer adapter, durable

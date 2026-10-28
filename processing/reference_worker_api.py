@@ -5,6 +5,7 @@ configuration fixes worker identity; requests never choose a node/environment.
 No filesystem paths are part of the worker wire protocol.
 """
 import hmac
+import json
 import re
 from types import MappingProxyType
 
@@ -87,6 +88,34 @@ class ReferenceWorkerAPI:
             raise Conflict("persisted transfer grant is unavailable") from None
         return grant
 
+    def _next(self, identity):
+        job = self.store.next_for_node(identity['node_id'])
+        if job is None:
+            return {'job': None, 'execution': None}
+        # Discovery remains advisory. Read the immutable submission and bind it
+        # to the same current global head within one SQLite read snapshot.
+        with self.store.queue._db() as db:
+            db.execute('BEGIN')
+            head = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
+            if (not head or head['id'] != job['jobId']
+                    or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()
+                    or self.store.queue._node(db, identity['node_id'])['state'] not in ('active', 'scheduled')):
+                raise Conflict('advisory queue head changed')
+            row = self.store._row(db, job['jobId'])
+            bound = ('jobId', 'generation', 'environment', 'manifestSha256', 'pipelineDigest')
+            current = self.store._public(row)
+            if any(current[key] != job[key] for key in bound) or current['status'] != 'queued':
+                raise Conflict('advisory job binding changed')
+            submission = json.loads(row['input_json'])
+            if any(submission[key] != job[key] for key in ('environment', 'manifestSha256', 'pipelineDigest')):
+                raise Conflict('persisted execution binding changed')
+            odm = submission['pipeline']['odm']['requested']
+            treedar = submission['pipeline']['treedar']['requested']
+            if type(odm) is not bool or type(treedar) is not bool or not (odm or treedar):
+                raise Conflict('persisted execution unavailable')
+            kind = 'combined' if odm and treedar else 'odm' if odm else 'treedar'
+            return {'job': job, 'execution': {'kind': kind, **{key: job[key] for key in bound}}}
+
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         if protected_transport is not True:
             return self._error(503, "protected_transport_required")
@@ -97,7 +126,7 @@ class ReferenceWorkerAPI:
             if method == 'GET' and path == PREFIX + '/authority':
                 return Response(200, {'authorityId': self.store.queue.authority_id})
             if method == 'GET' and path == PREFIX + '/next':
-                return Response(200, {'job': self.store.next_for_node(identity['node_id'])})
+                return Response(200, self._next(identity))
             if method == "POST" and path == PREFIX + "/claim":
                 payload = protocol.decode_submission(body)
                 protocol._closed(payload, ("jobId", "claimRequestId"), "claim")

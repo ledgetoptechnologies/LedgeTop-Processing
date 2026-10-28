@@ -301,6 +301,13 @@ class TreeDarEngine:
                 if reserved['state'] != 'reserved':
                     raise TreeDarHeld('fresh_scratch_reservation_required')
                 self._host()
+                # Input hashing and Docker/source probes can outlive the NAS
+                # grant's freshness. Revalidate the frozen exact receipt at the
+                # final admission boundary, before reserving or mutating Docker.
+                _provenance(checked,self.verifier,job_id=job['jobId'],generation=job['generation'],
+                    environment=job['environment'],object_id=input_object['id'],
+                    expected_sha256=input_object['sha256'],expected_bytes=input_object['byteSize'],
+                    allow_synthetic=allow_synthetic,policy=self.policy)
                 receipt = secrets.token_hex(16)
                 gate.reserve('main', self.config.coordinator_origin, self.config.authority_id, self.config.gate_generation, receipt)
                 gate.bind(receipt, dict(id=job['jobId'], workerId=self.config.worker_id, nodeId='main', authorityId=self.config.authority_id))

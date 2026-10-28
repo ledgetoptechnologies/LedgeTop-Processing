@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-28T01:17:10.681721-05:00",
+  "purpose": "Source qualification of per-job engine routing, broker-bound provenance and explicit worker-daemon composition",
+  "baseCommit": "c277d3f95d6a396eef4a7d0b351efd738ac2a364",
+  "sourceHashes": {
+    "processing/reference_execution.py": "f2b1f5a6e463efff9944cdb2d9575101166bb58a367ef630c7d7903187c6d147",
+    "processing/reference_provenance.py": "aa9673b906ffd40b2f8211c5229fffdcdaef54a591c2df12c117cf7c900a2ac3",
+    "processing/reference_driver.py": "23c63bb1a576abc3af96ecad7b871d58bdf55bd2d9f658c5defca241b5a93f2c",
+    "processing/reference_worker_api.py": "b8792926d5999a90cb18029b73534377623dd76b877961f3e49de38e33a894a8",
+    "processing/treedar_engine.py": "2c1d6bf22e5e5153fc87bd01f78ce9104709132d64f7717ff408870316732678",
+    "ops/reference_worker_daemon.py": "5ea02e3235180679fd832606c8fb88fc50e5483bcaa413584ec708ed331d4e23",
+    "tests/test_reference_execution.py": "f5d250ce3f8c563c9ba885998d260da7b3febef70b761521605acbd5c7d01f3f",
+    "tests/test_reference_provenance.py": "fef6bb179e9268405b08c94531690ca4e4ffe8edfb55411a656d7ce6dd423a4d",
+    "tests/test_reference_driver_routing.py": "fa39b6c42ddc19d4759f70fee922d84b12eab91d4f2f50a3faa595d10eff2fb2",
+    "tests/test_reference_worker_api.py": "465475edea5599dd5879a5f7963bddf059485d2470a0b17745ae14eb5bd6afe2",
+    "tests/test_treedar_engine.py": "624a0171f80a049012e8297551858807387fa58b60e4e79d97a733f6f48eafd5",
+    "tests/test_reference_worker_daemon_routing.py": "09d9db17cf59406fd8c36481fb10dc64c8897c3ecfcfb7c5916583de5cb46da1"
+  },
+  "tests": {
+    "fullLinux": {
+      "count": 634,
+      "passed": 634,
+      "skipped": 0,
+      "seconds": 54.138,
+      "network": "none",
+      "sourceMount": "read-only",
+      "temporaryFixtures": "container tmpfs, removed on exit",
+      "imageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb"
+    },
+    "actualBootstrap": {
+      "passed": true,
+      "engineVersion": "0.0.1",
+      "syntheticOnly": true,
+      "genuineAcquisition": false,
+      "inputPoints": 4555,
+      "knownCrowns": 3,
+      "recoveredCrowns": 3,
+      "outputObjects": 16,
+      "outputHashesVerified": true,
+      "processingHostsTouched": false
+    }
+  },
+  "review": {
+    "routingProvenanceDriver": "Independent read-only review found no blocking issue; late-EOF deadline regression fixed and retested",
+    "daemon": "Independent read-only review found no blocking issue in closed opt-in, legacy defaults, shared components, fixed local Docker policy and source/runtime pin refusals"
+  },
+  "runtime": {
+    "newSourceDeployed": false,
+    "installedCoreCommit": "e2ccf489ab41160acff3f90e2b4bcd568f72cf24",
+    "treeDarCapability": false,
+    "gaussianCapability": false,
+    "nasIssuerInstalled": false,
+    "realDataProcessed": false
+  },
+  "remaining": [
+    "NAS authenticated broker/provenance issuer and source-retention enforcement",
+    "Install and qualify worker/result services and production Viewer ingestion",
+    "Combined sequential ODM-to-TreeDar stage contract",
+    "TreeDar historical-adapter/journal migration before automatic updates",
+    "Abrupt-process stale-read-pin reconciliation",
+    "Automatic container update detection and scheduling",
+    "Viewer UI/hierarchy acceptance with existing owners"
+  ],
+  "sourceHashScope": "Exact working-tree bytes mounted read-only during qualification; Git may normalize line endings"
+}

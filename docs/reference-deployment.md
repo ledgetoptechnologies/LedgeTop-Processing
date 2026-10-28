@@ -40,6 +40,31 @@ engine-task cleanup and real-data processing are **not** activated. NAS SSH as
 owner detail. This installation qualifies coordinator infrastructure, not the
 complete NAS-backed processing pipeline.
 
+## Worker routing configuration source preparation
+
+The worker daemon has an explicit optional `executionRouting` setting. Omitting
+it preserves the original ODM-only factory. The closed setting has
+`schemaVersion: 1`, `mode: "per-job-v1"` and `treedar: null` for per-job ODM
+routing on cluster or main. Only main may replace `treedar: null` with a closed
+object containing `imageId`, `sourceRoot`, `sourceSha256` and `engineVersion`.
+The image is an immutable locally cached `sha256:` image ID; source is an
+explicit installed absolute path with its verified fixed-bootstrap digest.
+
+Controller, delivery, provenance and route journals derive fixed private paths
+under `stateRoot`. The daemon shares the existing ledger, outboxes and physical
+gate across both adapters and serves retained results through that router. The
+Docker executable/socket are fixed local constants, and no task command, UID,
+container options or CPU/RAM/PID limits are exposed by the new setting. Startup
+checks the main/Linux/nonroot identity and reads actual Docker/image/source
+metadata before admitting claims. It does not pull images, change a gate,
+install an issuer route or advertise a TreeDar capability.
+
+This is source preparation only. It cannot activate the NAS-backed path without
+an actual authenticated broker, trusted provenance issuer and qualified Viewer
+acceptance/storage route. Cleanup remains explicitly opt-in. TreeDar runtime
+journals still reject changed image/source/version; automatic TreeDar upgrades
+need a separate reviewed migration and retained-reader design.
+
 ## Historical preflight — October 27, 2026
 
 This records the read-only October 27, 2026 preflight as `bkoltz` on cluster

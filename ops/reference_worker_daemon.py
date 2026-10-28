@@ -1,13 +1,15 @@
-"""Explicit native ODM reference worker daemon. No import-time activation.
+"""Explicit reference worker daemon; ODM by default. No import-time activation.
 
 Run with --config pointing to an owner-private JSON file. The physical engine
 gate must already be provisioned for this exact authority/origin/generation.
-No credentials, gate handover, firewall rules or engine containers are created.
+Startup creates no credentials, gate handover, firewall rules or engine containers.
+Versioned per-job routing is optional; TreeDar composition is main-host only.
 """
 import argparse
 import ipaddress
 import os
 from pathlib import Path
+import re
 import signal
 import ssl
 import stat
@@ -37,7 +39,42 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineId','gateGeneration','gateCoordinatorOrigin','coordinatorOrigin','brokerOrigin','engineOrigin',
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
-OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion'))
+OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
+                      'executionRouting'))
+TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
+TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
+
+
+def _execution_routing(config):
+    """Explicit source-only opt-in; no capabilities or issuer are provisioned.
+
+    treedar:null enables per-job ODM routing on either node. A TreeDar object is
+    main/Linux only. Journals, command, socket, UID and container policy cannot
+    be supplied by a request or overridden in this configuration shape.
+    """
+    if 'executionRouting' not in config:
+        return None
+    routing = config['executionRouting']
+    p._closed(routing, ('schemaVersion','mode','treedar'), 'execution routing')
+    if (type(routing['schemaVersion']) is not int or routing['schemaVersion'] != 1
+            or routing['mode'] != 'per-job-v1'):
+        raise ValueError('unsupported execution routing version')
+    tree = routing['treedar']
+    if tree is not None:
+        p._closed(tree, ('imageId','sourceRoot','sourceSha256','engineVersion'), 'TreeDar runtime')
+        if (config['nodeId'] != 'main' or not sys.platform.startswith('linux')
+                or os.geteuid() == 0 or os.getegid() == 0
+                or type(tree['imageId']) is not str or not re.fullmatch(r'sha256:[a-f0-9]{64}',tree['imageId'])
+                or type(tree['engineVersion']) is not str
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,79}',tree['engineVersion'])
+                or type(tree['sourceRoot']) is not str or not Path(tree['sourceRoot']).is_absolute()
+                or any(char in tree['sourceRoot'] for char in '\n\r,')):
+            raise ValueError('fixed main TreeDar runtime required')
+        source = Path(tree['sourceRoot'])
+        if source.resolve() != source or any(part.is_symlink() for part in (source,*source.parents)):
+            raise ValueError('canonical installed source required')
+        p._hash(tree['sourceSha256'], 'installed source digest')
+    return routing
 
 
 class DaemonStateLock:
@@ -230,6 +267,7 @@ def load_config(path):
             raise ValueError('configuration fields differ')
         if 'schemaVersion' in config and (type(config['schemaVersion']) is not int or config['schemaVersion'] != 1):
             raise ValueError('unsupported configuration version')
+        _execution_routing(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
                 raise ValueError('absolute private directories required')
@@ -293,6 +331,7 @@ def _directory(value):
 
 def build_worker(config):
     """Build explicit components; verify the existing gate and actual version."""
+    routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     with NodeGate(config['engineId']) as gate:
         state = gate.snapshot()
@@ -317,15 +356,40 @@ def build_worker(config):
         coordinator_origin=config['gateCoordinatorOrigin'], gate_generation=config['gateGeneration'],
         worker_id=config['workerId'], engine_version=config['engineVersion'])
     broker = BrokerClient(config['brokerOrigin'], ssl_context=client_tls)
+    router = provenance = None
+    if routing is not None:
+        from processing.reference_execution import ExecutionRouter
+        tree_worker = None
+        if routing['treedar'] is not None:
+            from processing.reference_provenance import LidarProvenanceClient
+            from processing.treedar_delivery import TreeDarDelivery
+            from processing.treedar_engine import TreeDarConfig, TreeDarEngine
+            tree = routing['treedar']
+            provenance = LidarProvenanceClient(broker, state_path=root/'lidar-provenance.sqlite')
+            controller = TreeDarEngine(root/'treedar-controller.sqlite', ledger=ledger,
+                config=TreeDarConfig(docker_executable=TREEDAR_DOCKER_EXECUTABLE,
+                    docker_socket=TREEDAR_DOCKER_SOCKET, image_id=tree['imageId'],
+                    source_root=tree['sourceRoot'], source_sha256=tree['sourceSha256'],
+                    engine_version=tree['engineVersion'], engine_id=config['engineId'],
+                    authority_id=config['authorityId'], coordinator_origin=config['gateCoordinatorOrigin'],
+                    gate_generation=config['gateGeneration'], worker_id=config['workerId'],
+                    uid=os.geteuid(), gid=os.getegid()), verify_provenance=provenance.verify)
+            # Read-only local Docker/image/source census before new claims. No
+            # pull, handover, container mutation or capability advertisement.
+            controller._host()
+            tree_worker = TreeDarDelivery(root/'treedar-delivery.sqlite', controller=controller,
+                outbox=outbox, failure_outbox=failures)
+        router = ExecutionRouter(root/'execution-routes.sqlite', worker, tree_worker, failure_outbox=failures)
     driver = ReferenceDriver(worker, ledger, outbox, broker, config['coordinatorOrigin'], config['workerBearer'],
         state_path=root / 'driver.sqlite', ssl_context=client_tls, output_budget=config['outputBudget'],
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
+        execution_router=router, provenance_client=provenance,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
     permitted = frozenset(config['allowedEnvironments'])
-    result_api = ReferenceResultAPI(ReferenceResults(worker), bearer_readers={config['resultReadBearer']: dict(
+    result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker), bearer_readers={config['resultReadBearer']: dict(
         node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
         share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
