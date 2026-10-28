@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "890cd265c9ff9bad0e83aeddc1b096883200d335",
+  "archiveSha256": "40f58599244480d1ddcf362959dab8c24c9173812db422eb06cdd3266b0a2e7c",
+  "archiveBytes": 3440640,
+  "sourceFileCount": 305,
+  "validation": {
+    "linux": {
+      "total": 894,
+      "passed": 890,
+      "skipped": 4,
+      "seconds": 108.379,
+      "exitCode": 0,
+      "logSha256": "0b4fc189392315c9e15c3cc237b6708c3a035589a508f1aa25196e4fc4f99451",
+      "warning": "Expected fork-ownership test DeprecationWarning"
+    },
+    "windows": {
+      "total": 84,
+      "passed": 44,
+      "skipped": 40,
+      "seconds": 5.188,
+      "exitCode": 0,
+      "logSha256": "5fb2f512d1af7c0993423ce76cb4c876678b237e6f84d2092a81734b4fcb6a90",
+      "nodeProbeTestsPassed": 4
+    }
+  },
+  "actualGateBridge": {
+    "accepted": true,
+    "action": "check-only",
+    "sourceCommit": "890cd265c9ff9bad0e83aeddc1b096883200d335",
+    "operation": "c7f86cb0190d4691b03daf3ad651ebd0",
+    "helperSha256": "47b1929d6a131b0c89771716d1b70fc036585fedf25023971042f43a73402413",
+    "mainExit": 0,
+    "clusterExit": 0,
+    "containerUpdates": 0,
+    "maintenancePlansCreated": 0,
+    "gateReservationsChanged": false
+  },
+  "postProbeReadback": {
+    "cluster": {
+      "host": "cluster",
+      "helperSha256": "47b1929d6a131b0c89771716d1b70fc036585fedf25023971042f43a73402413",
+      "gate": {
+        "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+        "generation": 1,
+        "reservation": null,
+        "lockMode": "0o600",
+        "stateSha256": "5966c9cfbe78abd5f544a93fde4d86a62d69549e244297211a8bf35df05d5a05"
+      },
+      "backend": {
+        "id": "a7ff1ddebcd10225e570962d927becd1a5ac06882030e0dac5da4174a5f474cd",
+        "image": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+        "running": true,
+        "startedAt": "2026-10-27T21:54:12.675462547Z",
+        "restartCount": 0
+      },
+      "coordinator": {
+        "id": "7ebe34636518961ddb4398b545a6a73d0254a47a093b198cf5d2d8411345cd07",
+        "image": "sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9",
+        "running": true,
+        "startedAt": "2026-10-28T05:20:16.00093027Z",
+        "restartCount": 0
+      },
+      "health": {
+        "status": "ok",
+        "mode": "routing_probe",
+        "syntheticPrototypeEnabled": true,
+        "photoSmokeEnabled": false,
+        "viewerEnabled": true
+      },
+      "authority": {
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8"
+      },
+      "jobs": {
+        "total": 12,
+        "unfinished": 0
+      },
+      "nodes": [
+        {
+          "id": "cluster",
+          "state": "active",
+          "revision": 4
+        },
+        {
+          "id": "main",
+          "state": "active",
+          "revision": 13
+        }
+      ],
+      "legacyClusterRunning": false
+    },
+    "main": {
+      "host": "node",
+      "helperSha256": "47b1929d6a131b0c89771716d1b70fc036585fedf25023971042f43a73402413",
+      "gate": {
+        "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+        "generation": 1,
+        "reservation": null,
+        "lockMode": "0o600",
+        "stateSha256": "20eccf156246f35c02c75067e05dd413716f7d6a757faa4a7cab645c18da186b"
+      },
+      "backend": {
+        "id": "78be3d38659e2b698c7611b6b60fad46e7632ef96aa21898a7c2edafece093c1",
+        "image": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776",
+        "running": true,
+        "startedAt": "2026-10-27T21:23:16.890865398Z",
+        "restartCount": 0
+      }
+    }
+  },
+  "legacyLockNormalization": {
+    "host": "cluster",
+    "file": "canonical gate.lock",
+    "beforeMode": "0664",
+    "afterMode": "0600",
+    "underActualLease": true,
+    "inodeUnchanged": true,
+    "lockAndStateBytesUnchanged": true,
+    "generationUnchanged": true,
+    "reservationUnchanged": true
+  },
+  "failedPredecessorAttempt": {
+    "sourceCommit": "f96b532997443a6f7ff82279502fe88899aecdf0",
+    "result": "held before update actions",
+    "causes": [
+      "legacy cluster lock mode 0664 rejected",
+      "actual Docker JSON template failed on absent Health property"
+    ],
+    "evidenceRetained": true
+  },
+  "runtimeUpdatePerformed": false,
+  "activationReviewedFlag": false,
+  "automaticUpdatesEnabled": false,
+  "nasChanged": false,
+  "realDatasetProcessed": false,
+  "remaining": [
+    "Prepare and activate reviewed coordinator replacement with owned-maintenance API",
+    "Accept actual owned container update pipeline; no unattended supervisor installed",
+    "NAS access check and broker/retention implementation",
+    "Viewer integration and UI/hierarchy release acceptance"
+  ]
+}
