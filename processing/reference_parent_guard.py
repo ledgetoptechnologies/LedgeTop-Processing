@@ -24,7 +24,7 @@ from urllib.request import HTTPRedirectHandler,HTTPSHandler,ProxyHandler,Request
 
 from . import reference_protocol as p
 from .node_gate import NodeGate
-from .reference_pipeline import PipelineJournal
+from .reference_pipeline import PipelineJournal,PipelineOperationLease
 from .reference_sender import decode_receipt
 from .scratch_policy import ScratchLedger
 
@@ -229,7 +229,7 @@ class DriverClaimTokens:
             policy=self.journal.policy
             expected=dict(origin=self.policy.origin,nodeId=policy.node_id,workerId=policy.worker_id,workerInstanceId=policy.worker_instance_id,
                 authorityId=policy.authority_id,engineId=policy.engine_id,gateOrigin=policy.coordinator_origin,gateGeneration=policy.gate_generation,
-                outputBudget=policy.odm_output_budget+policy.treedar_output_budget,environments=sorted(policy.allowed_environments))
+                outputBudget=policy.output_budget,environments=sorted(policy.allowed_environments))
             if any(not exact(configured[key],value) for key,value in expected.items()) or row['claim_request']!=parent['claimRequestId']:raise ValueError()
             job=data['claim'];token=job['claimToken']
             if type(token) is not str or not 32<=len(token)<=128 or not re.fullmatch(r'[A-Za-z0-9_-]+',token):raise ValueError()
@@ -290,7 +290,7 @@ class ProductionParentGuard:
         p._closed(parent,PARENT_FIELDS,'parent fence binding');parent=json.loads(p.canonical_json(parent));policy=self.journal.policy
         expected=dict(nodeId=policy.node_id,workerId=policy.worker_id,workerInstanceId=policy.worker_instance_id,authorityId=policy.authority_id,
             engineId=policy.engine_id,coordinatorOrigin=policy.coordinator_origin,gateGeneration=policy.gate_generation,
-            outputBudget=policy.odm_output_budget+policy.treedar_output_budget)
+            outputBudget=policy.output_budget)
         if any(not exact(parent[key],value) for key,value in expected.items()) or parent['environment'] not in policy.allowed_environments:raise ParentGuardHeld('parent_guard_binding_changed')
         p._uuid(parent['jobId'],'parent job');p._integer(parent['generation'],'parent generation');p._integer(parent['inputBytes'],'parent input bytes');p._environment(parent['environment'])
         for key in ('claimRequestId','reservationId'):p._slug(parent[key],'parent identity')
@@ -334,6 +334,12 @@ class ProductionParentGuard:
             parent=self._parent(parent_binding)
             with _existing_gate(parent['engineId']) as gate:
                 self._fence(gate,parent);self._reservation(parent,mutation=mutation)
+                if mutation and self.journal.policy.recovery_control_budget:
+                    control=self.ledger.read_control_charge(parent['reservationId'])
+                    if (control is None or control['parentBindingSha256']!=p.digest(parent) or control['allowanceBytes']!=self.journal.policy.recovery_control_budget
+                            or control['allocatedBefore']!=parent['inputBytes'] or control['publicationSha256'] is None):raise ParentGuardHeld('published_original_recovery_control_required')
+                    from .reference_worker_recovery import validate_published_control
+                    validate_published_control(self,parent,control)
                 token=self.tokens.token(parent);observation=self.client.snapshot(parent['jobId'],token)
                 expected=dict(schemaVersion=1,protocol='ltds-parent-claim-v1',**{key:parent[key] for key in
                     ('authorityId','jobId','generation','environment','nodeId','workerId','workerInstanceId','claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest')})
@@ -346,3 +352,65 @@ class ProductionParentGuard:
         except ParentGuardHeld:raise
         except Exception:raise ParentGuardHeld('parent_guard_evidence_unavailable') from None
         finally:self._mutex.release()
+
+    def check_preexecution_recovery(self,parent_binding,*,lease):
+        """Setup/claim continuation only; never grants an engine mutation.
+
+        A reserved job whose controls were charged before any stage can survive
+        restart without pretending that an engine was already started.
+        """
+        if type(lease) is not PipelineOperationLease:raise ParentGuardHeld('actual_preexecution_lease_required')
+        try:
+            lease.check(self.journal);self._check();parent=self._parent(parent_binding)
+            with _readonly_sqlite(self.journal.path) as db:
+                row=db.execute('SELECT identity,state,result,failure FROM pipeline_parents WHERE job=?',(parent['jobId'],)).fetchone()
+                stages=db.execute('SELECT stage,state,intent,proof FROM pipeline_stages WHERE job=?',(parent['jobId'],)).fetchall()
+                binding=db.execute('SELECT value FROM pipeline_binding WHERE id=1').fetchone()
+            if (row is None or row['identity']!=p.canonical_json(parent).decode() or row['state']!='bound' or row['result'] is not None or row['failure'] is not None
+                    or binding is None or binding[0]!=self.journal._binding or len(stages)!=2 or {stage['stage'] for stage in stages}!={'odm','treedar'}
+                    or any(stage['state']!='new' or stage['intent'] is not None or stage['proof'] is not None for stage in stages)):raise ParentGuardHeld('unissued_original_parent_required')
+            receipt=self.ledger.read_control_charge(parent['reservationId'])
+            if receipt is not None and (receipt['parentBindingSha256']!=p.digest(parent) or receipt['allocatedBefore']!=parent['inputBytes']
+                    or receipt['allowanceBytes']!=self.journal.policy.recovery_control_budget):raise ParentGuardHeld('typed_preexecution_control_required')
+            if not self.journal.policy.recovery_control_budget:raise ParentGuardHeld('explicit_preexecution_control_policy_required')
+            with _existing_gate(parent['engineId']) as gate:
+                self._fence(gate,parent);self._reservation(parent,mutation=True)
+                with _readonly_sqlite(Path(self.ledger.path).absolute()) as db:
+                    reservation=db.execute('SELECT state,allocated FROM reservations WHERE id=?',(parent['reservationId'],)).fetchone()
+                    results=db.execute('SELECT COUNT(*) FROM results WHERE reservation=?',(parent['reservationId'],)).fetchone()[0]
+                expected=receipt['allocatedAfter'] if receipt is not None else parent['inputBytes']
+                if reservation['state']!='reserved' or reservation['allocated']!=expected or results:raise ParentGuardHeld('preexecution_only_reservation_required')
+                self._original_input_files(parent)
+                token=self.tokens.token(parent);value=self.client.snapshot(parent['jobId'],token)
+                expected=dict(schemaVersion=1,protocol='ltds-parent-claim-v1',**{key:parent[key] for key in ('authorityId','jobId','generation','environment','nodeId','workerId','workerInstanceId','claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest')})
+                if any(not exact(value[key],item) for key,item in expected.items()) or value['executionPhase']!='processing' or not (
+                    value['status']=='running' and value['heldReason'] is None or receipt is not None and value['status']=='held' and value['heldReason']=='coordinator_restart'):raise ParentGuardHeld('current_original_preexecution_claim_required')
+                lease.check(self.journal);self._check();self._fence(gate,parent);self._reservation(parent,mutation=True)
+            return None
+        except ParentGuardHeld:raise
+        except Exception:raise ParentGuardHeld('preexecution_recovery_evidence_unavailable') from None
+
+    def _original_input_files(self,parent):
+        self.tokens.token(parent)
+        with _readonly_sqlite(self.tokens.path) as db:
+            row=db.execute('SELECT data FROM driver_jobs WHERE job=?',(parent['jobId'],)).fetchone();data=_private_json(row[0])
+        objects=data['claim']['submission']['manifest']['objects'];paths=data['inputPaths']
+        if type(paths) is not dict or set(paths)!={obj['id'] for obj in objects}:raise ParentGuardHeld('complete_original_input_paths_required')
+        total=0
+        for obj in objects:
+            relative=paths[obj['id']];self.ledger._owned_path(parent['reservationId'],relative);path,identity=_private(self.ledger.root/relative)
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                before=os.fstat(fd)
+                if (before.st_dev,before.st_ino)!=identity or before.st_size!=obj['byteSize']:raise ParentGuardHeld('original_input_binding_changed')
+                digest=hashlib.sha256();count=0
+                while chunk:=os.read(fd,min(1024**2,obj['byteSize']-count+1)):
+                    count+=len(chunk)
+                    if count>obj['byteSize']:raise ParentGuardHeld('original_input_byte_bound_changed')
+                    digest.update(chunk)
+                after=os.fstat(fd);current=path.stat()
+                signature=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+                if count!=obj['byteSize'] or digest.hexdigest()!=obj['sha256'] or signature(before)!=signature(after) or signature(after)!=signature(current):raise ParentGuardHeld('original_input_integrity_changed')
+                total+=count
+            finally:os.close(fd)
+        if total!=parent['inputBytes']:raise ParentGuardHeld('whole_original_input_bytes_required')

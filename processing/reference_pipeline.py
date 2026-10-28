@@ -38,6 +38,17 @@ class PipelineHeld(ValueError):pass
 class PipelineBusy(PipelineHeld):pass
 
 
+class PipelineOperationLease:
+    """Live local operation capability; never a serialized execution grant."""
+    def __init__(self,journal,descriptor):
+        self.journal,self.descriptor=journal,descriptor;self.pid=os.getpid();self.thread=threading.get_ident()
+    def check(self,journal):
+        if (self.journal is not journal or self.pid!=os.getpid() or self.thread!=threading.get_ident()
+                or getattr(journal,'_active_lease',None) is not self or not journal._busy):raise PipelineHeld('live_pipeline_operation_required')
+        journal._check()
+        if journal._file(journal.lock_path,self.descriptor)!=journal._lock_identity:raise PipelineHeld('pipeline_operation_identity_changed')
+
+
 def encoded(value):return p.canonical_json(value).decode()
 def detached(value):return json.loads(p.canonical_json(value))
 
@@ -59,6 +70,7 @@ class PipelinePolicy:
     treedar_output_budget:int
     node_id:str='main'
     allowed_environments:tuple[str,...]=('production','staging')
+    recovery_control_budget:int=0
 
     def __post_init__(self):
         if self.node_id!='main':raise PipelineHeld('sequential_pipeline_requires_main')
@@ -72,10 +84,14 @@ class PipelinePolicy:
                 raise PipelineHeld('fixed_engine_versions_required')
         for sha in (self.odm_runtime_sha256,self.treedar_runtime_sha256,self.provenance_policy_sha256):p._hash(sha,'runtime/policy digest')
         for size in (self.odm_output_budget,self.treedar_output_budget):p._integer(size,'stage output budget')
-        p._integer(self.odm_output_budget+self.treedar_output_budget,'parent output budget')
+        p._integer(self.recovery_control_budget,'recovery control budget',allow_zero=True)
+        p._integer(self.output_budget,'parent output budget')
         if (type(self.allowed_environments) is not tuple or not self.allowed_environments
                 or len(set(self.allowed_environments))!=len(self.allowed_environments)):raise PipelineHeld('fixed_environments_required')
         for environment in self.allowed_environments:p._environment(environment)
+
+    @property
+    def output_budget(self):return self.odm_output_budget+self.treedar_output_budget+self.recovery_control_budget
 
 
 class ParentGuard(Protocol):
@@ -251,8 +267,9 @@ class PipelineJournal:
                 if self._file(self.lock_path,fd)!=self._lock_identity:raise PipelineHeld('pipeline_lock_changed')
                 try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 except BlockingIOError:raise PipelineBusy('pipeline_operation_active') from None
-                self._busy=True;yield;self._check()
-            finally:self._busy=False;os.close(fd)
+                self._busy=True;self._active_lease=PipelineOperationLease(self,fd)
+                yield self._active_lease;self._check()
+            finally:self._active_lease=None;self._busy=False;os.close(fd)
 
     @contextmanager
     def _db(self):
@@ -293,14 +310,16 @@ class PipelineJournal:
             manifestSha256=claim['manifestSha256'],pipelineDigest=claim['pipelineDigest'],claimRequestId=claim_request_id,
             claimTokenSha256=hashlib.sha256(claim['claimToken'].encode()).hexdigest(),reservationId=reservation_id,
             gateReceiptId=gate_receipt_id,inputBytes=submission['manifest']['totalBytes'],
-            outputBudget=self.policy.odm_output_budget+self.policy.treedar_output_budget)
+            outputBudget=self.policy.output_budget)
         return parent,submission
 
     def bind_parent(self,claim,*,claim_request_id,reservation_id,gate_receipt_id,guard):
         parent,submission=self._parent(claim,claim_request_id,reservation_id,gate_receipt_id)
         plan=_plan(self.policy,parent,submission)
         with self._operation(),self._db() as db:
-            self._guard(guard,parent,mutation=True)
+            # Binding observes an existing claim; control-enabled execution is
+            # gated only after pre-stage preparation can publish its receipt.
+            self._guard(guard,parent,mutation=self.policy.recovery_control_budget==0)
             old=db.execute('SELECT identity,submission,plan FROM pipeline_parents WHERE job=?',(parent['jobId'],)).fetchone()
             expected=(encoded(parent),encoded(submission),encoded(plan))
             if old:

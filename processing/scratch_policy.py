@@ -1,7 +1,9 @@
 """Internal durable scratch policy. No transfers, engine calls, or file deletion.
 
 Capacity probes return *current free bytes*, already excluding allocated bytes.
-Only remainingBytes is subtracted from that snapshot. Call record_allocated only
+Remaining bytes plus retained precharged control holds are subtracted from that
+snapshot. Control holds remain conservative after metadata materializes; no TTL
+or ordinary terminal settlement releases them. Call record_allocated only
 after writes consume disk; it moves bytes from remaining to allocated. Production
 and staging are immutable reservation settings, not interchangeable namespaces.
 Confirmed terminal attestation releases only unused reservation budget; allocated
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import hashlib
 import math
 import os
 from pathlib import Path, PurePosixPath
@@ -23,6 +26,12 @@ import unicodedata
 
 
 MAX_INTEGER = 2**53 - 1
+CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
+ reservation TEXT PRIMARY KEY,charge_id TEXT NOT NULL UNIQUE,scope TEXT NOT NULL,
+ identity TEXT NOT NULL CHECK(length(CAST(identity AS BLOB))<=4096),
+ receipt TEXT NOT NULL CHECK(length(CAST(receipt AS BLOB))<=8192),
+ bytes INTEGER NOT NULL CHECK(typeof(bytes)='integer' AND bytes>0),
+ publication TEXT CHECK(publication IS NULL OR length(CAST(publication AS BLOB))<=16384))'''
 
 
 class PolicyConflict(ValueError):
@@ -52,6 +61,33 @@ def _json(value):
 
 
 class ScratchLedger:
+    @staticmethod
+    def _control_publication(value):
+        """Closed bounded inert descriptor; concrete guard checks actual files."""
+        def closed(item,keys):
+            if type(item) is not dict or set(item)!=set(keys):raise PolicyConflict('closed control publication required')
+        closed(value,('scope','files','anchorReservation','anchorChargeId'))
+        scope=value['scope'];closed(scope,('protocol','parentPolicy','policy','transportPolicy','root','rootIdentity','path','lockPath'))
+        if scope['protocol']!='ltds-original-claim-recovery-worker-v2':raise PolicyConflict('control publication protocol differs')
+        closed(scope['policy'],('per_job_attempts','global_attempts','max_row_bytes','max_serialized_bytes','max_db_pages'))
+        for number in scope['policy'].values():_integer(number,'control publication limit',1)
+        closed(scope['parentPolicy'],('policySha256','nodeId','workerId','workerInstanceId','authorityId','engineId','coordinatorOrigin','gateGeneration'))
+        for key,item in scope['parentPolicy'].items():
+            if key=='gateGeneration':_integer(item,'control gate generation',1)
+            elif type(item) is not str or len(item)>4096 or any(c in item for c in '\0\n\r'):raise PolicyConflict('bounded control parent policy required')
+        _sha(scope['transportPolicy']);_sha(scope['parentPolicy']['policySha256'])
+        for key in ('root','path','lockPath'):
+            item=scope[key]
+            if type(item) is not str or len(item)>4096 or not Path(item).is_absolute() or any(c in item for c in '\0\n\r'):raise PolicyConflict('literal control paths required')
+        closed(value['files'],(scope['path'],scope['lockPath']))
+        for identity in (scope['rootIdentity'],*value['files'].values()):
+            if type(identity) is not list or len(identity)!=2:raise PolicyConflict('closed control inode identity required')
+            for number in identity:_integer(number,'control inode identity')
+        _id(value['anchorReservation']);_id(value['anchorChargeId'])
+        serialized=json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+        if len(serialized.encode())>16384:raise PolicyConflict('bounded control publication required')
+        return serialized,hashlib.sha256(serialized.encode()).hexdigest()
+
     def __init__(self, path, storage_root, capacity_probe=None, clock=None,
                  safety_floor_bytes=1024**3, cleanup_grace_seconds=3600):
         self.path = Path(path)
@@ -97,6 +133,14 @@ class ScratchLedger:
             for statement in schema.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            db.execute(CONTROL_SCHEMA)
+            expected=sqlite3.connect(':memory:')
+            try:
+                expected.execute('PRAGMA synchronous=FULL');expected.execute('BEGIN IMMEDIATE')
+                expected.execute(CONTROL_SCHEMA)
+                query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='control_charges' ORDER BY type,name"
+                if [tuple(row) for row in db.execute(query)]!=[tuple(row) for row in expected.execute(query)]:raise PolicyConflict('typed control schema changed')
+            finally:expected.close()
             if db.execute("SELECT job FROM reservations GROUP BY job HAVING COUNT(DISTINCT environment)>1").fetchone():
                 raise PolicyConflict("existing job has conflicting environments")
             db.execute("INSERT OR IGNORE INTO job_environments SELECT DISTINCT job,environment FROM reservations")
@@ -182,6 +226,10 @@ class ScratchLedger:
                     raise PolicyConflict("reservation settings changed or lease expired")
                 return dict(old)
             outstanding = db.execute("SELECT COALESCE(SUM(remaining),0) FROM reservations").fetchone()[0]
+            # A precharged control allowance is not yet physical disk use. Keep
+            # its full hold even after materialization: conservative until an
+            # explicitly qualified control lifecycle can release it.
+            outstanding += db.execute("SELECT COALESCE(SUM(bytes),0) FROM control_charges").fetchone()[0]
             free = _integer(self.probe(self.root), "free bytes")
             if free - outstanding - self.floor < total:
                 raise PolicyConflict("insufficient unreserved scratch")
@@ -205,6 +253,102 @@ class ScratchLedger:
                 raise PolicyConflict("allocation outside reservation")
             db.execute("UPDATE reservations SET allocated=?,remaining=remaining-? WHERE id=?",
                        (allocated_bytes, delta, reservation_id))
+
+    @staticmethod
+    def _control(row,reservation):
+        if row is None:return None
+        identity=json.loads(row['identity']);receipt=json.loads(row['receipt'])
+        if row['identity']!=_json(identity) or row['receipt']!=_json(receipt):raise PolicyConflict('canonical control receipt required')
+        fields=('reservationId','chargeId','scopeSha256','parentBindingSha256','allocatedBefore','allowanceBytes','maximumScopeCharges')
+        if set(identity)!=set(fields):raise PolicyConflict('control charge identity changed')
+        for key in ('allocatedBefore','allowanceBytes','maximumScopeCharges'):_integer(identity[key],key,0 if key=='allocatedBefore' else 1)
+        for key in ('scopeSha256','parentBindingSha256'):_sha(identity[key])
+        _id(identity['chargeId']);_id(identity['reservationId'])
+        expected=dict(schemaVersion=1,protocol='ltds-scratch-control-charge-v1',**identity,
+            jobId=reservation['job'],generation=reservation['generation'],environment=reservation['environment'],
+            settingsSha256=hashlib.sha256(reservation['settings'].encode()).hexdigest(),
+            allocatedAfter=identity['allocatedBefore']+identity['allowanceBytes'])
+        _integer(expected['allocatedAfter'],'control target')
+        expected['receiptSha256']=hashlib.sha256(_json(expected).encode()).hexdigest()
+        if (_json(receipt)!=_json(expected) or row['reservation']!=identity['reservationId'] or row['charge_id']!=identity['chargeId']
+                or row['scope']!=identity['scopeSha256'] or row['bytes']!=identity['allowanceBytes']
+                or reservation['allocated']<expected['allocatedAfter']):raise PolicyConflict('control charge receipt changed')
+        publication=json.loads(row['publication']) if row['publication'] is not None else None
+        if publication is not None:
+            serialized,sha=ScratchLedger._control_publication(publication)
+            if serialized!=row['publication']:raise PolicyConflict('canonical control publication required')
+        else:sha=None
+        return dict(receipt,publicationSha256=sha,publicationDescriptor=publication)
+
+    def read_control_charge(self,reservation_id):
+        """Historical typed receipt only; no clock update or executable grant."""
+        _id(reservation_id)
+        db=sqlite3.connect(self.path.absolute().as_uri()+'?mode=ro',uri=True)
+        db.row_factory=sqlite3.Row
+        try:
+            db.execute('BEGIN');row=db.execute('SELECT * FROM control_charges WHERE reservation=?',(reservation_id,)).fetchone()
+            return self._control(row,self._reservation(db,reservation_id))
+        finally:db.close()
+
+    def control_scope_publications(self,scope_sha256,maximum):
+        """Bounded historical scope census; no inference from allocated totals."""
+        _sha(scope_sha256);_integer(maximum,'control scope cap',1)
+        db=sqlite3.connect(self.path.absolute().as_uri()+'?mode=ro',uri=True);db.row_factory=sqlite3.Row
+        try:
+            db.execute('BEGIN');count,largest=db.execute('SELECT COUNT(*),COALESCE(MAX(length(CAST(publication AS BLOB))),0) FROM control_charges WHERE scope=?',(scope_sha256,)).fetchone()
+            if count>maximum or largest>16384:raise PolicyConflict('control scope cap exceeded')
+            values=[row[0] for row in db.execute('SELECT publication FROM control_charges WHERE scope=? AND publication IS NOT NULL LIMIT ?',(scope_sha256,maximum+1))]
+            result=[]
+            for value in values:
+                serialized,sha=self._control_publication(json.loads(value))
+                if serialized!=value:raise PolicyConflict('canonical control publication required')
+                result.append(sha)
+            return result
+        finally:db.close()
+
+    def prepare_control_charge(self,reservation_id,*,charge_id,scope_sha256,parent_binding_sha256,expected_allocated,allowance_bytes,maximum_scope_charges):
+        """Atomic exact-CAS pre-execution charge, receipt and retained hold.
+
+        Caller must separately own/prove the parent journal before stage issue.
+        Exact replay returns history; it never repeats the counter increment.
+        """
+        _id(reservation_id);_id(charge_id);_sha(scope_sha256);_sha(parent_binding_sha256)
+        _integer(expected_allocated,'control baseline');_integer(allowance_bytes,'control allowance',1);_integer(maximum_scope_charges,'scope cap',1)
+        target=_integer(expected_allocated+allowance_bytes,'control target')
+        identity=dict(reservationId=reservation_id,chargeId=charge_id,scopeSha256=scope_sha256,parentBindingSha256=parent_binding_sha256,
+            allocatedBefore=expected_allocated,allowanceBytes=allowance_bytes,maximumScopeCharges=maximum_scope_charges)
+        with self._transaction() as db:
+            reservation=self._reservation(db,reservation_id);old=db.execute('SELECT * FROM control_charges WHERE reservation=?',(reservation_id,)).fetchone()
+            if old is not None:
+                if old['identity']!=_json(identity):raise PolicyConflict('control charge replay differs')
+                return self._control(old,reservation)
+            settings=json.loads(reservation['settings'])
+            if (reservation['state']!='reserved' or reservation['expires']<=self._now(db) or reservation['terminal_at'] is not None
+                    or reservation['allocated']!=expected_allocated or expected_allocated!=settings['input_bytes'] or allowance_bytes>reservation['remaining']):raise PolicyConflict('fresh input-only control baseline required')
+            if db.execute('SELECT COUNT(*) FROM control_charges WHERE scope=?',(scope_sha256,)).fetchone()[0]>=maximum_scope_charges:raise PolicyConflict('control scope cap reached')
+            receipt=dict(schemaVersion=1,protocol='ltds-scratch-control-charge-v1',**identity,jobId=reservation['job'],generation=reservation['generation'],environment=reservation['environment'],
+                settingsSha256=hashlib.sha256(reservation['settings'].encode()).hexdigest(),allocatedAfter=target)
+            receipt['receiptSha256']=hashlib.sha256(_json(receipt).encode()).hexdigest()
+            db.execute('UPDATE reservations SET allocated=?,remaining=remaining-? WHERE id=?',(target,allowance_bytes,reservation_id))
+            db.execute('INSERT INTO control_charges VALUES(?,?,?,?,?,?,NULL)',(reservation_id,charge_id,scope_sha256,_json(identity),_json(receipt),allowance_bytes))
+            return dict(receipt,publicationSha256=None,publicationDescriptor=None)
+
+    def publish_control_charge(self,reservation_id,*,charge_id,scope_sha256,parent_binding_sha256,publication_descriptor):
+        """CAS publication identity; never replaces a published control owner."""
+        _id(reservation_id);_id(charge_id)
+        for value in (scope_sha256,parent_binding_sha256):_sha(value)
+        serialized,publication_sha256=self._control_publication(publication_descriptor)
+        if hashlib.sha256(json.dumps(publication_descriptor['scope'],sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()!=scope_sha256:raise PolicyConflict('control publication scope differs')
+        with self._transaction() as db:
+            reservation=self._reservation(db,reservation_id);row=db.execute('SELECT * FROM control_charges WHERE reservation=?',(reservation_id,)).fetchone()
+            receipt=self._control(row,reservation)
+            if receipt is None or any(receipt[key]!=value for key,value in (('chargeId',charge_id),('scopeSha256',scope_sha256),('parentBindingSha256',parent_binding_sha256))):raise PolicyConflict('exact control receipt required')
+            if receipt['publicationSha256'] is not None:
+                if receipt['publicationSha256']!=publication_sha256 or row['publication']!=serialized:raise PolicyConflict('control publication differs')
+                return receipt
+            if reservation['state']!='reserved' or reservation['expires']<=self._now(db):raise PolicyConflict('pre-execution control publication required')
+            db.execute('UPDATE control_charges SET publication=? WHERE reservation=? AND publication IS NULL',(serialized,reservation_id))
+            return dict(receipt,publicationSha256=publication_sha256,publicationDescriptor=json.loads(serialized))
 
     def set_engine_state(self, reservation_id, state, *, terminal_attested=False):
         """terminal_attested guarantees engine shutdown and no future allocation."""

@@ -4,6 +4,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import sqlite3
+import hashlib
+import json
+import copy
 
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 
@@ -58,6 +61,66 @@ class ScratchPolicyTests(unittest.TestCase):
             self.reserve(generation=0)
         with self.assertRaises(ValueError):
             self.reserve(job_id='_invalid')
+
+    def control(self,**changes):
+        values=dict(charge_id='control-one',scope_sha256='b'*64,parent_binding_sha256='c'*64,expected_allocated=100,allowance_bytes=50,maximum_scope_charges=8)
+        values.update(changes);return self.ledger.prepare_control_charge('r1',**values)
+
+    def test_control_charge_and_hold_are_atomic_exact_idempotent_and_readonly(self):
+        self.reserve();self.ledger.record_allocated('r1',100);first=self.control()
+        self.assertEqual(first,self.control());self.assertEqual(first['allocatedAfter'],150)
+        before=self.ledger.path.read_bytes();self.assertEqual(first,self.ledger.read_control_charge('r1'));self.assertEqual(before,self.ledger.path.read_bytes())
+        with self.ledger._transaction() as db:
+            row=self.ledger._reservation(db,'r1');self.assertEqual((row['allocated'],row['remaining']),(150,250))
+        for key,value in [('expected_allocated',101),('allowance_bytes',49),('scope_sha256','d'*64),('parent_binding_sha256','d'*64),('charge_id','other'),('maximum_scope_charges',7)]:
+            with self.subTest(key=key),self.assertRaises(PolicyConflict):self.control(**{key:value})
+
+    def test_precharge_does_not_free_unmaterialized_capacity_and_terminal_does_not_release_hold(self):
+        self.reserve();self.ledger.record_allocated('r1',100);self.free=400
+        self.control()
+        # Remaining250 + retained hold50 + floor100 leave no capacity.
+        with self.assertRaises(PolicyConflict):self.reserve(job_id='j2',reservation_id='r2',input_bytes=1,output_budget=0)
+        self.ledger.set_engine_state('r1','terminal',terminal_attested=True);self.free=150
+        with self.assertRaises(PolicyConflict):self.reserve(job_id='j2',reservation_id='r2',input_bytes=1,output_budget=0)
+
+    def test_control_charge_needs_fresh_full_input_baseline_and_no_engine_start(self):
+        self.reserve()
+        with self.assertRaises(PolicyConflict):self.control()
+        self.ledger.record_allocated('r1',100);self.ledger.set_engine_state('r1','engine_started')
+        with self.assertRaises(PolicyConflict):self.control()
+
+    def test_control_charge_commit_failure_never_changes_counter_without_receipt(self):
+        self.reserve();self.ledger.record_allocated('r1',100)
+        original=self.ledger._transaction
+        from contextlib import contextmanager
+        @contextmanager
+        def fail():
+            with original() as db:
+                yield db
+                raise OSError('synthetic before commit')
+        with patch.object(self.ledger,'_transaction',fail),self.assertRaises(OSError):self.control()
+        self.assertIsNone(self.ledger.read_control_charge('r1'))
+        with self.ledger._transaction() as db:self.assertEqual(self.ledger._reservation(db,'r1')['allocated'],100)
+
+    def test_control_publication_cas_keeps_typed_historical_receipt(self):
+        self.reserve();self.ledger.record_allocated('r1',100)
+        path=str(self.root/'recovery.sqlite');lock=path+'.lock'
+        descriptor=dict(scope=dict(protocol='ltds-original-claim-recovery-worker-v2',parentPolicy=dict(policySha256='a'*64,nodeId='main',workerId='worker',workerInstanceId='instance',authorityId='authority',engineId='engine',coordinatorOrigin='http://127.0.0.1:1',gateGeneration=1),
+            policy=dict(per_job_attempts=8,global_attempts=64,max_row_bytes=8192,max_serialized_bytes=131072,max_db_pages=64),transportPolicy='d'*64,root=str(self.root),rootIdentity=[1,2],path=path,lockPath=lock),files={path:[1,3],lock:[1,4]},anchorReservation='r1',anchorChargeId='control-one')
+        digest=lambda value:hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+        scope=digest(descriptor['scope']);self.control(scope_sha256=scope)
+        values=dict(charge_id='control-one',scope_sha256=scope,parent_binding_sha256='c'*64,publication_descriptor=descriptor)
+        receipt=self.ledger.publish_control_charge('r1',**values);self.assertEqual(receipt,self.ledger.publish_control_charge('r1',**values))
+        self.assertEqual(self.ledger.control_scope_publications(scope,8),[digest(descriptor)])
+        changed=copy.deepcopy(descriptor);changed['files'][path][1]+=1
+        with self.assertRaises(PolicyConflict):self.ledger.publish_control_charge('r1',**dict(values,publication_descriptor=changed))
+        self.ledger.set_engine_state('r1','engine_started');self.assertEqual(receipt,self.control(scope_sha256=scope))
+
+    def test_concurrent_identical_control_preparation_charges_once(self):
+        self.reserve();self.ledger.record_allocated('r1',100)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:receipts=list(executor.map(lambda _:self.control(),range(2)))
+        self.assertEqual(receipts[0],receipts[1])
+        with self.ledger._transaction() as db:self.assertEqual(self.ledger._reservation(db,'r1')['allocated'],150)
 
     def test_expired_retry_preserves_job_environment_after_restart(self):
         self.reserve()

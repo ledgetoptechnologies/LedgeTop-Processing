@@ -138,6 +138,19 @@ class PipelineTests(unittest.TestCase):
     def open(self,policy=None):
         return module.PipelineJournal(self.path,policy or self.policy,verify_provenance=lambda receipt:self.provenance_current and receipt==self.receipt)
 
+    def test_recovery_control_budget_is_additive_and_does_not_reduce_stage_maxima(self):
+        policy=replace(self.policy,recovery_control_budget=4096)
+        self.assertEqual(self.policy.output_budget,200);self.assertEqual(policy.output_budget,4296)
+        parent=dict(self.plan['parentBinding'],outputBudget=policy.output_budget)
+        plan=module._plan(policy,parent,self.claim['submission'])
+        self.assertEqual([stage['outputBudget'] for stage in plan['stages']],[100,100])
+        for value in (-1,True,1.5,p.MAX_SAFE_INTEGER):
+            with self.subTest(value=value),self.assertRaises(ValueError):replace(self.policy,recovery_control_budget=value)
+
+    def test_operation_lease_is_actual_active_owner_and_invalidated_on_exit(self):
+        with self.journal._operation() as lease:self.assertIsNone(lease.check(self.journal))
+        with self.assertRaises(module.PipelineHeld):lease.check(self.journal)
+
     def bind(self,claim=None,**kwargs):
         return self.journal.bind_parent(claim or self.claim,claim_request_id=kwargs.get('claim_request_id','pipeline-claim'),
             reservation_id=kwargs.get('reservation_id','parent-reservation'),gate_receipt_id=kwargs.get('gate_receipt_id','a'*32),guard=self.guard)
