@@ -9,6 +9,7 @@ import ssl
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import uuid
 
@@ -17,6 +18,7 @@ from ops.native_node_fixture import NativeNodeFixture
 from processing.node_gate import NodeGate
 from processing.reference_execution import ExecutionRouter
 from processing.reference_provenance import LidarProvenanceClient
+from processing.reference_readers import ReaderSession
 from processing.treedar_delivery import TreeDarDelivery
 from processing.treedar_engine import TreeDarEngine, TreeDarHeld, SOURCE_FILES, source_digest
 
@@ -83,7 +85,7 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
     def listener(self, api, host, port, *, ssl_context):
         self.assertIsInstance(ssl_context,ssl.SSLContext)
         self.listeners.append(api)
-        return object()
+        return SimpleNamespace(server_close=lambda:None)
 
     def build(self, config=None, *, provision=False):
         settings=self.load() if config is None else config
@@ -95,7 +97,9 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
                 patch.object(daemon,'create_reference_http_server',side_effect=self.listener), \
                 patch.object(daemon,'TREEDAR_DOCKER_SOCKET',str(self.root/'docker.sock')), \
                 patch.object(TreeDarEngine,'_docker',autospec=True,side_effect=self.docker):
-            return daemon.build_worker(settings)
+            driver,server=daemon.build_worker(settings)
+            self.addCleanup(server.server_close)
+            return driver,server
 
     def test_legacy_defaults_keep_odm_provider_and_create_no_routing_state(self):
         settings=self.load()
@@ -187,7 +191,8 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
 
     def test_same_main_configuration_reopens_the_existing_journals_without_handover(self):
         self.route()
-        first,_=self.build(provision=True)
+        first,server=self.build(provision=True)
+        server.server_close()
         second,_=self.build()
         self.assertEqual(first.execution_router.path,second.execution_router.path)
         self.assertEqual(first.provenance_client.path,second.provenance_client.path)
@@ -217,4 +222,45 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?',('legacy-job',)).fetchone()[0],'claim_pending')
         self.assertEqual(len(self.listeners),1)
         self.assertEqual(self.docker_calls,[])
+
+    def test_factory_failure_closes_owned_reader_lease_without_starting_threads(self):
+        observed=[]
+        def failed_listener(api,*args,**kwargs):
+            observed.append(api.results.reader_session)
+            raise OSError('synthetic listener bind failure')
+        with patch.object(self,'listener',side_effect=failed_listener):
+            with self.assertRaises(OSError):self.build(provision=True)
+        self.assertEqual(len(observed),1)
+        with self.assertRaises(Exception):observed[0].check()
+        with ReaderSession(observed[0].ledger):pass
+
+    def test_server_close_retains_lease_until_successful_handler_join_and_is_idempotent(self):
+        failed=[True]
+        def listener(api,*args,**kwargs):
+            self.listeners.append(api)
+            def close():
+                if failed[0]:raise OSError('synthetic uncertain handler join')
+            return SimpleNamespace(server_close=close)
+        with patch.object(self,'listener',side_effect=listener):
+            _,server=self.build(provision=True)
+        session=self.listeners[-1].results.reader_session
+        self.assertFalse(server.daemon_threads)
+        self.assertTrue(server.block_on_close)
+        with self.assertRaises(OSError):server.server_close()
+        session.check()
+        with self.assertRaises(Exception):
+            with ReaderSession(session.ledger):pass
+        failed[0]=False
+        server.server_close();server.server_close()
+        with ReaderSession(session.ledger):pass
+
+    def test_direct_factory_has_exclusive_reader_owner_and_rejects_unsupported_platform(self):
+        settings=self.load()
+        _,server=self.build(settings,provision=True)
+        session=self.listeners[-1].results.reader_session
+        with self.assertRaises(Exception):self.build(settings)
+        session.check()
+        server.server_close()
+        with patch.object(daemon.sys,'platform','win32'):
+            with self.assertRaisesRegex(ValueError,'requires Linux'):daemon.build_worker(settings)
 

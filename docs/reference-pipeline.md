@@ -306,6 +306,23 @@ on core source `e2ccf489`; current runtime evidence is in
 `evidence/reference-installed-20261028.json`. Earlier source-only deployment
 paragraphs above describe their historical checkpoints.
 
+## Owned result-reader recovery source checkpoint
+
+The Linux worker now owns a dedicated ledger-bound reader lease. A replacement
+process can retire only explicitly registered earlier-generation read pins after
+acquiring that same exclusive lease. Anonymous and foreign pins remain held.
+Streams record their own descriptor close before pin release, and handler drain
+precedes lease release. Uncertain attachment, close or commit outcomes retain
+ownership. No reservation, acceptance or cleanup rule is bypassed.
+
+All 663 isolated Linux tests passed without skips, including actual subprocess
+death/restart, fork contention, first-bootstrap crashes, FD reuse, release faults
+and HTTP HEAD/abort/drain. Independent source review found no blocking issue.
+The engine bootstrap source is unchanged from the preceding actual TreeDar
+qualification. Details are in [reference-readers.md](reference-readers.md) and
+`evidence/reference-readers-20261028.json`. This source is not deployed; NAS
+integration and runtime acceptance remain pending.
+
 ## Coordinated ownership
 
 The existing **Viewer** chat owns the storage broker, Viewer adapter, durable

@@ -43,7 +43,7 @@ complete NAS-backed processing pipeline.
 ## Worker routing configuration source preparation
 
 The worker daemon has an explicit optional `executionRouting` setting. Omitting
-it preserves the original ODM-only factory. The closed setting has
+it preserves ODM-only execution. The closed setting has
 `schemaVersion: 1`, `mode: "per-job-v1"` and `treedar: null` for per-job ODM
 routing on cluster or main. Only main may replace `treedar: null` with a closed
 object containing `imageId`, `sourceRoot`, `sourceSha256` and `engineVersion`.
@@ -64,6 +64,18 @@ an actual authenticated broker, trusted provenance issuer and qualified Viewer
 acceptance/storage route. Cleanup remains explicitly opt-in. TreeDar runtime
 journals still reject changed image/source/version; automatic TreeDar upgrades
 need a separate reviewed migration and retained-reader design.
+
+Routed workers also require the coordinator's private execution-advice response
+introduced in source `ad74795`. The currently installed `e2ccf489` coordinator
+does not provide it. An opted-in worker holds before claiming when that advice
+is missing; update and qualify the coordinator before enabling routed intake.
+
+The worker daemon now requires Linux and owns one dedicated result-reader lease
+beside its exact scratch ledger. It retains that lease until all result handlers
+drain. On restart it may retire only explicitly owned prior-generation read pins
+after acquiring the same lease. Anonymous legacy pins remain held. See
+[reference-readers.md](reference-readers.md) for ownership and crash behavior.
+This addition is source preparation; no worker service has been activated.
 
 ## Historical preflight — October 27, 2026
 

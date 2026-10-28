@@ -95,13 +95,17 @@ class ResultStream:
 
     Each read returns at most CHUNK_BYTES, even read(-1). The last bytes remain
     pinned until EOF is consumed or close() is called by the response owner.
-    A process crash leaves a conservative durable pin for reconciliation.
+    Anonymous crash pins remain conservative. An optional owned reader session
+    may reconcile its prior epochs only after obtaining the exclusive OS lease.
     """
-    def __init__(self, descriptor, *, length, fingerprint, headers, status, release):
+    def __init__(self, descriptor, *, length, fingerprint, headers, status, release, check=None,
+                 close_descriptor=None):
         self._descriptor = descriptor
         self._remaining = length
         self._fingerprint = fingerprint
         self._release = release
+        self._check = check
+        self._close_descriptor = close_descriptor
         self.headers, self.status = dict(headers), status
 
     @property
@@ -113,8 +117,11 @@ class ResultStream:
             return
         descriptor, self._descriptor = self._descriptor, None
         try:
-            os.close(descriptor)
-        except OSError:
+            if self._close_descriptor is not None:
+                self._close_descriptor()
+            else:
+                os.close(descriptor)
+        except Exception:
             # Unknown descriptor outcome must never release a live consumer pin.
             raise ResultUnavailable() from None
         try:
@@ -134,12 +141,16 @@ class ResultStream:
             self.close()
             return b""
         try:
+            if self._check is not None:
+                self._check()
             if _fingerprint(os.fstat(self._descriptor)) != self._fingerprint:
                 raise ResultUnavailable()
             chunk = os.read(self._descriptor, min(self._remaining, CHUNK_BYTES,
                             CHUNK_BYTES if size == -1 else size))
             if not chunk or _fingerprint(os.fstat(self._descriptor)) != self._fingerprint:
                 raise ResultUnavailable()
+            if self._check is not None:
+                self._check()
             self._remaining -= len(chunk)
             return chunk
         except Exception:
@@ -167,9 +178,14 @@ class ResultStream:
 
 
 class ReferenceResults:
-    def __init__(self, worker):
+    def __init__(self, worker, *, reader_session=None):
         self.worker = worker
         self.ledger, self.outbox = worker.ledger, worker.outbox
+        if reader_session is not None:
+            from .reference_readers import ReaderSession
+            if not isinstance(reader_session, ReaderSession) or reader_session.ledger is not self.ledger:
+                raise ValueError('result reader session ledger differs')
+        self.reader_session = reader_session
 
     def _load(self, job_id):
         protocol._slug(job_id, "job ID")
@@ -216,7 +232,8 @@ class ReferenceResults:
 
     def open(self, job_id, *, generation, object_id, result_manifest_sha256,
              authorization, object_sha256=None, range_header=None):
-        descriptor, pin, reservation = None, None, None
+        descriptor, pin, reservation, handle = None, None, None, None
+        opened = attached = False
         try:
             job, reservation, result, local = self._load(job_id)
             expected = (self.worker.node_id, self.worker.worker_id, job_id, job["generation"],
@@ -238,12 +255,19 @@ class ReferenceResults:
                 stored = db.execute("SELECT * FROM objects WHERE reservation=? AND id=?", (reservation, object_id)).fetchone()
                 if stored is None or (stored["path"], stored["sha"], stored["bytes"]) != (relative, obj["sha256"], obj["byteSize"]):
                     raise ResultUnavailable()
-            pin = "result-read-" + secrets.token_hex(24)
-            self.ledger.set_pin(reservation, object_id, pin, kind="read", state="active")
+            if self.reader_session is not None:
+                handle = self.reader_session.pin(reservation, object_id)
+            else:
+                pin = "result-read-" + secrets.token_hex(24)
+                self.ledger.set_pin(reservation, object_id, pin, kind="read", state="active")
             # Recheck after pin admission; cleanup can no longer acquire a fence.
             self.ledger._owned_path(reservation, relative)
             path = self.ledger.root / relative
             descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            opened = True
+            if handle is not None:
+                handle.attach_fd(descriptor)
+                attached = True
             observed, current = os.fstat(descriptor), path.lstat()
             if (not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1
                     or observed.st_size != obj["byteSize"]
@@ -265,21 +289,37 @@ class ReferenceResults:
                        "X-Result-Sha256": obj["sha256"], "X-Result-Manifest-Sha256": result["resultManifestSha256"]}
             if status == 206:
                 headers["Content-Range"] = "bytes " + str(start) + "-" + str(start + length - 1) + "/" + str(obj["byteSize"])
-            release = lambda reservation=reservation, object_id=object_id, pin=pin: self.ledger.set_pin(
-                reservation, object_id, pin, kind="read", state="released")
+            if handle is not None:
+                release = lambda handle=handle: handle.release()
+            else:
+                release = lambda reservation=reservation, object_id=object_id, pin=pin: self.ledger.set_pin(
+                    reservation, object_id, pin, kind="read", state="released")
             stream = ResultStream(descriptor, length=length, fingerprint=_fingerprint(observed),
-                                  headers=headers, status=status, release=release)
-            descriptor, pin = None, None
+                                  headers=headers, status=status, release=release,
+                                  check=handle.check if handle is not None else None,
+                                  close_descriptor=handle.close_fd if handle is not None else None)
+            descriptor, pin, handle = None, None, None
             return stream
         except Exception as error:
             closed = descriptor is None
             if descriptor is not None:
                 try:
-                    os.close(descriptor)
+                    if handle is not None and attached:
+                        handle.close_fd()
+                    else:
+                        os.close(descriptor)
                     closed = True
-                except OSError:
+                except Exception:
                     pass
-            if pin is not None and closed:
+            if handle is not None and closed:
+                try:
+                    if attached:
+                        handle.release()
+                    elif not opened:
+                        handle.abort_unopened()
+                except Exception:
+                    pass
+            elif pin is not None and closed:
                 try:
                     self.ledger.set_pin(reservation, object_id, pin, kind="read", state="released")
                 except Exception:

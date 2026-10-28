@@ -331,6 +331,8 @@ def _directory(value):
 
 def build_worker(config):
     """Build explicit components; verify the existing gate and actual version."""
+    if not sys.platform.startswith('linux'):
+        raise ValueError('owned result reader daemon requires Linux')
     routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     with NodeGate(config['engineId']) as gate:
@@ -388,14 +390,43 @@ def build_worker(config):
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
-    permitted = frozenset(config['allowedEnvironments'])
-    result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker), bearer_readers={config['resultReadBearer']: dict(
-        node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
-        share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
-    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_tls.load_cert_chain(config['serverCertFile'], config['serverKeyFile'])
-    server = create_reference_http_server(result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)
-    return driver, server
+    # The daemon owns one OS reader lease independently of its state-root lock.
+    # That also protects direct factory callers from overlapping reader owners.
+    from processing.reference_readers import ReaderSession
+    session = ReaderSession(ledger)
+    session.__enter__()
+    server = None
+    try:
+        permitted = frozenset(config['allowedEnvironments'])
+        result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker,
+            reader_session=session), bearer_readers={config['resultReadBearer']: dict(
+            node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
+            share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
+        server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_tls.load_cert_chain(config['serverCertFile'], config['serverKeyFile'])
+        server = create_reference_http_server(result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)
+        server.daemon_threads = False
+        server.block_on_close = True
+        original_close = server.server_close
+        close_lock = threading.Lock()
+        closed = False
+        def close_owned_readers():
+            nonlocal closed
+            with close_lock:
+                if closed:
+                    return
+                # Never release the lease in finally: a failed handler join is
+                # not evidence that all result descriptors have closed.
+                original_close()
+                session.close()
+                closed = True
+        server.server_close = close_owned_readers
+        return driver, server
+    except BaseException:
+        if server is not None:
+            server.server_close()
+        session.close()  # No listener/driver threads have been started here.
+        raise
 
 
 def main(argv=None):
