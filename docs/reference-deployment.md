@@ -40,6 +40,29 @@ engine-task cleanup and real-data processing are **not** activated. NAS SSH as
 owner detail. This installation qualifies coordinator infrastructure, not the
 complete NAS-backed processing pipeline.
 
+## Actual main-PC TreeDar bootstrap qualification
+
+The exact locally qualified TreeDar image
+`sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb`
+was absent on main, then copied directly from local Docker over SSH and verified.
+No registry publication or GitHub Actions run was used. Frozen source `c439b703`
+was staged privately on main; all 65 selected source/fixture hashes were checked.
+
+Operation `treedar-main-4604a5659ec6` CAS-drained both nodes, verified no active
+queue work and main NodeODX idleness, then held main's canonical NodeGate while
+running the actual TreeDar bootstrap in an isolated ephemeral container. It
+recovered all three known crowns from 4,555 synthetic points and checked all 16
+output hashes. No explicit CPU, container-memory, PID or thread cap was supplied.
+Inputs, control and results lived only in temporary mounts and the test container
+was removed. The existing processing services/images stayed unchanged. Both own
+maintenance plans were canceled after verification: cluster active revision 4,
+main active revision 13. The cache image and inactive staged source remain for
+later integration. See `evidence/main-treedar-bootstrap-20261028.json`.
+
+This proves actual main-host algorithm/bootstrap execution, not the host
+controller/worker API, genuine acquisition, NAS issuer or Viewer handoff.
+TreeDar and Gaussian availability remain disabled.
+
 ## Worker routing configuration source preparation
 
 The worker daemon has an explicit optional `executionRouting` setting. Omitting

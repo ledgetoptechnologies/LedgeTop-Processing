@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-28T06:58:13.741147+00:00",
+  "purpose": "Actual main-PC offline synthetic TreeDar bootstrap qualification; not worker/Viewer pipeline activation",
+  "host": "192.168.50.88",
+  "dockerEngineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+  "image": {
+    "id": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb",
+    "previouslyPresent": false,
+    "stagedBy": "local docker image save streamed directly to SSH docker image load",
+    "saveExitCode": 0,
+    "loadExitCode": 0,
+    "githubActionsUsed": false,
+    "registryPublication": false
+  },
+  "source": {
+    "commit": "c439b703ca7b8be21a162b9a67062eeb803862c3",
+    "path": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-c439b70/source",
+    "archiveBytes": 870400,
+    "archiveSha256": "24ba44fc31c675b8fe3d344b4305945c8e7042f3f9448d783c58751ba16c84a6",
+    "fileCount": 65,
+    "verifiedFileHashes": 65,
+    "stageReceiptSha256": "b7a30d6e70b529a54e0b4c8be76610277893c2d24736e29d2cd1f2a4bf6ae58e",
+    "serviceActivated": false
+  },
+  "qualification": {
+    "operation": "treedar-main-4604a5659ec6",
+    "receipt": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-c439b70/treedar-main-4604a5659ec6/qualification.json",
+    "receiptSha256": "90098b725608336d947645cedad3a9153adebf6b7081f3fca34e666e4c757a52",
+    "stage": "completed",
+    "nodeAdmission": "both nodes CAS-drained, no running/held queue jobs; main canonical NodeGate held during bootstrap",
+    "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "gateGeneration": 1,
+    "container": "ltds-treedar-main-4604a5659ec6",
+    "isolation": [
+      "network none",
+      "read-only root and source",
+      "nonroot UID/GID1000",
+      "dropped capabilities and no-new-privileges",
+      "ephemeral tmpfs inputs/control/outputs; auto-removed test container"
+    ],
+    "resourcePolicy": "No explicit CPU, container-memory, PID or thread-limit flags supplied; known-small qualification files use bounded temporary mounts",
+    "passed": true,
+    "actualBootstrap": true,
+    "actualTreeDarCli": true,
+    "syntheticOnly": true,
+    "genuineAcquisition": false,
+    "processingHostsTouched": true,
+    "engineVersion": "0.0.1",
+    "inputPoints": 4555,
+    "knownCrowns": 3,
+    "recoveredCrowns": 3,
+    "outputObjects": 16,
+    "outputHashesVerified": true,
+    "testContainersRemaining": 0,
+    "mainPrimaryImageUnchanged": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776"
+  },
+  "reopenedOwnPlans": {
+    "cluster": {
+      "state": "active",
+      "revision": 4,
+      "planId": "56bc95b9-4a06-44e8-87ed-9d4a8c0fb560"
+    },
+    "main": {
+      "state": "active",
+      "revision": 13,
+      "planId": "5f0e0a37-5d66-4774-9713-a507f065e16f"
+    }
+  },
+  "independentReadback": {
+    "passed": true,
+    "readOnly": true,
+    "archiveAndReceiptsVerified": true,
+    "all65SourceFilesVerified": true,
+    "cachedImageVerified": true,
+    "bothNodesActive": true,
+    "bothCanonicalGatesIdleAndSameAuthority": true,
+    "historicalJobs": 12,
+    "historicalSucceeded": 10,
+    "historicalFailed": 2,
+    "queuedRunningHeldJobs": 0,
+    "existingEngineContainerIdentitiesImagesAndStartTimesUnchanged": true,
+    "mainMonitoringAndTunnelUnchanged": true,
+    "legacyClusterOdxStopped": true,
+    "coordinatorHealthyAndUnchanged": true,
+    "testContainersRemaining": 0,
+    "outputVerificationScope": "Independent reviewer checked immutable receipt and qualifier hash-verification source; removed tmpfs output bytes could not be independently rehashed. No second engine run."
+  },
+  "remaining": [
+    "Actual host controller/worker and result-service integration",
+    "NAS broker, genuine provenance issuer, source retention and Viewer acceptance",
+    "TreeDar capability remains disabled; Gaussian remains disabled",
+    "Real-photo trial remains paused for user-selected smaller dataset"
+  ]
+}
