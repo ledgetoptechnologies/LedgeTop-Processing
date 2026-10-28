@@ -16,11 +16,29 @@ commit. See [reference-claim-recovery.md](reference-claim-recovery.md). This API
 is not configured in the installed runtime. Worker recovery, final mixed-pipeline
 delivery and outer-v2 integration still require qualification.
 
-Native ODM and TreeDar execution controllers, the concrete parent guard and
-native bundle validator/writer have source qualification. The TreeDar controller
-prepares its private RAW directory before launch. Local publication and worker
-recovery are being integrated separately; their presence in a worktree does not
-mean they are deployed or capable of settling the parent pipeline.
+The frozen source `2be08b5904e38e98a76b57bd22cc0c78e6338682` passed 1,202 Linux
+tests, with four Node probes skipped there, and seven separate Windows checks.
+All 364 source files were independently reread in inactive folders on both PCs.
+All 227 Python files compile under the hosts' Python 3.10/3.14, and inert
+controller imports passed. Containers and updater working directories remained
+unchanged. Evidence is in
+[recovery-publication-qualification-20261028.json](evidence/recovery-publication-qualification-20261028.json).
+
+The concrete worker client now bounds retained history, atomically charges
+additive control space and retains capacity for future metadata writes. Normal
+engine admission verifies the actual published control files and their format,
+identity and current history. See
+[reference-worker-recovery.md](reference-worker-recovery.md). Its combined-worker
+factory preparation remains unwired. Defaults also cap prepared parents at 64;
+control retirement/export and old-code downgrade protection are deployment
+gates, not completed automation.
+
+Native ODM and TreeDar execution controllers, the concrete parent guard, native
+bundle writer/publication and recovery client have source qualification. The
+TreeDar controller prepares its private RAW directory before launch. See
+[reference-treedar-publication.md](reference-treedar-publication.md) and
+[reference-recovery-runtime.md](reference-recovery-runtime.md). They are not
+deployed or composed into a facade capable of settling the parent pipeline.
 
 Existing image-update discovery services on both PCs remain installed on their
 qualified source, independently of these inactive components. Their working
