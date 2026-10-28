@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Reviewed disposable writable layer required by default NodeODX startup",
+  "fullLinuxRegression": {
+    "command": "python -B -m unittest discover -s tests",
+    "total": 823,
+    "passed": 821,
+    "skipped": 2,
+    "seconds": 86.172,
+    "exitCode": 0,
+    "skipReason": "Two fixed Node probe checks pass separately; cached Python test image has no Node",
+    "warnings": [
+      "One intentional multithreaded fork-ownership test DeprecationWarning"
+    ]
+  },
+  "actualFailedReadonlyAttempt": {
+    "host": "192.168.50.88",
+    "sourceCommit": "e353e9044576b490fead8f5406d5f43a93d1c8ff",
+    "operationId": "88f71c3e3babe23762e9517c217155ff85b38a19a2e3f359c9c8fa622205c9dc",
+    "containerId": "9436ded4fee9eac84d2b49af6b5765b53601bdeabf52c54c0aa30e5aed1b2a01",
+    "imageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "phase": "exec_intent",
+    "observedState": "exited",
+    "exitCode": 1,
+    "pid": 0,
+    "cause": "Default logger requires writable application directory /var/www; readonly root profile rejected vendor startup",
+    "startupSucceeded": false,
+    "qualificationSucceeded": false,
+    "noProcessingInputs": true,
+    "cleanup": {
+      "exactImageAndLabelVerified": true,
+      "restartPolicy": "no",
+      "forceRemoval": false,
+      "containerRemoved": true,
+      "sameEngineAndFullIdAbsenceVerified": true,
+      "closureSha256": "527bbc5b4439080e1e7d17787754820b87a883ae9762a39b6cee41e8ccff1a47",
+      "heldJournalsPreserved": true
+    }
+  },
+  "newPolicy": {
+    "filesystemMode": "ephemeral-node-defaults-v1",
+    "readonlyRootfs": false,
+    "network": "none",
+    "hostMounts": false,
+    "publishedPorts": false,
+    "gpuRequests": false,
+    "addedCpuMemoryPidThreadLimits": false,
+    "defaultImageStartupPreserved": true,
+    "layerDisposalProof": "Only after stored stopped proof and same-engine full container-ID absence"
+  },
+  "review": "Independent frozen profile and cleanup review found no blocking findings",
+  "installedMainServiceChanged": false,
+  "nasCommandsExecuted": false,
+  "newProfileHostStartupAccepted": false,
+  "automaticUpdatesEnabled": false,
+  "sourceSha256": {
+    "processing/update_qualifier.py": "bdbb3111849c847d8903527353fe5df75b028ea6562351a97cfc9623693c5cf1",
+    "tests/test_update_qualifier.py": "7d8cfb1ab39bce7e14bb0923b44ecf5f321ba0108dd4676d4cb2231f0da08758",
+    "docs/update-qualifier.md": "6cc9b23dcd544880b9bff2afd14e07e394531e0b975574c75b0dafeb46b90093"
+  }
+}

@@ -1,5 +1,5 @@
 import copy
-from dataclasses import replace
+from dataclasses import asdict,replace
 import json
 import os
 from pathlib import Path
@@ -13,7 +13,7 @@ from unittest.mock import patch
 import uuid
 
 from processing.update_registry import DockerRegistry,RegistryPolicy,RegistryChannel,_json,_sha
-from processing.update_qualifier import StartupPolicy,StartupQualifier,QualifierError,QualifierHeld,PROBE,startup_spec,WRITE_PATHS
+from processing.update_qualifier import StartupPolicy,StartupQualifier,QualifierError,QualifierHeld,PROBE,PROBE_SHA,startup_spec,WRITE_PATHS
 from processing.update_supervisor import UpdateSupervisor,SupervisorPolicy
 from tests import test_update_registry as registry_fixture
 from tests import test_update_supervisor as supervisor_fixture
@@ -32,7 +32,7 @@ class FakeDocker:
         self.options=[dict(name='numeric-limit',type='int',value=7,min=1,max=20),dict(name='bool-flag',type='bool',value=False)]
 
     def inspect(self):
-        host=dict(NetworkMode='none',ReadonlyRootfs=True,Privileged=False,
+        host=dict(NetworkMode='none',ReadonlyRootfs=False,Privileged=False,
             Tmpfs={path:'rw,nosuid,nodev,mode=1777' for path in WRITE_PATHS},PortBindings={},RestartPolicy={'Name':'no'},
             AutoRemove=False,CapDrop=['ALL'],SecurityOpt=['no-new-privileges'],Binds=None,Devices=[],DeviceRequests=None,
             PidMode='',IpcMode='private',NanoCpus=0,Memory=0,PidsLimit=None,LogConfig={'Type':'none'})
@@ -108,6 +108,8 @@ class QualifierTests(unittest.TestCase):
             row=self.qualifier._row(self.request['requestSha256']);evidence=json.loads(row['evidence'])
             with self.qualifier._db() as db:self.assertEqual(db.execute('PRAGMA synchronous').fetchone()[0],2)
         self.assertEqual(evidence['scope'],'startup-api-options-only-v1')
+        self.assertEqual(evidence['filesystemMode'],'ephemeral-node-defaults-v1')
+        self.assertTrue(evidence['containerWritableLayerDisposed'])
         self.assertFalse(evidence['reconstructionQualified']);self.assertFalse(evidence['gpuKernelsQualified'])
         self.assertEqual(evidence['optionsSha256'],_sha(sorted(self.docker.options,key=lambda item:item['name'])))
         self.assertNotIn('Cmd',row['defaults']);self.assertNotIn('/var/www/index.js',row['defaults'])
@@ -171,7 +173,7 @@ class QualifierTests(unittest.TestCase):
         for denied in ('--cpus','--memory','--pids-limit','--gpus','--mount','--volume','-p','--publish','--privileged'):
             self.assertNotIn(denied,create)
         self.assertEqual(create[create.index('--network')+1],'none')
-        self.assertIn('--read-only',create)
+        self.assertNotIn('--read-only',create)
         self.assertFalse(any('THREAD' in value or 'concurrency' in value for value in create))
         executed=next(args for args in self.docker.calls if args[0]=='exec')
         self.assertEqual(executed,['exec',self.docker.id,'/usr/bin/node','-e',PROBE])
@@ -245,8 +247,8 @@ class QualifierTests(unittest.TestCase):
                 with self.assertRaises(QualifierHeld):qualifier.qualify(self.request)
                 self.assertEqual(self.docker.mutations()[before:],['create'])
 
-    def test_modified_readonly_network_caps_or_default_cmd_spec_fails(self):
-        changes=[{'host':{'ReadonlyRootfs':False}},{'host':{'NetworkMode':'bridge'}},{'host':{'NanoCpus':2*10**9}},
+    def test_unexpected_readonly_root_network_caps_or_default_cmd_spec_fails(self):
+        changes=[{'host':{'ReadonlyRootfs':True}},{'host':{'NetworkMode':'bridge'}},{'host':{'NanoCpus':2*10**9}},
                  {'host':{'DeviceRequests':[{'Count':-1}]}},{'config':{'Cmd':['changed']}}]
         for index,change in enumerate(changes):
             path=self.root/str(index);path.mkdir(mode=0o700)
@@ -254,6 +256,39 @@ class QualifierTests(unittest.TestCase):
             self.docker.mismatch=change;before=len(self.docker.mutations())
             with self.assertRaises(QualifierHeld):qualifier.qualify(self.request)
             self.assertEqual(self.docker.mutations()[before:],['create'])
+
+    def test_filesystem_mode_is_single_frozen_reviewed_profile(self):
+        for mode in ('read-only','writable','ephemeral-node-defaults-v2',''):
+            with self.subTest(mode=mode),self.assertRaises(QualifierError):replace(self.policy,filesystem_mode=mode)
+
+    def test_writable_layer_disposal_cannot_be_claimed_before_exact_id_absence(self):
+        self.docker.faults['rm']='before'
+        with self.assertRaises(QualifierHeld):self.qualifier.qualify(self.request)
+        with self.qualifier._exclusive():row=self.qualifier._row(self.request['requestSha256'])
+        evidence=json.loads(row['evidence'])
+        self.assertEqual(evidence['filesystemMode'],'ephemeral-node-defaults-v1')
+        self.assertNotIn('containerWritableLayerDisposed',evidence)
+        self.assertIsNone(row['receipt'])
+        with self.assertRaises(QualifierHeld):self.open().lookup(self.request)
+
+    def test_old_filesystem_profile_binding_and_held_intent_are_not_converted(self):
+        old_policy=asdict(self.policy);old_policy.pop('filesystem_mode')
+        old_hash=_sha(dict(policy=old_policy,registryPolicy=asdict(self.registry.policy),probeSha256=PROBE_SHA,
+            scope='startup-api-options-only-v1'))
+        self.assertNotEqual(old_hash,self.qualifier.policy_sha256)
+        self.docker.faults['exec']='after'
+        with self.assertRaises(QualifierHeld):self.qualifier.qualify(self.request)
+        with self.qualifier._exclusive():
+            with self.qualifier._db() as db:
+                binding=json.loads(db.execute('SELECT value FROM qualifier_binding').fetchone()[0])
+                binding['policySha256']=old_hash
+                db.execute('UPDATE qualifier_binding SET value=?',(_json(binding),))
+                original=dict(db.execute('SELECT * FROM qualifications').fetchone())
+        before=list(self.docker.mutations())
+        with self.assertRaises(QualifierHeld):self.open()
+        with self.qualifier._exclusive():self.assertEqual(self.qualifier._row(original['id']),original)
+        self.assertEqual(original['state'],'exec_intent')
+        self.assertEqual(self.docker.mutations(),before)
 
     def test_actual_dialect_malformed_duplicate_options_or_secret_response_never_passes(self):
         cases=[dict(schemaVersion=1,info=_json(dict(self.docker.info,engine='odm')),options=_json(self.docker.options)),

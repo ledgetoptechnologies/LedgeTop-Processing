@@ -62,6 +62,7 @@ class StartupPolicy:
     startup_spec_sha256:str
     supervisor_state_root:str
     run_user:str
+    filesystem_mode:str='ephemeral-node-defaults-v1'
     write_paths:tuple[str,...]=WRITE_PATHS
     working_directory:str='/var/www'
     node_executable:str='/usr/bin/node'
@@ -71,6 +72,7 @@ class StartupPolicy:
     def __post_init__(self):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',self.qualifier_id):raise QualifierError('invalid_qualifier_identity')
         if self.node_id not in ('main','cluster') or self.expected_engine not in ('odm','odx'):raise QualifierError('explicit_node_and_engine_required')
+        if self.filesystem_mode!='ephemeral-node-defaults-v1':raise QualifierError('reviewed_filesystem_mode_required')
         try:
             if str(uuid.UUID(self.authority_id))!=self.authority_id:raise ValueError()
         except Exception:raise QualifierError('exact_authority_required') from None
@@ -262,7 +264,7 @@ class StartupQualifier:
                 or value['status'] not in ('created','running','exited','dead')
                 or c.get('User')!=self.policy.run_user or c.get('WorkingDir')!=self.policy.working_directory
                 or _sha({key:c.get(key) for key in ('Entrypoint','Cmd')})!=defaults['argsSha256']
-                or h.get('NetworkMode')!='none' or h.get('ReadonlyRootfs') is not True or h.get('Privileged') is not False
+                or h.get('NetworkMode')!='none' or h.get('ReadonlyRootfs') is not False or h.get('Privileged') is not False
                 or h.get('Tmpfs')!=expected_tmp or h.get('PortBindings') not in (None,{}) or not mounts_ok
                 or h.get('RestartPolicy',{}).get('Name') not in ('no','') or h.get('AutoRemove') is not False
                 or h.get('CapDrop')!=['ALL'] or h.get('SecurityOpt') not in (['no-new-privileges'],['no-new-privileges:true'])
@@ -285,6 +287,7 @@ class StartupQualifier:
             raise QualifierHeld('actual_engine_dialect_or_version_changed')
         return dict(schemaVersion=1,scope='startup-api-options-only-v1',requestSha256=request['requestSha256'],
             probeSha256=PROBE_SHA,engine=info['engine'],apiVersion=info['version'],engineVersion=info['engineVersion'],
+            filesystemMode=self.policy.filesystem_mode,
             configDigest=request['configDigest'],manifestDigest=request['manifestDigest'],localImageId=request['localImageId'],
             imageIdKind=_load(row['defaults'])['imageIdKind'],
             optionsSha256=_sha(sorted(options,key=lambda value:value['name'])),optionsCount=len(options),
@@ -313,7 +316,8 @@ class StartupQualifier:
                 or evidence['containerSpecSha256']!=stopped['specSha256']):
             raise QualifierHeld('sealed_qualification_evidence_changed')
         evidence=dict(evidence,containerId=row['container'],containerSpecSha256=stopped['specSha256'],
-                      defaultStartupSha256=self.policy.startup_spec_sha256,stopped=True,removed=True,tmpfsOutputsDisposed=True)
+                      defaultStartupSha256=self.policy.startup_spec_sha256,stopped=True,removed=True,tmpfsOutputsDisposed=True,
+                      containerWritableLayerDisposed=True)
         common=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','localImageId','supervisorPolicySha256','hostGeneration')
         receipt=seal_receipt(dict(schemaVersion=1,requestSha256=request['requestSha256'],**{key:request[key] for key in common},
             qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.policy_sha256,passed=True,
@@ -325,10 +329,11 @@ class StartupQualifier:
     def _evidence(self,evidence,request,completed):
         keys={'schemaVersion','scope','requestSha256','probeSha256','engine','apiVersion','engineVersion','optionsSha256',
             'optionsCount','reconstructionQualified','gpuInitializationQualified','gpuKernelsQualified','noTasksSubmitted',
-            'noProductionMounts','noPublishedPorts','postProbeRunningConfirmed','configDigest','manifestDigest','localImageId','imageIdKind'}
-        if completed:keys|={'containerId','containerSpecSha256','defaultStartupSha256','stopped','removed','tmpfsOutputsDisposed'}
+            'noProductionMounts','noPublishedPorts','postProbeRunningConfirmed','configDigest','manifestDigest','localImageId','imageIdKind','filesystemMode'}
+        if completed:keys|={'containerId','containerSpecSha256','defaultStartupSha256','stopped','removed','tmpfsOutputsDisposed','containerWritableLayerDisposed'}
         if (type(evidence) is not dict or set(evidence)!=keys or type(evidence['schemaVersion']) is not int or evidence['schemaVersion']!=1
                 or evidence['scope']!='startup-api-options-only-v1' or evidence['requestSha256']!=request['requestSha256']
+                or evidence['filesystemMode']!=self.policy.filesystem_mode
                 or evidence['probeSha256']!=PROBE_SHA or evidence['engine']!=self.policy.expected_engine
                 or any(evidence[key]!=request[key] for key in ('configDigest','manifestDigest','localImageId'))
                 or evidence['imageIdKind'] not in ('config','manifest')
@@ -341,7 +346,7 @@ class StartupQualifier:
                 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',evidence['engineVersion'])):
             raise QualifierHeld('startup_evidence_changed')
         if completed and (evidence['defaultStartupSha256']!=self.policy.startup_spec_sha256
-                or any(evidence[key] is not True for key in ('stopped','removed','tmpfsOutputsDisposed'))):
+                or any(evidence[key] is not True for key in ('stopped','removed','tmpfsOutputsDisposed','containerWritableLayerDisposed'))):
             raise QualifierHeld('startup_evidence_changed')
         _validate_info(dict(version=evidence['apiVersion'],engine=evidence['engine'],engineVersion=evidence['engineVersion']))
 
@@ -362,7 +367,7 @@ class StartupQualifier:
                 db.execute("INSERT INTO qualifications VALUES(?,?,'create_intent',?,NULL,?,NULL,NULL,NULL)",
                     (identifier,_json(request),name,_json(defaults)))
             args=['create','--pull','never','--name',name,'--label','ltds.qualifier.binding='+identifier,
-                '--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges',
+                '--network','none','--cap-drop','ALL','--security-opt','no-new-privileges',
                 '--user',self.policy.run_user,'--workdir',self.policy.working_directory,'--restart','no',
                 '--log-driver','none','--env','HOME=/tmp']
             for path in self.policy.write_paths:args+=['--tmpfs',path+':rw,nosuid,nodev,mode=1777']

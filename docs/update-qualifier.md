@@ -65,12 +65,23 @@ durable intent first. Repeated calls never replay a nonterminal mutation.
 
 The candidate uses its exact proven local image ID with `--pull never`, network
 `none`, no ports, no mounts, no Docker socket, no production credentials, no GPU
-device requests, read-only root, all capabilities dropped, and no new
-privileges. Its only writable paths are private tmpfs at `/var/www/data`,
-`/var/www/tmp`, `/var/www/logs`, and `/tmp`. Its reviewed user is explicit. Docker
+device requests, all capabilities dropped, and no new privileges. The frozen
+`filesystem_mode` accepts only `ephemeral-node-defaults-v1`: the candidate has
+its own **ephemeral writable root layer** and must report
+`ReadonlyRootfs:false`. No `--read-only` flag is passed. Private tmpfs remains at
+`/var/www/data`, `/var/www/tmp`, `/var/www/logs`, and `/tmp`. Its reviewed user is explicit. Docker
 logs are disabled. No CPU, RAM, PID, or thread limits are introduced, including
 on main. Startup is bounded by command deadlines; that is not a processing
 resource qualification.
+
+This filesystem profile accommodates the vendor's default startup behavior:
+the Node logger checks write access to its default log path, which can be the
+`/var/www` application directory. The default command and configuration remain
+untouched. The writable layer is not a host bind or production volume and does
+not grant additional Docker privilege. Its explicit policy field changes the
+qualification policy hash; an earlier read-only-profile journal is not replayed
+or silently converted. A fresh reviewed context is allowed only after separate
+proof closes the prior failed attempt. Its held journal and evidence remain.
 
 The only exec command runs a fixed Node.js constant. It makes internal
 `GET http://127.0.0.1:3000/info` and `GET /options` requests. It cannot submit,
@@ -90,7 +101,10 @@ must report non-running and PID zero. Only then is removal attempted. Successful
 exact-ID absence queries, bracketed by the same physical Engine identity, prove
 removal; names and generic inspect errors never prove absence. With no writable
 host mounts or persistent image volumes, removing the own stopped container
-disposes its private tmpfs output. The sanitized evidence and receipt remain in
+disposes its private tmpfs output and writable container layer. Evidence records
+`filesystemMode` and sets `containerWritableLayerDisposed:true` only after that
+exact-ID absence proof. This is container-resource disposal, not a claim of
+physical secure erasure. The sanitized evidence and receipt remain in
 the journal. No raw API body, default command, Docker stdout/stderr, credential,
 task data, or image is stored in the receipt.
 
