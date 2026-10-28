@@ -33,6 +33,7 @@ from processing.scratch_cleanup import ScratchCleanupExecutor
 from processing.scratch_policy import ScratchLedger
 from processing.viewer_service import NativeEngine
 from processing.worker_outbox import WorkerOutbox
+from ops.private_worker_directory import private_worker_directory, sync_worker_lease
 
 MAX_CONFIG_BYTES = 64 * 1024
 REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInstanceId','authorityId',
@@ -121,6 +122,8 @@ class DaemonStateLock:
             self._identity = (observed.st_dev, observed.st_ino)
             current_root = root.stat()
             self._root_identity = (current_root.st_dev, current_root.st_ino)
+            self.check(root)
+            sync_worker_lease(self._stream.fileno(), root)
             self.check(root)
             _STATE_OWNERS[str(root)] = self
             return self
@@ -365,14 +368,7 @@ def load_config(path):
 
 
 def _directory(value):
-    root = Path(value).absolute()
-    root.mkdir(parents=True, mode=0o700, exist_ok=True)
-    if root.resolve() != root or any(part.is_symlink() for part in (root, *root.parents)):
-        raise ValueError('owned private worker directory required')
-    info = root.stat()
-    if not stat.S_ISDIR(info.st_mode) or (os.name != 'nt' and (info.st_uid != os.geteuid() or info.st_mode & 0o077)):
-        raise ValueError('owned private worker directory required')
-    return root
+    return private_worker_directory(value)
 
 
 def build_worker(config):
