@@ -3,9 +3,12 @@
 `ops/update_reference_coordinator.py` is a separate source executor for updating
 the existing reference coordinator. It does not reuse the native predecessor
 selection or change the historical installer/frozen operation artifacts. Import
-does nothing. The activation CLI is deliberately blocked by
-`ACTIVATION_REVIEWED=False` pending independent source/fault review and an exact
-runtime operation. No live update is implied by these source tests.
+does nothing. The activation CLI is enabled after independent source review,
+the frozen 894-case Linux run (890 passed, four Node skips covered on Windows),
+and the actual two-PC gate preflight recorded for source `890cd26` in
+`docs/evidence/coordinator-gate-preflight-20261028.json`. An explicit new prepared
+operation and every immutable binding/live fence are still required. These
+checks do not themselves install the replacement coordinator.
 
 ## Exact operation binding
 

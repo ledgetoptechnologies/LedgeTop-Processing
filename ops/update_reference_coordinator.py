@@ -37,7 +37,10 @@ OLD_IMAGE = 'sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b3
 OLD_SOURCE = 'e2ccf489ab41160acff3f90e2b4bcd568f72cf24'
 LABEL = 'org.ledgetop.reference.update'
 MODE = 'reference-to-reference-v1'
-ACTIVATION_REVIEWED = False
+# Independent source review and frozen-source Linux/Windows plus actual dual-host
+# gate checks accepted source 890cd265c9ff9bad0e83aeddc1b096883200d335.
+# Explicit preparation, immutable argument binding and every live fence remain.
+ACTIVATION_REVIEWED = True
 class Stopped(ValueError):pass
 
 
