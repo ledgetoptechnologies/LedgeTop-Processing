@@ -10,9 +10,13 @@ independent read-only review verified all 68 staged source files, receipt and
 SQLite hashes, container absence, and the unchanged installed main service.
 See [actual acceptance evidence](evidence/main-nodeodx-startup-20261028.json).
 
-The supervisor is `qualified` at generation zero with zero schedule/run
-intents. The installed node still uses its original image and start time.
-This is startup/API/options acceptance; reconstruction and GPU processing remain
+At that checkpoint the supervisor was `qualified` at generation zero with zero
+schedule/run intents, and the installed node still used its original image and
+start time. Later that day, the same operation completed the owned maintenance
+pipeline and adopted the qualified image at generation one; see the
+[subsequent update acceptance](evidence/main-owned-update-20261028.json).
+The original startup receipt remains unchanged. This is startup/API/options
+acceptance; reconstruction and GPU processing remain
 unqualified. The candidate build reports the same engine version as the
 installed node. No processing data was submitted.
 

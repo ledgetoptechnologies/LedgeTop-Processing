@@ -1,4 +1,25 @@
-# Source-only host update supervisor
+# Host update supervisor
+
+## Actual main-PC acceptance — October 28, 2026
+
+The previously startup-qualified operation `1157e072` completed the actual owned
+maintenance workflow on the main PC using source `671fd2a`. One owned schedule
+and one managed run drained the node, replaced image `84117734` with immutable
+image `b9d9a1a4`, verified readiness, saved the Compose pin, reopened ingress and
+confirmed the coordinator finish. The supervisor adopted the image at generation
+one. A restarted inspection and completed reconciliation returned the same sealed
+completion without replaying the update. Independent read-only review accepted
+the journal/receipt chain, host state and coordinator acknowledgement.
+
+Both GPUs remain visible; CPU, memory, PID and other container resource settings
+are unchanged. Existing data mount and monitoring services remain in place. The
+node is active, its engine task list is empty, and all 12 historical coordinator
+jobs are unchanged. The old image remains cached for rollback. This validates the
+idle container-update pipeline under the explicit startup/API/options-only policy;
+no real imagery, reconstruction or GPU kernels were tested. No recurring updater
+service or timer is installed. See the [runtime evidence](evidence/main-owned-update-20261028.json).
+
+## Source and API
 
 `processing/update_supervisor.py` connects the existing `DockerRegistry` to
 explicit local qualification and maintenance adapters. It installs no daemon,

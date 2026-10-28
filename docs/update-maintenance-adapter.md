@@ -1,5 +1,10 @@
 # UpdateSupervisor maintenance adapter
 
+The actual main-PC owned schedule, managed update, durable pin, ingress reopen,
+coordinator finish and restarted reconciliation passed on October 28 using source
+`671fd2a`. See [runtime evidence](evidence/main-owned-update-20261028.json).
+This was one explicitly supervised operation; no recurring service is installed.
+
 `ops.update_maintenance_adapter.UpdateMaintenanceAdapter` connects the source
 `UpdateSupervisor` protocol to the real coordinator owned-schedule endpoints and
 `ops.node_maintenance.run`. It is a Linux library, with no installed detector,
