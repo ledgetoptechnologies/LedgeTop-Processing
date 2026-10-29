@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -29,7 +30,11 @@ REFERENCE_PROFILE = "reference-pipeline-v1"
 
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
-                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None):
+                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
+                 catalog_admission=False):
+        if type(catalog_admission) is not bool:
+            raise ValueError('explicit catalog admission mode required')
+        self.catalog_admission = catalog_admission
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
@@ -78,7 +83,19 @@ class Queue(Maintenance):
         # Optional recovery persists this epoch with its restart overlay.
         self.startup_id = str(uuid.uuid4())
         self.path = root / "jobs.sqlite3"
+        try:
+            self._initialize()
+        except Exception:
+            self._lock.close()
+            raise
+
+    def _initialize(self):
         with self._db() as db:
+            catalog_marker=db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'reference_catalog_%' OR name='reference_option_evidence' LIMIT 1").fetchone()
+            if catalog_marker:
+                if not self.catalog_admission:raise RuntimeError('catalog admission ABI requires compatible explicit mode')
+                from .reference_catalog_cache import validate_catalog_abi
+                validate_catalog_abi(db)
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
                 request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
@@ -120,10 +137,34 @@ class Queue(Maintenance):
         with self._lifecycle_lock:
             if self._lock.closed:
                 raise RuntimeError('coordinator ownership closed')
+            if self.catalog_admission and os.path.lexists(self.path):
+                descriptor=os.open(self.path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
+                try:
+                    observed,current=os.fstat(descriptor),self.path.lstat()
+                    header=os.read(descriptor,100)
+                    if (not stat.S_ISREG(observed.st_mode) or observed.st_nlink!=1
+                            or (observed.st_dev,observed.st_ino)!=(current.st_dev,current.st_ino)
+                            or os.name!='nt' and observed.st_uid!=os.geteuid()
+                            or not 100<=observed.st_size<=32768*4096 or len(header)!=100
+                            or header[:16]!=b'SQLite format 3\0' or header[16:20]!=b'\x10\x00\x01\x01'):
+                        raise RuntimeError('catalog requires bounded owned DELETE SQLite database')
+                finally:os.close(descriptor)
+                if any(os.path.lexists(str(self.path)+suffix) for suffix in ('-wal','-shm')):
+                    raise RuntimeError('catalog requires DELETE SQLite database')
             db = sqlite3.connect(self.path, timeout=10)
             db.row_factory = sqlite3.Row
+            if self.catalog_admission:
+                db.create_function('reference_catalog_writer_v1', 0, lambda: 1)
             self._database_users += 1
             try:
+                if self.catalog_admission:
+                    page_size=db.execute('PRAGMA page_size').fetchone()
+                    page_count=db.execute('PRAGMA page_count').fetchone()
+                    maximum=db.execute('PRAGMA max_page_count=32768').fetchone()
+                    if (len(page_size)!=1 or type(page_size[0]) is not int or page_size[0]!=4096
+                            or len(page_count)!=1 or type(page_count[0]) is not int or not 0<=page_count[0]<=32768
+                            or len(maximum)!=1 or type(maximum[0]) is not int or maximum[0]!=32768):
+                        raise RuntimeError('catalog SQLite page budget unavailable')
                 db.execute("PRAGMA synchronous=FULL")
                 with db:
                     yield db

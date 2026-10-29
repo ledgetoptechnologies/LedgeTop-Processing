@@ -56,6 +56,8 @@ class ReferenceStore:
             from .reference_routing import ReferenceRouting
             if type(routing) is not ReferenceRouting or routing.authority_id!=queue.authority_id:raise ValueError('concrete queue-bound reference routing required')
         self.routing=routing;self._routing_identity=routing
+        self.catalog_admission=None
+        self._catalog_identity=None
         self.queue = queue
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
@@ -175,10 +177,21 @@ class ReferenceStore:
             used += db.execute('''SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(epoch_id)+length(request_sha256)
                 +length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0)
                 FROM reference_recovery_receipts''').fetchone()[0]
+        for table in ('reference_catalog_state','reference_option_evidence'):
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
+                used+=db.execute(f'SELECT COALESCE(SUM(length(CAST(payload AS BLOB))+length(digest)),0) FROM {table}').fetchone()[0]
+                if table=='reference_catalog_state':used+=176*db.execute('SELECT COUNT(*) FROM reference_catalog_state').fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
-    def submit(self, validated):
+    def enable_catalog_admission(self, catalog):
+        from .reference_catalog_cache import CatalogAdmission
+        if type(catalog) is not CatalogAdmission or catalog.queue is not self.queue or self.catalog_admission is not None:
+            raise ValueError('concrete original catalog required')
+        self.catalog_admission=catalog;self._catalog_identity=catalog
+
+    def submit(self, validated, *, catalog_sha=None):
+        if self.catalog_admission is not self._catalog_identity:raise ValueError('catalog identity changed')
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -200,7 +213,11 @@ class ReferenceStore:
             pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
             if pending >= self.max_queued_jobs:
                 raise Conflict("reference pending job quota reached")
-            self._quota(db, len(encoded.encode("utf-8")))
+            evidence=None
+            if self.catalog_admission is not None:
+                evidence=self.catalog_admission.admit(db,checked,catalog_sha)
+            elif catalog_sha is not None:raise ValueError('catalog admission disabled')
+            self._quota(db,len(encoded.encode('utf-8'))+(len(_json(evidence).encode())+64 if evidence is not None else 0))
             job_id = str(uuid.uuid4())
             # Namespaced request identity also prevents collisions with ordinary
             # multipart/legacy submission IDs in the shared jobs table.
@@ -210,7 +227,24 @@ class ReferenceStore:
               manifest_sha,pipeline_digest,phase) VALUES(?,?,?,?,?,?,?,'queued')""",
               (job_id, checked["submissionId"], checked["requestDigest"], checked["environment"], encoded,
                checked["manifestSha256"], checked["pipelineDigest"]))
+            if evidence is not None:self.catalog_admission.insert_evidence(db,job_id,evidence)
             return self._public(self._row(db, job_id)), True
+
+    def option_evidence(self,job_id,*,node_id,worker_id,worker_instance_id,claim_token):
+        if self.catalog_admission is None or self.catalog_admission is not self._catalog_identity:
+            raise Conflict('option evidence unavailable')
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            claim=self._claim_snapshot(db,job_id,node_id=node_id,worker_id=worker_id,worker_instance_id=worker_instance_id,claim_token=claim_token)
+            if claim['status']!='running':raise Conflict('option evidence requires original running claim')
+            row=self._row(db,job_id);submission=json.loads(row['input_json'])
+            evidence=self.catalog_admission.read_evidence(db,job_id)
+            if (evidence['capabilityFingerprint'],evidence['optionsFingerprint'])!=(submission['capabilityFingerprint'],submission['pipeline']['odm']['optionsFingerprint']):
+                raise Conflict('original option binding changed')
+            definitions=evidence['selectedDefinitions']
+            if [o['name'] for o in definitions]!=sorted(submission['pipeline']['odm']['options']):raise Conflict('original selected definitions changed')
+            fields=('authorityId','jobId','generation','environment','nodeId','workerId','workerInstanceId','claimRequestId','manifestSha256','pipelineDigest')
+            return dict(schemaVersion=1,**{k:claim[k] for k in fields},**{k:evidence[k] for k in ('capabilityFingerprint','optionsFingerprint','catalogSha256','selectedDefinitions')})
 
     def get(self, job_id, *, private=False):
         with self.queue._db() as db:

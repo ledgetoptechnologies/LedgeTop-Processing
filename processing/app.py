@@ -26,7 +26,8 @@ def make_handler(config: Config):
                   node_ids=config.prototype_node_ids,
                   treedar_node_ids=config.treedar_node_ids,
                   viewer_enabled=config.viewer_enabled,
-                  reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
+                  reference_enabled=reference_settings is not None,
+                  catalog_admission=reference_settings is not None and reference_settings.catalog_admission is not None) if config.prototype_state_dir else None
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService

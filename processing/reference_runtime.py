@@ -13,6 +13,7 @@ import re
 import ssl
 import stat
 import threading
+import time
 
 from . import reference_protocol as p
 from .options import catalog
@@ -41,6 +42,7 @@ class ReferenceSettings:
     stream_budget: dict
     recovery_bindings: dict | None = None
     routing_bindings: dict | None = None
+    catalog_admission: object | None = None
 
 
 def _file(path, *, private):
@@ -77,7 +79,7 @@ def load_reference_settings(path, config):
         if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -146,8 +148,16 @@ def load_reference_settings(path, config):
                 p._closed(physical,('engineId','gateGeneration','engineVersion'),'routing identity')
                 routing[node]=RoutingNodeBinding(physical['engineId'],physical['gateGeneration'],physical['engineVersion'])
         if config.reference_main_fallback and routing is None:raise RuntimeConfigurationError('explicit independent routing identities required')
+        admission=None
+        if 'catalogAdmission' in value:
+            from .reference_catalog_cache import CatalogAdmissionPolicy
+            policy=value['catalogAdmission']
+            p._closed(policy,('schemaVersion','maxAgeSeconds'),'catalog admission policy')
+            if type(policy['schemaVersion']) is not int or policy['schemaVersion']!=1 or routing is None:
+                raise RuntimeConfigurationError('explicit bound catalog admission version required')
+            admission=CatalogAdmissionPolicy(policy['maxAgeSeconds'])
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -175,8 +185,9 @@ def discovered_policy(snapshot, config):
 
 
 class _DynamicAPI:
-    def __init__(self, control, config, settings, discover):
+    def __init__(self, control, config, settings, discover,admission=None):
         self.control, self.config, self.settings, self.discover = control, config, settings, discover
+        self.admission=admission
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         # Authenticate before engine discovery; ordinary status and worker actions
@@ -188,26 +199,38 @@ class _DynamicAPI:
             if environment is None:
                 return Response(401, {"error": "unauthorized"})
             try:
-                snapshot = self.discover()
+                catalog_state=None;source='fresh'
+                if self.admission is None:snapshot=self.discover()
+                else:
+                    catalog_state,source=self.admission.observe();snapshot=catalog_state['snapshot']
                 capability, options, allowed = discovered_policy(snapshot, self.config)
                 if path == p.PREFIX + '/options' and method == 'GET':
                     definitions = sorted((option for option in snapshot['commonOptions'] if option['name'] in allowed), key=lambda option: option['name'])
-                    return Response(200, p.decode_submission(p.canonical_json(dict(schemaVersion=1,
+                    result=Response(200, p.decode_submission(p.canonical_json(dict(schemaVersion=1,
                         environment=environment, capabilityFingerprint=capability,
                         optionsFingerprint=options, options=definitions))))
+                    result.headers['X-LTDS-Catalog-Source']=source
+                    if catalog_state is not None:result.headers['X-LTDS-Catalog-Observed-At']=str(catalog_state['observedAt'])
+                    return result
                 api = ReferenceAPI(self.control.viewer.store, bearer_tokens=self.settings.viewer_bearers,
                     capability_fingerprint=capability, options_fingerprint=options,
                     allowed_odm_options=allowed, treedar_available=False,
-                    result_proxy=self.control.viewer.result_proxy)
+                    result_proxy=self.control.viewer.result_proxy,
+                    admission_catalog_sha=catalog_state['catalogSha256'] if catalog_state is not None else None)
             except Exception:
                 return Response(503, {"error": "engine_catalog_unavailable"})
-            return api.handle(method, path, headers, body, protected_transport=protected_transport)
+            result=api.handle(method, path, headers, body, protected_transport=protected_transport)
+            result.headers['X-LTDS-Catalog-Source']=source
+            if catalog_state is not None:result.headers['X-LTDS-Catalog-Observed-At']=str(catalog_state['observedAt'])
+            return result
         return self.control.handle(method, path, headers, body, protected_transport=protected_transport)
 
 
 class ReferenceRuntime:
-    def __init__(self, queue, config, settings, *, discover=None, server_factory=None):
+    def __init__(self, queue, config, settings, *, discover=None, server_factory=None,catalog_clock=time.time):
         """Construct services around the existing authority; never create a Queue."""
+        if queue.catalog_admission != (settings.catalog_admission is not None):
+            raise RuntimeConfigurationError('catalog admission Queue/config mode mismatch')
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
@@ -236,6 +259,11 @@ class ReferenceRuntime:
                 routing=ReferenceRouting(config,settings.workers,authority_id=queue.authority_id,bindings=settings.routing_bindings,ssl_context=worker_context)
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",routing=routing)
+            admission=None
+            if settings.catalog_admission is not None:
+                from .reference_catalog_cache import CatalogAdmission
+                admission=CatalogAdmission(queue,config,settings,ssl_context=worker_context,store=self.store,clock=catalog_clock)
+                self.store.enable_catalog_admission(admission)
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},
@@ -250,7 +278,7 @@ class ReferenceRuntime:
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))
-            self.api = _DynamicAPI(self.control, config, settings, discover)
+            self.api = _DynamicAPI(self.control, config, settings, discover,admission)
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
 

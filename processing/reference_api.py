@@ -25,7 +25,7 @@ class Response:
 class ReferenceAPI:
     def __init__(self, store, *, bearer_tokens, capability_fingerprint,
                  options_fingerprint, allowed_odm_options=(), treedar_available=False,
-                 result_proxy=None):
+                 result_proxy=None, admission_catalog_sha=None):
         protocol._hash(capability_fingerprint, "capability fingerprint")
         protocol._hash(options_fingerprint, "options fingerprint")
         if type(bearer_tokens) is not dict or not bearer_tokens:
@@ -47,6 +47,7 @@ class ReferenceAPI:
         self.allowed_odm_options = options
         self.treedar_available = treedar_available
         self.result_proxy = result_proxy
+        self.admission_catalog_sha=admission_catalog_sha
         from .reference_terminal import TerminalService
         self.terminal = TerminalService(store)
 
@@ -130,7 +131,7 @@ class ReferenceAPI:
                     options_fingerprint=self.options_fingerprint,
                     allowed_odm_options=self.allowed_odm_options,
                     available_engines=("odm", "treedar") if self.treedar_available else ("odm",))
-                job, created = self.store.submit(validated)
+                job, created = self.store.submit(validated,catalog_sha=self.admission_catalog_sha)
                 return Response(201 if created else 200, job)
             match = re.fullmatch(re.escape(protocol.PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/results|/acceptance|/transfer-grants|/terminal-outcome|/terminal-acceptance)?", path)
             if not match:

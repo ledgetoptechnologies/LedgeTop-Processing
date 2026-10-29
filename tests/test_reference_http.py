@@ -279,9 +279,11 @@ class ReferenceHTTPTests(unittest.TestCase):
         self.assertEqual(self.request('GET', '/ltds/v1/capabilities', token=WORKER)[0], 401)
 
     def test_duplicate_private_claim_headers_fail_before_adapter(self):
-        status, body, _ = self.raw(b'GET /ltds/worker/v1/jobs/job-1/transfer-grant HTTP/1.1\r\n'
-            b'Host: localhost\r\nX-Claim-Token: first\r\nx-claim-token: second\r\n\r\n')
-        self.assertEqual((status, body), (400, {'error': 'duplicate_header'}))
+        for name in ('X-Claim-Token','X-LTDS-Claim-Token','X-LTDS-Option-Evidence'):
+            with self.subTest(name=name):
+                wire=('GET /ltds/worker/v1/jobs/job-1/option-evidence HTTP/1.1\r\nHost: localhost\r\n'+name+': first\r\n'+name.lower()+': second\r\n\r\n').encode()
+                status,body,_=self.raw(wire)
+                self.assertEqual((status,body),(400,{'error':'duplicate_header'}))
 
     def test_binary_result_http_scopes_auth_and_closes_stream_lease(self):
         _, job, _ = self.request('POST', '/ltds/v1/jobs', self.fixture['submission'])

@@ -122,7 +122,14 @@ class ReferenceDriver:
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
-                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None):
+                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
+                 require_option_evidence=False):
+        if type(require_option_evidence) is not bool:
+            raise ValueError('explicit original option evidence profile required')
+        if require_option_evidence and (combined_policy is not None or execution_router is not None and execution_router.treedar_worker is not None):
+            raise ValueError('original option evidence profile is ODM-only')
+        self.require_option_evidence = require_option_evidence
+        self._require_option_evidence_initial = require_option_evidence
         self._combined_policy=combined_policy;self._combined_policy_initial=combined_policy;self.combined_preparation=None;self._combined_preparation_initial=None;self._active_step=None
         if combined_policy is not None:
             from .reference_combined_preparation import CombinedPreparationPolicy
@@ -220,6 +227,8 @@ class ReferenceDriver:
             if execution_router is not None:
                 settings['executionRouting'] = dict(mode='per-job-v1', path=str(execution_router.path),
                     provenancePath=str(provenance_client.path) if provenance_client is not None else None)
+            if require_option_evidence:
+                settings['optionEvidence'] = dict(schemaVersion=1)
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
@@ -302,11 +311,15 @@ class ReferenceDriver:
                        (stage, p.canonical_json(data).decode(), job_id))
 
     def _request(self, method, suffix, payload=None, *, claim_token=None):
+        if self.require_option_evidence is not self._require_option_evidence_initial:
+            raise DriverHeld('original_option_evidence_profile_changed')
         url = self.origin + PREFIX + suffix
         headers = {'Authorization': 'Bearer ' + self._bearer, 'Accept': 'application/json',
                    'Accept-Encoding': 'identity'}
+        if self.require_option_evidence and suffix in ('/next', '/claim'):
+            headers['X-LTDS-Option-Evidence'] = '1'
         if claim_token is not None:
-            headers['X-Claim-Token'] = claim_token
+            headers['X-LTDS-Claim-Token' if suffix.endswith('/option-evidence') else 'X-Claim-Token'] = claim_token
         body = p.canonical_json(payload) if payload is not None else None
         if body is not None:
             headers['Content-Type'] = 'application/json'
@@ -328,8 +341,10 @@ class ReferenceDriver:
                     or response.headers.get('Content-Type', '').split(';')[0] != 'application/json'
                     or response.headers.get('Content-Encoding', 'identity') != 'identity'):
                 raise DriverWait('invalid_control_response')
-            raw = response.read(p.MAX_BODY_BYTES + 1)
-            if len(raw) > p.MAX_BODY_BYTES:
+            from .reference_option_evidence import MAX_EVIDENCE_BYTES
+            limit = MAX_EVIDENCE_BYTES if suffix.endswith('/option-evidence') else p.MAX_BODY_BYTES
+            raw = response.read(limit + 1)
+            if len(raw) > limit:
                 raise DriverWait('control_response_too_large')
             expected = response.headers.get('Content-Length')
             if expected is not None and (not expected.isascii() or not expected.isdecimal() or int(expected) != len(raw)):
@@ -504,6 +519,8 @@ class ReferenceDriver:
 
     def step(self):
         """Perform one bounded stage; never return private metadata or paths."""
+        if self.require_option_evidence is not self._require_option_evidence_initial:
+            return {'state':'held','reason':'original_option_evidence_profile_changed'}
         if self._state_owner is not None:
             try:self._state_owner.check(self.path.parent)
             except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
@@ -795,8 +812,32 @@ class ReferenceDriver:
                 status, fresh = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
                 if status == 409 or fresh['status'] != 'running':
                     raise DriverHeld('unstarted_claim_requires_reconciliation')
+                evidence = None
+                if self.require_option_evidence:
+                    # Authenticate with the ORIGINAL persisted token; an echoed
+                    # newer claim cannot replace the request that owns inputs.
+                    original = data['claim']
+                    if (any(type(fresh[key]) is not type(original[key]) or fresh[key] != original[key]
+                            for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken'))
+                            or p.canonical_json(fresh['submission']) != p.canonical_json(original['submission'])):
+                        raise DriverHeld('original_option_evidence_claim_changed')
+                    code, evidence = self._request('GET', '/jobs/' + job_id + '/option-evidence',
+                        claim_token=original['claimToken'])
+                    if code != 200:
+                        raise DriverHeld('original_engine_option_evidence_unavailable')
                 self._refresh_options()
                 self._bind_claim(fresh, data)
+                if self.require_option_evidence:
+                    from .reference_option_evidence import validate_option_evidence, OptionEvidenceHeld
+                    try:
+                        encoded = p.canonical_json(evidence).decode()
+                        if any(secret and secret in encoded for secret in (self._bearer, original['claimToken'], self.worker.engine.token)):
+                            raise OptionEvidenceHeld('original_engine_option_evidence_unavailable')
+                        validate_option_evidence(evidence, claim=original, claim_request_id=request_id,
+                            authority_id=self.worker.authority_id, worker_id=self.worker_id,
+                            worker_instance_id=self.worker_instance_id, fresh_definitions=self._option_definitions)
+                    except OptionEvidenceHeld as error:
+                        raise DriverHeld(str(error)) from None
                 data['claim'] = fresh
                 if self._kind(job_id) == 'treedar':
                     try:

@@ -43,10 +43,23 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting','serviceProfile'))
+                      'executionRouting','serviceProfile','optionEvidence'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
+
+
+def _option_evidence(config):
+    if 'optionEvidence' not in config:
+        return False
+    value = config['optionEvidence']
+    p._closed(value, ('schemaVersion',), 'original option evidence profile')
+    if type(value['schemaVersion']) is not int or value['schemaVersion'] != 1:
+        raise ValueError('unsupported original option evidence profile')
+    routing = config.get('executionRouting')
+    if routing is not None and routing.get('treedar') is not None:
+        raise ValueError('original option evidence profile is ODM-only')
+    return True
 
 
 def _service_profile(config):
@@ -411,6 +424,7 @@ def load_config(path):
             raise ValueError('unsupported configuration version')
         _service_profile(config)
         _execution_routing(config)
+        _option_evidence(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
                 raise ValueError('absolute private directories required')
@@ -469,6 +483,7 @@ def build_worker(config):
     """Own state/readers until the returned server has fully drained and closed."""
     if not sys.platform.startswith('linux'):
         raise ValueError('owned result reader daemon requires Linux')
+    _option_evidence(config)
     owner=DaemonStateLock(config['stateRoot'])
     owner.__enter__()
     resources={}
@@ -487,6 +502,7 @@ def _build_worker(config,owner,resources):
     """Construct under the factory's mandatory state-root ownership capability."""
     profile = _service_profile(config)
     routing = _execution_routing(config)
+    option_evidence = _option_evidence(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
     with NodeGate(config['engineId']) as gate:
@@ -565,6 +581,7 @@ def _build_worker(config,owner,resources):
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
         execution_router=router, provenance_client=provenance,state_owner=owner,
+        require_option_evidence=option_evidence,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)

@@ -75,6 +75,14 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(encoded)))
                 self.send_header("Connection", "close")
+                # Closed, non-secret catalog diagnostics; no arbitrary adapter
+                # headers, cookies, redirects or credentials are forwarded.
+                catalog_source=response.headers.get('X-LTDS-Catalog-Source')
+                observed=response.headers.get('X-LTDS-Catalog-Observed-At')
+                if catalog_source in ('fresh','cached'):
+                    self.send_header('X-LTDS-Catalog-Source',catalog_source)
+                if type(observed) is str and re.fullmatch(r'[0-9]{1,16}(?:\.[0-9]{1,9})?',observed):
+                    self.send_header('X-LTDS-Catalog-Observed-At',observed)
                 self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(encoded)
@@ -167,7 +175,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             if self.headers.get_all("Transfer-Encoding"):
                 self._error(400, "transfer_encoding_not_supported")
                 return
-            for name in ("Authorization", "Content-Length", "X-Claim-Token"):
+            for name in ("Authorization", "Content-Length", "X-Claim-Token", "X-LTDS-Claim-Token", "X-LTDS-Option-Evidence"):
                 if len(self.headers.get_all(name, [])) > 1:
                     self._error(400, "duplicate_header")
                     return

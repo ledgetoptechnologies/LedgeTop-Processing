@@ -127,6 +127,16 @@ class ReferenceWorkerAPI:
         if identity is None:
             return self._error(401, "unauthorized")
         try:
+            if (self.store.catalog_admission is not None and path in (PREFIX+'/next',PREFIX+'/claim')
+                    and self._header(headers,'X-LTDS-Option-Evidence')!='1'):
+                return self._error(409,'option_evidence_profile_required')
+            evidence=re.fullmatch(re.escape(PREFIX)+r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/option-evidence',path) if type(path) is str else None
+            if evidence:
+                if self.store.catalog_admission is None:return self._error(404,'not_found')
+                if method!='GET' or body:return self._error(400,'invalid_request')
+                token=self._header(headers,'X-LTDS-Claim-Token')
+                if token is None or not 1<=len(token)<=128:return self._error(401,'claim_authentication_required')
+                return Response(200,self.store.option_evidence(evidence[1],**identity,claim_token=token))
             if method == 'GET' and path == PREFIX + '/authority':
                 return Response(200, {'authorityId': self.store.queue.authority_id})
             if method == 'GET' and path == PREFIX + '/next':
