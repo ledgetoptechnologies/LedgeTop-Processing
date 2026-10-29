@@ -1,35 +1,139 @@
 {
   "schemaVersion": 1,
-  "status": "inactive-source-staged-with-scale-qualification-gate-open",
+  "status": "inactive-source-and-actual-main-image-qualified-runtime-gates-open",
   "scope": "Fresh indexed ODM worker composition, not activation or a completed production pipeline",
-  "profile": {"schemaVersion": 2, "fetchJournal": {"schemaVersion": 1, "policyId": "indexed-worker-fetch-v1"}},
+  "profile": {
+    "schemaVersion": 2,
+    "fetchJournal": {
+      "schemaVersion": 1,
+      "policyId": "indexed-worker-fetch-v1"
+    }
+  },
   "policySha256": "15df634d43a377178c7f07e1fa5cce4611768d700a6f41307e7f62b93c2ce791",
   "schemaSha256": "9e90470352dac1b6fc54f2aa597fe6cf5dfbbab08d2991618cbfe0f0f48c8a7c",
   "verification": {
-    "finalUnwrappedScaleSuite": {"tests": 31, "passed": 30, "failed": 1, "skipped": 0, "seconds": 34.702, "zeroBasedObjectIndex": 7469, "holdReason": "indexed_clock_rollback", "qualification": "FAILED; preserved"},
-    "selectedDefaultV1Regressions": {"passed": 232, "skipped": 0, "seconds": 24.132},
-    "independentSourceReview": {"passed": 21, "skipped": 0, "originalWarmAttemptReproductions": 3, "result": "accepted revised implementation within review scope; warm changes now hold"},
-    "rootBootstrapProfile": {"passed": 44, "skipped": 0, "seconds": 1.729},
-    "rootActualNode24Tls": {"indexedV2AndV1Passed": 4, "defaultPassed": 2, "separateRuns": true, "sourceHashesUnchanged": true},
+    "finalUnwrappedScaleSuite": {
+      "tests": 31,
+      "passed": 30,
+      "failed": 1,
+      "skipped": 0,
+      "seconds": 34.702,
+      "zeroBasedObjectIndex": 7469,
+      "holdReason": "indexed_clock_rollback",
+      "qualification": "FAILED; preserved"
+    },
+    "selectedDefaultV1Regressions": {
+      "passed": 232,
+      "skipped": 0,
+      "seconds": 24.132
+    },
+    "independentSourceReview": {
+      "passed": 21,
+      "skipped": 0,
+      "originalWarmAttemptReproductions": 3,
+      "result": "accepted revised implementation within review scope; warm changes now hold"
+    },
+    "rootBootstrapProfile": {
+      "passed": 44,
+      "skipped": 0,
+      "seconds": 1.729
+    },
+    "rootActualNode24Tls": {
+      "indexedV2AndV1Passed": 4,
+      "defaultPassed": 2,
+      "separateRuns": true,
+      "sourceHashesUnchanged": true
+    },
     "successfulDiagnosticScaleRuns": "An isolated 10k run and an observation-wrapped full suite passed; these do not erase or explain the failed final unwrapped qualification",
-    "metadataWitness": {"objects": 10000, "attempts": 10010, "maximumJobAndObjectIdCharacters": 128, "legalClaimBytes": 4171376, "databaseBytes": 22351872, "logicalJobChargeBytes": 33554432, "scope": "Concrete near-wire-boundary witness and capacity tests, not 50GB throughput"}
+    "metadataWitness": {
+      "objects": 10000,
+      "attempts": 10010,
+      "maximumJobAndObjectIdCharacters": 128,
+      "legalClaimBytes": 4171376,
+      "databaseBytes": 22351872,
+      "logicalJobChargeBytes": 33554432,
+      "scope": "Concrete near-wire-boundary witness and capacity tests, not 50GB throughput"
+    },
+    "actualMainPackagedImage": {
+      "sourceCommit": "7dee4dd5922f972f01e18ab2e50df2c7a61a1804",
+      "imageId": "sha256:514083cf1fd0797df579de38b15fd7aa97c85375836317fbf948f18cd9910af2",
+      "canonicalGitLfInventorySha256": "f04f5a4376b69b24f750dde859ac3f1bb45eb7383b38b22ba9076a7010e8f5fd",
+      "indexedJournalDriverTests": {
+        "passed": 31,
+        "skipped": 0,
+        "seconds": 79.909,
+        "actualTinyFileDownloads": 10000
+      },
+      "bootstrapProfileServiceTests": {
+        "passed": 44,
+        "skipped": 0,
+        "seconds": 3.671
+      },
+      "rootIndependentPackagedFileReadback": {
+        "files": 72,
+        "canonicalGitBlobsMatch": true,
+        "actualProductionImports": true
+      },
+      "metadataWitness": {
+        "legalClaimBytes": 4171376,
+        "objects": 10000,
+        "attempts": 10010,
+        "databaseBytes": 22343680
+      },
+      "existingRunningContainersUnchanged": 5,
+      "runtimeActivated": false,
+      "scope": "Actual Linux main PC packaged code; synthetic tiny inputs, not 50GB/science, installed worker or a universal clock guarantee"
+    },
+    "actualMainOldImageRefusals": {
+      "cases": 5,
+      "oldFactoryImage": "sha256:fed772b1b2b9593e2105a33e7fd3b36719db34dff919d46f940b70a70f13e06c",
+      "oldSource55Image": "sha256:f853927f61f5ac29819557b16cdb8b851e55510984d4d6b4d2aa87dd1e34e54e",
+      "fullFixtureFingerprintSha256": "3c73f531b89946990ee0dff23fade2545f619710932600d8a9a4d95f50d9cb38",
+      "rootIndependentReadbackMatches": true,
+      "fixtureFiles": 9,
+      "databaseReceiptAndScratchClaimBytesUnchanged": true,
+      "scope": "Four packaged old-factory profile guards and one old cold ScratchLedger refusal against new synthetic volume, not live downgrade approval"
+    }
   },
   "clockObservation": {
     "scope": "Separate 25-second disposable local Docker sampler; no driver job loop or OS settings changed",
     "negativeWallStepObservedSeconds": -0.0012426376342773438,
     "monotonicAdvancedNanoseconds": 352,
     "bindings": "Fixture driver, journal and broker use the same time.time function; no leaked substitution found",
-    "limitation": "Demonstrates local wall-clock nonmonotonicity; does not establish the prior failure-time cause or NTP/virtualization mechanism. Original clock guards remain strict."
+    "limitation": "Demonstrates local wall-clock nonmonotonicity; does not establish the prior failure-time cause or NTP/virtualization mechanism. Original clock guards remain strict.",
+    "targetHostOutcome": "Unmodified packaged 10k suite passed on actual main Linux PC; original local WSL failure remains preserved and unexplained at its failure time. Clock guards unchanged."
   },
-  "preservation": ["Default/v1 ABI and probe composition", "Original claim/grant/reservation and request identity", "One object per step and real per-object byte verification", "Bounded attempts and monotonic allocation", "Inputs retained without trusted cleanup authority", "Small-node-first/global exclusivity policies unchanged"],
+  "preservation": [
+    "Default/v1 ABI and probe composition",
+    "Original claim/grant/reservation and request identity",
+    "One object per step and real per-object byte verification",
+    "Bounded attempts and monotonic allocation",
+    "Inputs retained without trusted cleanup authority",
+    "Small-node-first/global exclusivity policies unchanged"
+  ],
   "evidence": {
     "finalQualificationSha256": "89a4407e9d6b59cede1e21c9534bc7e48871c34ceabc96ae9f2ea765b2d03a1b",
     "independentReviewSha256": "68f1a94fd8d2be2abd140307473201c1d74b84a21b1887af72b5ddf2f8903468",
     "clockDiagnosticSha256": "8bd0bb9958a3740d422f98778ab41c6e56d2415bfd0acbc5cb985589b6632bbc",
     "rootFourJointLogSha256": "b050790ce85f322fe084c8788d4f7ea159d09913cdc100ba8f1a56c2577fcd3c",
-    "rootTwoDefaultLogSha256": "9c2178314b5cacdd2cc43218c39b25ebc29ff9987c04e757f62c5256aa912ac1"
+    "rootTwoDefaultLogSha256": "9c2178314b5cacdd2cc43218c39b25ebc29ff9987c04e757f62c5256aa912ac1",
+    "actualMainQualificationSha256": "a94265e767da5d626b6908b40e66886c2aa7b0ee57bb967a7202b70076324d21",
+    "actualMainReviewSha256": "4ae608fda4710e27fe3e1ab38aeeb832fbb655f0e7db12d830e2a125c89dc991",
+    "actualMainRootReadbackSha256": "c0c583c050a1fb528294276c1608ec63cf0aebc8164497844c65fc6472175ced",
+    "actualMainDowngradeQualificationSha256": "de854c6028b2c2d2898d3c2bb5093456517264926af500204d6a300f5f0e823a",
+    "actualMainDowngradeReviewSha256": "8b0b983dac9bd0404324e9b7ca13dccb597aaae01ded3cc8ca03f96adc76f983",
+    "actualMainDowngradeRootReadbackSha256": "6f4c7e04cca46b66565b31379cc813f62766e7866146a128b2f52534d82abedd"
   },
-  "openGates": ["Clock/scale repeatability and target-host qualification", "Actual new image/bootstrap/downgrade qualification", "Actual NAS-backed producer/custody and purge-path integration", "Trusted cleanup authority and release ACK", "Explicit retained metadata retirement; current conservative cap is one retained job", "Qualified indexed maintenance census", "Automatic hot rollback-journal recovery", "Native large-upload responsiveness/reconciliation", "Actual 50GB and real processing acceptance"],
+  "openGates": [
+    "Actual installed worker activation and runtime bootstrap acceptance; only inactive actual-main image and synthetic bootstrap qualified",
+    "Actual NAS-backed producer/custody and purge-path integration",
+    "Trusted cleanup authority and release ACK",
+    "Explicit retained metadata retirement; current conservative cap is one retained job",
+    "Qualified indexed maintenance census",
+    "Automatic hot rollback-journal recovery",
+    "Native large-upload responsiveness/reconciliation",
+    "Actual 50GB and real processing acceptance"
+  ],
   "runtimeActivated": false,
   "packagePublished": false,
   "nasChanged": false,
