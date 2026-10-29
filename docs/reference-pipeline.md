@@ -77,6 +77,23 @@ before reopening a node after an engine update; its current version has no such
 worker phase. Initial same-gate host Docker inspection alone cannot qualify
 subsequent engine replacements.
 
+Newer source `c0ef757` qualifies metadata admission while both native engines
+are offline, with a durable verified catalog and immutable per-job selected
+option definitions. Root passed 189 focused checks, seven separately executed
+Node/Python cases, and an actual installed-image downgrade oracle. The latter
+preserves all 13 synthetic jobs, original authority and evidence bytes while
+old6bb cannot mutate the prepared database; explicit compatible mode reopens it.
+The owned disposable volume was removed. See
+[offline admission](reference-offline-admission.md) and
+[source qualification](evidence/reference-offline-admission-20261028.json).
+This source is not installed and is newer than the cached 66-file worker image.
+Its opt-in SQLite writer ABI forbids unqualified old-source/config rollback.
+Paired maintenance publication of the new engine version is still being wired;
+it must advance routing/cache epochs without rewriting older queued jobs.
+Lost-submission-ACK recovery across a changed catalog fingerprint also still
+needs exact-original-request reconciliation with the Viewer client; existing
+lookup alone is not proof of the original options.
+
 The coordinator-only upgrade now has a locally built exact `6bbd468` image and
 an independently tested incremental history validator. The actual image passed
 22 startup/schema1/shutdown tests; all 63 packaged Processing files matched the
