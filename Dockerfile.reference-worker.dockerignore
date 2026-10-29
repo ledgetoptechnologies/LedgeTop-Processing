@@ -7,6 +7,7 @@
 !ops/
 !ops/reference_worker_daemon.py
 !ops/private_worker_directory.py
+!ops/bootstrap_worker_input_accounting.py
 
 **/__pycache__/
 **/.git/

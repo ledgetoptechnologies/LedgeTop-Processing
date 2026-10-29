@@ -43,7 +43,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting','serviceProfile','optionEvidence'))
+                      'executionRouting','serviceProfile','optionEvidence','inputCopyAccounting'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -448,6 +448,8 @@ def load_config(path):
         _service_profile(config)
         _execution_routing(config)
         _option_evidence(config)
+        from ops.bootstrap_worker_input_accounting import input_profile
+        input_profile(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
                 raise ValueError('absolute private directories required')
@@ -507,6 +509,8 @@ def build_worker(config):
     if not sys.platform.startswith('linux'):
         raise ValueError('owned result reader daemon requires Linux')
     _option_evidence(config)
+    from ops.bootstrap_worker_input_accounting import input_profile
+    input_profile(config)
     owner=DaemonStateLock(config['stateRoot'])
     owner.__enter__()
     resources={}
@@ -526,6 +530,8 @@ def _build_worker(config,owner,resources):
     profile = _service_profile(config)
     routing = _execution_routing(config)
     option_evidence = _option_evidence(config)
+    from ops.bootstrap_worker_input_accounting import require_worker_input_profile
+    input_accounting = require_worker_input_profile(config,owner)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
     with NodeGate(config['engineId']) as gate:
@@ -544,7 +550,7 @@ def _build_worker(config,owner,resources):
     if type(info) is not dict or info.get('engineVersion') != config['engineVersion']:
         raise ValueError('actual engine version differs from configured pin')
     ledger = ScratchLedger(root / 'scratch.sqlite', scratch, safety_floor_bytes=config['safetyFloor'],
-                           cleanup_grace_seconds=config['cleanupGrace'])
+                           cleanup_grace_seconds=config['cleanupGrace'], input_copy_accounting=input_accounting)
     from processing.reference_readers import ReaderSession
     session=ReaderSession(ledger)
     session.__enter__()
@@ -605,6 +611,7 @@ def _build_worker(config,owner,resources):
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
         execution_router=router, provenance_client=provenance,state_owner=owner,
         require_option_evidence=option_evidence,
+        input_copy_accounting=input_accounting,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)

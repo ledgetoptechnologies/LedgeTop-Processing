@@ -36,6 +36,7 @@ from .options import _validate_options
 from .reference_runtime import _UNSAFE
 from .reference_execution import ExecutionRouter, RouteConflict
 from .treedar_engine import TreeDarHeld
+from .scratch_policy import ScratchLedger, PolicyConflict, INPUT_COPY_ACCOUNTING_VERSION
 
 
 PREFIX = '/ltds/worker/v1'
@@ -145,7 +146,21 @@ class ReferenceDriver:
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
                  execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
-                 require_option_evidence=False):
+                 require_option_evidence=False, input_copy_accounting=False):
+        if type(input_copy_accounting) is not bool:
+            raise ValueError('explicit driver input-copy profile required')
+        if input_copy_accounting != getattr(ledger, 'input_copy_accounting', False):
+            raise ValueError('driver and ledger input-copy profiles differ')
+        if input_copy_accounting:
+            if not isinstance(ledger, ScratchLedger):
+                raise ValueError('actual input-copy ledger required')
+            with ledger._transaction() as db:
+                if ledger.validate_accounting(db).get('inputCopyAccountingVersion') != INPUT_COPY_ACCOUNTING_VERSION:
+                    raise ValueError('input-copy ledger must be explicitly enabled first')
+        self.input_copy_accounting = input_copy_accounting
+        self._input_copy_accounting_initial = input_copy_accounting
+        self._input_ledger_initial = ledger
+        self._input_fetch_cache = None
         if type(require_option_evidence) is not bool:
             raise ValueError('explicit original option evidence profile required')
         if require_option_evidence and (combined_policy is not None or execution_router is not None and execution_router.treedar_worker is not None):
@@ -253,11 +268,15 @@ class ReferenceDriver:
                     provenancePath=str(provenance_client.path) if provenance_client is not None else None)
             if require_option_evidence:
                 settings['optionEvidence'] = dict(schemaVersion=1)
+            if input_copy_accounting:
+                settings['inputCopyAccounting'] = dict(schemaVersion=1)
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
             binding = p.canonical_json(settings).decode()
             old = db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
+            if input_copy_accounting and old is None and db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
+                raise ValueError('unbound legacy input claims require reconciliation')
             if execution_router is not None and old is None and db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
                 raise ValueError('unbound legacy driver claims require reconciliation')
             if old and old[0] != binding:
@@ -543,6 +562,10 @@ class ReferenceDriver:
 
     def step(self):
         """Perform one bounded stage; never return private metadata or paths."""
+        if (self.input_copy_accounting is not self._input_copy_accounting_initial
+                or self.ledger is not self._input_ledger_initial
+                or getattr(self.ledger, 'input_copy_accounting', False) is not self._input_copy_accounting_initial):
+            return {'state': 'held', 'reason': 'input_copy_profile_changed'}
         if self.require_option_evidence is not self._require_option_evidence_initial:
             return {'state':'held','reason':'original_option_evidence_profile_changed'}
         if self._state_owner is not None:
@@ -712,6 +735,173 @@ class ReferenceDriver:
         self._save(job_id, 'awaiting_failure_acceptance', data)
         return {'state': 'awaiting_failure_acceptance', 'jobId': job_id}
 
+    def _input_closure(self, job_id, claim, data):
+        """One bounded manifest-derived identity, never journal-supplied paths."""
+        manifest = claim['submission']['manifest']
+        p._integer(claim['generation'], 'input generation')
+        p._environment(claim['environment'])
+        objects = manifest['objects']
+        if (claim['jobId'] != job_id or type(objects) is not list or not 0 < len(objects) <= p.MAX_OBJECTS
+                or p.manifest_sha256(manifest) != claim['manifestSha256']
+                or manifest['sha256'] != claim['manifestSha256']
+                or p.digest(claim['submission']['pipeline']) != claim['pipelineDigest']):
+            raise DriverHeld('input_copy_manifest_changed')
+        reservation = data['reservation']['reservationId']
+        normalized = []
+        for obj in objects:
+            p._slug(obj['id'], 'input object'); p._integer(obj['byteSize'], 'input bytes'); p._hash(obj['sha256'], 'input hash')
+            normalized.append(dict(object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'],
+                relative_path='jobs/' + reservation + '/' + obj['id'] + '.input'))
+        if (len({obj['object_id'] for obj in normalized}) != len(normalized)
+                or sum(obj['byte_size'] for obj in normalized) != manifest['totalBytes']):
+            raise DriverHeld('input_copy_manifest_changed')
+        identity = dict(jobId=job_id, generation=claim['generation'], environment=claim['environment'],
+            inputManifestSha256=claim['manifestSha256'], pipelineDigest=claim['pipelineDigest'],
+            inputsSha256=self.ledger._closure_sha256(normalized))
+        return reservation, normalized, identity
+
+    def _prepare_input_binding(self, job_id, claim, data):
+        """Persist this driver's registration intent before creating any copy rows."""
+        reservation, objects, identity = self._input_closure(job_id, claim, data)
+        expected = dict(schemaVersion=1, binding=identity, state='binding_pending', next=0, byteCount=0)
+        checkpoint = data.get('inputAccounting')
+        if checkpoint is None:
+            with self.ledger._transaction() as db:
+                if db.execute('SELECT 1 FROM input_bindings WHERE reservation=?', (reservation,)).fetchone():
+                    raise DriverHeld('unowned_input_binding_requires_reconciliation')
+            if data.get('inputPaths'):
+                raise DriverHeld('legacy_input_paths_require_reconciliation')
+            data['inputAccounting'] = expected
+            self._save(job_id, 'reservation_pending', data)
+        elif p.canonical_json(checkpoint) not in (p.canonical_json(expected), p.canonical_json(dict(expected, state='bound'))):
+            raise DriverHeld('input_copy_binding_checkpoint_changed')
+        try:
+            if data['inputAccounting']['state'] == 'binding_pending':
+                self.ledger.register_input_binding(reservation, job_id=job_id, generation=claim['generation'],
+                    environment=claim['environment'], manifest_sha256=claim['manifestSha256'],
+                    pipeline_sha256=claim['pipelineDigest'], objects=objects)
+            self._check_input_rows(reservation, identity)
+        except PolicyConflict:
+            raise DriverHeld('input_copy_ledger_binding_changed') from None
+        data['inputAccounting'] = dict(expected, state='bound')
+        self._save(job_id, 'reservation_pending', data)
+
+    def _check_input_rows(self, reservation, identity):
+        with self.ledger._transaction() as db:
+            self.ledger._require_inputs(db)
+            row = db.execute('SELECT identity FROM input_bindings WHERE reservation=?', (reservation,)).fetchone()
+            if (row is None or row[0] != json.dumps(identity, sort_keys=True, separators=(',', ':'))
+                    or not self.ledger._closure_matches(db, reservation, identity)):
+                raise DriverHeld('input_copy_ledger_binding_changed')
+            reserved = self.ledger._reservation(db, reservation)
+            settings = json.loads(reserved['settings'])
+            if (reserved['job'], reserved['generation'], reserved['environment']) != (
+                    identity['jobId'], identity['generation'], identity['environment']) or settings['manifest_sha256'] != identity['inputManifestSha256'] or reserved['state'] not in ('reserved','uncertain'):
+                raise DriverHeld('input_copy_reservation_changed')
+            return dict(reserved)
+
+    def _input_cache(self, job_id, claim, data):
+        if (type(claim['generation']) is not int or claim['generation'] < 1
+                or p.digest(claim['submission']['pipeline']) != claim['pipelineDigest']):
+            raise DriverHeld('input_copy_manifest_changed')
+        checkpoint = data.get('inputAccounting')
+        if (type(checkpoint) is not dict or set(checkpoint) != {'schemaVersion','binding','state','next','byteCount'}
+                or type(checkpoint['schemaVersion']) is not int or checkpoint['schemaVersion'] != 1
+                or type(checkpoint['next']) is not int or type(checkpoint['byteCount']) is not int):
+            raise DriverHeld('input_copy_binding_checkpoint_changed')
+        key = (job_id, data['reservation']['reservationId'], claim['generation'], claim['environment'],
+               claim['manifestSha256'], claim['pipelineDigest'])
+        cached = self._input_fetch_cache
+        if cached is None or cached['key'] != key:
+            reservation, objects, identity = self._input_closure(job_id, claim, data)
+            if (type(checkpoint) is not dict or set(checkpoint) != {'schemaVersion','binding','state','next','byteCount'}
+                    or type(checkpoint['schemaVersion']) is not int or checkpoint['schemaVersion'] != 1 or checkpoint['binding'] != identity or checkpoint['state'] != 'bound'
+                    or type(checkpoint['next']) is not int or not 0 <= checkpoint['next'] <= len(objects)
+                    or type(checkpoint['byteCount']) is not int):
+                raise DriverHeld('input_copy_binding_checkpoint_changed')
+            reserved = self._check_input_rows(reservation, identity)
+            if reserved['allocated'] > sum(obj['byte_size'] for obj in objects):
+                raise DriverHeld('input_copy_allocation_changed')
+            index = checkpoint['next']; paths = data.get('inputPaths', {})
+            expected = {obj['object_id']: obj['relative_path'] for obj in objects[:index]}
+            if paths != expected or checkpoint['byteCount'] != sum(obj['byte_size'] for obj in objects[:index]):
+                raise DriverHeld('input_copy_journal_prefix_changed')
+            attempts = data.get('fetchAttempts', {})
+            ids = {obj['object_id'] for obj in objects}
+            if (type(attempts) is not dict or set(attempts) - ids
+                    or any(type(count) is not int or not 1 <= count <= 3 for count in attempts.values())):
+                raise DriverHeld('input_copy_attempt_history_changed')
+            with self.ledger._transaction() as db:
+                rows = {row['id']: dict(row) for row in db.execute(
+                    'SELECT id,fetched,cleaned FROM input_copies WHERE reservation=? LIMIT ?', (reservation, p.MAX_OBJECTS + 1))}
+            for number, obj in enumerate(objects):
+                row = rows[obj['object_id']]
+                if row['cleaned'] is not None or (number < index and row['fetched'] is None) or (number > index and row['fetched'] is not None):
+                    raise DriverHeld('input_copy_fetch_history_changed')
+                if number < index:
+                    self.worker._file(reservation, obj['relative_path'], obj['byte_size'], obj['sha256'])
+                    self.ledger.confirm_input_copy(reservation, obj['object_id'], byte_size=obj['byte_size'], sha256=obj['sha256'])
+            cached = dict(key=key, objects=objects, identity=identity, next=index,
+                          byteCount=checkpoint['byteCount'], allocated=reserved['allocated'])
+            self._input_fetch_cache = cached
+        if checkpoint != dict(schemaVersion=1, binding=cached['identity'], state='bound', next=cached['next'], byteCount=cached['byteCount']):
+            raise DriverHeld('input_copy_journal_prefix_changed')
+        if len(data.get('inputPaths', {})) != cached['next']:
+            raise DriverHeld('input_copy_journal_prefix_changed')
+        return cached
+
+    def _fetch_input_copy(self, job_id, claim, data, grant):
+        """One object per step; no release authority or cleanup is supplied here."""
+        try:
+            cached = self._input_cache(job_id, claim, data)
+            reservation = data['reservation']['reservationId']; index = cached['next']
+            if index == len(cached['objects']):
+                expected = {obj['object_id']: obj['relative_path'] for obj in cached['objects']}
+                if data.get('inputPaths', {}) != expected:
+                    raise DriverHeld('input_copy_journal_prefix_changed')
+                self._check_input_rows(reservation, cached['identity'])
+                self._save(job_id, 'processing_pending', data)
+                self._input_fetch_cache = None
+                return {'state': 'processing_pending', 'jobId': job_id}
+            obj = cached['objects'][index]; relative = obj['relative_path']; object_id = obj['object_id']
+            with self.ledger._transaction() as db:
+                self.ledger._require_inputs(db)
+                binding = db.execute('SELECT identity FROM input_bindings WHERE reservation=?', (reservation,)).fetchone()
+                row = db.execute('SELECT path,sha,bytes,cleaned FROM input_copies WHERE reservation=? AND id=?', (reservation, object_id)).fetchone()
+                if (binding is None or binding[0] != json.dumps(cached['identity'], sort_keys=True, separators=(',', ':'))
+                        or row is None or (row['path'],row['sha'],row['bytes'],row['cleaned']) != (relative,obj['sha256'],obj['byte_size'],None)):
+                    raise DriverHeld('input_copy_ledger_binding_changed')
+            if object_id in data.get('inputPaths', {}):
+                raise DriverHeld('input_copy_journal_prefix_changed')
+            self.ledger._owned_path(reservation, relative)
+            target = self.ledger.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            attempts = data.setdefault('fetchAttempts', {}).get(object_id, 0)
+            if os.path.lexists(target):
+                if not attempts:
+                    raise DriverHeld('unowned_input_file_requires_reconciliation')
+            else:
+                if attempts >= 3:
+                    raise DriverHeld('worker_fetch_attempt_budget_exhausted')
+                data['fetchAttempts'][object_id] = attempts + 1
+                self._save(job_id, 'fetching', data)
+                self.broker.download_object(grant, object_id, target)
+            self.worker._file(reservation, relative, obj['byte_size'], obj['sha256'])
+            self.ledger.confirm_input_copy(reservation, object_id, byte_size=obj['byte_size'], sha256=obj['sha256'])
+            byte_count = cached['byteCount'] + obj['byte_size']
+            allocated = max(cached['allocated'], byte_count)
+            self.ledger.record_allocated(reservation, allocated)
+            cached['allocated'] = allocated
+            data.setdefault('inputPaths', {})[object_id] = relative
+            data['inputAccounting'] = dict(schemaVersion=1, binding=cached['identity'], state='bound', next=index + 1, byteCount=byte_count)
+            self._save(job_id, 'fetching', data)
+            cached.update(next=index + 1, byteCount=byte_count)
+            return {'state': 'fetching', 'jobId': job_id}
+        except PolicyConflict:
+            raise DriverHeld('input_copy_ledger_binding_changed') from None
+        except WorkerHeld:
+            raise DriverHeld('input_copy_integrity_changed') from None
+
     def _step(self):
         with self._db() as db:
             row = db.execute("SELECT * FROM driver_jobs WHERE stage NOT IN ('completed','awaiting_acceptance','awaiting_failure_acceptance') ORDER BY created LIMIT 1").fetchone()
@@ -779,6 +969,8 @@ class ReferenceDriver:
             self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
                 manifest_sha256=claim['manifestSha256'], input_bytes=claim['submission']['manifest']['totalBytes'], output_budget=self.output_budget,
                 environment=claim['environment'], ttl_seconds=self.transfer_ttl, worker_ready=True)
+            if self.input_copy_accounting:
+                self._prepare_input_binding(job_id, claim, data)
             status, public = self._request('POST', suffix + '/reservation', {'claimToken': token, 'transferRequest': request})
             if status == 409:
                 return {'state': 'reservation_pending', 'jobId': job_id}
@@ -804,6 +996,12 @@ class ReferenceDriver:
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
         if stage == 'fetching':
+            if self.input_copy_accounting:
+                try:
+                    grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+                except ValueError:
+                    raise DriverHeld('input_copy_grant_changed') from None
+                return self._fetch_input_copy(job_id, claim, data, grant)
             grant = validate_grant(data['grant'], job=claim, clock=self.clock)
             reservation = data['reservation']['reservationId']
             directory = self.ledger.root / 'jobs' / reservation
@@ -853,6 +1051,16 @@ class ReferenceDriver:
                 status, fresh = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
                 if status == 409 or fresh['status'] != 'running':
                     raise DriverHeld('unstarted_claim_requires_reconciliation')
+                if self.input_copy_accounting:
+                    original = data['claim']
+                    if (any(type(fresh[key]) is not type(original[key]) or fresh[key] != original[key]
+                            for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken'))
+                            or p.canonical_json(fresh['submission']) != p.canonical_json(original['submission'])):
+                        raise DriverHeld('input_copy_original_claim_changed')
+                    reservation, objects, identity = self._input_closure(job_id, original, data)
+                    self._check_input_rows(reservation, identity)
+                    if data.get('inputPaths') != {obj['object_id']:obj['relative_path'] for obj in objects}:
+                        raise DriverHeld('input_copy_journal_prefix_changed')
                 evidence = None
                 if self.require_option_evidence:
                     # Authenticate with the ORIGINAL persisted token; an echoed
