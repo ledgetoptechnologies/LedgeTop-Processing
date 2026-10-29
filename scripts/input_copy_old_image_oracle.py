@@ -10,10 +10,12 @@ Run inside the PREVIOUS worker image with this source tree mounted read-only at
 The image's own processing.scratch_policy is the old writer; the mounted copy is
 loaded under a separate module name. Prints one JSON summary; exits 1 on failure.
 """
+from contextlib import closing
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 
@@ -81,8 +83,8 @@ def main():
             expected_allocated=3, allowance_bytes=2, maximum_scope_charges=1)
         opted = new.ScratchLedger(both, root, input_copy_accounting=True, **options)
         opted.enable_input_copy_accounting()
-        stored = json.loads(__import__('sqlite3').connect(both).execute(
-            "SELECT value FROM metadata WHERE key='config'").fetchone()[0])
+        with closing(sqlite3.connect(both)) as db:
+            stored = json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
         results['bothMarkers'] = sorted(key for key in stored if key.endswith('Version'))
         before = digest(both)
         try:
