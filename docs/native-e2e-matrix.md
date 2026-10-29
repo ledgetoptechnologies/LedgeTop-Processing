@@ -115,6 +115,42 @@ pass plus 1 unexpected success.
 | `viewer-e66e37b-poll-fix-v1` | `e66e37b` fix | PASS (1 test, about 11 s) |
 | `viewer-e66e37b-poll-fix-v1` | `4b4f707` control | FAIL at the pin check (`cc4c7d86…` is not `fdb948ee…`), as intended: the regression refuses a tree that is not the pinned fix |
 
+## Final poll-only candidate 7de601c (harness v4)
+
+Viewer `7de601c1381a791fe9c9ec7f3385a5645724b91e` ("Keep provider polling
+recoverable during outages") is a separate candidate, not a descendant of
+`e66e37b`. Its parent is remote `main` `8fe25966235c3485fcc4e7f5b258fb756a7bbeac`
+("ci: restrict GitHub Actions to main", workflows and tests only). Content proof:
+
+| Commit | `processingWorker.js` git blob (LF) | Checked-out bytes (CRLF) |
+| --- | --- | --- |
+| `4b4f707` baseline | `e26bd880…f29b5d` | `cc4c7d86…270a6` |
+| `8fe2596` remote main | `e26bd880…f29b5d`, identical to the baseline, **so it does not contain the fix** | — |
+| `e66e37b` first fix | `96d06a5e…2413bf` | `fdb948ee…06752` |
+| `7de601c` final candidate | `5e32e0af…564cdf` | `d08e2512…aadbf4` |
+
+Against `8fe2596`, `7de601c` changes only `processingWorker.js` and adds a Viewer
+test. Beyond `e66e37b`'s behaviour, it also retries when building the provider
+adapter or credentials fails (`provider_adapter_unavailable`) and when saving
+observations fails (`provider_observation_persistence_unavailable`). Because it
+changes the reconcile and retry path, the full v1 suite was repeated on it.
+
+Harness v4 (`8ed0979`) moves the plain T9 checks into `FixedPollRegression`, which
+each pinned class configures with its own target and pin. It adds
+`CoordinatorOutageFixedPoll7de`, run only with
+`MATRIX_VIEWER_TARGET=viewer-7de601c-poll-only-v1` and guarded by the `d08e2512…`
+bytes. The `e66e37b` regression keeps its own target and pin.
+
+| Run | Viewer tree | Result |
+| --- | --- | --- |
+| v1 suite | `7de601c` | 7 pass, T9 **unexpected success**, 2 pinned classes skipped. Every record loaded `processingWorker.js` `d08e2512…`. |
+| `viewer-7de601c-poll-only-v1` | `7de601c` | PASS. Six refused claims all `queued_upstream` / `provider_observation_unavailable`, then `ingesting`. |
+| `viewer-e66e37b-poll-fix-v1` | `e66e37b` | PASS, unchanged after the v4 refactor |
+| `viewer-7de601c-poll-only-v1` | `e66e37b` (wrong-source control) | FAIL at the pin check (`fdb948ee…` is not `d08e2512…`), as intended |
+
+Not exercised: the new adapter and persistence failure branches. The relay
+models only an unreachable provider.
+
 ## First failures preserved
 
 Earlier runs of the same harness are kept as evidence, not converted to passes:
