@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "status": "candidate-not-jointly-accepted-or-enabled",
+  "scope": "Pure wire binding fixture. Digests are synthetic commitments, not resolved finality or cleanup proof.",
+  "expectedCommitments": {
+    "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "ack": {
+    "schemaVersion": 1,
+    "receiptType": "source_release_ack",
+    "validationVersion": "ltds-source-release-ack-v1",
+    "ackId": "source-release-ack-1",
+    "sourceRetentionReceiptId": "source-receipt-1",
+    "sourceStorageReceiptId": "source-storage-1",
+    "jobId": "source-job-1",
+    "generation": 1,
+    "environment": "staging",
+    "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+    "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+    "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+  },
+  "canonicalAck": "{\"ackId\":\"source-release-ack-1\",\"acknowledgedAt\":\"2026-10-29T08:00:00.000Z\",\"environment\":\"staging\",\"generation\":1,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"localCleanupClosureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"pipelineClosureSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptType\":\"source_release_ack\",\"schemaVersion\":1,\"sourceRetentionReceiptId\":\"source-receipt-1\",\"sourceStorageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-release-ack-v1\"}",
+  "ackSha256": "8a11209f2b60a57b71a95bc4b2de831c158d42a3b2adcb04ed9a100a026ccb08"
+}

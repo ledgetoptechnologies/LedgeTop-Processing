@@ -3,6 +3,13 @@
 Status: proposal only; no endpoint, validator, issuer or cleanup is enabled.
 Existing `contracts/source-retention-v1.contract.json` remains unchanged.
 
+The candidate pure validator is `processing/reference_source_release_ack.py`;
+its canonical synthetic fixture is `contracts/source-release-ack-v1.candidate.json`.
+These check syntax and expected bindings only, perform no I/O, and are not wired
+to an endpoint or cleanup path. The fixture's synthetic closure digests do not
+represent resolved finality or cleanup. Peer Node validation and joint acceptance
+remain pending; existing source-retention receipt bytes are unchanged.
+
 Viewer must first persist its original-source custody receipt and a pin covering
 the complete manifest in the same transaction. Its authenticated issuer returns
 that existing receipt only after custody is established. Every relevant delete,
