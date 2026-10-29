@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "status": "candidate-pure-contract-not-activated",
+  "validatorCommit": "bca29d1f68f65d1f477d7fcd290a42826b8c324a",
+  "sharedVectorsCommit": "2e27db7d359a5d0eedaf5a1cb622e4a806d11bc7",
+  "goldenFixtureGitLfSha256": "2e77ba27468f345b25a4315327bdb27994d3b7263c15c9ba483e6170b172fd27",
+  "sharedVectorsGitLfSha256": "7833b999a06bd08a19cf940fdeb4b4be67b1932069812610324963a68144cbc2",
+  "canonicalAckSha256": "8a11209f2b60a57b71a95bc4b2de831c158d42a3b2adcb04ed9a100a026ccb08",
+  "verification": {
+    "rootInitialPython": {"newAckTests": 5, "existingRetentionTests": 7, "passed": 12, "skipped": 0, "seconds": 0.027},
+    "rootExpandedPython": {"passed": 6, "skipped": 0, "seconds": 0.020, "sharedVectors": 59, "validVectors": 3, "invalidVectors": 56},
+    "independentFrozenValidatorReview": {"commit": "bca29d1f68f65d1f477d7fcd290a42826b8c324a", "passed": 5, "skipped": 0, "seconds": 0.018, "decision": "accepted within pure syntax and exact binding scope", "reviewSha256": "f666a89755b22f84f140f10d7d36adc55cceed9592f94b40b178c75896b85009"},
+    "rootNodeOracle": {"version": "v24.16.0", "canonicalBytesMatch": true, "bodyDigestMatches": true, "scope": "Golden-byte serialization only, not Node validator qualification"},
+    "viewerNodeSharedVectorParity": "pending owner implementation and actual test result"
+  },
+  "properties": [
+    "Closed compact ACK body with16KiB wire bound before parsing",
+    "Existing full source-retention receipt and manifest closure revalidated",
+    "Exact source receipt roles, job, generation, environment and all digests bound",
+    "Duplicate JSON keys, nonfinite numbers, unsafe IDs, malformed dates and unknown fields rejected",
+    "Raw generation1.0 and1e0 rejected to preserve Python integer-token semantics",
+    "Detached return value; no side effects or persistent state"
+  ],
+  "unimplemented": [
+    "Authenticated issuer and tenant authority",
+    "Durable source custody and every purge pin",
+    "Complete independently resolved holder inventory and late-assignment fence",
+    "Whole-parent finality and local cleanup closure domain/resolver",
+    "Durable receipt-role registry, replay store and ACK outbox",
+    "Endpoint, pin release and actual input cleanup wiring"
+  ],
+  "cleanupAuthorizedByValidator": false,
+  "endpointEnabled": false,
+  "runtimeActivated": false,
+  "nasChanged": false,
+  "sourceRetentionContractChanged": false
+}
