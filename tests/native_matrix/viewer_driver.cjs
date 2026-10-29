@@ -19,6 +19,7 @@ const { ViewerRepository } = require(path.join(source, 'repository'));
 const { StorageManager } = require(path.join(source, 'storageManager'));
 const { NodeOdmProvider } = require(path.join(source, 'nodeOdmProvider'));
 const worker = require(path.join(source, 'processingWorker'));
+const { processingJobCounts } = require(path.join(source, 'processingOverview'));
 
 const root = process.env.MATRIX_ROOT;
 const signal = (name) => fs.writeFileSync(path.join(root, name), '1');
@@ -83,6 +84,8 @@ function submitAttempt(v, name, count) {
 
 const advanceClock = (v) => v.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE status='pending'").run();
 const expireLeases = (v) => v.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE status='leased'").run();
+const warnings = (v) => Number(processingJobCounts(v.db).observationWarnings ?? NaN);
+const pendingIngest = (v, attemptId) => v.db.prepare("SELECT COUNT(*) AS n FROM processing_jobs WHERE attempt_id=? AND job_type='ingest' AND status IN ('pending','leased')").get(attemptId).n;
 const jobs = (v, attemptId) => v.db.prepare('SELECT job_type,status,attempt_count,error_code FROM processing_jobs WHERE attempt_id=? ORDER BY created_at,rowid').all(attemptId);
 
 // One worker step at a time; returns the attempt after the step.
@@ -155,7 +158,8 @@ const cases = {
     const during = [];
     for (let i = 0; i < failures; i++) {
       const a = await step(v, attempt.id);
-      during.push({ status: a.status, jobs: jobs(v, attempt.id).filter((j) => j.job_type === 'reconcile').slice(-1)[0] });
+      during.push({ status: a.status, jobs: jobs(v, attempt.id).filter((j) => j.job_type === 'reconcile').slice(-1)[0],
+        observationWarnings: warnings(v) });
       if (a.status === 'failed') break;
     }
     link.set(true);
@@ -164,7 +168,32 @@ const cases = {
     if (afterOutage !== 'failed') final = (await untilStatus(v, attempt.id, ['ingesting', 'derivatives', 'ready_for_review', 'failed'])).attempt.status;
     signal('outage-finished');
     return { attemptId: attempt.id, providerTaskId: attempt.providerTaskId, startedAs: started.attempt.status, outageSteps: during,
-      statusAfterOutage: afterOutage, finalStatus: final, errorCode: v.processing.getAttempt(attempt.id).errorCode || null };
+      statusAfterOutage: afterOutage, finalStatus: final, errorCode: v.processing.getAttempt(attempt.id).errorCode || null,
+      observationWarningsAfterRecovery: warnings(v) };
+  },
+
+  // T13: the provider reports completion but enqueueing the ingest job fails
+  // once (a temporary trigger in this temp DB only). Records whether the
+  // attempt is left 'ingesting' with no ingest job, then lets it recover.
+  async atomic_ingest(v) {
+    const attempt = submitAttempt(v, 'atomic', 2);
+    await untilStatus(v, attempt.id, ['running']);
+    const provider = new NodeOdmProvider({ endpoint: v.provider.endpoint, token: process.env.MATRIX_TOKEN });
+    const deadline = Date.now() + 60000;
+    while ((await provider.status(attempt.providerTaskId)).status !== 'completed') {
+      if (Date.now() > deadline) throw new Error('upstream did not complete');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    v.db.exec("CREATE TEMP TRIGGER matrix_fail_ingest_enqueue BEFORE INSERT ON processing_jobs WHEN NEW.job_type='ingest' BEGIN SELECT RAISE(ABORT,'matrix injected ingest enqueue failure'); END");
+    const injected = await step(v, attempt.id);
+    const afterInjection = { status: injected.status, pendingIngestJobs: pendingIngest(v, attempt.id),
+      reconcile: jobs(v, attempt.id).filter((j) => j.job_type === 'reconcile').slice(-1)[0], observationWarnings: warnings(v) };
+    v.db.exec('DROP TRIGGER matrix_fail_ingest_enqueue');
+    const recovered = await untilStatus(v, attempt.id, ['derivatives', 'ready_for_review', 'failed']);
+    return { attemptId: attempt.id, afterInjection,
+      strandedIngesting: afterInjection.status === 'ingesting' && afterInjection.pendingIngestJobs === 0,
+      finalStatus: recovered.attempt.status, errorCode: recovered.attempt.errorCode || null,
+      modelVersions: v.db.prepare('SELECT COUNT(*) AS n FROM model_versions WHERE provider_version_id=?').get(attempt.id).n };
   },
 
   // T5: running cancellation through the provider call the Viewer route makes.

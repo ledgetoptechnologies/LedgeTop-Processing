@@ -304,5 +304,53 @@ class CoordinatorOutageFixedPoll7de(FixedPollRegression, NativeViewerMatrix):
         self.check_fixed_poll()
 
 
+FIXED_74E = dict(
+    target='viewer-74e97db-warning-atomic-v1',
+    viewer_commit='74e97db414df544075c71dab58215a61e2a550c3',
+    # Checked-out bytes (CRLF, core.autocrlf=true) that Node loads; LF git blob
+    # digests: processingWorker 7713468e..., processingRepository 26265f1c...,
+    # processingOverview f87a3760....
+    processing_worker_sha256='32cf4f95085e4839fed9b5f5fe21c02fbe31c4e41b1dc70fa8ac4cfb77e5459b',
+    modules={
+        'apps/viewer/server/processingWorker.js': '32cf4f95085e4839fed9b5f5fe21c02fbe31c4e41b1dc70fa8ac4cfb77e5459b',
+        'apps/viewer/server/processingRepository.js': '212ea4fe1b363b1e977d940dd9ba32c488aaa411e77574a6b711896941a6efdb',
+        'apps/viewer/server/processingOverview.js': '556a69989e406c66cb8d372ca21d8d39ab3a408d739188cb53272edf5b618b12'})
+
+
+@unittest.skipUnless(os.environ.get('MATRIX_VIEWER_TARGET') == FIXED_74E['target'],
+                     'select with MATRIX_VIEWER_TARGET=' + FIXED_74E['target'])
+class ObservationWarningAtomicIngest74e(FixedPollRegression, NativeViewerMatrix):
+    """Viewer 74e97db only: T9 survival, additive warning and atomic ingest."""
+
+    pin = FIXED_74E
+
+    def assert_modules(self, record):
+        loaded = {m['path']: m['sha256'] for m in record['viewerModules']['loaded']}
+        for path, digest in self.pin['modules'].items():
+            self.assertEqual(loaded.get(path), digest, 'not the pinned 74e97db source: ' + path)
+
+    def test_t9_74e_long_outage_keeps_attempt_and_ingests(self):
+        self.check_fixed_poll()
+
+    def test_t11w_74e_observation_warning_is_raised_and_cleared(self):
+        record = self.finish(self.run_case('outage', OUTAGE_FAILURES='6'))
+        self.assert_modules(record)
+        self.assertTrue(record['ok'], record.get('error'))
+        result = record['result']
+        self.assertEqual([step['observationWarnings'] for step in result['outageSteps']], [1] * 6, result)
+        self.assertEqual(result['observationWarningsAfterRecovery'], 0, result)
+
+    def test_t13_74e_ingest_enqueue_failure_never_strands_an_ingesting_attempt(self):
+        record = self.finish(self.run_case('atomic_ingest'))
+        self.assert_modules(record)
+        self.assertTrue(record['ok'], record.get('error'))
+        result = record['result']
+        self.assertFalse(result['strandedIngesting'], result)
+        self.assertEqual(result['afterInjection']['status'], 'running', result)
+        self.assertEqual(result['afterInjection']['reconcile']['error_code'], 'provider_observation_persistence_unavailable', result)
+        self.assertEqual(result['finalStatus'], 'derivatives', result)
+        self.assertEqual(result['modelVersions'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
