@@ -90,6 +90,24 @@ def read_file(path,maximum=65536):
 
 def read_json(path):return p.decode_submission(read_file(path)[0])
 
+
+def bounded_deferred_receipt(root,node_id,*,expected_plan_id,expected_target):
+    """Worker-aware entry to the existing definite-success receipt contract.
+
+    The generic legacy reader remains unchanged. Here both the byte bound and
+    duplicate-key rejection apply BEFORE JSON materialization, also on resume.
+    """
+    value=read_json(Path(root)/'update.json')
+    require(value.get('nodeId')==node_id and value.get('planId')==expected_plan_id
+        and value.get('targetImage')==expected_target and value.get('status')=='succeeded'
+        and type(expected_target) is str and re.fullmatch('sha256:[a-f0-9]{64}',expected_target)
+        and type(value.get('oldImage')) is str and re.fullmatch('sha256:[a-f0-9]{64}',value['oldImage'])
+        and value.get('stage') in ('finalization_pending','finish_pending','completed')
+        and type(value.get('result')) is dict and value['result'].get('image')==expected_target
+        and value['result'].get('healthy') is True and type(value.get('reservedRevision')) is int,
+        'definite_owned_worker_replacement_success_required')
+    return value
+
 @dataclass(frozen=True)
 class WorkerPolicy:
     node_id:str
@@ -313,11 +331,12 @@ with opener.open(request,timeout=30) as response:
 '''
 
 class WorkerMaintenance:
-    def __init__(self,root,policy,api,*,runner=None,operator=None,owned_schedule_request_id=None):
+    def __init__(self,root,policy,api,*,runner=None,operator=None,owned_schedule_request_id=None,operation_receipt=None):
         require(type(policy) is WorkerPolicy,'concrete_worker_policy_required')
         self.root,_=private(root,directory=True);self.policy=policy;self.api=api;self.runner=runner or _run
         self._pid=os.getpid();self._policy_sha=policy.sha256;self._owner=None
         self.operator=operator;self.owned_schedule_request_id=owned_schedule_request_id
+        self._operation_receipt=Path(operation_receipt).absolute() if operation_receipt is not None else None
         self.publication=self.root/'worker-current.json';self.marker=self.root/'worker-publication-marker.json'
         self._check()
 
@@ -496,7 +515,15 @@ class WorkerMaintenance:
         require(runtime['engineVersion']==view['engineVersion'] and runtime['targetImage'] in (None,state['oldImage']),'runtime_previous_binding_changed')
         before=self.backend(state,adapter,target=state['oldImage'])
         require(before['engineVersion']==view['engineVersion'],'previous_worker_native_version_changed')
-        self.phase(state,receipt,'stop_pending',beforeConfig=view,beforePublication=publication,beforeBackend=before,mountSha256=mount_sha,beforeRuntime=runtime)
+        self._operation_receipt=Path(receipt).absolute()
+        mapping={}
+        if config.get('inputCopyAccounting')=={'schemaVersion':2,'fetchJournal':{'schemaVersion':1,'policyId':'indexed-worker-fetch-v1'}}:
+            from ops.reference_worker_indexed_maintenance import capture_mapping_witness
+            mapping['mappingWitness']=capture_mapping_witness(self,state)
+        self.phase(state,receipt,'stop_pending',beforeConfig=view,beforePublication=publication,beforeBackend=before,mountSha256=mount_sha,beforeRuntime=runtime,**mapping)
+        # save() has fsynced the SAME prospective witness and intent before stop.
+        recorded=read_json(Path(receipt)/'managed-update.json')
+        require(recorded==state,'worker_stop_checkpoint_changed')
         self.fence(state,gate)
         self.docker(['stop','--time','-1',self.policy.container_id])
         item=self.inspect();require(not item['running'] and item['pid']==0 and item['exitCode']==0,'graceful_worker_stop_unproven')
@@ -544,10 +571,18 @@ class WorkerMaintenance:
         require(context is not None,'indexed_stopped_mapping_unproven')
         return dict(indexed_context=context)
 
+    def _restore_indexed_context(self,state,*,running):
+        config,_=self.config()
+        if config.get('inputCopyAccounting',{}).get('schemaVersion')!=2:return
+        if getattr(self,'_indexed_maintenance_context',None) is not None:return
+        from ops.reference_worker_indexed_maintenance import restore_mapping_context
+        self._indexed_maintenance_context=restore_mapping_context(self,state,running=running)
+
     def _stopped_owner(self,state):
         require(self.lookup_stop(state)['committed'],'worker_stop_not_proven')
         if self._owner is None:self._owner=DaemonStateLock(self.policy.state_root).__enter__()
         self._owner.check(self.policy.state_root)
+        self._restore_indexed_context(state,running=False)
         require(offline_census(self.policy.state_root,**self._indexed_census_arguments())==state['worker']['census'],'quiesced_worker_history_changed')
 
     def rebind(self,state,receipt,version,gate):
@@ -659,6 +694,7 @@ class WorkerMaintenance:
         if idle:self.wait_health(idle=True)
         else:self.health(idle=False)
         if idle:
+            self._restore_indexed_context(state,running=True)
             wanted={filename:state['worker']['census'][filename].get('__indexed_history__',state['worker']['census'][filename].get(table)) for filename,table in _HISTORY.items()}
             require(immutable_history(self.policy.state_root,**self._indexed_census_arguments())==wanted,'retained_worker_history_changed_on_restart')
 

@@ -58,6 +58,181 @@ def observe_owned_rebind(worker):
     require(proof['base']==p.digest({k:v for k,v in config.items() if k!='engineVersion'}))
     worker.publication_read(view)
     proof['config']=view
+    facts=list(proof['facts']);position=next(i for i,pair in enumerate(proof['pairs']) if pair[0]==str(Path(worker.policy.config_directory)/'worker.json'))
+    info=Path(proof['pairs'][position][0]).lstat()
+    facts[position]=(info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode&0o777)
+    proof['facts']=tuple(facts)
+
+
+# Prospective receipt, not a generic serialized context. Only the trusted live
+# namespace observer may issue it, and restoration also needs actual stopped
+# Docker identity, a held daemon lease, owned update/schedule receipts and the
+# unchanged host inodes. Old mount digests are deliberately insufficient.
+_WITNESS_FIELDS=('schemaVersion','purpose','receiptRoot','receiptIdentity','policySha256',
+    'planId','ownedScheduleRequestId','reservedRevision','operationBindingSha256',
+    'oldImage','targetImage','engineId','containerId','imageId','recipeSha256',
+    'configBaseSha256','beforeConfig','pairs','facts')
+
+def _receipt(worker):
+    from ops.reference_worker_maintenance import private
+    path=getattr(worker,'_operation_receipt',None)
+    require(path is not None,'indexed_mapping_receipt_required')
+    return private(path,directory=True)
+
+def _operation(worker,state):
+    from ops.reference_worker_maintenance import WorkerMaintenance,read_json
+    require(type(worker) is WorkerMaintenance,'indexed_maintenance_owner_required')
+    path,info=_receipt(worker)
+    p._uuid(state['planId'],'owned mapping plan')
+    p._uuid(worker.owned_schedule_request_id,'owned mapping request')
+    own=state['worker'];p._integer(own['reservedRevision'],'owned mapping revision')
+    require(own['profileSha256']==worker.policy.sha256
+        and state['binding'].get('workerProfileSha256')==worker.policy.sha256
+        and state['binding'].get('ownedScheduleRequestId')==worker.owned_schedule_request_id,
+        'indexed_mapping_operation_changed')
+    require(worker.operator is not None and worker.operator.origin==worker.api.origin,'indexed_mapping_operator_required')
+    wire=worker.operator.json('GET','/v1/prototype/nodes/'+worker.policy.node_id+'/schedule-owned/'+worker.owned_schedule_request_id)
+    require(type(wire) is dict and set(wire)=={'receipt'},'indexed_mapping_schedule_changed')
+    require(all(wire['receipt'].get(k)==v for k,v in dict(requestId=worker.owned_schedule_request_id,
+        authorityId=worker.policy.authority_id,nodeId=worker.policy.node_id,planId=state['planId'],targetImage=state['targetImage']).items()),
+        'indexed_mapping_schedule_changed')
+    update=read_json(path/'update.json')
+    require(all(update.get(k)==v for k,v in dict(nodeId=worker.policy.node_id,planId=state['planId'],
+        oldImage=state['oldImage'],targetImage=state['targetImage'],reservedRevision=own['reservedRevision']).items()),
+        'indexed_mapping_update_changed')
+    return dict(receiptRoot=str(path),receiptIdentity=[info.st_dev,info.st_ino],policySha256=worker.policy.sha256,
+        planId=state['planId'],ownedScheduleRequestId=worker.owned_schedule_request_id,reservedRevision=own['reservedRevision'],
+        operationBindingSha256=p.digest(state['binding']),oldImage=state['oldImage'],targetImage=state['targetImage'],
+        engineId=worker.policy.engine_id,containerId=worker.policy.container_id,imageId=worker.policy.image_id,
+        recipeSha256=worker.policy.recipe_sha256,configBaseSha256=worker.policy.config_base_sha256)
+
+def capture_mapping_witness(worker,state):
+    """Return the bounded witness for the SAME durable stop_pending write."""
+    from ops.reference_worker_maintenance import private
+    proof=_PROOFS.get(worker);require(proof is not None,'indexed_stopped_mapping_unproven')
+    require(proof['pid']==os.getpid() and proof['policy']==worker.policy.sha256,'indexed_mapping_observer_changed')
+    worker.barrier(state)
+    require(worker.docker(['info','--format','{{.ID}}']).strip()==worker.policy.engine_id,'indexed_mapping_engine_changed')
+    item=worker.inspect();require(item['running'] and item['pid']>0,'indexed_mapping_live_worker_required')
+    config,view=worker.config()
+    require(view==proof['config'] and proof['base']==p.digest({k:v for k,v in config.items() if k!='engineVersion'}),'indexed_mapping_config_changed')
+    facts=[]
+    for source,target in proof['pairs']:
+        _,info=private(source,directory=Path(source).is_dir())
+        facts.append([info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode&0o777])
+    require(_same(facts,proof['facts']),'indexed_mount_identity_changed')
+    value=dict(schemaVersion=1,purpose='prospective-indexed-stop-mapping',**_operation(worker,state),
+        beforeConfig=view,pairs=[list(pair) for pair in proof['pairs']],facts=facts)
+    require(len(p.canonical_json(value))<=16384,'indexed_mapping_witness_bound')
+    return value
+
+def _config_at_checkpoint(worker,state,witness):
+    """Only the existing atomic rebind's exact inode/bytes may advance config."""
+    own=state['worker'];phase=own['phase'];before=witness['beforeConfig']
+    require(_same(own['beforeConfig'],before),'indexed_mapping_before_config_changed')
+    config,view=worker.config()
+    if _same(view,before):
+        require(phase in ('stop_pending','stopped','quiesced','rebind_pending'),'indexed_mapping_config_phase_changed')
+        require(_same(worker.publication_read(before),own['beforePublication']),'indexed_mapping_publication_changed')
+    else:
+        require(phase in ('rebind_pending','publication_pending','rebound','start_pending','verified','finish_pending'),
+            'indexed_mapping_config_phase_changed')
+        after=own.get('afterConfig')
+        require(type(after) is dict and set(after)=={'sha256','identity','engineVersion'},'indexed_mapping_rebind_required')
+        # rename changes ctime only; existing rebind() records that final ctime
+        # before advancing publication. No new temp or config is constructed.
+        require(view['sha256']==after['sha256'] and view['engineVersion']==after['engineVersion']
+            and view['identity'][:4]==after['identity'][:4] and view['identity'][5:]==after['identity'][5:]
+            and (phase=='rebind_pending' or _same(view,after)),'indexed_mapping_rebind_changed')
+        if phase=='rebind_pending':
+            require(_same(worker.publication_read(before),own['beforePublication']),'indexed_mapping_publication_changed')
+        else:
+            expected=worker.publication_value(view,state['planId'])
+            require(_same(own.get('afterPublication'),expected)
+                and _same(worker.publication_read(view),expected),'indexed_mapping_publication_changed')
+    return config,view
+
+def restore_mapping_context(worker,state,*,running=False):
+    """Revalidate a prospective owned receipt; never adopt old JSON or cold roots."""
+    from ops.reference_worker_maintenance import read_file,private
+    from ops.reference_worker_daemon import DaemonStateLock
+    require(type(running) is bool,'indexed_mapping_mode_required')
+    root,_=_receipt(worker);journal=root/'managed-update.json'
+    raw,record_identity=read_file(journal)
+    update_raw,update_identity=read_file(root/'update.json')
+    update=p.decode_submission(update_raw)
+    stored=p.decode_submission(raw)
+    require(_same(stored,state),'indexed_mapping_journal_changed')
+    own=stored['worker'];witness=own.get('mappingWitness')
+    require(type(witness) is dict,'indexed_stopped_mapping_unproven')
+    p._closed(witness,_WITNESS_FIELDS,'prospective mapping witness')
+    require(type(witness['schemaVersion']) is int and witness['schemaVersion']==1
+        and witness['purpose']=='prospective-indexed-stop-mapping'
+        and len(p.canonical_json(witness))<=16384,'indexed_mapping_witness_changed')
+    expected=_operation(worker,stored)
+    require(all(type(witness[k]) is type(v) and _same(witness[k],v) for k,v in expected.items()),'indexed_mapping_operation_changed')
+    require(type(witness['pairs']) is list and len(witness['pairs'])==8
+        and all(type(v) is list and len(v)==2 and all(type(x) is str for x in v) for v in witness['pairs'])
+        and type(witness['facts']) is list and len(witness['facts'])==8
+        and all(type(v) is list and len(v)==5 and all(type(x) is int and x>=0 for x in v) for v in witness['facts']),
+        'indexed_mapping_facts_changed')
+    # Only definite backend success is resumable here. An uncertain execute()
+    # receipt still requires separate reconciliation, never replacement replay.
+    require(update.get('status')=='succeeded' and update.get('stage') in ('finalization_pending','finish_pending','completed')
+        and type(update.get('result')) is dict and update['result'].get('image')==stored['targetImage']
+        and update['result'].get('healthy') is True,'indexed_mapping_backend_success_required')
+    worker.barrier(stored)
+    require(worker.docker(['info','--format','{{.ID}}']).strip()==worker.policy.engine_id,'indexed_mapping_engine_changed')
+    item=worker.inspect()
+    if running:require(item['running'] and item['pid']>0,'indexed_mapping_running_required')
+    else:
+        require(not item['running'] and item['pid']==0 and item['exitCode']==0,'indexed_worker_not_stopped')
+        require(type(worker._owner) is DaemonStateLock,'indexed_maintenance_owner_required')
+        worker._owner.check(Path(worker.policy.state_root))
+    config,view=_config_at_checkpoint(worker,stored,witness)
+    # Reconstruct the exact eight expected path pairs, not arbitrary paths from
+    # the receipt. The seven stable identities never acquire rebind exceptions.
+    gate='/var/lib/ledgetop-gates/LedgeTop-Processing/node-gates/'+hashlib.sha256(worker.policy.engine_id.encode()).hexdigest()
+    pairs=[(worker.policy.config_directory,worker.policy.container_config_directory),(worker.policy.state_root,config['stateRoot']),
+        (worker.policy.scratch_root,config['scratchRoot']),(worker.policy.gate_directory,gate),
+        (str(Path(worker.policy.config_directory)/'worker.json'),str(Path(worker.policy.container_config_directory)/'worker.json'))]
+    for key in ('caFile','serverCertFile','serverKeyFile'):
+        pairs.append((str(Path(worker.policy.config_directory)/Path(config[key]).relative_to(worker.policy.container_config_directory)),config[key]))
+    require(_same(pairs,witness['pairs']),'indexed_mapping_paths_changed')
+    facts=[]
+    for index,(source,target) in enumerate(pairs):
+        _,info=private(source,directory=index<4)
+        fact=[info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode&0o777]
+        if index!=4:require(fact==witness['facts'][index],'indexed_mount_identity_changed')
+        else:
+            before=witness['beforeConfig']['identity']
+            require(witness['facts'][index]==[before[0],before[1],before[5],before[6],before[7]],'indexed_mapping_config_fact_changed')
+            require(fact==[view['identity'][0],view['identity'][1],view['identity'][5],view['identity'][6],view['identity'][7]],'indexed_mapping_config_fact_changed')
+        facts.append(tuple(fact))
+    if running:
+        # Actual trusted exec is mandatory again after a cold controller start.
+        observe_running_mounts(worker)
+        live=_PROOFS[worker]
+        require(_same(live['pairs'],pairs) and _same(live['facts'],facts),'indexed_runtime_mount_identity_changed')
+    else:
+        _PROOFS[worker]=dict(pid=os.getpid(),container=worker.policy.container_id,engine=worker.policy.engine_id,
+            policy=worker.policy.sha256,config=view,base=p.digest({k:v for k,v in config.items() if k!='engineVersion'}),
+            pairs=tuple(pairs),facts=tuple(facts))
+    try:
+        if running:
+            context=object.__new__(IndexedMaintenanceContext)
+            _CONTEXTS[context]=(weakref.ref(worker),_PROOFS[worker],None)
+        else:context=stopped_context(worker)
+        _authority(context,worker.policy.state_root,running=running)
+        again,again_identity=read_file(journal)
+        require(raw==again and record_identity==again_identity,'indexed_mapping_journal_changed')
+        update_again,update_after=read_file(root/'update.json')
+        require(update_raw==update_again and update_identity==update_after,'indexed_mapping_update_changed')
+        worker.barrier(stored)
+        return context
+    except BaseException:
+        _PROOFS.pop(worker,None)
+        raise
 
 
 class IndexedMaintenanceContext:
@@ -93,7 +268,8 @@ def _check(context,root,*,running=False):
     require(Path(root)==Path(worker.policy.state_root))
     # After restart the daemon owns the lock; this observer cannot acquire it.
     if not running:
-        require(worker._owner is owner,'indexed_maintenance_owner_changed')
+        from ops.reference_worker_daemon import DaemonStateLock
+        require(type(owner) is DaemonStateLock and worker._owner is owner,'indexed_maintenance_owner_changed')
         owner.check(Path(root))
     require(proof['pid']==os.getpid() and proof['policy']==worker.policy.sha256)
     config,view=worker.config()

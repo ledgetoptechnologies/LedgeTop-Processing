@@ -114,7 +114,10 @@ def owned_open_proof(ingress,state):
 
 
 def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,*,already_finished=False,worker=None,gate=None):
-    private=deferred_receipt(receipt,settings['nodeId'],expected_plan_id=state['planId'],expected_target=state['targetImage'])
+    if worker is not None:
+        from ops.reference_worker_maintenance import bounded_deferred_receipt
+        private=bounded_deferred_receipt(receipt,settings['nodeId'],expected_plan_id=state['planId'],expected_target=state['targetImage'])
+    else:private=deferred_receipt(receipt,settings['nodeId'],expected_plan_id=state['planId'],expected_target=state['targetImage'])
     source=json.loads((root/'compose.json').read_text())
     service=settings['service'];pin=source['services'][service]['image']
     if compose_base(source,service)!=state['composeBaseSha256'] or pin not in (state['oldImage'],state['targetImage']):
@@ -169,7 +172,7 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
         from processing.reference_protocol import _uuid
         _uuid(owned_schedule_request_id,'owned schedule request')
         settings['ownedScheduleRequestId']=owned_schedule_request_id
-        worker=WorkerMaintenance(root,worker_policy,api,operator=operator,owned_schedule_request_id=owned_schedule_request_id)
+        worker=WorkerMaintenance(root,worker_policy,api,operator=operator,owned_schedule_request_id=owned_schedule_request_id,operation_receipt=receipt)
         try:return _run(root,api,operator,receipt,wait_seconds,drain_seconds,expected_plan_id=expected_plan_id,expected_target=expected_target,settings=settings,worker=worker)
         finally:worker.close()
     return _run(root,api,operator,receipt,wait_seconds,drain_seconds,expected_plan_id=expected_plan_id,expected_target=expected_target,settings=settings)
@@ -195,12 +198,18 @@ def _run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected
         managed=receipt/'managed-update.json'
         binding=operation_binding(api,settings,ingress,args)
         if managed.exists():
-            state=json.loads(managed.read_text())
+            if worker is not None:
+                from ops.reference_worker_maintenance import read_json
+                state=read_json(managed)
+            else:state=json.loads(managed.read_text())
             if (state.get('binding')!=binding or state.get('stage') not in ('ingress_closed','update_returned',
                     'compose_pin_pending','compose_pinned','ingress_open_pending','finish_pending','completed')):
                 raise GateError('frozen managed operation binding changed')
             fence(state)
-            private=deferred_receipt(receipt,node_id,expected_plan_id=state['planId'],expected_target=state['targetImage'])
+            if worker is not None:
+                from ops.reference_worker_maintenance import bounded_deferred_receipt
+                private=bounded_deferred_receipt(receipt,node_id,expected_plan_id=state['planId'],expected_target=state['targetImage'])
+            else:private=deferred_receipt(receipt,node_id,expected_plan_id=state['planId'],expected_target=state['targetImage'])
             final=dict(healthy=True,image=state['targetImage'],previousImage=private['oldImage'],
                 composePinUpdateRequired=False,persistentComposePin=state['targetImage'],ingress='open')
             node=api.json('GET','/v1/prototype/nodes/'+node_id)['node']
