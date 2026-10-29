@@ -229,15 +229,26 @@ const cases = {
   },
 };
 
+// Evidence of exactly which Viewer code ran: every CommonJS module loaded from
+// the pinned tree, with the sha256 of its bytes on disk. ES modules imported
+// lazily by ingest are not in require.cache and are listed separately.
+function viewerModules() {
+  const tree = path.resolve(process.env.VIEWER_SOURCE_ROOT);
+  const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const loaded = Object.keys(require.cache).filter((file) => file.startsWith(tree + path.sep)).sort()
+    .map((file) => ({ path: path.relative(tree, file).split(path.sep).join('/'), sha256: digest(file) }));
+  return { tree, loaded, esmNote: 'ES modules (.mjs) imported during ingest are not enumerated here' };
+}
+
 (async () => {
   const name = process.env.MATRIX_CASE;
   const link = await relay(process.env.MATRIX_ENDPOINT);
   const v = viewer(link.origin);
   try {
     const result = await cases[name](v, link);
-    console.log(JSON.stringify({ case: name, ok: true, result }));
+    console.log(JSON.stringify({ case: name, ok: true, result, viewerModules: viewerModules() }));
   } catch (error) {
-    console.log(JSON.stringify({ case: name, ok: false, error: String(error && error.stack || error).slice(0, 2000) }));
+    console.log(JSON.stringify({ case: name, ok: false, error: String(error && error.stack || error).slice(0, 2000), viewerModules: viewerModules() }));
     process.exitCode = 1;
   } finally {
     v.db.close();
