@@ -86,6 +86,37 @@ class IncrementalCoordinatorTests(unittest.TestCase):
         self.queue.close();self.queue=LegacyQueue(self.volume,node_ids=('cluster','main'),reference_enabled=True)
         self.compare(self.census(),plans=tuple(plans),cancel_intents=tuple(cancel_intents),reopened=('cluster','main'))
 
+    def test_surgical_profile_requires_exact_four_owned_rows_and_all_history_digests(self):
+        for node in ('cluster','main'):
+            _, receipt = self.plan(node)
+            self.queue.cancel_node(node, dict(expectedRevision=receipt['revision'], planId=receipt['planId']))
+        baseline = self.census()
+        self.assertEqual(len(baseline['ownedRows']), 4)
+        binding = replace(self.binding,
+            predecessor_source='6bbd468e1177746cb695e43195e75355b0681f23',
+            candidate_source='d738edb209972a1723fa5af374578951b2a8448c',
+            owned_history_sha256=digest(baseline['ownedRows']))
+        binding.check_baseline(baseline)
+        compare_transition(baseline, baseline, binding=binding)
+        for count in (0, 2, 3, 5):
+            changed = copy.deepcopy(baseline)
+            changed['ownedRows'] = (baseline['ownedRows'] + [baseline['ownedRows'][0]])[:count]
+            with self.subTest(count=count), self.assertRaises(IncrementalHeld):
+                replace(binding, owned_history_sha256=digest(changed['ownedRows'])).check_baseline(changed)
+        for field in ('owned_history_sha256','jobs_rows_sha256','schema_sha256'):
+            with self.subTest(field=field), self.assertRaises(IncrementalHeld):
+                replace(binding, **{field:'f'*64}).check_baseline(baseline)
+        with self.assertRaises(IncrementalHeld):
+            self.binding.check_baseline(baseline)
+        with self.assertRaises(IncrementalHeld):
+            replace(binding, candidate_source='e'*40).check_baseline(baseline)
+        # New operation drains remain exact receipts, never a broad table ignore.
+        row, _ = self.plan('cluster')
+        compare_transition(self.census(), baseline, binding=binding, plans=(row,))
+        changed = self.census(); changed['ownedRows'][0]['request_json'] = '{}'
+        with self.assertRaises(IncrementalHeld):
+            compare_transition(changed, baseline, binding=binding, plans=(row,))
+
     def test_prior_history_deletion_tamper_and_unowned_row_never_table_wide_ignored(self):
         old=self.baseline['ownedRows'][0]
         with self.queue._db() as db:db.execute('DELETE FROM owned_maintenance_schedules WHERE request_id=?',(old['request_id'],))

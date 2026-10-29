@@ -24,6 +24,12 @@ def digest(value):return hashlib.sha256(encoded(value)).hexdigest()
 def require(condition,reason):
     if not condition:raise IncrementalHeld(reason)
 
+# Exact qualified preparation profiles; this is not live activation permission.
+BASELINE_OWNED_COUNTS = {
+    ('671fd2a6bde40088bdfad91ccf67eab45ee3d8d7', '6bbd468e1177746cb695e43195e75355b0681f23'): 2,
+    ('6bbd468e1177746cb695e43195e75355b0681f23', 'd738edb209972a1723fa5af374578951b2a8448c'): 4,
+}
+
 
 @dataclass(frozen=True)
 class IncrementalBinding:
@@ -50,7 +56,8 @@ class IncrementalBinding:
         require(self.predecessor_source!=self.candidate_source and self.main_container!=self.cluster_container,'distinct_upgrade_identity_required')
 
     def check_baseline(self,census):
-        require(census['authorityId']==self.authority_id and census['sqliteQuickCheck']=='ok' and len(census['ownedRows'])==2,'installed_baseline_changed')
+        expected = BASELINE_OWNED_COUNTS.get((self.predecessor_source, self.candidate_source))
+        require(expected is not None and census['authorityId']==self.authority_id and census['sqliteQuickCheck']=='ok' and len(census['ownedRows'])==expected,'installed_baseline_changed')
         require(census['tables']['jobs']['sha256']==self.jobs_rows_sha256 and digest(census['ownedRows'])==self.owned_history_sha256 and digest(census['schema'])==self.schema_sha256,'installed_history_or_schema_changed')
         require(all(row['state']=='active' for row in census['nodeRows'].values()),'other_maintenance_present')
 

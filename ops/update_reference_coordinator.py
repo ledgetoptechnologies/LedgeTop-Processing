@@ -45,7 +45,7 @@ MODE = 'reference-to-reference-v1'
 # Follow-up census compatibility includes the existing TerminalService table;
 # its reference_* zero-row admission fence remains unchanged.
 ACTIVATION_REVIEWED = True
-# Qualified only by the actual private-config/state-copy evidence0354562.
+# Historical pair qualified by private-config/state-copy evidence0354562.
 # This is not a generic approval of future coordinator images or worker ABIs.
 INCREMENTAL_ACTIVATION_REVIEWED = True
 QUALIFIED_INCREMENTAL_PAIR = (
@@ -54,6 +54,16 @@ QUALIFIED_INCREMENTAL_PAIR = (
     '6bbd468e1177746cb695e43195e75355b0681f23',
     'sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b',
 )
+# Surgical NodeODM3 pair: actual on-host old/candidate/rollback application
+# qualification preserved private configuration and copied state byte-for-byte.
+# Evidence: processing-nodeodm3-incremental-qualification-20261028/
+# binary-corrected-packet/root-independent-readback.json. No worker ABI release.
+QUALIFIED_INCREMENTAL_PAIRS = frozenset((QUALIFIED_INCREMENTAL_PAIR, (
+    '6bbd468e1177746cb695e43195e75355b0681f23',
+    'sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b',
+    'd738edb209972a1723fa5af374578951b2a8448c',
+    'sha256:a04271d08115481d5dd3a8a171b9b609567b823c7d5ea8af34b56b8915db5837',
+)))
 INCREMENTAL_MODE='reference-incremental-v1'
 class Stopped(ValueError):pass
 
@@ -63,12 +73,12 @@ def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
 
 
 def incremental_release_reviewed(profile,candidate_image,candidate_source):
-    """One qualified application/image pair; read-only preparation is separate."""
+    """Exact qualified application/image pairs; preparation is separate."""
     return (INCREMENTAL_ACTIVATION_REVIEWED is True
         and type(profile) is incremental.IncrementalBinding
         and profile.candidate_source==candidate_source
         and (profile.predecessor_source,profile.predecessor_image,
-             candidate_source,candidate_image)==QUALIFIED_INCREMENTAL_PAIR)
+             candidate_source,candidate_image) in QUALIFIED_INCREMENTAL_PAIRS)
 
 
 def incremental_census_source():

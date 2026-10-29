@@ -34,7 +34,13 @@ DOCKER_HOST = 'unix:///run/docker.sock'
 SOURCES = {
     '671fd2a6bde40088bdfad91ccf67eab45ee3d8d7': (49, 'c5d141da519e4787e26fb2c01dfc6506d4834f730885c802a940c36d87ddbb77'),
     '6bbd468e1177746cb695e43195e75355b0681f23': (63, '04a14d73f7f1652b82a61428be51f9dd751b9bc957094500f8eb776458387add'),
+    'd738edb209972a1723fa5af374578951b2a8448c': (63, '86aa245deef9497cd1a512c9e9ce750a3c7ebf5f75077fe25e9d95be2b4a37a8'),
 }
+
+QUALIFIED_SOURCE_PAIRS = frozenset((
+    ('671fd2a6bde40088bdfad91ccf67eab45ee3d8d7', '6bbd468e1177746cb695e43195e75355b0681f23'),
+    ('6bbd468e1177746cb695e43195e75355b0681f23', 'd738edb209972a1723fa5af374578951b2a8448c'),
+))
 
 
 class QualificationHeld(ValueError): pass
@@ -130,7 +136,7 @@ class QualificationBinding:
     def validate(self):
         from ops.incremental_coordinator_binding import IncrementalBinding
         binding = IncrementalBinding(**self.incremental)
-        require((binding.predecessor_source, binding.candidate_source) == tuple(SOURCES), 'qualified_source_pair_required')
+        require((binding.predecessor_source, binding.candidate_source) in QUALIFIED_SOURCE_PAIRS, 'qualified_source_pair_required')
         require(re.fullmatch(r'sha256:[a-f0-9]{64}', self.candidate_image) is not None, 'immutable_candidate_required')
         require(type(self.engine_id) is str and re.fullmatch(r'[A-Za-z0-9:_-]{16,128}', self.engine_id) is not None, 'existing_local_engine_identity_required')
         require((self.native_env_file, self.tls_root, self.config_path, self.live_volume) ==
@@ -143,7 +149,7 @@ def private_file(path, limit=1048576):
     before = path.lstat()
     require(path.resolve() == path and not any(p.is_symlink() for p in (path, *path.parents)), 'private_path_changed')
     require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size <= limit, 'private_file_bound')
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
     try:
         opened = os.fstat(descriptor)
         require((opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino), 'private_inode_changed')

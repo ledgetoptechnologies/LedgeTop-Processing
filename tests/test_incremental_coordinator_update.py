@@ -14,7 +14,7 @@ import uuid
 from types import SimpleNamespace
 
 from ops import update_reference_coordinator as m
-from ops.incremental_coordinator_binding import IncrementalBinding,volume_census,digest
+from ops.incremental_coordinator_binding import IncrementalBinding,IncrementalHeld,volume_census,digest
 from processing.app import make_handler
 from processing.config import Config
 from processing.odx_smoke_worker import Client
@@ -178,6 +178,14 @@ class IncrementalUpdateTests(unittest.TestCase):
                 self.gates.incremental_binding=self.incremental_profile
                 transport=self.make_transport();operation=self.root/('wrong-'+str(index));operation.mkdir(mode=0o700)
                 updater=m.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=transport,cluster_probe=lambda _:None,incremental_binding=self.incremental_profile,helper_source_commit='d'*40)
+                if field in ('predecessor_source','candidate_source'):
+                    # Exact source-pair baseline qualification now rejects these
+                    # before a prepared checkpoint can confer any further state.
+                    with self.assertRaisesRegex(IncrementalHeld,'installed_baseline_changed'):
+                        updater.prepare(target,self.incremental_profile.candidate_source,f.MAIN)
+                    self.assertEqual(transport.calls,[])
+                    self.assertEqual(len(volume_census(self.volume,authority=m.AUTHORITY,uid=os.geteuid())['ownedRows']),2)
+                    continue
                 state=updater.prepare(target,self.incremental_profile.candidate_source,f.MAIN)
                 # Both real entry points validate the real prepared checkpoint;
                 # no validate/guard mocks substitute for the release boundary.
@@ -251,6 +259,55 @@ class IncrementalUpdateTests(unittest.TestCase):
                     if call[0] in ('exec','top'):self.assertEqual(call[1],profile.cluster_container)
                 with patch.object(transport,'inspected',return_value=dict(Id='0'*64,Name='/node-odx-gpu',Image=profile.cluster_image,State=dict(Running=True),Config=dict(Labels={}),NetworkSettings=dict(Ports={}))):
                     with self.assertRaises(Exception):gates.local.check()
+
+
+@unittest.skipUnless(os.name=='posix','Linux owned updater fixture')
+class NodeODM3IncrementalUpdateTests(unittest.TestCase):
+    """Real HTTP/SQLite transition with the four-row surgical baseline."""
+    make_transport=IncrementalUpdateTests.make_transport
+    backup=IncrementalUpdateTests.backup
+    target='sha256:a04271d08115481d5dd3a8a171b9b609567b823c7d5ea8af34b56b8915db5837'
+
+    def setUp(self):
+        IncrementalUpdateTests.setUp(self)
+        for node in ('cluster','main'):
+            current=self.queue.get_node(node)
+            row=self.queue.schedule_node_owned(node,dict(schemaVersion=1,requestId=str(uuid.uuid4()),authorityId=m.AUTHORITY,expectedRevision=current['revision'],targetImage=f.MAIN,drainAt='2026-01-01T00:00:00Z',notBefore='2026-01-01T00:00:00Z',afterJobId=None))
+            self.queue.cancel_node(node,dict(expectedRevision=row['revision'],planId=row['planId']))
+        baseline=volume_census(self.volume,authority=m.AUTHORITY,uid=os.geteuid())
+        self.prior_rows=baseline['ownedRows'];self.assertEqual(len(self.prior_rows),4)
+        self.incremental_profile=replace(self.incremental_profile,predecessor_image=TARGET,predecessor_source='6bbd468e1177746cb695e43195e75355b0681f23',candidate_source='d738edb209972a1723fa5af374578951b2a8448c',owned_history_sha256=digest(self.prior_rows))
+        self.gates.incremental_binding=self.incremental_profile
+        self.transport=self.make_transport();self.operation=self.root/'surgical-operation';self.operation.mkdir(mode=0o700)
+        self.updater=m.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda _:None,incremental_binding=self.incremental_profile,helper_source_commit='d'*40)
+        self.state=self.updater.prepare(self.target,self.incremental_profile.candidate_source,f.MAIN)
+
+    def assert_history(self):
+        current=volume_census(self.volume,authority=m.AUTHORITY,uid=os.geteuid())
+        prior_ids={row['request_id'] for row in self.prior_rows}
+        self.assertEqual([row for row in current['ownedRows'] if row['request_id'] in prior_ids],self.prior_rows)
+        self.assertEqual(len(current['ownedRows']),6)
+        self.assertEqual(current['tables']['jobs']['sha256'],self.state['baseline']['tables']['jobs']['sha256'])
+        self.assertEqual({self.queue.get_node(node)['state'] for node in ('cluster','main')},{'active'})
+
+    def test_surgical_actual_prepare_activate_preserves_four_rows_and_adds_only_two(self):
+        self.assertTrue(m.incremental_release_reviewed(self.incremental_profile,self.target,self.incremental_profile.candidate_source))
+        self.assertEqual(self.updater.activate(self.state)['phase'],'completed');self.assert_history()
+        self.assertFalse(self.state['databaseRestored']);self.assertEqual(sum(args[0]=='create' for args in self.transport.calls),1)
+
+    def test_surgical_lost_start_explicit_rollback_preserves_all_six_rows(self):
+        self.transport.loss='start'
+        with self.assertRaises(OSError):self.updater.activate(self.state)
+        self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back');self.assert_history()
+        self.assertEqual(sum(args[0]=='create' for args in self.transport.calls),1)
+
+    def test_surgical_release_refuses_any_other_image_or_source_before_effects(self):
+        for predecessor,candidate,source in ((replace(self.incremental_profile,predecessor_image='sha256:'+'0'*64),self.target,self.incremental_profile.candidate_source),(self.incremental_profile,'sha256:'+'0'*64,self.incremental_profile.candidate_source),(self.incremental_profile,self.target,'0'*40)):
+            self.assertFalse(m.incremental_release_reviewed(predecessor,candidate,source))
+        changed=copy.deepcopy(self.state);changed['image']='sha256:'+'0'*64
+        for action in (self.updater.activate,self.updater.rollback):
+            with self.assertRaisesRegex(m.Stopped,'incremental_application_migration_review_required'):action(changed)
+        self.assertEqual(self.transport.calls,[])
 
 
 if __name__=='__main__':unittest.main()

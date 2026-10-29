@@ -93,6 +93,22 @@ class QualifierTests(unittest.TestCase):
         with patch.object(q, 'private_file', side_effect=self.read_file):
             return q.qualify(self.profile, self.operation, docker=transport or self.docker)
 
+    def test_exact_surgical_pair_allowed_without_changing_old_profile_serialization(self):
+        surgical = replace(self.binding,
+            predecessor_source='6bbd468e1177746cb695e43195e75355b0681f23',
+            candidate_source='d738edb209972a1723fa5af374578951b2a8448c')
+        profile = replace(self.profile, incremental=asdict(surgical))
+        self.assertEqual(profile.validate(), surgical)
+        self.assertEqual(set(asdict(surgical)), set(asdict(self.binding)))
+        self.assertEqual(q.SOURCES[surgical.candidate_source], (63, '86aa245deef9497cd1a512c9e9ce750a3c7ebf5f75077fe25e9d95be2b4a37a8'))
+        self.assertEqual(self.profile.validate(), self.binding)
+        for old, new in [(surgical.candidate_source,surgical.predecessor_source),
+                         (self.binding.predecessor_source,surgical.candidate_source),
+                         (surgical.predecessor_source,'f'*40)]:
+            invalid = replace(surgical, predecessor_source=old, candidate_source=new)
+            with self.subTest(pair=(old,new)), self.assertRaises(q.QualificationHeld):
+                replace(profile, incremental=asdict(invalid)).validate()
+
     def test_full_intent_order_and_strict_isolation_recipe_without_secret_arguments(self):
         result = self.qualify()
         self.assertEqual(result['state'], 'qualified_copy_retained')
@@ -293,6 +309,22 @@ def synthetic_seed():
         handler.reference_listener.close(); handler.viewer_service.close(); queue.close()
     census = incremental.volume_census('/prototype-state', authority=queue.authority_id)
     return dict(census=census, configSha256=q.hashlib.sha256(runtime.read_bytes()).hexdigest())
+
+
+class PrivateFileByteExactTests(unittest.TestCase):
+    def test_crlf_and_binary_bytes_are_read_exactly_without_translation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve()/'source.py'
+            raw = b"first\r\nsecond\r\n\x1a\x00last\r\n"
+            path.write_bytes(raw)
+            before = path.stat()
+            self.assertEqual(q.private_file(path, len(raw)), raw)
+            after = path.stat()
+            self.assertEqual((before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns),
+                             (after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns))
+            with self.assertRaises(q.QualificationHeld):
+                q.private_file(path, len(raw)-1)
+            self.assertEqual(path.read_bytes(), raw)
 
 
 @unittest.skipUnless(os.environ.get('PRIVATE_QUALIFIER_IMAGE_ORACLE') == '1', 'explicit synthetic helper-image oracle required')
