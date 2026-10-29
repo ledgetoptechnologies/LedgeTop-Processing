@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "status": "source55-local-images-built-and-independently-reviewed-not-activated",
+  "sourceCommit": "55cfcd93850f65443fcd2ca40422147849de2908",
+  "authorReceipt": "C:\\Users\\fstor\\.codex\\artifacts\\processing-source55-images-20261028\\qualification-result.json",
+  "authorReceiptSha256": "243e5952696345b1b8096738322e653b0f02fab0c50d574b8eeae1cbbf505214",
+  "rootReview": {
+    "status": "root independent local image review passed",
+    "sourceCommit": "55cfcd93850f65443fcd2ca40422147849de2908",
+    "sourceFilesVerified": 74,
+    "normalizedWorktreeMatchesArchive": true,
+    "images": {
+      "coordinator": {
+        "dockerInspectId": "sha256:6aa14924b5218338923bd64ae2ff46a50a9daacbe995967194057ec276263454",
+        "packagedPythonFiles": 68,
+        "uid": 10001,
+        "inertProbeRepeated": true,
+        "rootFsMatched": true,
+        "exportHashMatched": true
+      },
+      "worker": {
+        "dockerInspectId": "sha256:f853927f61f5ac29819557b16cdb8b851e55510984d4d6b4d2aa87dd1e34e54e",
+        "packagedPythonFiles": 70,
+        "uid": 1000,
+        "inertProbeRepeated": true,
+        "rootFsMatched": true,
+        "exportHashMatched": true
+      }
+    },
+    "runtimeActivated": false,
+    "remoteActions": false
+  },
+  "packagedSourceFiles": 74,
+  "archiveMatchesQualifiedWorktreeAfterCRLFNormalization": true,
+  "rawNewlineDifferences": 54,
+  "baseRootFsMatchesQualifiedPinnedBase": true,
+  "images": {
+    "coordinator": {
+      "dockerInspectId": "sha256:6aa14924b5218338923bd64ae2ff46a50a9daacbe995967194057ec276263454",
+      "buildkitManifestDigest": "sha256:6aa14924b5218338923bd64ae2ff46a50a9daacbe995967194057ec276263454",
+      "buildkitConfigDigest": null,
+      "exportedConfigDigest": "sha256:2eb0727dff346212bc6d8ca6876b348c6ca07b34bc633ddb8e7a62fe781bc9a7",
+      "rootFs": {
+        "Type": "layers",
+        "Layers": [
+          "sha256:9b35de7893378218e365c34c2c735fb0032a859112fb7345ca8ea73f9aa1db70",
+          "sha256:d4c43825326664c9c63a40a35fb3c9d6bcaec8036f29fb01a20fad5fc7d21f88",
+          "sha256:0a599021925b67f98f44b40892432f4a4601a21251c310b392a8b8cab7a29c2c",
+          "sha256:695ce0068eaf39fc9b618331038ec946c98981bf3e92d89c8378d78f10bda2a4",
+          "sha256:3bf3e839f8fea74052bd90984c067a8559b0292561fce7474266f6075c1a6fe6",
+          "sha256:7742fe9d9e4a73ab1f0512c0711fb943dd232c65db2c94749e53cd11b89a1e9a",
+          "sha256:ed0a61e8d907788e35e6cff90a1f63df5b74d36c0ae3e526909874215a5152eb"
+        ]
+      },
+      "export": {
+        "path": "C:\\Users\\fstor\\.codex\\artifacts\\processing-source55-images-20261028\\coordinator-source55.tar",
+        "size": 44522496,
+        "sha256": "1e97910ff09faebcde9cbe4adcabea187165156a3192137f8a17205ee1ad538c",
+        "manifestConfigPath": "blobs/sha256/2eb0727dff346212bc6d8ca6876b348c6ca07b34bc633ddb8e7a62fe781bc9a7"
+      }
+    },
+    "worker": {
+      "dockerInspectId": "sha256:f853927f61f5ac29819557b16cdb8b851e55510984d4d6b4d2aa87dd1e34e54e",
+      "buildkitManifestDigest": "sha256:f853927f61f5ac29819557b16cdb8b851e55510984d4d6b4d2aa87dd1e34e54e",
+      "buildkitConfigDigest": null,
+      "exportedConfigDigest": "sha256:15dc5b3cfefcef27a16fd25130742aba2876afa34ff0422b97a67ebe509c236f",
+      "rootFs": {
+        "Type": "layers",
+        "Layers": [
+          "sha256:9b35de7893378218e365c34c2c735fb0032a859112fb7345ca8ea73f9aa1db70",
+          "sha256:d4c43825326664c9c63a40a35fb3c9d6bcaec8036f29fb01a20fad5fc7d21f88",
+          "sha256:0a599021925b67f98f44b40892432f4a4601a21251c310b392a8b8cab7a29c2c",
+          "sha256:695ce0068eaf39fc9b618331038ec946c98981bf3e92d89c8378d78f10bda2a4",
+          "sha256:3bf3e839f8fea74052bd90984c067a8559b0292561fce7474266f6075c1a6fe6",
+          "sha256:9b634a4b6f593a025146878bd3977b4e14cc25cbdad08f8d56d4fec068232a0c",
+          "sha256:5031bb8594b2fc7dbe9a66aae3a872a0b5814caba784083e62e1ba8b8d320d11",
+          "sha256:4ef4b203031d204cf269ae29b422910e039974419784f165ad103697ffe494d2"
+        ]
+      },
+      "export": {
+        "path": "C:\\Users\\fstor\\.codex\\artifacts\\processing-source55-images-20261028\\worker-source55.tar",
+        "size": 44534272,
+        "sha256": "57bd35c2f70d661b5561373edb526bd0f5bc50c8da0f61b1fec253754f945783",
+        "manifestConfigPath": "blobs/sha256/15dc5b3cfefcef27a16fd25130742aba2876afa34ff0422b97a67ebe509c236f"
+      }
+    }
+  },
+  "digestExplanation": "Docker Desktop inspect .Id equals the OCI manifest digest here. Exported config digest is separately derived from the actual exported config bytes; another Engine may use that config digest as image ID. RootFS and exact source inventory remain explicit.",
+  "scope": "Local Docker Desktop only; inert imports/help; no ports, mounts, credentials, pushes, remote changes, engine jobs or activation.",
+  "notProved": [
+    "remote-host image IDs or load acceptance",
+    "actual coordinator config/state migration",
+    "worker service activation or real photos",
+    "Viewer broker/source custody/durable acceptance application integration"
+  ],
+  "runtimeActivated": false,
+  "pushed": false
+}
