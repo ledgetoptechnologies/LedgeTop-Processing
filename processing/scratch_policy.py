@@ -8,6 +8,14 @@ after writes consume disk; it moves bytes from remaining to allocated. Productio
 and staging are immutable reservation settings, not interchangeable namespaces.
 Confirmed terminal attestation releases only unused reservation budget; allocated
 files still occupy the probe's free-space snapshot until an executor removes them.
+
+Opt-in input-copy accounting (input_copy_accounting=True plus an explicit,
+irreversible enable_input_copy_accounting()) registers fetched processing-input
+copies separately from result objects. Release is a low-level primitive: it
+needs a configured InputReleaseAuthority that independently resolves the compact
+release record from concrete durable stores. Without one, nothing is released.
+The latched marker and its schema footprint fence older and default-off writers
+before any business mutation; arbitrary privileged DB edits are out of scope.
 """
 from __future__ import annotations
 
@@ -27,6 +35,30 @@ import unicodedata
 
 MAX_INTEGER = 2**53 - 1
 ACCOUNTING_VERSION = 1
+INPUT_COPY_ACCOUNTING_VERSION = 1
+MAX_INPUT_COPIES = 10000  # Matches the paired v1 manifest object ceiling.
+MAX_RELEASE_RECORD_BYTES = 16384  # Compact: independent of closure size.
+RELEASE_FIELDS = ('schemaVersion', 'purpose', 'scope', 'releaseId', 'authorityId', 'reservationId', 'jobId',
+                  'generation', 'environment', 'inputManifestSha256', 'pipelineDigest', 'inputsSha256', 'outcome',
+                  'outcomeSha256', 'terminalReceiptId', 'sourceCustodyReceiptId', 'sourceStorageReceiptId',
+                  'pipelineClosureSha256')
+INPUT_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS input_accounting (singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+    "version INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS input_bindings (reservation TEXT PRIMARY KEY, identity TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS input_copies (reservation TEXT NOT NULL, id TEXT NOT NULL, "
+    "bytes INTEGER NOT NULL, sha TEXT NOT NULL, path TEXT NOT NULL UNIQUE, path_key TEXT NOT NULL UNIQUE, "
+    "fetched REAL, cleaned REAL, PRIMARY KEY(reservation,id))",
+    "CREATE TABLE IF NOT EXISTS input_releases (reservation TEXT PRIMARY KEY, record TEXT NOT NULL, "
+    "record_sha TEXT NOT NULL, authority TEXT NOT NULL, released REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS input_pins (reservation TEXT NOT NULL, object TEXT NOT NULL, "
+    "reference TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(reservation,object,reference))",
+    "CREATE TABLE IF NOT EXISTS input_cleanup_intents (reservation TEXT NOT NULL, object TEXT NOT NULL, "
+    "token TEXT NOT NULL UNIQUE, expires REAL NOT NULL, state TEXT NOT NULL, path TEXT NOT NULL, "
+    "sha TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(reservation,object))",
+)
+INPUT_TABLES = ('input_accounting', 'input_bindings', 'input_copies', 'input_releases', 'input_pins',
+                'input_cleanup_intents')
 CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
  reservation TEXT PRIMARY KEY,charge_id TEXT NOT NULL UNIQUE,scope TEXT NOT NULL,
  identity TEXT NOT NULL CHECK(length(CAST(identity AS BLOB))<=4096),
@@ -61,6 +93,29 @@ def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _path_key(path):
+    """Portable Windows case/Unicode identity of an owned relative path."""
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+class InputReleaseAuthority:
+    """Trusted composition seam for releasing worker input copies.
+
+    An implementation must resolve every referenced record itself from concrete
+    durable stores and the authenticated issuer: positive retained-original-source
+    custody covering every original object until its release ACK, the durable
+    terminal outcome and its exact acceptance, and whole-parent pipeline finality.
+    It returns the exact canonical record, or raises. Caller JSON, digests or
+    booleans are never authority. No implementation ships with the ledger; without
+    one, every input release is refused.
+    """
+
+    authority_id = None
+
+    def resolve_input_release(self, record):
+        raise NotImplementedError
+
+
 class ScratchLedger:
     @staticmethod
     def _control_publication(value):
@@ -91,7 +146,17 @@ class ScratchLedger:
         return serialized,hashlib.sha256(serialized.encode()).hexdigest()
 
     def __init__(self, path, storage_root, capacity_probe=None, clock=None,
-                 safety_floor_bytes=1024**3, cleanup_grace_seconds=3600):
+                 safety_floor_bytes=1024**3, cleanup_grace_seconds=3600, input_copy_accounting=False,
+                 release_authority=None):
+        if type(input_copy_accounting) is not bool:
+            raise ValueError("explicit input copy accounting profile required")
+        if release_authority is not None and (not isinstance(release_authority, InputReleaseAuthority)
+                or not input_copy_accounting):
+            raise ValueError("input release authority requires the opt-in profile")
+        if release_authority is not None:
+            _id(release_authority.authority_id)
+        self.input_copy_accounting = input_copy_accounting
+        self.release_authority = release_authority
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         original_root = Path(storage_root).absolute()
@@ -148,11 +213,14 @@ class ScratchLedger:
             db.execute("INSERT OR IGNORE INTO job_environments SELECT DISTINCT job,environment FROM reservations")
             config = _json(dict(root=str(self.root), floor=self.floor, grace=self.grace))
             previous = db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
+            present = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if previous is None and any(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is not None for table in
-                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges')):
+                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges')
+                    + tuple(table for table in INPUT_TABLES if table in present)):
                 raise PolicyConflict('existing accounting configuration missing')
             db.execute("INSERT OR IGNORE INTO metadata VALUES('config',?)", (config,))
-            self.validate_accounting(db)
+            if self.validate_accounting(db).get('inputCopyAccountingVersion'):
+                self._check_input_schema(db)
             self._observe_clock(db)
         if os.name != "nt":
             os.chmod(self.path, 0o600)
@@ -188,15 +256,22 @@ class ScratchLedger:
         No cached version flag: the first control charge latches its marker in
         the same transaction as the receipt, counter and retained capacity hold.
         """
-        base=dict(root=str(self.root),floor=self.floor,grace=self.grace)
         config=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
         count=db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0]
         if config is None:raise PolicyConflict('accounting configuration missing')
-        if config[0]==_json(base):
+        shapes={_json(self._config(control=control,inputs=inputs)):(control,inputs) for control in (False,True) for inputs in (False,True)}
+        if config[0] not in shapes:raise PolicyConflict('unknown accounting version or ledger policy')
+        control,inputs=shapes[config[0]]
+        footprint=db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN (%s)"
+            %",".join("'"+table+"'" for table in INPUT_TABLES)).fetchone()[0]
+        if footprint and not inputs:raise PolicyConflict('input copy records exist without their latched marker')
+        if inputs and (footprint!=len(INPUT_TABLES) or [tuple(row) for row in db.execute('SELECT singleton,version FROM input_accounting')]!=[(1,INPUT_COPY_ACCOUNTING_VERSION)]):
+            raise PolicyConflict('latched input copy marker lacks its schema footprint')
+        if inputs and not self.input_copy_accounting:raise PolicyConflict('latched input copy accounting requires its opt-in profile')
+        versioned=self._config(control=control,inputs=inputs)
+        if not control:
             if count:raise PolicyConflict('control accounting marker missing')
-            return base
-        versioned=dict(base,accountingVersion=ACCOUNTING_VERSION)
-        if config[0]!=_json(versioned):raise PolicyConflict('unknown accounting version or ledger policy')
+            return versioned
         if not count:raise PolicyConflict('latched control accounting records missing')
         # SQL checks precede materialization. Each yielded row has fixed bounded
         # fields; qualify all retained allowances before admission trusts SUM.
@@ -214,6 +289,23 @@ class ScratchLedger:
             reservation=self._reservation(db,row['reservation'])
             self._control(row,reservation)
         return versioned
+
+    def _config(self, *, control, inputs):
+        config = dict(root=str(self.root), floor=self.floor, grace=self.grace)
+        if control:
+            config["accountingVersion"] = ACCOUNTING_VERSION
+        if inputs:
+            config["inputCopyAccountingVersion"] = INPUT_COPY_ACCOUNTING_VERSION
+        return config
+
+    def _latch(self, db, *, control=False, inputs=False):
+        """Write the config with every already latched marker preserved."""
+        # Read the stored markers directly: a control latch runs after its first
+        # charge row exists, before the marker would validate.
+        current = json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
+        config = self._config(control=control or "accountingVersion" in current,
+                              inputs=inputs or "inputCopyAccountingVersion" in current)
+        db.execute("UPDATE metadata SET value=? WHERE key='config'", (_json(config),))
 
     def _reservation(self, db, reservation_id):
         row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
@@ -373,7 +465,7 @@ class ScratchLedger:
             receipt['receiptSha256']=hashlib.sha256(_json(receipt).encode()).hexdigest()
             db.execute('UPDATE reservations SET allocated=?,remaining=remaining-? WHERE id=?',(target,allowance_bytes,reservation_id))
             db.execute('INSERT INTO control_charges VALUES(?,?,?,?,?,?,NULL)',(reservation_id,charge_id,scope_sha256,_json(identity),_json(receipt),allowance_bytes))
-            db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=ACCOUNTING_VERSION)),))
+            self._latch(db,control=True)
             return dict(receipt,publicationSha256=None,publicationDescriptor=None)
 
     def publish_control_charge(self,reservation_id,*,charge_id,scope_sha256,parent_binding_sha256,publication_descriptor):
@@ -436,6 +528,10 @@ class ScratchLedger:
         # development machines. Existing files also use filesystem inode identity
         # to detect hardlinks; all checks precede registration in one writer lock.
         known = [row[0] for row in db.execute("SELECT path FROM objects")]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='input_copies'").fetchone():
+            if any(db.execute("SELECT 1 FROM input_copies WHERE path_key=?", (_path_key(obj["relative_path"]),)).fetchone()
+                   for obj in normalized):
+                raise PolicyConflict("output path aliases an input copy")
         for obj in normalized:
             path = obj["relative_path"]
             candidate = self.root / path
@@ -625,4 +721,405 @@ class ScratchLedger:
             db.execute("UPDATE objects SET cleaned=? WHERE reservation=? AND id=?",
                        (self._now(db), reservation_id, object_id))
             db.execute("UPDATE cleanup_intents SET state='cleaned' WHERE reservation=? AND object=?",
+                       (reservation_id, object_id))
+
+    # ----- Opt-in processing-input copies -------------------------------------
+    # Separate tables, pins, intents and executor namespace: result object APIs,
+    # IDs and receipts are unchanged and never stand in for input copies.
+
+    def _check_input_schema(self, db):
+        expected = sqlite3.connect(':memory:')
+        try:
+            for statement in INPUT_SCHEMA:
+                expected.execute(statement)
+            query = ("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN (%s) ORDER BY type,name"
+                     % ",".join("'" + table + "'" for table in INPUT_TABLES))
+            if [tuple(row) for row in db.execute(query)] != [tuple(row) for row in expected.execute(query)]:
+                raise PolicyConflict('input copy schema changed')
+        finally:
+            expected.close()
+
+    def _require_inputs(self, db):
+        if not self.validate_accounting(db).get("inputCopyAccountingVersion"):
+            raise PolicyConflict("input copy accounting is not enabled")
+
+    def enable_input_copy_accounting(self):
+        """Explicitly and irreversibly latch input-copy accounting (idempotent)."""
+        if not self.input_copy_accounting:
+            raise PolicyConflict("input copy accounting requires its opt-in profile")
+        with self._transaction() as db:
+            for statement in INPUT_SCHEMA:
+                db.execute(statement)
+            db.execute("INSERT OR IGNORE INTO input_accounting VALUES(1,?)", (INPUT_COPY_ACCOUNTING_VERSION,))
+            self._check_input_schema(db)
+            self._latch(db, inputs=True)
+
+    def _check_input_aliases(self, db, reservation_id, normalized):
+        """Portable case/Unicode identity via the indexed path_key, plus single-link
+        identity for any file already present; bounded per registration."""
+        keys = [_path_key(obj["relative_path"]) for obj in normalized]
+        if len(set(keys)) != len(keys):
+            raise PolicyConflict("input path aliases another object")
+        if any(db.execute("SELECT 1 FROM input_copies WHERE path_key=?", (key,)).fetchone() for key in keys):
+            raise PolicyConflict("input path aliases another object")
+        # Owned result paths sit under their own (ASCII) reservation directory.
+        results = {_path_key(row[0]) for row in db.execute(
+            "SELECT path FROM objects WHERE lower(reservation)=lower(?)", (reservation_id,))}
+        if results & set(keys):
+            raise PolicyConflict("input path aliases another object")
+        for obj in normalized:
+            candidate = self.root / obj["relative_path"]
+            if candidate.exists():
+                if not candidate.is_file():
+                    raise ValueError("input path is not a regular file")
+                if candidate.stat().st_nlink != 1:
+                    raise PolicyConflict("input path aliases another object")
+
+    def _closure_sha256(self, normalized):
+        return hashlib.sha256(_json([dict(object_id=o["object_id"], byte_size=o["byte_size"], sha256=o["sha256"],
+            relative_path=o["relative_path"]) for o in sorted(normalized, key=lambda o: o["object_id"])]).encode()).hexdigest()
+
+    def _closure_matches(self, db, reservation_id, binding):
+        """Recompute the immutable closure from actual rows, once per call.
+
+        Only identity fields count: fetched/cleaned bookkeeping never changes it.
+        Missing, extra or changed rows, a non-canonical path or a stale path_key
+        all mismatch the binding digest.
+        """
+        rows = []
+        cursor = db.execute("SELECT id,bytes,sha,path,path_key FROM input_copies WHERE reservation=? ORDER BY id LIMIT ?",
+                            (reservation_id, MAX_INPUT_COPIES + 1))
+        for index, row in enumerate(cursor):
+            if index >= MAX_INPUT_COPIES:
+                return False  # Refuse an oversized closure before touching the excess row.
+            # Lexical canonical-owned check only; filesystem symlink/escape checks
+            # still run per object in _owned_path before any fence or unlink.
+            parts = PurePosixPath(row["path"]).parts if type(row["path"]) is str else ()
+            if (len(parts) < 3 or parts[:2] != ("jobs", reservation_id) or row["path"] != "/".join(parts)
+                    or any(part in (".", "..") for part in parts) or row["path_key"] != _path_key(row["path"])):
+                return False
+            rows.append(dict(object_id=row["id"], byte_size=row["bytes"], sha256=row["sha"], relative_path=row["path"]))
+        return bool(rows) and self._closure_sha256(rows) == binding["inputsSha256"]
+
+    def register_input_binding(self, reservation_id, *, job_id, generation, environment, manifest_sha256,
+                               pipeline_sha256, objects):
+        """Bind the full fetched-input closure to its original reservation before any download.
+
+        objects: list of {object_id, byte_size, sha256, relative_path}. Exact replay is
+        idempotent at any later state; a new binding needs a live reservation.
+        """
+        _id(reservation_id); _id(job_id); _integer(generation, "generation", 1)
+        _sha(manifest_sha256); _sha(pipeline_sha256)
+        if environment not in ("production", "staging"):
+            raise ValueError("invalid environment")
+        if type(objects) is not list or not 0 < len(objects) <= MAX_INPUT_COPIES:
+            raise ValueError("bounded non-empty input closure required")
+        normalized = []
+        for obj in objects:
+            if type(obj) is not dict or set(obj) != {"object_id", "byte_size", "sha256", "relative_path"}:
+                raise ValueError("closed input copy descriptor required")
+            normalized.append(dict(object_id=_id(obj["object_id"]), byte_size=_integer(obj["byte_size"], "input copy bytes"),
+                sha256=_sha(obj["sha256"]), relative_path=self._owned_path(reservation_id, obj["relative_path"])))
+        normalized.sort(key=lambda o: o["object_id"])
+        if len({o["object_id"] for o in normalized}) != len(normalized):
+            raise ValueError("duplicate input copy ID")
+        identity = _json(dict(jobId=job_id, generation=generation, environment=environment,
+            inputManifestSha256=manifest_sha256, pipelineDigest=pipeline_sha256,
+            inputsSha256=self._closure_sha256(normalized)))
+        with self._transaction() as db:
+            self._require_inputs(db)
+            row = self._reservation(db, reservation_id)
+            old = db.execute("SELECT identity FROM input_bindings WHERE reservation=?", (reservation_id,)).fetchone()
+            if old:
+                if old[0] != identity:
+                    raise PolicyConflict("input binding changed")
+                return
+            settings = json.loads(row["settings"])
+            if row["state"] not in ("reserved", "engine_started", "uncertain") or (
+                    row["state"] == "reserved" and row["expires"] <= self._now(db)):
+                raise PolicyConflict("input binding requires a live reservation")
+            if ((row["job"], row["generation"], row["environment"], settings["manifest_sha256"])
+                    != (job_id, generation, environment, manifest_sha256)):
+                raise PolicyConflict("input binding does not match the original reservation")
+            if sum(o["byte_size"] for o in normalized) != settings["input_bytes"]:
+                raise PolicyConflict("input closure bytes differ from the reservation")
+            self._check_input_aliases(db, reservation_id, normalized)
+            db.execute("INSERT INTO input_bindings VALUES(?,?)", (reservation_id, identity))
+            db.executemany("INSERT INTO input_copies VALUES(?,?,?,?,?,?,NULL,NULL)",
+                [(reservation_id, o["object_id"], o["byte_size"], o["sha256"], o["relative_path"],
+                  _path_key(o["relative_path"])) for o in normalized])
+
+    def confirm_input_copy(self, reservation_id, object_id, *, byte_size, sha256):
+        """Record that the caller verified this exact copy on disk; idempotent.
+
+        Only confirmed copies can become cleanup candidates: missing or partial
+        fetches never authorize deletion.
+        """
+        _id(object_id); _integer(byte_size, "input copy bytes"); _sha(sha256)
+        with self._transaction() as db:
+            self._require_inputs(db)
+            row = self._reservation(db, reservation_id)
+            copy = db.execute("SELECT bytes,sha,fetched,cleaned FROM input_copies WHERE reservation=? AND id=?",
+                              (reservation_id, object_id)).fetchone()
+            if copy is None or (copy["bytes"], copy["sha"]) != (byte_size, sha256):
+                raise PolicyConflict("unknown or changed input copy")
+            if copy["fetched"] is not None:
+                return
+            if copy["cleaned"] is not None or row["state"] not in ("reserved", "engine_started", "uncertain"):
+                raise PolicyConflict("input copy confirmation requires a live reservation")
+            db.execute("UPDATE input_copies SET fetched=? WHERE reservation=? AND id=?",
+                       (self._now(db), reservation_id, object_id))
+
+    def _release_identity(self, db, reservation_id, record):
+        """Closed compact record bound to this ledger's own binding and rows.
+
+        Necessary, never sufficient: the configured authority must still resolve it.
+        """
+        if type(record) is not dict or set(record) != set(RELEASE_FIELDS):
+            raise PolicyConflict("closed input release record required")
+        for key, value in (("schemaVersion", 1), ("purpose", "input-copy-release"),
+                           ("scope", "worker_fetched_inputs_only")):
+            if type(record[key]) is not type(value) or record[key] != value:
+                raise PolicyConflict("unsupported input release record")
+        try:
+            for key in ("releaseId", "authorityId", "reservationId", "jobId", "terminalReceiptId",
+                        "sourceCustodyReceiptId", "sourceStorageReceiptId"):
+                _id(record[key])
+            for key in ("inputManifestSha256", "pipelineDigest", "inputsSha256", "outcomeSha256", "pipelineClosureSha256"):
+                _sha(record[key])
+            _integer(record["generation"], "generation", 1)
+        except ValueError:
+            raise PolicyConflict("invalid input release record field") from None
+        roles = [record[key] for key in ("releaseId", "terminalReceiptId", "sourceCustodyReceiptId", "sourceStorageReceiptId")]
+        if len(set(roles)) != len(roles):
+            raise PolicyConflict("input release receipt roles must be distinct")
+        if record["outcome"] not in ("succeeded", "failed", "cancelled"):
+            raise PolicyConflict("unsupported terminal outcome")
+        stored = db.execute("SELECT identity FROM input_bindings WHERE reservation=?", (reservation_id,)).fetchone()
+        if stored is None:
+            raise PolicyConflict("unknown input binding")
+        binding = json.loads(stored[0])
+        if not self._closure_matches(db, reservation_id, binding):
+            raise PolicyConflict("stored input closure differs from its binding")
+        row = self._reservation(db, reservation_id)
+        if (record["reservationId"], record["jobId"], record["generation"], record["environment"],
+                record["inputManifestSha256"], record["pipelineDigest"], record["inputsSha256"]) != (
+                reservation_id, binding["jobId"], binding["generation"], binding["environment"],
+                binding["inputManifestSha256"], binding["pipelineDigest"], binding["inputsSha256"]):
+            raise PolicyConflict("input release record differs from the original binding")
+        if row["state"] != "terminal" or (row["job"], row["generation"]) != (binding["jobId"], binding["generation"]):
+            raise PolicyConflict("input release requires the original confirmed terminal reservation")
+        source_roles = (record["sourceCustodyReceiptId"], record["sourceStorageReceiptId"], record["releaseId"])
+        if any(db.execute("SELECT 1 FROM receipts WHERE id=? OR storage_id=?", (value, value)).fetchone()
+               for value in source_roles):
+            raise PolicyConflict("input release reuses a result receipt role")
+        if record["outcome"] == "succeeded":
+            result = db.execute("SELECT identity FROM results WHERE reservation=?", (reservation_id,)).fetchone()
+            if result is None or json.loads(result[0])["result_manifest_sha256"] != record["outcomeSha256"]:
+                raise PolicyConflict("succeeded release must name the registered result")
+            if db.execute("SELECT 1 FROM objects WHERE reservation=? AND accepted IS NULL", (reservation_id,)).fetchone():
+                raise PolicyConflict("full durable Viewer acceptance required")
+            receipt = db.execute("SELECT payload FROM receipts WHERE id=?", (record["terminalReceiptId"],)).fetchone()
+            if receipt is None or json.loads(receipt[0])["reservation_id"] != reservation_id:
+                raise PolicyConflict("succeeded release must name a durable Viewer receipt")
+        return binding
+
+    def _resolve(self, record):
+        authority = self.release_authority
+        if authority is None:
+            raise PolicyConflict("no input release authority is configured")
+        if record["authorityId"] != authority.authority_id:
+            raise PolicyConflict("input release names a different authority")
+        try:
+            resolved = authority.resolve_input_release(json.loads(_json(record)))
+        except Exception:
+            raise PolicyConflict("input release authority did not confirm the record") from None
+        try:
+            if _json(resolved) != _json(record):
+                raise PolicyConflict("input release authority resolved a different record")
+        except (TypeError, ValueError):
+            raise PolicyConflict("input release authority resolved a different record") from None
+
+    def release_input_copies(self, reservation_id, *, record):
+        """Store an authority-resolved compact release record; returns copy count.
+
+        record fields: RELEASE_FIELDS. The ledger checks it against its own binding,
+        reservation, results and receipts, then requires the configured authority to
+        resolve the identical record. Terminal metadata acknowledgement alone is
+        never deletion authority. No file is deleted; pins and grace still apply.
+        """
+        _id(reservation_id)
+        try:
+            encoded = _json(record)
+        except (TypeError, ValueError):
+            raise PolicyConflict("canonical input release record required") from None
+        if len(encoded.encode()) > MAX_RELEASE_RECORD_BYTES:
+            raise PolicyConflict("bounded input release record required")
+        with self._transaction() as db:
+            self._require_inputs(db)
+            old = db.execute("SELECT record FROM input_releases WHERE reservation=?", (reservation_id,)).fetchone()
+            if old and old[0] != encoded:
+                raise PolicyConflict("input release record changed")
+            self._release_identity(db, reservation_id, record)
+            self._resolve(record)
+            if not old:
+                db.execute("INSERT INTO input_releases VALUES(?,?,?,?,?)", (reservation_id, encoded,
+                    hashlib.sha256(encoded.encode()).hexdigest(), record["authorityId"], self._now(db)))
+            return db.execute("SELECT COUNT(*) FROM input_copies WHERE reservation=?", (reservation_id,)).fetchone()[0]
+
+    def _stored_release(self, db, reservation_id):
+        """Re-check the bounded canonical stored record against its digest, original
+        identity and referenced rows; None retains every copy."""
+        row = db.execute("SELECT record,record_sha,authority FROM input_releases WHERE reservation=?",
+                         (reservation_id,)).fetchone()
+        if row is None or type(row[0]) is not str or len(row[0].encode()) > MAX_RELEASE_RECORD_BYTES:
+            return None
+        try:
+            record = json.loads(row[0])
+            if (_json(record) != row[0] or hashlib.sha256(row[0].encode()).hexdigest() != row[1]
+                    or record.get("authorityId") != row[2]):
+                return None
+            self._release_identity(db, reservation_id, record)
+        except (PolicyConflict, ValueError, TypeError, KeyError, AttributeError):
+            return None
+        return record
+
+    def set_input_pin(self, reservation_id, object_id, reference, *, kind, state):
+        """read: readers; worker: active execution; downstream: dependent stages."""
+        _id(reference)
+        if kind not in ("read", "worker", "downstream") or state not in ("active", "uncertain", "released"):
+            raise ValueError("invalid pin")
+        with self._transaction() as db:
+            self._require_inputs(db)
+            copy = db.execute("SELECT cleaned FROM input_copies WHERE reservation=? AND id=?",
+                              (reservation_id, object_id)).fetchone()
+            if copy is None or copy[0] is not None:
+                raise PolicyConflict("unknown or cleaned input copy")
+            if db.execute("SELECT 1 FROM input_cleanup_intents WHERE reservation=? AND object=?",
+                          (reservation_id, object_id)).fetchone():
+                raise PolicyConflict("input copy is fenced for cleanup")
+            old = db.execute("SELECT kind FROM input_pins WHERE reservation=? AND object=? AND reference=?",
+                             (reservation_id, object_id, reference)).fetchone()
+            if old and old[0] != kind:
+                raise PolicyConflict("pin kind changed")
+            db.execute("INSERT INTO input_pins VALUES(?,?,?,?,?) ON CONFLICT(reservation,object,reference) "
+                       "DO UPDATE SET state=excluded.state", (reservation_id, object_id, reference, kind, state))
+
+    def _input_eligible(self, db, now, reservation_id=None, object_id=None):
+        """Yield eligible copies whose stored release record still validates."""
+        exact = "" if reservation_id is None else " AND c.reservation=? AND c.id=?"
+        rows = db.execute("""SELECT c.reservation,c.id,c.bytes,c.sha,c.path,r.generation,x.released
+            FROM input_copies c JOIN reservations r ON r.id=c.reservation
+            JOIN input_releases x ON x.reservation=c.reservation
+            WHERE r.state='terminal' AND c.fetched IS NOT NULL AND c.cleaned IS NULL
+            AND MAX(x.released,r.terminal_at)<=?
+            AND NOT EXISTS(SELECT 1 FROM input_cleanup_intents i WHERE i.reservation=c.reservation AND i.object=c.id)
+            AND NOT EXISTS(SELECT 1 FROM input_pins p WHERE p.reservation=c.reservation
+              AND p.object=c.id AND p.state!='released')""" + exact + " ORDER BY x.released,c.reservation,c.id",
+            (now - self.grace,) + (() if reservation_id is None else (reservation_id, object_id)))
+        valid = {}
+        for row in rows:
+            if row["reservation"] not in valid:
+                valid[row["reservation"]] = self._stored_release(db, row["reservation"])
+            if valid[row["reservation"]] is not None:
+                yield row
+
+    def input_cleanup_candidates(self, *, max_count=100, max_bytes=1024**3):
+        """Oldest releases first; count and byte limits are hard. A copy larger
+        than max_bytes is deferred, never admitted: see oversized_input_copies."""
+        _integer(max_count, "max count", 1); _integer(max_bytes, "max bytes")
+        planned, total = [], 0
+        with self._transaction() as db:
+            self._require_inputs(db)
+            for row in self._input_eligible(db, self._now(db)):
+                if len(planned) >= max_count:
+                    break
+                if total + row["bytes"] > max_bytes:
+                    continue
+                self._owned_path(row["reservation"], row["path"])
+                planned.append(dict(row))
+                total += row["bytes"]
+        return planned
+
+    def oversized_input_copies(self, *, max_bytes, max_count=100):
+        """Report otherwise eligible copies that no batch under max_bytes can admit.
+
+        They stay retained until a reviewed private object-size policy covers them.
+        """
+        _integer(max_count, "max count", 1); _integer(max_bytes, "max bytes")
+        found = []
+        with self._transaction() as db:
+            self._require_inputs(db)
+            for row in self._input_eligible(db, self._now(db)):
+                if row["bytes"] > max_bytes:
+                    found.append(dict(row))
+                    if len(found) >= max_count:
+                        break
+        return found
+
+    def begin_input_cleanup(self, reservation_id, object_id, *, generation, sha256, lease_seconds=60):
+        """Atomically fence one released input copy after the authority freshly
+        re-resolves its stored record; never deletes, never expires the fence."""
+        _integer(generation, "generation", 1); _sha(sha256)
+        _integer(lease_seconds, "cleanup lease", 1)
+        with self._transaction() as db:
+            self._require_inputs(db)
+            now = self._now(db)
+            row = next(self._input_eligible(db, now, reservation_id, object_id), None)
+            if row is None or row["generation"] != generation or row["sha"] != sha256:
+                raise PolicyConflict("input cleanup candidate changed or is no longer eligible")
+            self._resolve(self._stored_release(db, reservation_id))
+            self._owned_path(reservation_id, row["path"])
+            token = secrets.token_hex(32)
+            expires = now + lease_seconds
+            db.execute("INSERT INTO input_cleanup_intents VALUES(?,?,?,?,'cleanup_pending',?,?,?)",
+                       (reservation_id, object_id, token, expires, row["path"], row["sha"], row["bytes"]))
+            return dict(row) | dict(intent_token=token, lease_expires=expires, state="cleanup_pending")
+
+    def input_cleanup_intent(self, reservation_id, object_id):
+        """Recover a persisted input fence; expired leases report uncertainty and retain it."""
+        with self._transaction() as db:
+            self._require_inputs(db)
+            now = self._now(db)
+            row = db.execute("""SELECT i.*,i.token AS intent_token,i.expires AS lease_expires,
+                             c.path AS row_path,c.sha AS row_sha,c.bytes AS row_bytes,r.generation
+                             FROM input_cleanup_intents i
+                             JOIN input_copies c ON c.reservation=i.reservation AND c.id=i.object
+                             JOIN reservations r ON r.id=i.reservation
+                             WHERE i.reservation=? AND i.object=?""",
+                             (reservation_id, object_id)).fetchone()
+            if row is None:
+                raise PolicyConflict("unknown input cleanup intent")
+            if (row["row_path"], row["row_sha"], row["row_bytes"]) != (row["path"], row["sha"], row["bytes"]):
+                raise PolicyConflict("input copy changed after its cleanup fence")
+            if row["state"] == "cleanup_pending" and row["expires"] <= now:
+                db.execute("UPDATE input_cleanup_intents SET state='uncertain' WHERE reservation=? AND object=?",
+                           (reservation_id, object_id))
+                return dict(row) | dict(state="uncertain")
+            return dict(row)
+
+    def mark_input_cleaned(self, reservation_id, object_id, *, generation, sha256,
+                           intent_token, executor_attested):
+        """Confirm the exact fenced input intent after executor-verified unlink."""
+        _integer(generation, "generation", 1); _sha(sha256)
+        if executor_attested is not True:
+            raise PolicyConflict("cleanup executor attestation required")
+        with self._transaction() as db:
+            self._require_inputs(db)
+            row = db.execute("SELECT c.*,r.generation FROM input_copies c JOIN reservations r "
+                "ON r.id=c.reservation WHERE c.reservation=? AND c.id=?", (reservation_id, object_id)).fetchone()
+            if row is None or row["generation"] != generation or row["sha"] != sha256:
+                raise PolicyConflict("input cleanup identity changed")
+            intent = db.execute("SELECT * FROM input_cleanup_intents WHERE reservation=? AND object=?",
+                                (reservation_id, object_id)).fetchone()
+            if intent is None or not isinstance(intent_token, str) or not secrets.compare_digest(intent["token"], intent_token):
+                raise PolicyConflict("input cleanup intent token does not match")
+            if (row["path"], row["sha"], row["bytes"]) != (intent["path"], intent["sha"], intent["bytes"]):
+                raise PolicyConflict("input copy changed after its cleanup fence")
+            if row["cleaned"] is not None:
+                return
+            self._owned_path(reservation_id, row["path"])
+            db.execute("UPDATE input_copies SET cleaned=? WHERE reservation=? AND id=?",
+                       (self._now(db), reservation_id, object_id))
+            db.execute("UPDATE input_cleanup_intents SET state='cleaned' WHERE reservation=? AND object=?",
                        (reservation_id, object_id))
