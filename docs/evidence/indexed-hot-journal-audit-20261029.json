@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "status": "retained-work-holds-recovery-required-not-automatic-recovery",
+  "scope": "Supplementary actual SQLite interruption audit against evolving source; not a full worker or engine power-loss test",
+  "environment": "Local isolated Linux Docker, read-only source/root, network none, synthetic private state in tmpfs",
+  "procedure": "Explicitly bootstrap fresh v2; child SQLite connection begins an uncommitted transaction with cache_size=1 and FULL synchronous, inserts 1000 normalized synthetic object rows to force pager spill, signals transaction-open; terminate that exact owned child; invoke normal read-only startup guard",
+  "observed": {
+    "ownedChildExitCode": -9,
+    "actualHotRollbackJournalPresent": true,
+    "normalStartup": "IndexedFetchHeld:indexed_database_recovery_required",
+    "engineOrNetworkJobs": 0,
+    "clientData": false
+  },
+  "interpretation": "Current guard intentionally refuses a journal requiring SQLite recovery. Logical exception/reopen tests and coordinator disconnect tests do not prove automatic restart after an interrupted pager transaction. No recovery or marker repair was attempted by this audit.",
+  "remaining": "Design and qualify bounded same-owner/profile hot-journal recovery before claiming automatic worker power-loss recovery. Retain strict ownership, original ABI, root/inode, sidecar bounds, quota and no-foreign-adoption checks. This is separate from the current indexed transfer optimization.",
+  "cleanup": "Only this owned disposable synthetic temporary directory and child were closed by the test fixture; no installed state, image, volume, NAS or original files changed"
+}
