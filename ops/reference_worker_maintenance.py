@@ -27,7 +27,7 @@ class WorkerMaintenanceHeld(ValueError):pass
 class WorkerComposeNode(ComposeNode):
     """Existing Compose recipe, with the owned worker fence at Docker mutation."""
     def __init__(self,args,root,worker):
-        super().__init__(args,root);self.worker_maintenance=worker
+        super().__init__(args,root,owned_recipe_provenance=True);self.worker_maintenance=worker
 
     def replace(self,image):
         try:command=self.prepare(image)
@@ -508,8 +508,12 @@ class WorkerMaintenance:
         from urllib.parse import urlsplit
         require(observed['ports'].get(str(adapter.args.node_port)+'/tcp')==[{'HostIp':'127.0.0.1','HostPort':str(urlsplit(adapter.node.origin).port)}],'worker_native_port_changed')
         labels=observed['labels'];require(labels.get('com.docker.compose.project')==adapter.args.project
-            and labels.get('com.docker.compose.service')==adapter.args.service
-            and labels.get('com.docker.compose.project.config_files')==adapter.args.compose_file,'worker_native_compose_changed')
+            and labels.get('com.docker.compose.service')==adapter.args.service,'worker_native_compose_changed')
+        source=str(Path(adapter.args.compose_file).absolute().resolve())
+        if labels.get('com.docker.compose.project.config_files')!=source:
+            require(type(adapter) is WorkerComposeNode and adapter.owned_recipe_provenance is True,
+                    'worker_native_compose_changed')
+            adapter.configuration_identity(labels,target)
         info=adapter.node.json('GET','/info');version=info.get('engineVersion')
         require(type(version) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}',version),'worker_native_version_unavailable')
         return dict(containerId=item['Id'],imageId=target,engineVersion=version)

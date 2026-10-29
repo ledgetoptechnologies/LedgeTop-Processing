@@ -36,8 +36,8 @@
     {
       "requirement": "Drain, container update, verification and recovery",
       "state": "partial-existing-runtime-and-source",
-      "evidence": "Indexed census/history and same-owner one-start retry in sourcefcae10b; independent static review plus29 source tests on main. Existing coordinator gate remains installed separately.",
-      "remaining": "Actual Docker mapping/repeated upgrade/rollback lab; source fixes for ingress bind address and executed-compose artifact provenance now under development; cold new-process updater resume, legacy updater migration and activation remain open"
+      "evidence": "Indexed census/history and same-owner one-start retry in sourcefcae10b; independent static review plus29 source tests on main. Both actual cached NodeODX images passed isolated empty startup/info/task-list probes, same engine3.8.5/API2.4 with distinct digests; exact stopped readback and original5 unchanged recorded in empty-nodeodx-image-probes-20261029.json. Existing coordinator gate remains installed separately.",
+      "remaining": "Actual Docker mapping/repeated upgrade/rollback lab remains unlaunched; ingress/Compose provenance source core reviewed with amended planner delta review pending. Cold new-process updater resume, legacy updater migration and activation remain open"
     },
     {
       "requirement": "Optional genuine-LiDAR TreeDar and future Gaussian splats",
@@ -66,8 +66,8 @@
     {
       "requirement": "Engineering Hub and Viewer/Claude/Hermes coordination",
       "state": "active",
-      "evidence": "Fresh Hubv5 verifiedd85 healthy/54tools and listenerPID70444; canonical Processingv51 updated and read back. Viewer owner actively coordinates source integration/Claude.",
-      "remaining": "Hermes original keyed send retained/pending in fresh exactreceipt; no new acknowledgement or idle/reboot wake proof. Continue event-driven updates without scheduled inbox polling."
+      "evidence": "Fresh 11:17:03Z configured Hub verifiedd85 healthy/54tools and listenerPID70444, no scoped note change from canonical Processingv51. Viewer owner actively coordinates source integration/Claude. New user-authorized Hermes submission-compatibility research request f4cab1c4-ea7a-47c3-b690-554219da13ad accepted; durable receipt retained separately from the earlier request.",
+      "remaining": "Hermes reply and actual new delivery unverified; prior pending request not resent. No new idle/reboot wake proof. Continue event-driven updates without scheduled inbox polling."
     }
   ],
   "operatorBoundaries": {

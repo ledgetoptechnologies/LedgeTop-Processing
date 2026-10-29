@@ -65,10 +65,26 @@ def _allowed_clients(values):
     return result
 
 
-def configuration(listen, backend, closed, allowed_clients=()):
+def _listen_directives(port, address):
+    if address is None:
+        return f'listen 0.0.0.0:{port};\n        listen [::]:{port} ipv6only=on;'
+    if type(address) is not str or '%' in address:
+        raise GateError('canonical fixed ingress bind address required')
+    try:
+        value = ipaddress.ip_address(address)
+    except ValueError:
+        raise GateError('canonical fixed ingress bind address required') from None
+    if str(value) != address:
+        raise GateError('canonical fixed ingress bind address required')
+    return (f'listen {address}:{port};' if value.version == 4
+            else f'listen [{address}]:{port} ipv6only=on;')
+
+
+def configuration(listen, backend, closed, allowed_clients=(), *, listen_address=None):
     if any(type(p) is not int or not 1024 <= p <= 65535 for p in (listen, backend)) or listen == backend:
         raise GateError('invalid fixed ingress ports')
     allowed = _allowed_clients(allowed_clients)
+    binding = _listen_directives(listen, listen_address)
     # Empty preserves the legacy unrestricted gate. Restricted gates use the
     # actual peer address; neither X-Forwarded-For nor any other header is trusted.
     access = ''
@@ -97,8 +113,7 @@ http {{
     scgi_temp_path /tmp/scgi;
     client_max_body_size 0;
     server {{
-        listen 0.0.0.0:{listen};
-        listen [::]:{listen} ipv6only=on;
+        {binding}
         {access}
         add_header Cache-Control no-store always;
         location / {{ {route} }}
@@ -122,7 +137,10 @@ class Ingress:
         if not re.fullmatch(r'sha256:[a-f0-9]{64}', self.config['proxyImage']):
             raise GateError('immutable gateway image required')
         configuration(self.config['listenPort'], self.config['backendPort'], True,
-                      self.config.get('allowedClients', ()))
+                      self.config.get('allowedClients', ()),
+                      listen_address=self.config.get('listenAddress'))
+        if 'listenAddress' in self.config and self.config['listenAddress'] is None:
+            raise GateError('explicit ingress bind address must be a fixed IP')
         if self.config.get('backendEngine', 'odx') not in ('odm', 'odx'):
             raise GateError('explicit ODM-family backend engine required')
         token = self.config.get('backendToken', '')
@@ -218,7 +236,8 @@ class Ingress:
         save(self.root / 'state.json', state)
         save(self.root / 'public-config/nginx.conf',
              configuration(self.config['listenPort'], self.config['backendPort'], closed,
-                           self.config.get('allowedClients', ())), mode=0o644)
+                           self.config.get('allowedClients', ()),
+                           listen_address=self.config.get('listenAddress')), mode=0o644)
         self.docker(['exec', item['Id'], 'nginx', '-t', '-c', '/config/nginx.conf'])
         self.docker(['kill', '--signal', 'HUP', item['Id']])
         deadline = time.monotonic() + seconds

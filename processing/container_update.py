@@ -74,7 +74,10 @@ def loopback(value):
 
 class ComposeNode:
     """Only one operator-selected Compose service; no image pulls or pruning."""
-    def __init__(self, args, root):
+    def __init__(self, args, root, *, owned_recipe_provenance=False):
+        if type(owned_recipe_provenance) is not bool:
+            raise UpdateError('explicit Compose provenance mode required')
+        self.owned_recipe_provenance = owned_recipe_provenance
         self.args, self.root = args, root
         self.expected_engine = getattr(args,'expected_engine','odx')
         upload,process = getattr(args,'upload_layout',None),getattr(args,'process_layout',None)
@@ -129,7 +132,40 @@ class ComposeNode:
                 or bindings[0].get('HostIp') != endpoint.hostname
                 or bindings[0].get('HostPort') != str(expected_port)):
             raise UpdateError('probe origin is not the exact private port of the managed container')
+        if self.owned_recipe_provenance:
+            self.configuration_identity(labels, item['Image'])
         return item
+
+    def _source_model(self):
+        from .compose_execution_registry import source_snapshot
+        path = Path(self.args.compose_file).absolute()
+        snapshot = source_snapshot(path)
+        model = json.loads(self.docker([*self.base, 'config', '--format', 'json']))
+        if source_snapshot(path) != snapshot:
+            raise UpdateError('original Compose source changed during resolution')
+        return path, snapshot, model
+
+    def configuration_identity(self, labels, image):
+        """Read-only exact original source or registered immutable execution."""
+        from .compose_execution_registry import ComposeExecutionRegistry, ComposeProvenanceHeld
+        source = str(Path(self.args.compose_file).absolute())
+        label = labels.get('com.docker.compose.project.config_files')
+        if label == source:
+            if self.owned_recipe_provenance:
+                from .compose_execution_registry import source_snapshot
+                try:
+                    source_snapshot(Path(source))
+                except (ComposeProvenanceHeld, OSError, ValueError, KeyError, TypeError):
+                    raise UpdateError('original Compose source identity changed') from None
+            return dict(mode='original-source', sourcePath=source)
+        if not self.owned_recipe_provenance:
+            raise UpdateError('unowned resolved Compose execution')
+        try:
+            path, _snapshot, model = self._source_model()
+            proof = ComposeExecutionRegistry(path, self.args.project, self.args.service, model).verify(label, image)
+        except (ComposeProvenanceHeld, OSError, ValueError, KeyError, TypeError):
+            raise UpdateError('owned resolved Compose identity changed') from None
+        return dict(mode='registered-execution', **proof)
 
     def image(self, image):
         if not PIN.fullmatch(image):
@@ -190,6 +226,13 @@ class ComposeNode:
     def prepare(self, image):
         self.engine()
         self.image(image)
+        source_context = None
+        if self.owned_recipe_provenance:
+            from .compose_execution_registry import ComposeProvenanceHeld
+            try:
+                source_context = self._source_model()
+            except (ComposeProvenanceHeld, OSError, ValueError, KeyError, TypeError):
+                raise UpdateError('original Compose source preflight held') from None
         override = self.root / 'image-override.json'
         data = json.dumps({'services': {self.args.service: {'image': image, 'pull_policy': 'never'}}})
         with os.fdopen(os.open(override, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as stream:
@@ -201,6 +244,22 @@ class ComposeNode:
         if (service.get('post_start') or service.get('pre_stop') or service.get('scale', 1) != 1
                 or deployment.get('replicas', 1) != 1 or deployment.get('mode', 'replicated') != 'replicated'):
             raise UpdateError('service hooks/scaling are not supported by maintenance adapter')
+        if self.owned_recipe_provenance:
+            from .compose_execution_registry import ComposeExecutionRegistry, ComposeProvenanceHeld, source_snapshot
+            try:
+                path, snapshot, model = source_context
+                # The independent original model preceded the exact override
+                # resolution and hook/scaling checks above.
+                if source_snapshot(path) != snapshot:
+                    raise UpdateError('original Compose source changed before registration')
+                registry = ComposeExecutionRegistry(path, self.args.project, self.args.service, model)
+                proof = registry.reserve(configuration, image, self.root)
+                save(self.root / 'compose-execution.json', dict(schemaVersion=1,
+                     sourceResolution=snapshot, registry=proof))
+            except (ComposeProvenanceHeld, OSError, ValueError, KeyError, TypeError):
+                raise UpdateError('owned Compose recipe registration held before execution') from None
+            return ['docker', 'compose', '-p', self.args.project, '-f', proof['executed']['path'],
+                    'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', self.args.service]
         # Execute the exact resolved configuration we validated. Source edits
         # between validation and 'up' must not introduce a new hook or mount.
         resolved = self.root / 'resolved-compose.json'

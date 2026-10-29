@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "scope": "Inactive Compose execution provenance, explicit ingress binding and empty runtime planner source",
+  "baseCommit": "04a857603500db38f4657f97ed12aa3f66697432",
+  "decision": "source-accepted-runtime-incomplete",
+  "frozenSource": {
+    "artifact": "processing-worker-maintenance-runtime-plan-20261029/amended-source-review/frozen-source.json",
+    "sha256": "f4c6b87b9642eb05b3e8148644a1095286f1cc0416dcd91e8d49523271f6ec99",
+    "paths": 10
+  },
+  "reviews": [
+    {
+      "artifact": "processing-compose-runtime-independent-20261029/review.md",
+      "sha256": "9634ee7405a586c782a44b60bd054f06b88f5d803bca3bae52555000cda0fc8e",
+      "result": "Core provenance and private ingress accepted; known-invalid planner logging held pending amendment",
+      "tests": "40 host-only tests passed, zero skips, 2.088 seconds"
+    },
+    {
+      "artifact": "processing-compose-runtime-independent-amended-20261029/review.md",
+      "sha256": "2864f68e916302522f772bbb34e66b83b56e4df3d4745eae1f4bbe1edc54408b",
+      "result": "Three-file planner/test/doc amendment accepted; logging defect closed",
+      "tests": "8 targeted host-only tests passed, zero skips, 0.022 seconds"
+    }
+  ],
+  "qualifiedProperties": [
+    "Worker-aware adapter requires immutable registered Compose execution artifacts, separately bound to original source and exact operation identities.",
+    "Retained recipes support sequential image transitions and rollback without arbitrary prior receipt adoption or pruning.",
+    "Explicit canonical ingress IP emits only its selected address family; omitted field preserves legacy behavior.",
+    "Planner emits supported bounded backend logging/configuration; backend private overlay is writable while worker root remains read-only."
+  ],
+  "runtimeEvidence": "empty-nodeodx-image-probes-20261029.json",
+  "remaining": [
+    "Actual POSIX/Compose mapping, full worker maintenance sequence, repeated transition and rollback acceptance.",
+    "Fresh full-lab provisioning and completed run authority with exact original-five plus retained-probe inventory; historical strict-five draft refuses the current eight-container inventory.",
+    "Installed legacy updater migration before production worker activation.",
+    "Cold new-process updater mapping remains held."
+  ],
+  "deployed": false,
+  "packagesPublished": false
+}

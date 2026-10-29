@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "scope": "Two isolated empty cached-image startup probes on main; not worker maintenance or processing acceptance",
+  "host": "192.168.50.88",
+  "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+  "operationId": "a2255efc-8c6f-40a5-a6a2-7779ea5753b4",
+  "result": "passed",
+  "images": [
+    "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776",
+    "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde"
+  ],
+  "observedForBoth": {
+    "engine": "odx",
+    "engineVersion": "3.8.5",
+    "apiVersion": "2.4.0",
+    "taskQueueCount": 0,
+    "taskListEmpty": true
+  },
+  "finalStateForBoth": {
+    "status": "exited",
+    "running": false,
+    "pid": 0,
+    "restartCount": 0,
+    "sizeRwBytes": 24576,
+    "retained": true
+  },
+  "constraints": {
+    "network": "none",
+    "runtime": "runc",
+    "hostMounts": false,
+    "publishedPorts": false,
+    "gpu": false,
+    "credentials": false,
+    "tasksSubmitted": false,
+    "existingFiveUnchanged": true,
+    "fullMaintenanceLabLaunched": false
+  },
+  "startupCorrections": [
+    "Preserved failed local log-driver max-file=1 attempt; corrected max-file=2 for compression compatibility.",
+    "Preserved read-only backend failure; real image uses a private writable overlay and supported bounded logger configuration. Worker root remains read-only.",
+    "Preserved failed pre-start docker cp archive destination; proved target absent, copied one verified canonical config to the directory, then started each exact owned CID once."
+  ],
+  "evidence": {
+    "artifactDirectory": "processing-worker-maintenance-runtime-plan-20261029/probe-v3-proposal",
+    "executionSummary": {
+      "file": "corrected-execution-stdout.json",
+      "sha256": "3fb81448bcc392699d08048f1b67a43fbae05b51d9ad154087f731ce0138123d",
+      "note": "Its state=created field is the pre-start recipe observation; the separate fresh final readback proves stopped state."
+    },
+    "finalReadback": {
+      "file": "fresh-final-readback.json",
+      "sha256": "eea14d64ee8a2185a44aee870f5e78db9e7e5e3086bd945a44113ca996aae6b3"
+    }
+  },
+  "remaining": [
+    "Accept and commit reviewed Compose provenance/private ingress source.",
+    "Complete fresh full-lab plan and actual worker drain, image transition, restart, publication and repeated rollback acceptance.",
+    "Qualify live pipeline, real datasets, NAS custody and Viewer handoffs separately."
+  ]
+}
