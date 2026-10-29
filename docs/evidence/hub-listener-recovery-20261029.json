@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-29T16:23:49Z",
+  "scope": "Observed recovery of the existing Processing chat native subscription; not a new delivery or reboot test",
+  "threadId": "01a16555-50cc-7ee2-9b43-189cac48a431",
+  "correlationId": "agent-link-5b9b51f9-d5af-45a8-88dd-9f1835029e9e",
+  "priorRecordedPid": 70444,
+  "priorRecordedProcessAbsent": true,
+  "replacementProcessAbsentBeforeRecovery": true,
+  "trustedCurrentChatEnvironmentMatched": true,
+  "recovery": {
+    "procedure": "Existing link_chat.py link for the exact correlation, then its returned native_push.py command and existing per-chat config",
+    "registrationResult": "registered_launch_required",
+    "managedExecutionSession": 32122,
+    "observedPid": 151676,
+    "processIdentityVerified": true,
+    "independentProcessCommandAndConfigReviewPassed": true,
+    "observedSubscriptionStatus": "subscribed",
+    "observedCursor": 3682,
+    "observedNotificationCount": 467,
+    "observedResourceReadCount": 493,
+    "existingRouteReused": true,
+    "activeProcessStillNeededForGoal": true
+  },
+  "installedHub": {
+    "observedCommit": "d85b3f6e3a9dffbf58b0ae75a2197dd1647690d7",
+    "healthPassed": true,
+    "toolCount": 54,
+    "readinessNoteVersionReviewed": 351,
+    "publishedNewerBuildNotAssumedInstalled": true
+  },
+  "notEstablished": [
+    "A new resource_updated and app_accepted event for this listener generation",
+    "Idle-chat automatic wake or uninterrupted delivery",
+    "Reboot or app-restart recovery",
+    "A new reply to the pending Hermes research request"
+  ],
+  "newDiscussionCreated": false,
+  "invitationResent": false,
+  "scheduledInboxPollingCreated": false,
+  "newServiceInstalled": false,
+  "nasAdministration": false,
+  "userOrSharedProcessTerminated": false,
+  "credentialsRecorded": false
+}

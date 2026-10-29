@@ -48,7 +48,7 @@
     {
       "requirement": "Viewer hierarchy and dark Operations-aligned workspace revamp",
       "state": "source-integrated-under-owner-review",
-      "evidence": "Root Git verified5545d132 includes archived assignment fixes0f5/728,Claude2522,GCP/hierarchya85 and local main ref ea42. Actual remote main and origin/main are4b4f707; local ancestry is not remote publication. Backend persistence/API qualified separately.",
+      "evidence": "Root Git verified5545d132 includes archived assignment fixes0f5/728,Claude2522,GCP/hierarchya85 and local main ref ea42. Current local origin/main tracking ref is f2f00c47; this pass did not refresh the remote. Local ancestry/tracking refs do not prove release publication. Backend persistence/API qualified separately.",
       "remaining": "Exact5545 rendered desktop/mobile plus actual persisted hierarchy acceptance and release; latest52 unit/source tests and earlier fixture Edge runs are not that acceptance"
     },
     {
@@ -61,13 +61,13 @@
       "requirement": "Authorized real small pilot, queued jobs and 10k-photo acceptance",
       "state": "not-accepted",
       "evidence": "Authorized retained 20-photo upload failed before engine submission; Viewer PR349 fix published as digest0ba39949509c488442c14a643dd902b5df3a93e0ef95f1a56fd52375a0b2c152",
-      "remaining": "Beau reported pre-update API/worker both running config90d0... then manually updated. Public ready revision4b/schema40 healthy; authenticated registry maps fixed0ba manifest to amd64config99d1... . Post-update both-role image readback pending; browser bridge currently times out and no retry occurred. Then same-operation subject/source-valid20-photo retry, small real queued acceptance and separately authorized approximately50GB/10k no-GCP dataset; tiny-file tests do not establish this"
+      "remaining": "Beau reported pre-update API/worker both running config90d0... then manually updated. Last public ready revision4b/schema40 was healthy; authenticated registry maps fixed0ba manifest to amd64config99d1... . Post-update both-role image readback pending. Browser bridge recovered, but existing Viewer tab now requires opening through Operations and has no established authenticated subject; no retry occurred. Then same-operation subject/source-valid20-photo retry, small real queued acceptance and separately authorized approximately50GB/10k no-GCP dataset; tiny-file tests do not establish this"
     },
     {
       "requirement": "Engineering Hub and Viewer/Claude/Hermes coordination",
       "state": "active",
-      "evidence": "Fresh 11:17:03Z configured Hub verifiedd85 healthy/54tools and listenerPID70444, no scoped note change from canonical Processingv51. Viewer owner actively coordinates source integration/Claude. New user-authorized Hermes submission-compatibility research request f4cab1c4-ea7a-47c3-b690-554219da13ad accepted; durable receipt retained separately from the earlier request.",
-      "remaining": "Hermes reply and actual new delivery unverified; prior pending request not resent. No new idle/reboot wake proof. Continue event-driven updates without scheduled inbox polling."
+      "evidence": "Fresh configured Hub review verified installed d85 healthy/54tools and readiness351; published newer builds are not assumed installed. Old listenerPID70444 was absent. Root supported recovery restored this exact chat/correlation as managed session32122, actualPID151676; status subscribed/cursor3682 and independent command/config identity verified. See hub-listener-recovery-20261029.json. Viewer owner is active and adapter/protocol worktree-versus-branch identity is reconciled. Hermes research request f4cab1c4-ea7a-47c3-b690-554219da13ad remains accepted/pending, not resent.",
+      "remaining": "Observe a fresh event/app delivery for this listener generation and any actual Hermes research reply; historical accepted deliveries do not prove new wake. No idle/reboot recovery proof. Continue event-driven updates without scheduled inbox polling."
     }
   ],
   "operatorBoundaries": {
