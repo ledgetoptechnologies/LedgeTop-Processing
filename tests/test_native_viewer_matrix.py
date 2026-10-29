@@ -354,5 +354,48 @@ class ObservationWarningAtomicIngest74e(FixedPollRegression, NativeViewerMatrix)
         self.assertEqual(result['modelVersions'], 1)
 
 
+FIXED_821 = dict(
+    target='viewer-821186f-pr353-v1',
+    viewer_commit='821186f434224c83bf88f175e37913dbce92838c',
+    # Checked-out bytes (CRLF) that Node loads; LF git blobs: processingWorker
+    # d4b58cc7..., processingRepository 9457f8a9..., processingOverview e694b262....
+    processing_worker_sha256='4e1db9e29e4137650a6d2d90226179b0b9d58273f0b63ab17e7a333e0529dd77',
+    modules={
+        'apps/viewer/server/processingWorker.js': '4e1db9e29e4137650a6d2d90226179b0b9d58273f0b63ab17e7a333e0529dd77',
+        'apps/viewer/server/processingRepository.js': '7276c9d40b70da053675ef840b4a99f17e3666df5d9dabe3d6ef5535ef8a1604',
+        'apps/viewer/server/processingOverview.js': '80ac01e92863178443ed9ec8c3d205b2707e2094bb3f77fe8694202b305d9b85'})
+
+
+@unittest.skipUnless(os.environ.get('MATRIX_VIEWER_TARGET') == FIXED_821['target'],
+                     'select with MATRIX_VIEWER_TARGET=' + FIXED_821['target'])
+class Pr353Head821(FixedPollRegression, NativeViewerMatrix):
+    """Viewer PR353 head 821186f only: T9, warning, atomic ingest, stale reconcile."""
+
+    pin = FIXED_821
+    engine_type = OdmLayoutEngine
+    assert_modules = ObservationWarningAtomicIngest74e.assert_modules
+
+    def test_t9_821_long_outage_keeps_attempt_and_ingests(self):
+        self.check_fixed_poll()
+
+    def test_t11w_821_observation_warning_is_raised_and_cleared(self):
+        ObservationWarningAtomicIngest74e.test_t11w_74e_observation_warning_is_raised_and_cleared(self)
+
+    def test_t13_821_ingest_enqueue_failure_never_strands_an_ingesting_attempt(self):
+        ObservationWarningAtomicIngest74e.test_t13_74e_ingest_enqueue_failure_never_strands_an_ingesting_attempt(self)
+
+    def test_t14_821_stale_reconcile_is_settled_without_retrying(self):
+        record = self.finish(self.run_case('stale_reconcile'))
+        self.assert_modules(record)
+        self.assertTrue(record['ok'], record.get('error'))
+        result = record['result']
+        self.assertEqual(result['statusBefore'], 'derivatives', result)
+        self.assertEqual(len(result['staleJob']), 1, result)
+        self.assertEqual((result['staleJob'][0]['status'], result['staleJob'][0]['error_code']),
+                         ('cancelled', 'stale_reconcile_attempt'), result)
+        self.assertEqual(result['attemptStatusAfter'], 'derivatives')
+        self.assertEqual(result['observationWarnings'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

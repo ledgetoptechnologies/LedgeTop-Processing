@@ -196,6 +196,25 @@ const cases = {
       modelVersions: v.db.prepare('SELECT COUNT(*) AS n FROM model_versions WHERE provider_version_id=?').get(attempt.id).n };
   },
 
+  // T14: a leftover reconcile job for an attempt that already advanced to
+  // 'derivatives' (enqueued through Viewer's own repository API). Records how
+  // the worker settles it and whether it keeps retrying.
+  async stale_reconcile(v) {
+    const attempt = submitAttempt(v, 'stale', 2);
+    const done = await untilStatus(v, attempt.id, ['derivatives', 'ready_for_review', 'failed']);
+    const staleJob = v.processing.enqueueJob(attempt.id, 'reconcile');
+    const observed = [];
+    for (let i = 0; i < 4; i++) {
+      advanceClock(v); expireLeases(v);
+      await worker.processOne(v.deps, 'matrix-worker');
+      const row = v.db.prepare('SELECT status,attempt_count,error_code FROM processing_jobs WHERE id=?').get(staleJob);
+      observed.push(row);
+      if (!['pending', 'leased'].includes(row.status)) break;
+    }
+    return { attemptId: attempt.id, statusBefore: done.attempt.status, staleJob: observed,
+      attemptStatusAfter: v.processing.getAttempt(attempt.id).status, observationWarnings: warnings(v) };
+  },
+
   // T5: running cancellation through the provider call the Viewer route makes.
   async cancel(v) {
     const attempt = submitAttempt(v, 'cancel', 2);
