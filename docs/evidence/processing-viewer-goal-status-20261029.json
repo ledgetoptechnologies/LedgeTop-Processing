@@ -6,8 +6,8 @@
     {
       "requirement": "Lightweight NAS-backed production/staging queue and just-in-time reserved transfer",
       "state": "partial-source",
-      "evidence": "ReferenceStore production priority, persisted claims and indexed transfer source; actual main packaged 10k tiny-transfer qualification in indexed-worker-source-20261029.json",
-      "remaining": "Real app ProcessingReferenceProvider, authenticated managed source custody/purge pins and installed JIT transfer; negotiated paged manifest needed for the measured16832-photo parent, separate from20-photo pilot"
+      "evidence": "ReferenceStore production priority, persisted claims and indexed transfer source; actual main packaged 10k tiny-transfer qualification in indexed-worker-source-20261029.json. Separately, packaged v3 synthetic backend ran three jobs production/production/staging, verified proxy results and fsynced consumer copies with full acceptance, retained all three inputs/results, and kept a fourth queued; actual Viewer, scientific processing, cross-host and outages were not exercised. Receipt processing-v3-backend-runtime-e227a604-0a5b-42d2-8cc2-cc20fa245a27/qualification-summary.json SHA256 e4486c08076aabcd78e389d901d1d08fc43380baf6162e440baa6dd91143bf43.",
+      "remaining": "Real app ProcessingReferenceProvider, authenticated managed source custody/purge pins and installed JIT transfer; safely retire metadata for ongoing operation after the three retained slots; negotiated paged manifest needed for the measured16832-photo parent, separate from20-photo pilot"
     },
     {
       "requirement": "Small-node-first routing, one heavy execution slot and production priority",
