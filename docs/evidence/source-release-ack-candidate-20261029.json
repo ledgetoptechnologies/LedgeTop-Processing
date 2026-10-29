@@ -7,11 +7,46 @@
   "sharedVectorsGitLfSha256": "7833b999a06bd08a19cf940fdeb4b4be67b1932069812610324963a68144cbc2",
   "canonicalAckSha256": "8a11209f2b60a57b71a95bc4b2de831c158d42a3b2adcb04ed9a100a026ccb08",
   "verification": {
-    "rootInitialPython": {"newAckTests": 5, "existingRetentionTests": 7, "passed": 12, "skipped": 0, "seconds": 0.027},
-    "rootExpandedPython": {"passed": 6, "skipped": 0, "seconds": 0.020, "sharedVectors": 59, "validVectors": 3, "invalidVectors": 56},
-    "independentFrozenValidatorReview": {"commit": "bca29d1f68f65d1f477d7fcd290a42826b8c324a", "passed": 5, "skipped": 0, "seconds": 0.018, "decision": "accepted within pure syntax and exact binding scope", "reviewSha256": "f666a89755b22f84f140f10d7d36adc55cceed9592f94b40b178c75896b85009"},
-    "rootNodeOracle": {"version": "v24.16.0", "canonicalBytesMatch": true, "bodyDigestMatches": true, "scope": "Golden-byte serialization only, not Node validator qualification"},
-    "viewerNodeSharedVectorParity": "pending owner implementation and actual test result"
+    "rootInitialPython": {
+      "newAckTests": 5,
+      "existingRetentionTests": 7,
+      "passed": 12,
+      "skipped": 0,
+      "seconds": 0.027
+    },
+    "rootExpandedPython": {
+      "passed": 6,
+      "skipped": 0,
+      "seconds": 0.02,
+      "sharedVectors": 59,
+      "validVectors": 3,
+      "invalidVectors": 56
+    },
+    "independentFrozenValidatorReview": {
+      "commit": "bca29d1f68f65d1f477d7fcd290a42826b8c324a",
+      "passed": 5,
+      "skipped": 0,
+      "seconds": 0.018,
+      "decision": "accepted within pure syntax and exact binding scope",
+      "reviewSha256": "f666a89755b22f84f140f10d7d36adc55cceed9592f94b40b178c75896b85009"
+    },
+    "rootNodeOracle": {
+      "version": "v24.16.0",
+      "canonicalBytesMatch": true,
+      "bodyDigestMatches": true,
+      "scope": "Golden-byte serialization only, not Node validator qualification"
+    },
+    "viewerNodeSharedVectorParity": {
+      "commit": "95d5287f5d9ff4eb25b8afece8f0955ad4405f4f",
+      "rootObservedNodeVersion": "v24.16.0",
+      "rootTestCommand": "node --test apps/viewer/test/reference-source-release-ack.test.js",
+      "passed": 5,
+      "skipped": 0,
+      "milliseconds": 234.9972,
+      "sharedVectors": 59,
+      "exactGitLfFixturesMatch": true,
+      "scope": "Pure validator and canonical bytes; existing source receipt decoder inspected for duplicate keys and raw integer-token checks"
+    }
   },
   "properties": [
     "Closed compact ACK body with16KiB wire bound before parsing",
@@ -22,6 +57,7 @@
     "Detached return value; no side effects or persistent state"
   ],
   "unimplemented": [
+    "Joint whole-pipeline acceptance; matching validator fields are not authenticated cleanup authority",
     "Authenticated issuer and tenant authority",
     "Durable source custody and every purge pin",
     "Complete independently resolved holder inventory and late-assignment fence",
