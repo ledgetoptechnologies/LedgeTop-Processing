@@ -1,0 +1,698 @@
+{
+  "schemaVersion": 1,
+  "commit": "21cb9e40a4ee5bcee0ea97827a393978ac8d5714",
+  "files": [
+    {
+      "path": "apps/viewer/package-lock.json",
+      "sha256": "7ebcefea8db70bba3bf238594a3a555b04901ef8482137963b3ebc97bdb00f84"
+    },
+    {
+      "path": "apps/viewer/package.json",
+      "sha256": "9d16af7ad50253d31c46fca9eb276d9223ea1849cb84b24a3b60bee905571e8d"
+    },
+    {
+      "path": "apps/viewer/server/adminAuth.js",
+      "sha256": "359229a43d3d14ebb43d7a3404e481932ccf0ad7522d55e5665c6d7465ae9b9c"
+    },
+    {
+      "path": "apps/viewer/server/api.js",
+      "sha256": "a2fba82a0a02c60aa9d96c4429e372031f3c06d31a2324708c116a47396ce85c"
+    },
+    {
+      "path": "apps/viewer/server/apiV1.js",
+      "sha256": "2c75c74de4500adfda7c643d43ba16a4f31f487566c9351728c9d277acddfe17"
+    },
+    {
+      "path": "apps/viewer/server/assets.js",
+      "sha256": "de104c75946505fcbfd16f4cde77b91fc8ea37a09c5fe8626183c66b60c8f372"
+    },
+    {
+      "path": "apps/viewer/server/auth.js",
+      "sha256": "80ca928b4c8f85366653b73eb3aa5d3ed378df2015beed9c34f8b036afd1264d"
+    },
+    {
+      "path": "apps/viewer/server/cameraPhotos.js",
+      "sha256": "ed1ac6fb65ceb73b44089fe3ecfcbfff5d868ca54b1a40e60809500aa3410912"
+    },
+    {
+      "path": "apps/viewer/server/capacityBudget.js",
+      "sha256": "aff8457fd75c91b4fc63da867904fc6be51272734a796c657ffaa2ccee510bdd"
+    },
+    {
+      "path": "apps/viewer/server/capacityLedgerService.js",
+      "sha256": "4d87d32c695bdcf07fdc0aa85daafc9bcf29687a05531eb1473175a04e2fb01c"
+    },
+    {
+      "path": "apps/viewer/server/capacityObservation.js",
+      "sha256": "d9e48f644f5e5bebcfd55debc91993ee1bd81ad26ba5b0575511d5e6aac3fe3c"
+    },
+    {
+      "path": "apps/viewer/server/capacityQuiescence.js",
+      "sha256": "77f0732a143fefc7a5666f9cec27032f221b06784835048f2f0c38d1428e0524"
+    },
+    {
+      "path": "apps/viewer/server/catalogImport.js",
+      "sha256": "4eee5782709834ff0d612acb83e188925e959aea021eaf3fb09e60a88d158478"
+    },
+    {
+      "path": "apps/viewer/server/clientDeliveryCatalog.js",
+      "sha256": "72ff3b63c86fc3cf9e390575fa84dd5f973d6a0b9daee78d7d3a5760e24257f1"
+    },
+    {
+      "path": "apps/viewer/server/clientGrantProxy.js",
+      "sha256": "2f8ca91a98dd144ff3bd42e8dcb00be5a51768f677109bd34f59751c71bc36fc"
+    },
+    {
+      "path": "apps/viewer/server/config.js",
+      "sha256": "d79d85372059773e02560c8b3c7760594feebefede4bec47398cbba91c0541da"
+    },
+    {
+      "path": "apps/viewer/server/containerLifecycle.js",
+      "sha256": "97dfa8adcff207e0a104c48566f9bd9143a8f2d48bd778b742ee4b51712160bb"
+    },
+    {
+      "path": "apps/viewer/server/controllerOrigins.js",
+      "sha256": "5710239db87205c3af44bc5367b39b7737ed823fe3d1cdb64d7b5b7c6e8bb15e"
+    },
+    {
+      "path": "apps/viewer/server/database.js",
+      "sha256": "85bcb18ea4991a5e96a871b35b7f8837b43fbd43f1fa1b52d310858ae222da1a"
+    },
+    {
+      "path": "apps/viewer/server/datasetOperationWorker.js",
+      "sha256": "0ebcfbe467968abbe47df22b2846523ab46c9bc602535678cc5362ad9f9b17da"
+    },
+    {
+      "path": "apps/viewer/server/derivativeInputSnapshot.js",
+      "sha256": "51faa8490179343a5babe2a28f7ca50993ec9f948e66e87bbf7f067a6ecf4eea"
+    },
+    {
+      "path": "apps/viewer/server/derivativeWorker.js",
+      "sha256": "c96ab6015a8b88f46d75ad35d73b6fe8b5cecf60dd336fe7274f43ee7e1fd38a"
+    },
+    {
+      "path": "apps/viewer/server/directClientGrantContract.js",
+      "sha256": "1fb5e34f4cca0b0a74170b81102e1da926bf99aee7435b09a76e3990df8f5922"
+    },
+    {
+      "path": "apps/viewer/server/directClientSourceMigration.js",
+      "sha256": "90bd8d62bde3b5c735ae6ab3bb6f3c0e37f907def2f45b3ca324fc7f05aa2f8d"
+    },
+    {
+      "path": "apps/viewer/server/durableFs.js",
+      "sha256": "7b001c1bd7e49fde85e0f98f461ca56d83baa5ccf6b9d7727c570a70c4c94765"
+    },
+    {
+      "path": "apps/viewer/server/ephemeralMeasurementAccess.js",
+      "sha256": "1e1d45037a70d058e4ddcb7803ec6cd099bd2e82291ee68236a886ea370b9790"
+    },
+    {
+      "path": "apps/viewer/server/ephemeralMeasurementApi.js",
+      "sha256": "4f99dc994d3f1b5a99d70661d571a0f649e894e39d5ead4d68ee0160c12d2fd8"
+    },
+    {
+      "path": "apps/viewer/server/ephemeralMeasurementRepository.js",
+      "sha256": "7bcce043ea1789cb92753c6d16f6e00a2a431753db1381491775f5bc74dec3b0"
+    },
+    {
+      "path": "apps/viewer/server/ephemeralMeasurementWorker.js",
+      "sha256": "ee2e03b8b74cca28f298b1394720450432fdfe80eb60a29fc40b64e35c4c41fa"
+    },
+    {
+      "path": "apps/viewer/server/eptConversionReceipt.js",
+      "sha256": "399ad25eb2638766ca4d179e663a3c8f75d2e9b5449316e48ff6bc72c2a1c500"
+    },
+    {
+      "path": "apps/viewer/server/eptConversionReceiptRepository.js",
+      "sha256": "1571f26c82801083acc916c95d50e7ca908f12d410b7690b3be292a6c656fb75"
+    },
+    {
+      "path": "apps/viewer/server/eptConverterIdentity.js",
+      "sha256": "8d21c87135b97837ce7ab482eeb6679f873a424df381d54a39c8705332c1cc7c"
+    },
+    {
+      "path": "apps/viewer/server/eventDelivery.js",
+      "sha256": "31533e7b077923af021b2301151bf6544f6383e59bb092ba56e03b79e3de3a12"
+    },
+    {
+      "path": "apps/viewer/server/explicitSourceUnitInspection.mjs",
+      "sha256": "3e12c8da18c0f6999f6f0b35bf90b5b97a4b26f324f029fcaf7d84f4b087681d"
+    },
+    {
+      "path": "apps/viewer/server/gcpApi.js",
+      "sha256": "171f884661d551185412de37171b30290d784b7d45f5ce8e7d3a2e9c9be290aa"
+    },
+    {
+      "path": "apps/viewer/server/gcpCrsValidation.js",
+      "sha256": "b0d4f9e8d7fe8db062969717a060f0c7bced41d2ec55f6ff5ec8f035cda4ae45"
+    },
+    {
+      "path": "apps/viewer/server/gcpDiscovery.js",
+      "sha256": "3ba04cabcdb25dfc88b8e2aeeb6d580205beb75bdad356b89ff793fa559c070d"
+    },
+    {
+      "path": "apps/viewer/server/gcpImport.js",
+      "sha256": "e8cccfa8ad142061c2b9790c8d156616b240a4c19b0f665f09a247e486a17d9a"
+    },
+    {
+      "path": "apps/viewer/server/gcpOdm.js",
+      "sha256": "d562945ecb7631ddf70bb07d007960ec80011f3c5636ff5fa26a1104c4b7a4c0"
+    },
+    {
+      "path": "apps/viewer/server/gcpRawArchive.js",
+      "sha256": "31c15213ddb519eba46f0589c701d44e9315a10517c577fa1f59b049434e0b16"
+    },
+    {
+      "path": "apps/viewer/server/gcpRawCapacity.js",
+      "sha256": "d081cef42b5012d3a48deb0a10f202204097e52be7f5b740ed0dde502f1acaf3"
+    },
+    {
+      "path": "apps/viewer/server/gcpRawDerivedVerifier.js",
+      "sha256": "bc310b6ce2221408a5831c7eeff65a1598e4dce1484f25a291a76d97109da53b"
+    },
+    {
+      "path": "apps/viewer/server/gcpRawJournal.js",
+      "sha256": "7cd99f876694af16ed29bbfddf2bb0e74c33bc332763f0b66900b207a11764f4"
+    },
+    {
+      "path": "apps/viewer/server/gcpRawSource.js",
+      "sha256": "6132b9facb26346a6ec56ad2ad8c0cca43af501943b865f0a3188cfeee9120d9"
+    },
+    {
+      "path": "apps/viewer/server/gcpRawTransport.js",
+      "sha256": "eece973ddccd3e1b087dbb5c214212ff610f5e7c77aeca4be06861d15e63d10c"
+    },
+    {
+      "path": "apps/viewer/server/gcpRepository.js",
+      "sha256": "606a1ec5226e217a49908ee339a3c103cbbd616a5779e56969bcd4a15672000d"
+    },
+    {
+      "path": "apps/viewer/server/gcp_validate_crs.py",
+      "sha256": "2b11a530776d627015cbdea282bd7700661c4ae6c090f1c8a514a32c7f27e6e7"
+    },
+    {
+      "path": "apps/viewer/server/importBrowser.js",
+      "sha256": "7567eb31490c6617df6e39396fa6529e505c86b3b49380ccaf1727f721c17e2e"
+    },
+    {
+      "path": "apps/viewer/server/importCleanup.js",
+      "sha256": "2a36abf9134dda39d1e70e9354b177adda9eb3307a976b50095cede7993f1e8b"
+    },
+    {
+      "path": "apps/viewer/server/importSourceSnapshot.js",
+      "sha256": "a5446d46551b4c72806f85a2ab81e458d179befd7eeb8f2037e286e23e127ebe"
+    },
+    {
+      "path": "apps/viewer/server/importSourceUnitEvidence.js",
+      "sha256": "15a91017622ab0381250fe05f978d32bd9c598be0a84f8013f493e576a8c32a0"
+    },
+    {
+      "path": "apps/viewer/server/index.js",
+      "sha256": "73b05e5a90575e4d0c3bb53b95e452c80b44e0d7a7359d76a7538fe24540ee45"
+    },
+    {
+      "path": "apps/viewer/server/jsonBodyParser.js",
+      "sha256": "d63cb8921bdc3adbd1e1caf3eb0e1a09f0157c86cdc1e011754681f863647a2f"
+    },
+    {
+      "path": "apps/viewer/server/legacyMigration.js",
+      "sha256": "b6557369f9bce8c51387a0ef8635e8f58dbfd0d8f0c1853599ce06b5512e89c9"
+    },
+    {
+      "path": "apps/viewer/server/lodBackfill.js",
+      "sha256": "a329437d9e2438063f03258d7cd2d4c39b18a97d51af5eac9022e055f798b08f"
+    },
+    {
+      "path": "apps/viewer/server/lodDerivativePolicy.js",
+      "sha256": "80fe5935eacd35f7f6dc8f17f945d2c8772b544f7787febc267cb94a54db0127"
+    },
+    {
+      "path": "apps/viewer/server/lodDerivativeStorage.js",
+      "sha256": "3ae35ae63a028fefd3080711bd2356230c479ed1312773dc0ea4b15809b69352"
+    },
+    {
+      "path": "apps/viewer/server/lodProvenance.js",
+      "sha256": "10a08fb215a53722b303f5681a1a4c40e6afbc25f620791bff5fc054f5d982a5"
+    },
+    {
+      "path": "apps/viewer/server/lodRecovery.js",
+      "sha256": "c751c3714e3a55cc190389feb9e862975272b7dea54db1b563315315c57b7487"
+    },
+    {
+      "path": "apps/viewer/server/lodRecoveryCompanions.js",
+      "sha256": "4ce6886c4987f2bea1547eaa019ca74c513de4f5b26f57288e224c462b1ead6f"
+    },
+    {
+      "path": "apps/viewer/server/lodRecoveryPolicy.js",
+      "sha256": "e597719d387ba0e6339815eea4b7d7d5d47f5889a08ab5e4983c699ecb5838c6"
+    },
+    {
+      "path": "apps/viewer/server/measurementApi.js",
+      "sha256": "ba782184312fa5a348fdbd4762763f319284be01ae73f8e82a7854aabdd466e8"
+    },
+    {
+      "path": "apps/viewer/server/measurementCalculationApi.js",
+      "sha256": "19fa4ee61ec0e7c0a33db77c6e02f8ea969c2d0e9e8b3412493f08474b590f73"
+    },
+    {
+      "path": "apps/viewer/server/measurementCalculationChild.js",
+      "sha256": "7f6f74741998b82bf08873f5a913d2b68b6fd9a08fa39eeb63617ef4aa5680ce"
+    },
+    {
+      "path": "apps/viewer/server/measurementCalculationRepository.js",
+      "sha256": "634d1428718e820b1dcf6d76323cd15a6bcc6010e1e6eaac21b41f22f1338ac2"
+    },
+    {
+      "path": "apps/viewer/server/measurementCalculationTransport.js",
+      "sha256": "6a298c64d53f590683a32d2fb1ad39cc38cc1a67c4dab4b6390266e0ea86edc5"
+    },
+    {
+      "path": "apps/viewer/server/measurementCalculationWorker.js",
+      "sha256": "ca9d86fcba7b4a228a260ebe412131e9805f51867e4115fdd0cf644f51611e8d"
+    },
+    {
+      "path": "apps/viewer/server/measurementDelaunayReference.mjs",
+      "sha256": "f5a1c08bd9f3b455897bf6ec82b5807d240ab1b9bcbafc74577794ea37ddbf4c"
+    },
+    {
+      "path": "apps/viewer/server/measurementEptCrs.mjs",
+      "sha256": "ffe23a2cf9a02afe1d17583dd27d9bc006d6208b5eb4e2c32d10a8003503f198"
+    },
+    {
+      "path": "apps/viewer/server/measurementMeshCalculation.mjs",
+      "sha256": "b6b1332414bbc605ab1ff8e0b7d321faf47898c27fa9a002beba6eb59af33c94"
+    },
+    {
+      "path": "apps/viewer/server/measurementPointGridCache.mjs",
+      "sha256": "6daf48b6f1082a64386dacea38baf67a0bd4f0fd5754f0006faad9a06b59fcfa"
+    },
+    {
+      "path": "apps/viewer/server/measurementPointSurface.mjs",
+      "sha256": "6f628be1a24de691726ede48e1b365968f856c5b14f80bccb7e67a8384572d31"
+    },
+    {
+      "path": "apps/viewer/server/measurementPointTransect.mjs",
+      "sha256": "45d6a37ad40aae0cfecb47ca520f5229fc47c227a3a758e73bed2ade60d56ec3"
+    },
+    {
+      "path": "apps/viewer/server/measurementRasterCalculation.mjs",
+      "sha256": "07148fc3513381355e32139c25428e7bd377b09082276fe13a86a9e1e8f7dc7e"
+    },
+    {
+      "path": "apps/viewer/server/measurementRasterTransect.mjs",
+      "sha256": "29bae29ba2189f6f93a504f3b120044a5313f571b6a48e505c55f8c7a71673ec"
+    },
+    {
+      "path": "apps/viewer/server/measurementReconstruction.mjs",
+      "sha256": "8831d7e0748a36f4bd01528e6830f85fdcc3f5c4427dea87a2a6fbc1e57b365e"
+    },
+    {
+      "path": "apps/viewer/server/measurementReconstructionSupport.js",
+      "sha256": "a34775583cd1d1d6dc878c532d6ddd33f21309856c487874049cdde97c9d47c7"
+    },
+    {
+      "path": "apps/viewer/server/measurementRepository.js",
+      "sha256": "2aed7d263ea1beef4abd5f059df993eac2aa9d04d7dd6ea47de6bf001fc3cb78"
+    },
+    {
+      "path": "apps/viewer/server/measurementSelection.mjs",
+      "sha256": "b01df6cb3c86e02d37c5318f8e7f2c0c243dd61a29fa05315159a0d8c0004bda"
+    },
+    {
+      "path": "apps/viewer/server/measurementSourceUnitEvidence.js",
+      "sha256": "66f6df3b74918ef70645e4aa19712c31b9886e121342a4a50663160e33f2bdb7"
+    },
+    {
+      "path": "apps/viewer/server/measurementTiffHeader.mjs",
+      "sha256": "984723172c8e7d7ac70dc49212bbc4c2281c3fb24c143e921103a7e440b6fa33"
+    },
+    {
+      "path": "apps/viewer/server/measurementTiming.js",
+      "sha256": "21184e4be608537975f1bfa7ce04e07f36152e24d943c9d69cdb140cb7f31e44"
+    },
+    {
+      "path": "apps/viewer/server/measurementTransectRequest.js",
+      "sha256": "65e01a1975a777afa96ffb540001b1bc10f8b8060cb1799bd4c6a247eb52129e"
+    },
+    {
+      "path": "apps/viewer/server/measurementUnitEvidence.js",
+      "sha256": "49b526d36e961290489b689c64b561f8b9805875bdb7dd2ed3513a079e3725f9"
+    },
+    {
+      "path": "apps/viewer/server/measurementUnitEvidence.mjs",
+      "sha256": "b3edb7a895fc73eaf1dad7520bf203c576c150d2378175344184fb59f9bed8f5"
+    },
+    {
+      "path": "apps/viewer/server/migrationIdentityGuard.js",
+      "sha256": "36d2b6680d23b7a520e398e5ec0e88a2f3a2ec574aeba6470f97d8c030383745"
+    },
+    {
+      "path": "apps/viewer/server/nativePointUnitInspection.mjs",
+      "sha256": "e53ea59f459dc8d49e49a6c9c69a450b045066fff6705e4c0f974d6a1062f047"
+    },
+    {
+      "path": "apps/viewer/server/nodeOdmProvider.js",
+      "sha256": "e80f6021cd64cf53e5b670bf97c9d6f6957dd6fb2ec4a1f272fa32533191a5bc"
+    },
+    {
+      "path": "apps/viewer/server/odmGeorefReconciliation.js",
+      "sha256": "d3d3e7fc4fbb887b061248a50263934e069c82bf460aac0962952bc96cb37815"
+    },
+    {
+      "path": "apps/viewer/server/odmSourceUnitProvenance.js",
+      "sha256": "61cbe92a0c85f1a8d470077f9b16be2268d35697c09395df562d7604ad5fdd1e"
+    },
+    {
+      "path": "apps/viewer/server/odmTaskMetadata.js",
+      "sha256": "5225030d3df21000212db4ce5297c21857946770e39df173d35a959626846e59"
+    },
+    {
+      "path": "apps/viewer/server/orthophotoCutline.js",
+      "sha256": "2283c47592087006e69ba0a5e1adfb37eabf5c679ec574e8d2c004ebd3b456d9"
+    },
+    {
+      "path": "apps/viewer/server/outputPreservation.js",
+      "sha256": "8b9a921a9a603266bd35171cde811ddbad0f02501c7bc902f26102a4f34a8aff"
+    },
+    {
+      "path": "apps/viewer/server/outputSupersession.js",
+      "sha256": "4c0b0afc8bd9aea60a0e2feeedeee36d2685a01747f7e053b95ce862cb507a11"
+    },
+    {
+      "path": "apps/viewer/server/photoExif.mjs",
+      "sha256": "f07c9a961c45d2a1532f6e031938003d9f0de7f7d5120c2117ffb2e152350024"
+    },
+    {
+      "path": "apps/viewer/server/processingApi.js",
+      "sha256": "5486c3a8f2dc27736baebd750e43e2759608a3ed2609ba723c0fa0a36bbf8d99"
+    },
+    {
+      "path": "apps/viewer/server/processingArchiveEvidence.js",
+      "sha256": "68399d8f54a9c4ef63c1deab5426ba8fc7bfe42e9032c1c509a876f9163653af"
+    },
+    {
+      "path": "apps/viewer/server/processingIngestRecovery.js",
+      "sha256": "3a91a0a5f9761ac5e76ae0fd822b7a5044c7b69a69e6e1011f29c8b703ad7f15"
+    },
+    {
+      "path": "apps/viewer/server/processingOverview.js",
+      "sha256": "599425205c45d9eae70d02860a726af90c7c78fcfcf0840d44cb11db511d8ee1"
+    },
+    {
+      "path": "apps/viewer/server/processingProvenance.js",
+      "sha256": "e965ab977c00e2058e9f5ea21a658fb89b2ad1af3c24facefb3a7b030e8eb82c"
+    },
+    {
+      "path": "apps/viewer/server/processingRasterUnitInspection.mjs",
+      "sha256": "479af466b21c7a18e049192a983d0f6c5127046ab67a44e1dc5c186ea2ebb92c"
+    },
+    {
+      "path": "apps/viewer/server/processingReadiness.js",
+      "sha256": "67c2c2e183542b4a9b4dfeca6cbb52532d4a50a95be62eba529b56e72d9a4804"
+    },
+    {
+      "path": "apps/viewer/server/processingReadyEvent.js",
+      "sha256": "06432b468b9f4a2e57abd61562fd2884c93e43f68e0d3d47b3d248740de114ce"
+    },
+    {
+      "path": "apps/viewer/server/processingRepository.js",
+      "sha256": "4c2880322869ec39b05c90ab29cc0428f6b90b619b2b8303f21b948638aa7aaf"
+    },
+    {
+      "path": "apps/viewer/server/processingSecurity.js",
+      "sha256": "bdfbb30cc6f8c78c9bd8fd88eef914ab81ef1ea7052d582f70e581bf562da0a5"
+    },
+    {
+      "path": "apps/viewer/server/processingUnitEvidence.js",
+      "sha256": "1e0ef21c1fbf86cd721effe2741fbcd5b3e611b7a3a53640083ede537de6d4d0"
+    },
+    {
+      "path": "apps/viewer/server/processingWorker.js",
+      "sha256": "fdbeccce7546fd7c81305d02f88b2a0fd80a52eaed659cb4cc5287c16e18fad4"
+    },
+    {
+      "path": "apps/viewer/server/productDownloads.js",
+      "sha256": "e94c37a03078f1ab9a62b0319b3b6e138b4fb4a38eb7df75ffab6c3e4fc7a4c6"
+    },
+    {
+      "path": "apps/viewer/server/projectShareApi.js",
+      "sha256": "b3d4ee5d39928474f607d2a7a3c3e080d4a335e55fb2c63b06966ed5d9955b6c"
+    },
+    {
+      "path": "apps/viewer/server/providerAdmission.js",
+      "sha256": "594a2c12ec586501e70bc328029bbccfe99524beabdb3b1df133d092ebd2d562"
+    },
+    {
+      "path": "apps/viewer/server/providerAuth.js",
+      "sha256": "0e713d282ae00d975ae50ed89eaba7bd874af5954c5b20fec85aa40144d60250"
+    },
+    {
+      "path": "apps/viewer/server/providerCredentials.js",
+      "sha256": "2ed8f996ac8410dd904c9be2b4d6db25fc72a345f4f9e90edfefd802773ba0fe"
+    },
+    {
+      "path": "apps/viewer/server/providerHealth.js",
+      "sha256": "06d57e3de8948403b3ac83dd4123585bd8871e3197211d2cdaa9c81b780c91c2"
+    },
+    {
+      "path": "apps/viewer/server/providerSelection.mjs",
+      "sha256": "fa0236bbd8a6f7c0add95b2586c8cea0a93b3e41d1a5a9607c740b5305fc71cd"
+    },
+    {
+      "path": "apps/viewer/server/providerlessRetryReconciliation.js",
+      "sha256": "cd1abccb97e76e20a3ffb4f7b00ab6e4f523bad7761c250546d6cdd638f63697"
+    },
+    {
+      "path": "apps/viewer/server/proxyGate.js",
+      "sha256": "ddaf64bfba61b17ad17580093a2fb80a4058d34e544a4efbe5ac71a7753f8db4"
+    },
+    {
+      "path": "apps/viewer/server/publicSharePolicy.js",
+      "sha256": "114839590966a0e065d8178e3d06a338d805fe138992ae28fbb63525c637b3b6"
+    },
+    {
+      "path": "apps/viewer/server/referenceAcceptance.js",
+      "sha256": "1bb351460d10db5274c305b892c6567f1bce5a326e225449cb49138b70839d86"
+    },
+    {
+      "path": "apps/viewer/server/referenceAppDispatch.js",
+      "sha256": "743423ead0fbb1cc974600f06b158a603b33f3065a6651063fc829c33458087b"
+    },
+    {
+      "path": "apps/viewer/server/referenceCaTransport.js",
+      "sha256": "3ea6ed955d40727d0c8d2bdc6d7f34fbb39c4802c130534da81c51465a3c9d19"
+    },
+    {
+      "path": "apps/viewer/server/referenceCatalogIdentity.js",
+      "sha256": "41afa6e9aa8f8f608f936483b453c1578661b813bb61142f6c23a25d5f4c653f"
+    },
+    {
+      "path": "apps/viewer/server/referenceCatalogProjection.js",
+      "sha256": "2c71f07a5849f3e877898ede54ef9efbcc17d0e4a77b2ead1541d48540112a31"
+    },
+    {
+      "path": "apps/viewer/server/referenceGcpMaterialization.js",
+      "sha256": "109d7b71783ffd7fa5b92561fae531c9d857d99b2f29acdb576138603357ee80"
+    },
+    {
+      "path": "apps/viewer/server/referenceGrantReconciliationDraft.js",
+      "sha256": "b39322df224e54bb98dc2a2bdafe3fc5f715cc10d15d1ea787dad836fa5ae262"
+    },
+    {
+      "path": "apps/viewer/server/referenceHttp.js",
+      "sha256": "b0e249ace9ce78953c9ddd50127076426f9237c283f0f079d2837d77fe042474"
+    },
+    {
+      "path": "apps/viewer/server/referenceIndexedScope.js",
+      "sha256": "92063c6e33c85ee98192f6bb11634765ca1851ad147b942d379df865234ac982"
+    },
+    {
+      "path": "apps/viewer/server/referenceManagedScopes.js",
+      "sha256": "df6dcbb312bdbb30c6d6850dbd4e06a69ff4be034d082676f8f542948f4fa243"
+    },
+    {
+      "path": "apps/viewer/server/referenceOptions.js",
+      "sha256": "1fa3564b6be07a46cb4695931528bea2a5465bc703ed8c562d55beb8d1a7e6c7"
+    },
+    {
+      "path": "apps/viewer/server/referenceProtocol.js",
+      "sha256": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159"
+    },
+    {
+      "path": "apps/viewer/server/referenceProvider.js",
+      "sha256": "835d167ea9c35e0e9a8008cf19bef98e91abb165ad334390947f0a19f9143c1e"
+    },
+    {
+      "path": "apps/viewer/server/referenceResultBridge.js",
+      "sha256": "98019b114208319f7f920b102d5736e8f6f412454d1364110271002dd13fbe28"
+    },
+    {
+      "path": "apps/viewer/server/referenceResultJournal.js",
+      "sha256": "c31e32577b393419c6f5242269d7be3ba6013d7cea584dc692fb1c3b42a7bc51"
+    },
+    {
+      "path": "apps/viewer/server/referenceResultSpool.js",
+      "sha256": "ba37933234bdd03f321b6f9be46073de24cc46678be98148fba6f5b1682bc86a"
+    },
+    {
+      "path": "apps/viewer/server/referenceSourceBindingDraft.js",
+      "sha256": "4cb1a6203a0d9e04e5c5492ca06d2fead1d1f9ab16d4425b7d0eab7e95813547"
+    },
+    {
+      "path": "apps/viewer/server/referenceSourcePendingEffects.js",
+      "sha256": "a093d809dbc875c7b983c5a82b9bd67c78dd5c17b19363112c89118dd99f6754"
+    },
+    {
+      "path": "apps/viewer/server/referenceSourceReleaseAck.js",
+      "sha256": "e2375d2078c8d8aaa0f26d44b2682b6a705c259288ad512b131b123aa9845bc3"
+    },
+    {
+      "path": "apps/viewer/server/referenceSourceRetention.js",
+      "sha256": "4120f72f4d49668237625f4ca59e5da532c1228a725f5e1bae05c07bf6979183"
+    },
+    {
+      "path": "apps/viewer/server/referenceSubmissionDraft.js",
+      "sha256": "1fbdb34251f6e019b49f1e67c748a592481fda4aab41200f0f39b671fc29ae13"
+    },
+    {
+      "path": "apps/viewer/server/referenceSyntheticCoordinator.js",
+      "sha256": "503c9fb4228f9ac48f8c9a1deda1b911c7178684fd213c436f36f39f4a23d9f3"
+    },
+    {
+      "path": "apps/viewer/server/referenceSyntheticJournal.js",
+      "sha256": "7fb2ffd9810ee2ba4e8d23ce62550bd2a8d1b72999f901fbf941057a20892ca4"
+    },
+    {
+      "path": "apps/viewer/server/referenceSyntheticScopeBarrier.js",
+      "sha256": "479fad9f5c6d2b0a80b809143691fdd21b9377a04733561b985f2c3da803e859"
+    },
+    {
+      "path": "apps/viewer/server/referenceTerminalDraft.js",
+      "sha256": "0508d645cbc036fc3c05d01620b3d69bcb4b888ac13199f059f30f2bcf561def"
+    },
+    {
+      "path": "apps/viewer/server/referenceTransferBroker.js",
+      "sha256": "7aca3037d72a728443c645b9358b0fe4daf301d2879c62a3020fe8a736df7361"
+    },
+    {
+      "path": "apps/viewer/server/repository.js",
+      "sha256": "915f7137c7834f999ebcf607237c0d1fc0c25751ecb6277e5af08aed1a6ed008"
+    },
+    {
+      "path": "apps/viewer/server/retainedChunkVerifier.js",
+      "sha256": "119d16f8175f8c045c7682b5d7c7f80d83ee45705aa01da14002264f35a6cf57"
+    },
+    {
+      "path": "apps/viewer/server/retainedManifest.js",
+      "sha256": "1f1547b3428b5696eb331e5db81af75d7a9603130ad017e6b21e87e656c7ea3f"
+    },
+    {
+      "path": "apps/viewer/server/runtimeIdentity.js",
+      "sha256": "d5c487404604328909595478d694d34640d9f930b21c8df7d051c219a4f108f9"
+    },
+    {
+      "path": "apps/viewer/server/safeZip.js",
+      "sha256": "8fc71900bc283acc48abbdcfe449e8ae02d47fe3c08714f3bdcb44b23126ca5e"
+    },
+    {
+      "path": "apps/viewer/server/serviceAuth.js",
+      "sha256": "9dc5de1933cd8d1e2264e9f767f616eb2d337b166e0b259af719a3fd633c5b58"
+    },
+    {
+      "path": "apps/viewer/server/serviceIdempotency.js",
+      "sha256": "dbfc94157e9b2685a04a35389cd98c1e61b8404fcfd7c21df3a637c6043bfe73"
+    },
+    {
+      "path": "apps/viewer/server/shareApi.js",
+      "sha256": "6c74d128c060038df631a864b974754b82900c2d51a5a753d813365d1538b437"
+    },
+    {
+      "path": "apps/viewer/server/shareStore.js",
+      "sha256": "14fc6375d8c5086bf5fc3ec29ecc7788d3d4ddc113cf95100f9ad889eb7529c0"
+    },
+    {
+      "path": "apps/viewer/server/shareTokenVault.js",
+      "sha256": "ca5ab13f620f5b64c18fe7cbc4bdc6dcc3fbf334c9806cd325eb832ed08999cf"
+    },
+    {
+      "path": "apps/viewer/server/sourceAuthorization.js",
+      "sha256": "7b8490c7134018f7fd0ea2d99fcba9e511705289c2d76ebb6fa0055d46ce1323"
+    },
+    {
+      "path": "apps/viewer/server/sourceCustodyDraft.js",
+      "sha256": "1545110d46fbb29473a985281748dfb0989f3fc1a950474154b9e7bc2b38149a"
+    },
+    {
+      "path": "apps/viewer/server/sourceSnapshotAcquisition.js",
+      "sha256": "dbf6686facf467e52003b720cdfad740436a2bd11d0a6712eed6977f7f9d50cb"
+    },
+    {
+      "path": "apps/viewer/server/sqliteLockPreflight.js",
+      "sha256": "6752e5de8765efb15317183ebcc470c9b674e450fce884f161184b2ab321a0b5"
+    },
+    {
+      "path": "apps/viewer/server/storageLifecycle.js",
+      "sha256": "b4b8227d28f0dfc635003befa02587be2cc834b6fb5c44f407e4e46d266bad20"
+    },
+    {
+      "path": "apps/viewer/server/storageManager.js",
+      "sha256": "8dcd7648601f758c5e80d4c2bf45ba6d2dc7fcc1d9be499b355ff7a1d961d0a0"
+    },
+    {
+      "path": "apps/viewer/server/storageRetention.js",
+      "sha256": "8bab94f52d136402b7bbb16859f45a1fba2f0d30ac39f796b3efb73460fa5184"
+    },
+    {
+      "path": "apps/viewer/server/storageUsage.js",
+      "sha256": "5b02f029baccde883ff01097eec8ceff97c4d1a3b86669bb1bdfb3c9529e01bf"
+    },
+    {
+      "path": "apps/viewer/server/store.js",
+      "sha256": "8a1a058d449a03c7c836ae2064f0d3cb87e038fd50a19f52bb116743fa911d11"
+    },
+    {
+      "path": "apps/viewer/server/taskImageInventory.js",
+      "sha256": "c491e6e484cf56925d0076461148173c1411cfa9fbc67397702d9dd2da3b5ea8"
+    },
+    {
+      "path": "apps/viewer/server/taskPhotoImports.js",
+      "sha256": "49a3d29f81049ceddc5f7a43432a04e783eaea7a5b56bbaf225dd7d474a5e3cd"
+    },
+    {
+      "path": "apps/viewer/server/viewerEvents.js",
+      "sha256": "8dd7cc194ed186e258c90184056d2d3473ae63070741f5dc4b2fa0ca7257d87d"
+    },
+    {
+      "path": "apps/viewer/server/webodmTaskImport.js",
+      "sha256": "d4d43eabc8f01457b9b3c2f450e3a97b9ae0aa2109d9e9b72fe74daa1e842bda"
+    },
+    {
+      "path": "apps/viewer/server/worker.js",
+      "sha256": "a7a7a1adf6fdcd1dd7dbbc2990d1fa857810eb0630794f7ad3c07a109ba49d3d"
+    },
+    {
+      "path": "apps/viewer/server/workerSupervisor.js",
+      "sha256": "3a24b93118f853feb90b5976ed70585e918a8d0dc61550f2127ef2fdbffbd5d3"
+    },
+    {
+      "path": "apps/viewer/server/workspaceConnectPolicy.js",
+      "sha256": "1015644b3eacec5416ad4c4fc6a1cf445c36eea86f440cd236471cce143f93f8"
+    },
+    {
+      "path": "apps/viewer/server/workspaceHierarchy.js",
+      "sha256": "11af59c27a3193aa65c22cced6a85f0f0395371b564957044bdc553ded1c8721"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "3e3fbab222cbf980b771d65cbaf6c3a7c72e5a9341ccbecb1d37522efa630d8f"
+    },
+    {
+      "path": "package.json",
+      "sha256": "c2c9b2f65bf33250158efa14ee67ac20432518ce4b33f20b45c23042ca3f2ebf"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha256": "17c814b167307942d3609c7b9d916ceddb85839573ab39baa114e30edb132a1a"
+    }
+  ]
+}

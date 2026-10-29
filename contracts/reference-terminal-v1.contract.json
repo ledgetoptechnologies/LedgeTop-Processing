@@ -1,0 +1,343 @@
+{
+  "schemaVersion": 1,
+  "protocol": "ltds-reference-v1",
+  "scope": "synthetic confirmed terminal metadata only; no file custody or cleanup authority",
+  "routes": {
+    "outcome": "GET /ltds/v1/jobs/{jobId}/terminal-outcome",
+    "acceptance": "POST /ltds/v1/jobs/{jobId}/terminal-acceptance"
+  },
+  "canonicalization": "processing.reference_protocol.canonical_json UTF-8, sorted keys, compact separators; failureSha256 excludes only failureSha256",
+  "valid": [
+    {
+      "name": "failed-native",
+      "outcome": {
+        "environment": "staging",
+        "errorCode": "engine_failed",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "generation": 1,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-failed-native",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "failed"
+      },
+      "acceptance": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": 1,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-native",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "outcomeCanonicalUtf8": "{\"environment\":\"staging\",\"errorCode\":\"engine_failed\",\"failureSha256\":\"7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8\",\"generation\":1,\"inputManifestSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"jobId\":\"terminal-vector-failed-native\",\"pipelineDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"schemaVersion\":1,\"terminalState\":\"failed\"}",
+      "acceptanceCanonicalUtf8": "{\"acceptedAt\":\"2026-10-29T12:00:00.000Z\",\"environment\":\"staging\",\"failureSha256\":\"7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8\",\"generation\":1,\"inputManifestSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"jobId\":\"terminal-vector-failed-native\",\"pipelineDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"receiptId\":\"receipt-failed-native\",\"schemaVersion\":1,\"storageReceiptId\":\"storage-failed-native\",\"validationVersion\":\"ltds-reference-v1\"}",
+      "acceptanceSha256": "ffef9586dcbb9368e3656f8bf59078218aa56cb5b74694309400e9e506355dc0"
+    },
+    {
+      "name": "cancelled-attested-native",
+      "outcome": {
+        "environment": "staging",
+        "errorCode": "cancelled_by_worker",
+        "failureSha256": "1d2e6384ac99831db6007decab89fd336d9cff023363ceb3ac401b9471db9a44",
+        "generation": 1,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-cancelled-attested-native",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "cancelled"
+      },
+      "acceptance": {
+        "jobId": "terminal-vector-cancelled-attested-native",
+        "generation": 1,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "1d2e6384ac99831db6007decab89fd336d9cff023363ceb3ac401b9471db9a44",
+        "schemaVersion": 1,
+        "receiptId": "receipt-cancelled-attested-native",
+        "storageReceiptId": "storage-cancelled-attested-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "outcomeCanonicalUtf8": "{\"environment\":\"staging\",\"errorCode\":\"cancelled_by_worker\",\"failureSha256\":\"1d2e6384ac99831db6007decab89fd336d9cff023363ceb3ac401b9471db9a44\",\"generation\":1,\"inputManifestSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"jobId\":\"terminal-vector-cancelled-attested-native\",\"pipelineDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"schemaVersion\":1,\"terminalState\":\"cancelled\"}",
+      "acceptanceCanonicalUtf8": "{\"acceptedAt\":\"2026-10-29T12:00:00.000Z\",\"environment\":\"staging\",\"failureSha256\":\"1d2e6384ac99831db6007decab89fd336d9cff023363ceb3ac401b9471db9a44\",\"generation\":1,\"inputManifestSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"jobId\":\"terminal-vector-cancelled-attested-native\",\"pipelineDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"receiptId\":\"receipt-cancelled-attested-native\",\"schemaVersion\":1,\"storageReceiptId\":\"storage-cancelled-attested-native\",\"validationVersion\":\"ltds-reference-v1\"}",
+      "acceptanceSha256": "506f17c8ac030c747f8db90addb0acc920e32bd4a0cdffd03fbd9c5b1eb41249"
+    },
+    {
+      "name": "failed-production-safe-integer-boundary",
+      "outcome": {
+        "environment": "production",
+        "errorCode": "engine_failed",
+        "failureSha256": "2a76e3edc39136d0da0d8790f221fb20fc3b83594daa11eab535514c5bf9bf3e",
+        "generation": 9007199254740991,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-failed-production-safe-integer-boundary",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "failed"
+      },
+      "acceptance": {
+        "jobId": "terminal-vector-failed-production-safe-integer-boundary",
+        "generation": 9007199254740991,
+        "environment": "production",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "2a76e3edc39136d0da0d8790f221fb20fc3b83594daa11eab535514c5bf9bf3e",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-production-safe-integer-boundary",
+        "storageReceiptId": "storage-failed-production-safe-integer-boundary",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "outcomeCanonicalUtf8": "{\"environment\":\"production\",\"errorCode\":\"engine_failed\",\"failureSha256\":\"2a76e3edc39136d0da0d8790f221fb20fc3b83594daa11eab535514c5bf9bf3e\",\"generation\":9007199254740991,\"inputManifestSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"jobId\":\"terminal-vector-failed-production-safe-integer-boundary\",\"pipelineDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"schemaVersion\":1,\"terminalState\":\"failed\"}",
+      "acceptanceCanonicalUtf8": "{\"acceptedAt\":\"2026-10-29T12:00:00.000Z\",\"environment\":\"production\",\"failureSha256\":\"2a76e3edc39136d0da0d8790f221fb20fc3b83594daa11eab535514c5bf9bf3e\",\"generation\":9007199254740991,\"inputManifestSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"jobId\":\"terminal-vector-failed-production-safe-integer-boundary\",\"pipelineDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"receiptId\":\"receipt-failed-production-safe-integer-boundary\",\"schemaVersion\":1,\"storageReceiptId\":\"storage-failed-production-safe-integer-boundary\",\"validationVersion\":\"ltds-reference-v1\"}",
+      "acceptanceSha256": "1ab9b8979aeefda5f9933c0ecf826693ba3be25f8c64a9f52817655c4e847793"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-failure-field",
+      "kind": "outcome",
+      "base": "failed-native",
+      "value": {
+        "environment": "staging",
+        "errorCode": "engine_failed",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "generation": 1,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-failed-native",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "failed",
+        "exceptionText": "not-allowed"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "exceptionText"
+    },
+    {
+      "name": "boolean-generation",
+      "kind": "outcome",
+      "base": "failed-native",
+      "value": {
+        "environment": "staging",
+        "errorCode": "engine_failed",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "generation": true,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-failed-native",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "failed"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "generation"
+    },
+    {
+      "name": "unconfirmed-state",
+      "kind": "outcome",
+      "base": "failed-native",
+      "value": {
+        "environment": "staging",
+        "errorCode": "engine_failed",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "generation": 1,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-failed-native",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "running"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "terminalState"
+    },
+    {
+      "name": "failure-digest-changed",
+      "kind": "outcome",
+      "base": "failed-native",
+      "value": {
+        "environment": "staging",
+        "errorCode": "engine_failed",
+        "failureSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "generation": 1,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-failed-native",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "failed"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "failureSha256"
+    },
+    {
+      "name": "error-code-path",
+      "kind": "outcome",
+      "base": "failed-native",
+      "value": {
+        "environment": "staging",
+        "errorCode": "private/path",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "generation": 1,
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "jobId": "terminal-vector-failed-native",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "schemaVersion": 1,
+        "terminalState": "failed"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "errorCode"
+    },
+    {
+      "name": "unknown-receipt-file-claim",
+      "kind": "acceptance",
+      "base": "failed-native",
+      "value": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": 1,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-native",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1",
+        "filesAccepted": true
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "filesAccepted"
+    },
+    {
+      "name": "boolean-receipt-generation",
+      "kind": "acceptance",
+      "base": "failed-native",
+      "value": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": true,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-native",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "generation"
+    },
+    {
+      "name": "receipt-failure-binding-changed",
+      "kind": "acceptance",
+      "base": "failed-native",
+      "value": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": 1,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-native",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "expectedValidationError": "Conflict",
+      "mutatedField": "failureSha256"
+    },
+    {
+      "name": "receipt-environment-changed",
+      "kind": "acceptance",
+      "base": "failed-native",
+      "value": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": 1,
+        "environment": "production",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-native",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "expectedValidationError": "Conflict",
+      "mutatedField": "environment"
+    },
+    {
+      "name": "unzoned-acceptance-time",
+      "kind": "acceptance",
+      "base": "failed-native",
+      "value": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": 1,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-native",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "acceptedAt"
+    },
+    {
+      "name": "unsafe-receipt-id",
+      "kind": "acceptance",
+      "base": "failed-native",
+      "value": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": 1,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "schemaVersion": 1,
+        "receiptId": "../foreign",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "ltds-reference-v1"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "receiptId"
+    },
+    {
+      "name": "unknown-validation-version",
+      "kind": "acceptance",
+      "base": "failed-native",
+      "value": {
+        "jobId": "terminal-vector-failed-native",
+        "generation": 1,
+        "environment": "staging",
+        "inputManifestSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pipelineDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "failureSha256": "7e4bea5aa64d06db4a88604a229c5590d6104048e089ad48b357a26c93c3e1a8",
+        "schemaVersion": 1,
+        "receiptId": "receipt-failed-native",
+        "storageReceiptId": "storage-failed-native",
+        "acceptedAt": "2026-10-29T12:00:00.000Z",
+        "validationVersion": "foreign"
+      },
+      "expectedValidationError": "ProtocolError",
+      "mutatedField": "validationVersion"
+    }
+  ],
+  "replay": {
+    "exactReceipt": "created:false, terminalAccepted:true; same stored canonical receipt and no second row",
+    "changedReceipt": "409 reference_conflict even if changed acceptedAt or receipt identifiers",
+    "unconfirmedCancellation": "409 reference_conflict; no outcome may be inferred from a timeout or cancellation request",
+    "foreignEnvironment": "404 not_found before action parsing",
+    "afterAcceptance": "outcome remains available; public phase completed and resultManifest absent"
+  }
+}
