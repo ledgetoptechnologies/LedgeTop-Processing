@@ -39,13 +39,13 @@ docker run --name ledgetop-reference-worker --init --read-only \
   --mount type=bind,src=/OWNER/private-worker-config,dst=/run/ledgetop-worker,readonly \
   --mount type=bind,src=/OWNER/private-worker-state,dst=/var/lib/ledgetop-worker/state \
   --mount type=bind,src=/OWNER/private-worker-scratch,dst=/var/lib/ledgetop-worker/scratch \
-  --mount type=bind,src=/OWNER/existing-node-gates,dst=/var/lib/ledgetop-gates/LedgeTop-Processing/node-gates \
+  --mount type=bind,src=/OWNER/existing-node-gates/ENGINE_SHA256,dst=/var/lib/ledgetop-gates/LedgeTop-Processing/node-gates/ENGINE_SHA256 \
   sha256:REVIEWED_IMMUTABLE_IMAGE_ID \
   --config /run/ledgetop-worker/worker.json
 ```
 
 Use literal absolute existing host directories with real UID1000 ownership and
-private mode0700 for state, scratch and the existing gate directory; private
+private mode0700 for state, scratch and the existing hashed Engine gate directory; private
 config/server key must satisfy the existing owner/private-file checks. Preserve
 existing paths and permissions: this image does not repair ownership or provision
 host directories. State and scratch mount points baked into the image are
@@ -58,8 +58,13 @@ budgets, cleanup and read-pin policy remain owned by the existing worker.
 For this image `XDG_STATE_HOME=/var/lib/ledgetop-gates`. The actual gate formula is
 `$XDG_STATE_HOME/LedgeTop-Processing/node-gates/sha256(engineId)`; an ordinary host
 without XDG override uses `$HOME/.local/state` instead. Resolve the **actual host
-process's** XDG/HOME and physical Engine ID, then bind its existing `node-gates`
-parent into the destination shown above. Independently compare existing inode,
+process's** XDG/HOME and physical Engine ID. Replace both `ENGINE_SHA256`
+placeholders with the lowercase SHA256 of the UTF-8 Engine ID and bind only that
+existing private gate directory into the matching destination shown above.
+The observed cluster parent is mode0775 while its hashed gate root is0700;
+the main parent and hashed root are0700. Parent privacy must not be assumed,
+and no permission change is needed for this exact-root mount.
+Independently compare existing inode,
 authority, node, generation and reservation state before activation. Never
 provision a second container-private gate or change its namespace to bypass a
 held reservation. Matching UID alone does not prove host/container gate identity.
