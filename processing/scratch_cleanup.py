@@ -186,26 +186,51 @@ class ScratchCleanupExecutor:
         proves cleanup: reconciliation requires a matching durable verified fact
         and an unlinking/removed journal phase. No data or journal records expire.
         """
+        return self._execute(None, reservation_id, object_id, generation=generation, sha256=sha256,
+            byte_size=byte_size, relative_path=relative_path, intent_token=intent_token)
+
+    def execute_input_copy(self, reservation_id, object_id, *, generation, sha256, byte_size,
+                           relative_path, intent_token=None):
+        """The same exact procedure for one released processing-input copy.
+
+        Its ledger fence and journal binding use the separate input-copy namespace,
+        so an input and a result object with the same ID can never share an intent.
+        """
+        return self._execute("input-copy", reservation_id, object_id, generation=generation, sha256=sha256,
+            byte_size=byte_size, relative_path=relative_path, intent_token=intent_token)
+
+    def _execute(self, namespace, reservation_id, object_id, *, generation, sha256, byte_size,
+                 relative_path, intent_token):
         rename = self._supported()  # Fail closed on Windows before creating a fence.
         self.ledger._owned_path(reservation_id, relative_path)
+        inputs = namespace == "input-copy"
+        begin = self.ledger.begin_input_cleanup if inputs else self.ledger.begin_cleanup
+        recover = self.ledger.input_cleanup_intent if inputs else self.ledger.cleanup_intent
+        confirm = self.ledger.mark_input_cleaned if inputs else self.ledger.mark_cleaned
         if intent_token is None:
-            intent = self.ledger.begin_cleanup(reservation_id, object_id, generation=generation, sha256=sha256)
+            intent = begin(reservation_id, object_id, generation=generation, sha256=sha256)
             intent_token = intent["intent_token"]
         else:
-            intent = self.ledger.cleanup_intent(reservation_id, object_id)
+            intent = recover(reservation_id, object_id)
         if (type(generation) is not int or type(byte_size) is not int
                 or (intent["generation"], intent["sha"], intent["bytes"], intent["path"], intent["intent_token"])
                 != (generation, sha256, byte_size, relative_path, intent_token)):
             raise CleanupRefused("cleanup request does not match durable intent")
         binding = dict(reservationId=reservation_id, objectId=object_id, generation=generation,
                        sha256=sha256, bytes=byte_size, path=relative_path, intentToken=intent_token)
-        quarantine = intent_token + ".object"
+        # Journal rows are keyed by token. Input rows use their own durable key
+        # namespace; result keys and bindings stay byte-identical.
+        key = intent_token
+        if inputs:
+            binding["namespace"] = namespace
+            key = namespace + ":" + intent_token
+        quarantine = intent_token + (".input" if inputs else ".object")
         with self._root_descriptor() as root_fd, self._parent_descriptor(root_fd, relative_path) as parent_fd:
             with self._journal(root_fd) as (journal_fd, db):
                 self._sync(parent_fd, journal_fd)  # Capability preflight before any rename/unlink.
                 binding["rootIdentity"] = dict(device=os.fstat(root_fd).st_dev, inode=os.fstat(root_fd).st_ino)
                 binding["parentIdentity"] = dict(device=os.fstat(parent_fd).st_dev, inode=os.fstat(parent_fd).st_ino)
-                entry = self._load(db, intent_token)
+                entry = self._load(db, key)
                 if entry and entry[0] != _json(binding):
                     raise CleanupRefused("journal binding mismatch")
                 verified = json.loads(entry[1]) if entry else None
@@ -232,7 +257,7 @@ class ScratchCleanupExecutor:
                         if os.fstat(source_fd).st_dev != os.fstat(journal_fd).st_dev:
                             raise CleanupRefused("quarantine must share source filesystem")
                         verified = identity
-                        self._persist(db, journal_fd, intent_token, binding, verified, "verified")
+                        self._persist(db, journal_fd, key, binding, verified, "verified")
                         if rename(parent_fd, os.fsencode(relative_path.split("/")[-1]), journal_fd, os.fsencode(quarantine), 1):
                             code = ctypes.get_errno()
                             if code in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
@@ -243,17 +268,17 @@ class ScratchCleanupExecutor:
                         check_fd, _ = self._open_verified(journal_fd, quarantine, binding, verified)
                         os.close(check_fd)
                         self._sync(parent_fd, journal_fd)
-                        self._persist(db, journal_fd, intent_token, binding, verified, "quarantined")
+                        self._persist(db, journal_fd, key, binding, verified, "quarantined")
                     finally:
                         os.close(source_fd)
                     quarantined_fd = True
                 if quarantined_fd is not None:
-                    self._persist(db, journal_fd, intent_token, binding, verified, "unlinking")
+                    self._persist(db, journal_fd, key, binding, verified, "unlinking")
                     os.unlink(quarantine, dir_fd=journal_fd)
                 elif phase not in ("unlinking", "removed"):
                     raise CleanupRefused("missing file without verified deletion phase")
                 self._sync(parent_fd, journal_fd)
-                self._persist(db, journal_fd, intent_token, binding, verified, "removed")
-                self.ledger.mark_cleaned(reservation_id, object_id, generation=generation,
+                self._persist(db, journal_fd, key, binding, verified, "removed")
+                confirm(reservation_id, object_id, generation=generation,
                     sha256=sha256, intent_token=intent_token, executor_attested=True)
         return dict(reservationId=reservation_id, objectId=object_id, intentToken=intent_token, state="cleaned")
