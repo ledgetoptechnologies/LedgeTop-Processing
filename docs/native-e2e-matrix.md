@@ -94,6 +94,27 @@ ordinary assertion is a separate, later harness change. Retry time remains
 simulated (`available_at` advanced), the outage is a refusing relay, and the
 fix's 5-minute backoff ceiling is not exercised in wall time.
 
+## Versioned fixed-source regression (harness v3)
+
+Harness v3 (`b0f7de2`) adds `CoordinatorOutageFixedPollV1`, a plain-assertion
+T9 for Viewer `e66e37b` only:
+
+- It runs only with `MATRIX_VIEWER_TARGET=viewer-e66e37b-poll-fix-v1`; default
+  runs skip it.
+- It first requires the loaded `processingWorker.js` sha256 to be
+  `fdb948ee…06752`.
+- It then asserts that six refused reconciles all stay `queued_upstream` with
+  `provider_observation_unavailable`, and that the attempt proceeds to ingest.
+
+The v1 classes, including T9's `expectedFailure`, are unchanged. The baseline and
+fix suite results above stay as recorded: 7 pass plus 1 expected failure, and 7
+pass plus 1 unexpected success.
+
+| Selected target | Viewer tree | Result |
+| --- | --- | --- |
+| `viewer-e66e37b-poll-fix-v1` | `e66e37b` fix | PASS (1 test, about 11 s) |
+| `viewer-e66e37b-poll-fix-v1` | `4b4f707` control | FAIL at the pin check (`cc4c7d86…` is not `fdb948ee…`), as intended: the regression refuses a tree that is not the pinned fix |
+
 ## First failures preserved
 
 Earlier runs of the same harness are kept as evidence, not converted to passes:
