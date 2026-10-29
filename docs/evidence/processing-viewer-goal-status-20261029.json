@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "goalStatus": "active-incomplete",
+  "scope": "Full coordinated Processing and Viewer objective; source qualifications do not establish runtime completion",
+  "requirements": [
+    {
+      "requirement": "Lightweight NAS-backed production/staging queue and just-in-time reserved transfer",
+      "state": "partial-source",
+      "evidence": "ReferenceStore production priority, persisted claims and indexed transfer source; actual main packaged 10k tiny-transfer qualification in indexed-worker-source-20261029.json",
+      "remaining": "Actual NAS producer, authenticated source custody issuer, complete purge pins and installed end-to-end transfer; Viewer capacity foundation is separate and dormant"
+    },
+    {
+      "requirement": "Small-node-first routing, one heavy execution slot and production priority",
+      "state": "qualified-existing-coordinator-policy",
+      "evidence": "Existing installed coordinator routing qualification: 10/20/50/1000 photos to cluster, 1001 to main; cluster cap 1000 photos/20GiB, main no compute/photo caps",
+      "remaining": "Revalidate through final NAS-backed Viewer pipeline; preserve these invariants in each new composition"
+    },
+    {
+      "requirement": "Per-node private engines and durable completion outboxes",
+      "state": "partial-source",
+      "evidence": "Worker daemon and outbox source, target main inactive image 75 synthetic tests and five actual cached-old-image refusals",
+      "remaining": "Install and accept worker composition on both PCs; migrate legacy updater and direct bypass routes"
+    },
+    {
+      "requirement": "Crash-safe worker to orchestrator to Viewer handoff",
+      "state": "partial-source",
+      "evidence": "Persisted claims, result outboxes, retry and acceptance source; hot SQLite journal audit explicitly records held recovery",
+      "remaining": "Automatic hot driver journal recovery, scratch journal recovery, full authenticated custody/acceptance/release chain, native upload uncertainty and actual restart acceptance"
+    },
+    {
+      "requirement": "Bounded safe cleanup and retained metadata retirement",
+      "state": "not-enabled",
+      "evidence": "Input-copy ledger/executor default-deny authority; source-release-ack-proposal.md is a review draft only",
+      "remaining": "Real source issuer and all purge pins, authenticated release and cleanup closure, durable last-copy ACK, bounded metadata retirement; current indexed profile permits only one retained job"
+    },
+    {
+      "requirement": "Drain, container update, verification and recovery",
+      "state": "partial-existing-runtime-and-source",
+      "evidence": "Existing coordinator maintenance gate and prior synthetic drain/rollback; legacy census deliberately refuses indexed ABI",
+      "remaining": "Qualified indexed maintenance history, stopped/restart namespace proof, actual worker-aware updater rollout and automated update detection/test promotion"
+    },
+    {
+      "requirement": "Optional genuine-LiDAR TreeDar and future Gaussian splats",
+      "state": "partial-source-disabled",
+      "evidence": "TreeDar synthetic geometry qualification and provenance validators; Gaussian splats intentionally disabled",
+      "remaining": "Authenticated genuine acquisition issuer, optional-stage app/worker integration, main-only runtime acceptance and genuine LiDAR test"
+    },
+    {
+      "requirement": "Viewer hierarchy and dark Operations-aligned workspace revamp",
+      "state": "source-integrated-under-owner-review",
+      "evidence": "Real migration42 hierarchy API and persistent authorization tests; Claude redesign2522 combined with GCP/hierarchy on Viewer owner candidate977835ad",
+      "remaining": "Archived-assignment UX correction, final current-main integration, rendered desktop/mobile/operator acceptance and release; display grouping must never grant access"
+    },
+    {
+      "requirement": "Shared cross-language contracts and failure/recovery acceptance",
+      "state": "partial-qualified",
+      "evidence": "Existing reference/source-retention fixtures and Python/Node integration tests; target main packaged qualification and old-image refusal evidence",
+      "remaining": "Joint custody/release/cleanup closure fixture and actual authenticated peer integration; full crash and response-loss matrix on final composition"
+    },
+    {
+      "requirement": "Authorized real small pilot, queued jobs and 10k-photo acceptance",
+      "state": "not-accepted",
+      "evidence": "Authorized retained 20-photo upload failed before engine submission; Viewer PR349 fix published as digest0ba39949509c488442c14a643dd902b5df3a93e0ef95f1a56fd52375a0b2c152",
+      "remaining": "Beau-controlled TrueNAS API/worker image readback and update, same-operation valid retry, small real queued acceptance, then separately authorized approximately50GB/10k no-GCP dataset; tiny-file tests do not establish this"
+    },
+    {
+      "requirement": "Engineering Hub and Viewer/Claude/Hermes coordination",
+      "state": "active",
+      "evidence": "Fresh Hub v4 read: installed endpoint d85 healthy,54tools, actual existing listener PID70444; Viewer owner actively coordinates Claude",
+      "remaining": "Hermes exact request remains retained/pending; no fresh Hermes acknowledgement or idle/reboot delivery proof. Continue event-driven updates without scheduled inbox polling"
+    }
+  ],
+  "operatorBoundaries": {
+    "trueNasAdministration": "Beau only",
+    "nasPermissionChanges": false,
+    "newClientJobSubmitted": false,
+    "realClientDataCleaned": false,
+    "indexedWorkerActivated": false,
+    "goalComplete": false
+  }
+}
