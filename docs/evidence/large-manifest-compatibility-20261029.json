@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "status": "compatibility-gap-confirmed-not-processing-authorized",
+  "observationSource": "Viewer owner sanitized parent-selection measurements; Root has not independently scanned or hashed the client files",
+  "selection": {
+    "jpegDirectoryEntries": 16832,
+    "jpegBytes": 152668897280,
+    "auxiliaryCsvEntries": 1,
+    "auxiliaryKindReported": "Emlid CSV; no GCP-use inference",
+    "representativeUploadEnvelopeBytes": 4379484,
+    "envelopeScope": "Viewer upload JSON with actual paths/sizes and placeholder SHA values, photos only; not a canonical Processing manifest or claim",
+    "duplicateBasenameRenamingReported": true,
+    "independentPortableBasenameCount": null,
+    "independentContentDuplicateCount": null
+  },
+  "previousUserEstimate": {
+    "photos": "approximately10000",
+    "bytes": "approximately50GB",
+    "gcp": false,
+    "scope": "Earlier intended large test estimate; not assumed identical to the measured parent selection"
+  },
+  "currentCompatibility": {
+    "mainNodePhotoPolicyLimit": null,
+    "referenceTransportMaxObjects": 10000,
+    "referenceRequestClaimByteLimit": 4194304,
+    "indexedGrantByteLimit": 2097152,
+    "indexedDatabaseByteCap": 67108864,
+    "indexedJobControlChargeBytes": 33554432,
+    "viewerBrowserTransferByteCap": 137438953472,
+    "viewerDormantPreparationObjectCap": 20001,
+    "scope": "The10k reference transport/indexed profile and Viewer upload limits are not main-PC compute/photo policy. Dormant larger preparation is not a compatible protocol revision."
+  },
+  "requiredWork": [
+    "Agree and implement coordinated bounded larger or paged NAS-referenced manifest transport",
+    "Update all affected request, manifest, grant, indexed schema, count, attempt, quota and capacity limits together with explicit version compatibility",
+    "Qualify worst legal object dimensions and actual SQLite metadata growth; a count-only increase is insufficient",
+    "Use NAS-backed just-in-time source transfer rather than assuming the current browser cap can upload the measured selection",
+    "Preserve exact source identity and auxiliary CSV retention; do not truncate or silently deduplicate",
+    "Keep authorized retained20-photo operation separate from any future large-selection admission and processing"
+  ],
+  "runtimeChanged": false,
+  "clientDataUploaded": false,
+  "clientDataProcessed": false,
+  "clientDataDeleted": false,
+  "goalComplete": false
+}
