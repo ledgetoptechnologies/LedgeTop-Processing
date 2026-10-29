@@ -54,6 +54,22 @@
     "registryPublished": false,
     "runtimeDeployed": false
   },
+  "actualMainPcImage": {
+    "id": "sha256:fed772b1b2b9593e2105a33e7fd3b36719db34dff919d46f940b70a70f13e06c",
+    "sourceCommit": "0b7db5c58e54d3ce86359e79f04d1d6e9789d37e",
+    "sourceLayout": "Detached clean Linux Git clone; canonical LF blobs",
+    "sourceFileCount": 71,
+    "rawSourceInventorySha256": "de6adf097232c389c9cc39af99845f2ee1e81e25249d992d2da666648db640be",
+    "actualImagePrimitiveTestsPassed": 19,
+    "standaloneFactoryChecksPassed": 4,
+    "skipped": 0,
+    "existingContainersUnchanged": 5,
+    "monitoringPreserved": true,
+    "independentRootReadback": "Actual image, RootFS, all 71 raw Git blob hashes, UID1000, source protection and imports verified",
+    "hostBootstrapExecuted": false,
+    "persistentWorkerActivated": false,
+    "registryPublished": false
+  },
   "remainingWork": [
     "Actual authenticated worker-scoped source custody and whole-parent finality authority",
     "Purge-path retention pins and end-to-end release acknowledgements",
