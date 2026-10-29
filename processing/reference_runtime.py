@@ -40,6 +40,7 @@ class ReferenceSettings:
     workers: dict
     stream_budget: dict
     recovery_bindings: dict | None = None
+    routing_bindings: dict | None = None
 
 
 def _file(path, *, private):
@@ -76,7 +77,7 @@ def load_reference_settings(path, config):
         if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -135,8 +136,18 @@ def load_reference_settings(path, config):
                     physical["coordinatorOrigin"],physical["gateGeneration"],physical["outputBudget"])
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
+        routing=None
+        if 'routingBindings' in value:
+            from .reference_routing import RoutingNodeBinding
+            configured=value['routingBindings']
+            if type(configured) is not dict or set(configured)!=set(('cluster','main')):raise RuntimeConfigurationError('routing binding coverage changed')
+            routing={}
+            for node,physical in configured.items():
+                p._closed(physical,('engineId','gateGeneration','engineVersion'),'routing identity')
+                routing[node]=RoutingNodeBinding(physical['engineId'],physical['gateGeneration'],physical['engineVersion'])
+        if config.reference_main_fallback and routing is None:raise RuntimeConfigurationError('explicit independent routing identities required')
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -219,8 +230,12 @@ class ReferenceRuntime:
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
+            routing=None
+            if config.reference_main_fallback:
+                from .reference_routing import ReferenceRouting
+                routing=ReferenceRouting(config,settings.workers,authority_id=queue.authority_id,bindings=settings.routing_bindings,ssl_context=worker_context)
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
-                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main")
+                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",routing=routing)
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},

@@ -46,12 +46,16 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None):
+                 main_node_id=None, routing=None):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
+        if routing is not None:
+            from .reference_routing import ReferenceRouting
+            if type(routing) is not ReferenceRouting or routing.authority_id!=queue.authority_id:raise ValueError('concrete queue-bound reference routing required')
+        self.routing=routing;self._routing_identity=routing
         self.queue = queue
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
@@ -233,7 +237,23 @@ class ReferenceStore:
         if phase not in PHASES or (phase != row["phase"] and phase not in PHASES[row["phase"]]):
             raise Conflict("invalid reference phase transition")
 
-    def _required_node(self, submission):
+    def _route_sample(self):
+        if self.routing is not self._routing_identity:raise ValueError('reference routing identity changed')
+        if self.routing is None:return None
+        # Avoid health traffic while the single slot is owned or no reference
+        # head exists. A later head change is rechecked atomically and retries.
+        with self.queue._db() as db:
+            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():return None
+            head=db.execute("SELECT profile FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
+            if head is None or head['profile']!=PROFILE:return None
+        return self.routing.sample()
+
+    def _required_node(self, submission, db=None, sample=None):
+        if self.routing is not None:
+            states={node:self.queue._node(db,node)['state'] for node in ('cluster','main')}
+            return self.routing.choose(submission,states,sample,local_max_photos=self.local_max_photos,
+                local_max_input_bytes=self.local_max_input_bytes,main_node_id=self.main_node_id)
+
         requires_main = (submission['pipeline']['treedar']['requested']
             or submission['manifest']['inputCounts']['images'] > self.local_max_photos
             or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
@@ -242,6 +262,7 @@ class ReferenceStore:
     def next_for_node(self, node_id):
         """PRIVATE worker discovery; advisory only, claim remains atomic."""
         self.queue._known_node(node_id)
+        sample=self._route_sample()
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self.queue._refresh_nodes(db)
@@ -253,7 +274,7 @@ class ReferenceStore:
                 return None
             row = self._row(db, head['id'])
             submission = json.loads(row['input_json'])
-            if self._required_node(submission) != node_id:
+            if self._required_node(submission,db,sample) != node_id:
                 return None
             if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:
                 return None
@@ -271,6 +292,7 @@ class ReferenceStore:
             protocol._slug(value, "claim identifier")
         if PROFILE not in self.queue.allowed_profiles:
             raise Conflict("reference profile disabled")
+        sample=self._route_sample()
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
@@ -293,7 +315,7 @@ class ReferenceStore:
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference phase cannot be claimed")
             submission = json.loads(row["input_json"])
-            required_node = self._required_node(submission)
+            required_node = self._required_node(submission,db,sample)
             if node_id != required_node:
                 return None
             if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:

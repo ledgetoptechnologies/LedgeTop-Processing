@@ -29,6 +29,7 @@ class Config:
     viewer_max_input_bytes: int = 20 * 1024 ** 3
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
+    reference_main_fallback: bool = False
 
 
 def _node_origin(value: str) -> str:
@@ -96,6 +97,11 @@ def from_environment() -> Config:
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
+    fallback=os.environ.get('PROCESSING_REFERENCE_MAIN_FALLBACK','0')
+    if fallback not in ('0','1'):
+        raise ValueError('PROCESSING_REFERENCE_MAIN_FALLBACK must be 0 or 1')
+    if fallback=='1' and (not os.environ.get('PROCESSING_REFERENCE_CONFIG') or set(node_ids)!=set(('cluster','main'))):
+        raise ValueError('reference fallback requires explicit runtime and both nodes')
     return Config(
         api_token=token,
         local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
@@ -119,4 +125,5 @@ def from_environment() -> Config:
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
+        reference_main_fallback=fallback=='1',
     )
