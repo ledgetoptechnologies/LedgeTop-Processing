@@ -240,5 +240,40 @@ class CoordinatorOutage(NativeViewerMatrix):
         self.assertNotEqual(record['result']['statusAfterOutage'], 'failed', record['result'])
 
 
+# ----- Versioned fixed-source regressions -------------------------------------
+# These never change the v1 expectations above. Each targets one exact Viewer
+# source, is selected explicitly with MATRIX_VIEWER_TARGET and first proves the
+# pinned module bytes actually ran.
+
+FIXED_POLL_V1 = dict(
+    target='viewer-e66e37b-poll-fix-v1',
+    viewer_commit='e66e37b31165035d162109bf6a1faa2ebc47b5cd',
+    processing_worker_sha256='fdb948ee45c0d61ec76dba94e42bca8ae4d8b2619b98309bba35bfab12f06752')
+
+
+@unittest.skipUnless(os.environ.get('MATRIX_VIEWER_TARGET') == FIXED_POLL_V1['target'],
+                     'select with MATRIX_VIEWER_TARGET=' + FIXED_POLL_V1['target'])
+class CoordinatorOutageFixedPollV1(NativeViewerMatrix):
+    """T9 against Viewer e66e37b only: a plain assertion, no expectedFailure."""
+
+    engine_duration = 8
+
+    def loaded_worker_sha256(self, record):
+        return {m['path']: m['sha256'] for m in record['viewerModules']['loaded']}.get(
+            'apps/viewer/server/processingWorker.js')
+
+    def test_t9_fixed_v1_long_outage_keeps_attempt_and_ingests(self):
+        record = self.finish(self.run_case('outage', OUTAGE_FAILURES='6'))
+        self.assertEqual(self.loaded_worker_sha256(record), FIXED_POLL_V1['processing_worker_sha256'],
+                         'the selected Viewer tree is not the pinned poll fix')
+        self.assertTrue(record['ok'], record.get('error'))
+        result = record['result']
+        self.assertEqual(len(result['outageSteps']), 6)
+        self.assertTrue(all(step['status'] == 'queued_upstream' for step in result['outageSteps']), result)
+        self.assertEqual({step['jobs']['error_code'] for step in result['outageSteps']}, {'provider_observation_unavailable'})
+        self.assertEqual(result['statusAfterOutage'], 'queued_upstream')
+        self.assertIn(result['finalStatus'], ('ingesting', 'derivatives', 'ready_for_review'))
+
+
 if __name__ == '__main__':
     unittest.main()
