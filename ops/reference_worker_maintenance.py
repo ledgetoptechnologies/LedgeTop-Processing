@@ -156,7 +156,7 @@ def _legacy_driver_history(db, tables):
                     'indexed_worker_maintenance_not_qualified')
 
 
-def offline_census(root):
+def offline_census(root, *, indexed_context=None):
     """Under actual DaemonStateLock; bounded immutable SQL, no repairs/expiry."""
     root,_=private(root,directory=True);result={};paths=[]
     with os.scandir(root) as stream:
@@ -166,7 +166,9 @@ def offline_census(root):
     require(required<={x.name for x in paths},'complete_worker_state_required')
     for path in paths:
         require(not path.name.endswith(('-wal','-shm','-journal')),'worker_sql_sidecar_unresolved')
-        require(path.name in required|{'engine-cleanup.sqlite','worker-daemon.lock','scratch.sqlite.readers.lock'},'unknown_worker_state_file')
+        require(path.name in required|{'engine-cleanup.sqlite','worker-daemon.lock','scratch.sqlite.readers.lock'}|({'input-copy-bootstrap','indexed-driver-recovery'} if indexed_context is not None else set()),'unknown_worker_state_file')
+        if path.name in ('input-copy-bootstrap','indexed-driver-recovery') and indexed_context is not None:
+            private(path,directory=True);continue
         private(path)
         if not path.name.endswith('.sqlite'):continue
         raw,fingerprint=read_file(path,64*1024**2)
@@ -180,7 +182,10 @@ def offline_census(root):
             names=list(db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 65"))
             require(len(names)<=64,'worker_schema_bound');tables={r[0] for r in names}
             if path.name=='driver.sqlite':
-                _legacy_driver_history(db, tables)
+                if indexed_context is None:_legacy_driver_history(db, tables)
+                else:
+                    from ops.reference_worker_indexed_maintenance import inspect_driver
+                    indexed_hashes,indexed_history=inspect_driver(db,root,indexed_context)
                 require('driver_jobs' in tables and not db.execute("SELECT 1 FROM driver_jobs WHERE stage!='completed' LIMIT 1").fetchone(),'worker_pending_driver_or_acceptance')
             if path.name in ('outbox.sqlite','failure-outbox.sqlite'):
                 require('completions' in tables and not db.execute("SELECT 1 FROM completions WHERE state!='acknowledged' LIMIT 1").fetchone(),'worker_pending_outbox')
@@ -206,6 +211,10 @@ def offline_census(root):
                 if 'control_charges' in tables:require(not db.execute('SELECT 1 FROM control_charges LIMIT 1').fetchone(),'noncanonical_worker_control_history_requires_review')
             if path.name=='engine-cleanup.sqlite':require(not db.execute("SELECT 1 FROM removals WHERE phase!='removed' LIMIT 1").fetchone(),'worker_engine_cleanup_unresolved')
             hashes={}
+            if path.name=='driver.sqlite' and indexed_context is not None:
+                result[path.name]=dict(indexed_hashes,__indexed_history__=indexed_history)
+                require(identity(path.lstat())==fingerprint,'worker_state_changed_during_census')
+                continue
             for name in tables:
                 require(re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,127}',name),'worker_sql_schema_changed')
                 count=db.execute('SELECT COUNT(*) FROM "'+name+'"').fetchone()[0];require(count<=10000,'worker_row_bound')
@@ -223,7 +232,7 @@ def offline_census(root):
 
 _HISTORY={'driver.sqlite':'driver_jobs','worker.sqlite':'executions','outbox.sqlite':'completions','failure-outbox.sqlite':'completions'}
 
-def immutable_history(root):
+def immutable_history(root, *, indexed_context=None):
     """Read exact retained claims/manifests/outbox rows, not live reader metadata.
 
     Only used before reopening the owned updating barrier, when no new claims
@@ -242,7 +251,13 @@ def immutable_history(root):
             if filename == 'driver.sqlite':
                 names = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 65").fetchall()
                 require(len(names) <= 64, 'worker_schema_bound')
-                _legacy_driver_history(db, {row[0] for row in names})
+                if indexed_context is None:_legacy_driver_history(db, {row[0] for row in names})
+                else:
+                    from ops.reference_worker_indexed_maintenance import inspect_driver
+                    _,history=inspect_driver(db,root,indexed_context,running=True)
+                    result[filename]=history
+                    require(identity(path.lstat())==identity(before),'worker_history_changed_during_read')
+                    continue
             count=db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]
             require(count<=10000,'worker_history_row_bound')
             columns=[r[1] for r in db.execute('PRAGMA table_info('+table+')')]
@@ -340,6 +355,9 @@ class WorkerMaintenance:
         for source,_target in pairs:
             value=Path(source).lstat();wanted.append([value.st_dev,value.st_ino,value.st_uid,value.st_gid,stat.S_IMODE(value.st_mode)])
         require(actual==wanted,'worker_mount_inode_or_owner_changed')
+        if config.get('inputCopyAccounting')=={'schemaVersion':2,'fetchJournal':{'schemaVersion':1,'policyId':'indexed-worker-fetch-v1'}}:
+            from ops.reference_worker_indexed_maintenance import observe_running_mounts
+            observe_running_mounts(self)
         return digest(wanted)
 
     def config(self):
@@ -465,7 +483,11 @@ class WorkerMaintenance:
         item=self.inspect();require(not item['running'] and item['pid']==0 and item['exitCode']==0,'graceful_worker_stop_unproven')
         self.phase(state,receipt,'stopped')
         self._owner=DaemonStateLock(self.policy.state_root).__enter__()
-        census=offline_census(self.policy.state_root)
+        self._indexed_maintenance_context=None
+        if config.get('inputCopyAccounting')=={'schemaVersion':2,'fetchJournal':{'schemaVersion':1,'policyId':'indexed-worker-fetch-v1'}}:
+            from ops.reference_worker_indexed_maintenance import stopped_context
+            self._indexed_maintenance_context=stopped_context(self)
+        census=offline_census(self.policy.state_root,**self._indexed_census_arguments())
         self.phase(state,receipt,'quiesced',census=census)
         self._replacement_context=(state,gate,adapter)
 
@@ -492,11 +514,18 @@ class WorkerMaintenance:
         require(type(version) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}',version),'worker_native_version_unavailable')
         return dict(containerId=item['Id'],imageId=target,engineVersion=version)
 
+    def _indexed_census_arguments(self):
+        config,_=self.config()
+        if config.get('inputCopyAccounting',{}).get('schemaVersion')!=2:return {}
+        context=getattr(self,'_indexed_maintenance_context',None)
+        require(context is not None,'indexed_stopped_mapping_unproven')
+        return dict(indexed_context=context)
+
     def _stopped_owner(self,state):
         require(self.lookup_stop(state)['committed'],'worker_stop_not_proven')
         if self._owner is None:self._owner=DaemonStateLock(self.policy.state_root).__enter__()
         self._owner.check(self.policy.state_root)
-        require(offline_census(self.policy.state_root)==state['worker']['census'],'quiesced_worker_history_changed')
+        require(offline_census(self.policy.state_root,**self._indexed_census_arguments())==state['worker']['census'],'quiesced_worker_history_changed')
 
     def rebind(self,state,receipt,version,gate):
         worker=state['worker'];self._stopped_owner(state)
@@ -543,6 +572,9 @@ class WorkerMaintenance:
             self.phase(state,receipt,'publication_pending',afterPublication=after)
             self.fence(state,gate)
             save(self.publication,after)
+        if getattr(self,'_indexed_maintenance_context',None) is not None:
+            from ops.reference_worker_indexed_maintenance import observe_owned_rebind
+            observe_owned_rebind(self)
         self.phase(state,receipt,'rebound',afterPublication=after)
 
     def after_backend(self,state,receipt,gate,adapter):
@@ -604,8 +636,8 @@ class WorkerMaintenance:
         if idle:self.wait_health(idle=True)
         else:self.health(idle=False)
         if idle:
-            wanted={filename:state['worker']['census'][filename][table] for filename,table in _HISTORY.items()}
-            require(immutable_history(self.policy.state_root)==wanted,'retained_worker_history_changed_on_restart')
+            wanted={filename:state['worker']['census'][filename].get('__indexed_history__',state['worker']['census'][filename].get(table)) for filename,table in _HISTORY.items()}
+            require(immutable_history(self.policy.state_root,**self._indexed_census_arguments())==wanted,'retained_worker_history_changed_on_restart')
 
     def finish_intent(self,state,receipt):
         require(state['worker']['phase']=='verified','worker_finish_intent_must_not_replay')

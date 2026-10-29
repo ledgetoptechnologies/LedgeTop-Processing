@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "status": "reviewed-source-qualified-on-main-runtime-gates-open",
+  "scope": "Indexed maintenance census/history and synthetic controller/service tests; not an installed updater or actual Docker stop/start acceptance",
+  "sourceReceiptSha256": "d359ba992158e60bfd8c177ff0f19324c88c1866e26db9e9476a8fcb734e67ce",
+  "independentStaticReviewSha256": "0091051659ad60a93ad9857c5407af9b492d96afcef2e1c7fdefacd4fa5574db",
+  "actualMainSourceQualification": {
+    "frozenSummarySha256": "e796e14886ad51370cc300dcd1fff3b4500bf7bcbd2e83adbdfc8dcd63a954a8",
+    "reviewSha256": "9cf644fbc65fbe2abc42964cf72fececa953c4cbde7e78fb7937fb1b60a45407",
+    "collectedVerificationSha256": "14833f91a083318ff78cdc7e5405d625268f16ecfc5bebae15681a73df5413cf",
+    "testsPassed": 29,
+    "skipped": 0,
+    "seconds": 18.827,
+    "strictResourceWarningsClean": true,
+    "runOnce": true,
+    "sourceFilesVerifiedBeforeAfter": 573,
+    "runtimeImage": "sha256:b31c1fb4414144a3d8b9804666f567df1a009c54f8cab7c36755ffba280545a8",
+    "sourceMountReadOnly": true,
+    "criticalDependenciesMatchNormalizedCommitted242dac6": true,
+    "existingRealContainersUnchanged": 5,
+    "packagedProductionCodeQualification": false
+  },
+  "preservedLocalEvidence": {
+    "initialIndependentSuite": {"passed": 22, "errors": 1, "seconds": 54.505, "error": "worker_not_quiescent"},
+    "historicalGrantSemanticTests": {"passed": 12, "seconds": 5.855},
+    "deterministicBusyDeadlineSameControllerRetry": {"passed": 1, "seconds": 7.354},
+    "correctedWholeSuite": "UNKNOWN after180s wrapper observation timeout; no matching running/exited container in bounded inspection, no rerun or stop issued",
+    "hostObservation": "Windows later reported45304KiB physical memory free of66868976KiB; this does not establish the timeout or prior lifecycle failure cause"
+  },
+  "properties": [
+    "Explicit process-local mount proof minted by trusted actual observation, exact config/inode/policy and stopped-owner binding",
+    "Legacy callers without indexed context retain their existing indexed refusal and output shape",
+    "Normalized ordered bounded history covers indexed claims, objects, reservations, grants, quota, progress, attempts and bootstrap/complete-recovery records",
+    "Historical grant semantics validated at persisted trusted high-water, not current time; no execution capability issued",
+    "Pending, partial, unknown or corrupt histories retain the node hold",
+    "Actual driver lock can force the unchanged3s deadline; same controller/operation subsequently verifies actual idle with exactly one start and closed barriers",
+    "Positive test fixture uses existing production default30s; production timeout and busy-health policy unchanged"
+  ],
+  "remaining": [
+    "Actual deployed Docker namespace/mapping and private worker updater qualification",
+    "Cold new-process maintenance restart/mapping/finish remains held",
+    "Full10k terminal-job maintenance flow;10010-row hashing and small actual audits do not establish this",
+    "Incomplete fetched terminal failure histories remain conservatively held",
+    "Real engine update, runtime publication and deployment acceptance",
+    "Custody/release ACK, metadata retirement and real dataset processing remain separate"
+  ],
+  "runtimeActivated": false,
+  "realContainerStopStart": false,
+  "nasChanged": false,
+  "clientDataUsed": false,
+  "cleanupAuthorityAdded": false
+}
