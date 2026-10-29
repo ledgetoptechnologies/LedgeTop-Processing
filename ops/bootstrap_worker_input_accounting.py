@@ -48,11 +48,11 @@ def input_profile(config):
     if value['schemaVersion']==1:
         _require(set(value)=={'schemaVersion'})
     else:
-        _require(value['schemaVersion']==2 and set(value)=={'schemaVersion','fetchJournal'})
+        _require(value['schemaVersion'] in (2,3) and set(value)=={'schemaVersion','fetchJournal'})
         fetch=value['fetchJournal']
         _require(type(fetch) is dict and set(fetch)=={'schemaVersion','policyId'}
                  and type(fetch['schemaVersion']) is int and fetch['schemaVersion']==1
-                 and fetch['policyId']=='indexed-worker-fetch-v1')
+                 and fetch['policyId']==('indexed-worker-fetch-v1' if value['schemaVersion']==2 else 'indexed-worker-fetch-three-retained-v1'))
         routing=config.get('executionRouting')
         _require(routing is None or type(routing) is dict and routing.get('treedar') is None)
     return True
@@ -60,15 +60,16 @@ def input_profile(config):
 
 def indexed_profile(config):
     """A closed v2 composition request, never an authority to initialize state."""
-    return input_profile(config) and config['inputCopyAccounting']['schemaVersion']==2
+    return input_profile(config) and config['inputCopyAccounting']['schemaVersion'] in (2,3)
 
 
-def _indexed_descriptor():
+def _indexed_descriptor(config=None):
     from processing.reference_indexed_fetch import compiled_profile_descriptor
-    value=compiled_profile_descriptor()
+    policy_id='indexed-worker-fetch-v1' if config is None else config['inputCopyAccounting']['fetchJournal']['policyId']
+    value=compiled_profile_descriptor(policy_id)
     _require(type(value) is dict and set(value)=={'schemaVersion','protocol','policyId','policySha256','schemaSha256','limits'}
              and type(value['schemaVersion']) is int and value['schemaVersion']==1
-             and value['protocol']=='ltds-indexed-worker-fetch-v1' and value['policyId']=='indexed-worker-fetch-v1'
+             and value['protocol']=='ltds-indexed-worker-fetch-v1' and value['policyId']==policy_id
              and type(value['limits']) is dict and value['limits'])
     for key in ('policySha256','schemaSha256'):
         _require(type(value[key]) is str and re.fullmatch('[a-f0-9]{64}',value[key]) is not None)
@@ -155,7 +156,7 @@ def _binding(config):
                 policy=policy,inputCopyAccounting=dict(schemaVersion=1))
     if indexed_profile(config):
         value['inputCopyAccounting']=json.loads(_encoded(config['inputCopyAccounting']))
-        value['indexedFetchJournal']=_indexed_descriptor()
+        value['indexedFetchJournal']=_indexed_descriptor(config)
     _require(ipaddress.ip_address(urlsplit(value['origins']['engineOrigin']).hostname).is_loopback)
     serialized=_encoded(value)
     _require(len(serialized)<=LIMIT-1024)
@@ -252,8 +253,8 @@ def _indexed_context(root,intent,owner):
 
 def _indexed_record(root,directory,intent,intent_sha,created_sha,owner,*,fresh=False,external_only=False):
     if external_only:
-        from processing.reference_indexed_fetch import _file as indexed_file
-        info=indexed_file(root/'driver.sqlite')
+        from processing.reference_indexed_fetch import _file as indexed_file,policy_from_binding
+        info=indexed_file(root/'driver.sqlite',policy=policy_from_binding(intent['binding']))
         from types import SimpleNamespace
         context=SimpleNamespace(driver_identity=_identity(info),root_identity=_directory(root),
                                 binding_sha256=intent['bindingSha256'])

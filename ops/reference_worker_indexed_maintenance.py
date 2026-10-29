@@ -309,8 +309,13 @@ def _authority(context,root,*,running=False):
     if os.path.lexists(root/'indexed-driver-recovery'):
         from processing.reference_indexed_recovery import inspect_completed_recovery_capsule
         receipts['recovery']=inspect_completed_recovery_capsule(root,bootstrap_id=intent['bootstrapId'],binding_sha256=intent['bindingSha256'],
-            root_identity=_id(root),driver_identity=_id(root/'driver.sqlite'))
+            root_identity=_id(root),driver_identity=_id(root/'driver.sqlite'),policy=j.policy_from_binding(binding))
     return intent,receipts
+
+def indexed_database_cap(context,root,*,running=False):
+    intent,_=_authority(context,root,running=running)
+    return j.policy_from_binding(intent['binding']).database_cap
+
 
 class _ReadOnlyJournal:
     """Reuse logical checks without constructing a writer or observing walltime."""
@@ -405,16 +410,15 @@ def audit_terminal_job(db,ro,row,scratch):
 
 def inspect_driver(db,root,context,*,running=False):
     """Full terminal audit only at maintenance boundaries, never health polling."""
-    intent,receipts=_authority(context,root,running=running);ro=_ReadOnlyJournal(intent,root);ro.check(db)
+    intent,receipts=_authority(context,root,running=running);policy=j.policy_from_binding(intent['binding']);ro=_ReadOnlyJournal(intent,root);ro.check(db)
     tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
     require(not db.execute("SELECT 1 FROM driver_jobs WHERE typeof(data)!='text' OR length(CAST(data AS BLOB))>8192 LIMIT 1").fetchone(),'indexed_maintenance_projection_bound')
     jobs=list(db.execute('SELECT job,claim_request,stage,data FROM driver_jobs LIMIT 65'))
-    require(len(jobs)<=j.LIMITS['retainedJobs'],'indexed_maintenance_job_bound')
-    require(not db.execute('SELECT 1 FROM readiness_tasks LIMIT 1').fetchone(),'indexed_readiness_task_unresolved')
+    require(len(jobs)<=policy.retained_jobs,'indexed_maintenance_job_bound')
     require(len(jobs)==db.execute('SELECT COUNT(*) FROM indexed_claims').fetchone()[0]==db.execute('SELECT COUNT(*) FROM indexed_quota').fetchone()[0],
         'indexed_maintenance_job_closure')
-    require(not db.execute('SELECT 1 FROM indexed_quota WHERE charge!=? LIMIT 1',(j.JOB_CHARGE,)).fetchone(),'indexed_quota_changed')
-    require(db.execute('SELECT COALESCE(SUM(charge),0) FROM indexed_quota').fetchone()[0]+j.NON_JOB_ALLOWANCE<=j.DB_CAP,'indexed_quota_changed')
+    require(not db.execute("SELECT 1 FROM indexed_quota WHERE typeof(charge)!='integer' OR charge!=? LIMIT 1",(j.JOB_CHARGE,)).fetchone(),'indexed_quota_changed')
+    require(db.execute('SELECT COALESCE(SUM(charge),0) FROM indexed_quota').fetchone()[0]+j.NON_JOB_ALLOWANCE<=policy.database_cap,'indexed_quota_changed')
     for table in ('indexed_seals','indexed_reservations','indexed_grants','indexed_fetch'):
         require(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==len(jobs),'indexed_terminal_history_missing')
     for table in ('indexed_objects','indexed_seals','indexed_reservations','indexed_grants','indexed_fetch','indexed_attempts'):
@@ -426,13 +430,23 @@ def inspect_driver(db,root,context,*,running=False):
         deadline=time.monotonic()+3
         scratch.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
         for row in jobs:audit_terminal_job(db,ro,row,scratch)
+    # Readiness is a terminal-native UUID cache, not pending work. It may survive
+    # only for these independently audited completed jobs; no foreign cache,
+    # malformed UUID or excess selected-profile slot is adopted or deleted.
+    cached=db.execute('SELECT uuid FROM readiness_tasks LIMIT ?',(policy.capacity+1,)).fetchall()
+    require(len(cached)<=policy.capacity,'indexed_readiness_task_unresolved')
+    completed={row['job'] for row in jobs}
+    for entry in cached:
+        try:p._uuid(entry[0],'cached native task')
+        except (TypeError,ValueError):raise IndexedMaintenanceHeld('indexed_readiness_task_unresolved') from None
+        require(entry[0] in completed,'indexed_readiness_task_unresolved')
     after=scratch_path.lstat()
     require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==
         (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns),'indexed_scratch_changed_during_audit')
     settings=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
     if settings:bootstrap._driver_settings(json.loads(settings[0]),intent['binding'],indexed=True)
-    limits={name:j.LIMITS['retainedJobs'] for name in tables}
-    limits.update(driver_binding=1,driver_engine_pin=1,readiness_tasks=0,indexed_profile=1,indexed_objects=10000,indexed_attempts=10010)
+    limits={name:policy.retained_jobs for name in tables}
+    limits.update(driver_binding=1,driver_engine_pin=1,readiness_tasks=policy.capacity,indexed_profile=1,indexed_objects=10000*policy.capacity,indexed_attempts=10010*policy.capacity)
     hashes={name:_hash_rows(db,name,limits[name]) for name in sorted(tables)}
     # Engine pin legitimately advances on owned native version admission; it is
     # fenced separately by gate/backend/config and omitted only from retained hash.

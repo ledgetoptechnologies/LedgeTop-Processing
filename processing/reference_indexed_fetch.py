@@ -21,6 +21,7 @@ from . import reference_protocol as p
 
 PROTOCOL = 'ltds-indexed-worker-fetch-v1'
 POLICY_ID = 'indexed-worker-fetch-v1'
+THREE_POLICY_ID = 'indexed-worker-fetch-three-retained-v1'
 PAGE_SIZE = 4096
 PAGE_CAP = 16384
 DB_CAP = PAGE_SIZE * PAGE_CAP
@@ -77,10 +78,59 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def compiled_profile_descriptor():
-    schema_sha = p.digest(SCHEMA)
-    policy = dict(schemaVersion=1, protocol=PROTOCOL, policyId=POLICY_ID, schemaSha256=schema_sha, limits=dict(LIMITS))
-    return dict(policy, policySha256=p.digest(policy))
+@dataclass(frozen=True)
+class IndexedPolicy:
+    policy_id: str
+    page_cap: int
+    retained_jobs: int
+    @property
+    def database_cap(self):return PAGE_SIZE*self.page_cap
+    @property
+    def physical_allowance(self):return 3*self.database_cap
+    @property
+    def capacity(self):return min(self.retained_jobs,(self.database_cap-NON_JOB_ALLOWANCE)//JOB_CHARGE)
+
+_V2_POLICY=IndexedPolicy(POLICY_ID,PAGE_CAP,LIMITS['retainedJobs'])
+_THREE_POLICY=IndexedPolicy(THREE_POLICY_ID,32768,3)
+
+
+def validated_policy(value=None):
+    value=_V2_POLICY if value is None else value
+    require(type(value) is IndexedPolicy and value in (_V2_POLICY,_THREE_POLICY),'indexed_policy_unknown')
+    return value
+
+
+def compiled_profile_descriptor(policy_id=POLICY_ID):
+    # Default descriptor bytes are the already qualified v2 ABI. The larger
+    # policy is a separate fresh-state opt-in, never an in-place page-cap edit.
+    require(type(policy_id) is str and policy_id in (POLICY_ID,THREE_POLICY_ID),'indexed_policy_unknown')
+    limits=dict(LIMITS)
+    if policy_id==THREE_POLICY_ID:
+        limits.update(databasePageCap=_THREE_POLICY.page_cap,retainedJobs=3,
+                      physicalAllowanceBytes=_THREE_POLICY.physical_allowance)
+    schema_sha=p.digest(SCHEMA)
+    policy=dict(schemaVersion=1,protocol=PROTOCOL,policyId=policy_id,schemaSha256=schema_sha,limits=limits)
+    return dict(policy,policySha256=p.digest(policy))
+
+
+def policy_from_binding(binding):
+    require(type(binding) is dict,'indexed_policy_binding_required')
+    profile=binding.get('inputCopyAccounting')
+    if profile is not None:
+        if encoded(profile)==encoded(dict(schemaVersion=3,fetchJournal=dict(schemaVersion=1,policyId=THREE_POLICY_ID))):
+            selected=_THREE_POLICY
+        else:
+            require(encoded(profile)==encoded(dict(schemaVersion=2,fetchJournal=dict(schemaVersion=1,policyId=POLICY_ID))),
+                    'indexed_policy_profile_changed')
+            selected=_V2_POLICY
+    else:
+        # Existing low-level v2 fixture bindings have no app profile. A v3
+        # descriptor can never select its larger limits through this fallback.
+        selected=_V2_POLICY
+    if 'indexedFetchJournal' in binding:
+        require(encoded(binding['indexedFetchJournal'])==encoded(compiled_profile_descriptor(selected.policy_id)),
+                'indexed_policy_descriptor_changed')
+    return selected
 
 
 @dataclass(frozen=True)
@@ -91,6 +141,8 @@ class IndexedFetchContext:
     root_identity: tuple
     binding_json: bytes = field(repr=False)
     driver_path: str = field(default='',repr=False)
+    @property
+    def policy(self):return policy_from_binding(json.loads(self.binding_json))
 
 
 class IndexedCapacityProbe:
@@ -106,7 +158,7 @@ class IndexedCapacityProbe:
 
     def _check(self):
         root,root_id=_root(self.root,self.owner)
-        require(root_id==self.context.root_identity and _identity(_file(self.path))==self.context.driver_identity,
+        require(root_id==self.context.root_identity and _identity(_file(self.path,policy=self.context.policy))==self.context.driver_identity,
                 'indexed_capacity_identity_changed')
         require(self.scratch_root.resolve()==self.scratch_root
                 and not any(v.is_symlink() for v in (self.scratch_root,*self.scratch_root.parents)))
@@ -123,7 +175,7 @@ class IndexedCapacityProbe:
         for path in (self.path,Path(str(self.path)+'-journal')):
             if os.path.lexists(path):
                 info=path.lstat();allocated+=getattr(info,'st_blocks',0)*512
-        return max(0,PHYSICAL_ALLOWANCE-allocated)
+        return max(0,self.context.policy.physical_allowance-allocated)
 
     def __call__(self,root):
         require(Path(root).absolute()==self.scratch_root,'indexed_capacity_root_changed')
@@ -151,16 +203,17 @@ def _root(path, owner):
     return root,_identity(info)
 
 
-def _file(path):
+def _file(path,*,policy=None):
+    policy=validated_policy(policy)
     path=Path(path).absolute();require(path.resolve()==path and not any(v.is_symlink() for v in (path,*path.parents)))
     info=path.lstat()
-    require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=DB_CAP
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=policy.database_cap
             and (os.name=='nt' or info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o600))
     require(not any(os.path.lexists(str(path)+v) for v in ('-wal','-shm')))
     rollback=Path(str(path)+'-journal')
     if os.path.lexists(rollback):
         item=rollback.lstat()
-        require(stat.S_ISREG(item.st_mode) and item.st_nlink==1 and item.st_size<=2*DB_CAP
+        require(stat.S_ISREG(item.st_mode) and item.st_nlink==1 and item.st_size<=2*policy.database_cap
                 and (os.name=='nt' or item.st_uid==os.geteuid() and stat.S_IMODE(item.st_mode)==0o600))
     return info
 
@@ -181,10 +234,11 @@ def _profile(bootstrap_id,binding,root_identity,driver_identity):
     require(str(uuid.UUID(bootstrap_id))==bootstrap_id)
     raw=encoded(binding);require(len(raw)<=16384)
     return dict(schemaVersion=1,protocol=PROTOCOL,bootstrapId=bootstrap_id,bindingSha256=sha(raw),
-                rootIdentity=list(root_identity),driverIdentity=list(driver_identity),descriptor=compiled_profile_descriptor())
+                rootIdentity=list(root_identity),driverIdentity=list(driver_identity),descriptor=compiled_profile_descriptor(policy_from_binding(binding).policy_id))
 
 
 def initialize_fresh_profile(driver_path, *, bootstrap_id, binding, owner):
+    policy=policy_from_binding(binding)
     path=Path(driver_path).absolute();root,root_id=_root(path.parent,owner)
     require(not os.path.lexists(path),'indexed_existing_database_requires_reconciliation')
     fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
@@ -193,7 +247,7 @@ def initialize_fresh_profile(driver_path, *, bootstrap_id, binding, owner):
     with closing(sqlite3.connect(path)) as db:
         db.execute('PRAGMA journal_mode=DELETE');db.execute('PRAGMA synchronous=FULL')
         require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE)
-        require(db.execute('PRAGMA max_page_count='+str(PAGE_CAP)).fetchone()[0]==PAGE_CAP)
+        require(db.execute('PRAGMA max_page_count='+str(policy.page_cap)).fetchone()[0]==policy.page_cap)
         db.execute('BEGIN IMMEDIATE')
         for statement in SCHEMA:db.execute(statement)
         db.execute('INSERT INTO indexed_profile VALUES(1,?)',(encoded(_profile(bootstrap_id,binding,root_id,identity)).decode(),))
@@ -206,9 +260,10 @@ def initialize_fresh_profile(driver_path, *, bootstrap_id, binding, owner):
 
 def validate_profile_connection(db, *, bootstrap_id, binding, root_identity, driver_identity):
     """Logical verification only; never grants a live physical context."""
+    policy=policy_from_binding(binding)
     expected=_profile(bootstrap_id,binding,root_identity,driver_identity)
     deadline=time.monotonic()+3;db.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
-    require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE and db.execute('PRAGMA page_count').fetchone()[0]<=PAGE_CAP)
+    require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE and db.execute('PRAGMA page_count').fetchone()[0]<=policy.page_cap)
     require(db.execute('PRAGMA journal_mode').fetchone()[0]=='delete')
     require(_schema(db)==_expected_schema(),'indexed_schema_changed')
     row=db.execute('SELECT record FROM indexed_profile WHERE singleton=1 AND length(CAST(record AS BLOB))<=16384').fetchone()
@@ -223,17 +278,18 @@ def validate_profile_connection(db, *, bootstrap_id, binding, root_identity, dri
         require(type(driver_binding[0]) is str and len(driver_binding[0].encode())<=16384)
         settings=json.loads(driver_binding[0])
         require(encoded(settings.get('inputCopyAccounting'))==encoded(dict(schemaVersion=1))
-                and encoded(settings.get('indexedFetchJournal'))==encoded(compiled_profile_descriptor()),'indexed_driver_binding_changed')
+                and encoded(settings.get('indexedFetchJournal'))==encoded(compiled_profile_descriptor(policy.policy_id)),'indexed_driver_binding_changed')
 
 
 def read_only_profile(driver_path, *, bootstrap_id, binding, owner):
-    path=Path(driver_path).absolute();_,root_id=_root(path.parent,owner);info=_file(path)
+    policy=policy_from_binding(binding)
+    path=Path(driver_path).absolute();_,root_id=_root(path.parent,owner);info=_file(path,policy=policy)
     require(not os.path.lexists(str(path)+'-journal'),'indexed_database_recovery_required')
     expected=_profile(bootstrap_id,binding,root_id,_identity(info))
     with closing(sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)) as db:
         validate_profile_connection(db,bootstrap_id=bootstrap_id,binding=binding,
             root_identity=root_id,driver_identity=_identity(info))
-    after=_file(path);require((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)==
+    after=_file(path,policy=policy);require((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)==
         (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns))
     return IndexedFetchContext(bootstrap_id,expected['bindingSha256'],_identity(info),root_id,encoded(binding),str(path))
 
@@ -286,12 +342,16 @@ class IndexedFetchJournal:
             row=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
             self.driver_binding=None if row is None else row[0]
 
+    @property
+    def policy(self):return self.context.policy
+
     def check(self,db):
+        policy=self.policy
         _,identity=_root(self.path.parent,self.owner);require(identity==self.context.root_identity)
-        require(_identity(_file(self.path))==self.context.driver_identity,'indexed_file_replaced')
+        require(_identity(_file(self.path,policy=self.policy))==self.context.driver_identity,'indexed_file_replaced')
         require(db.execute('PRAGMA schema_version').fetchone()[0]==self.schema_version,'indexed_schema_changed')
-        require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE and db.execute('PRAGMA page_count').fetchone()[0]<=PAGE_CAP)
-        require(db.execute('PRAGMA max_page_count='+str(PAGE_CAP)).fetchone()[0]==PAGE_CAP)
+        require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE and db.execute('PRAGMA page_count').fetchone()[0]<=policy.page_cap)
+        require(db.execute('PRAGMA max_page_count='+str(policy.page_cap)).fetchone()[0]==policy.page_cap)
         if self.driver_binding is not None:
             row=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
             require(row is not None and row[0]==self.driver_binding,'indexed_driver_binding_changed')
@@ -301,7 +361,7 @@ class IndexedFetchJournal:
         old=db.execute('SELECT charge FROM indexed_quota WHERE job=?',(job,)).fetchone()
         if old:require(old[0]==JOB_CHARGE);return
         count,total=db.execute('SELECT COUNT(*),COALESCE(SUM(charge),0) FROM indexed_quota').fetchone()
-        require(count<LIMITS['retainedJobs'] and total+JOB_CHARGE+NON_JOB_ALLOWANCE<=DB_CAP,'indexed_metadata_quota_full')
+        require(count<self.policy.retained_jobs and total+JOB_CHARGE+NON_JOB_ALLOWANCE<=self.policy.database_cap,'indexed_metadata_quota_full')
         allocated=sum(getattr(v.lstat(),'st_blocks',0)*512 for v in (self.path,Path(str(self.path)+'-journal')) if os.path.lexists(v))
         outstanding=0
         if ledger is not None:
@@ -314,7 +374,7 @@ class IndexedFetchJournal:
         free=shutil.disk_usage(self.path.parent).free
         require(type(free) is int and free>=0,'indexed_capacity_probe_unavailable')
         floor=json.loads(self.context.binding_json).get('policy',{}).get('safetyFloor',0)
-        require(free-outstanding-floor>=max(0,PHYSICAL_ALLOWANCE-allocated),'indexed_metadata_disk_unavailable')
+        require(free-outstanding-floor>=max(0,self.policy.physical_allowance-allocated),'indexed_metadata_disk_unavailable')
         db.execute('INSERT INTO indexed_quota VALUES(?,?)',(job,JOB_CHARGE))
 
     def seal_claim(self,db,job,claim_request,claim):

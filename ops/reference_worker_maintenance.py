@@ -172,6 +172,11 @@ def load_profile(root):
     for path in policy.legacy_maintenance_paths:require(not os.path.lexists(path),'legacy_updater_still_enabled')
     return settings,policy
 
+def _indexed_config(config):
+    from ops.bootstrap_worker_input_accounting import indexed_profile
+    return indexed_profile(config)
+
+
 def _legacy_driver_history(db, tables):
     """Do not treat normalized input history as legacy driver JSON.
 
@@ -208,7 +213,11 @@ def offline_census(root, *, indexed_context=None):
             private(path,directory=True);continue
         private(path)
         if not path.name.endswith('.sqlite'):continue
-        raw,fingerprint=read_file(path,64*1024**2)
+        cap=64*1024**2
+        if path.name=='driver.sqlite' and indexed_context is not None:
+            from ops.reference_worker_indexed_maintenance import indexed_database_cap
+            cap=indexed_database_cap(indexed_context,root)
+        raw,fingerprint=read_file(path,cap)
         require(raw[:20]==b'SQLite format 3\0\x10\x00\x01\x01','worker_delete_sqlite_required')
         db=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True,timeout=1);db.row_factory=sqlite3.Row
         try:
@@ -278,7 +287,11 @@ def immutable_history(root, *, indexed_context=None):
     result={}
     for filename,table in _HISTORY.items():
         path=Path(root)/filename;_path,before=private(path)
-        require(before.st_size<=64*1024**2 and not any(os.path.lexists(str(path)+suffix) for suffix in ('-wal','-shm','-journal')),'worker_history_snapshot_unavailable')
+        cap=64*1024**2
+        if filename=='driver.sqlite' and indexed_context is not None:
+            from ops.reference_worker_indexed_maintenance import indexed_database_cap
+            cap=indexed_database_cap(indexed_context,root,running=True)
+        require(before.st_size<=cap and not any(os.path.lexists(str(path)+suffix) for suffix in ('-wal','-shm','-journal')),'worker_history_snapshot_unavailable')
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
         try:require(os.read(fd,20)==b'SQLite format 3\0\x10\x00\x01\x01' and identity(os.fstat(fd))==identity(before),'worker_history_sqlite_format_changed')
         finally:os.close(fd)
@@ -393,7 +406,7 @@ class WorkerMaintenance:
         for source,_target in pairs:
             value=Path(source).lstat();wanted.append([value.st_dev,value.st_ino,value.st_uid,value.st_gid,stat.S_IMODE(value.st_mode)])
         require(actual==wanted,'worker_mount_inode_or_owner_changed')
-        if config.get('inputCopyAccounting')=={'schemaVersion':2,'fetchJournal':{'schemaVersion':1,'policyId':'indexed-worker-fetch-v1'}}:
+        if _indexed_config(config):
             from ops.reference_worker_indexed_maintenance import observe_running_mounts
             observe_running_mounts(self)
         return digest(wanted)
@@ -517,7 +530,7 @@ class WorkerMaintenance:
         require(before['engineVersion']==view['engineVersion'],'previous_worker_native_version_changed')
         self._operation_receipt=Path(receipt).absolute()
         mapping={}
-        if config.get('inputCopyAccounting')=={'schemaVersion':2,'fetchJournal':{'schemaVersion':1,'policyId':'indexed-worker-fetch-v1'}}:
+        if _indexed_config(config):
             from ops.reference_worker_indexed_maintenance import capture_mapping_witness
             mapping['mappingWitness']=capture_mapping_witness(self,state)
         self.phase(state,receipt,'stop_pending',beforeConfig=view,beforePublication=publication,beforeBackend=before,mountSha256=mount_sha,beforeRuntime=runtime,**mapping)
@@ -530,7 +543,7 @@ class WorkerMaintenance:
         self.phase(state,receipt,'stopped')
         self._owner=DaemonStateLock(self.policy.state_root).__enter__()
         self._indexed_maintenance_context=None
-        if config.get('inputCopyAccounting')=={'schemaVersion':2,'fetchJournal':{'schemaVersion':1,'policyId':'indexed-worker-fetch-v1'}}:
+        if _indexed_config(config):
             from ops.reference_worker_indexed_maintenance import stopped_context
             self._indexed_maintenance_context=stopped_context(self)
         census=offline_census(self.policy.state_root,**self._indexed_census_arguments())
@@ -566,14 +579,14 @@ class WorkerMaintenance:
 
     def _indexed_census_arguments(self):
         config,_=self.config()
-        if config.get('inputCopyAccounting',{}).get('schemaVersion')!=2:return {}
+        if not _indexed_config(config):return {}
         context=getattr(self,'_indexed_maintenance_context',None)
         require(context is not None,'indexed_stopped_mapping_unproven')
         return dict(indexed_context=context)
 
     def _restore_indexed_context(self,state,*,running):
         config,_=self.config()
-        if config.get('inputCopyAccounting',{}).get('schemaVersion')!=2:return
+        if not _indexed_config(config):return
         if getattr(self,'_indexed_maintenance_context',None) is not None:return
         from ops.reference_worker_indexed_maintenance import restore_mapping_context
         self._indexed_maintenance_context=restore_mapping_context(self,state,running=running)

@@ -80,7 +80,8 @@ def directory_identity(directory):
     return [info.st_dev,info.st_ino]
 
 
-def state_read(directory):
+def state_read(directory,*,policy=None):
+    policy=indexed.validated_policy(policy)
     path=directory/'state.json';before=file_facts(path,16384)
     raw=path.read_bytes();require(file_facts(path,16384)==before)
     value=json.loads(raw);require(indexed.encoded(value)==raw)
@@ -95,7 +96,7 @@ def state_read(directory):
                 and all(type(v) is int and v>=0 for v in value[key]))
     def digest(v):return type(v) is str and len(v)==64 and all(c in '0123456789abcdef' for c in v)
     require(str(uuid.UUID(value['bootstrapId']))==value['bootstrapId'] and digest(value['bindingSha256']))
-    for key,cap in (('original',indexed.DB_CAP),('journal',2*indexed.DB_CAP)):
+    for key,cap in (('original',policy.database_cap),('journal',2*policy.database_cap)):
         record=value[key]
         require(type(record) is dict and set(record)=={'facts','sha256'} and digest(record['sha256']))
         f=record['facts'];require(type(f) is list and len(f)==8 and all(type(v) is int and v>=0 for v in f)
@@ -106,12 +107,12 @@ def state_read(directory):
     return value
 
 
-def inspect_completed_recovery_capsule(state_root, *, bootstrap_id, binding_sha256, root_identity, driver_identity):
+def inspect_completed_recovery_capsule(state_root, *, bootstrap_id, binding_sha256, root_identity, driver_identity, policy=None):
     """Read-only stopped census seam; never authorizes recovery or current jobs."""
     root=Path(state_root).absolute();require(root.resolve()==root)
     info=root.stat();require([info.st_dev,info.st_ino]==list(root_identity))
     directory=root/DIRECTORY
-    state=state_read(directory)
+    state=state_read(directory,policy=policy)
     require(state['phase']=='complete' and state['bootstrapId']==bootstrap_id
             and state['bindingSha256']==binding_sha256
             and state['rootIdentity']==list(root_identity) and state['driverIdentity']==list(driver_identity)
@@ -133,10 +134,11 @@ def state_write(directory,value):
     os.replace(path,directory/'state.json');sync(directory)
 
 
-def clean_copy(directory,identity):
+def clean_copy(directory,identity,*,policy=None):
+    policy=indexed.validated_policy(policy)
     # Only fixed, regular, single-link files created inside this owned capsule.
     require(directory_identity(directory)==identity)
-    for name,cap in (('copy.sqlite-journal',2*indexed.DB_CAP),('copy.sqlite',indexed.DB_CAP)):
+    for name,cap in (('copy.sqlite-journal',2*policy.database_cap),('copy.sqlite',policy.database_cap)):
         path=directory/name
         if os.path.lexists(path):file_facts(path,cap);path.unlink()
     sync(directory)
@@ -165,7 +167,7 @@ def copied_file(source,target,cap):
 def capacity(config,intent,path,directory,*,copy_required=True):
     """Read-only ledger commitments plus existing global metadata hold, once."""
     from ops import bootstrap_worker_input_accounting as bootstrap
-    root=path.parent;binding=intent['binding'];ledger=root/'scratch.sqlite'
+    root=path.parent;binding=intent['binding'];policy=indexed.policy_from_binding(binding);ledger=root/'scratch.sqlite'
     created=bootstrap._file(root/bootstrap.DIRECTORY/'ledger-created.json')[0]
     bootstrap._ledger(ledger,binding,expected_identity=created['ledgerIdentity'])
     before=fingerprint(ledger,1024**3)
@@ -178,21 +180,21 @@ def capacity(config,intent,path,directory,*,copy_required=True):
     held=remaining+control if root.stat().st_dev==Path(binding['scratchRoot']).stat().st_dev else 0
     allocated=sum(getattr(p.lstat(),'st_blocks',0)*512 for p in (path,Path(str(path)+'-journal')) if os.path.lexists(p))
     materialized=sum(getattr(p.lstat(),'st_blocks',0)*512 for p in directory.iterdir() if p.name.startswith('copy.'))
-    extra=(indexed.DB_CAP+2*indexed.DB_CAP+CONTROL_ALLOWANCE) if copy_required else CONTROL_ALLOWANCE
+    extra=(3*policy.database_cap+CONTROL_ALLOWANCE) if copy_required else CONTROL_ALLOWANCE
     free=shutil.disk_usage(root).free
     require(type(free) is int and free>=held+binding['policy']['safetyFloor']
-            +max(0,indexed.PHYSICAL_ALLOWANCE-allocated)+max(0,extra-materialized))
+            +max(0,policy.physical_allowance-allocated)+max(0,extra-materialized))
 
 
 def validate_business_connection(db,binding):
     """Bounded read-only claim/object/grant/attempt closure, no clock or TTL writes."""
-    p=indexed.p
+    p=indexed.p;policy=indexed.policy_from_binding(binding)
     from .reference_driver import _INDEXED_FIXED_CLAIM,_INDEXED_MUTABLE_CLAIM,validate_indexed_fetch_projection
     fixed=_INDEXED_FIXED_CLAIM
     permitted_projection=set(fixed+_INDEXED_MUTABLE_CLAIM)
-    require(db.execute('SELECT COUNT(*) FROM driver_jobs').fetchone()[0]<=indexed.LIMITS['retainedJobs']+1)
+    require(db.execute('SELECT COUNT(*) FROM driver_jobs').fetchone()[0]<=policy.retained_jobs+1)
     require(not db.execute('SELECT 1 FROM indexed_quota WHERE typeof(charge)!=\'integer\' OR charge!=? LIMIT 1',(indexed.JOB_CHARGE,)).fetchone())
-    require(db.execute('SELECT COALESCE(SUM(charge),0) FROM indexed_quota').fetchone()[0]+indexed.NON_JOB_ALLOWANCE<=indexed.DB_CAP)
+    require(db.execute('SELECT COALESCE(SUM(charge),0) FROM indexed_quota').fetchone()[0]+indexed.NON_JOB_ALLOWANCE<=policy.database_cap)
     for table in ('indexed_quota','indexed_claims'):
         require(not db.execute('SELECT 1 FROM '+table+' x LEFT JOIN driver_jobs d ON d.job=x.job WHERE d.job IS NULL LIMIT 1').fetchone())
     for table in ('indexed_objects','indexed_seals','indexed_reservations','indexed_grants','indexed_fetch','indexed_attempts'):
@@ -319,7 +321,7 @@ def recovered_validate(path,intent,identity,root_identity):
         row=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
         if row is not None:bootstrap._driver_settings(json.loads(row[0]),intent['binding'],indexed=True)
     require(not any(os.path.lexists(str(path)+s) for s in ('-journal','-wal','-shm')))
-    return fingerprint(path,indexed.DB_CAP)['sha256']
+    return fingerprint(path,indexed.policy_from_binding(intent['binding']).database_cap)['sha256']
 
 
 def recover_indexed_driver(config,owner):
@@ -330,15 +332,16 @@ def recover_indexed_driver(config,owner):
     path=root/'driver.sqlite';journal=Path(str(path)+'-journal');directory=root/DIRECTORY
     if not os.path.lexists(journal) and not os.path.lexists(directory):return False
     intent=bootstrap.completed_indexed_recovery_authority(config,owner)
-    info=indexed._file(path);identity=[info.st_dev,info.st_ino];root_id=bootstrap._directory(root)
+    policy=indexed.policy_from_binding(intent['binding'])
+    info=indexed._file(path,policy=policy);identity=[info.st_dev,info.st_ino];root_id=bootstrap._directory(root)
     if not os.path.lexists(directory):directory.mkdir(mode=0o700);sync(root)
     directory_id=directory_identity(directory)
     if os.path.lexists(directory/'state.json'):
-        state=state_read(directory)
+        state=state_read(directory,policy=policy)
         require(state['bootstrapId']==intent['bootstrapId'] and state['bindingSha256']==intent['bindingSha256']
                 and state['driverIdentity']==identity and state['rootIdentity']==root_id)
         if state['phase']=='complete':
-            clean_copy(directory,state['directoryIdentity'])
+            clean_copy(directory,state['directoryIdentity'],policy=policy)
             if not os.path.lexists(journal):return False
             state=None
     else:
@@ -349,7 +352,7 @@ def recover_indexed_driver(config,owner):
         state=None
     if state is None:
         require(os.path.lexists(journal))
-        original=fingerprint(path,indexed.DB_CAP);rollback=fingerprint(journal,2*indexed.DB_CAP)
+        original=fingerprint(path,policy.database_cap);rollback=fingerprint(journal,2*policy.database_cap)
         # Multi-database super-journals are outside this single-file protocol.
         with journal.open('rb') as stream:
             require(stream.read(8)==MAGIC and rollback['facts'][5]>512)
@@ -361,29 +364,29 @@ def recover_indexed_driver(config,owner):
         capacity(config,intent,path,directory);state_write(directory,state)
     owner.check(root)
     if state['phase'] in ('copying','validated'):
-        require(fingerprint(path,indexed.DB_CAP)==state['original']
-                and fingerprint(journal,2*indexed.DB_CAP)==state['journal'])
+        require(fingerprint(path,policy.database_cap)==state['original']
+                and fingerprint(journal,2*policy.database_cap)==state['journal'])
         capacity(config,intent,path,directory)
         if state['phase']=='copying':
-            copied_file(path,directory/'copy.sqlite',indexed.DB_CAP)
-            copied_file(journal,directory/'copy.sqlite-journal',2*indexed.DB_CAP);sync(directory)
+            copied_file(path,directory/'copy.sqlite',policy.database_cap)
+            copied_file(journal,directory/'copy.sqlite-journal',2*policy.database_cap);sync(directory)
             state['recoveredSha256']=recovered_validate(directory/'copy.sqlite',intent,identity,root_id)
-            require(fingerprint(path,indexed.DB_CAP)==state['original']
-                    and fingerprint(journal,2*indexed.DB_CAP)==state['journal'])
+            require(fingerprint(path,policy.database_cap)==state['original']
+                    and fingerprint(journal,2*policy.database_cap)==state['journal'])
             state['phase']='validated';state_write(directory,state)
-        require(fingerprint(directory/'copy.sqlite',indexed.DB_CAP)['sha256']==state['recoveredSha256'])
+        require(fingerprint(directory/'copy.sqlite',policy.database_cap)['sha256']==state['recoveredSha256'])
         capacity(config,intent,path,directory,copy_required=False)
-        require(fingerprint(path,indexed.DB_CAP)==state['original']
-                and fingerprint(journal,2*indexed.DB_CAP)==state['journal'])
+        require(fingerprint(path,policy.database_cap)==state['original']
+                and fingerprint(journal,2*policy.database_cap)==state['journal'])
         owner.check(root);state['phase']='original-started';state_write(directory,state)
     if state['phase']=='original-started':
         capacity(config,intent,path,directory,copy_required=False)
-        require([indexed._file(path).st_dev,indexed._file(path).st_ino]==identity)
-        if os.path.lexists(journal):require(fingerprint(journal,2*indexed.DB_CAP)==state['journal'])
-        else:require(fingerprint(path,indexed.DB_CAP)['sha256']==state['recoveredSha256'])
+        require([indexed._file(path,policy=policy).st_dev,indexed._file(path,policy=policy).st_ino]==identity)
+        if os.path.lexists(journal):require(fingerprint(journal,2*policy.database_cap)==state['journal'])
+        else:require(fingerprint(path,policy.database_cap)['sha256']==state['recoveredSha256'])
         actual=recovered_validate(path,intent,identity,root_id)
         require(actual==state['recoveredSha256'])
         owner.check(root)
         state['phase']='complete';state_write(directory,state)
-        clean_copy(directory,state['directoryIdentity'])
+        clean_copy(directory,state['directoryIdentity'],policy=policy)
     return True

@@ -313,7 +313,7 @@ class ReferenceDriver:
                 settings['inputCopyAccounting'] = dict(schemaVersion=1)
             if indexed_fetch_context is not None:
                 from .reference_indexed_fetch import compiled_profile_descriptor
-                settings['indexedFetchJournal']=compiled_profile_descriptor()
+                settings['indexedFetchJournal']=compiled_profile_descriptor(indexed_fetch_context.policy.policy_id)
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
@@ -887,9 +887,9 @@ class ReferenceDriver:
         from ops.reference_worker_daemon import _health_sql
         context=self.indexed_fetch_context
         if read_only_profile(self.path,bootstrap_id=context.bootstrap_id,binding=json.loads(context.binding_json),owner=self._state_owner)!=context:return False
-        rows=_health_sql(self.path,"SELECT data FROM driver_jobs WHERE job=? AND claim_request=? AND stage='claim_pending' AND typeof(data)='text' AND length(CAST(data AS BLOB))<=8192",(job,claim_request))
+        rows=_health_sql(self.path,"SELECT data FROM driver_jobs WHERE job=? AND claim_request=? AND stage='claim_pending' AND typeof(data)='text' AND length(CAST(data AS BLOB))<=8192",(job,claim_request),indexed_context=self._indexed_context_initial)
         if len(rows)!=1 or set(json.loads(rows[0][0]))-{'execution'}:return False
-        claimed=_health_sql(self.path,'SELECT 1 FROM indexed_claims WHERE job=? UNION ALL SELECT 1 FROM indexed_fetch WHERE job=? LIMIT 1',(job,job))
+        claimed=_health_sql(self.path,'SELECT 1 FROM indexed_claims WHERE job=? UNION ALL SELECT 1 FROM indexed_fetch WHERE job=? LIMIT 1',(job,job),indexed_context=self._indexed_context_initial)
         lease.check_observer(self)
         return not claimed
 

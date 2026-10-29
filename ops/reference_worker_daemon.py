@@ -335,10 +335,18 @@ class WorkerService:
         return 2 if failed else 0
 
 
-def _health_sql(path,query,parameters=()):
+def _health_sql(path,query,parameters=(),*,indexed_context=None):
     """Existing bounded DELETE database only; no recovery/sidecar creation."""
     path,info=_file(str(path),private=True)
-    if info.st_size>64*1024**2 or any(os.path.lexists(str(path)+s) for s in ('-wal','-shm','-journal')):
+    cap=64*1024**2
+    if indexed_context is not None:
+        from processing.reference_indexed_fetch import IndexedFetchContext
+        if (type(indexed_context) is not IndexedFetchContext or str(path)!=indexed_context.driver_path
+                or (info.st_dev,info.st_ino)!=indexed_context.driver_identity
+                or (path.parent.stat().st_dev,path.parent.stat().st_ino)!=indexed_context.root_identity):
+            raise ValueError('private health indexed binding unavailable')
+        cap=indexed_context.policy.database_cap
+    if info.st_size>cap or any(os.path.lexists(str(path)+s) for s in ('-wal','-shm','-journal')):
         raise ValueError('private health snapshot unavailable')
     descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
     try:
@@ -363,7 +371,10 @@ def _work_health(driver):
         return dict(workState='busy', retainedJobs=None, pendingJobs=None, awaitingAcceptance=None)
     try:
         driver._state_owner.check(driver.path.parent)
-        rows=_health_sql(driver.path,'SELECT stage,COUNT(*) FROM driver_jobs GROUP BY stage LIMIT 17')
+        context=getattr(driver,'_indexed_context_initial',None)
+        # Liveness still reports retained pending work after public profile
+        # tamper; readiness's exact driver/context proof rejects its exception.
+        rows=_health_sql(driver.path,'SELECT stage,COUNT(*) FROM driver_jobs GROUP BY stage LIMIT 17',indexed_context=context)
         allowed = {'claim_pending','claimed','reservation_pending','awaiting_grant','fetching_pending','fetching',
             'processing_pending','execution_pending','executing','delivering','failure_delivering',
             'awaiting_acceptance','awaiting_failure_acceptance','completed'}
