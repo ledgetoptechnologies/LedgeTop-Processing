@@ -151,6 +151,78 @@ bytes. The `e66e37b` regression keeps its own target and pin.
 Not exercised: the new adapter and persistence failure branches. The relay
 models only an unreachable provider.
 
+## Candidate 74e97db (harness v5, v5.1): historical
+
+Viewer `74e97db414df544075c71dab58215a61e2a550c3` sits on top of `7de601c`. It adds:
+
+- an `observationWarnings` count in `processingOverview`;
+- `advanceReconcileJob`, which commits the provider observation and the next
+  job in one transaction.
+
+Harness v5 (`6a0783d`) adds per-step warning sampling, the `atomic_ingest` case
+and `ObservationWarningAtomicIngest74e` (target
+`viewer-74e97db-warning-atomic-v1`). That class is guarded by the loaded bytes of
+three files:
+
+| File | Loaded bytes | LF git blob |
+| --- | --- | --- |
+| `processingWorker.js` | `32cf4f95…` | `7713468e…` |
+| `processingRepository.js` | `212ea4fe…` | `26265f1c…` |
+| `processingOverview.js` | `556a6998…` | `f87a3760…` |
+
+`atomic_ingest` blocks the ingest-job insert once, with a temporary trigger in
+the isolated test database, at the moment upstream completes.
+
+**First v5 run.** T13 failed at the final ingest with `missing_required_output`
+because the class used the transport-only engine. The atomic assertions before it
+had passed. This was a harness defect, fixed in v5.1 (`9db9ceb`) by switching to
+the ODM-layout engine; no assertion changed.
+
+| Run | Result |
+| --- | --- |
+| v5.1 target on `74e97db`, twice | 3/3 pass. Warnings are `[1,1,1,1,1,1]` during the outage and `0` after recovery. After the injected failure the attempt stays `running`, with 0 ingest jobs and the reconcile pending as `provider_observation_persistence_unavailable`. It then reaches `derivatives` with 1 model version. |
+| v1 suite on `74e97db` (v5) | 7 pass, T9 unexpected success |
+| Control: 74e target on `7de601c` | Refused at the pin. Recorded behaviour: no warning count (`null`), and after the injected failure the attempt is `ingesting` with 0 ingest jobs (the stranded state). In this harness it later recovered, because its reconcile job stayed retryable (`ERR_SQLITE_ERROR`). |
+| Control: 7de target on `74e97db` | Refused at the pin |
+
+## PR353 head 821186f (harness v6)
+
+Viewer `821186f434224c83bf88f175e37913dbce92838c` is the head of LedgeTop-Ops
+PR #353 (open, base `main`). It sits on top of `74e97db`. Current remote `main`
+(`747987fc`) does not contain it: `main`'s `processingWorker.js` blob is
+`e26bd880…`, the baseline. It adds:
+
+- `settleStaleReconcileJob`: a reconcile job whose attempt is already terminal or
+  `derivatives` is cancelled as `stale_reconcile_attempt`;
+- retryable `provider_attempt_unavailable` and missing-provider handling, counted
+  as warnings.
+
+Harness v6 (`4603ecc`) adds the `stale_reconcile` case, which enqueues an extra
+reconcile through Viewer's own `enqueueJob` once the attempt is at
+`derivatives`. It also adds `Pr353Head821` (target `viewer-821186f-pr353-v1`),
+guarded by three files:
+
+| File | Loaded bytes | LF git blob |
+| --- | --- | --- |
+| `processingWorker.js` | `4e1db9e2…` | `d4b58cc7…` |
+| `processingRepository.js` | `7276c9d4…` | `9457f8a9…` |
+| `processingOverview.js` | `80ac01e9…` | `e694b262…` |
+
+| Run | Result |
+| --- | --- |
+| 821 target on `821186f` | 4/4 pass (T9, warning, atomic ingest, stale reconcile). The stale job is cancelled with `stale_reconcile_attempt` on its first claim; the attempt stays `derivatives` with 0 warnings. |
+| v1 suite on `821186f` | 7 pass, T9 unexpected success, 9 pinned classes skipped |
+| Control: 821 target on `74e97db` | Refused at the pin. Recorded behaviour: the stale job keeps rescheduling as `processing_interrupted` (attempts 1–4 observed), which is the retry loop `821` removes. |
+
+Not exercised:
+
+- `provider_attempt_unavailable` and missing-provider branches;
+- adapter-construction and log-persistence failures;
+- `provider_result_identity_mismatch`;
+- the lease-abort path.
+
+The owner's 28 focused Viewer tests are separate and are not part of this matrix.
+
 ## First failures preserved
 
 Earlier runs of the same harness are kept as evidence, not converted to passes:
