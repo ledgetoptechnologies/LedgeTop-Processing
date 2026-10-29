@@ -1,0 +1,19 @@
+FROM python:3.13-slim-bookworm@sha256:e32be0e55814a08977501ca863271d9bd02443710db8f2afaf8372e2c4508530
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/home/worker \
+    XDG_STATE_HOME=/var/lib/ledgetop-gates
+
+WORKDIR /app
+COPY --chown=0:0 processing ./processing
+COPY --chown=0:0 ops/reference_worker_daemon.py ops/private_worker_directory.py ./ops/
+RUN mkdir -p /home/worker /run/ledgetop-worker \
+    /var/lib/ledgetop-worker/state /var/lib/ledgetop-worker/scratch \
+    /var/lib/ledgetop-gates/LedgeTop-Processing/node-gates \
+    && chown 1000:1000 /home/worker
+
+USER 1000:1000
+HEALTHCHECK NONE
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["python", "-m", "ops.reference_worker_daemon"]
