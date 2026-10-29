@@ -199,3 +199,14 @@ Bootstrap/compatibility tests do not establish quota, free-space accounting,
 expiry/recovery or installed-worker acceptance. This daemon adds no metadata
 charge or free-byte estimate of its own. No version-2 host bootstrap, runtime
 activation, source-custody issuer or automatic input deletion is established.
+
+## Scoped completed-v2 driver recovery candidate
+
+Normal factory startup has a separate completed-v2 driver rollback preflight.
+It validates a bounded copied DB/journal before SQLite may recover the original
+inode, preserves scratch commitments and clocks, and leaves hot scratch or
+non-hot/zero-header driver journals held. The ordinary profile verifier remains
+read-only. See [the recovery protocol](reference-indexed-driver-recovery.md) for
+its bounded capsule, crash phases, capacity accounting, maintenance seam and
+source-only qualification limits. It does not enable cleanup, migrate a profile,
+change the indexed descriptor, or activate an installed worker.

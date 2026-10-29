@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "status": "source-reviewed-inactive-target-qualification-open",
+  "scope": "Completed physically bound v2 driver SQLite hot rollback journals only; not full worker power-loss recovery",
+  "frozenReviewSha256": "a3953eb7d1b8caa65b35e0ec633e8207a61df12bb73c2eccbeada0c1af5090a0",
+  "patchSha256": "9b57a535a3e45ce9dbce9c786232fb6e87a7836ed545e8ef4db77c068acadcd2",
+  "recoveryModuleRawSha256": "818042685636c0cc21c950ff524468b4038d73205189833e0f0682feff5b79b4",
+  "driverRawSha256": "c80b0a22325585415ee679cdba7ae5ce5c9804e0fd58b73d7956af25cda87766",
+  "verification": {
+    "authorRecovery": {"passed": 29, "skipped": 0, "seconds": 90.595},
+    "authorRuntimeRegression": {"passed": 4, "scaleHeld": 1, "seconds": 129.611, "scaleObjectIndex": 5367, "holdReason": "indexed_clock_rollback", "rerunToObtainGreen": false},
+    "independentOriginalReproductions": {"cases": 6, "allRefusedBeforeOriginalMutation": true, "originalDatabaseJournalAndScratchBytesUnchanged": true},
+    "independentFocused": {"passed": 8, "skipped": 0, "seconds": 16.266},
+    "independentGuardExtraction": "AST comparison proved existing runtime guard expression and error unchanged after parameter substitution",
+    "reviewSha256": "0c5b8a9aeaf8a3608f00cdd34c8b99d4dc0ed950c9c899de813309bd0b1a92fb",
+    "resultSha256": "d7034affbdea6a5e5c373b4296f1068420cbc7663c864c9b129759ea92ba3ddc",
+    "rootFrozenReadback": "All eight working source raw hashes matched independently reviewed packet before commit"
+  },
+  "properties": [
+    "Existing state lock and external completed bootstrap/root/inode/claim authority checked before driver SQLite writes",
+    "Bounded private raw-copy recovery and complete profile, schema, claim, grant, cursor, attempt and phase/projection validation precede original recovery",
+    "SQLite alone recovers original in place; no original replacement or manual journal deletion",
+    "Durable phases support interrupted copy, first atomic-state publication and actual observed mid-pager rollback interruption",
+    "Preserve outstanding reservations, control holds, safety floor and existing metadata allowance plus separately checked recovery headroom",
+    "Normal read-only verifier remains read-only; default/v1 composition and compiled indexed descriptor unchanged",
+    "Shared pure fetching guard preserves legal mutable fields, fetching-at-count and early reservation checkpoints"
+  ],
+  "remaining": [
+    "Actual updated packaged image and target-host qualification; earlier7dee image75 tests do not qualify this source",
+    "Local10k clock rollback remains observed and unexplained at failure time; clock guards unchanged",
+    "Genuine pre-spill zero-header/non-hot journal remains held; copy-only SQLite experiments are not an enabled recovery algorithm",
+    "Hot scratch ledger and other database recovery remains held",
+    "Unknown state, WAL/SHM, super-journal, changed identities or insufficient recovery headroom remains held",
+    "Metadata retirement, authenticated custody/release ACK and full pipeline runtime acceptance remain separate"
+  ],
+  "runtimeActivated": false,
+  "imageBuilt": false,
+  "nasChanged": false,
+  "clientDataUsed": false,
+  "cleanupAuthorityAdded": false
+}

@@ -204,28 +204,35 @@ def initialize_fresh_profile(driver_path, *, bootstrap_id, binding, owner):
     return read_only_profile(path,bootstrap_id=bootstrap_id,binding=binding,owner=owner)
 
 
+def validate_profile_connection(db, *, bootstrap_id, binding, root_identity, driver_identity):
+    """Logical verification only; never grants a live physical context."""
+    expected=_profile(bootstrap_id,binding,root_identity,driver_identity)
+    deadline=time.monotonic()+3;db.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
+    require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE and db.execute('PRAGMA page_count').fetchone()[0]<=PAGE_CAP)
+    require(db.execute('PRAGMA journal_mode').fetchone()[0]=='delete')
+    require(_schema(db)==_expected_schema(),'indexed_schema_changed')
+    row=db.execute('SELECT record FROM indexed_profile WHERE singleton=1 AND length(CAST(record AS BLOB))<=16384').fetchone()
+    require(row is not None and row[0]==encoded(expected).decode(),'indexed_profile_changed')
+    require(not db.execute('SELECT 1 FROM driver_binding WHERE typeof(binding)!=\'text\' OR length(CAST(binding AS BLOB))>16384 LIMIT 1').fetchone(),'indexed_driver_binding_bound')
+    driver_binding=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
+    if driver_binding is None:
+        for table in ('driver_jobs','readiness_tasks','driver_engine_pin','indexed_quota','indexed_claims','indexed_objects',
+                      'indexed_seals','indexed_reservations','indexed_grants','indexed_fetch','indexed_attempts'):
+            require(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is None,'unbound_indexed_history')
+    else:
+        require(type(driver_binding[0]) is str and len(driver_binding[0].encode())<=16384)
+        settings=json.loads(driver_binding[0])
+        require(encoded(settings.get('inputCopyAccounting'))==encoded(dict(schemaVersion=1))
+                and encoded(settings.get('indexedFetchJournal'))==encoded(compiled_profile_descriptor()),'indexed_driver_binding_changed')
+
+
 def read_only_profile(driver_path, *, bootstrap_id, binding, owner):
     path=Path(driver_path).absolute();_,root_id=_root(path.parent,owner);info=_file(path)
     require(not os.path.lexists(str(path)+'-journal'),'indexed_database_recovery_required')
     expected=_profile(bootstrap_id,binding,root_id,_identity(info))
     with closing(sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True)) as db:
-        deadline=time.monotonic()+3;db.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
-        require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE and db.execute('PRAGMA page_count').fetchone()[0]<=PAGE_CAP)
-        require(db.execute('PRAGMA journal_mode').fetchone()[0]=='delete')
-        require(_schema(db)==_expected_schema(),'indexed_schema_changed')
-        row=db.execute('SELECT record FROM indexed_profile WHERE singleton=1 AND length(CAST(record AS BLOB))<=16384').fetchone()
-        require(row is not None and row[0]==encoded(expected).decode(),'indexed_profile_changed')
-        require(not db.execute('SELECT 1 FROM driver_binding WHERE typeof(binding)!=\'text\' OR length(CAST(binding AS BLOB))>16384 LIMIT 1').fetchone(),'indexed_driver_binding_bound')
-        driver_binding=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
-        if driver_binding is None:
-            for table in ('driver_jobs','readiness_tasks','driver_engine_pin','indexed_quota','indexed_claims','indexed_objects',
-                          'indexed_seals','indexed_reservations','indexed_grants','indexed_fetch','indexed_attempts'):
-                require(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is None,'unbound_indexed_history')
-        else:
-            require(type(driver_binding[0]) is str and len(driver_binding[0].encode())<=16384)
-            settings=json.loads(driver_binding[0])
-            require(encoded(settings.get('inputCopyAccounting'))==encoded(dict(schemaVersion=1))
-                    and encoded(settings.get('indexedFetchJournal'))==encoded(compiled_profile_descriptor()),'indexed_driver_binding_changed')
+        validate_profile_connection(db,bootstrap_id=bootstrap_id,binding=binding,
+            root_identity=root_id,driver_identity=_identity(info))
     after=_file(path);require((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)==
         (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns))
     return IndexedFetchContext(bootstrap_id,expected['bindingSha256'],_identity(info),root_id,encoded(binding),str(path))

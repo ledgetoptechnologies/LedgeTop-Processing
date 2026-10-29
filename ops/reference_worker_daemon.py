@@ -550,7 +550,10 @@ def _build_worker(config,owner,resources):
     profile = _service_profile(config)
     routing = _execution_routing(config)
     option_evidence = _option_evidence(config)
-    from ops.bootstrap_worker_input_accounting import require_worker_input_profile,require_worker_indexed_context
+    from ops.bootstrap_worker_input_accounting import require_worker_input_profile,require_worker_indexed_context,indexed_profile
+    if indexed_profile(config):
+        from processing.reference_indexed_recovery import recover_indexed_driver
+        recover_indexed_driver(config,owner)
     input_accounting = require_worker_input_profile(config,owner)
     indexed_context = require_worker_indexed_context(config,owner)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])

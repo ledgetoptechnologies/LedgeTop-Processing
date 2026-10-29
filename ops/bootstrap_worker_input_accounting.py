@@ -250,8 +250,15 @@ def _indexed_context(root,intent,owner):
     return context
 
 
-def _indexed_record(root,directory,intent,intent_sha,created_sha,owner,*,fresh=False):
-    context=_indexed_context(root,intent,owner)
+def _indexed_record(root,directory,intent,intent_sha,created_sha,owner,*,fresh=False,external_only=False):
+    if external_only:
+        from processing.reference_indexed_fetch import _file as indexed_file
+        info=indexed_file(root/'driver.sqlite')
+        from types import SimpleNamespace
+        context=SimpleNamespace(driver_identity=_identity(info),root_identity=_directory(root),
+                                binding_sha256=intent['bindingSha256'])
+    else:
+        context=_indexed_context(root,intent,owner)
     if fresh:
         with closing(sqlite3.connect((root/'driver.sqlite').as_uri()+'?mode=ro&immutable=1',uri=True)) as db:
             _require(db.execute('SELECT 1 FROM driver_binding LIMIT 1').fetchone() is None)
@@ -263,7 +270,7 @@ def _indexed_record(root,directory,intent,intent_sha,created_sha,owner,*,fresh=F
     return context,record_sha
 
 
-def _records(config,owner,*,completed):
+def _records(config,owner,*,completed,external_indexed=False):
     owner.check(Path(config['stateRoot']))
     binding=_binding(config);root=Path(binding['stateRoot']);directory=root/DIRECTORY
     _directory(directory)
@@ -283,7 +290,7 @@ def _records(config,owner,*,completed):
     indexed_sha=None
     if indexed:
         if os.path.lexists(directory/'indexed-created.json'):
-            _,indexed_sha=_indexed_record(root,directory,intent,intent_sha,created_sha,owner,fresh=not completed)
+            _,indexed_sha=_indexed_record(root,directory,intent,intent_sha,created_sha,owner,fresh=not completed,external_only=external_indexed)
         else:
             _require(not completed and not os.path.lexists(root/'driver.sqlite'))
     if completed:
@@ -296,6 +303,14 @@ def _records(config,owner,*,completed):
                  and ledger['enabled'])
     owner.check(root)
     return intent,created,ledger
+
+
+def completed_indexed_recovery_authority(config,owner):
+    """External completed-v2 authority; no driver SQLite open or clock observation."""
+    _require(indexed_profile(config))
+    intent,created,ledger=_records(config,owner,completed=True,external_indexed=True)
+    _require(ledger['enabled'])
+    return intent
 
 
 def _driver_settings(stored,bound,*,indexed):

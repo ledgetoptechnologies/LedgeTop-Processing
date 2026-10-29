@@ -44,6 +44,17 @@ _INDEXED_FIXED_CLAIM = ('jobId','generation','environment','nodeId','manifestSha
 _INDEXED_MUTABLE_CLAIM = ('phase','status','error','transferRequest','transferGrantAcknowledgement','resultManifestSha256','executionPhase')
 
 
+def validate_indexed_fetch_projection(projection, *, reservation, identity):
+    """Pure existing hot-fetch control guard, shared with pre-recovery census."""
+    from .reference_indexed_fetch import require
+    require(not set(projection)-{'claim','reservation','inputAccounting','indexedGrant','execution'}
+            and projection.get('indexedGrant') is True
+            and p.canonical_json(projection.get('reservation'))==p.canonical_json(reservation)
+            and p.canonical_json(projection.get('inputAccounting'))==p.canonical_json(dict(schemaVersion=1,
+                binding=identity,state='bound',next=0,byteCount=0)), 'indexed_progress_projection_changed')
+
+
+
 class DriverHeld(ValueError):
     pass
 
@@ -914,11 +925,7 @@ class ReferenceDriver:
         require(type(projection.get('claim')) is dict and set(_INDEXED_FIXED_CLAIM)<=set(projection['claim']) and not set(projection['claim'])-set(_INDEXED_FIXED_CLAIM+_INDEXED_MUTABLE_CLAIM),
             'indexed_claim_projection_changed')
         require(row['claim_request']==session['claim_request'],'indexed_claim_request_changed')
-        require(not set(projection)-{'claim','reservation','inputAccounting','indexedGrant','execution'}
-                and projection.get('indexedGrant') is True
-                and p.canonical_json(projection.get('reservation'))==p.canonical_json(session['data']['reservation'])
-                and p.canonical_json(projection.get('inputAccounting'))==p.canonical_json(dict(schemaVersion=1,
-                    binding=cached['identity'],state='bound',next=0,byteCount=0)), 'indexed_progress_projection_changed')
+        validate_indexed_fetch_projection(projection,reservation=session['data']['reservation'],identity=cached['identity'])
         require(all(type(projection['claim'][key]) is type(claim[key]) and projection['claim'][key]==claim[key]
             for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken')),
             'indexed_original_claim_changed')
