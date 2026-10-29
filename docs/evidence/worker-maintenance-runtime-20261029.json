@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "scope": "Actual empty real-Docker worker-aware maintenance on main; no client processing or production deployment",
+  "sourceCommit": "ff56c4d34f5e6e88b50024e89994c5810d41f087",
+  "operationId": "8c288aad-0201-428a-a5d7-749adfe07f83",
+  "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+  "workerImageId": "sha256:de54c26959188c4aec93238af13184a3d524ecd867562b381c86c55c0467c6eb",
+  "workerContainerId": "fbb6dd5c5a5a5ea41b41d512c025e1dd46e1e29cfddc4f039b0cff3ea2e429e8",
+  "workerRecipeSha256": "cbe91019c4c7d31800214d05a238f97ed7e24d18ef03389021bee554c474348f",
+  "artifactDirectory": "processing-worker-maintenance-full-lab-v3-20261029",
+  "initialReadiness": {
+    "actualCanonicalCliServiceReady": true,
+    "nativeBackendHealthyAndEmptyBeforeWorkerStart": true,
+    "actualHostContainerMountIdentitiesMatch": true,
+    "imageSideVerifiedTlsAuthenticatedNextStatus": 200,
+    "imageSideNextJobAndExecutionNull": true,
+    "gateReservationNull": true,
+    "healthRetainedPendingAwaitingCounts": [0, 0, 0],
+    "twoTransientBusyObservationsPreserved": true,
+    "boundedReadOnlyReobservationPassedWithoutGuardChange": true,
+    "completedAuthoritySha256": "cc271c44a379a96f54f495871656547411f9d3bb8836f9d608dc4e1df2e0c77d"
+  },
+  "transitions": [
+    {
+      "number": 1,
+      "requestId": "74e10bf5-4f3b-4d53-a8b3-4def3493b814",
+      "targetImage": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+      "engineVersion": "3.8.5",
+      "nodeEpoch": 1,
+      "managedStage": "completed",
+      "managedReceiptSha256": "e2f2ecb77dc8e3aad16740617fa860c4fa0c70c9a6991e31bc3f921c4d34af5c"
+    },
+    {
+      "number": 2,
+      "requestId": "1fbe30e8-9958-469a-a00c-7d69409b3c55",
+      "targetImage": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776",
+      "engineVersion": "3.8.5",
+      "nodeEpoch": 2,
+      "managedStage": "completed",
+      "managedReceiptSha256": "c4c6d3a16394155109c35c6c23221777bf4860bc70fb1f0b1e5ca6144d4c5154"
+    }
+  ],
+  "bothTransitionsProved": [
+    "Future notBefore deferral with unchanged starts, then continuation of the same owned request",
+    "Actual worker stop, stopped census, registered Compose execution and backend image replacement",
+    "Owned config rebind, restart of the same worker CID, TLS readiness and runtime publication",
+    "Changed target-image/epoch despite unchanged engine version, ingress reopen and owned finish",
+    "Full post-READY recipe stability and terminal receipt reconciliation without another execution"
+  ],
+  "registeredRecipes": {
+    "reservations": 2,
+    "registrations": 2,
+    "bothCreatedByOperation1": true,
+    "prior841ArtifactId": "3065574b5ab8903640d85f37ea87b05890d085f0faab79139e3b1cb211f4765c",
+    "targetB9ArtifactId": "5fb08ae6cffbdf481b31358ab79c298dbd0f54be843d79f862f3200df7fe6943",
+    "operation2CreatedNoRegistration": true,
+    "operation2ExactExecutionPinIndependentComparisonPending": true
+  },
+  "shutdown": {
+    "originalEighteenUnchanged": true,
+    "allTwentyTwoContainerIdsAccountedFor": true,
+    "ownWorkerBackendIngressExitedZeroPidZero": true,
+    "coordinatorGracefulExitCode": 0,
+    "coordinatorEndedBeforeFinalCleanupObserver": true,
+    "firstCleanupApiObservationFailedBeforeAnyStop": true,
+    "closedImmutableQueueEmptyWithoutSidecarsProvedBeforeOwnedStops": true,
+    "evidenceRetained": true
+  },
+  "finalSummaryHashes": {
+    "localOfflineStdoutSha256": "3c128d081aabbeea8aeb3fc7aa01d224133afa40f2848e3cf1162fa8245e24d9",
+    "remoteSummaryFileSha256": "eb76d2ac259c5ae6f5c3fe7fd9f06afe4e62eab7de5d36d3020f14a9541b9daf"
+  },
+  "notEstablished": [
+    "Real in-flight dataset drain, processing throughput or scientific output correctness",
+    "Cold stopped-worker mapping adoption, power-loss handling or full worker-to-Viewer delivery",
+    "Production legacy-updater migration, activation on both PCs or automatic release detection",
+    "NAS source custody, release/cleanup authority, metadata retirement or client pilot acceptance"
+  ],
+  "clientJobsSubmitted": false,
+  "nasAdministration": false,
+  "productionServicesChanged": false,
+  "packagesPublished": false
+}

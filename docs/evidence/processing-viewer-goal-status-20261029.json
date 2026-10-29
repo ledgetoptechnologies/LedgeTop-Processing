@@ -19,7 +19,7 @@
       "requirement": "Per-node private engines and durable completion outboxes",
       "state": "partial-source",
       "evidence": "Qualified inactive main worker core242dac6 imageb31:104 packaged tests and Root74-file protected-code/Git readback; source-only indexed maintenancefcae10b:29 tests on actual main Linux",
-      "remaining": "Actual -m CLI class-identity defect found after imported-factory qualification; canonical dispatch fixed in ff56c4d and new inactive image de54c269 built with75 protected Git-matched files and3 packaged CLI tests. Real factory/service not yet accepted; see worker-cli-image-ff56-20261029.json. Install and accept composition on both PCs; migrate legacy updater/direct bypass routes"
+      "remaining": "CLI defect fixed ff56c4d; de54 image75 protected files and3 packaged CLI tests passed. Actual empty V3 canonical service, image-side authenticated TLS, mount mapping and two backend updates accepted on main; see worker-maintenance-runtime-20261029.json. This is an isolated lab, not production activation. Install/accept composition on both PCs and migrate legacy updater/direct bypass routes"
     },
     {
       "requirement": "Crash-safe worker to orchestrator to Viewer handoff",
@@ -35,9 +35,9 @@
     },
     {
       "requirement": "Drain, container update, verification and recovery",
-      "state": "partial-existing-runtime-and-source",
+      "state": "qualified-empty-runtime-open-integration",
       "evidence": "Indexed census/history and same-owner one-start retry in sourcefcae10b; independent static review plus29 source tests on main. Both actual cached NodeODX images passed isolated empty startup/info/task-list probes, same engine3.8.5/API2.4 with distinct digests; exact stopped readback and original5 unchanged recorded in empty-nodeodx-image-probes-20261029.json. Existing coordinator gate remains installed separately.",
-      "remaining": "First lab held before scheduling; mount-order/first-start OomKillDisable differences diagnosed, canonical projection fixed and Linux35 passed. Second lab native readiness passed but worker exited before service start; cached-byte/inert CLI evidence exposed __main__ versus canonical ownership-class split. Dispatch fixed ff56c4d; new de54 image packaged CLI3 passed, no real factory/maintenance accepted. All18 IDs accounted, original5 unchanged; failed states/policies untouched. Fresh service/transport acceptance, post-ready policy capture, actual repeated upgrade/rollback, cold new-process resume, legacy migration and activation remain open"
+      "remaining": "Actual empty V3 passed canonical startup/TLS/mount census and two scheduled worker-aware image transitions841→b9→841, same version3.8.5/epochs1→2, same-request continuations and terminal reconciliation with stable worker recipe. Clean shutdown retained22 containers; original18 unchanged. First two failures and strict fixes preserved. Exact op2 retained execution-pin comparison pending readback; active-work drain, cold new-process resume, production legacy migration/activation and automatic update detection remain open"
     },
     {
       "requirement": "Optional genuine-LiDAR TreeDar and future Gaussian splats",
@@ -61,7 +61,7 @@
       "requirement": "Authorized real small pilot, queued jobs and 10k-photo acceptance",
       "state": "not-accepted",
       "evidence": "Authorized retained 20-photo upload failed before engine submission; Viewer PR349 fix published as digest0ba39949509c488442c14a643dd902b5df3a93e0ef95f1a56fd52375a0b2c152",
-      "remaining": "Beau-controlled TrueNAS API/worker image readback and update, same-operation valid retry, small real queued acceptance, then separately authorized approximately50GB/10k no-GCP dataset; tiny-file tests do not establish this"
+      "remaining": "Beau reported pre-update API/worker both running config90d0... then manually updated. Public ready revision4b/schema40 healthy; authenticated registry maps fixed0ba manifest to amd64config99d1... . Post-update both-role image readback pending; browser bridge currently times out and no retry occurred. Then same-operation subject/source-valid20-photo retry, small real queued acceptance and separately authorized approximately50GB/10k no-GCP dataset; tiny-file tests do not establish this"
     },
     {
       "requirement": "Engineering Hub and Viewer/Claude/Hermes coordination",
