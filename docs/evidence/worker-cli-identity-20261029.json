@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "scope": "Inactive canonical worker CLI dispatch source; strict capability checks unchanged",
+  "baseCommit": "7a8f190",
+  "sourcePacket": {
+    "artifact": "processing-worker-cli-identity-20261029/frozen-source.json",
+    "sha256": "083c31b340f1459654310c06ee72e6520cc1c184b7396be13fbcd6e5770c55cc"
+  },
+  "independentReview": {
+    "artifact": "processing-worker-cli-identity-20261029/independent/review.json",
+    "sha256": "7d1dc86d46db1c48c3ee9580e31730f2f80453b2477a1c813dc65e3b06557c08",
+    "decision": "source-accepted",
+    "tests": "Three focused host tests passed, zero skips; actual interpreter -m --help passed without factory activation"
+  },
+  "finding": "The real -m entrypoint defined __main__.DaemonStateLock, whereas the indexed helper imports and requires the distinct canonical ops.reference_worker_daemon.DaemonStateLock. Imported factory tests did not exercise that namespace split.",
+  "cachedImageProof": {
+    "artifact": "processing-worker-maintenance-full-lab-v2-20261029/cli-canonical-owner-identity-diagnostic.json",
+    "daemonBytesEqualPinnedSource": true,
+    "indexedBytesEqualPinnedSource": true,
+    "cliOwnerModule": "__main__",
+    "canonicalOwnerModule": "ops.reference_worker_daemon",
+    "classIdentityEqual": false,
+    "factoryCalls": 0,
+    "stateOwnerInstances": 0,
+    "networkRequests": 0
+  },
+  "change": "Keep the existing Docker entrypoint and arguments; its __main__ block dispatches to the canonical imported main. Active factory classes and _STATE_OWNERS now share the helper namespace.",
+  "unchanged": [
+    "Exact-type ownership guards and refusal of foreign owner classes",
+    "Canonical registry and state/lease validation",
+    "Docker entrypoint argv, worker configuration and indexed schema",
+    "Failed workers, their state and captured policies"
+  ],
+  "remaining": "Build a new pinned image from accepted source; qualify packaged canonical dispatch and actual service readiness, then real maintenance. Host source changes do not fix the old cached image.",
+  "deployed": false,
+  "realWorkerServiceQualified": false,
+  "exactPreviousWorkerExceptionLogged": false
+}

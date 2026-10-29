@@ -715,4 +715,8 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    # Capability helpers import this canonical module and require its exact
+    # ownership classes. Executing the __main__ copies would split both those
+    # identities and the live ownership registry from the imported helpers.
+    from ops.reference_worker_daemon import main as canonical_main
+    raise SystemExit(canonical_main())
