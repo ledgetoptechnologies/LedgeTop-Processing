@@ -19,7 +19,7 @@
       "requirement": "Per-node private engines and durable completion outboxes",
       "state": "partial-source",
       "evidence": "Qualified inactive main worker core242dac6 imageb31:104 packaged tests and Root74-file protected-code/Git readback; source-only indexed maintenancefcae10b:29 tests on actual main Linux",
-      "remaining": "Install and accept worker composition on both PCs; migrate legacy updater and direct bypass routes"
+      "remaining": "Actual -m CLI class-identity defect found after imported-factory qualification; canonical dispatch fixed in ff56c4d and new inactive image de54c269 built with75 protected Git-matched files and3 packaged CLI tests. Real factory/service not yet accepted; see worker-cli-image-ff56-20261029.json. Install and accept composition on both PCs; migrate legacy updater/direct bypass routes"
     },
     {
       "requirement": "Crash-safe worker to orchestrator to Viewer handoff",
@@ -37,7 +37,7 @@
       "requirement": "Drain, container update, verification and recovery",
       "state": "partial-existing-runtime-and-source",
       "evidence": "Indexed census/history and same-owner one-start retry in sourcefcae10b; independent static review plus29 source tests on main. Both actual cached NodeODX images passed isolated empty startup/info/task-list probes, same engine3.8.5/API2.4 with distinct digests; exact stopped readback and original5 unchanged recorded in empty-nodeodx-image-probes-20261029.json. Existing coordinator gate remains installed separately.",
-      "remaining": "First real empty lab safely held before scheduling: backend nonsecret config unreadable under root/cap-drop-ALL; worker exited2, exact exception unknown. Actual effective mount order varies; source0a1f457 canonical projection accepted and Linux35 source regressions passed. Config-check-only witness proved first-start OomKillDisable false-to-null and exactly reconstructed old policy mismatch; no old policy adopted. Test resources stopped, original5 and complete13 inventory unchanged. See worker-runtime-startup-witness-20261029.json and worker-recipe-linux-source-20261029.json. Fresh readable-config/readiness and post-ready policy capture, actual repeated upgrade/rollback, cold new-process resume, legacy migration and activation remain open"
+      "remaining": "First lab held before scheduling; mount-order/first-start OomKillDisable differences diagnosed, canonical projection fixed and Linux35 passed. Second lab native readiness passed but worker exited before service start; cached-byte/inert CLI evidence exposed __main__ versus canonical ownership-class split. Dispatch fixed ff56c4d; new de54 image packaged CLI3 passed, no real factory/maintenance accepted. All18 IDs accounted, original5 unchanged; failed states/policies untouched. Fresh service/transport acceptance, post-ready policy capture, actual repeated upgrade/rollback, cold new-process resume, legacy migration and activation remain open"
     },
     {
       "requirement": "Optional genuine-LiDAR TreeDar and future Gaussian splats",

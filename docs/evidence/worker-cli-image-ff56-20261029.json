@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "scope": "New inactive main-PC image build, protected-code verification and packaged CLI tests; no factory/service acceptance",
+  "sourceCommit": "ff56c4d34f5e6e88b50024e89994c5810d41f087",
+  "imageId": "sha256:de54c26959188c4aec93238af13184a3d524ecd867562b381c86c55c0467c6eb",
+  "localTag": "ledgetop-reference-worker:qa-ff56c4d34f5e-e3432c6b",
+  "operationId": "e3432c6b-8fb0-4fd4-bc67-08e3d293b5d3",
+  "artifactDirectory": "processing-worker-cli-image-ff56-20261029",
+  "sourceVerification": {
+    "protectedPythonFiles": 75,
+    "inventorySha256": "7afb71d7dd0054048cd121131a74013efdd11bd351515f84c0e8037fb09a15e9",
+    "actualImageBytesMatch": true,
+    "rootIndependentlyMatchedExpectedHashesToGitBlobs": true,
+    "codeOwnerUid": 0,
+    "codeMode": "0644",
+    "codeDirectoryMode": "0755",
+    "uid1000CannotWriteCode": true,
+    "actualImportsFromApp": true
+  },
+  "tests": {
+    "packagedCliPassed": 3,
+    "skipped": 0,
+    "seconds": 0.027937942009884864,
+    "actualUnchangedEntrypointHelpExitCode": 0,
+    "factoryOrServiceRun": false
+  },
+  "evidenceHashes": {
+    "actualBuildReportSha256": "1b0eaf1928fbc64b4fb6ccbb6740369b2964fd2353550e9f9ccb98856e2ca8f7",
+    "actualQaReportSha256": "abfab687e6400c99f779dc79e0a1553c28a5e8324d75580fab1806fe334fc56b"
+  },
+  "boundaries": {
+    "sameCachedPinnedPythonBase": true,
+    "dockerfileAndSpecificIgnoreUnchanged": true,
+    "buildNetwork": "none",
+    "pulls": false,
+    "published": false,
+    "qaNetwork": "none",
+    "sourceOverlayAtApp": false,
+    "dockerSocketInQa": false,
+    "originalSixteenContainersUnchanged": true,
+    "exactEighteenIdsAccountedFor": true,
+    "twoQaContainersRetainedStoppedExitZero": true,
+    "nasOrClientData": false,
+    "runtimeServiceActivated": false
+  },
+  "remaining": "Use this pinned image in a fresh reviewed lab, prove real canonical worker factory/service and image-side coordinator transport, then actual drain/update/restart/repeated rollback. Earlier image b31 imported-factory qualifications do not establish the old image's real CLI startup."
+}
