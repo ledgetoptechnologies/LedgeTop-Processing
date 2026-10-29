@@ -7,7 +7,7 @@
       "requirement": "Lightweight NAS-backed production/staging queue and just-in-time reserved transfer",
       "state": "partial-source",
       "evidence": "ReferenceStore production priority, persisted claims and indexed transfer source; actual main packaged 10k tiny-transfer qualification in indexed-worker-source-20261029.json",
-      "remaining": "Actual NAS producer, authenticated source custody issuer, complete purge pins and installed end-to-end transfer; Viewer capacity foundation is separate and dormant"
+      "remaining": "Real app ProcessingReferenceProvider, authenticated managed source custody/purge pins and installed JIT transfer; negotiated paged manifest needed for the measured16832-photo parent, separate from20-photo pilot"
     },
     {
       "requirement": "Small-node-first routing, one heavy execution slot and production priority",
@@ -18,14 +18,14 @@
     {
       "requirement": "Per-node private engines and durable completion outboxes",
       "state": "partial-source",
-      "evidence": "Worker daemon and outbox source, target main inactive image 75 synthetic tests and five actual cached-old-image refusals",
+      "evidence": "Qualified inactive main worker core242dac6 imageb31:104 packaged tests and Root74-file protected-code/Git readback; source-only indexed maintenancefcae10b:29 tests on actual main Linux",
       "remaining": "Install and accept worker composition on both PCs; migrate legacy updater and direct bypass routes"
     },
     {
       "requirement": "Crash-safe worker to orchestrator to Viewer handoff",
       "state": "partial-source",
-      "evidence": "Persisted claims, result outboxes, retry and acceptance source; hot SQLite journal audit explicitly records held recovery",
-      "remaining": "Automatic hot driver journal recovery, scratch journal recovery, full authenticated custody/acceptance/release chain, native upload uncertainty and actual restart acceptance"
+      "evidence": "Completed physically bound v2 driver hot-journal recovery source242dac6 accepted after six corruption repros held unchanged;29 recovery tests included in actual-main packaged104; existing durable outbox/acceptance source",
+      "remaining": "Pre-spill cold/zero-header and scratch database recovery, full authenticated custody/release chain, native upload uncertainty and installed restart acceptance"
     },
     {
       "requirement": "Bounded safe cleanup and retained metadata retirement",
@@ -36,8 +36,8 @@
     {
       "requirement": "Drain, container update, verification and recovery",
       "state": "partial-existing-runtime-and-source",
-      "evidence": "Existing coordinator maintenance gate and prior synthetic drain/rollback; legacy census deliberately refuses indexed ABI",
-      "remaining": "Qualified indexed maintenance history, stopped/restart namespace proof, actual worker-aware updater rollout and automated update detection/test promotion"
+      "evidence": "Indexed census/history and same-owner one-start retry in sourcefcae10b; independent static review plus29 source tests on main. Existing coordinator gate remains installed separately.",
+      "remaining": "Actual Docker mapping/repeated upgrade/rollback lab; source fixes for ingress bind address and executed-compose artifact provenance now under development; cold new-process updater resume, legacy updater migration and activation remain open"
     },
     {
       "requirement": "Optional genuine-LiDAR TreeDar and future Gaussian splats",
@@ -48,14 +48,14 @@
     {
       "requirement": "Viewer hierarchy and dark Operations-aligned workspace revamp",
       "state": "source-integrated-under-owner-review",
-      "evidence": "Real migration42 hierarchy API and persistent authorization tests; Claude redesign2522 combined with GCP/hierarchy on Viewer owner candidate977835ad",
-      "remaining": "Archived-assignment UX correction, final current-main integration, rendered desktop/mobile/operator acceptance and release; display grouping must never grant access"
+      "evidence": "Root Git verified5545d132 includes archived assignment fixes0f5/728,Claude2522,GCP/hierarchya85 and current mainea42; backend persistence/API qualified separately",
+      "remaining": "Exact5545 rendered desktop/mobile plus actual persisted hierarchy acceptance and release; latest52 unit/source tests and earlier fixture Edge runs are not that acceptance"
     },
     {
       "requirement": "Shared cross-language contracts and failure/recovery acceptance",
       "state": "partial-qualified",
-      "evidence": "Existing reference/source-retention fixtures and Python/Node integration tests; target main packaged qualification and old-image refusal evidence",
-      "remaining": "Joint custody/release/cleanup closure fixture and actual authenticated peer integration; full crash and response-loss matrix on final composition"
+      "evidence": "Python and Node95d5287f pass the same59 ACK candidate vectors and exact canonical fixture hashes; backend104 packaged and maintenance29 source tests qualified on main",
+      "remaining": "Authenticated custody/issuer/replay/finality/cleanup resolver integration, app vertical slice and full restart/response-loss/runtime acceptance; server-owned options/pipeline fingerprints must remain opaque across languages"
     },
     {
       "requirement": "Authorized real small pilot, queued jobs and 10k-photo acceptance",
@@ -66,8 +66,8 @@
     {
       "requirement": "Engineering Hub and Viewer/Claude/Hermes coordination",
       "state": "active",
-      "evidence": "Fresh Hub v4 read: installed endpoint d85 healthy,54tools, actual existing listener PID70444; Viewer owner actively coordinates Claude",
-      "remaining": "Hermes exact request remains retained/pending; no fresh Hermes acknowledgement or idle/reboot delivery proof. Continue event-driven updates without scheduled inbox polling"
+      "evidence": "Fresh Hubv5 verifiedd85 healthy/54tools and listenerPID70444; canonical Processingv51 updated and read back. Viewer owner actively coordinates source integration/Claude.",
+      "remaining": "Hermes original keyed send retained/pending in fresh exactreceipt; no new acknowledgement or idle/reboot wake proof. Continue event-driven updates without scheduled inbox polling."
     }
   ],
   "operatorBoundaries": {
