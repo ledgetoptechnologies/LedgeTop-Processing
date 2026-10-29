@@ -430,6 +430,36 @@ class InputCopyLedgerTests(unittest.TestCase):
                 with closing(sqlite3.connect(self.ledger.path)) as db:
                     self.assertEqual(db.execute('SELECT COUNT(*) FROM input_cleanup_intents').fetchone()[0], 0)
 
+    def test_oversized_closure_stops_at_the_first_excess_row(self):
+        """Review repro: a counting cursor proves no row past the limit is consumed."""
+        consumed = []
+
+        class Cursor:
+            def __iter__(self):
+                for index in range(MAX_INPUT_COPIES + 137):
+                    consumed.append(index)
+                    name = 'p%05d' % index
+                    yield dict(id=name, bytes=1, sha=sha(b'z'), path='jobs/r1/' + name + '.input',
+                               path_key='jobs/r1/' + name + '.input')
+
+        class Database:
+            def execute(self, query, parameters):
+                return Cursor()
+        self.assertFalse(self.ledger._closure_matches(Database(), 'r1', dict(inputsSha256='0' * 64)))
+        self.assertEqual(len(consumed), MAX_INPUT_COPIES + 1)
+
+    def test_actual_oversized_closure_rows_retain_every_copy(self):
+        self.ready(); self.now += 10
+        with closing(sqlite3.connect(self.ledger.path)) as db, db:
+            db.executemany("INSERT INTO input_copies VALUES('r1',?,1,?,?,?,1,NULL)",
+                [('x%05d' % index, sha(b'z'), 'jobs/r1/x%05d.input' % index, 'jobs/r1/x%05d.input' % index)
+                 for index in range(MAX_INPUT_COPIES + 135)])
+        started = time.monotonic()
+        self.assertEqual(self.candidates(), [])
+        with self.assertRaises(PolicyConflict):
+            self.ledger.begin_input_cleanup('r1', 'i1', generation=1, sha256=sha(b'abc'))
+        self.assertLess(time.monotonic() - started, 10)
+
     def test_bookkeeping_changes_do_not_alter_the_closure(self):
         self.ready(); self.now += 10
         self.sql("UPDATE input_copies SET fetched=fetched+1")

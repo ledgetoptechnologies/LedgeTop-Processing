@@ -39,7 +39,10 @@ Driver, daemon and authority integration are separate steps (see below).
 - **Scope.** The fence covers coherent old and default-off writers, and accidental
   loss of the marker or footprint. It does not defend against a privileged actor
   rewriting the database consistently.
-- The table schemas are checked exactly whenever the marker is present.
+- The table schemas are checked exactly at construction (bootstrap) and at
+  `enable_input_copy_accounting()` whenever the marker is present. Every
+  transaction checks the marker, the presence of all six tables and the exact
+  `input_accounting` row, not the full schema text.
 
 | Table | Purpose |
 | --- | --- |
@@ -92,7 +95,8 @@ These checks are necessary but never sufficient:
   actual `input_copies` identity rows** (id, bytes, sha, lexically canonical owned
   path and matching `path_key`). Missing, extra or changed rows therefore
   mismatch. Mutable `fetched`/`cleaned` bookkeeping is excluded. This runs once
-  per reservation per call, in linear time for 10,000 rows;
+  per reservation per call, in linear time for 10,000 rows. An oversized closure
+  is refused at its 10,001st row, before that row is validated or kept;
 - the four receipt roles are distinct, and source roles reuse no result receipt;
 - for `succeeded`, the registered result digest matches, every result object is
   durably accepted, and `terminalReceiptId` names this reservation's durable

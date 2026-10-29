@@ -787,8 +787,11 @@ class ScratchLedger:
         all mismatch the binding digest.
         """
         rows = []
-        for row in db.execute("SELECT id,bytes,sha,path,path_key FROM input_copies WHERE reservation=? ORDER BY id",
-                              (reservation_id,)):
+        cursor = db.execute("SELECT id,bytes,sha,path,path_key FROM input_copies WHERE reservation=? ORDER BY id LIMIT ?",
+                            (reservation_id, MAX_INPUT_COPIES + 1))
+        for index, row in enumerate(cursor):
+            if index >= MAX_INPUT_COPIES:
+                return False  # Refuse an oversized closure before touching the excess row.
             # Lexical canonical-owned check only; filesystem symlink/escape checks
             # still run per object in _owned_path before any fence or unlink.
             parts = PurePosixPath(row["path"]).parts if type(row["path"]) is str else ()
@@ -796,7 +799,7 @@ class ScratchLedger:
                     or any(part in (".", "..") for part in parts) or row["path_key"] != _path_key(row["path"])):
                 return False
             rows.append(dict(object_id=row["id"], byte_size=row["bytes"], sha256=row["sha"], relative_path=row["path"]))
-        return bool(rows) and len(rows) <= MAX_INPUT_COPIES and self._closure_sha256(rows) == binding["inputsSha256"]
+        return bool(rows) and self._closure_sha256(rows) == binding["inputsSha256"]
 
     def register_input_binding(self, reservation_id, *, job_id, generation, environment, manifest_sha256,
                                pipeline_sha256, objects):
