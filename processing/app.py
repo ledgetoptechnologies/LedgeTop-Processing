@@ -3,6 +3,7 @@
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
 from pathlib import Path
 import signal
 import sys
@@ -27,7 +28,8 @@ def make_handler(config: Config):
                   treedar_node_ids=config.treedar_node_ids,
                   viewer_enabled=config.viewer_enabled,
                   reference_enabled=reference_settings is not None,
-                  catalog_admission=reference_settings is not None and reference_settings.catalog_admission is not None) if config.prototype_state_dir else None
+                  catalog_admission=reference_settings is not None and reference_settings.catalog_admission is not None,
+                  runtime_version_publication=reference_settings is not None and reference_settings.runtime_version_publication is not None) if config.prototype_state_dir else None
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService
@@ -73,6 +75,8 @@ def make_handler(config: Config):
             self.wfile.write(body)
 
         def _authorized(self, operator=False, observer=False) -> bool:
+            if len(self.headers.get_all('Authorization',[]))>1:
+                self._reply(400,{'error':'duplicate_header'});return False
             value = self.headers.get("Authorization", "")
             token = config.prototype_operator_token if operator else config.api_token
             if not token:
@@ -87,6 +91,36 @@ def make_handler(config: Config):
                 return False
             return True
 
+        def _runtime_version(self,method,request=None):
+            match=re.fullmatch(r'/v1/prototype/nodes/([A-Za-z0-9._-]+)/runtime-version(?:/receipts/([a-f0-9-]{36}))?',self.path)
+            if match is None:return False
+            if not self._authorized(operator=True):return True
+            registry=reference_runtime.runtime_versions if reference_runtime is not None else None
+            if registry is None:self._reply(404,{'error':'runtime_version_publication_disabled'});return True
+            from .reference_runtime_versions import RuntimeVersionHeld,validate_version_request
+            node,request_id=match.groups()
+            try:
+                if method=='GET':
+                    if self.headers.get('Content-Length','0')!='0' or self.headers.get('Transfer-Encoding'):
+                        self._reply(400,{'error':'invalid_request'});return True
+                    if request_id is None:self._reply(200,{'runtime':registry.current(node)})
+                    else:
+                        receipt=registry.lookup(node,request_id)
+                        self._reply(200,{'receipt':receipt}) if receipt is not None else self._reply(404,{'error':'runtime_version_receipt_unavailable'})
+                elif method=='POST' and request_id is None:
+                    try:validate_version_request(request)
+                    except (ValueError,TypeError,KeyError):
+                        self._reply(400,{'error':'invalid_runtime_version_request'});return True
+                    tokens=self.headers.get_all('X-LTDS-Update-Token',[])
+                    if len(tokens)!=1:self._reply(401,{'error':'maintenance_claim_required'});return True
+                    self._reply(200,{'receipt':registry.publish(node,request,update_token=tokens[0])})
+                else:self._reply(405,{'error':'method_not_allowed'})
+            except Conflict:self._reply(409,{'error':'runtime_version_conflict'})
+            except RuntimeVersionHeld:self._reply(503,{'error':'runtime_version_verification_unavailable'})
+            except ValueError:self._reply(400,{'error':'invalid_runtime_version_request'})
+            except Exception:self._reply(503,{'error':'runtime_version_unavailable'})
+            return True
+
         def _nodes(self) -> tuple[dict, dict]:
             return (probe_node("local", config.local_node_url, config.local_node_token),
                     probe_node("main", config.main_node_url, config.main_node_token))
@@ -94,6 +128,7 @@ def make_handler(config: Config):
         def do_GET(self):
             if facade and facade.handle(self):
                 return
+            if self._runtime_version('GET'):return
             if self.path.startswith("/v1/prototype/"):
                 prefix='/v1/prototype/nodes/'
                 if self.path.startswith(prefix) and '/schedule-owned' in self.path[len(prefix):]:
@@ -181,7 +216,10 @@ def make_handler(config: Config):
                 return
             try:
                 raw=self.rfile.read(length)
-                if self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'):
+                if self.path.endswith('/runtime-version'):
+                    from .reference_protocol import decode_submission
+                    request=decode_submission(raw)
+                elif self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'):
                     def unique(pairs):
                         value={}
                         for key,item in pairs:
@@ -192,6 +230,7 @@ def make_handler(config: Config):
                 else:
                     request=json.loads(raw)
                 if prototype:
+                    if self._runtime_version('POST',request):return
                     if self.path == "/v1/prototype/jobs":
                         job, created = queue.submit(request)
                         self._reply(201 if created else 200, {"job": job})
@@ -234,6 +273,7 @@ def make_handler(config: Config):
             self._reply(200, {"mode": "routing_probe", "executesWork": False,
                               **decision, "nodes": [local, main]})
 
+    Handler.reference_runtime_versions=reference_runtime.runtime_versions if reference_runtime is not None else None
     return Handler
 
 

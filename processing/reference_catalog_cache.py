@@ -112,7 +112,7 @@ def _snapshot(value,bindings):
     return value
 
 class CatalogAdmission:
-    def __init__(self,queue,config,settings,*,ssl_context,store,clock=time.time):
+    def __init__(self,queue,config,settings,*,ssl_context,store,clock=time.time,runtime_versions=None):
         from .reference_runtime import discovered_policy
         from .reference_routing import RoutingNodeBinding
         policy=settings.catalog_admission
@@ -128,13 +128,18 @@ class CatalogAdmission:
             ipaddress.ip_address(parsed.hostname)
             endpoints.append((role,origin.rstrip('/'),token))
         self.queue,self.config,self.settings=queue,config,settings
+        if runtime_versions is not None:
+            from .reference_runtime_versions import RuntimeVersionRegistry
+            if type(runtime_versions) is not RuntimeVersionRegistry or runtime_versions.queue is not queue or runtime_versions.config is not config or runtime_versions.settings is not settings:
+                raise CatalogHeld('concrete_original_runtime_registry_required')
+        self.runtime_versions=runtime_versions
         self.store=store
         self.policy,self.bindings,self.context,self.clock=policy,dict(settings.routing_bindings),ssl_context,clock
         self.endpoints=tuple(endpoints);self._trust=tls_trust_sha256(ssl_context)
         self._tls_policy=(ssl_context.minimum_version,ssl_context.maximum_version,ssl_context.options,ssl_context.verify_flags,ssl_context.hostname_checks_common_name,
             tuple((c['name'],c['protocol'],c['strength_bits']) for c in ssl_context.get_ciphers()))
         self._bindings_sha=p.digest({n:vars(b) for n,b in self.bindings.items()})
-        self._identity=(queue,config,settings,policy,self.endpoints,ssl_context,clock,store)
+        self._identity=(queue,config,settings,policy,self.endpoints,ssl_context,clock,store,runtime_versions)
         self.scope=p.digest(dict(schemaVersion=1,authorityId=queue.authority_id,
             origins=[(r,o) for r,o,_ in endpoints],bindings={n:vars(b) for n,b in self.bindings.items()},
             workers={n:{k:v for k,v in w.items() if k not in ('bearer','resultBearer')} for n,w in settings.workers.items()},
@@ -158,7 +163,7 @@ class CatalogAdmission:
             if old is None or old['scope']!=self.scope:raise CatalogHeld('catalog_scope_migration_required')
 
     def _check(self):
-        if ((self.queue,self.config,self.settings,self.policy,self.endpoints,self.context,self.clock,self.store)!=self._identity
+        if ((self.queue,self.config,self.settings,self.policy,self.endpoints,self.context,self.clock,self.store,self.runtime_versions)!=self._identity
                 or tls_trust_sha256(self.context)!=self._trust
                 or p.digest({n:vars(b) for n,b in self.bindings.items()})!=self._bindings_sha
                 or (self.context.minimum_version,self.context.maximum_version,self.context.options,self.context.verify_flags,self.context.hostname_checks_common_name,
@@ -191,7 +196,7 @@ class CatalogAdmission:
         state=dict(state,highWater=high)
         if row['invalidated'] or row['pending'] not in (_EMPTY_PENDING,owned_pending):state['state']='invalidated'
         if state['state']=='valid':
-            _snapshot(state['snapshot'],self.bindings)
+            _snapshot(state['snapshot'],self._effective_bindings(db))
             cap,opt,allowed=self._discovered_policy(state['snapshot'],self.config)
             if (state['capabilityFingerprint'],state['optionsFingerprint'],state['allowed'],state['catalogSha256'])!=(cap,opt,sorted(allowed),p.digest(state['snapshot'])):
                 raise CatalogHeld('catalog_policy_changed')
@@ -215,7 +220,10 @@ class CatalogAdmission:
         db.execute('UPDATE reference_catalog_state SET invalidated=?,pending=?,high_water=?,control_sha256=? WHERE singleton=1',
             (invalidated,pending,encoded,control))
 
-    def _discover_node(self,endpoint):
+    def _effective_bindings(self,db=None):
+        return self.runtime_versions.current_bindings(db) if self.runtime_versions is not None else self.bindings
+
+    def _discover_node(self,endpoint,bindings):
         role,origin,token=endpoint;observed=dict(role=role,info=None,options=None)
         query='?'+urlencode({'token':token}) if token else ''
         for route,limit in (('/info',65536),('/options',MAX_EVIDENCE)):
@@ -225,7 +233,7 @@ class CatalogAdmission:
                 if _contains_secret(value,token):raise CatalogHeld('credential_reflected')
                 if route=='/info':
                     info=_validate_info(value);observed['info']=info
-                    if info['engineVersion']!=self.bindings['cluster' if role=='local' else role].engine_version:raise CatalogHeld('engine_version_changed')
+                    if info['engineVersion']!=bindings['cluster' if role=='local' else role].engine_version:raise CatalogHeld('engine_version_changed')
                 else:
                     definitions=_validate_options(value);_encoded(definitions,MAX_EVIDENCE);observed['options']=definitions
             except (ValueError,TypeError):return 'unknown',None,observed
@@ -233,8 +241,8 @@ class CatalogAdmission:
         return 'fresh',dict(role=role,configured=True,available=True,reason=None,options=definitions,
             optionsSha256=option_hash,capabilitiesSha256=_sha({**info,'optionsSha256':option_hash}),**info),observed
 
-    def _discover(self):
-        with ThreadPoolExecutor(max_workers=2) as pool:results=list(pool.map(self._discover_node,self.endpoints))
+    def _discover(self,bindings):
+        with ThreadPoolExecutor(max_workers=2) as pool:results=list(pool.map(lambda endpoint:self._discover_node(endpoint,bindings),self.endpoints))
         failures=[outcome for outcome,_,_ in results if outcome!='fresh']
         observed=[item for _,_,item in results]
         if failures:return ('unknown' if 'unknown' in failures else 'unavailable'),None,observed
@@ -243,7 +251,7 @@ class CatalogAdmission:
         common=set(byrole['local'])&set(byrole['main']);union=set(byrole['local'])|set(byrole['main'])
         conflicting=sorted(n for n in common if _canonical(byrole['local'][n])!=_canonical(byrole['main'][n]))
         definitions=[byrole['local'][n] for n in sorted(common-set(conflicting))]
-        return 'fresh',_snapshot(dict(ready=True,reason=None,nodes=nodes,commonOptions=definitions,commonOptionsSha256=_sha(definitions),conflictingNames=conflicting,unsupportedByNode={r:sorted(union-set(v)) for r,v in byrole.items()}),self.bindings),observed
+        return 'fresh',_snapshot(dict(ready=True,reason=None,nodes=nodes,commonOptions=definitions,commonOptionsSha256=_sha(definitions),conflictingNames=conflicting,unsupportedByNode={r:sorted(union-set(v)) for r,v in byrole.items()}),bindings),observed
 
     @staticmethod
     def _known_drift(old,observed):
@@ -260,16 +268,20 @@ class CatalogAdmission:
         if not self._lock.acquire(timeout=1):raise CatalogHeld('catalog_observation_busy')
         try:
             pending=uuid.uuid4().hex;before=self.clock();_clock_text(before)
+            runtime=self.runtime_versions.snapshot() if self.runtime_versions is not None else None
+            bindings=runtime.bindings if runtime else self.bindings
             # Durable constant-size intent BEFORE native I/O. A crash or any
             # later unknown commit leaves a pending marker that closes fallback.
             with self.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');prior=self._state(db)
+                if runtime is not None and self.runtime_versions.snapshot(db)!=runtime:raise CatalogHeld('runtime_epoch_changed')
                 if prior is None:raise CatalogHeld('catalog_marker_missing')
                 self._update_controls(db,invalidated=int(prior['state']!='valid' or before<prior['highWater']),pending=pending,high_water=max(before,prior['highWater']))
-            outcome,snapshot,observed=self._discover();self._check();now=self.clock();_clock_text(now)
+            outcome,snapshot,observed=self._discover(bindings);self._check();now=self.clock();_clock_text(now)
             held=None;result=None
             with self.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');old=self._state(db,owned_pending=pending)
+                if runtime is not None and self.runtime_versions.snapshot(db)!=runtime:raise CatalogHeld('runtime_epoch_changed')
                 actual=db.execute('SELECT pending FROM reference_catalog_state WHERE singleton=1').fetchone()
                 if actual is None or actual[0]!=pending:raise CatalogHeld('catalog_observation_ownership_changed')
                 if old is not None and now<old['highWater']:outcome='unknown'
@@ -308,6 +320,16 @@ class CatalogAdmission:
                 or type(now) not in (int,float) or not math.isfinite(now) or now<state['highWater']
                 or now-state['observedAt']>self.policy.max_age_seconds):raise CatalogHeld('fresh_or_valid_cached_admission_required')
         return self.evidence(state,submission)
+
+    def invalidate_for_runtime(self,db):
+        """Close the current catalog inside a qualified publication transaction.
+
+        The registry calls this BEFORE changing accepted versions. It also
+        cancels any old observation intent, fencing a late HTTP response.
+        """
+        self._check();state=self._state(db)
+        if state is None:raise CatalogHeld('catalog_marker_missing')
+        self._update_controls(db,invalidated=1,pending=_EMPTY_PENDING,high_water=state['highWater'])
 
     def insert_evidence(self,db,job_id,evidence):
         raw=_encoded(evidence,MAX_EVIDENCE+4096)

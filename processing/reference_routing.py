@@ -58,9 +58,32 @@ class _Sample:
     owner:object=field(repr=False)
     at:float
     nodes:object
+    runtime_epoch:int|None=None
+    runtime_digest:str|None=None
+
+def worker_observation(code,body,*,node,authority_id,worker_id,instance_id,binding):
+    if code=='unavailable':return 'unavailable'
+    if (code not in (200,503) or type(body) is not dict or set(body)!=_HEALTH_FIELDS
+            or type(body['schemaVersion']) is not int or body['schemaVersion']!=1
+            or (body['nodeId'],body['profile'],body['scope'])!=(node,'odm_only','service_liveness')
+            or (body['identityScope'],body['authorityId'],body['workerId'],body['workerInstanceId'],body['engineId'],body['gateGeneration'],body['engineVersion'])!=('configured_service',authority_id,worker_id,instance_id,binding.engine_id,binding.gate_generation,binding.engine_version)
+            or type(body['gateGeneration']) is not int
+            or body['state'] not in ('starting','ready','failed','draining','stopped')
+            or body['reason'] is not None and (type(body['reason']) is not str or re.fullmatch('[a-z][a-z0-9_]{0,79}',body['reason']) is None)
+            or any(type(body[k]) is not bool for k in ('driverAlive','listenerAlive'))):return 'unknown'
+    counts=[body[k] for k in ('retainedJobs','pendingJobs','awaitingAcceptance')]
+    if body['workState']=='busy':return 'busy' if counts==[None,None,None] else 'unknown'
+    if (any(type(n) is not int or not 0<=n<=1000000 for n in counts) or counts[0]<counts[1]+counts[2]):return 'unknown'
+    retained,pending,awaiting=counts
+    expected='empty' if not retained else 'pending_work' if pending else 'awaiting_acceptance' if awaiting else 'idle'
+    if body['workState']!=expected:return 'unknown'
+    ready=body['state']=='ready' and body['driverAlive'] and body['listenerAlive']
+    if (code==200)!=ready:return 'unknown'
+    if pending:return 'busy'
+    return 'ready' if ready else 'unavailable'
 
 class ReferenceRouting:
-    def __init__(self,config,workers,*,authority_id,bindings,ssl_context,timeout=2):
+    def __init__(self,config,workers,*,authority_id,bindings,ssl_context,timeout=2,runtime_versions=None):
         if (type(config) is not Config or config.reference_main_fallback is not True
                 or set(workers)!=set(('cluster','main')) or set(config.prototype_node_ids)!=set(workers)):
             raise RoutingHeld('explicit_two_node_routing_policy_required')
@@ -88,8 +111,13 @@ class ReferenceRouting:
             Queue.slug(worker['workerId']);_slug(worker['instanceId'],'routing worker instance')
             nodes[node]=_Endpoint(native,token,remote,reader,worker['workerId'],worker['instanceId'],binding)
         self._nodes=MappingProxyType(nodes);self.timeout=timeout;self._tls=ssl_context;self.authority_id=authority_id
+        if runtime_versions is not None:
+            from .reference_runtime_versions import RuntimeVersionRegistry
+            if type(runtime_versions) is not RuntimeVersionRegistry or runtime_versions.queue.authority_id!=authority_id:
+                raise RoutingHeld('concrete_original_runtime_registry_required')
+        self.runtime_versions=runtime_versions
         self._trust=self._tls_identity()
-        self._identity=(self._nodes,self.timeout,self._tls,self.authority_id)
+        self._identity=(self._nodes,self.timeout,self._tls,self.authority_id,self.runtime_versions)
         self._seal=object();self._sampling=threading.BoundedSemaphore(1)
 
     def _tls_identity(self):
@@ -101,36 +129,18 @@ class ReferenceRouting:
         except Exception:raise RoutingHeld('routing_tls_policy_changed') from None
 
     def _check(self):
-        if ((self._nodes,self.timeout,self._tls,self.authority_id)!=self._identity
+        if ((self._nodes,self.timeout,self._tls,self.authority_id,self.runtime_versions)!=self._identity
                 or self._tls_identity()!=self._trust):raise RoutingHeld('routing_transport_changed')
 
     def _json(self,url,headers):
         from .reference_catalog_transport import read_json
         return read_json(url,headers,context=self._tls,timeout=self.timeout)
 
-    def _worker(self,node,endpoint):
+    def _worker(self,node,endpoint,binding=None):
         code,body=self._json(endpoint.worker+HEALTH_PATH,{'Authorization':'Bearer '+endpoint.reader,'Accept':'application/json','Accept-Encoding':'identity'})
-        if code=='unavailable':return 'unavailable'
-        if (code not in (200,503) or type(body) is not dict or set(body)!=_HEALTH_FIELDS
-                or type(body['schemaVersion']) is not int or body['schemaVersion']!=1
-                or (body['nodeId'],body['profile'],body['scope'])!=(node,'odm_only','service_liveness')
-                or (body['identityScope'],body['authorityId'],body['workerId'],body['workerInstanceId'],body['engineId'],body['gateGeneration'],body['engineVersion'])!=('configured_service',self.authority_id,endpoint.worker_id,endpoint.instance_id,endpoint.binding.engine_id,endpoint.binding.gate_generation,endpoint.binding.engine_version)
-                or type(body['gateGeneration']) is not int
-                or body['state'] not in ('starting','ready','failed','draining','stopped')
-                or body['reason'] is not None and (type(body['reason']) is not str or re.fullmatch('[a-z][a-z0-9_]{0,79}',body['reason']) is None)
-                or any(type(body[k]) is not bool for k in ('driverAlive','listenerAlive'))):return 'unknown'
-        counts=[body[k] for k in ('retainedJobs','pendingJobs','awaitingAcceptance')]
-        if body['workState']=='busy':return 'busy' if counts==[None,None,None] else 'unknown'
-        if (any(type(n) is not int or not 0<=n<=1000000 for n in counts) or counts[0]<counts[1]+counts[2]):return 'unknown'
-        retained,pending,awaiting=counts
-        expected='empty' if not retained else 'pending_work' if pending else 'awaiting_acceptance' if awaiting else 'idle'
-        if body['workState']!=expected:return 'unknown'
-        ready=body['state']=='ready' and body['driverAlive'] and body['listenerAlive']
-        if (code==200)!=ready:return 'unknown'
-        if pending:return 'busy'
-        return 'ready' if ready else 'unavailable'
+        return worker_observation(code,body,node=node,authority_id=self.authority_id,worker_id=endpoint.worker_id,instance_id=endpoint.instance_id,binding=binding or endpoint.binding)
 
-    def _native(self,node):
+    def _native(self,node,binding=None):
         endpoint=self._nodes[node]
         query='?'+urlencode({'token':endpoint.native_token}) if endpoint.native_token else ''
         code,info=self._json(endpoint.native+'/info'+query,{'Accept':'application/json','Accept-Encoding':'identity'})
@@ -139,13 +149,13 @@ class ReferenceRouting:
                 or any(type(info.get(k)) is not str or not 1<=len(info[k])<=128 or any(ord(c)<33 or ord(c)>126 for c in info[k]) for k in ('engine','engineVersion','version'))
                 or 'maxImages' not in info or info['maxImages'] is not None and (type(info['maxImages']) is not int or not 1<=info['maxImages']<=2**53-1)):
             return Observation('unknown')
-        if info['engineVersion']!=endpoint.binding.engine_version:return Observation('unknown')
+        if info['engineVersion']!=(binding or endpoint.binding).engine_version:return Observation('unknown')
         return Observation('busy' if info['taskQueueCount'] else 'ready',info['maxImages'])
 
-    def _node(self,node):
+    def _node(self,node,binding=None):
         # Both independent channels must be observed. A stopped daemon is not
         # evidence that its still-running engine is idle or correctly bound.
-        worker=self._worker(node,self._nodes[node]);native=self._native(node)
+        worker=self._worker(node,self._nodes[node],binding);native=self._native(node,binding)
         states=(worker,native.state)
         for state in ('unknown','busy','unavailable'):
             if state in states:return Observation(state,native.max_images)
@@ -156,16 +166,20 @@ class ReferenceRouting:
         if not self._sampling.acquire(timeout=2*self.timeout+1):raise RoutingHeld('routing_sample_capacity_unavailable')
         try:
             at=time.monotonic()
+            runtime=self.runtime_versions.snapshot() if self.runtime_versions is not None else None
             with ThreadPoolExecutor(max_workers=2) as pool:
-                values=dict(zip(('cluster','main'),pool.map(self._node,('cluster','main'))))
+                values=dict(zip(('cluster','main'),pool.map(lambda node:self._node(node,runtime.bindings[node] if runtime else None),('cluster','main'))))
             self._check()
-            return _Sample(self._seal,at,MappingProxyType(values))
+            return _Sample(self._seal,at,MappingProxyType(values),runtime.epoch if runtime else None,runtime.bindings_sha256 if runtime else None)
         finally:self._sampling.release()
 
-    def choose(self,submission,states,sample,*,local_max_photos,local_max_input_bytes,main_node_id):
+    def choose(self,submission,states,sample,*,local_max_photos,local_max_input_bytes,main_node_id,db=None):
         self._check()
         if (type(sample) is not _Sample or sample.owner is not self._seal or not 0<=time.monotonic()-sample.at<=4*self.timeout+1):
             raise RoutingHeld('fresh_fixed_route_observation_required')
+        if self.runtime_versions is not None:
+            runtime=self.runtime_versions.snapshot(db)
+            if (sample.runtime_epoch,sample.runtime_digest)!=(runtime.epoch,runtime.bindings_sha256):raise RoutingHeld('runtime_epoch_changed')
         if submission['pipeline']['treedar']['requested']:
             # This liveness profile is ODM-only; retain existing main-only TreeDar
             # routing. Its separate adapter still controls actual admission.

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "status": "synthetic-two-canonical-node-source-qualified-not-installed",
+  "ownedFiles": {
+    "ops/native_node_fixture.py": "042e4d45f66dfb520b4867bda811c6377e15b047df95d27ed124eaf65ed6409f",
+    "tests/test_reference_two_node_joint.py": "2797e0a7d427a52b6c7f7be7319115e14970ae97aa803ff994f2de7bda060d04",
+    "tests/helpers/reference_joint_images_preload.cjs": "943b68a64984dc91d130b596c0a9f403818ca041eb91f122ba209aa48cb664a0"
+  },
+  "driverHealthDependencies": {
+    "processing/reference_driver.py": "a23b48077c85456ae3626b4a713dbd9cec4c21c75b04c930eab4f5dca9fac5e9",
+    "ops/reference_worker_daemon.py": "179ff9c2355e6e410b8e601bb3cb3d165f0d320ed4aa10ab219ff2bd2a4bc787"
+  },
+  "authorTests": {
+    "total": 6,
+    "passed": 6,
+    "skips": 0,
+    "seconds": 5.916,
+    "log": "v2/final-tests.log",
+    "logSha256": "2ae8857a7ac82aefc0344bbc49743a2d7ce3459118891ccb44c277fb0141aed2"
+  },
+  "independentReview": {
+    "total": 6,
+    "passed": 6,
+    "skips": 0,
+    "seconds": 6.341,
+    "frozenFilesVerified": 267,
+    "logSha256": "e9f9ea1c78a6ad6d948646989f63ac9fb9b30376897f3b06ff2133712f68b290"
+  },
+  "proofs": [
+    "both actual canonical WorkerService threads; no direct Driver.step or fake health/claim",
+    "distinct hashed private per-engine gate directories, native fixtures, state and reader services; one real Queue/authority and fallbackTrue",
+    "preload only creates bounded fresh synthetic3byte sources and expands objectFiles then calls original mintGrant exactly once; unchanged validators/auth/bytebudget",
+    "main2 budget18 consumed6 reserved0 inflight0 onegrantrow; observed two distinct original names and source inodes",
+    "durable Node acceptance precedes native/result cleanup; Node and worker original input bytes remain before isolated fixture teardown",
+    "original9 Node867 modules/helper/fixture pins verified unchanged by class qualification"
+  ],
+  "notProved": [
+    "photogrammetry/scientific processing from abc bytes/emptyZIP",
+    "actual production Engine/CID/image/namespace/gate deployment",
+    "NAS/source custody/issuer/Gaussian/full Viewer application integration",
+    "Queue survival across physical reboot or uncooperative writers"
+  ],
+  "runtimeActivated": false,
+  "initialIndependentFailure": {
+    "testsPassed": 5,
+    "testsFailed": 1,
+    "cause": "Native terminal fixture transition preceded independent heavy-state sampling. Corrected test waits actual native status20 and independently observed owned/heavy1 before setting40; no assertion weakened.",
+    "failedEvidencePreserved": "C:\\Users\\fstor\\.codex\\artifacts\\processing-two-node-canonical-qa-20261028\\root-review-result.json"
+  },
+  "qualificationReceipt": "C:\\Users\\fstor\\.codex\\artifacts\\processing-two-node-canonical-qa-20261028\\v2\\qualification-result.json"
+}

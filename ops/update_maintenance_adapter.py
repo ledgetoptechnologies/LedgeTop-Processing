@@ -82,7 +82,7 @@ class ScheduleWindow:
 
 class UpdateMaintenanceAdapter:
     def __init__(self,managed_root,*,state_path,receipt_root,api,operator,node_id,authority_id,engine_id,adapter_id,
-                 window,clock=lambda:datetime.now(timezone.utc)):
+                 window,clock=lambda:datetime.now(timezone.utc),worker_aware=False):
         if not sys_linux():raise MaintenanceAdapterHeld('linux_maintenance_adapter_required')
         if type(window) is not ScheduleWindow or not isinstance(api,Client) or not isinstance(operator,Client):
             raise MaintenanceAdapterHeld('fixed_clients_and_window_required')
@@ -98,6 +98,8 @@ class UpdateMaintenanceAdapter:
         self.path=Path(state_path).absolute();directory(self.path.parent)
         if self.path.resolve()!=self.path or self.path.is_symlink():raise MaintenanceAdapterHeld('private_adapter_journal_required')
         self.api,self.operator,self.window,self.clock=api,operator,window,clock
+        if type(worker_aware) is not bool:raise MaintenanceAdapterHeld('explicit_maintenance_mode_required')
+        self.worker_aware=worker_aware;self._worker_mode=worker_aware
         self.binding=MappingProxyType(dict(adapterId=adapter_id,authorityId=authority_id,nodeId=node_id,engineId=engine_id))
         self._clients=(api.origin,operator.origin,digest(api.token),digest(operator.token))
         self._pid=os.getpid();self._mutex=threading.RLock();self._busy=False
@@ -111,6 +113,7 @@ class UpdateMaintenanceAdapter:
         finally:os.close(descriptor)
         frozen=dict(schemaVersion=1,binding=dict(self.binding),managedRoot=str(self.root),receiptRoot=str(self.receipt_root),
             statePath=str(self.path),stateIdentity=self._file_identity,coordinator=api.origin,config=self._config,window=asdict(window))
+        if worker_aware:frozen.update(schemaVersion=2,workerAware=True)
         with self._db(write=True) as db:
             names={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
             if names-{'adapter_binding','schedule_intents','run_intents'}:raise MaintenanceAdapterHeld('dedicated_adapter_journal_required')
@@ -131,14 +134,16 @@ class UpdateMaintenanceAdapter:
         finally:os.close(fd)
 
     def _fingerprints(self):
-        settings=read_json(self.root/'maintenance.json');gateway=read_json(self.root/'ingress'/'gateway.json')
+        settings,worker=managed.load_settings(self.root,worker_aware=True) if self.worker_aware else (read_json(self.root/'maintenance.json'),None)
+        gateway=read_json(self.root/'ingress'/'gateway.json')
+        if worker is not None and (worker.node_id,worker.authority_id,worker.engine_id)!=(self.binding['nodeId'],self.binding['authorityId'],self.binding['engineId']):raise MaintenanceAdapterHeld('worker_profile_authority_changed')
         source=read_json(self.root/'compose.json')
         if (settings['nodeId']!=self.binding['nodeId'] or settings.get('coordinator')!=self.api.origin
                 or gateway['engineId']!=self.binding['engineId']):raise MaintenanceAdapterHeld('managed_root_binding_changed')
         return dict(settings=digest(settings),ingress=digest(gateway),composeBase=managed.compose_base(source,settings['service']))
 
     def _check(self):
-        if self._pid!=os.getpid():raise MaintenanceAdapterHeld('adapter_owner_process_changed')
+        if self._pid!=os.getpid() or self.worker_aware is not self._worker_mode:raise MaintenanceAdapterHeld('adapter_owner_or_mode_changed')
         directory(self.root);directory(self.receipt_root);directory(self.path.parent)
         info=self.path.lstat()
         if (self.path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
@@ -194,10 +199,19 @@ class UpdateMaintenanceAdapter:
 
     def _context(self,work):
         self._check()
-        settings=read_json(self.root/'maintenance.json');ingress=Ingress(self.root/'ingress')
+        settings,_worker=managed.load_settings(self.root,worker_aware=True) if self.worker_aware else (read_json(self.root/'maintenance.json'),None)
+        ingress=Ingress(self.root/'ingress')
         if digest(ingress.config)!=self._config['ingress']:raise MaintenanceAdapterHeld('ingress_binding_changed')
         args=managed.adapter_args(self.root,settings,ingress)
         return settings,ingress,ComposeNode(args,Path(work))
+
+    def worker_ready(self,adapter):
+        if not self.worker_aware:return True
+        from ops.reference_worker_maintenance import WorkerMaintenance
+        _settings,policy=managed.load_settings(self.root,worker_aware=True)
+        worker=WorkerMaintenance(self.root,policy,self.api,operator=self.operator)
+        try:return worker.ready(adapter)
+        finally:worker.close()
 
     def _host(self):
         authority=self.api.json('GET','/v1/prototype/authority')
@@ -320,7 +334,7 @@ class UpdateMaintenanceAdapter:
                     raise MaintenanceAdapterHeld('physical_gate_binding_changed')
                 if state['reservation'] is not None:return False
                 _,_,adapter=self._context(request['receiptDirectory'])
-                return adapter.idle() is True
+                return adapter.idle() is True and self.worker_ready(adapter)
         except GateBusy:return False
 
     def ready_to_run(self,request):
@@ -345,7 +359,8 @@ class UpdateMaintenanceAdapter:
                     (request['requestSha256'],request['operationId'],request['hostGeneration'],canonical(request)))
             try:
                 result=managed.run(self.root,self.api,self.operator,Path(request['receiptDirectory']),self.window.wait_seconds,
-                    self.window.drain_seconds,expected_plan_id=request['plan']['planId'],expected_target=request['localImageId'])
+                    self.window.drain_seconds,expected_plan_id=request['plan']['planId'],expected_target=request['localImageId'],
+                    **({'worker_aware':True,'owned_schedule_request_id':json.loads(self._schedule_row(request)['wire'])['requestId']} if self.worker_aware else {}))
             except Exception:raise MaintenanceAdapterHeld('managed_run_requires_read_only_reconciliation') from None
             if result.get('status')!='succeeded':raise MaintenanceAdapterHeld('issued_run_has_no_successful_completion')
             value=self._completion(request)
@@ -363,6 +378,7 @@ class UpdateMaintenanceAdapter:
         state=read_json(root/'managed-update.json');private=read_json(root/'update.json')
         if state.get('stage')!='completed' or private.get('stage')!='completed':return None
         settings,ingress,adapter=self._context(root)
+        if self.worker_aware:settings['ownedScheduleRequestId']=json.loads(self._schedule_row(request)['wire'])['requestId']
         expected=dict(healthy=True,image=request['localImageId'],previousImage=request['previousImageId'],
             composePinUpdateRequired=False,persistentComposePin=request['localImageId'],ingress='open')
         if (state.get('binding')!=managed.operation_binding(self.api,settings,ingress,adapter.args)
@@ -381,6 +397,12 @@ class UpdateMaintenanceAdapter:
                 or self._host()['imageId']!=request['localImageId'] or not adapter.serving(request['localImageId'])):
             raise MaintenanceAdapterHeld('durable_host_pin_not_proven')
         managed.owned_open_proof(ingress,state)
+        if self.worker_aware:
+            from ops.reference_worker_maintenance import WorkerMaintenance
+            _settings,policy=managed.load_settings(self.root,worker_aware=True)
+            worker=WorkerMaintenance(self.root,policy,self.api,operator=self.operator)
+            try:worker.verify(state,adapter,idle=False);worker.verify_runtime(state)
+            finally:worker.close()
         value=dict(schemaVersion=1,requestSha256=request['requestSha256'],**{key:request[key] for key in COMMON},
             planId=request['plan']['planId'],planSha256=request['plan']['planSha256'],previousImageId=request['previousImageId'],
             targetImageId=request['localImageId'],qualificationSha256=request['qualificationSha256'],imageId=request['localImageId'],

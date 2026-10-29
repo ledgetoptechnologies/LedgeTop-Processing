@@ -31,10 +31,13 @@ REFERENCE_PROFILE = "reference-pipeline-v1"
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 catalog_admission=False):
+                 catalog_admission=False,runtime_version_publication=False):
         if type(catalog_admission) is not bool:
             raise ValueError('explicit catalog admission mode required')
         self.catalog_admission = catalog_admission
+        if type(runtime_version_publication) is not bool or runtime_version_publication and not catalog_admission:
+            raise ValueError('explicit paired runtime publication mode required')
+        self.runtime_version_publication=runtime_version_publication
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
@@ -91,6 +94,11 @@ class Queue(Maintenance):
 
     def _initialize(self):
         with self._db() as db:
+            runtime_marker=db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'reference_runtime_%' LIMIT 1").fetchone()
+            if runtime_marker:
+                if not self.runtime_version_publication:raise RuntimeError('runtime publication ABI requires compatible explicit mode')
+                from .reference_runtime_versions import validate_runtime_version_abi
+                validate_runtime_version_abi(db)
             catalog_marker=db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'reference_catalog_%' OR name='reference_option_evidence' LIMIT 1").fetchone()
             if catalog_marker:
                 if not self.catalog_admission:raise RuntimeError('catalog admission ABI requires compatible explicit mode')
@@ -155,6 +163,8 @@ class Queue(Maintenance):
             db.row_factory = sqlite3.Row
             if self.catalog_admission:
                 db.create_function('reference_catalog_writer_v1', 0, lambda: 1)
+            if self.runtime_version_publication:
+                db.create_function('reference_runtime_writer_v1',0,lambda:1)
             self._database_users += 1
             try:
                 if self.catalog_admission:

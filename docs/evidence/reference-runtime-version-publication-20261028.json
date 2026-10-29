@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "status": "runtime-version-publication-readiness-and-reconcile-source-qualified-not-installed",
+  "sourcePins": {
+    "processing/reference_runtime_versions.py": "ece3b240b2287bb106b2ca00253e0116bb26bcfd53d03af972737ccd5cb0b6e1",
+    "processing/prototype.py": "8fa44906578cedb19f87fc436dbb0e3b3349b0cdf40fe09152106fcb5c4e81a1",
+    "processing/reference_runtime.py": "522b8d61698afe5d1b63180aac2f826c0b0bf0c881b4114ba68b46d07f639a70",
+    "processing/app.py": "7cbab70c0a95a5362bda8f7b4cee10a48c7eaa52145d58566617d9445dcf8083",
+    "processing/reference_catalog_cache.py": "7e821f5afc60309d1f78ff1951b4da0664e7bf54c018931bda97d35a6b94f83e",
+    "processing/reference_routing.py": "4ad7c997349e30688ee25eb505d303f5f63963bec94a522667d2d4273fc7bb6b",
+    "processing/reference_store.py": "c592da8cb2279817a71fb190c5e55db8322eed89b1e70a4ca5d71f25876707bf",
+    "processing/reference_api.py": "b8d23d70641241fd270b106964dcf2322a49e5cacfcf6c61624e05f461d8440c",
+    "processing/reference_driver.py": "a23b48077c85456ae3626b4a713dbd9cec4c21c75b04c930eab4f5dca9fac5e9",
+    "ops/reference_worker_daemon.py": "179ff9c2355e6e410b8e601bb3cb3d165f0d320ed4aa10ab219ff2bd2a4bc787",
+    "tests/test_reference_runtime_versions.py": "f00ef520219a0a54778f4625ae923e95f1c5c5b965cf9b6a76f2288c673133f2",
+    "tests/test_reference_worker_readiness.py": "f520d2003db86abdbc57ddbab5a6b7eeeea709b8a18a7b13a480cfb7c3bc6c77",
+    "tests/test_reference_reconcile.py": "50eb20dea2644eeb85b5ba7d5b83a25ecaaf0fd28f4e0a5032f0df1aeb94d21d",
+    "docs/reference-runtime-versions.md": "d135244bf7c68bb3429912e57cd36b72bc86489c4f8cb5b7c016b7ddcc19fe4f",
+    "docs/reference-submission-reconcile.md": "078a032264543ff94401098ef5404708de2b109ab7c993f9ff963f8326524ab2"
+  },
+  "authorTests": {
+    "image": "83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb",
+    "modules": "tests.test_reference_catalog_cache tests.test_reference_option_evidence tests.test_reference_runtime_versions tests.test_reference_worker_readiness tests.test_reference_reconcile tests.test_reference_runtime tests.test_reference_api tests.test_reference_worker_api tests.test_reference_store tests.test_reference_routing tests.test_reference_http tests.test_prototype tests.test_maintenance tests.test_reference_driver tests.test_reference_worker_service.WorkerServiceTests tests.test_reference_worker_daemon_routing",
+    "passed": 213,
+    "seconds": 12.414,
+    "skips": 0
+  },
+  "independentTests": {
+    "passed": 213,
+    "skips": 0,
+    "seconds": 11.233,
+    "logSha256": "be4f0f9abdf41c6ca760d0a795cfcc00fbed061476c115d6ecec10bab4709028"
+  },
+  "reviewScope": [
+    "owned original maintenance schedule, token and revision binding",
+    "fresh Reader TLS/native HTTP proof outside Queue transaction and final durable epoch CAS",
+    "immutable original job option evidence and same-version image/ABA epochs",
+    "writer ABI prevents old mode/source mutations",
+    "whole-step exclusion and typed metadata-RPC readiness window",
+    "mutation guard rejects readiness window even when health owns state lock",
+    "exact original submission reconciliation without new job/catalog/grant"
+  ],
+  "remaining": [
+    "paired worker maintenance final independent qualification",
+    "actual Viewer app broker/source-custody/ACK integration",
+    "installed config/state migration and physical runtime acceptance",
+    "256 lifetime publication history retirement/export unqualified",
+    "64 prepared-history lifecycle unqualified"
+  ],
+  "runtimeActivated": false,
+  "remoteActions": false,
+  "goalComplete": false,
+  "authorFreeze": "C:\\Users\\fstor\\.codex\\artifacts\\processing-runtime-version-publication-20261028\\frozen-coordinator-v1.json"
+}

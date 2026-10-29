@@ -90,9 +90,29 @@ This source is not installed and is newer than the cached 66-file worker image.
 Its opt-in SQLite writer ABI forbids unqualified old-source/config rollback.
 Paired maintenance publication of the new engine version is still being wired;
 it must advance routing/cache epochs without rewriting older queued jobs.
-Lost-submission-ACK recovery across a changed catalog fingerprint also still
-needs exact-original-request reconciliation with the Viewer client; existing
-lookup alone is not proof of the original options.
+An isolated Viewer patch packet now passes six Node tests and two actual
+Node/Python tests for exact-original-request reconciliation after a lost
+submission response, changed catalog and coordinator restart. It creates no
+second job, claim or grant. The packet is against component base867; actual
+current Viewer application integration remains pending with its owner.
+
+Two actual canonical worker services also pass six independently repeated
+synthetic tests for small-node preference, global heavy-job exclusion, a full
+two-image main-node flow, and fallback when the small engine is unavailable.
+The fixture waits for actual native processing and an independently observed
+heavy-state sample before completing the job. See
+[two-node qualification](evidence/reference-two-node-canonical-20261028.json).
+These tiny synthetic inputs do not establish real photogrammetry throughput.
+
+Beau's next large-data target is approximately 10,000 photos, about 50 GB, with
+no GCPs, following a smaller explicitly selected trial. Actual Node/Python
+metadata validation and main-node eligibility pass for that synthetic manifest;
+no client dataset has started. Draft v1 permits at most 10,000 total objects
+and 4 MiB of JSON. More photos, auxiliary files above that total, or unusually
+long filenames need separate compatibility work. The reference source broker's
+default 100 requests and five-minute initial transfer window also require
+explicit, qualified settings for this scale. Broker application assembly,
+transfer timing, retry budgets and scratch capacity remain acceptance gates.
 
 The coordinator-only upgrade now has a locally built exact `6bbd468` image and
 an independently tested incremental history validator. The actual image passed

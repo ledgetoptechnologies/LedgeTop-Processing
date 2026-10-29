@@ -53,9 +53,12 @@ def _parts(content_type, body):
 class NativeNodeFixture:
     synthetic_fixture = True
 
-    def __init__(self, path, host='127.0.0.1', port=0, engine_version='synthetic-transport-only', *, synthetic_enabled=False):
+    def __init__(self, path, host='127.0.0.1', port=0, engine_version='synthetic-transport-only', *, synthetic_enabled=False, expected_uploads=1):
         if synthetic_enabled is not True:
             raise ValueError('explicit synthetic fixture opt-in required')
+        if type(expected_uploads) is not int or not 1 <= expected_uploads <= 50:
+            raise ValueError('bounded expected synthetic upload count required')
+        self.expected_uploads = expected_uploads
         if not ipaddress.ip_address(host).is_loopback or type(port) is not int or not 0 <= port <= 65535:
             raise ValueError('synthetic fixture requires literal loopback binding')
         if type(engine_version) is not str or not 1 <= len(engine_version) <= 128 or not all(0x21 <= ord(c) <= 0x7e for c in engine_version):
@@ -72,12 +75,27 @@ class NativeNodeFixture:
         self._thread = None
         self._closed = False
         with self._db() as db:
+            policy = db.execute("SELECT 1 FROM sqlite_master WHERE name='synthetic_upload_policy'").fetchone()
+            tasks = db.execute("SELECT 1 FROM sqlite_master WHERE name='tasks'").fetchone()
+            if expected_uploads == 1 and policy:
+                raise ValueError('synthetic fixture upload policy differs')
+            if expected_uploads != 1:
+                if policy:
+                    rows = db.execute('SELECT expected_uploads FROM synthetic_upload_policy').fetchall()
+                    if len(rows) != 1 or rows[0][0] != expected_uploads:
+                        raise ValueError('synthetic fixture upload policy differs')
+                elif tasks:
+                    raise ValueError('synthetic fixture upload policy differs')
+                else:
+                    db.execute('CREATE TABLE synthetic_upload_policy(expected_uploads INTEGER NOT NULL)')
+                    db.execute('INSERT INTO synthetic_upload_policy VALUES(?)', (expected_uploads,))
+            actions = "'initialize','upload','commit'" if expected_uploads == 1 else "'initialize','commit'"
             db.executescript('''CREATE TABLE IF NOT EXISTS tasks (
               uuid TEXT PRIMARY KEY,name TEXT NOT NULL,options TEXT NOT NULL,
               uploaded INTEGER NOT NULL DEFAULT 0,committed INTEGER NOT NULL DEFAULT 0,status INTEGER NOT NULL DEFAULT 10);
               CREATE TABLE IF NOT EXISTS calls (action TEXT NOT NULL,job TEXT NOT NULL);
               CREATE UNIQUE INDEX IF NOT EXISTS single_mutation ON calls(action,job)
-                WHERE action IN ('initialize','upload','commit');''')
+                WHERE action IN ('''+actions+''');''')
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -259,13 +277,13 @@ class NativeNodeFixture:
                 if len(parts) != 1 or parts[0][0] != 'images' or parts[0][1] is None or parts[0][2] != b'abc':
                     raise ValueError('fixture accepts abc only')
                 p._basename(parts[0][1])
-                if task['uploaded'] or task['committed']:
+                if task['uploaded'] >= self.expected_uploads or task['committed']:
                     return 409, {'error': 'synthetic_upload_exists'}, False
-                db.execute('UPDATE tasks SET uploaded=1 WHERE uuid=?', (identifier,))
+                db.execute('UPDATE tasks SET uploaded=uploaded+1 WHERE uuid=?', (identifier,))
                 db.execute("INSERT INTO calls VALUES('upload',?)", (identifier,))
                 return 200, {'success': True}, False
             if method == 'POST' and action == 'commit' and read is None:
-                if body or not task['uploaded'] or task['committed']:
+                if body or task['uploaded'] != self.expected_uploads or task['committed']:
                     return 409, {'error': 'synthetic_commit_refused'}, False
                 db.execute('UPDATE tasks SET committed=1,status=40 WHERE uuid=?', (identifier,))
                 db.execute("INSERT INTO calls VALUES('commit',?)", (identifier,))

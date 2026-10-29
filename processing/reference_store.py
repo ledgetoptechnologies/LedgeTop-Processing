@@ -181,6 +181,9 @@ class ReferenceStore:
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
                 used+=db.execute(f'SELECT COALESCE(SUM(length(CAST(payload AS BLOB))+length(digest)),0) FROM {table}').fetchone()[0]
                 if table=='reference_catalog_state':used+=176*db.execute('SELECT COUNT(*) FROM reference_catalog_state').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_runtime_versions'").fetchone():
+            used+=db.execute('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))+length(digest)),0) FROM reference_runtime_versions').fetchone()[0]
+            used+=db.execute('SELECT COALESCE(SUM(length(request_id)+length(node_id)+length(request_sha)+length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))+length(receipt_sha)+length(update_token_sha)+length(row_sha)+16),0) FROM reference_runtime_version_receipts').fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
@@ -259,6 +262,24 @@ class ReferenceStore:
                              (submission_id, environment)).fetchone()
             return self._public(self._row(db, row[0])) if row else None
 
+    def reconcile_submission(self,raw,*,environment):
+        """Exact original-envelope comparison only; never new admission."""
+        protocol._closed(raw,('schemaVersion','submissionId','manifest','pipeline','capabilityFingerprint'),'original submission')
+        try:
+            checked=protocol.validate_submission(raw,environment=environment,
+                capability_fingerprint=raw['capabilityFingerprint'],
+                options_fingerprint=raw['pipeline']['odm']['optionsFingerprint'],
+                allowed_odm_options=set(raw['pipeline']['odm']['options']),available_engines=('odm','treedar'))
+        except (KeyError,TypeError):raise ValueError('malformed original submission') from None
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            found=db.execute('SELECT job_id,input_json,request_digest FROM reference_jobs WHERE submission_id=? AND environment=?',
+                (checked['submissionId'],environment)).fetchone()
+            if found is None:return None
+            if found['input_json']!=_json(checked) or found['request_digest']!=checked['requestDigest']:
+                raise Conflict('original submission differs')
+            return self._public(self._row(db,found['job_id']))
+
     def list(self, *, private=False):
         with self.queue._db() as db:
             ids = [row[0] for row in db.execute("SELECT job_id FROM reference_jobs ORDER BY created_at,job_id")]
@@ -286,7 +307,7 @@ class ReferenceStore:
         if self.routing is not None:
             states={node:self.queue._node(db,node)['state'] for node in ('cluster','main')}
             return self.routing.choose(submission,states,sample,local_max_photos=self.local_max_photos,
-                local_max_input_bytes=self.local_max_input_bytes,main_node_id=self.main_node_id)
+                local_max_input_bytes=self.local_max_input_bytes,main_node_id=self.main_node_id,db=db)
 
         requires_main = (submission['pipeline']['treedar']['requested']
             or submission['manifest']['inputCounts']['images'] > self.local_max_photos

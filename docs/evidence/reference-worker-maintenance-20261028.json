@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "status": "paired-worker-maintenance-source-qualified-not-installed",
+  "sourcePins": {
+    "tests/test_reference_worker_maintenance.py": "027efd959f1a21f61d2a99c966af35c5861ddc79cce61ed1421edd3f0f1755b7",
+    "ops/update_maintenance_adapter.py": "c583edf78e9f5736813466e9d8dd38314b8e0f19c03666f973faf34cabd83f99",
+    "docs/reference-worker-maintenance.md": "0d2b829ad84761ae68e5ac2bfa0a8c16e24b2e8e42326abfc0c566abe9d27f80",
+    "tests/fixtures/worker_maintenance_020c/fixture.attrs": "a7ca2284e018acd9f1400d267ddd81c5416e72924d518470870ae823370b8457",
+    "ops/reference_worker_maintenance.py": "d2474511189f67a0f7c1b674981533bb18709bf34145981ab440fcd07842b0db",
+    "tests/fixtures/worker_maintenance_020c/node_maintenance.py": "7f56c68c1129dddd755d884854e25d2ced4fbbae60c2899c75e36832ffadea3e",
+    "ops/update_service.py": "2f01ef5695cd8370c0b1ccda1efb3e7eecbeb8f9a7619abc74d9b4ddee75ff3c",
+    "tests/fixtures/worker_maintenance_020c/update_service.py": "4cb938e2e66eb794d31e6a046f335b593188c8b48b4a2e7c230cd336294f5eb6",
+    "ops/node_maintenance.py": "b770114060567cfa43fe64395eb13e1f8fbe8a99ff9bb5bcf16f5d14245db772",
+    "tests/fixtures/worker_maintenance_020c/.gitattributes": "8effd2d7276a2fa241f1325de3259a9154d1ad5d59c442e763803c826571a008"
+  },
+  "coordinatorDependencyPins": {
+    "processing/reference_runtime_versions.py": "ece3b240b2287bb106b2ca00253e0116bb26bcfd53d03af972737ccd5cb0b6e1",
+    "processing/prototype.py": "8fa44906578cedb19f87fc436dbb0e3b3349b0cdf40fe09152106fcb5c4e81a1",
+    "processing/reference_runtime.py": "522b8d61698afe5d1b63180aac2f826c0b0bf0c881b4114ba68b46d07f639a70",
+    "processing/app.py": "7cbab70c0a95a5362bda8f7b4cee10a48c7eaa52145d58566617d9445dcf8083",
+    "processing/reference_catalog_cache.py": "7e821f5afc60309d1f78ff1951b4da0664e7bf54c018931bda97d35a6b94f83e",
+    "processing/reference_routing.py": "4ad7c997349e30688ee25eb505d303f5f63963bec94a522667d2d4273fc7bb6b",
+    "processing/reference_store.py": "c592da8cb2279817a71fb190c5e55db8322eed89b1e70a4ca5d71f25876707bf",
+    "processing/reference_api.py": "b8d23d70641241fd270b106964dcf2322a49e5cacfcf6c61624e05f461d8440c",
+    "processing/reference_driver.py": "a23b48077c85456ae3626b4a713dbd9cec4c21c75b04c930eab4f5dca9fac5e9",
+    "ops/reference_worker_daemon.py": "179ff9c2355e6e410b8e601bb3cb3d165f0d320ed4aa10ab219ff2bd2a4bc787",
+    "tests/test_reference_runtime_versions.py": "f00ef520219a0a54778f4625ae923e95f1c5c5b965cf9b6a76f2288c673133f2",
+    "tests/test_reference_worker_readiness.py": "f520d2003db86abdbc57ddbab5a6b7eeeea709b8a18a7b13a480cfb7c3bc6c77",
+    "tests/test_reference_reconcile.py": "50eb20dea2644eeb85b5ba7d5b83a25ecaaf0fd28f4e0a5032f0df1aeb94d21d",
+    "docs/reference-runtime-versions.md": "d135244bf7c68bb3429912e57cd36b72bc86489c4f8cb5b7c016b7ddcc19fe4f",
+    "docs/reference-submission-reconcile.md": "078a032264543ff94401098ef5404708de2b109ab7c993f9ff963f8326524ab2"
+  },
+  "authorTests": {
+    "passed": 52,
+    "logSha256": "47ca0bcc2623d2df2b1dc4ce512eb05206d66421bcf99a149c6238b9945a0879",
+    "seconds": 45.025,
+    "skipped": 0,
+    "total": 52,
+    "resourceWarning": "error"
+  },
+  "independentTests": {
+    "passed": 52,
+    "skips": 0,
+    "seconds": 50.041,
+    "logSha256": "643596f8f0ba61234e527183e21e07e49ca98cae676d1bfe13c6749142e5c639",
+    "verifiedSourceFiles": 25
+  },
+  "scope": [
+    "actual canonical factory/service/TLS/NodeGate/state owner",
+    "actual ReferenceRuntime/registry/catalog/native operator routes",
+    "actual worker-aware adapter schedule/run/lookup",
+    "synthetic Docker/Compose/namespace/ingress/backend boundary",
+    "restart-between-updates succeeds; restart-during-update retains held authority"
+  ],
+  "correction": "Full worker configuration and publication CAS are rechecked after slow Compose preparation immediately before backend mutation; changed configuration holds without Docker replacement or maintenance finish. Earlier51 receipt superseded.",
+  "notProved": [
+    "physical Docker/Compose/namespace/ingress replacement; test boundaries are synthetic",
+    "automatic authority recovery if coordinator restarts during updating; retains closed held state",
+    "actual worker service activation and Viewer broker/source custody integration"
+  ],
+  "remoteActions": false,
+  "runtimeActivated": false,
+  "authorReceipt": "C:\\Users\\fstor\\.codex\\artifacts\\processing-worker-maintenance-20261028\\qualified-ops-v2.json"
+}

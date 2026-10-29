@@ -102,11 +102,12 @@ def parse_configuration(raw):
     from ops.update_maintenance_adapter import ScheduleWindow
     raw=json.loads(canonical(raw))
     closed(raw,('schemaVersion','serviceId','codeBindingSha256','registry','qualification','maintenance','supervisor','capacity','service'))
-    if type(raw['schemaVersion']) is not int or raw['schemaVersion']!=1:raise ServiceConfigurationError('configuration_version_required')
+    if type(raw['schemaVersion']) is not int or raw['schemaVersion'] not in (1,2):raise ServiceConfigurationError('configuration_version_required')
     if type(raw['serviceId']) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}',raw['serviceId']):raise ServiceConfigurationError('fixed_service_identity_required')
     if type(raw['codeBindingSha256']) is not str or not re.fullmatch(r'[a-f0-9]{64}',raw['codeBindingSha256']):raise ServiceConfigurationError('reviewed_source_binding_required')
     for key in ('registry','qualification','supervisor'):closed(raw[key],('statePath','policy'))
-    closed(raw['maintenance'],('managedRoot','statePath','receiptRoot','window'))
+    closed(raw['maintenance'],('managedRoot','statePath','receiptRoot','window')+(('workerAware',) if raw['schemaVersion']==2 else ()))
+    if raw['schemaVersion']==2 and raw['maintenance']['workerAware'] is not True:raise ServiceConfigurationError('explicit_worker_aware_profile_required')
     closed(raw['capacity'],('policy',))
     closed(raw['service'],('statePath','discoveryIntervalSeconds','errorCooldownSeconds','maxTransitions'))
     rp=policy_map(raw['registry']['policy'],RegistryPolicy)
@@ -155,11 +156,12 @@ def runtime_identity(configuration):
         raise ServiceConfigurationError('configured_processing_host_required')
 
 
-def control_clients(managed_root):
+def control_clients(managed_root,*,worker_aware=False):
     from processing.odx_smoke_worker import Client
     from processing.container_update import loopback
     root=private_path(str(managed_root),directory=True)
-    settings=read_private_json(root/'maintenance.json')
+    from ops.node_maintenance import load_settings
+    settings,_worker=load_settings(root,worker_aware=True) if worker_aware else (read_private_json(root/'maintenance.json'),None)
     origin=loopback(settings['coordinator'])
     path=private_path(str(root/'maintenance.env'))
     if path.stat().st_size>16384:raise ServiceConfigurationError('bounded_control_credentials_required')
@@ -190,11 +192,12 @@ def compose(configuration):
     qualifier=StartupQualifier(raw['qualification']['statePath'],c.startup_policy,registry=registry)
     if qualifier.policy_sha256!=c.supervisor_policy.qualification_policy_sha256:
         raise ServiceConfigurationError('qualification_policy_changed')
-    api,operator=control_clients(raw['maintenance']['managedRoot'])
+    worker_aware=raw['schemaVersion']==2
+    api,operator=control_clients(raw['maintenance']['managedRoot'],**({'worker_aware':True} if worker_aware else {}))
     adapter=UpdateMaintenanceAdapter(raw['maintenance']['managedRoot'],state_path=raw['maintenance']['statePath'],
         receipt_root=raw['maintenance']['receiptRoot'],api=api,operator=operator,node_id=c.supervisor_policy.node_id,
         authority_id=c.supervisor_policy.authority_id,engine_id=c.registry_policy.engine_id,
-        adapter_id=c.supervisor_policy.maintenance_adapter_id,window=c.window)
+        adapter_id=c.supervisor_policy.maintenance_adapter_id,window=c.window,**({'worker_aware':True} if worker_aware else {}))
     supervisor=UpdateSupervisor(raw['supervisor']['statePath'],c.supervisor_policy,registry=registry,qualifier=qualifier,maintenance=adapter)
     return supervisor,capacity,adapter,api
 
@@ -223,7 +226,7 @@ def readiness_probes(configuration,adapter,api):
                     or state.get('coordinatorOrigin')!=api.origin):raise ServiceConfigurationError('physical_gate_binding_changed')
             if state.get('reservation') is not None:return False
             settings,ingress,backend=adapter._context(Path(c.raw['supervisor']['statePath']).parent)
-            return backend.idle() is True
+            return backend.idle() is True and (c.raw['schemaVersion']!=2 or adapter.worker_ready(backend))
         finally:gate.__exit__(None,None,None)
     def can_schedule(status):
         node=api.json('GET','/v1/prototype/nodes/'+c.supervisor_policy.node_id)['node']

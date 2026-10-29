@@ -107,6 +107,9 @@ class ReferenceAPI:
         if method == "GET" and path == protocol.PREFIX + "/capabilities":
             return Response(200, self._capabilities(environment))
         try:
+            if method=='POST' and path==protocol.PREFIX+'/jobs/reconcile':
+                job=self.store.reconcile_submission(protocol.decode_submission(body),environment=environment)
+                return Response(200,job) if job is not None else self._error(404,'submission_unavailable')
             binary = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/results/([A-Za-z0-9][A-Za-z0-9_-]{0,127})', path)
             if method == 'GET' and binary:
                 job = self._job(binary[1], environment, private=True)

@@ -1,0 +1,9 @@
+{
+  "sourceCommit": "020c15c79577aff83af388fe476451ceca545518",
+  "sourceRoot": "ops",
+  "sha256": {
+    "update_service.py": "4cb938e2e66eb794d31e6a046f335b593188c8b48b4a2e7c230cd336294f5eb6",
+    "node_maintenance.py": "7f56c68c1129dddd755d884854e25d2ced4fbbae60c2899c75e36832ffadea3e"
+  },
+  "purpose": "Actual pre-worker-aware cold configuration/CLI rejection oracle; never execute against a real host"
+}

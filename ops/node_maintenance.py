@@ -23,6 +23,17 @@ from processing.odx_smoke_worker import Client, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
 
 
+def load_settings(root,*,worker_aware=False):
+    if type(worker_aware) is not bool:raise GateError('explicit maintenance mode required')
+    if worker_aware:
+        from ops.reference_worker_maintenance import load_profile
+        settings,policy=load_profile(root)
+        settings=dict(settings,workerProfileSha256=policy.sha256)
+        return settings,policy
+    if (root/'maintenance-worker-v2.json').exists():raise GateError('explicit worker maintenance v2 mode required')
+    return json.loads((root/'maintenance.json').read_text()),None
+
+
 def private_directory(value):
     root = Path(value).absolute()
     if root.resolve() != root or not root.is_dir() or root.stat().st_mode & 0o077:
@@ -69,10 +80,13 @@ def compose_base(source,service):
 
 
 def operation_binding(api,settings,ingress,args):
-    return dict(nodeId=settings['nodeId'],project=settings['project'],service=settings['service'],coordinator=api.origin,
+    result=dict(nodeId=settings['nodeId'],project=settings['project'],service=settings['service'],coordinator=api.origin,
         backendName=ingress.config['backendName'],backendPort=ingress.config['backendPort'],engineId=args.docker_engine_id,
         expectedEngine=args.expected_engine,nodePort=args.node_port,
         proxyName=ingress.config['proxyName'],proxyImage=ingress.config['proxyImage'],listenPort=ingress.config['listenPort'])
+    if 'workerProfileSha256' in settings:result['workerProfileSha256']=settings['workerProfileSha256']
+    if 'ownedScheduleRequestId' in settings:result['ownedScheduleRequestId']=settings['ownedScheduleRequestId']
+    return result
 
 
 def sync_compose(root):
@@ -99,7 +113,7 @@ def owned_open_proof(ingress,state):
     return dict(state='open',containerId=identifier,oldWorkersDrained=True)
 
 
-def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,*,already_finished=False):
+def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,*,already_finished=False,worker=None,gate=None):
     private=deferred_receipt(receipt,settings['nodeId'],expected_plan_id=state['planId'],expected_target=state['targetImage'])
     source=json.loads((root/'compose.json').read_text())
     service=settings['service'];pin=source['services'][service]['image']
@@ -114,11 +128,18 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
     sync_compose(root)
     if not (adapter.serving(state['targetImage']) if already_finished else adapter.healthy(state['targetImage'])):
         raise GateError('pinned replacement health changed')
+    if worker is not None:
+        if already_finished:worker.verify(state,adapter,idle=False);worker.verify_runtime(state)
+        else:
+            if state['worker']['phase']=='finish_pending':raise GateError('unknown worker-aware finish requires exact read-only reconciliation')
+            worker.after_backend(state,receipt,gate,adapter)
+            worker.publish_runtime(state,receipt,gate,adapter)
     if state['stage'] in ('update_returned','compose_pin_pending','compose_pinned'):
         state['stage']='compose_pinned';save(receipt/'managed-update.json',state)
         closed=json.loads((ingress.root/'state.json').read_text())
         if closed.get('state')!='closed' or closed.get('containerId')!=state['closedIngress']['containerId']:
             raise GateError('owned closed ingress no longer matches')
+        if worker is not None:worker.fence(state,gate)
         state['stage']='ingress_open_pending';save(receipt/'managed-update.json',state)
         ingress.change(False,expected=state['targetImage'],seconds=drain_seconds)
     proof=owned_open_proof(ingress,state)
@@ -132,6 +153,8 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
     save(receipt/'managed-update.json',state)
     result=dict(healthy=True,image=state['targetImage'],previousImage=private['oldImage'],
         composePinUpdateRequired=False,persistentComposePin=state['targetImage'],ingress='open')
+    if worker is not None and not already_finished:
+        worker.fence(state,gate);worker.finish_intent(state,receipt)
     result=finalize_deferred(api,operator,settings['nodeId'],receipt,expected_plan_id=state['planId'],
         expected_target=state['targetImage'],result=result)
     state.update(stage='completed',persistentComposePin=state['targetImage'],result=result)
@@ -139,8 +162,20 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
     return result
 
 
-def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_plan_id=None,expected_target=None):
-    settings = json.loads((root / 'maintenance.json').read_text())
+def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_plan_id=None,expected_target=None,worker_aware=False,owned_schedule_request_id=None):
+    settings,worker_policy=load_settings(root,worker_aware=worker_aware)
+    if worker_policy is not None:
+        from ops.reference_worker_maintenance import WorkerMaintenance
+        from processing.reference_protocol import _uuid
+        _uuid(owned_schedule_request_id,'owned schedule request')
+        settings['ownedScheduleRequestId']=owned_schedule_request_id
+        worker=WorkerMaintenance(root,worker_policy,api,operator=operator,owned_schedule_request_id=owned_schedule_request_id)
+        try:return _run(root,api,operator,receipt,wait_seconds,drain_seconds,expected_plan_id=expected_plan_id,expected_target=expected_target,settings=settings,worker=worker)
+        finally:worker.close()
+    return _run(root,api,operator,receipt,wait_seconds,drain_seconds,expected_plan_id=expected_plan_id,expected_target=expected_target,settings=settings)
+
+
+def _run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_plan_id=None,expected_target=None,settings,worker=None):
     node_id = settings['nodeId']
     if (expected_plan_id is None)!=(expected_target is None):
         raise GateError('frozen plan and target must be supplied together')
@@ -151,7 +186,10 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
         fence(api.json('GET','/v1/prototype/nodes/'+node_id)['node'])
     ingress = Ingress(root / 'ingress')
     args=adapter_args(root,settings,ingress)
-    adapter = ComposeNode(args, receipt)
+    if worker is None:adapter = ComposeNode(args, receipt)
+    else:
+        from ops.reference_worker_maintenance import WorkerComposeNode
+        adapter=WorkerComposeNode(args,receipt,worker)
     deadline = time.monotonic() + wait_seconds
     with lock(receipt), locked(root / 'ingress'):
         managed=receipt/'managed-update.json'
@@ -168,7 +206,7 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
             node=api.json('GET','/v1/prototype/nodes/'+node_id)['node']
             fence(node)
             if finish_matches(node,private,final):
-                return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,already_finished=True)
+                return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,already_finished=True,worker=worker)
             if (node.get('state')!='updating' or node.get('revision')!=private['reservedRevision']
                     or node.get('planId')!=state['planId'] or node.get('targetImage')!=state['targetImage']):
                 raise GateError('frozen operation is no longer updating')
@@ -186,7 +224,7 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
                 if (current_node.get('state')!='updating' or current_node.get('revision')!=private['reservedRevision']
                         or current_node.get('planId')!=state['planId'] or current_node.get('targetImage')!=state['targetImage']):
                     raise GateError('frozen operation changed while acquiring host gate')
-                return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds)
+                return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,worker=worker,gate=gate)
         if (receipt/'update.json').exists():
             raise GateError('unbound update receipt requires inspection')
         while True:
@@ -232,6 +270,7 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
                         or reserved['nodeId']!=node_id or reserved['planId']!=state['planId']
                         or reserved['targetImage']!=state['targetImage']):
                     raise GateError('owned reservation changed before ingress close')
+                if worker is not None:worker.before_backend(state,receipt,gate,reserved,adapter)
                 state['stage']='ingress_close_pending';save(receipt/'managed-update.json',state)
                 closed=ingress.change(True,seconds=drain_seconds)
                 if (type(closed) is not dict or closed.get('state')!='closed' or closed.get('oldWorkersDrained') is not True
@@ -246,13 +285,14 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
             save(receipt / 'managed-update.json', state)
             if result['status'] != 'succeeded':
                 return {**result,'ingress':'closed' if state.get('closedIngress') else 'unchanged'}
-            return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds)
+            return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,worker=worker,gate=gate)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True)
     parser.add_argument('--credentials', required=True)
+    parser.add_argument('--worker-aware',action='store_true',help='explicit fenced maintenance-worker-v2 profile')
     actions = parser.add_subparsers(dest='action', required=True)
     actions.add_parser('status')
     schedule = actions.add_parser('schedule')
@@ -262,6 +302,7 @@ def main():
     schedule.add_argument('--after-job-id')
     runner = actions.add_parser('run')
     runner.add_argument('--receipt', required=True)
+    runner.add_argument('--owned-schedule-request-id')
     runner.add_argument('--wait-seconds', type=int, choices=range(0, 86401), default=86400)
     runner.add_argument('--drain-seconds', type=int, choices=range(1, 86401), default=3600)
     args = parser.parse_args()
@@ -271,7 +312,7 @@ def main():
         if path.resolve() != path or not path.is_file() or path.stat().st_mode & 0o077:
             raise GateError('private credential file required')
         env = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
-        settings = json.loads((root / 'maintenance.json').read_text())
+        settings,_policy=load_settings(root,worker_aware=args.worker_aware)
         if settings['coordinator'] != 'http://127.0.0.1:18080':
             raise GateError('installed private coordinator tunnel required')
         api = Client(settings['coordinator'], env['PROCESSING_API_TOKEN'])
@@ -283,13 +324,15 @@ def main():
         if args.action == 'status':
             result = {'node': node, 'ingressState': json.loads((root / 'ingress/state.json').read_text())['state']}
         elif args.action == 'schedule':
+            if args.worker_aware:raise GateError('worker-aware scheduling requires the owned update supervisor')
             receipt_args=adapter_args(root,settings,Ingress(root/'ingress'))
             ComposeNode(receipt_args, root).image(args.target_image)
             result = operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule', {
                 'expectedRevision': node['revision'], 'targetImage': args.target_image,
                 'drainAt': args.drain_at, 'notBefore': args.not_before, 'afterJobId': args.after_job_id})
         else:
-            result = run(root, api, operator, private_directory(args.receipt), args.wait_seconds, args.drain_seconds)
+            result = run(root, api, operator, private_directory(args.receipt), args.wait_seconds, args.drain_seconds,
+                **({'worker_aware':True,'owned_schedule_request_id':args.owned_schedule_request_id} if args.worker_aware else {}))
         print(json.dumps(result, sort_keys=True))
         return 1 if result.get('status') == 'failed' else 0
     except (GateError, NodeGateError, UpdateError, SmokeError, OSError, ValueError, KeyError):

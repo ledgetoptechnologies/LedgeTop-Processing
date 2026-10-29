@@ -43,6 +43,7 @@ class ReferenceSettings:
     recovery_bindings: dict | None = None
     routing_bindings: dict | None = None
     catalog_admission: object | None = None
+    runtime_version_publication: object | None = None
 
 
 def _file(path, *, private):
@@ -79,7 +80,7 @@ def load_reference_settings(path, config):
         if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()) + (("runtimeVersionPublication",) if "runtimeVersionPublication" in value else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -156,8 +157,15 @@ def load_reference_settings(path, config):
             if type(policy['schemaVersion']) is not int or policy['schemaVersion']!=1 or routing is None:
                 raise RuntimeConfigurationError('explicit bound catalog admission version required')
             admission=CatalogAdmissionPolicy(policy['maxAgeSeconds'])
+        publication=None
+        if 'runtimeVersionPublication' in value:
+            from .reference_runtime_versions import RuntimeVersionPublicationPolicy
+            policy=value['runtimeVersionPublication'];p._closed(policy,('schemaVersion',),'runtime publication')
+            if type(policy['schemaVersion']) is not int or policy['schemaVersion']!=1 or admission is None or routing is None or set(config.prototype_node_ids)!=set(('cluster','main')) or not config.prototype_operator_token:
+                raise RuntimeConfigurationError('explicit paired runtime publication required')
+            publication=RuntimeVersionPublicationPolicy()
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission,publication)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -231,6 +239,8 @@ class ReferenceRuntime:
         """Construct services around the existing authority; never create a Queue."""
         if queue.catalog_admission != (settings.catalog_admission is not None):
             raise RuntimeConfigurationError('catalog admission Queue/config mode mismatch')
+        if queue.runtime_version_publication!=(settings.runtime_version_publication is not None):
+            raise RuntimeConfigurationError('runtime publication Queue/config mode mismatch')
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
@@ -253,17 +263,22 @@ class ReferenceRuntime:
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
+            self.runtime_versions=None
+            if settings.runtime_version_publication is not None:
+                from .reference_runtime_versions import RuntimeVersionRegistry
+                self.runtime_versions=RuntimeVersionRegistry(queue,config,settings,ssl_context=worker_context)
             routing=None
             if config.reference_main_fallback:
                 from .reference_routing import ReferenceRouting
-                routing=ReferenceRouting(config,settings.workers,authority_id=queue.authority_id,bindings=settings.routing_bindings,ssl_context=worker_context)
+                routing=ReferenceRouting(config,settings.workers,authority_id=queue.authority_id,bindings=settings.routing_bindings,ssl_context=worker_context,runtime_versions=self.runtime_versions)
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",routing=routing)
             admission=None
             if settings.catalog_admission is not None:
                 from .reference_catalog_cache import CatalogAdmission
-                admission=CatalogAdmission(queue,config,settings,ssl_context=worker_context,store=self.store,clock=catalog_clock)
+                admission=CatalogAdmission(queue,config,settings,ssl_context=worker_context,store=self.store,clock=catalog_clock,runtime_versions=self.runtime_versions)
                 self.store.enable_catalog_admission(admission)
+                if self.runtime_versions is not None:self.runtime_versions.attach_catalog(admission)
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},

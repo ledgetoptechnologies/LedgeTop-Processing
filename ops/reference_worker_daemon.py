@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from processing import reference_protocol as p
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
-from processing.reference_driver import ReferenceDriver
+from processing.reference_driver import ReferenceDriver,CoordinatorReadinessLease
 from processing.reference_api import Response
 from processing.reference_engine_cleanup import EngineCacheCleanup
 from processing.reference_engine_worker import ReferenceEngineWorker
@@ -318,6 +318,27 @@ class WorkerService:
         return 2 if failed else 0
 
 
+def _health_sql(path,query,parameters=()):
+    """Existing bounded DELETE database only; no recovery/sidecar creation."""
+    path,info=_file(str(path),private=True)
+    if info.st_size>64*1024**2 or any(os.path.lexists(str(path)+s) for s in ('-wal','-shm','-journal')):
+        raise ValueError('private health snapshot unavailable')
+    descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+    try:
+        observed=os.fstat(descriptor);header=os.read(descriptor,100)
+        if (observed.st_dev,observed.st_ino)!=(info.st_dev,info.st_ino) or len(header)!=100 or header[:16]!=b'SQLite format 3\0' or header[16:20]!=b'\x10\x00\x01\x01':
+            raise ValueError('private health snapshot unavailable')
+    finally:os.close(descriptor)
+    db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=.25)
+    try:
+        budget=[0]
+        def progress():
+            budget[0]+=1
+            return int(budget[0]>1000)
+        db.set_progress_handler(progress,1000);db.execute('BEGIN')
+        return db.execute(query,parameters).fetchall()
+    finally:db.close()
+
 def _work_health(driver):
     """Bounded, SQL-only aggregate; no job data or lifecycle mutation."""
     driver._state_owner.check(driver.path.parent)
@@ -325,20 +346,7 @@ def _work_health(driver):
         return dict(workState='busy', retainedJobs=None, pendingJobs=None, awaitingAcceptance=None)
     try:
         driver._state_owner.check(driver.path.parent)
-        path, info = _file(str(driver.path), private=True)
-        if (info.st_size > 64*1024**2 or any(os.path.lexists(str(path)+suffix) for suffix in ('-wal','-shm','-journal'))):
-            raise ValueError('private health snapshot unavailable')
-        db = sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1', uri=True, timeout=1)
-        try:
-            budget = [0]
-            def progress():
-                budget[0] += 1
-                return int(budget[0] > 1000)
-            db.set_progress_handler(progress, 1000)
-            db.execute('BEGIN')
-            rows = db.execute('SELECT stage,COUNT(*) FROM driver_jobs GROUP BY stage LIMIT 17').fetchall()
-        finally:
-            db.close()
+        rows=_health_sql(driver.path,'SELECT stage,COUNT(*) FROM driver_jobs GROUP BY stage LIMIT 17')
         allowed = {'claim_pending','claimed','reservation_pending','awaiting_grant','fetching_pending','fetching',
             'processing_pending','execution_pending','executing','delivering','failure_delivering',
             'awaiting_acceptance','awaiting_failure_acceptance','completed'}
@@ -347,6 +355,21 @@ def _work_health(driver):
         retained = sum(count for _,count in rows)
         awaiting = sum(count for stage,count in rows if stage in ('awaiting_acceptance','awaiting_failure_acceptance'))
         pending = sum(count for stage,count in rows if stage not in ('completed','awaiting_acceptance','awaiting_failure_acceptance'))
+        lease=driver._readiness_rpc
+        if lease is not None:
+            if type(lease) is not CoordinatorReadinessLease:raise ValueError('private readiness observation unavailable')
+            lease.check_observer(driver)
+            preclaims=sum(count for stage,count in rows if stage=='claim_pending')
+            eligible=(pending==0 and lease.phase=='discovery')
+            if lease.phase=='initial_claim' and preclaims==pending==1:
+                match=_health_sql(driver.path,"SELECT COUNT(*) FROM driver_jobs WHERE job=? AND claim_request=? AND stage='claim_pending' AND data='{}'",(lease.job_id,lease.claim_request_id))
+                eligible=match==[(1,)]
+            if eligible:
+                executions=_health_sql(driver.worker.path,"SELECT 1 FROM executions WHERE phase NOT IN ('delivered','failure_delivered') LIMIT 1")
+                reservations=_health_sql(driver.ledger.path,"SELECT 1 FROM reservations WHERE state NOT IN ('terminal','expired') LIMIT 1")
+                if executions or reservations:raise ValueError('private readiness has owned work')
+                pending=0
+            lease.check_observer(driver)
         driver._state_owner.check(driver.path.parent)
         return dict(workState='empty' if not retained else 'pending_work' if pending else 'awaiting_acceptance' if awaiting else 'idle',
             retainedJobs=retained, pendingJobs=pending, awaitingAcceptance=awaiting)

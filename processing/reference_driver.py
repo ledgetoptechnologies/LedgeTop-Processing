@@ -5,6 +5,7 @@ Engine mutations remain physically fenced. Delivery, Viewer acceptance and
 optional exact-object cleanup continue after slot release.
 """
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import hashlib
@@ -51,7 +52,28 @@ class DriverWait(ValueError):
 class DriverStepLease:
     def __init__(self,driver):self.driver=driver;self.pid=os.getpid();self.thread=threading.get_ident();self.lock=driver._lock
     def check(self,driver):
-        if self.driver is not driver or self.pid!=os.getpid() or self.thread!=threading.get_ident() or getattr(driver,'_active_step',None) is not self or self.lock is not driver._lock or not self.lock.locked():raise DriverHeld('actual_driver_step_required')
+        if self.driver is not driver or self.pid!=os.getpid() or self.thread!=threading.get_ident() or getattr(driver,'_active_step',None) is not self or self.lock is not driver._lock or not self.lock.locked() or not driver._step_guard.locked() or driver._readiness_rpc is not None:raise DriverHeld('actual_driver_step_required')
+        driver._state_owner.check(driver.path.parent)
+
+
+@dataclass(frozen=True)
+class CoordinatorReadinessLease:
+    driver:object
+    step:object
+    phase:str
+    job_id:str|None=None
+    claim_request_id:str|None=None
+    def __post_init__(self):
+        if type(self.step) is not DriverStepLease or self.phase not in ('discovery','initial_claim'):raise DriverHeld('actual_readiness_rpc_required')
+        self.step.check(self.driver)
+        if self.phase=='initial_claim':
+            p._slug(self.job_id,'readiness job');p._slug(self.claim_request_id,'readiness claim request')
+        elif self.job_id is not None or self.claim_request_id is not None:raise DriverHeld('actual_readiness_rpc_required')
+    def check_observer(self,driver):
+        step=self.step
+        if (self.driver is not driver or step.driver is not driver or step.pid!=os.getpid() or step.thread==threading.get_ident()
+                or driver._active_step is not step or driver._readiness_rpc is not self
+                or step.lock is not driver._lock or not driver._lock.locked() or not driver._step_guard.locked()):raise DriverHeld('actual_readiness_observer_required')
         driver._state_owner.check(driver.path.parent)
 
 
@@ -188,6 +210,8 @@ class ReferenceDriver:
         self.origin, self._bearer = coordinator_origin.rstrip('/'), worker_bearer
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
+        self._step_guard=threading.Lock()
+        self._readiness_rpc=None
         self.path = Path(state_path).absolute()
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(path.is_symlink() for path in (self.path, *self.path.parents)):
@@ -524,8 +548,10 @@ class ReferenceDriver:
         if self._state_owner is not None:
             try:self._state_owner.check(self.path.parent)
             except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
-        if not self._lock.acquire(blocking=False):
+        if not self._step_guard.acquire(blocking=False):
             return {'state': 'busy'}
+        if not self._lock.acquire(blocking=False):
+            self._step_guard.release();return {'state':'busy'}
         try:
             if self._state_owner is not None:
                 try:self._state_owner.check(self.path.parent)
@@ -556,6 +582,19 @@ class ReferenceDriver:
         finally:
             self._active_step=None
             self._lock.release()
+            self._step_guard.release()
+
+    @contextmanager
+    def _readiness_window(self,phase,job_id=None,claim_request_id=None):
+        if self._state_owner is None or self._combined_policy is not None:
+            yield;return
+        lease=CoordinatorReadinessLease(self,self._active_step,phase,job_id,claim_request_id)
+        self._readiness_rpc=lease
+        self._lock.release()
+        try:yield
+        finally:
+            self._lock.acquire()
+            self._readiness_rpc=None
 
     def _background(self):
         """One retained acknowledgement plus at most one separately fenced cleanup."""
@@ -679,7 +718,8 @@ class ReferenceDriver:
         if row is None:
             if not self._ready():
                 return {'state': 'not_ready'}
-            _, next_job = self._request('GET', '/next')
+            with self._readiness_window('discovery'):
+                _, next_job = self._request('GET', '/next')
             head = next_job.get('job')
             if head is None:
                 return {'state': 'idle'}
@@ -702,7 +742,8 @@ class ReferenceDriver:
                 self._advice(data.get('execution', {}), data.get('execution'))
             if not self._ready():
                 return {'state': 'not_ready', 'jobId': job_id}
-            status, claim = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
+            with self._readiness_window('initial_claim',job_id,request_id):
+                status, claim = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
             if status == 409:
                 return {'state': 'claim_pending', 'jobId': job_id}
             if claim['status'] != 'running':
