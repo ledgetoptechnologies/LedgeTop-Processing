@@ -54,7 +54,8 @@ INPUT_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS input_pins (reservation TEXT NOT NULL, object TEXT NOT NULL, "
     "reference TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(reservation,object,reference))",
     "CREATE TABLE IF NOT EXISTS input_cleanup_intents (reservation TEXT NOT NULL, object TEXT NOT NULL, "
-    "token TEXT NOT NULL UNIQUE, expires REAL NOT NULL, state TEXT NOT NULL, PRIMARY KEY(reservation,object))",
+    "token TEXT NOT NULL UNIQUE, expires REAL NOT NULL, state TEXT NOT NULL, path TEXT NOT NULL, "
+    "sha TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY(reservation,object))",
 )
 INPUT_TABLES = ('input_accounting', 'input_bindings', 'input_copies', 'input_releases', 'input_pins',
                 'input_cleanup_intents')
@@ -778,6 +779,25 @@ class ScratchLedger:
         return hashlib.sha256(_json([dict(object_id=o["object_id"], byte_size=o["byte_size"], sha256=o["sha256"],
             relative_path=o["relative_path"]) for o in sorted(normalized, key=lambda o: o["object_id"])]).encode()).hexdigest()
 
+    def _closure_matches(self, db, reservation_id, binding):
+        """Recompute the immutable closure from actual rows, once per call.
+
+        Only identity fields count: fetched/cleaned bookkeeping never changes it.
+        Missing, extra or changed rows, a non-canonical path or a stale path_key
+        all mismatch the binding digest.
+        """
+        rows = []
+        for row in db.execute("SELECT id,bytes,sha,path,path_key FROM input_copies WHERE reservation=? ORDER BY id",
+                              (reservation_id,)):
+            # Lexical canonical-owned check only; filesystem symlink/escape checks
+            # still run per object in _owned_path before any fence or unlink.
+            parts = PurePosixPath(row["path"]).parts if type(row["path"]) is str else ()
+            if (len(parts) < 3 or parts[:2] != ("jobs", reservation_id) or row["path"] != "/".join(parts)
+                    or any(part in (".", "..") for part in parts) or row["path_key"] != _path_key(row["path"])):
+                return False
+            rows.append(dict(object_id=row["id"], byte_size=row["bytes"], sha256=row["sha"], relative_path=row["path"]))
+        return bool(rows) and len(rows) <= MAX_INPUT_COPIES and self._closure_sha256(rows) == binding["inputsSha256"]
+
     def register_input_binding(self, reservation_id, *, job_id, generation, environment, manifest_sha256,
                                pipeline_sha256, objects):
         """Bind the full fetched-input closure to its original reservation before any download.
@@ -876,6 +896,8 @@ class ScratchLedger:
         if stored is None:
             raise PolicyConflict("unknown input binding")
         binding = json.loads(stored[0])
+        if not self._closure_matches(db, reservation_id, binding):
+            raise PolicyConflict("stored input closure differs from its binding")
         row = self._reservation(db, reservation_id)
         if (record["reservationId"], record["jobId"], record["generation"], record["environment"],
                 record["inputManifestSha256"], record["pipelineDigest"], record["inputsSha256"]) != (
@@ -1047,8 +1069,8 @@ class ScratchLedger:
             self._owned_path(reservation_id, row["path"])
             token = secrets.token_hex(32)
             expires = now + lease_seconds
-            db.execute("INSERT INTO input_cleanup_intents VALUES(?,?,?,?,'cleanup_pending')",
-                       (reservation_id, object_id, token, expires))
+            db.execute("INSERT INTO input_cleanup_intents VALUES(?,?,?,?,'cleanup_pending',?,?,?)",
+                       (reservation_id, object_id, token, expires, row["path"], row["sha"], row["bytes"]))
             return dict(row) | dict(intent_token=token, lease_expires=expires, state="cleanup_pending")
 
     def input_cleanup_intent(self, reservation_id, object_id):
@@ -1057,13 +1079,16 @@ class ScratchLedger:
             self._require_inputs(db)
             now = self._now(db)
             row = db.execute("""SELECT i.*,i.token AS intent_token,i.expires AS lease_expires,
-                             c.path,c.sha,c.bytes,r.generation FROM input_cleanup_intents i
+                             c.path AS row_path,c.sha AS row_sha,c.bytes AS row_bytes,r.generation
+                             FROM input_cleanup_intents i
                              JOIN input_copies c ON c.reservation=i.reservation AND c.id=i.object
                              JOIN reservations r ON r.id=i.reservation
                              WHERE i.reservation=? AND i.object=?""",
                              (reservation_id, object_id)).fetchone()
             if row is None:
                 raise PolicyConflict("unknown input cleanup intent")
+            if (row["row_path"], row["row_sha"], row["row_bytes"]) != (row["path"], row["sha"], row["bytes"]):
+                raise PolicyConflict("input copy changed after its cleanup fence")
             if row["state"] == "cleanup_pending" and row["expires"] <= now:
                 db.execute("UPDATE input_cleanup_intents SET state='uncertain' WHERE reservation=? AND object=?",
                            (reservation_id, object_id))
@@ -1086,6 +1111,8 @@ class ScratchLedger:
                                 (reservation_id, object_id)).fetchone()
             if intent is None or not isinstance(intent_token, str) or not secrets.compare_digest(intent["token"], intent_token):
                 raise PolicyConflict("input cleanup intent token does not match")
+            if (row["path"], row["sha"], row["bytes"]) != (intent["path"], intent["sha"], intent["bytes"]):
+                raise PolicyConflict("input copy changed after its cleanup fence")
             if row["cleaned"] is not None:
                 return
             self._owned_path(reservation_id, row["path"])

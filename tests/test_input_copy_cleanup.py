@@ -404,6 +404,47 @@ class InputCopyLedgerTests(unittest.TestCase):
         self.sql("UPDATE input_releases SET record='%s',record_sha='%s'" % (forged, hashlib.sha256(forged.encode()).hexdigest()))
         self.assertEqual(self.candidates(), [])
 
+    CLOSURE_TAMPERS = (
+        "UPDATE input_copies SET path='jobs/r1/unlisted.input',path_key='jobs/r1/unlisted.input' WHERE id='i1'",
+        "UPDATE input_copies SET path_key='jobs/r1/other.input' WHERE id='i1'",
+        "UPDATE input_copies SET bytes=4 WHERE id='i1'",
+        "UPDATE input_copies SET sha='" + '0' * 64 + "' WHERE id='i1'",
+        "UPDATE input_copies SET id='i9' WHERE id='i1'",
+        "DELETE FROM input_copies WHERE id='i2'",
+        "INSERT INTO input_copies VALUES('r1','i3',3,'" + '0' * 64 + "','jobs/r1/i3.input','jobs/r1/i3.input',1,NULL)",
+        "UPDATE input_copies SET path='jobs/r1/./i1.input',path_key='jobs/r1/./i1.input' WHERE id='i1'")
+
+    def test_tampered_input_closure_retains_every_copy_without_a_fence(self):
+        """Review repro: row identity changed under an unchanged binding and release."""
+        for statement in self.CLOSURE_TAMPERS:
+            with self.subTest(statement=statement):
+                self.doCleanups(); self.setUp()
+                self.ready(); self.now += 10
+                (self.root / 'jobs/r1/unlisted.input').write_bytes(b'abc')
+                self.sql(statement)
+                self.assertEqual(self.candidates(), [])
+                self.assertEqual(self.ledger.oversized_input_copies(max_bytes=0), [])
+                for name, data in (('i1', b'abc'), ('i2', b'def')):
+                    with self.assertRaises(PolicyConflict):
+                        self.ledger.begin_input_cleanup('r1', name, generation=1, sha256=sha(data))
+                with closing(sqlite3.connect(self.ledger.path)) as db:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM input_cleanup_intents').fetchone()[0], 0)
+
+    def test_bookkeeping_changes_do_not_alter_the_closure(self):
+        self.ready(); self.now += 10
+        self.sql("UPDATE input_copies SET fetched=fetched+1")
+        self.assertEqual(self.candidates(), [('r1', 'i1'), ('r1', 'i2')])
+
+    def test_row_changed_after_fence_refuses_recovery_and_confirmation(self):
+        self.ready(); self.now += 10
+        intent = self.ledger.begin_input_cleanup('r1', 'i1', generation=1, sha256=sha(b'abc'))
+        self.sql("UPDATE input_copies SET path='jobs/r1/unlisted.input',path_key='jobs/r1/unlisted.input' WHERE id='i1'")
+        with self.assertRaises(PolicyConflict):
+            self.ledger.input_cleanup_intent('r1', 'i1')
+        with self.assertRaises(PolicyConflict):
+            self.ledger.mark_input_cleaned('r1', 'i1', generation=1, sha256=sha(b'abc'),
+                intent_token=intent['intent_token'], executor_attested=True)
+
     def test_authority_revocation_before_fence_retains_copies(self):
         self.ready(); self.now += 10
         self.authority.records.clear()
@@ -556,6 +597,7 @@ class InputCopyExecutorTests(unittest.TestCase):
     record = InputCopyLedgerTests.record
     release = InputCopyLedgerTests.release
     ready = InputCopyLedgerTests.ready
+    sql = InputCopyLedgerTests.sql
 
     def executor(self):
         from processing.scratch_cleanup import ScratchCleanupExecutor
@@ -589,6 +631,36 @@ class InputCopyExecutorTests(unittest.TestCase):
                                                relative_path='jobs/r1/i1.input')
         self.assertEqual((self.root / 'jobs/r1/i1.input').read_bytes(), b'abc')
         self.assertEqual((self.root / 'jobs/r1/i2.input').read_bytes(), b'def')
+
+    def test_tampered_closure_row_never_deletes_an_unlisted_file(self):
+        """Review repro, end to end with the actual executor."""
+        self.ready(); self.now += 10
+        victim = self.root / 'jobs/r1/unlisted-copy.input'
+        victim.write_bytes(b'abc')
+        self.sql("UPDATE input_copies SET path='jobs/r1/unlisted-copy.input',path_key='jobs/r1/unlisted-copy.input' "
+                 "WHERE reservation='r1' AND id='i1'")
+        self.assertEqual(self.ledger.input_cleanup_candidates(), [])
+        for relative in ('jobs/r1/unlisted-copy.input', 'jobs/r1/i1.input'):
+            with self.assertRaises(PolicyConflict):
+                self.executor().execute_input_copy('r1', 'i1', generation=1, sha256=sha(b'abc'), byte_size=3,
+                                                   relative_path=relative)
+        self.assertEqual(victim.read_bytes(), b'abc')
+        self.assertEqual((self.root / 'jobs/r1/i1.input').read_bytes(), b'abc')
+        self.assertEqual((self.root / 'jobs/r1/i2.input').read_bytes(), b'def')
+
+    def test_row_changed_after_fence_stops_the_executor(self):
+        from processing.scratch_cleanup import CleanupRefused
+        self.ready(); self.now += 10
+        intent = self.ledger.begin_input_cleanup('r1', 'i1', generation=1, sha256=sha(b'abc'))
+        victim = self.root / 'jobs/r1/unlisted.input'
+        victim.write_bytes(b'abc')
+        self.sql("UPDATE input_copies SET path='jobs/r1/unlisted.input',path_key='jobs/r1/unlisted.input' WHERE id='i1'")
+        for relative in ('jobs/r1/unlisted.input', 'jobs/r1/i1.input'):
+            with self.assertRaises((PolicyConflict, CleanupRefused)):
+                self.executor().execute_input_copy('r1', 'i1', generation=1, sha256=sha(b'abc'), byte_size=3,
+                                                   relative_path=relative, intent_token=intent['intent_token'])
+        self.assertEqual(victim.read_bytes(), b'abc')
+        self.assertEqual((self.root / 'jobs/r1/i1.input').read_bytes(), b'abc')
 
     def test_replaced_copy_is_retained_with_its_fence(self):
         from processing.scratch_cleanup import CleanupRefused

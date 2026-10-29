@@ -88,7 +88,11 @@ Before asking the authority, the ledger checks the record against its own rows.
 These checks are necessary but never sufficient:
 
 - the original binding and the confirmed terminal reservation match;
-- `inputsSha256` equals the ledger's own closure digest;
+- `inputsSha256` equals the ledger's own closure digest, **recomputed from the
+  actual `input_copies` identity rows** (id, bytes, sha, lexically canonical owned
+  path and matching `path_key`). Missing, extra or changed rows therefore
+  mismatch. Mutable `fetched`/`cleaned` bookkeeping is excluded. This runs once
+  per reservation per call, in linear time for 10,000 rows;
 - the four receipt roles are distinct, and source roles reuse no result receipt;
 - for `succeeded`, the registered result digest matches, every result object is
   durably accepted, and `terminalReceiptId` names this reservation's durable
@@ -101,7 +105,10 @@ The stored record is re-checked every time it is used:
   the full identity checks above;
 - missing, corrupted, stale or mismatched records retain every copy;
 - `begin_input_cleanup` also asks the authority to re-resolve the record before
-  creating a fence, so revoked custody holds deletion.
+  creating a fence, so revoked custody holds deletion;
+- each fence stores the exact path, sha and bytes it fenced. Recovery
+  (`input_cleanup_intent`) and confirmation (`mark_input_cleaned`) refuse a row
+  that changed after the fence, so the executor never acts on a substituted path.
 
 ## Lifecycle
 
@@ -160,15 +167,20 @@ The stored record is re-checked every time it is used:
 
 ## Evidence
 
-- `tests/test_input_copy_cleanup.py` has 37 tests: 31 ledger tests on any platform
-  and 6 executor tests that need Linux. They include each review reproduction:
+- `tests/test_input_copy_cleanup.py` has 42 tests: 34 ledger tests on any platform
+  and 8 executor tests that need Linux. They include each review reproduction:
   - terminal metadata alone releases and deletes nothing (ledger and executor
     end to end);
   - a removed marker with retained input rows is refused live, cold and default-off;
   - a tampered stored record (record, digest, authority, release row, binding,
     acceptance or receipts) retains every copy and refuses a fence;
   - a legal 10,000-object closure with 128-character IDs releases with a compact
-    record.
+    record;
+  - an input row changed under an unchanged binding and release (path to an
+    unlisted same-byte file, path_key, bytes, sha, id, a missing row, an extra row,
+    a non-canonical path) admits no candidate and no fence, and the actual
+    executor deletes nothing. A row changed after its fence stops recovery,
+    confirmation and the executor.
 
   They also cover:
   - authority mismatch and revocation, and every record field negative;
