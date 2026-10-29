@@ -40,6 +40,8 @@ from .scratch_policy import ScratchLedger, PolicyConflict, INPUT_COPY_ACCOUNTING
 
 
 PREFIX = '/ltds/worker/v1'
+_INDEXED_FIXED_CLAIM = ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken')
+_INDEXED_MUTABLE_CLAIM = ('phase','status','error','transferRequest','transferGrantAcknowledgement','resultManifestSha256','executionPhase')
 
 
 class DriverHeld(ValueError):
@@ -90,6 +92,9 @@ class ReferenceDriver:
         path = Path(path).absolute()
         if not os.path.lexists(path):
             return {'jobs': {}, 'sha256': p.digest([])}
+        from .reference_indexed_fetch import reject_indexed_footprint, IndexedFetchHeld
+        try:reject_indexed_footprint(path)
+        except IndexedFetchHeld:raise DriverHeld('indexed_migration_census_not_qualified') from None
         if path.resolve() != path or any(item.is_symlink() for item in (path,*path.parents)):
             raise DriverHeld('migration_driver_journal_unavailable')
         info = path.stat()
@@ -146,7 +151,15 @@ class ReferenceDriver:
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
                  execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
-                 require_option_evidence=False, input_copy_accounting=False):
+                 require_option_evidence=False, input_copy_accounting=False, indexed_fetch_context=None):
+        from .reference_indexed_fetch import IndexedFetchContext
+        if indexed_fetch_context is not None and (type(indexed_fetch_context) is not IndexedFetchContext
+                or not input_copy_accounting or combined_policy is not None
+                or execution_router is not None and execution_router.treedar_worker is not None):
+            raise ValueError('separate fresh indexed ODM profile required')
+        self.indexed_fetch_context=indexed_fetch_context
+        self._indexed_context_initial=indexed_fetch_context
+        self._indexed=None;self._indexed_session=None;self._indexed_progress_proof=None;self._indexed_background_due=0
         if type(input_copy_accounting) is not bool:
             raise ValueError('explicit driver input-copy profile required')
         if input_copy_accounting != getattr(ledger, 'input_copy_accounting', False):
@@ -246,6 +259,23 @@ class ReferenceDriver:
                 os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
+        from .reference_indexed_fetch import IndexedFetchJournal, reject_indexed_footprint
+        if indexed_fetch_context is None:
+            reject_indexed_footprint(self.path)
+        else:
+            self._indexed=IndexedFetchJournal(self.path,indexed_fetch_context,state_owner,clock=clock)
+            from .reference_indexed_fetch import IndexedCapacityProbe
+            if (type(ledger.probe) is not IndexedCapacityProbe or ledger.probe.context!=indexed_fetch_context
+                    or ledger.probe.owner is not state_owner or indexed_fetch_context.driver_path!=str(self.path)):
+                raise ValueError('indexed capacity composition differs')
+            context_binding=json.loads(indexed_fetch_context.binding_json)
+            physical=context_binding['physical']
+            if (any(physical.get(key)!=value for key,value in dict(nodeId=node_id,workerId=worker_id,
+                    workerInstanceId=worker_instance_id,authorityId=worker.authority_id,engineId=worker.engine_id,
+                    gateGeneration=worker.gate_generation).items())
+                    or context_binding['stateRoot']!=str(self.path.parent)
+                    or context_binding['scratchRoot']!=str(ledger.root)):
+                raise ValueError('indexed physical context differs')
         self._open = build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=ssl_context)).open
         self._initial_open=self._open;self._ssl_context=ssl_context
         with self._db() as db:
@@ -270,6 +300,9 @@ class ReferenceDriver:
                 settings['optionEvidence'] = dict(schemaVersion=1)
             if input_copy_accounting:
                 settings['inputCopyAccounting'] = dict(schemaVersion=1)
+            if indexed_fetch_context is not None:
+                from .reference_indexed_fetch import compiled_profile_descriptor
+                settings['indexedFetchJournal']=compiled_profile_descriptor()
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
@@ -312,6 +345,7 @@ class ReferenceDriver:
                     raise ValueError('engine pin change requires reconciled idle execution')
                 db.execute('UPDATE driver_engine_pin SET pin=? WHERE singleton=1', (worker.version,))
             db.execute('INSERT OR IGNORE INTO driver_engine_pin VALUES(1,?)', (worker.version,))
+        if self._indexed is not None:self._indexed.driver_binding=binding
         self.sender = ReferenceSender(outbox, self.origin, bearer_token=worker_bearer,
             claim_binding_provider=self._claim_binding, ssl_context=ssl_context, timeout=10)
         if combined_policy is not None:
@@ -320,6 +354,8 @@ class ReferenceDriver:
             self._combined_preparation_initial=self.combined_preparation
 
     def _storage(self):
+        if self.indexed_fetch_context is not self._indexed_context_initial:
+            raise DriverHeld('indexed_profile_changed')
         if self._combined_policy is not self._combined_policy_initial:raise DriverHeld('combined_profile_identity_changed')
         if self._combined_policy is None:return
         maximum=self._combined_policy.driver_page_cap*4096
@@ -343,6 +379,7 @@ class ReferenceDriver:
                 if db.execute('PRAGMA max_page_count='+str(cap)).fetchone()[0]!=cap:raise DriverHeld('combined_driver_storage_cap')
             with db:
                 db.execute('BEGIN IMMEDIATE')
+                if self._indexed is not None:self._indexed.check(db)
                 yield db
                 self._storage()
         finally:
@@ -350,6 +387,8 @@ class ReferenceDriver:
 
     def _save(self, job_id, stage, data):
         with self._db() as db:
+            if self._indexed is not None:
+                data=self._indexed_projection(db,job_id,data)
             db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?',
                        (stage, p.canonical_json(data).decode(), job_id))
 
@@ -550,6 +589,12 @@ class ReferenceDriver:
 
     def _claim_binding(self, binding):
         with self._db() as db:
+            if self._indexed is not None:
+                job=self._indexed.header(db,binding['jobId'])
+                if tuple(binding[key] for key in ('generation','environment','inputManifestSha256','pipelineDigest')) != (
+                        job['generation'],job['environment'],job['manifestSha256'],job['pipelineDigest']):
+                    raise DriverHeld('worker_claim_binding_changed')
+                return dict(claimRequestId=job['claimRequestId'],claimToken=job['claimToken'])
             row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (binding['jobId'],)).fetchone()
         if row is None:
             raise DriverHeld('unknown_worker_claim')
@@ -566,6 +611,9 @@ class ReferenceDriver:
                 or self.ledger is not self._input_ledger_initial
                 or getattr(self.ledger, 'input_copy_accounting', False) is not self._input_copy_accounting_initial):
             return {'state': 'held', 'reason': 'input_copy_profile_changed'}
+        if self.indexed_fetch_context is not self._indexed_context_initial:
+            return {'state':'held','reason':'indexed_profile_changed'}
+        self._indexed_progress_proof=None
         if self.require_option_evidence is not self._require_option_evidence_initial:
             return {'state':'held','reason':'original_option_evidence_profile_changed'}
         if self._state_owner is not None:
@@ -598,6 +646,10 @@ class ReferenceDriver:
         except (RouteConflict, TreeDarHeld):
             return {'state': 'held', 'reason': 'execution_reconciliation_required'}
         except Exception as error:
+            from .reference_indexed_fetch import IndexedFetchHeld
+            if isinstance(error,IndexedFetchHeld):return {'state':'held','reason':str(error)}
+            from .reference_transfer import TransferError
+            if self._indexed is not None and isinstance(error,TransferError):return {'state':'held','reason':'indexed_transfer_unavailable'}
             if self.combined_preparation is not None:
                 from .reference_combined_preparation import CombinedPreparationHeld
                 if isinstance(error,CombinedPreparationHeld):return {'state':'held','reason':str(error)}
@@ -621,14 +673,31 @@ class ReferenceDriver:
 
     def _background(self):
         """One retained acknowledgement plus at most one separately fenced cleanup."""
+        if self._indexed is not None and time.monotonic()<self._indexed_background_due:
+            return {'state':'background_idle'}
+        if self._indexed is not None:self._indexed_background_due=time.monotonic()+5
         with self._db() as db:
-            row = db.execute("""SELECT * FROM driver_jobs WHERE stage IN
+            fields='*' if self._indexed is None else "created,job,claim_request,stage,background_checked,CASE WHEN typeof(data)='text' AND length(CAST(data AS BLOB))<=8192 THEN data ELSE NULL END AS data"
+            row = db.execute("""SELECT """+fields+""" FROM driver_jobs WHERE stage IN
               ('awaiting_acceptance','awaiting_failure_acceptance') ORDER BY background_checked,created LIMIT 1""").fetchone()
             if row is not None:
+                if self._indexed is not None:
+                    from .reference_indexed_fetch import require
+                    require(row['data'] is not None,'indexed_progress_bound')
                 db.execute('UPDATE driver_jobs SET background_checked=? WHERE job=?', (self.clock(), row['job']))
         observed = {'state': 'background_idle'}
         if row is not None:
-            data = json.loads(row['data'])
+            if self._indexed is None:data=json.loads(row['data'])
+            else:
+                from .reference_indexed_fetch import require
+                require(len(row['data'].encode())<=8192)
+                data=json.loads(row['data'])
+                require(type(data.get('claim')) is dict and set(_INDEXED_FIXED_CLAIM)<=set(data['claim']) and not set(data['claim'])-set(_INDEXED_FIXED_CLAIM+_INDEXED_MUTABLE_CLAIM),
+                    'indexed_claim_projection_changed')
+                with self._db() as db:header=self._indexed.header(db,row['job'])
+                require(all(type(data['claim'][key]) is type(header[key]) and data['claim'][key]==header[key]
+                    for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken')),
+                    'indexed_original_claim_changed')
             claim = data['claim']
             kind = 'acceptance' if row['stage'] == 'awaiting_acceptance' else 'terminal-acceptance'
             status, relayed = self._request('GET', '/jobs/' + row['job'] + '/' + kind, claim_token=claim['claimToken'])
@@ -734,6 +803,168 @@ class ReferenceDriver:
         self.worker._phase(job_id, 'failure_delivered')
         self._save(job_id, 'awaiting_failure_acceptance', data)
         return {'state': 'awaiting_failure_acceptance', 'jobId': job_id}
+
+    def _indexed_projection(self,db,job_id,data):
+        """Seal large original records once; retain only bounded mutable control."""
+        from .reference_indexed_fetch import require, LIMITS
+        claim=data.get('claim')
+        if claim is not None:
+            old=db.execute('SELECT 1 FROM indexed_claims WHERE job=?',(job_id,)).fetchone()
+            if old is None:
+                row=db.execute('SELECT claim_request FROM driver_jobs WHERE job=?',(job_id,)).fetchone()
+                require(row is not None)
+                self._indexed.seal_claim(db,job_id,row[0],claim)
+            else:
+                header=self._indexed.header(db,job_id)
+                require(all(type(claim[key]) is type(header[key]) and claim[key]==header[key]
+                    for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken')),
+                    'indexed_original_claim_changed')
+        if 'reservation' in data:self._indexed.seal_reservation(db,job_id,data['reservation'])
+        if 'grant' in data:self._indexed.seal_grant(db,job_id,data['grant'])
+        small={key:value for key,value in data.items() if key not in ('claim','grant','inputPaths','fetchAttempts')}
+        if claim is not None:small['claim']={key:value for key,value in claim.items() if key in _INDEXED_FIXED_CLAIM+_INDEXED_MUTABLE_CLAIM}
+        if 'grant' in data:small['indexedGrant']=True
+        require(len(p.canonical_json(small))<=LIMITS['progressBytes'],'indexed_progress_bound')
+        return small
+
+    def _load_driver_data(self,row):
+        if self._indexed is None:return json.loads(row['data'])
+        from .reference_indexed_fetch import require, LIMITS
+        require(len(row['data'].encode())<=LIMITS['progressBytes'],'indexed_progress_bound')
+        data=json.loads(row['data'])
+        if 'claim' not in data:return data
+        with self._db() as db:
+            original=self._indexed.claim(db,row['job']);header=self._indexed.header(db,row['job'])
+            require(type(data['claim']) is dict and set(_INDEXED_FIXED_CLAIM)<=set(data['claim']) and not set(data['claim'])-set(_INDEXED_FIXED_CLAIM+_INDEXED_MUTABLE_CLAIM),
+                'indexed_claim_projection_changed')
+            require(all(type(data['claim'][key]) is type(header[key]) and data['claim'][key]==header[key]
+                for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken')),
+                'indexed_original_claim_changed')
+            reservation=db.execute("SELECT record FROM indexed_reservations WHERE job=? AND typeof(record)='text' AND length(CAST(record AS BLOB))<=4096",(row['job'],)).fetchone()
+            expected=None if reservation is None else json.loads(reservation[0])
+            require(('reservation' not in data and expected is None) or p.canonical_json(data.get('reservation'))==p.canonical_json(expected),'indexed_reservation_changed')
+            transfer=data['claim'].get('transferRequest')
+            require((transfer is None and row['stage'] in ('claimed','reservation_pending')) or p.canonical_json(transfer)==p.canonical_json(expected),
+                'indexed_transfer_request_changed')
+            for key in _INDEXED_MUTABLE_CLAIM:
+                if key in data['claim']:original[key]=data['claim'][key]
+            data['claim']=original
+            if data.pop('indexedGrant',False):data['grant']=self._indexed.grant(db,row['job'])
+            progress=db.execute('SELECT next,bytes FROM indexed_fetch WHERE job=?',(row['job'],)).fetchone()
+            if progress is not None and data.get('inputAccounting',{}).get('state')=='bound':
+                objects=original['submission']['manifest']['objects'];reservation=data['reservation']['reservationId']
+                data['inputPaths']={obj['id']:'jobs/'+reservation+'/'+obj['id']+'.input' for obj in objects[:progress[0]]}
+                data['inputAccounting'].update(next=progress[0],byteCount=progress[1])
+        return data
+
+    def immediate_fetch_progress(self,result):
+        """Concrete service scheduling proof, never a caller's JSON progress flag."""
+        if self._indexed is None:return False
+        if self.indexed_fetch_context is not self._indexed_context_initial:return False
+        proof=self._indexed_progress_proof
+        if proof is None or proof[0] is not result:return False
+        self._state_owner.check(self.path.parent)
+        with self._db() as db:return self._indexed.progress(db,proof[1])==proof[2]
+
+    def indexed_empty_claim_pending(self,job,claim_request,lease):
+        if self._indexed is None:return False
+        if (self.indexed_fetch_context is not self._indexed_context_initial
+                or type(lease) is not CoordinatorReadinessLease or lease.phase!='initial_claim'
+                or (job,claim_request)!=(lease.job_id,lease.claim_request_id)):return False
+        lease.check_observer(self)
+        from .reference_indexed_fetch import read_only_profile
+        from ops.reference_worker_daemon import _health_sql
+        context=self.indexed_fetch_context
+        if read_only_profile(self.path,bootstrap_id=context.bootstrap_id,binding=json.loads(context.binding_json),owner=self._state_owner)!=context:return False
+        rows=_health_sql(self.path,"SELECT data FROM driver_jobs WHERE job=? AND claim_request=? AND stage='claim_pending' AND typeof(data)='text' AND length(CAST(data AS BLOB))<=8192",(job,claim_request))
+        if len(rows)!=1 or set(json.loads(rows[0][0]))-{'execution'}:return False
+        claimed=_health_sql(self.path,'SELECT 1 FROM indexed_claims WHERE job=? UNION ALL SELECT 1 FROM indexed_fetch WHERE job=? LIMIT 1',(job,job))
+        lease.check_observer(self)
+        return not claimed
+
+    def _indexed_fetch_step(self):
+        from .reference_indexed_fetch import require
+        from .reference_transfer import validate_indexed_grant
+        with self._db() as db:
+            head=db.execute("SELECT job,stage,typeof(data) AS data_type,length(CAST(data AS BLOB)) AS data_bytes FROM driver_jobs WHERE stage NOT IN ('completed','awaiting_acceptance','awaiting_failure_acceptance') ORDER BY created LIMIT 1").fetchone()
+            if head is None:return None
+            require(head['data_type']=='text' and head['data_bytes']<=8192,'indexed_progress_bound')
+            if head['stage']!='fetching':return None
+            row=db.execute("SELECT job,claim_request,stage,data FROM driver_jobs WHERE job=? AND typeof(data)='text' AND length(CAST(data AS BLOB))<=8192",(head['job'],)).fetchone()
+            require(row is not None,'indexed_progress_bound')
+        job_id=row['job'];session=self._indexed_session
+        if session is None or session['job']!=job_id:
+            data=self._load_driver_data(row);claim=data['claim']
+            self._refresh_options();self._validate_job(claim)
+            with self._db() as db:
+                self._indexed.validate_cold(db,job_id,claim,grant=data['grant'])
+                progress=self._indexed.progress(db,job_id)
+                attempts=list(db.execute('SELECT seq,MAX(attempt) FROM indexed_attempts WHERE job=? GROUP BY seq LIMIT 10001',(job_id,)))
+                known_attempts=self._indexed.attempts_for(db,job_id,progress['next']) if progress['next']<len(claim['submission']['manifest']['objects']) else []
+            require(self.clock()>=progress['clock'],'indexed_clock_rollback')
+            data['fetchAttempts']={claim['submission']['manifest']['objects'][seq]['id']:count for seq,count in attempts}
+            cached=self._input_cache(job_id,claim,data)
+            handle=validate_indexed_grant(data['grant'],job=claim,clock=self.clock)
+            session=dict(job=job_id,claim_request=row['claim_request'],data=data,claim=claim,cached=cached,progress=progress,grant=handle,known_attempts=known_attempts)
+            self._indexed_session=session
+        claim=session['claim'];cached=session['cached'];progress=session['progress'];index=progress['next']
+        session['grant'].check_expiry(clock=self.clock)
+        require(len(row['data'].encode())<=8192)
+        projection=json.loads(row['data'])
+        require(type(projection.get('claim')) is dict and set(_INDEXED_FIXED_CLAIM)<=set(projection['claim']) and not set(projection['claim'])-set(_INDEXED_FIXED_CLAIM+_INDEXED_MUTABLE_CLAIM),
+            'indexed_claim_projection_changed')
+        require(row['claim_request']==session['claim_request'],'indexed_claim_request_changed')
+        require(not set(projection)-{'claim','reservation','inputAccounting','indexedGrant','execution'}
+                and projection.get('indexedGrant') is True
+                and p.canonical_json(projection.get('reservation'))==p.canonical_json(session['data']['reservation'])
+                and p.canonical_json(projection.get('inputAccounting'))==p.canonical_json(dict(schemaVersion=1,
+                    binding=cached['identity'],state='bound',next=0,byteCount=0)), 'indexed_progress_projection_changed')
+        require(all(type(projection['claim'][key]) is type(claim[key]) and projection['claim'][key]==claim[key]
+            for key in ('jobId','generation','environment','nodeId','manifestSha256','pipelineDigest','claimToken')),
+            'indexed_original_claim_changed')
+        reservation=session['data']['reservation']['reservationId']
+        with self._db() as db:
+            require(self._indexed.progress(db,job_id)==progress,'indexed_cursor_changed')
+        if index==len(cached['objects']):
+            with self._db() as db:self._indexed.validate_attempt_closure(db,job_id,len(cached['objects']),progress)
+            self._check_input_rows(reservation,cached['identity'])
+            data=session['data'];data['inputPaths']={obj['object_id']:obj['relative_path'] for obj in cached['objects']}
+            data['inputAccounting'].update(next=index,byteCount=progress['bytes'])
+            self._save(job_id,'processing_pending',data)
+            self._indexed_session=None;self._input_fetch_cache=None
+            return {'state':'processing_pending','jobId':job_id}
+        expected=cached['objects'][index]
+        with self._db() as db:
+            descriptor=self._indexed.object(db,job_id,index)
+            require((descriptor['id'],descriptor['byteSize'],descriptor['sha256'])==
+                    (expected['object_id'],expected['byte_size'],expected['sha256']),'indexed_object_changed')
+            actual_attempts=self._indexed.attempts_for(db,job_id,index)
+            require(actual_attempts==session['known_attempts'],'indexed_attempt_predecessor_changed')
+            attempt=None if not actual_attempts else actual_attempts[-1]
+        object_id=expected['object_id'];relative=expected['relative_path'];target=self.ledger.root/relative
+        with self.ledger._transaction() as db:
+            self.ledger._require_inputs(db)
+            copy=db.execute('SELECT path,sha,bytes,cleaned FROM input_copies WHERE reservation=? AND id=?',(reservation,object_id)).fetchone()
+            require(copy is not None and tuple(copy)==(relative,expected['sha256'],expected['byte_size'],None),'indexed_scratch_copy_changed')
+        self.ledger._owned_path(reservation,relative);target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        if os.path.lexists(target):
+            require(attempt is not None,'indexed_unowned_input_file')
+        else:
+            with self._db() as db:progress,intent=self._indexed.begin_attempt(db,job_id,index,progress,previous_attempts=session['known_attempts'])
+            session['known_attempts']=[*session['known_attempts'],dict(attempt=len(session['known_attempts'])+1,intent=intent,state='started')]
+            session['progress']=progress;attempt=dict(intent=intent,state='started')
+            self.broker.download_indexed_object(session['grant'],object_id,target)
+        self.worker._file(reservation,relative,expected['byte_size'],expected['sha256'])
+        self.ledger.confirm_input_copy(reservation,object_id,byte_size=expected['byte_size'],sha256=expected['sha256'])
+        allocated=max(cached['allocated'],progress['bytes']+expected['byte_size'])
+        self.ledger.record_allocated(reservation,allocated);cached['allocated']=allocated
+        with self._db() as db:
+            progress=self._indexed.advance(db,job_id,index,expected['byte_size'],progress,attempt['intent'])
+        session['progress']=progress
+        session['known_attempts']=[]
+        result={'state':'fetching','jobId':job_id}
+        self._indexed_progress_proof=(result,job_id,progress)
+        return result
 
     def _input_closure(self, job_id, claim, data):
         """One bounded manifest-derived identity, never journal-supplied paths."""
@@ -903,6 +1134,9 @@ class ReferenceDriver:
             raise DriverHeld('input_copy_integrity_changed') from None
 
     def _step(self):
+        if self._indexed is not None:
+            fast=self._indexed_fetch_step()
+            if fast is not None:return fast
         with self._db() as db:
             row = db.execute("SELECT * FROM driver_jobs WHERE stage NOT IN ('completed','awaiting_acceptance','awaiting_failure_acceptance') ORDER BY created LIMIT 1").fetchone()
         if row is None:
@@ -922,11 +1156,12 @@ class ReferenceDriver:
             p._slug(job_id, 'job ID')
             request_id = 'driver-' + secrets.token_hex(16)
             with self._db() as db:
+                if self._indexed is not None:self._indexed.reserve_slot(db,job_id,ledger=self.ledger)
                 db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,'claim_pending',?)",
                            (job_id, request_id, p.canonical_json(data).decode()))
             return {'state': 'claim_pending', 'jobId': job_id}
         job_id, request_id, stage = row['job'], row['claim_request'], row['stage']
-        data = json.loads(row['data'])
+        data = self._load_driver_data(row)
         if stage == 'claim_pending':
             if self.execution_router is not None or self.combined_preparation is not None:
                 self._advice(data.get('execution', {}), data.get('execution'))

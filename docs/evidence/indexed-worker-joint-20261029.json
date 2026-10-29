@@ -1,0 +1,57 @@
+{
+  "status": "six actual pinned Node24/Python joint synthetic workflows passed for the exact captured source snapshot",
+  "testsPassed": 6,
+  "testsSkipped": 0,
+  "elapsedSeconds": 18.358,
+  "indexedV2Cases": 2,
+  "inputAccountingV1CompatibilityCases": 2,
+  "defaultCanonicalCases": 2,
+  "viewerFixtureCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+  "runnerImage": "sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0",
+  "testSourceSha256": "577e95c480d6fb3d49b0edb7f4eab487e057c50ceac32d62f31b452ac142bed2",
+  "productionSourcePins": {
+    "processing/reference_driver.py": "789f984399aa512c40d6c2b94dded071b966b26bb8e93aed16c784800cda56f6",
+    "processing/reference_indexed_fetch.py": "168ebb5541ff608896b294d151ad91a7c2710e6f40bee049c401b058546ca88b",
+    "processing/reference_transfer.py": "890406c63e073ea583e64afc2accba835c32945be826637e431c6c12306768fb",
+    "ops/bootstrap_worker_input_accounting.py": "e693b53eaa37ef188047312e7952993aae384956ea43763e933f01e992dae411",
+    "ops/reference_worker_daemon.py": "202365443354a8d376bf854821479d3d19706d4acb5cf75a8e1732ac49d4dcfd"
+  },
+  "sourceSnapshotPinsSha256": "814b0b2039848ca66811d00661b4df102dca98f9df7fc1b2794a5c11b61bb52f",
+  "sourcePinsStableDuringRun": true,
+  "checks": [
+    "actual fresh closed-v2 bootstrap and private canonical factory/service",
+    "actual pinned Node24 broker/control and verified loopback TLS",
+    "normalized immutable claim/grant identities and exact original claim request",
+    "normalized single-object cursor/attempt/retained quota and bounded mutable projection",
+    "original 3-byte input retained and actual hash verified without a release authority",
+    "acceptance precedes result/native-cache cleanup; original sources preserved",
+    "original grant expiration after engine commit and coordinator outage retain original claim, physical receipt and result payload",
+    "coordinator recovery delivers the same result without another engine initialize/upload/commit",
+    "default/v1 real workflows still pass and have no indexed schema/binding footprint"
+  ],
+  "fixtureInputBytes": 3,
+  "fixtureInputObjects": 1,
+  "syntheticBackend": true,
+  "network": "none except isolated loopback",
+  "readOnlySourceAndViewerFixture": true,
+  "resourceWarningAsError": true,
+  "priorFailureRetained": {
+    "artifact": "processing-indexed-worker-joint-20261029/joint-result.json",
+    "reason": "Captured daemon lacked the subsequently corrected IndexedCapacityProbe composition; v2 factory refused before a job. Existing v1/default cases passed."
+  },
+  "runtimeActivated": false,
+  "hostBootstrapExecuted": false,
+  "clientDatasetUsed": false,
+  "nasChanged": false,
+  "automaticInputCleanupAuthorityProvided": false,
+  "notProved": [
+    "final evolving source acceptance beyond the exact snapshot",
+    "actual image or installed worker activation",
+    "10,000-object or 50-GB throughput",
+    "current production Viewer application integration",
+    "geometry or science",
+    "real NAS/custody issuer/reboot or OS recovery"
+  ],
+  "localResultReceipt": "C:/Users/fstor/.codex/artifacts/processing-indexed-worker-joint-20261029-v2/joint-result.json",
+  "localLogSha256": "30fff00663ee0f88bbf019fefd78a29992578454f09f4b9a92591e9bd6e49fee"
+}

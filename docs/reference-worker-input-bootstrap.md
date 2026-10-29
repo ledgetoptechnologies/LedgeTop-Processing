@@ -7,7 +7,8 @@ The private daemon accepts an optional closed profile:
 ```
 
 Absence retains the existing default-off factory and driver behavior. Boolean
-values, numeric substitutes, unknown fields and other versions are refused.
+values, numeric substitutes and unknown fields are refused. The separately
+versioned indexed composition below is the only additional accepted version.
 Presence does not initialize or migrate state. The normal factory requires an
 already completed bound bootstrap before constructing the ledger, worker,
 outboxes or execution router. It passes the real opt-in flag to both
@@ -103,3 +104,98 @@ uncheckpointed-ledger retention, two workers sharing scratch, default-off
 compatibility, identity/policy drift, root/claim replacement, symlinks, legacy
 driver refusal, marker corruption, credential reflection and preservation of
 the joint input/control-accounting fences.
+
+## Indexed composition version 2 (source only)
+
+The closed private request is:
+
+```json
+"inputCopyAccounting": {
+  "schemaVersion": 2,
+  "fetchJournal": {"schemaVersion": 1, "policyId": "indexed-worker-fetch-v1"}
+}
+```
+
+It is a fresh ODM composition, not a ledger upgrade. The ledger still latches
+`inputCopyAccountingVersion:1`. Default-off and version-1 bootstrap record shapes
+remain unchanged. Version 2 adds its exact configuration and the actual compiled
+indexed protocol/policy/schema descriptor to the durable binding. Its permanent
+scratch claim has version 2 and a distinct indexed purpose/descriptor. Removing
+fields or changing the request to version 1 cannot produce the stored binding.
+TreeDar acquisition and combined preparation are not enabled by this profile.
+
+Explicit bootstrap additionally initializes a fresh `driver.sqlite` through
+`initialize_fresh_profile`. The journal owner creates the fixed empty base and
+indexed schema, immutable profile footprint and policy identity in one owned
+transaction. It does not insert a claim, reservation or driver settings binding.
+`indexed-created.json` then pins that actual database inode, root identity,
+bootstrap/binding identity and compiled descriptor, coupled to the existing
+intent and ledger-created checkpoint digests. Completion version 2 binds the
+indexed-created digest as well as the ledger checkpoint. No implicit migration,
+old-journal adoption or marker repair is available.
+
+If an indexed database is created but its checkpoint is not persisted, bootstrap
+retains it and holds for inspection. A known indexed checkpoint can resume only
+with the same actual root/database/claim identities and an empty pre-completion
+business history. An interrupted post-enable operation does not enable the
+ledger again. A changed compiled policy/schema is a binding mismatch, not
+permission to update an old receipt.
+
+Normal startup uses the real read-only journal profile verifier and a concrete
+`IndexedFetchContext` before opening legacy ledger/driver components. An empty
+driver settings binding is accepted only for the actual preinitialized indexed
+profile whose complete base/indexed business history is still empty; it is not
+a general exception for empty legacy journals. The actual driver records its
+ledger version-1 input binding plus the exact indexed descriptor and receives
+the verified context. Bootstrap and startup never manufacture caller-controlled
+contexts or infer authority from a supplied hash.
+
+For this composition, the service may omit the ordinary idle poll delay only
+after the actual driver proves a completed single-object cursor advance. It
+checks ownership and stop state and yields with zero sleep before the next
+step. Idle, held, unavailable, retry and non-progress results retain ordinary
+poll/backoff behavior. Caller JSON flags and numeric substitutes grant no fast
+path. The driver owns the indexed background-acceptance cadence; the daemon adds
+no separate heartbeat, grant renewal or batch engine-upload loop.
+
+The health observer's pending-claim exception requires the real cross-thread
+readiness lease, its exact initial-claim job/request identity and a read-only
+check of the actual indexed profile and unowned pending record. Other jobs,
+discovery/fabricated leases, sealed claims and changed profiles cannot use it.
+Dispatch uses the immutable initial composition identity so clearing the public
+context cannot fall back to the legacy `data='{}'` exception. The legacy
+version-1 SQL path is retained.
+
+Before any normal legacy ledger/clock observation, default-off and version-1
+factories also check the actual owned driver file read-only for any
+case-insensitive `indexed_*` SQLite namespace or a lone `indexedFetchJournal`
+binding marker. A coherent ordinary core binding does not permit adoption of
+foreign indexed state. The shared guard validates private file/path ownership,
+single-link identity, bounded reads and unchanged identity across the snapshot;
+it creates no tables or clock observations and preserves supported empty legacy
+files. The nonindexed binding checker separately refuses the new marker.
+
+`tests/test_reference_worker_indexed_profile.py` covers the real bootstrap,
+canonical factory cold reopen, descriptor/claim receipts, interruption windows,
+v1/v2 downgrade refusal, policy/schema drift, leased health byte invariance,
+foreign/unleased pending work and service scheduling boundaries. The actual
+inactive old `0b7` image also refused new, stripped-fetch, version-1 and omitted
+profiles against a generated v2 fixture, preserving all ledger/driver/receipt
+bytes. The actual prior source55 image refused a cold default ledger writer;
+that narrower test is not a full source55 daemon/TLS startup proof.
+
+The compiled numeric metadata limits remain candidate values until the journal
+owner's worst-legal-input SQLite oracle and independent review qualify them.
+Only version 2 receives the compiled `IndexedCapacityProbe` in the actual ledger
+factory. It checks the real context/owner/root/device identities. For shared
+state/scratch storage it withholds the one global metadata allowance still not
+materialized as driver/rollback-journal blocks; it does not charge those blocks
+twice. Separate scratch storage retains its raw free-space probe. The driver's
+preclaim guard also accounts for same-device outstanding ledger reservations and
+retained control holds. No request or private JSON field can supply a substitute
+free-space function. Version-1/default factory probe composition is unchanged.
+Bootstrap/compatibility tests do not establish quota, free-space accounting,
+10,000-object hot-path performance, native upload responsiveness, real broker
+expiry/recovery or installed-worker acceptance. This daemon adds no metadata
+charge or free-byte estimate of its own. No version-2 host bootstrap, runtime
+activation, source-custody issuer or automatic input deletion is established.

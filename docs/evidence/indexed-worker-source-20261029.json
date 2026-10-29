@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "status": "inactive-source-staged-with-scale-qualification-gate-open",
+  "scope": "Fresh indexed ODM worker composition, not activation or a completed production pipeline",
+  "profile": {"schemaVersion": 2, "fetchJournal": {"schemaVersion": 1, "policyId": "indexed-worker-fetch-v1"}},
+  "policySha256": "15df634d43a377178c7f07e1fa5cce4611768d700a6f41307e7f62b93c2ce791",
+  "schemaSha256": "9e90470352dac1b6fc54f2aa597fe6cf5dfbbab08d2991618cbfe0f0f48c8a7c",
+  "verification": {
+    "finalUnwrappedScaleSuite": {"tests": 31, "passed": 30, "failed": 1, "skipped": 0, "seconds": 34.702, "zeroBasedObjectIndex": 7469, "holdReason": "indexed_clock_rollback", "qualification": "FAILED; preserved"},
+    "selectedDefaultV1Regressions": {"passed": 232, "skipped": 0, "seconds": 24.132},
+    "independentSourceReview": {"passed": 21, "skipped": 0, "originalWarmAttemptReproductions": 3, "result": "accepted revised implementation within review scope; warm changes now hold"},
+    "rootBootstrapProfile": {"passed": 44, "skipped": 0, "seconds": 1.729},
+    "rootActualNode24Tls": {"indexedV2AndV1Passed": 4, "defaultPassed": 2, "separateRuns": true, "sourceHashesUnchanged": true},
+    "successfulDiagnosticScaleRuns": "An isolated 10k run and an observation-wrapped full suite passed; these do not erase or explain the failed final unwrapped qualification",
+    "metadataWitness": {"objects": 10000, "attempts": 10010, "maximumJobAndObjectIdCharacters": 128, "legalClaimBytes": 4171376, "databaseBytes": 22351872, "logicalJobChargeBytes": 33554432, "scope": "Concrete near-wire-boundary witness and capacity tests, not 50GB throughput"}
+  },
+  "clockObservation": {
+    "scope": "Separate 25-second disposable local Docker sampler; no driver job loop or OS settings changed",
+    "negativeWallStepObservedSeconds": -0.0012426376342773438,
+    "monotonicAdvancedNanoseconds": 352,
+    "bindings": "Fixture driver, journal and broker use the same time.time function; no leaked substitution found",
+    "limitation": "Demonstrates local wall-clock nonmonotonicity; does not establish the prior failure-time cause or NTP/virtualization mechanism. Original clock guards remain strict."
+  },
+  "preservation": ["Default/v1 ABI and probe composition", "Original claim/grant/reservation and request identity", "One object per step and real per-object byte verification", "Bounded attempts and monotonic allocation", "Inputs retained without trusted cleanup authority", "Small-node-first/global exclusivity policies unchanged"],
+  "evidence": {
+    "finalQualificationSha256": "89a4407e9d6b59cede1e21c9534bc7e48871c34ceabc96ae9f2ea765b2d03a1b",
+    "independentReviewSha256": "68f1a94fd8d2be2abd140307473201c1d74b84a21b1887af72b5ddf2f8903468",
+    "clockDiagnosticSha256": "8bd0bb9958a3740d422f98778ab41c6e56d2415bfd0acbc5cb985589b6632bbc",
+    "rootFourJointLogSha256": "b050790ce85f322fe084c8788d4f7ea159d09913cdc100ba8f1a56c2577fcd3c",
+    "rootTwoDefaultLogSha256": "9c2178314b5cacdd2cc43218c39b25ebc29ff9987c04e757f62c5256aa912ac1"
+  },
+  "openGates": ["Clock/scale repeatability and target-host qualification", "Actual new image/bootstrap/downgrade qualification", "Actual NAS-backed producer/custody and purge-path integration", "Trusted cleanup authority and release ACK", "Explicit retained metadata retirement; current conservative cap is one retained job", "Qualified indexed maintenance census", "Automatic hot rollback-journal recovery", "Native large-upload responsiveness/reconciliation", "Actual 50GB and real processing acceptance"],
+  "runtimeActivated": false,
+  "packagePublished": false,
+  "nasChanged": false,
+  "clientDatasetUsed": false,
+  "inputReleaseAuthorityProvided": false
+}

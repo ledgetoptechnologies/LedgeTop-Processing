@@ -16,6 +16,7 @@ import ssl
 import stat
 import sys
 import threading
+import time
 from urllib.parse import urlsplit
 
 from processing import reference_protocol as p
@@ -245,6 +246,18 @@ class WorkerService:
                 driverAlive=self._driver_thread is not None and self._driver_thread.is_alive(),
                 listenerAlive=self._server_thread is not None and self._server_thread.is_alive())
 
+    def _progress_yield(self,result,stop):
+        """Only the actual driver's completed indexed step can avoid idle delay."""
+        proof=getattr(self.driver,'immediate_fetch_progress',None)
+        if proof is None or proof(result) is not True:
+            return False
+        self.driver._state_owner.check(self.driver.path.parent)
+        if not stop.is_set():
+            # Give the listener/stop observer a boundary without a per-photo
+            # idle poll delay. The driver still owns background poll cadence.
+            time.sleep(0)
+        return True
+
     def run(self, stop):
         if self._server_thread is not None:
             raise ValueError('worker service already started')
@@ -260,7 +273,11 @@ class WorkerService:
             backoff = self.poll_seconds
             try:
                 while not stop.is_set():
-                    state = self.driver.step()['state']
+                    result = self.driver.step()
+                    if self._progress_yield(result,stop):
+                        backoff = self.poll_seconds
+                        continue
+                    state = result['state']
                     backoff = min(60, max(self.poll_seconds, backoff * 2)) if state in ('retry_wait','held','not_ready') else self.poll_seconds
                     stop.wait(backoff)
             except BaseException:
@@ -362,8 +379,11 @@ def _work_health(driver):
             preclaims=sum(count for stage,count in rows if stage=='claim_pending')
             eligible=(pending==0 and lease.phase=='discovery')
             if lease.phase=='initial_claim' and preclaims==pending==1:
-                match=_health_sql(driver.path,"SELECT COUNT(*) FROM driver_jobs WHERE job=? AND claim_request=? AND stage='claim_pending' AND data='{}'",(lease.job_id,lease.claim_request_id))
-                eligible=match==[(1,)]
+                if getattr(driver,'_indexed_context_initial',None) is not None:
+                    eligible=driver.indexed_empty_claim_pending(lease.job_id,lease.claim_request_id,lease) is True
+                else:
+                    match=_health_sql(driver.path,"SELECT COUNT(*) FROM driver_jobs WHERE job=? AND claim_request=? AND stage='claim_pending' AND data='{}'",(lease.job_id,lease.claim_request_id))
+                    eligible=match==[(1,)]
             if eligible:
                 executions=_health_sql(driver.worker.path,"SELECT 1 FROM executions WHERE phase NOT IN ('delivered','failure_delivered') LIMIT 1")
                 reservations=_health_sql(driver.ledger.path,"SELECT 1 FROM reservations WHERE state NOT IN ('terminal','expired') LIMIT 1")
@@ -530,8 +550,9 @@ def _build_worker(config,owner,resources):
     profile = _service_profile(config)
     routing = _execution_routing(config)
     option_evidence = _option_evidence(config)
-    from ops.bootstrap_worker_input_accounting import require_worker_input_profile
+    from ops.bootstrap_worker_input_accounting import require_worker_input_profile,require_worker_indexed_context
     input_accounting = require_worker_input_profile(config,owner)
+    indexed_context = require_worker_indexed_context(config,owner)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
     with NodeGate(config['engineId']) as gate:
@@ -549,8 +570,13 @@ def _build_worker(config,owner,resources):
     info = engine.read('/info')
     if type(info) is not dict or info.get('engineVersion') != config['engineVersion']:
         raise ValueError('actual engine version differs from configured pin')
+    ledger_arguments = {}
+    if indexed_context is not None:
+        from processing.reference_indexed_fetch import indexed_capacity_probe
+        ledger_arguments['capacity_probe'] = indexed_capacity_probe(indexed_context,owner,scratch)
     ledger = ScratchLedger(root / 'scratch.sqlite', scratch, safety_floor_bytes=config['safetyFloor'],
-                           cleanup_grace_seconds=config['cleanupGrace'], input_copy_accounting=input_accounting)
+                           cleanup_grace_seconds=config['cleanupGrace'], input_copy_accounting=input_accounting,
+                           **ledger_arguments)
     from processing.reference_readers import ReaderSession
     session=ReaderSession(ledger)
     session.__enter__()
@@ -605,6 +631,7 @@ def _build_worker(config,owner,resources):
             else:
                 manager.assert_active(candidate)
         router = ExecutionRouter(root/'execution-routes.sqlite', worker, tree_worker, failure_outbox=failures)
+    indexed_arguments = {} if indexed_context is None else dict(indexed_fetch_context=indexed_context)
     driver = ReferenceDriver(worker, ledger, outbox, broker, config['coordinatorOrigin'], config['workerBearer'],
         state_path=root / 'driver.sqlite', ssl_context=client_tls, output_budget=config['outputBudget'],
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
@@ -614,7 +641,8 @@ def _build_worker(config,owner,resources):
         input_copy_accounting=input_accounting,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
-        cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
+        cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None,
+        **indexed_arguments)
     permitted = frozenset(config['allowedEnvironments'])
     result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker,
         reader_session=session), bearer_readers={config['resultReadBearer']: dict(

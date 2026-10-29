@@ -236,6 +236,7 @@ class InputBootstrapFactoryTests(unittest.TestCase):
         try:
             self.assertTrue(driver.input_copy_accounting);self.assertTrue(driver.ledger.input_copy_accounting)
             self.assertIsNone(driver.ledger.release_authority)
+            self.assertIsNone(getattr(driver.ledger.probe,'context',None))
             with closing(sqlite3.connect(driver.path)) as db:
                 value=json.loads(db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()[0])
             self.assertEqual(value['inputCopyAccounting'],{'schemaVersion':1})
