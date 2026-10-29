@@ -1,20 +1,62 @@
 {
   "schemaVersion": 1,
-  "status": "source-reviewed-inactive-target-qualification-open",
+  "status": "source-and-inactive-main-packaged-image-qualified-runtime-gates-open",
   "scope": "Completed physically bound v2 driver SQLite hot rollback journals only; not full worker power-loss recovery",
   "frozenReviewSha256": "a3953eb7d1b8caa65b35e0ec633e8207a61df12bb73c2eccbeada0c1af5090a0",
   "patchSha256": "9b57a535a3e45ce9dbce9c786232fb6e87a7836ed545e8ef4db77c068acadcd2",
   "recoveryModuleRawSha256": "818042685636c0cc21c950ff524468b4038d73205189833e0f0682feff5b79b4",
   "driverRawSha256": "c80b0a22325585415ee679cdba7ae5ce5c9804e0fd58b73d7956af25cda87766",
   "verification": {
-    "authorRecovery": {"passed": 29, "skipped": 0, "seconds": 90.595},
-    "authorRuntimeRegression": {"passed": 4, "scaleHeld": 1, "seconds": 129.611, "scaleObjectIndex": 5367, "holdReason": "indexed_clock_rollback", "rerunToObtainGreen": false},
-    "independentOriginalReproductions": {"cases": 6, "allRefusedBeforeOriginalMutation": true, "originalDatabaseJournalAndScratchBytesUnchanged": true},
-    "independentFocused": {"passed": 8, "skipped": 0, "seconds": 16.266},
+    "authorRecovery": {
+      "passed": 29,
+      "skipped": 0,
+      "seconds": 90.595
+    },
+    "authorRuntimeRegression": {
+      "passed": 4,
+      "scaleHeld": 1,
+      "seconds": 129.611,
+      "scaleObjectIndex": 5367,
+      "holdReason": "indexed_clock_rollback",
+      "rerunToObtainGreen": false
+    },
+    "independentOriginalReproductions": {
+      "cases": 6,
+      "allRefusedBeforeOriginalMutation": true,
+      "originalDatabaseJournalAndScratchBytesUnchanged": true
+    },
+    "independentFocused": {
+      "passed": 8,
+      "skipped": 0,
+      "seconds": 16.266
+    },
     "independentGuardExtraction": "AST comparison proved existing runtime guard expression and error unchanged after parameter substitution",
     "reviewSha256": "0c5b8a9aeaf8a3608f00cdd34c8b99d4dc0ed950c9c899de813309bd0b1a92fb",
     "resultSha256": "d7034affbdea6a5e5c373b4296f1068420cbc7663c864c9b129759ea92ba3ddc",
-    "rootFrozenReadback": "All eight working source raw hashes matched independently reviewed packet before commit"
+    "rootFrozenReadback": "All eight working source raw hashes matched independently reviewed packet before commit",
+    "actualMainPackaged": {
+      "sourceCommit": "242dac62186dc298e6176827d90d38d81d7cca75",
+      "imageId": "sha256:b31c1fb4414144a3d8b9804666f567df1a009c54f8cab7c36755ffba280545a8",
+      "testsPassed": 104,
+      "testsSkipped": 0,
+      "groups": {
+        "indexed": 31,
+        "bootstrapProfileService": 44,
+        "recovery": 29
+      },
+      "realTinyDownloads": 10000,
+      "canonicalGitPythonFiles": 285,
+      "packagedPythonFiles": 74,
+      "sourceInventorySha256": "70e116c82cb8bd5c3a347a3672d5f3f8ada15bb38f595549324fea4a4c40d071",
+      "databaseWitnessBytes": 22339584,
+      "rootIndependentProtectedCodeAndImportsMatch": true,
+      "existingRunningContainersUnchanged": 5,
+      "frozenSummarySha256": "0b721fb27c0ed1ce60cecace7ff089e61efbe47b4afd3abd49d3bf9b7170458f",
+      "reviewSha256": "05bfaa1e0066e3cc8c8d34f868eb760b7ea269634ef4ac324f502b3e6f98630a",
+      "collectedVerificationSha256": "ddf05dbad38c3e74ba84e8c6f21c7e99cdb2e1708a6a1d4121f8a2cefd728e33",
+      "rootIndependentReadbackSha256": "e29f4e5ab26fd35268029734bde29ed67d16f002e657fad902091aeae83d538c",
+      "scope": "Inactive physical Linux main image; real tiny files and genuine pager interruptions, not NAS custody or scientific processing"
+    }
   },
   "properties": [
     "Existing state lock and external completed bootstrap/root/inode/claim authority checked before driver SQLite writes",
@@ -26,15 +68,15 @@
     "Shared pure fetching guard preserves legal mutable fields, fetching-at-count and early reservation checkpoints"
   ],
   "remaining": [
-    "Actual updated packaged image and target-host qualification; earlier7dee image75 tests do not qualify this source",
-    "Local10k clock rollback remains observed and unexplained at failure time; clock guards unchanged",
+    "Actual installed worker bootstrap/activation and full runtime acceptance;104 packaged tests do not establish these",
+    "Original local10k clock rollback remains preserved; actual main10k passed without clock or guard changes, not a universal clock guarantee",
     "Genuine pre-spill zero-header/non-hot journal remains held; copy-only SQLite experiments are not an enabled recovery algorithm",
     "Hot scratch ledger and other database recovery remains held",
     "Unknown state, WAL/SHM, super-journal, changed identities or insufficient recovery headroom remains held",
     "Metadata retirement, authenticated custody/release ACK and full pipeline runtime acceptance remain separate"
   ],
   "runtimeActivated": false,
-  "imageBuilt": false,
+  "imageBuilt": true,
   "nasChanged": false,
   "clientDataUsed": false,
   "cleanupAuthorityAdded": false
