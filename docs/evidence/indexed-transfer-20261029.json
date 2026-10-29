@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scope": "Additive source API; no route, deployment, renewal, cleanup authority or real dataset operation",
+  "sourceBase": "71aa768",
+  "rawWindowsSourceSha256": {
+    "processing/reference_transfer.py": "890406c63e073ea583e64afc2accba835c32945be826637e431c6c12306768fb",
+    "tests/test_reference_indexed_transfer.py": "3021f3a44239b1bddcbb3f35ab574ead332372fd30fd7e4c9d4e060ab7ee00ad",
+    "docs/reference-indexed-transfer.md": "32c9c1218d6bade6dcc17237069e08194731cea41269838c303faee595d8ded1"
+  },
+  "verification": {
+    "independentRootRun": {
+      "tests": 39,
+      "passed": 39,
+      "skipped": 0,
+      "seconds": 1.556,
+      "modules": ["tests.test_reference_transfer", "tests.test_reference_indexed_transfer"],
+      "actualHttpsTests": 5,
+      "environment": "Local Linux Docker UID 1000, network disabled except loopback, read-only filesystem and source mount, synthetic files in tmpfs, Python warnings treated as errors",
+      "pythonImage": "sha256:da79709a04938e2e76c552196c36678eddbacc66a6be9de5a2aec734d06888fe"
+    },
+    "scaleScope": "10,000-object factory admission and exactly one mapping lookup per object; not 10,000 network downloads or a durable driver benchmark",
+    "coverage": ["unchanged legacy grant validation and downloads", "opaque capability and detached descriptors", "original identity and grant limits", "HTTPS verification", "no redirect following", "size/hash corruption", "no replacement of existing or racing target", "fsync failure", "wall clock rollback", "original monotonic expiry including validation time", "single GET per call", "secret-free errors"]
+  },
+  "remaining": ["Indexed driver journal and actual crash-recovery qualification", "Worst-case retained SQLite metadata and disk admission proof", "Actual broker limits and grant lifetime alignment", "Worker bootstrap and downgrade qualification", "Installed runtime acceptance", "NAS-backed custody and safe cleanup authority"]
+}

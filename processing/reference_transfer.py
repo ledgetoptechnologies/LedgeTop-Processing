@@ -12,7 +12,10 @@ from pathlib import Path
 import secrets
 import ssl
 import stat
+import threading
 import time
+from types import MappingProxyType
+from weakref import WeakKeyDictionary
 from urllib.parse import urlsplit
 from urllib.error import HTTPError
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
@@ -107,8 +110,146 @@ def validate_grant(grant, *, job, clock=time.time):
                           grant["environment"], expiry, tuple(objects), token)
 
 
+_MAX_INDEXED_GRANT_BYTES = 2 * 1024 * 1024
+_INDEXED_HANDLES = WeakKeyDictionary()
+_INDEXED_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class _IndexedRecord:
+    job_id: str
+    reservation_id: str
+    generation: int
+    environment: str
+    expires: float
+    manifest_sha256: str
+    grant_sha256: str
+    nonce: str
+    byte_budget: int
+    object_ids: tuple
+    index: object = field(repr=False)
+    token: str = field(repr=False)
+
+
+class _IndexedState:
+    def __init__(self, record, wall, monotonic, started):
+        self.record = record
+        self.monotonic = monotonic
+        self.wall = wall
+        self.mono = started
+        self.deadline = started + (record.expires - wall)
+        self.held = False
+        self.lock = threading.RLock()
+
+    def check_expiry(self, clock):
+        with self.lock:
+            if self.held:
+                raise TransferError("indexed transfer clock or expiry held")
+            try:
+                wall, mono = _now(clock), _now(self.monotonic)
+                if (wall < self.wall or mono < self.mono or wall >= self.record.expires
+                        or mono >= self.deadline):
+                    raise TransferError("indexed transfer clock or expiry held")
+                self.wall, self.mono = wall, mono
+            except Exception:
+                self.held = True
+                raise TransferError("indexed transfer clock or expiry held") from None
+
+
+def _indexed_state(handle):
+    if type(handle) is not IndexedValidatedGrant:
+        raise TransferError("factory validated indexed grant required")
+    with _INDEXED_LOCK:
+        state = _INDEXED_HANDLES.get(handle)
+    if state is None:
+        raise TransferError("factory validated indexed grant required")
+    return state
+
+
+def _indexed_object(state, object_id):
+    if type(object_id) is not str:
+        raise TransferError("object is outside indexed grant")
+    descriptor = state.record.index.get(object_id)
+    if descriptor is None:
+        raise TransferError("object is outside indexed grant")
+    # Do not expose the factory's map or a mutable-by-reflection descriptor.
+    return TransferObject(*descriptor)
+
+
+def _indexed_property(name):
+    return property(lambda handle: getattr(_indexed_state(handle).record, name))
+
+
+class IndexedValidatedGrant:
+    """Opaque process-local grant capability, created by validate_indexed_grant.
+
+    It has no assignable instance fields. Its immutable index is not exposed;
+    object_for returns a detached descriptor, never download authority itself.
+    """
+    __slots__ = ('__weakref__',)
+
+    def __new__(cls, *args, **kwargs):
+        raise TransferError("factory validated indexed grant required")
+
+    job_id = _indexed_property('job_id')
+    reservation_id = _indexed_property('reservation_id')
+    generation = _indexed_property('generation')
+    environment = _indexed_property('environment')
+    expires = _indexed_property('expires')
+    manifest_sha256 = _indexed_property('manifest_sha256')
+    grant_sha256 = _indexed_property('grant_sha256')
+    nonce = _indexed_property('nonce')
+    byte_budget = _indexed_property('byte_budget')
+    object_ids = _indexed_property('object_ids')
+
+    def object_for(self, object_id):
+        return _indexed_object(_indexed_state(self), object_id)
+
+    def check_expiry(self, clock=time.time):
+        """Check the same hot time gate when reconciling without another GET."""
+        _indexed_state(self).check_expiry(clock)
+
+    def __repr__(self):
+        return '<IndexedValidatedGrant objects=%d>' % len(self.object_ids)
+
+
+def validate_indexed_grant(grant, *, job, clock=time.time, monotonic=time.monotonic):
+    """Validate once and detach a bounded original-identity/object index.
+
+    job is trusted persisted private metadata, as for validate_grant. This
+    factory does not authenticate a caller-provided job or renew a reservation.
+    A restarted driver must validate the original grant again with its trusted
+    persisted clock high-water mark; this capability is deliberately not pickled.
+    """
+    try:
+        objects = job['submission']['manifest']['objects']
+        if type(objects) is not list or not 0 < len(objects) <= p.MAX_OBJECTS:
+            raise TransferError("indexed object closure exceeds bound")
+        raw = p.canonical_json(grant)
+        if (len(raw) > _MAX_INDEXED_GRANT_BYTES
+                or len(p.canonical_json(job['submission']['manifest'])) > p.MAX_BODY_BYTES):
+            raise TransferError("indexed transfer metadata exceeds bound")
+        started, wall = _now(monotonic), _now(clock)
+        validated = validate_grant(grant, job=job, clock=lambda: wall)
+        index = {obj.id: (obj.id, obj.byte_size, obj.sha256) for obj in validated.objects}
+        record = _IndexedRecord(validated.job_id, validated.reservation_id,
+            validated.generation, validated.environment, validated.expires,
+            grant['manifestSha256'], hashlib.sha256(raw).hexdigest(), grant['nonce'],
+            grant['byteBudget'], tuple(index), MappingProxyType(index), validated.token)
+        state = _IndexedState(record, wall, monotonic, started)
+        state.check_expiry(clock)
+        handle = object.__new__(IndexedValidatedGrant)
+        with _INDEXED_LOCK:
+            _INDEXED_HANDLES[handle] = state
+        return handle
+    except Exception:
+        raise TransferError("indexed transfer grant unavailable") from None
+
+
 class _RefuseRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if fp is not None:
+            fp.close()
         raise TransferError("broker redirects are forbidden")
 
 
@@ -146,8 +287,25 @@ class BrokerClient:
         obj = next((obj for obj in grant.objects if obj.id == object_id), None)
         if obj is None:
             raise TransferError("object is outside grant")
-        if grant.expires <= _now(self.clock):
-            raise TransferError("transfer grant expired")
+        def check_expiry():
+            if grant.expires <= _now(self.clock):
+                raise TransferError("transfer grant expired")
+        return self._publish_object(obj, grant.token, destination, check_expiry)
+
+    def download_indexed_object(self, grant, object_id, destination):
+        """Publish one factory-authorized indexed object with O(1) lookup.
+
+        Attempts and aggregate request charges belong to the owned driver. One
+        invocation here performs at most one GET and never retries or renews.
+        """
+        state = _indexed_state(grant)
+        obj = _indexed_object(state, object_id)
+        return self._publish_object(obj, state.record.token, destination,
+                                    lambda: state.check_expiry(self.clock))
+
+    def _publish_object(self, obj, token, destination, check_expiry):
+        """The single streaming/TLS/no-replace publisher for both grant APIs."""
+        check_expiry()
         target = Path(destination).absolute()
         p._basename(target.name)
         parent = target.parent
@@ -166,7 +324,7 @@ class BrokerClient:
             descriptor = os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
             owned_part = True
             request = Request(self.origin + OBJECT_PREFIX + obj.id,
-                headers={"Authorization": "Bearer " + grant.token, "Accept-Encoding": "identity"}, method="GET")
+                headers={"Authorization": "Bearer " + token, "Accept-Encoding": "identity"}, method="GET")
             try:
                 response = self._open(request, timeout=self.timeout)
             except HTTPError as error:
@@ -185,8 +343,7 @@ class BrokerClient:
                 with os.fdopen(descriptor, "wb") as output:
                     descriptor = None
                     while True:
-                        if grant.expires <= _now(self.clock):
-                            raise TransferError("transfer grant expired")
+                        check_expiry()
                         chunk = response.read(min(CHUNK_BYTES, obj.byte_size - count + 1))
                         if not chunk:
                             break
@@ -204,8 +361,7 @@ class BrokerClient:
             current = parent.stat()
             if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or parent.resolve() != parent:
                 raise TransferError("destination directory changed")
-            if grant.expires <= _now(self.clock):
-                raise TransferError("transfer grant expired")
+            check_expiry()
             # Same-directory hard link atomically fails if target exists, including
             # a dangling symlink. os.replace would overwrite a racing consumer.
             os.link(part, target, follow_symlinks=False)
