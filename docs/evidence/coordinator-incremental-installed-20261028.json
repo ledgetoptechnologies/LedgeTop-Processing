@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "status": "known-coordinator-upgrade-installed-and-independently-verified",
+  "operation": "aa3f17e0d02141f1973d166767db5161",
+  "completedAtUtc": "2026-10-29T00:06:22.761067+00:00",
+  "operatorLocalDate": "2026-10-28 America/Chicago",
+  "applicationSource": "6bbd468e1177746cb695e43195e75355b0681f23",
+  "image": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+  "containerId": "da861a5ea97cbb31c510858d69bc815cd825f92669ed8a205827abc59dc24548",
+  "helperSource": "6541e84bb0a1ef4cd949bf0b6b9052c426e583df",
+  "helperArchiveSha256": "b9c12185b2891974224ce45f7d0245d09161e42ef006a809ea1d9a04004054f6",
+  "helperSha256": "27ac3295e6669ae46481e8c5685965d2099eb200bc31b99a7dc7285883d67663",
+  "stagedFilesPerHost": 485,
+  "pythonCompilesPerHost": 247,
+  "sourceImportsPerHost": 4,
+  "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+  "stateVolume": "ledgetop-processing-prototype-c3fcb3a-state",
+  "endpoints": {
+    "nativeViewerProvider": "http://192.168.50.89:3005",
+    "privateReferenceTls": "https://192.168.50.89:18443"
+  },
+  "runtime": {
+    "running": true,
+    "healthy": true,
+    "restarts": 0,
+    "soleStateVolumeOwner": true,
+    "sameAuthority": true,
+    "sameStateVolume": true,
+    "configTlsEnvironmentUnchanged": true,
+    "databaseRestored": false
+  },
+  "history": {
+    "terminalJobs": 12,
+    "statuses": {
+      "succeeded": 10,
+      "failed": 2
+    },
+    "sha256": "2ad24fe66eaab476299534c64ba89acbf236bd33d959489c1bcf4c7ecc6fcf9f",
+    "priorOwnedRowsPreservedByteForByte": 2,
+    "operationOwnedRowsAdded": 2,
+    "totalOwnedRows": 4
+  },
+  "maintenance": {
+    "bothActualHostGatesAcquiredThroughReviewedBridge": true,
+    "bridgeCloseProtocolAndBothSshExitsZero": true,
+    "sshStderrHashes": {
+      "main": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "cluster": "905f77af4cf099954453d503f28c8ef37522a6055f289f84de2f9fe57c63308b"
+    },
+    "bothOwnPlansDrainedThenReopened": true,
+    "nodeRevisions": {
+      "cluster": 11,
+      "main": 20
+    },
+    "gateGeneration": 1,
+    "gateStateBytesUnchanged": true,
+    "noPersistedGateReservationLeft": true
+  },
+  "referenceChecks": {
+    "tlsVerified": true,
+    "referenceEnvironment": "staging",
+    "workerAuthoritiesVerified": true,
+    "nativeProductionCredentialsRejected": true,
+    "optionCount": 56,
+    "operatorLookupVerified": true
+  },
+  "referenceScope": "Private reference API remains staging-only; unchanged native production Viewer provider credentials still work. No new reference workers/broker activated.",
+  "backup": {
+    "bytes": 180224,
+    "databaseHistory": {
+      "count": 12,
+      "sha256": "4e5f11ab7b5083fa26809acef9d261d4152d5d43f6c1a3116b8d7609eead301b"
+    },
+    "directories": 3,
+    "fullCensusSha256": "6e0c331329b9400015c3d44236e724b4bb0dda77bb3a88117e642864058fb695",
+    "regularFiles": 2,
+    "sourceCensusSha256": "6e0c331329b9400015c3d44236e724b4bb0dda77bb3a88117e642864058fb695",
+    "sourceRawFiles": [
+      {
+        "bytes": 0,
+        "kind": "file",
+        "mode": 420,
+        "path": "coordinator.lock",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 180224,
+        "kind": "file",
+        "mode": 384,
+        "path": "jobs.sqlite3",
+        "sha256": "08a7a7368e0ab5f4589a75a6d75d55e717081d0b045722b7b2bf6562cc70f6cb"
+      },
+      {
+        "kind": "directory",
+        "mode": 448,
+        "path": "viewer-spool"
+      },
+      {
+        "kind": "directory",
+        "mode": 448,
+        "path": "viewer-tasks"
+      }
+    ],
+    "sqliteQuickCheck": "ok",
+    "treeSha256": "38efb931a4ae02c90700ad0b9bde10d947330da7b232701292830180211b2fd8"
+  },
+  "rollbackRetention": {
+    "oldContainerId": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+    "oldContainerName": "/ledgetop-processing-prototype-c3fcb3a-pre-reference-update-aa3f17e0d02141f1973d166767db5161",
+    "oldContainerRetainedStopped": true,
+    "backupRetained": true,
+    "noAutomaticRollbackOrRestore": true,
+    "completedCheckpointMustNotBeReplayed": true,
+    "afterAdmissionReopenRequiresFreshDrainAndCompatibilityReview": true
+  },
+  "hosts": {
+    "cluster": {
+      "node": "cluster",
+      "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+      "backendIdle": true,
+      "gateGeneration": 1,
+      "gateReserved": false,
+      "gateBytesUnchanged": true,
+      "updaterWorkingDirectory": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/source",
+      "updaterTimerActive": true,
+      "backendId": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+      "backendImage": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6"
+    },
+    "main": {
+      "node": "main",
+      "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+      "backendIdle": true,
+      "gateGeneration": 1,
+      "gateReserved": false,
+      "gateBytesUnchanged": true,
+      "updaterWorkingDirectory": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/source",
+      "updaterTimerActive": true,
+      "mainNoComputeCaps": true,
+      "monitoringRunning": {
+        "dcgmExporter": true,
+        "nodeExporter": true
+      },
+      "backendId": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+      "backendImage": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde"
+    }
+  },
+  "legacyClusterOdxStopped": true,
+  "realDataProcessingRun": false,
+  "nasConfigurationOrDataFilesChanged": false,
+  "githubActionsRun": false,
+  "packagesPublished": false,
+  "remaining": [
+    "Actual canonical private worker/result-service composition and installed acceptance.",
+    "Viewer NAS-backed submission/broker/acceptance/retention assembly; bulk source stays on NAS and orchestrator queue lightweight.",
+    "Reference worker-pull fallback when preferred small node unavailable; existing strict small-first/global slot/priority preserved.",
+    "Genuine-LiDAR TreeDar/combined runtime composition; hours-later combined stage needs real Viewer metadata-only custody issuer agreement.",
+    "Source custody/bounded cleanup/full modes/contract and Viewer UI/Claude owner/hierarchy acceptance.",
+    "Real-photo trial remains paused until Beau selects smaller dataset."
+  ],
+  "fullGoalComplete": false
+}

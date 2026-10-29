@@ -1,9 +1,21 @@
 # Incremental coordinator upgrade: 671→6bb
 
+This migration completed on October 28 local time (October 29 00:06 UTC), operation
+`aa3f17e0d02141f1973d166767db5161`. The live coordinator is now source `6bbd468`,
+image `sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b`,
+container `da861a5ea97cbb31c510858d69bc815cd825f92669ed8a205827abc59dc24548`.
+It is healthy under the original authority and volume. Both nodes reopened;
+the original 12-job history and two owned receipts remain, plus this operation's
+two audit receipts. See [installed evidence](evidence/coordinator-incremental-installed-20261028.json).
+The sequence below describes that completed operation. Do not replay its
+checkpoint or restore its backup; admission has reopened, so later rollback or
+upgrade needs a fresh drain, binding and compatibility review.
+
 The incremental profile is integrated into the existing updater and bridge,
 with source release scoped to the exact qualified source/image pair below.
 Isolated on-cluster copied-state qualification created and removed its own test
-containers and state copy. The production coordinator, maintenance, configuration,
+containers and state copy. The later live cutover replaced the coordinator and
+added only its owned drain/reopen transitions. Configuration, backend containers,
 systemd and NAS data remain unchanged. The historical strict mode retains its defaults.
 
 ## Read-only observed predecessor

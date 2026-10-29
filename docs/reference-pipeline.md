@@ -10,6 +10,16 @@ installed acceptance and remaining limitations.
 
 ## Current integration boundary, October 28
 
+The coordinator now runs the qualified `6bbd468` image after an actual dual-host
+gate, owned drain, verified backup, cutover and owned reopen. Its original queue
+authority and 12-job history are preserved; both backend nodes are active.
+The stopped predecessor and backup are retained. Existing image updater timers
+still use source `020c15c`, and the main PC retains unlimited compute settings
+and its running monitoring exporters. See
+[installed cutover evidence](evidence/coordinator-incremental-installed-20261028.json).
+The unchanged native Viewer provider works at port 3005; the private reference
+API remains staging-only. Reference workers and the NAS broker are still inactive.
+
 The latest committed source adds optional original-claim restart continuation
 with atomic epoch/receipt transactions and coordinator lease protection through
 commit. See [reference-claim-recovery.md](reference-claim-recovery.md). This API
@@ -50,9 +60,10 @@ frozen source. The final validator passed 10 independent tests and preserves
 the two existing owned-maintenance rows. See the
 [incremental upgrade plan](coordinator-incremental-upgrade-plan.md) and
 [preflight evidence](evidence/coordinator-incremental-preflight-20261028.json).
-Existing updater/bridge integration, complete application/state/configuration
-migration, rollback and fresh live gate checks still precede activation. The
-installed coordinator and updater directories have not changed in this work.
+That qualification was followed by actual private-config/state-copy acceptance
+and the installed cutover above. Its completed checkpoint must not be replayed.
+New worker/routing assembly remains separate uninstalled development; this
+coordinator step does not complete the NAS/Viewer, full-mode or UI work.
 
 Read-only inspection of that Viewer branch found the reference modules consumed
 only by tests/helper. Its app still selects the legacy provider in
