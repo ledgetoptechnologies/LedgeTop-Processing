@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scope": "Actual main Linux source-only qualification; mocked Docker boundaries remain mocked",
+  "sourceCommit": "11e46a60bd6b81195d96b2e1d5b01e9e71730c04",
+  "operation": "compose-source-main-11e46a6-d7299441664a4e63997764f5a3029c07",
+  "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+  "runtimeImageId": "sha256:b31c1fb4414144a3d8b9804666f567df1a009c54f8cab7c36755ffba280545a8",
+  "sourceVerification": {
+    "trackedFiles": 586,
+    "pythonFiles": 292,
+    "allHashesIndependentlyMatchedGitBlobs": true,
+    "canonicalFileModesAndUid1000": true,
+    "sourceInventorySha256": "fd24423f95903a829af03b677eaddb883f6d2bf77ce0a54c6254cd712733740e"
+  },
+  "tests": {
+    "passed": 40,
+    "skipped": 0,
+    "unittestSeconds": 0.355,
+    "containerSeconds": 1.066929339984199,
+    "runs": 1,
+    "strictWarningsClean": true,
+    "logSha256": "1708c440ce5510af410a76a2906ab26deb124aa045a41ca30740ef69114671fa"
+  },
+  "evidence": {
+    "artifactDirectory": "processing-main-compose-source-11e46a6-20261029",
+    "qualificationSummarySha256": "6778fd37ea45ef80188832def04005430e28b9659b72448a0950b588eb20a4c3",
+    "reviewSha256": "acaa0186c16f3a05e7dd080281c553f177222b051dcd55c1e3f20612987b7b3f",
+    "remoteCompleteSha256": "5fe1f3293df49a5640be6feab6b9bf5b70a6b0e90274b7549fd5922564ededc9",
+    "allEightAfterSha256": "e8387e56a30baa91739c31cbf67028005b8829f540a0e7e2ae72b9d6e03cff6c"
+  },
+  "boundaries": {
+    "originalFiveUnchanged": true,
+    "knownThreeRetainedProbesUnchanged": true,
+    "exactAllEightInventoryUnchanged": true,
+    "temporaryTestContainerAutoRemoved": true,
+    "sourceReadOnly": true,
+    "network": "none",
+    "dockerSocket": false,
+    "buildPullPublish": false,
+    "nasOrClientData": false,
+    "fullLabLaunched": false,
+    "packagedProductionCodeQualified": false,
+    "physicalDiskPowerLossQualified": false
+  },
+  "remaining": "Actual Compose labels/mapping, nginx listening, worker drain/update/restart/publication and repeated image rollback remain separate acceptance gates."
+}

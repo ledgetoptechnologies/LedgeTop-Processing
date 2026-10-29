@@ -37,7 +37,7 @@
       "requirement": "Drain, container update, verification and recovery",
       "state": "partial-existing-runtime-and-source",
       "evidence": "Indexed census/history and same-owner one-start retry in sourcefcae10b; independent static review plus29 source tests on main. Both actual cached NodeODX images passed isolated empty startup/info/task-list probes, same engine3.8.5/API2.4 with distinct digests; exact stopped readback and original5 unchanged recorded in empty-nodeodx-image-probes-20261029.json. Existing coordinator gate remains installed separately.",
-      "remaining": "Actual Docker mapping/repeated upgrade/rollback lab remains unlaunched; ingress/Compose provenance source core reviewed with amended planner delta review pending. Cold new-process updater resume, legacy updater migration and activation remain open"
+      "remaining": "Actual Docker mapping/repeated upgrade/rollback lab remains unlaunched. Ingress/Compose provenance source11e46a6 accepted and pushed; actual main Linux source-only40 tests passed with586 Git-verified files, recorded in owned-compose-linux-source-20261029.json. These tests do not qualify actual Docker update behavior. Cold new-process updater resume, legacy updater migration and activation remain open"
     },
     {
       "requirement": "Optional genuine-LiDAR TreeDar and future Gaussian splats",
