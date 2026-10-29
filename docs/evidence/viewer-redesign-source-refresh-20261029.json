@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "status": "independent-current-source-and-focused-tests-not-rendered-or-deployed",
+  "priorOwnerEvidence": "viewer-ui-owner-reference-20261028.json",
+  "owner": "Existing linked Viewer/Claude workspace-redesign lane; Processing made no Viewer source edits",
+  "branch": "claude/viewer-workspace-redesign",
+  "headBeforeAndAfterTests": "675be1388fdab17185f9aaef0b727df5ef5ec2e6",
+  "worktreeCleanBeforeAndAfter": true,
+  "newProcessingPageCommit": "b591e298e1adb0fa52f460785bbc5a0122b538ab",
+  "comparison": {
+    "localOriginMain": "4b4f7075110372241aa139503d1dfd450e0b6c14",
+    "mainCommitsMissingFromRedesign": 1,
+    "meaning": "The retained upload-fix merge still needs integration into this isolated branch; no merge performed by Processing"
+  },
+  "sourcePins": {
+    "apps/viewer/workspace.css": "a289281adb4b167cc8285c9a4d3f3f57680a0940c77c0a751089a410a8dc9d16",
+    "apps/viewer/workspace-projects.js": "f79f637177ca34dd60cdd870ae472b54acb706f08cc414a7f5b7212a0643960f",
+    "apps/viewer/workspace-hierarchy.mjs": "e2b661ecf3632ac5eb3ec9ca1dfba5c0cc9229eb13fc5661cdb5f7cd599bccd3",
+    "apps/viewer/docs/WORKSPACE_REDESIGN_PLAN_2026-10-27.md": "f5582a71be520ec1e57634b7cd91cec5b29a147f663c734bd285d5680180f0db"
+  },
+  "focusedTests": {
+    "passed": 62,
+    "skipped": 0,
+    "milliseconds": 517.308127,
+    "environment": "Local read-only source mount and filesystem; network disabled; cached Node image 3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0",
+    "files": ["workspace-brand.test.mjs", "workspace-hierarchy.test.mjs", "workspace-load-errors.test.mjs", "workspace-task-layout.test.mjs", "workspace-navigation-state.test.mjs", "workspace-shell.test.js"]
+  },
+  "verifiedSourceBehavior": ["Customer grouping uses exact organizationId and groupId with cross-customer rejection", "Legacy unassigned projects remain visible", "Processing page uses installed attempt.status and submissionPhase rather than inventing delivered status", "No Viewer source or runtime edits by Processing"],
+  "notProven": ["Rendered desktop/mobile usability", "Actual Ops accent match in rendered UI", "Creation and persistence of the full customer/project/subcategory/task hierarchy", "Current deployment or production acceptance", "New authenticated Claude acknowledgement of this source revision"]
+}
