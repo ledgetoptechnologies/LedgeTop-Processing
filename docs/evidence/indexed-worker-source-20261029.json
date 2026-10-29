@@ -92,7 +92,8 @@
       "rootIndependentReadbackMatches": true,
       "fixtureFiles": 9,
       "databaseReceiptAndScratchClaimBytesUnchanged": true,
-      "scope": "Four packaged old-factory profile guards and one old cold ScratchLedger refusal against new synthetic volume, not live downgrade approval"
+      "scope": "Four packaged old-factory profile guards and one old cold ScratchLedger refusal against new synthetic volume, not live downgrade approval",
+      "fixtureDisposition": "Retired only after independent readback and exact no-holder/fingerprint checks; see synthetic-fixture-retirement-20261029.json. Original qualification evidence retained."
     }
   },
   "clockObservation": {

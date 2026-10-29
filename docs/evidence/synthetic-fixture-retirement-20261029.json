@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "purpose": "known-synthetic-test-fixture-disposal-only",
+  "status": "retired-after-qualified-independent-readback",
+  "host": "main-processing",
+  "dockerEngineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+  "volume": "ltds-indexed-downgrade-7dee-2d30197f21044858930511cf39443781",
+  "originalOperation": "indexed-downgrade-7dee-2d30197f21044858930511cf39443781",
+  "verification": {
+    "originalNameDriverLabelsCreationIdentityMatch": true,
+    "syntheticFiles": 9,
+    "fixtureFingerprintSha256": "3c73f531b89946990ee0dff23fade2545f619710932600d8a9a4d95f50d9cb38",
+    "readOnlyFingerprintMatchBeforeRemoval": true,
+    "runningOrStoppedContainerHolders": 0,
+    "exclusiveRetirementIntentPersistedBeforeRemoval": true,
+    "dockerVolumeRemoveExitCode": 0,
+    "forceOrPruneUsed": false,
+    "absenceVerifiedTwice": true,
+    "existingRealRunningContainersUnchanged": 5,
+    "retirementSummarySha256": "68aee6b2caa84b4edba50ea6292fb783bdc389c74f57b5dc295cf92c7ff2e9ea",
+    "completeReceiptSha256": "f61d1be16e4201a070cb856849603f700c5b336fddffaf9e803fc09afd299b54"
+  },
+  "preserved": [
+    "Original qualification and independent readback receipts",
+    "Images and source directories",
+    "All other volumes and Docker caches",
+    "Every real service and client/source/result file"
+  ],
+  "nasChanged": false,
+  "businessInputCleanupAuthority": false,
+  "scopeLimitation": "This exact fixture was created for tests and retained only until Root readback. Disposing of it does not qualify input-custody/release ACK or production cleanup."
+}
