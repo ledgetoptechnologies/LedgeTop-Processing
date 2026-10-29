@@ -38,6 +38,9 @@
     "id": "sha256:da79709a04938e2e76c552196c36678eddbacc66a6be9de5a2aec734d06888fe",
     "sourceFiles": 71,
     "sourceInventorySha256": "5c7ce3ea0d13406fbfbe979d67ec28c1af558c93bf19fd4970e5b68009d5c27b",
+    "sourceLayout": "Windows Git archive CRLF export; this image matches that frozen exported-byte manifest",
+    "rawGitBlobLinuxInventorySha256": "de6adf097232c389c9cc39af99845f2ee1e81e25249d992d2da666648db640be",
+    "sourceLayoutCorrection": "All 71 exported files differ from canonical Git blobs only by CRLF-to-LF conversion. Prior raw-Git-byte wording was imprecise. Linux clone builds need separate image identity and qualification; no inventory pin substitution is implied.",
     "privateBuildContextFilesMode": "0600",
     "privateBuildContextDirectoriesMode": "0700",
     "imageSourceMode": "0644 root-owned",
@@ -47,7 +50,7 @@
     "standaloneFactoryChecksPassed": 4,
     "standaloneFactoryScope": "Actual image classes, synthetic loopback info-only engine and OpenSSL certificate; TLS context/server construction, not coordinator TLS exchange or real engine processing",
     "minimalImageFixtureLimitation": "Four original factory tests could not import excluded test-only ops.native_node_fixture; those errors are preserved and not counted as passes",
-    "independentRootReadback": "All 71 raw source hashes, UID/source modes, actual imports and RootFS matched",
+    "independentRootReadback": "All 71 image source hashes match the frozen Windows export, UID/source modes, actual imports and RootFS; a separate independent git cat-file comparison proves only the declared CRLF conversion",
     "registryPublished": false,
     "runtimeDeployed": false
   },
