@@ -48,7 +48,7 @@
     {
       "requirement": "Viewer hierarchy and dark Operations-aligned workspace revamp",
       "state": "source-integrated-under-owner-review",
-      "evidence": "Root Git verified5545d132 includes archived assignment fixes0f5/728,Claude2522,GCP/hierarchya85 and current mainea42; backend persistence/API qualified separately",
+      "evidence": "Root Git verified5545d132 includes archived assignment fixes0f5/728,Claude2522,GCP/hierarchya85 and local main ref ea42. Actual remote main and origin/main are4b4f707; local ancestry is not remote publication. Backend persistence/API qualified separately.",
       "remaining": "Exact5545 rendered desktop/mobile plus actual persisted hierarchy acceptance and release; latest52 unit/source tests and earlier fixture Edge runs are not that acceptance"
     },
     {
