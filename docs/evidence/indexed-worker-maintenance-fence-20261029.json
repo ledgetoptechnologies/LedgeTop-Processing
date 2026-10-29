@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scope": "Source-only maintenance hold for the new indexed input journal; not runtime activation or qualification of indexed maintenance",
+  "behavior": {
+    "offlineCensus": "Refuses any indexed_* table or indexedFetchJournal driver binding before treating driver_jobs as complete history",
+    "immutableHistory": "Applies the same fence before comparing retained legacy driver history",
+    "legacy": "Existing legacy history remains readable",
+    "writes": "Neither reader writes, repairs, migrates or deletes worker records"
+  },
+  "verification": {
+    "runtime": "Local Linux Docker, read-only source mount, read-only root filesystem, network disabled, temporary synthetic SQLite files only",
+    "pythonImage": "sha256:da79709a04938e2e76c552196c36678eddbacc66a6be9de5a2aec734d06888fe",
+    "newTests": {
+      "module": "tests.test_reference_worker_maintenance_indexed",
+      "passed": 6,
+      "skipped": 0,
+      "cases": ["legacy retained history", "empty indexed profile", "orphan normalized attempts", "binding-only null marker", "stripped binding with normalized tables", "SQLite case-insensitive table alias"],
+      "preservation": "Full synthetic file bytes, inode identities and directory inventory unchanged after each reader"
+    },
+    "existingSuite": {
+      "module": "tests.test_reference_worker_maintenance",
+      "firstRun": {"tests": 24, "passed": 23, "errors": 1, "skipped": 0},
+      "error": "Container UID 1000 has no passwd entry; configuration test calls pwd.getpwuid via canonical_capacity_path",
+      "targetedRerun": "Only that configuration test rerun as existing container UID 0; passed without source changes",
+      "limitation": "This is not a claim that all 24 passed in one execution or that host Docker replacement was performed"
+    }
+  },
+  "remaining": "A qualified indexed maintenance census must compare all normalized immutable records, bound attempt history and composition policy before this explicit hold may be removed. Production worker services remain inactive."
+}

@@ -135,6 +135,27 @@ def load_profile(root):
     for path in policy.legacy_maintenance_paths:require(not os.path.lexists(path),'legacy_updater_still_enabled')
     return settings,policy
 
+def _legacy_driver_history(db, tables):
+    """Do not treat normalized input history as legacy driver JSON.
+
+    The indexed profile needs its own qualified maintenance census. A leftover
+    binding is still a footprint even when the indexed tables are missing.
+    """
+    require(not any(name.lower().startswith('indexed_') for name in tables),
+            'indexed_worker_maintenance_not_qualified')
+    if 'driver_binding' in tables:
+        rows = db.execute('SELECT binding FROM driver_binding LIMIT 2').fetchall()
+        require(len(rows) <= 1, 'worker_driver_binding_changed')
+        for row in rows:
+            raw = row[0]
+            require(type(raw) is str and len(raw.encode('utf-8')) <= 65536,
+                    'worker_driver_binding_bound')
+            binding = p.decode_submission(raw.encode('utf-8'))
+            require(type(binding) is dict, 'worker_driver_binding_changed')
+            require('indexedFetchJournal' not in binding,
+                    'indexed_worker_maintenance_not_qualified')
+
+
 def offline_census(root):
     """Under actual DaemonStateLock; bounded immutable SQL, no repairs/expiry."""
     root,_=private(root,directory=True);result={};paths=[]
@@ -159,6 +180,7 @@ def offline_census(root):
             names=list(db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 65"))
             require(len(names)<=64,'worker_schema_bound');tables={r[0] for r in names}
             if path.name=='driver.sqlite':
+                _legacy_driver_history(db, tables)
                 require('driver_jobs' in tables and not db.execute("SELECT 1 FROM driver_jobs WHERE stage!='completed' LIMIT 1").fetchone(),'worker_pending_driver_or_acceptance')
             if path.name in ('outbox.sqlite','failure-outbox.sqlite'):
                 require('completions' in tables and not db.execute("SELECT 1 FROM completions WHERE state!='acknowledged' LIMIT 1").fetchone(),'worker_pending_outbox')
@@ -216,7 +238,12 @@ def immutable_history(root):
         finally:os.close(fd)
         db=sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True,timeout=1);db.row_factory=sqlite3.Row
         try:
-            db.execute('BEGIN');count=db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]
+            db.execute('BEGIN')
+            if filename == 'driver.sqlite':
+                names = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 65").fetchall()
+                require(len(names) <= 64, 'worker_schema_bound')
+                _legacy_driver_history(db, {row[0] for row in names})
+            count=db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]
             require(count<=10000,'worker_history_row_bound')
             columns=[r[1] for r in db.execute('PRAGMA table_info('+table+')')]
             require(0<len(columns)<=64 and all(re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,127}',c) for c in columns),'worker_history_schema_changed')
