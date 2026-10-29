@@ -54,7 +54,12 @@
     "prior841ArtifactId": "3065574b5ab8903640d85f37ea87b05890d085f0faab79139e3b1cb211f4765c",
     "targetB9ArtifactId": "5fb08ae6cffbdf481b31358ab79c298dbd0f54be843d79f862f3200df7fe6943",
     "operation2CreatedNoRegistration": true,
-    "operation2ExactExecutionPinIndependentComparisonPending": true
+    "operation2ExactExecutionPinIndependentComparisonPending": false,
+    "operation2ExecutedPriorRegisteredArtifactVerified": true,
+    "operation2ComposeExecutionReceiptSha256": "4edede7c61853ddfbe1125b2054b7896d3454cdeb25b95943735056b4210dea9",
+    "prior841RegistrationSha256": "2610da7011d58cfd9d0e6e8c46a70f05f8952b23bc32e18003d656dd3a74370b",
+    "prior841ReservationSha256": "28bd06595127a51d93dd625967788496151b076a57c0c78a58af10e933d3bdf2",
+    "comparisonScope": "Collected operation2 registry.executed path and sha256 exactly match the prior841 registration artifactPath and artifactSha256; the bound reservation originates in operation1"
   },
   "shutdown": {
     "originalEighteenUnchanged": true,
