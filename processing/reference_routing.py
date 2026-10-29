@@ -184,12 +184,12 @@ class ReferenceRouting:
             # This liveness profile is ODM-only; retain existing main-only TreeDar
             # routing. Its separate adapter still controls actual admission.
             return main_node_id
-        count=submission['manifest']['inputCounts']['images'];size=submission['manifest']['totalBytes']
+        count=submission['manifest']['inputCounts']['images']
         def state(node):return states[node] in ('active','scheduled')
         def eligible(node):
             observation=sample.nodes[node]
             return state(node) and observation.state=='ready' and (observation.max_images is None or count<=observation.max_images)
-        if count>local_max_photos or size>local_max_input_bytes:
+        if count>local_max_photos:
             return main_node_id if eligible('main') else None
         if eligible('cluster'):return 'cluster'
         local=sample.nodes['cluster']

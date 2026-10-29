@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 import uuid
 
 from processing import reference_protocol as p
@@ -29,10 +30,17 @@ from tests import test_treedar_engine as engine_fixture
 class TreeDarFactoryMigrationTests(unittest.TestCase):
     def setUp(self):
         self.host=factory_fixture.WorkerDaemonRoutingTests(methodName='runTest')
-        self.host.setUp();self.addCleanup(self.host.doCleanups)
+        native_fixture=factory_fixture.NativeNodeFixture
+        # The main-routed ODM fixture now has two photos. Use the native
+        # fixture's existing immutable two-upload policy, not a mutated counter.
+        with patch.object(factory_fixture,'NativeNodeFixture',
+                side_effect=lambda *args,**kwargs:native_fixture(*args,expected_uploads=2,**kwargs)):
+            self.host.setUp()
+        self.addCleanup(self.host.doCleanups)
+        self.assertEqual(self.host.backend.expected_uploads,2)
         self.queue=Queue(self.host.root/'coordinator',reference_enabled=True,node_ids=('cluster','main'),treedar_node_ids=('main',))
         self.addCleanup(self.queue.close)
-        self.store=ReferenceStore(self.queue,local_max_input_bytes=1)
+        self.store=ReferenceStore(self.queue,local_max_photos=1)
         self.raw=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
         self.host.config['authorityId']=self.queue.authority_id
         self.host.route()
@@ -91,9 +99,16 @@ class TreeDarFactoryMigrationTests(unittest.TestCase):
             obj=raw['manifest']['objects'][0]
             obj.update(kind='lidar',name='transport-only.las',mediaType='application/vnd.las')
             raw['manifest']['inputCounts'].update(images=0,lidarObjects=1)
-            raw['manifest']['sha256']=p.manifest_sha256(raw['manifest'])
             raw['pipeline']['odm']['requested']=False
             raw['pipeline']['treedar'].update(requested=True,inputObjectIds=[obj['id']],provenanceReceiptId='proof-'+uuid.uuid4().hex)
+        else:
+            second=copy.deepcopy(raw['manifest']['objects'][0])
+            second.update(id=second['id']+'-second',name='second-photo.jpg')
+            raw['manifest']['objects'].append(second)
+            raw['manifest']['objectCount']=2
+            raw['manifest']['inputCounts']['images']=2
+            raw['manifest']['totalBytes']=sum(o['byteSize'] for o in raw['manifest']['objects'])
+        raw['manifest']['sha256']=p.manifest_sha256(raw['manifest'])
         return self.store.submit(p.validate_submission(raw,environment='staging',
             capability_fingerprint=raw['capabilityFingerprint'],available_engines=('odm','treedar')))[0]
 
@@ -153,6 +168,8 @@ class TreeDarFactoryMigrationTests(unittest.TestCase):
         new=self.submit();self.advance(new,'executing');self.proof(new);self.advance(new,'awaiting_acceptance')
         self.assertEqual(json.loads(self.driver.execution_router._row(new['jobId'])['result'])['engineVersions'],{'treedar':'0.0.2'})
         photo=self.submit('odm');self.advance(photo,'awaiting_acceptance')
+        self.assertEqual(self.host.backend.counts()['upload'],2)
+        self.assertEqual(self.host.backend.counts()['commit'],1)
         self.assertEqual(self.driver.execution_router.kind_for(photo['jobId']),'odm')
         self.assertEqual(old_controller.config.engine_version,'0.0.1')
 

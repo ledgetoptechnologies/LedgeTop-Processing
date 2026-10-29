@@ -246,9 +246,9 @@ class ReferenceRoutingTests(unittest.TestCase):
         self.endpoints['cluster'][0].code=401
         status,replay=self.claim('cluster',job);self.assertEqual(status,200);self.assertEqual(replay['claimToken'],claim['claimToken'])
 
-    def test_photo_and_byte_boundaries_and_native_limit(self):
+    def test_photo_count_only_boundaries_and_native_limit(self):
         sample=self.routing.sample();states=dict(cluster='active',main='active')
-        for count,size,expected in ((1000,20*1024**3,'cluster'),(1001,3,'main'),(1,20*1024**3+1,'main')):
+        for count,size,expected in ((1000,20*1024**3,'cluster'),(1001,3,'main'),(1,20*1024**3+1,'cluster'),(1000,50*1024**3,'cluster')):
             raw=dict(pipeline=dict(treedar=dict(requested=False)),manifest=dict(inputCounts=dict(images=count),totalBytes=size))
             self.assertEqual(self.routing.choose(raw,states,sample,local_max_photos=1000,local_max_input_bytes=20*1024**3,main_node_id='main'),expected)
         self.endpoints['cluster'][1].body['maxImages']=2

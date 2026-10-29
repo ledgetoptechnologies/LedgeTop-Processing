@@ -2,7 +2,7 @@
 
 An otherwise small job waits for local while it is busy, unavailable or draining.
 Only an explicit ``allow_main_fallback=True`` permits it to consume main. Jobs
-above either local size ceiling always require main and never overflow to local.
+above the local photo-count ceiling require main and never overflow to local.
 This helper reserves nothing: callers must atomically gate and recheck admission
 before dispatch. Missing queue/state fields retain legacy fixture compatibility;
 when supplied, queue counts must be zero and maintenance state must be active.
@@ -23,7 +23,9 @@ def plan(photo_count: int, input_bytes: int, local: dict, main: dict,
         limit = node.get("maxImages")
         return limit is None or (type(limit) is int and limit > 0 and photo_count <= limit)
 
-    local_size_ok = photo_count <= local_max_photos and input_bytes <= local_max_input_bytes
+    # Byte admission/storage budgets are separate from selecting a photo node.
+    # Keep the existing arguments for callers; only count determines this route.
+    local_size_ok = photo_count <= local_max_photos
     if local_size_ok:
         if accepts(local):
             return {"decision": "local", "reason": "local_within_limits"}

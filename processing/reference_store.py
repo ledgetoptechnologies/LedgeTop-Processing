@@ -310,8 +310,7 @@ class ReferenceStore:
                 local_max_input_bytes=self.local_max_input_bytes,main_node_id=self.main_node_id,db=db)
 
         requires_main = (submission['pipeline']['treedar']['requested']
-            or submission['manifest']['inputCounts']['images'] > self.local_max_photos
-            or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
+            or submission['manifest']['inputCounts']['images'] > self.local_max_photos)
         return self.main_node_id if requires_main else 'cluster'
 
     def next_for_node(self, node_id):

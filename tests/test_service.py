@@ -86,8 +86,8 @@ class ServiceTests(unittest.TestCase):
     def test_small_job_waits_for_local_when_local_unavailable(self):
         self.assertEqual(plan(300, 4000, {"ready": False}, {"ready": True, "maxImages": 1000}, 800, 20000)["decision"], "wait")
 
-    def test_byte_limit_prevents_small_photo_count_overloading_local(self):
-        self.assertEqual(plan(10, 20001, {"ready": True}, {"ready": False}, 800, 20000)["decision"], "wait")
+    def test_byte_size_does_not_route_small_photo_job_away_from_local(self):
+        self.assertEqual(plan(10, 20001, {"ready": True}, {"ready": False}, 800, 20000)["decision"], "local")
 
     def test_requires_authentication(self):
         with self.assertRaises(HTTPError) as exc:

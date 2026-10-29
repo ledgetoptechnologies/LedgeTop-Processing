@@ -27,6 +27,16 @@ class ReferenceStoreTests(unittest.TestCase):
         self.queue.close()
         self.directory.cleanup()
 
+    def test_fallback_routing_uses_photo_count_not_byte_ceiling(self):
+        for count,size,expected in ((1000,50*1024**3,'cluster'),(1001,3,'node-2')):
+            raw=dict(pipeline=dict(treedar=dict(requested=False)),
+                manifest=dict(inputCounts=dict(images=count),totalBytes=size))
+            with self.subTest(count=count,size=size):
+                self.assertEqual(self.store._required_node(raw),expected)
+        raw['pipeline']['treedar']['requested']=True
+        raw['manifest']['inputCounts']['images']=0
+        self.assertEqual(self.store._required_node(raw),'node-2')
+
     def new_submission(self):
         raw = copy.deepcopy(self.fixture["submission"])
         raw["submissionId"] = str(uuid.uuid4())

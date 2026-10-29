@@ -63,10 +63,16 @@ class ExecutionRouterTests(unittest.TestCase):
         return job,identifier
 
     def new_odm(self):
-        self.fixture.store=ReferenceStore(self.fixture.queue,local_max_input_bytes=1)
+        self.fixture.store=ReferenceStore(self.fixture.queue,local_max_photos=1)
         raw=copy.deepcopy(json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission'])
         raw['submissionId']=str(uuid.uuid4())
         raw['manifest']['objects'][0].update(name='survey_0042.DNG',mediaType='image/x-adobe-dng')
+        second=copy.deepcopy(raw['manifest']['objects'][0])
+        second.update(id=second['id']+'-second',name='survey_0043.DNG')
+        raw['manifest']['objects'].append(second)
+        raw['manifest']['objectCount']=2
+        raw['manifest']['inputCounts']['images']=2
+        raw['manifest']['totalBytes']=6
         raw['manifest']['sha256']=p.manifest_sha256(raw['manifest'])
         submitted=self.fixture.store.submit(p.validate_submission(raw,environment='staging',
             capability_fingerprint=raw['capabilityFingerprint']))[0]
@@ -77,20 +83,22 @@ class ExecutionRouterTests(unittest.TestCase):
         reservation='odm-'+uuid.uuid4().hex
         self.router.bind(job)  # No transfer or native mutation has occurred.
         self.ledger.reserve(job_id=job['jobId'],generation=1,reservation_id=reservation,
-            manifest_sha256=job['manifestSha256'],input_bytes=3,output_budget=1024**2,
+            manifest_sha256=job['manifestSha256'],input_bytes=6,output_budget=1024**2,
             environment='staging',ttl_seconds=1000,worker_ready=True)
         folder=self.ledger.root/'jobs'/reservation
         folder.mkdir(mode=0o700)
-        path=folder/'photo.input'
-        path.write_bytes(b'abc')
-        self.ledger.record_allocated(reservation,3)
+        paths={}
+        for number,obj in enumerate(job['submission']['manifest']['objects']):
+            path=folder/('photo-'+str(number)+'.input');path.write_bytes(b'abc')
+            paths[obj['id']]=str(path.relative_to(self.ledger.root))
+        self.ledger.record_allocated(reservation,6)
         transfer=copy.deepcopy(json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['transferRequest'])
-        transfer.update(reservationId=reservation,manifestSha256=job['manifestSha256'])
+        transfer.update(reservationId=reservation,manifestSha256=job['manifestSha256'],byteBudget=6)
         self.fixture.store.reserve(job['jobId'],transfer,node_id='main')
         self.fixture.store.update_phase(job['jobId'],'fetching')
         self.fixture.store.update_phase(job['jobId'],'processing')
         job=self.fixture.store.get(job['jobId'],private=True)
-        return job,identity,reservation,{job['submission']['manifest']['objects'][0]['id']:str(path.relative_to(self.ledger.root))}
+        return job,identity,reservation,paths
 
     def finish_odm(self):
         job,identity,reservation,paths=self.new_odm()
@@ -139,7 +147,8 @@ class ExecutionRouterTests(unittest.TestCase):
         self.assertEqual(self.router.kind_for(odm_job['jobId']),'odm')
         self.assertEqual(self.read_result(tree_job),b'synthetic output')
         self.assertEqual(self.read_result(odm_job),self.transport.archive)
-        self.assertEqual(self.native.upload.call_args.args[1]['name'],'survey_0042.DNG')
+        self.assertEqual([call.args[1]['name'] for call in self.native.upload.call_args_list],
+            ['survey_0042.DNG','survey_0043.DNG'])
         for index,job in enumerate((tree_job,odm_job)):
             result=json.loads(self.router._row(job['jobId'])['result'])
             receipt=dict(schemaVersion=1,receiptId=f'viewer-{index}',storageReceiptId=f'viewer-storage-{index}',

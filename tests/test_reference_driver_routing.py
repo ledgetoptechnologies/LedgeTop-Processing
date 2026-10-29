@@ -44,7 +44,7 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
         self.root, self.ledger = self.host.root, self.host.ledger
         self.queue = Queue(self.root/'queue', reference_enabled=True, node_ids=('cluster','main'), treedar_node_ids=('main',))
         self.addCleanup(self.queue.close)
-        self.store = ReferenceStore(self.queue, local_max_input_bytes=1)
+        self.store = ReferenceStore(self.queue, local_max_photos=1)
         self.fixture = json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
         self.api = ReferenceControlAPI(self.store, viewer_bearers={VIEWER:'staging'},
             worker_bearers={TOKEN:dict(node_id='main',worker_id='worker-main',worker_instance_id='instance-main')},
@@ -144,6 +144,16 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
             raw['manifest']['sha256']=p.manifest_sha256(raw['manifest'])
             raw['pipeline']['odm']['requested']=kind=='combined'
             raw['pipeline']['treedar'].update(requested=True,inputObjectIds=[obj['id']],provenanceReceiptId='proof-'+uuid.uuid4().hex)
+        else:
+            # Two real fixture descriptors exceed the explicit one-photo local
+            # threshold; byte size no longer forces this main-node route.
+            second=copy.deepcopy(raw['manifest']['objects'][0])
+            second.update(id=second['id']+'-second',name='second-photo.jpg')
+            raw['manifest']['objects'].append(second)
+            raw['manifest']['objectCount']=2
+            raw['manifest']['inputCounts']['images']=2
+            raw['manifest']['totalBytes']=sum(o['byteSize'] for o in raw['manifest']['objects'])
+            raw['manifest']['sha256']=p.manifest_sha256(raw['manifest'])
         return self.store.submit(p.validate_submission(raw,environment='staging',
             capability_fingerprint=raw['capabilityFingerprint'],available_engines=('odm','treedar')))[0]
 

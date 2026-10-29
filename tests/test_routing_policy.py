@@ -19,9 +19,11 @@ class RoutingPolicyTests(unittest.TestCase):
             with self.subTest(count=count):
                 self.assertEqual(self.route(count)["decision"], expected)
 
-    def test_byte_boundary_requires_main_independent_of_photo_count(self):
-        self.assertEqual(self.route(size=20_000)["decision"], "local")
-        self.assertEqual(self.route(size=20_001)["decision"], "main")
+    def test_bytes_do_not_change_photo_count_routing(self):
+        for size in (20_000,20_001,20*1024**3+1,50*1024**3):
+            with self.subTest(size=size):
+                self.assertEqual(self.route(1000,size)["decision"],"local")
+                self.assertEqual(self.route(1001,size)["decision"],"main")
 
     def test_busy_local_does_not_consume_idle_main(self):
         self.local["taskQueueCount"] = 1
