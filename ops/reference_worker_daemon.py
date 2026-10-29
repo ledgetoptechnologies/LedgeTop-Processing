@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import sqlite3
 import ssl
 import stat
 import sys
@@ -21,6 +22,7 @@ from processing import reference_protocol as p
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_driver import ReferenceDriver
+from processing.reference_api import Response
 from processing.reference_engine_cleanup import EngineCacheCleanup
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
@@ -41,10 +43,28 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting'))
+                      'executionRouting','serviceProfile'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
+
+
+def _service_profile(config):
+    profile = config.get('serviceProfile')
+    if 'serviceProfile' not in config:
+        return None
+    p._closed(profile, ('schemaVersion','mode'), 'private service profile')
+    if (type(profile['schemaVersion']) is not int or profile['schemaVersion'] != 1
+            or profile['mode'] != 'odm_only' or 'executionRouting' in config
+            or config['nodeId'] not in ('cluster','main')
+            or type(config['engineVersion']) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}', config['engineVersion'])):
+        raise ValueError('explicit ODM-only private service profile required')
+    identity = p.canonical_json({key:config[key] for key in
+        ('nodeId','authorityId','workerId','workerInstanceId','engineId','gateGeneration','engineVersion')}).decode()
+    if any(type(config[key]) is str and config[key] and config[key] in identity for key in
+            ('workerBearer','resultReadBearer','engineToken')):
+        raise ValueError('private service identity reflects a credential')
+    return profile
 
 
 def _execution_routing(config):
@@ -197,6 +217,9 @@ class WorkerService:
         self._lock = threading.Lock()
         self._state, self._reason = 'starting', None
         self._driver_thread = self._server_thread = None
+        health_api = getattr(server, 'worker_health_api', None)
+        if health_api is not None:
+            health_api.bind_service(self)
 
     def _failed(self, reason, stop):
         with self._lock:
@@ -282,6 +305,76 @@ class WorkerService:
         return 2 if failed else 0
 
 
+def _work_health(driver):
+    """Bounded, SQL-only aggregate; no job data or lifecycle mutation."""
+    driver._state_owner.check(driver.path.parent)
+    if not driver._lock.acquire(blocking=False):
+        return dict(workState='busy', retainedJobs=None, pendingJobs=None, awaitingAcceptance=None)
+    try:
+        driver._state_owner.check(driver.path.parent)
+        path, info = _file(str(driver.path), private=True)
+        if (info.st_size > 64*1024**2 or any(os.path.lexists(str(path)+suffix) for suffix in ('-wal','-shm','-journal'))):
+            raise ValueError('private health snapshot unavailable')
+        db = sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1', uri=True, timeout=1)
+        try:
+            budget = [0]
+            def progress():
+                budget[0] += 1
+                return int(budget[0] > 1000)
+            db.set_progress_handler(progress, 1000)
+            db.execute('BEGIN')
+            rows = db.execute('SELECT stage,COUNT(*) FROM driver_jobs GROUP BY stage LIMIT 17').fetchall()
+        finally:
+            db.close()
+        allowed = {'claim_pending','claimed','reservation_pending','awaiting_grant','fetching_pending','fetching',
+            'processing_pending','execution_pending','executing','delivering','failure_delivering',
+            'awaiting_acceptance','awaiting_failure_acceptance','completed'}
+        if any(stage not in allowed or type(count) is not int or count < 0 for stage,count in rows):
+            raise ValueError('private health snapshot unavailable')
+        retained = sum(count for _,count in rows)
+        awaiting = sum(count for stage,count in rows if stage in ('awaiting_acceptance','awaiting_failure_acceptance'))
+        pending = sum(count for stage,count in rows if stage not in ('completed','awaiting_acceptance','awaiting_failure_acceptance'))
+        driver._state_owner.check(driver.path.parent)
+        return dict(workState='empty' if not retained else 'pending_work' if pending else 'awaiting_acceptance' if awaiting else 'idle',
+            retainedJobs=retained, pendingJobs=pending, awaitingAcceptance=awaiting)
+    finally:
+        driver._lock.release()
+
+
+class WorkerHealthAPI:
+    """Reader-authenticated private liveness; never execution/admission authority."""
+    PATH = '/ltds/worker/v1/health'
+
+    def __init__(self, result_api, driver, identity):
+        self.result_api, self.driver, self._service = result_api, driver, None
+        self._identity = p.canonical_json(identity)
+
+    def bind_service(self, service):
+        if type(service) is not WorkerService or service.driver is not self.driver or self._service is not None:
+            raise ValueError('actual private worker service required')
+        self._service = service
+
+    def handle(self, method, path, headers, body=b'', *, protected_transport=False):
+        if path != self.PATH:
+            return self.result_api.handle(method, path, headers, body, protected_transport=protected_transport)
+        if protected_transport is not True:
+            return Response(503, {'error':'protected_transport_required'})
+        if self.result_api._authenticate(headers) is None:
+            return Response(401, {'error':'unauthorized'})
+        if method != 'GET' or body not in (b'', ''):
+            return Response(400, {'error':'invalid_health_request'})
+        if self._service is None:
+            return Response(503, {'error':'worker_service_not_started'})
+        try:
+            health = self._service.health()
+            work = _work_health(self.driver)
+            ready = health['state'] == 'ready' and health['driverAlive'] and health['listenerAlive']
+            return Response(200 if ready else 503, dict(schemaVersion=1, profile='odm_only', scope='service_liveness',
+                **p.decode_submission(self._identity), **health, **work))
+        except Exception:
+            return Response(503, {'error':'worker_health_unavailable'})
+
+
 def _file(path, *, private=False):
     if type(path) is not str or not Path(path).is_absolute():
         raise ValueError('explicit absolute configuration file required')
@@ -316,6 +409,7 @@ def load_config(path):
             raise ValueError('configuration fields differ')
         if 'schemaVersion' in config and (type(config['schemaVersion']) is not int or config['schemaVersion'] != 1):
             raise ValueError('unsupported configuration version')
+        _service_profile(config)
         _execution_routing(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
@@ -391,6 +485,7 @@ def build_worker(config):
 
 def _build_worker(config,owner,resources):
     """Construct under the factory's mandatory state-root ownership capability."""
+    profile = _service_profile(config)
     routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
@@ -478,9 +573,14 @@ def _build_worker(config,owner,resources):
         reader_session=session), bearer_readers={config['resultReadBearer']: dict(
         node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
         share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
+    health_identity = dict(identityScope='configured_service', **{key:config[key] for key in
+        ('nodeId','authorityId','workerId','workerInstanceId','engineId','gateGeneration','engineVersion')}) if profile is not None else None
+    health_api = WorkerHealthAPI(result_api, driver, health_identity) if profile is not None else None
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_tls.load_cert_chain(config['serverCertFile'], config['serverKeyFile'])
-    server = create_reference_http_server(result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)
+    server = create_reference_http_server(health_api or result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)
+    if health_api is not None:
+        server.worker_health_api = health_api
     original_close = server.server_close
     resources['serverClose']=original_close
     server.daemon_threads = False
@@ -508,10 +608,14 @@ def _build_worker(config,owner,resources):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, help='owner-private JSON settings file')
+    parser.add_argument('--check-config', action='store_true', help='validate private settings without opening worker state or listeners')
     args = parser.parse_args(argv)
     server = None
     try:
         config = load_config(args.config)
+        if args.check_config:
+            print('reference worker configuration valid', flush=True)
+            return 0
         driver, server = build_worker(config)
         stop = threading.Event()
         for name in ('SIGINT','SIGTERM'):
