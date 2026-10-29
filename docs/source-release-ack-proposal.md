@@ -5,6 +5,11 @@ Existing `contracts/source-retention-v1.contract.json` remains unchanged.
 
 The candidate pure validator is `processing/reference_source_release_ack.py`;
 its canonical synthetic fixture is `contracts/source-release-ack-v1.candidate.json`.
+Shared machine-readable parity vectors are in
+`contracts/source-release-ack-v1.negative-vectors.candidate.json`. Each has a
+JSON value or UTF-8 wire text, shallow context overrides and expected validity.
+Wire integer fields use integer tokens; `1.0` and `1e0` are rejected, as in the
+existing Python reference decoder's positive-integer validation.
 These check syntax and expected bindings only, perform no I/O, and are not wired
 to an endpoint or cleanup path. The fixture's synthetic closure digests do not
 represent resolved finality or cleanup. Peer Node validation and joint acceptance
@@ -52,6 +57,9 @@ acknowledgedAt
 IDs use the existing ASCII slug bounds, digests use lower-case SHA256, generation
 is the existing positive safe integer, and time is canonical UTC milliseconds.
 The ACK binds the exact issued custody receipt. The authenticated Processing
+`sourceRetentionReceiptId` refers to the same source receipt named
+`sourceCustodyReceiptId` in the existing local `input-copy-release` record.
+The authenticated Processing
 identity is transport/durable registration authority, never a caller JSON field.
 Receipt-role uniqueness is enforced in durable stores across source, storage,
 result, terminal and ACK roles. The ACK ID is persisted before the first send;

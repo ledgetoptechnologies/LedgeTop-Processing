@@ -31,6 +31,19 @@ class SourceReleaseAckTests(unittest.TestCase):
         self.assertNotEqual(result, self.ack)
         self.assertEqual(self.validate(p.canonical_json(self.ack)), self.ack)
 
+    def test_shared_candidate_vectors(self):
+        fixture = json.loads((ROOT/'contracts/source-release-ack-v1.negative-vectors.candidate.json').read_text())
+        self.assertEqual(len({v['id'] for v in fixture['vectors']}),len(fixture['vectors']))
+        for vector in fixture['vectors']:
+            with self.subTest(vector=vector['id']):
+                context = {**fixture['context'], **vector['contextOverrides']}
+                payload = vector['payload']
+                value = payload['value'] if payload['kind']=='json' else payload['text']
+                if vector['valid']:
+                    self.assertIsInstance(validate_source_release_ack(value,**context),dict)
+                else:
+                    with self.assertRaises(p.ProtocolError):validate_source_release_ack(value,**context)
+
     def test_every_identity_and_expected_commitment_is_bound(self):
         for field, value in dict(sourceRetentionReceiptId='wrong-source', sourceStorageReceiptId='wrong-storage',
             jobId='wrong-job', generation=2, environment='production', inputManifestSha256='e'*64,

@@ -1,0 +1,1425 @@
+{
+  "schemaVersion": 1,
+  "status": "candidate-pure-validation-parity-no-authority",
+  "context": {
+    "job_id": "source-job-1",
+    "generation": 1,
+    "environment": "staging",
+    "input_manifest": {
+      "id": "manifest-synthetic-1",
+      "revision": 1,
+      "sha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+      "totalBytes": 6,
+      "objects": [
+        {
+          "id": "image-a",
+          "name": "photo.jpg",
+          "byteSize": 3,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "kind": "image",
+          "mediaType": "image/jpeg"
+        },
+        {
+          "id": "Image-B",
+          "name": "other.jpg",
+          "byteSize": 3,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "kind": "image",
+          "mediaType": "image/jpeg"
+        }
+      ],
+      "objectCount": 2,
+      "inputCounts": {
+        "images": 2,
+        "lidarObjects": 0,
+        "points": 0
+      }
+    },
+    "pipeline_digest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+    "source_receipt": {
+      "schemaVersion": 1,
+      "receiptType": "source_retention",
+      "receiptId": "source-receipt-1",
+      "storageReceiptId": "source-storage-1",
+      "jobId": "source-job-1",
+      "generation": 1,
+      "environment": "staging",
+      "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+      "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+      "retainedObjectIds": [
+        "Image-B",
+        "image-a"
+      ],
+      "retainedAt": "2026-10-27T12:00:00.000Z",
+      "validationVersion": "ltds-source-retention-v1",
+      "retentionGuarantee": "until_release_ack_v1"
+    },
+    "pipeline_closure_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "local_cleanup_closure_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "semantics": "contextOverrides is shallow merge onto context. json payload passes its parsed value; utf8 payload passes its text to the strict wire parser. A positive result proves syntax/binding only, never replay, authentication, closure or cleanup authority.",
+  "vectors": [
+    {
+      "id": "valid-json",
+      "valid": true,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "valid-wire",
+      "valid": true,
+      "payload": {
+        "kind": "utf8",
+        "text": "{\"ackId\":\"source-release-ack-1\",\"acknowledgedAt\":\"2026-10-29T08:00:00.000Z\",\"environment\":\"staging\",\"generation\":1,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"localCleanupClosureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"pipelineClosureSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptType\":\"source_release_ack\",\"schemaVersion\":1,\"sourceRetentionReceiptId\":\"source-receipt-1\",\"sourceStorageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-release-ack-v1\"}"
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "valid-new-ack-shape-no-replay-authority",
+      "valid": true,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "another-ack",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-schemaVersion",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-receiptType",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-validationVersion",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-ackId",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-sourceRetentionReceiptId",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-sourceStorageReceiptId",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-jobId",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-generation",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-environment",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-inputManifestSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-pipelineDigest",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-pipelineClosureSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-localCleanupClosureSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-acknowledgedAt",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-sourceRetentionReceiptId",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "wrong-source",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-sourceStorageReceiptId",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "wrong-storage",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-jobId",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "wrong-job",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-generation",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 2,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-environment",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "production",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-inputManifestSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-pipelineDigest",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-pipelineClosureSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "mismatch-localCleanupClosureSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "boolean-schema",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": true,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "boolean-generation",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": true,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "zero-generation",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 0,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "unsafe-generation",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 9007199254740992,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "wrong-family",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_retention",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "wrong-version",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-reference-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "path-ack",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "../ack",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "unicode-ack",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "caf\u00e9",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "role-custody",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-receipt-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "role-storage",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-storage-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "array-environment",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": [
+            "staging"
+          ],
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "caller-authority-extra",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z",
+          "cleanupComplete": true
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "invalid-date",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-02-30T00:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "hour24",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T24:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "missing-millis",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "timezone-offset",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000+00:00"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "uppercase-inputManifestSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "uppercase-pipelineDigest",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "uppercase-pipelineClosureSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "uppercase-localCleanupClosureSha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "expected-pipeline_closure_sha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {
+        "pipeline_closure_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    },
+    {
+      "id": "expected-local_cleanup_closure_sha256",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {
+        "local_cleanup_closure_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    },
+    {
+      "id": "partial-source",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {
+        "source_receipt": {
+          "schemaVersion": 1,
+          "receiptType": "source_retention",
+          "receiptId": "source-receipt-1",
+          "storageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "retainedObjectIds": [],
+          "retainedAt": "2026-10-27T12:00:00.000Z",
+          "validationVersion": "ltds-source-retention-v1",
+          "retentionGuarantee": "until_release_ack_v1"
+        }
+      }
+    },
+    {
+      "id": "wrong-source-family",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {
+        "source_receipt": {
+          "schemaVersion": 1,
+          "receiptType": "result_acceptance",
+          "receiptId": "source-receipt-1",
+          "storageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "retainedObjectIds": [
+            "Image-B",
+            "image-a"
+          ],
+          "retainedAt": "2026-10-27T12:00:00.000Z",
+          "validationVersion": "ltds-source-retention-v1",
+          "retentionGuarantee": "until_release_ack_v1"
+        }
+      }
+    },
+    {
+      "id": "expiring-source",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {
+        "source_receipt": {
+          "schemaVersion": 1,
+          "receiptType": "source_retention",
+          "receiptId": "source-receipt-1",
+          "storageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "retainedObjectIds": [
+            "Image-B",
+            "image-a"
+          ],
+          "retainedAt": "2026-10-27T12:00:00.000Z",
+          "validationVersion": "ltds-source-retention-v1",
+          "retentionGuarantee": "expires_in_24h"
+        }
+      }
+    },
+    {
+      "id": "stale-source-generation",
+      "valid": false,
+      "payload": {
+        "kind": "json",
+        "value": {
+          "schemaVersion": 1,
+          "receiptType": "source_release_ack",
+          "validationVersion": "ltds-source-release-ack-v1",
+          "ackId": "source-release-ack-1",
+          "sourceRetentionReceiptId": "source-receipt-1",
+          "sourceStorageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 1,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "pipelineClosureSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "localCleanupClosureSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "acknowledgedAt": "2026-10-29T08:00:00.000Z"
+        }
+      },
+      "contextOverrides": {
+        "source_receipt": {
+          "schemaVersion": 1,
+          "receiptType": "source_retention",
+          "receiptId": "source-receipt-1",
+          "storageReceiptId": "source-storage-1",
+          "jobId": "source-job-1",
+          "generation": 2,
+          "environment": "staging",
+          "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+          "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+          "retainedObjectIds": [
+            "Image-B",
+            "image-a"
+          ],
+          "retainedAt": "2026-10-27T12:00:00.000Z",
+          "validationVersion": "ltds-source-retention-v1",
+          "retentionGuarantee": "until_release_ack_v1"
+        }
+      }
+    },
+    {
+      "id": "duplicate-json-key",
+      "valid": false,
+      "payload": {
+        "kind": "utf8",
+        "text": "{\"schemaVersion\":1,\"ackId\":\"source-release-ack-1\",\"acknowledgedAt\":\"2026-10-29T08:00:00.000Z\",\"environment\":\"staging\",\"generation\":1,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"localCleanupClosureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"pipelineClosureSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptType\":\"source_release_ack\",\"schemaVersion\":1,\"sourceRetentionReceiptId\":\"source-receipt-1\",\"sourceStorageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-release-ack-v1\"}"
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "oversized-padded-wire",
+      "valid": false,
+      "payload": {
+        "kind": "utf8",
+        "text": "                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 {\"ackId\":\"source-release-ack-1\",\"acknowledgedAt\":\"2026-10-29T08:00:00.000Z\",\"environment\":\"staging\",\"generation\":1,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"localCleanupClosureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"pipelineClosureSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptType\":\"source_release_ack\",\"schemaVersion\":1,\"sourceRetentionReceiptId\":\"source-receipt-1\",\"sourceStorageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-release-ack-v1\"}"
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "fractional-integer-token",
+      "valid": false,
+      "payload": {
+        "kind": "utf8",
+        "text": "{\"ackId\":\"source-release-ack-1\",\"acknowledgedAt\":\"2026-10-29T08:00:00.000Z\",\"environment\":\"staging\",\"generation\":1.0,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"localCleanupClosureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"pipelineClosureSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptType\":\"source_release_ack\",\"schemaVersion\":1,\"sourceRetentionReceiptId\":\"source-receipt-1\",\"sourceStorageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-release-ack-v1\"}"
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "exponent-integer-token",
+      "valid": false,
+      "payload": {
+        "kind": "utf8",
+        "text": "{\"ackId\":\"source-release-ack-1\",\"acknowledgedAt\":\"2026-10-29T08:00:00.000Z\",\"environment\":\"staging\",\"generation\":1e0,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"localCleanupClosureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"pipelineClosureSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptType\":\"source_release_ack\",\"schemaVersion\":1,\"sourceRetentionReceiptId\":\"source-receipt-1\",\"sourceStorageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-release-ack-v1\"}"
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "nonfinite-number",
+      "valid": false,
+      "payload": {
+        "kind": "utf8",
+        "text": "{\"ackId\":\"source-release-ack-1\",\"acknowledgedAt\":\"2026-10-29T08:00:00.000Z\",\"environment\":\"staging\",\"generation\":NaN,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"localCleanupClosureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"pipelineClosureSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptType\":\"source_release_ack\",\"schemaVersion\":1,\"sourceRetentionReceiptId\":\"source-receipt-1\",\"sourceStorageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-release-ack-v1\"}"
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "nonobject-top-level",
+      "valid": false,
+      "payload": {
+        "kind": "utf8",
+        "text": "[]"
+      },
+      "contextOverrides": {}
+    },
+    {
+      "id": "invalid-utf8-text-surrogate",
+      "valid": false,
+      "payload": {
+        "kind": "utf8",
+        "text": "\ud800"
+      },
+      "contextOverrides": {}
+    }
+  ]
+}
