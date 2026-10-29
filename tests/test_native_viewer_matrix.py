@@ -251,21 +251,28 @@ FIXED_POLL_V1 = dict(
     processing_worker_sha256='fdb948ee45c0d61ec76dba94e42bca8ae4d8b2619b98309bba35bfab12f06752')
 
 
-@unittest.skipUnless(os.environ.get('MATRIX_VIEWER_TARGET') == FIXED_POLL_V1['target'],
-                     'select with MATRIX_VIEWER_TARGET=' + FIXED_POLL_V1['target'])
-class CoordinatorOutageFixedPollV1(NativeViewerMatrix):
-    """T9 against Viewer e66e37b only: a plain assertion, no expectedFailure."""
+FIXED_POLL_7DE = dict(
+    target='viewer-7de601c-poll-only-v1',
+    viewer_commit='7de601c1381a791fe9c9ec7f3385a5645724b91e',
+    # sha256 of the checked-out bytes (CRLF working tree, core.autocrlf=true);
+    # its LF git blob digest is 5e32e0afbb7f8455879a96b1b300d472615e4c324bf4f6af105a915d6e564cdf.
+    processing_worker_sha256='d08e2512d5449a9a3192c062492c2e88c0577ae41c139b6d7c0e40a2c5aadbf4')
 
+
+class FixedPollRegression:
+    """Plain T9 regression for one pinned Viewer source (set ``pin``)."""
+
+    pin = None
     engine_duration = 8
 
     def loaded_worker_sha256(self, record):
         return {m['path']: m['sha256'] for m in record['viewerModules']['loaded']}.get(
             'apps/viewer/server/processingWorker.js')
 
-    def test_t9_fixed_v1_long_outage_keeps_attempt_and_ingests(self):
+    def check_fixed_poll(self):
         record = self.finish(self.run_case('outage', OUTAGE_FAILURES='6'))
-        self.assertEqual(self.loaded_worker_sha256(record), FIXED_POLL_V1['processing_worker_sha256'],
-                         'the selected Viewer tree is not the pinned poll fix')
+        self.assertEqual(self.loaded_worker_sha256(record), self.pin['processing_worker_sha256'],
+                         'the selected Viewer tree is not the pinned poll fix ' + self.pin['viewer_commit'])
         self.assertTrue(record['ok'], record.get('error'))
         result = record['result']
         self.assertEqual(len(result['outageSteps']), 6)
@@ -273,6 +280,28 @@ class CoordinatorOutageFixedPollV1(NativeViewerMatrix):
         self.assertEqual({step['jobs']['error_code'] for step in result['outageSteps']}, {'provider_observation_unavailable'})
         self.assertEqual(result['statusAfterOutage'], 'queued_upstream')
         self.assertIn(result['finalStatus'], ('ingesting', 'derivatives', 'ready_for_review'))
+
+
+@unittest.skipUnless(os.environ.get('MATRIX_VIEWER_TARGET') == FIXED_POLL_V1['target'],
+                     'select with MATRIX_VIEWER_TARGET=' + FIXED_POLL_V1['target'])
+class CoordinatorOutageFixedPollV1(FixedPollRegression, NativeViewerMatrix):
+    """T9 against Viewer e66e37b only: a plain assertion, no expectedFailure."""
+
+    pin = FIXED_POLL_V1
+
+    def test_t9_fixed_v1_long_outage_keeps_attempt_and_ingests(self):
+        self.check_fixed_poll()
+
+
+@unittest.skipUnless(os.environ.get('MATRIX_VIEWER_TARGET') == FIXED_POLL_7DE['target'],
+                     'select with MATRIX_VIEWER_TARGET=' + FIXED_POLL_7DE['target'])
+class CoordinatorOutageFixedPoll7de(FixedPollRegression, NativeViewerMatrix):
+    """T9 against Viewer 7de601c only (the final poll-only candidate)."""
+
+    pin = FIXED_POLL_7DE
+
+    def test_t9_fixed_7de_long_outage_keeps_attempt_and_ingests(self):
+        self.check_fixed_poll()
 
 
 if __name__ == '__main__':
