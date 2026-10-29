@@ -50,6 +50,25 @@ def require(value,reason):
 
 def digest(value):return p.digest(value)
 
+def worker_recipe_sha256(image,config,host,mounts):
+    """Bind every recipe field while ignoring Docker's mount enumeration order.
+
+    Docker returns its effective mounts from an unordered collection. Only
+    that four-entry, unique-destination inventory is normalized; Config and
+    HostConfig arrays keep their exact order. The projection domain prevents
+    silently adopting a policy captured with the former raw-array digest.
+    Policy capture and inspection must both call this helper.
+    """
+    require(type(image) is str and re.fullmatch('sha256:[a-f0-9]{64}',image)
+        and type(config) is dict and type(host) is dict,'worker_recipe_projection_invalid')
+    require(type(mounts) is list and len(mounts)==4
+        and all(type(m) is dict and type(m.get('Destination')) is str
+            and m['Destination'].startswith('/') for m in mounts),'worker_recipe_mount_projection_invalid')
+    destinations=[m['Destination'] for m in mounts]
+    require(len(set(destinations))==4,'worker_recipe_mount_projection_invalid')
+    return digest(dict(schemaVersion=1,projection='worker-recipe-mount-destinations-v1',
+        image=image,config=config,host=host,mounts=sorted(mounts,key=lambda m:m['Destination'])))
+
 def private(path,*,directory=False):
     path=Path(path).absolute();info=path.lstat()
     require(path.resolve()==path and not any(x.is_symlink() for x in (path,*path.parents))
@@ -323,8 +342,8 @@ class WorkerMaintenance:
         p._closed(value,('id','name','image','config','host','mounts','running','pid','exitCode'),'worker container inspection')
         require((value['id'],value['name'],value['image'])==(self.policy.container_id,'/'+self.policy.container_name,self.policy.image_id),'owned_worker_container_changed')
         require(type(value['running']) is bool and type(value['pid']) is int and type(value['exitCode']) is int,'worker_process_state_unknown')
-        recipe={k:value[k] for k in ('image','config','host','mounts')}
-        require(digest(recipe)==self.policy.recipe_sha256,'worker_recipe_changed')
+        require(worker_recipe_sha256(*(value[k] for k in ('image','config','host','mounts')))
+            ==self.policy.recipe_sha256,'worker_recipe_changed')
         host=value['host'];config=value['config']
         require(config['User']=='1000:1000' and config['Entrypoint']==['python','-m','ops.reference_worker_daemon']
             and config['Cmd']==['--config',str(Path(self.policy.container_config_directory)/'worker.json')] and host['NetworkMode']=='host'

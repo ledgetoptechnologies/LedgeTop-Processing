@@ -101,9 +101,9 @@ class WorkerMaintenanceTests(unittest.TestCase):
         self.ingress=Ingress(self)
         save(self.managed/'compose.json',dict(services=dict(node=dict(image=OLD))))
         save(self.ingress.root/'state.json',dict(state='open',containerId='owned-proxy',oldWorkers=[],expectedBackendImage=OLD))
-        self.recipe=self.worker_inspect();recipe={key:self.recipe[key] for key in ('image','config','host','mounts')}
+        self.recipe=self.worker_inspect()
         cert_digest=hashlib.sha256(ssl.PEM_cert_to_DER_cert(self.cert.read_text())).hexdigest()
-        self.policy=m.WorkerPolicy('cluster',self.queue.authority_id,'test-engine',1,WORKER_CID,'canonical-worker',WORKER_IMAGE,m.digest(recipe),str(self.config_dir),
+        self.policy=m.WorkerPolicy('cluster',self.queue.authority_id,'test-engine',1,WORKER_CID,'canonical-worker',WORKER_IMAGE,m.worker_recipe_sha256(*(self.recipe[k] for k in ('image','config','host','mounts'))),str(self.config_dir),
             m.digest({k:v for k,v in self.config.items() if k!='engineVersion'}),hashlib.sha256(self.config_path.read_bytes()).hexdigest(),str(self.worker_state),str(self.scratch),str(self.gate_root),
             'https://127.0.0.1:'+str(self.config['listenPort']),cert_digest,cert_digest,(str(self.managed/'maintenance.json'),),container_config_directory=str(self.config_dir),timeout_seconds=3)
         settings=dict(nodeId='cluster',coordinator=self.api.origin,project='owned',service='node',expectedEngine='odm',uploadLayout='var-www-tmp-v1',processLayout='node-var-www-v1')

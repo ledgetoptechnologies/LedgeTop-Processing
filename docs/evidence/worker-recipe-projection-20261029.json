@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scope": "Inactive host-side worker recipe capture and verification source",
+  "baseCommit": "d43fc1f",
+  "sourcePacket": {
+    "artifact": "processing-worker-recipe-projection-20261029/frozen-source.json",
+    "sha256": "e917fec0ac9df20698d8a8c8ec589d439e5279e4e1ab4909cb2bdd15f8305085"
+  },
+  "independentReview": {
+    "artifact": "processing-worker-recipe-projection-20261029/independent/review.json",
+    "sha256": "9c74ca51e659ff670b47b1e4888bf76bfc3db82cc4eb8d7d75721256ab1d34a9",
+    "decision": "source-accepted",
+    "tests": "Six host tests passed, zero skips; three additional independent checks passed"
+  },
+  "change": "One shared domain-separated helper binds all image, Config, HostConfig and mount fields while sorting only the effective four unique absolute mount destinations. Other arrays keep their order. Former raw policy digests are refused.",
+  "regressions": [
+    "All 24 effective-mount permutations retain the same capture digest and pass the actual inspection method with synthetic Docker responses.",
+    "Changed mount source/destination/writability/propagation/extra fields and image/config/host/environment/command order remain bound.",
+    "Duplicate, missing, extra, nonmapping, untyped or relative mount inventory is refused.",
+    "A matching digest does not bypass existing semantic mount or boolean guards."
+  ],
+  "runtimeObservation": {
+    "artifactDirectory": "processing-worker-maintenance-full-lab-20261029",
+    "operationId": "c94791ee-bfe7-4c28-8b39-ab3f02472f0a",
+    "mountOrderInstabilityObserved": true,
+    "originalPolicyMismatchFullyExplained": false,
+    "preStartFullRecipeWasRetained": false,
+    "backendExitedBeforeWorkerStart": true,
+    "backendFailure": "Invalid configuration: nonsecret UID1000-owned mode0600 bind was unreadable to root with all capabilities dropped.",
+    "workerExitCode": 2,
+    "workerExactExceptionKnown": false,
+    "coordinatorGracefulTerminalExitCode": 0,
+    "maintenanceScheduled": false,
+    "backendUpdated": false,
+    "jobsSubmitted": false,
+    "originalContainersUnchanged": true
+  },
+  "remaining": [
+    "Actual Linux controller regression and real Docker lifecycle qualification.",
+    "Full before/after recipe witness for unexplained initial difference; no blind policy recapture.",
+    "Fresh reviewed backend config readability and readiness sequencing before worker startup."
+  ],
+  "deployed": false,
+  "failedLabWorkerRestarted": false,
+  "coldStoppedMappingAdopted": false
+}
