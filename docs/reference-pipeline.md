@@ -53,6 +53,17 @@ documentation changes. The later incremental-upgrade helper is a separate delta.
 The backend and tiny input are synthetic, and Node returns `published:false`.
 No real geometry, project publication, NAS issuer or production mount is proved.
 
+The canonical ODM factory and `WorkerService` now pass 64 focused Linux checks
+and two separately executed Node/Python service-thread handoff tests. The latter
+cover acceptance before cleanup and original-grant expiry after actual engine
+commit during a coordinator outage, without manually stepping the driver. See
+[worker service](reference-worker-service.md) and
+[qualification evidence](evidence/reference-worker-service-20261028.json).
+This source is committed but not installed. Its reader-authenticated health is
+bounded liveness/configured identity, not physical container/gate attestation.
+Worker packaging, exact host binding and actual Viewer/NAS integration remain
+required before activation.
+
 The coordinator-only upgrade now has a locally built exact `6bbd468` image and
 an independently tested incremental history validator. The actual image passed
 22 startup/schema1/shutdown tests; all 63 packaged Processing files matched the
@@ -96,8 +107,11 @@ The isolated outer-v2 candidate now has bounded standard-library lexical,
 structural and named metadata digest validation. It is unagreed and inactive;
 32 semantic/authentication/archive/lifecycle negative vectors remain deferred.
 Structural validation cannot authorize engine execution or catalog acceptance.
-Metadata-only source reauthorization and sealed at-start admission are still
-needed for processing that outlasts its original payload grant.
+Metadata-only source reauthorization is still needed before a new combined
+TreeDar stage starts after its original payload grant expires. Already-started
+ODM execution, result sealing and delivery do not renew that transfer grant;
+the service-thread outage test now verifies this distinction. Actual source
+custody/purge protection and authenticated metadata issuance remain unfinished.
 
 Native ODM and TreeDar execution controllers, the concrete parent guard, native
 bundle writer/publication and recovery client have source qualification. The
