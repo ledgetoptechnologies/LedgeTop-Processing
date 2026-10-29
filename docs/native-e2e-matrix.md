@@ -67,6 +67,33 @@ Executed twice with identical outcomes: 8 tests, 7 pass, 1 expected failure, abo
 T9 is written to assert the desired behaviour under `unittest.expectedFailure`. A
 fix in Viewer's `processingWorker.js` retry path shows up as an unexpected success.
 
+## Qualification of the Viewer poll fix (harness v2)
+
+Harness v2 (`05a9ef9`) adds evidence only. Each case result lists every CommonJS
+Viewer module it loaded, with the sha256 of its bytes. Assertions are unchanged
+and T9 keeps its `expectedFailure` annotation.
+
+Both runs used the same image and dependencies as above:
+
+- **Baseline:** Viewer `4b4f7075110372241aa139503d1dfd450e0b6c14` (#349). It is
+  recorded separately from the earlier `9e56370` run. Every case loaded
+  `processingWorker.js` sha256 `cc4c7d86…270a6`.
+- **Fix:** Viewer `e66e37b31165035d162109bf6a1faa2ebc47b5cd` ("Keep reconciling when
+  provider status is unavailable", on `codex/viewer-poll-cancel-repro-20261029`).
+  Every case loaded `processingWorker.js` sha256 `fdb948ee…06752`. The other 36
+  loaded Viewer modules are the same set.
+
+| Viewer | T1–T8, T10 | T9 long outage |
+| --- | --- | --- |
+| `4b4f707` baseline | 7 pass | EXPECTED FAILURE. Reconcile claims 1–4 reschedule; claim 5 marks the attempt `failed` (`processing_failed`) while the engine job runs. |
+| `e66e37b` fix | 7 pass | **UNEXPECTED SUCCESS.** All 6 refused claims reschedule as `provider_observation_unavailable` with the attempt still `queued_upstream`. After the outage it proceeds to `ingesting`. |
+
+The unittest summary for the fix run is `FAILED (unexpected successes=1)`. That is
+the intended signal that the gap is closed, not a regression. Flipping T9 to an
+ordinary assertion is a separate, later harness change. Retry time remains
+simulated (`available_at` advanced), the outage is a refusing relay, and the
+fix's 5-minute backoff ceiling is not exercised in wall time.
+
 ## First failures preserved
 
 Earlier runs of the same harness are kept as evidence, not converted to passes:
