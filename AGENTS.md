@@ -1,7 +1,8 @@
 # Repository CI policy
 
-Beau's October 27, 2026 direction: GitHub Actions runs for pushes to `main`
-and pull requests targeting `main`. Do not add feature-branch push workflows.
+Beau's October 29, 2026 direction: GitHub Actions runs only for pushes to `main`
+and explicitly main-guarded manual runs. Do not add pull-request, tag, staging,
+dev or feature-branch runs. Run ordinary staging and pre-merge tests locally.
 Manual GitHub runs must be guarded to `main`; image publication is main-only
 and never runs in a PR. Use Engineering Hub for ordinary branch iteration when
 its actual execution path is available; do not claim that path is installed
