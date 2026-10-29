@@ -323,6 +323,8 @@ class ObservationWarningAtomicIngest74e(FixedPollRegression, NativeViewerMatrix)
     """Viewer 74e97db only: T9 survival, additive warning and atomic ingest."""
 
     pin = FIXED_74E
+    # T13 must reach a real ingest, so the archive needs ODM output paths.
+    engine_type = OdmLayoutEngine
 
     def assert_modules(self, record):
         loaded = {m['path']: m['sha256'] for m in record['viewerModules']['loaded']}
