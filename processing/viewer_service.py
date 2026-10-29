@@ -6,6 +6,7 @@ Completed engine tasks and downloaded archives remain until operator cleanup.
 """
 
 import http.client
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -118,6 +119,29 @@ class ViewerService:
         self._thread = None
         self._backoff = {}
         self._downloads = {}
+        self.spool_admission = None
+
+    def enable_spool_admission(self,capacity):
+        from .viewer_spool_capacity import SpoolCapacity
+        if (type(capacity) is not SpoolCapacity or type(self.store) is not TaskStore
+                or capacity.queue is not self.queue or capacity.tasks!=self.store.root
+                or self._thread is not None or self.spool_admission is not None):
+            raise ValueError('shared pre-start spool admission required')
+        self.spool_admission=capacity;self.store.spool_admission=capacity
+
+    def upload_window(self,identifier,length):
+        if self.spool_admission is None:return nullcontext()
+        task=self.store.task(identifier)
+        if task['stage']!='uploading' or task['job_id']:
+            raise Conflict('task is no longer accepting uploads')
+        return self.spool_admission.window('upload',identifier,task['generation'],length)
+
+    def init_window(self,identifier,length):
+        if self.spool_admission is None:return nullcontext()
+        with self.queue._db() as db:
+            row=db.execute('SELECT generation,removed FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
+        generation=1 if row is None else row['generation']+(1 if row['removed'] else 0)
+        return self.spool_admission.window('form',identifier,generation,length)
 
     def _catalog(self):
         return catalog([('local', self.config.local_node_url, self.config.local_node_token),
@@ -201,12 +225,17 @@ class ViewerService:
                     declared = response.headers.get('Content-Length')
                     if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
                         raise Conflict('archive exceeds configured disk allowance')
-                    with partial.open('xb') as output:
+                    bound=int(declared) if declared is not None else self.config.viewer_max_archive_bytes
+                    admission=(self.spool_admission.window('archive',identifier,task['generation'],max(1,bound))
+                        if self.spool_admission is not None else nullcontext())
+                    with admission, partial.open('xb') as output:
                         os.chmod(partial, 0o600)
                         while chunk := response.read(1024 ** 2):
                             total += len(chunk)
                             if total > self.config.viewer_max_archive_bytes:
                                 raise Conflict('archive exceeds configured disk allowance')
+                            if self.spool_admission is not None:
+                                self.spool_admission.consume('archive',identifier,task['generation'],len(chunk))
                             output.write(chunk)
                         if declared is not None and total != int(declared):
                             raise EngineUnavailable('archive_transfer_incomplete')

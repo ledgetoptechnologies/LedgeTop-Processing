@@ -6,6 +6,7 @@ memory. Each multipart part is streamed to an unlinked private temporary file.
 """
 
 from email.parser import BytesHeaderParser
+from contextlib import closing, nullcontext
 from email.policy import default as email_policy
 import hmac
 import json
@@ -86,7 +87,7 @@ class _Body:
         self.buffer = b''
 
 
-def _copy_part(body, boundary, output):
+def _copy_part(body, boundary, output, before_write=None):
     marker = b'\r\n--' + boundary
     written = 0
     while True:
@@ -98,6 +99,7 @@ def _copy_part(body, boundary, output):
                     raise RequestError(400, 'truncated_multipart')
             suffix = body.buffer[index + len(marker):needed]
             if suffix in (b'\r\n', b'--'):
+                if before_write is not None:before_write()
                 output.write(body.buffer[:index])
                 written += index
                 body.buffer = body.buffer[needed:]
@@ -107,6 +109,7 @@ def _copy_part(body, boundary, output):
         else:
             count = max(0, len(body.buffer) - len(marker) - 1)
         if count:
+            if before_write is not None:before_write()
             output.write(body.buffer[:count])
             written += count
             body.buffer = body.buffer[count:]
@@ -116,7 +119,7 @@ def _copy_part(body, boundary, output):
             raise RequestError(400, 'truncated_multipart')
 
 
-def _multipart(stream, length, content_type, temp_dir=None):
+def _multipart(stream, length, content_type, temp_dir=None, before_write=None):
     message = BytesHeaderParser(policy=email_policy).parsebytes(
         b'Content-Type: ' + content_type.encode('ascii') + b'\r\n\r\n')
     boundary = message.get_boundary()
@@ -149,7 +152,7 @@ def _multipart(stream, length, content_type, temp_dir=None):
         # unsafe basename. Preserve the decoded parameter exactly for validation.
         filename = headers.get_param('filename', header='Content-Disposition')
         with tempfile.TemporaryFile(mode='w+b', dir=temp_dir) as output:
-            size, final = _copy_part(body, boundary, output)
+            size, final = _copy_part(body, boundary, output, before_write)
             output.seek(0)
             yield name, filename, output, size
         if final:
@@ -186,6 +189,9 @@ class ViewerFacade:
                 raise ValueError('private existing spool directory required')
             temp_dir = str(directory)
         self.temp_dir = temp_dir
+        capacity=getattr(service,'spool_admission',None)
+        if capacity is not None and (temp_dir is None or Path(temp_dir).absolute()!=capacity.spool):
+            raise ValueError('admitted multipart must use the accounted spool root')
 
     @staticmethod
     def _reply(handler, status, value):
@@ -311,13 +317,19 @@ class ViewerFacade:
             if len(handler.headers.get_all('set-uuid', [])) != 1:
                 raise RequestError(400, 'invalid_task_uuid')
             values = {}
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                if name not in ('name', 'options', 'outputs') or filename is not None or name in values:
-                    raise RequestError(400, 'invalid_init_form')
-                values[name] = stream.read(size).decode('utf-8')
-            options = json.loads(values.get('options', '[]'))
-            outputs = json.loads(values['outputs']) if 'outputs' in values else None
-            self._reply(handler, 200, self.service.initialize(identifier, values.get('name', ''), options, outputs, environment))
+            capacity=getattr(self.service,'spool_admission',None)
+            window=self.service.init_window(identifier,length) if capacity is not None else nullcontext()
+            with window:
+                with closing(_multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir,
+                        capacity.check_floor if capacity is not None else None)) as parts:
+                    for name, filename, stream, size in parts:
+                        if name not in ('name', 'options', 'outputs') or filename is not None or name in values:
+                            raise RequestError(400, 'invalid_init_form')
+                        values[name] = stream.read(size).decode('utf-8')
+                options = json.loads(values.get('options', '[]'))
+                outputs = json.loads(values['outputs']) if 'outputs' in values else None
+                result=self.service.initialize(identifier, values.get('name', ''), options, outputs, environment)
+            self._reply(handler, 200,result)
             return
         upload = re.fullmatch(r'/task/new/upload/([^/]+)', path)
         if upload:
@@ -325,15 +337,22 @@ class ViewerFacade:
             identifier = task_uuid(unquote(upload[1]))
             self._authorize(identifier, environment)
             count, seen = 0, set()
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                if name != 'images':
-                    raise RequestError(400, 'invalid_upload_form')
-                filename = safe_filename(filename)
-                if filename.casefold() in seen or not size:
-                    raise RequestError(400, 'duplicate_or_empty_upload')
-                seen.add(filename.casefold())
-                self.service.upload(identifier, filename, stream, size)
-                count += 1
+            capacity=getattr(self.service,'spool_admission',None)
+            window=self.service.upload_window(identifier,length) if capacity is not None else nullcontext()
+            with window:
+                # Close every unlinked parser temporary before settling the
+                # future-allocation promise, including a failed later part.
+                with closing(_multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir,
+                        capacity.check_floor if capacity is not None else None)) as parts:
+                    for name, filename, stream, size in parts:
+                        if name != 'images':
+                            raise RequestError(400, 'invalid_upload_form')
+                        filename = safe_filename(filename)
+                        if filename.casefold() in seen or not size:
+                            raise RequestError(400, 'duplicate_or_empty_upload')
+                        seen.add(filename.casefold())
+                        self.service.upload(identifier, filename, stream, size)
+                        count += 1
             if not count:
                 raise RequestError(400, 'empty_upload')
             self._reply(handler, 200, {'success': True})

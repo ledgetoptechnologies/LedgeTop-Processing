@@ -19,6 +19,9 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if config.prototype_state_dir:
+        from .viewer_spool_capacity import startup_guard
+        startup_guard(config.prototype_state_dir,getattr(config,'viewer_spool_admission',None))
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
@@ -37,6 +40,13 @@ def make_handler(config: Config):
         service = ViewerService(queue, config)
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
+        if getattr(config,'viewer_spool_admission',None) is not None:
+            from .viewer_spool_capacity import SpoolCapacity, SpoolPolicy
+            try:
+                service.enable_spool_admission(SpoolCapacity(queue,Path(config.prototype_state_dir),spool,
+                    service.store.root,SpoolPolicy.from_payload(config.viewer_spool_admission)))
+            except BaseException:
+                service.close();queue.close();raise
         facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
     reference_runtime = None
     if reference_settings is not None:

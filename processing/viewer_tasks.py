@@ -69,6 +69,7 @@ class TaskStore:
         if os.name != 'nt' and self.root.stat().st_mode & 0o077:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
+        self.spool_admission = None
         self._lock = threading.RLock()
         # Claim credentials are stored in this shared database. Tighten the
         # exact existing, owned database before creating or updating secret
@@ -169,6 +170,9 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()
+            if self.spool_admission is not None:
+                prospective=1 if row is None else row['generation']+(1 if row['removed'] else 0)
+                self.spool_admission.consume('form',identifier,prospective,0)
             if row is not None and row['environment'] != environment:
                 # Authorization and task operations use separate reads. Keep
                 # the original UUID's credential domain stable even while a
@@ -221,6 +225,8 @@ class TaskStore:
                 row = self._row(db, identifier)
                 if row['stage'] != 'uploading' or row['job_id']:
                     raise Conflict('task is no longer accepting uploads')
+                if self.spool_admission is not None:
+                    self.spool_admission.consume('upload',identifier,row['generation'],length)
                 directory = self._directory(row)
                 existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                       (identifier, key)).fetchone()

@@ -1,6 +1,7 @@
 """Strict startup configuration for the private routing prototype."""
 
 from dataclasses import dataclass, field
+import json
 import os
 import re
 from urllib.parse import urlsplit
@@ -30,6 +31,24 @@ class Config:
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     reference_main_fallback: bool = False
+    viewer_spool_admission: dict | None = None
+
+
+def _spool_admission(enabled):
+    raw=os.environ.get('PROCESSING_VIEWER_SPOOL_ADMISSION','')
+    if not raw:return None
+    if not enabled or len(raw.encode())>4096:raise ValueError('explicit bounded Viewer spool policy required')
+    try:
+        from .viewer_spool_capacity import SpoolPolicy
+        def pairs(items):
+            result={}
+            for key,item in items:
+                if key in result:raise ValueError('duplicate spool policy field')
+                result[key]=item
+            return result
+        value=json.loads(raw,object_pairs_hook=pairs);SpoolPolicy.from_payload(value)
+    except Exception:raise ValueError('invalid Viewer spool policy') from None
+    return value
 
 
 def _node_origin(value: str) -> str:
@@ -126,4 +145,5 @@ def from_environment() -> Config:
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         reference_main_fallback=fallback=='1',
+        viewer_spool_admission=_spool_admission(viewer=='1'),
     )
