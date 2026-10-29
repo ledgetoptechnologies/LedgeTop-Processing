@@ -19,7 +19,7 @@ before any business mutation; arbitrary privileged DB edits are out of scope.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import json
 import hashlib
 import math
@@ -147,7 +147,7 @@ class ScratchLedger:
 
     def __init__(self, path, storage_root, capacity_probe=None, clock=None,
                  safety_floor_bytes=1024**3, cleanup_grace_seconds=3600, input_copy_accounting=False,
-                 release_authority=None):
+                 release_authority=None, auxiliary_budget=None):
         if type(input_copy_accounting) is not bool:
             raise ValueError("explicit input copy accounting profile required")
         if release_authority is not None and (not isinstance(release_authority, InputReleaseAuthority)
@@ -158,6 +158,9 @@ class ScratchLedger:
         self.input_copy_accounting = input_copy_accounting
         self.release_authority = release_authority
         self.path = Path(path)
+        from .reference_auxiliary_budget import reject_unbudgeted
+        reject_unbudgeted(self.path,auxiliary_budget)
+        self.auxiliary_budget=auxiliary_budget
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         original_root = Path(storage_root).absolute()
         if original_root.is_symlink() or any(p.is_symlink() for p in original_root.parents):
@@ -227,7 +230,15 @@ class ScratchLedger:
 
     @contextmanager
     def _transaction(self, *, bootstrap=False):
-        db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        from .reference_auxiliary_budget import writer_scope
+        scope=ExitStack()
+        configure=scope.enter_context(writer_scope(self.path,self.auxiliary_budget))
+        try:
+            db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+            scope.callback(db.close)
+            configure(db)
+        except BaseException:
+            scope.close();raise
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA synchronous=FULL")
@@ -248,7 +259,7 @@ class ScratchLedger:
             db.rollback()
             raise
         finally:
-            db.close()
+            scope.close()
 
     def validate_accounting(self,db):
         """Live exact config/receipt invariant, including read-only snapshots.

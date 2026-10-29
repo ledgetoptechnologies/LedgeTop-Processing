@@ -186,7 +186,50 @@ def capacity(config,intent,path,directory,*,copy_required=True):
             +max(0,policy.physical_allowance-allocated)+max(0,extra-materialized))
 
 
-def validate_business_connection(db,binding):
+def validate_business_connection(db,binding,*,state_root=None):
+    """Audit the original partition before checking any logical projection.
+
+    Recovery's caller has already checked the actual profile/schema and original
+    root/inode binding. A memory projection is business input, never authority
+    to open or repair an original file.
+    """
+    from . import reference_metadata_retirement as retirement
+    policy=indexed.policy_from_binding(binding)
+    if policy.policy_id!=retirement.POLICY_ID:
+        return _validate_hot_business_connection(db,binding)
+    # This verifies every original archive/tombstone and the disjoint complete
+    # partition BEFORE projecting anything away. Unknown/incomplete state holds.
+    with retirement.validated_partition(db) as partition:
+        jobs=retirement.partition_jobs(db,partition)
+        validate_retirement_readiness(db,policy,len(jobs))
+        if jobs:
+            # The stored proof's syntax/hash is not independently resolved
+            # receipt evidence. An incomplete integration remains held.
+            resolver=getattr(retirement,'validate_archived_closures',None)
+            require(state_root is not None and callable(resolver))
+            resolver(db,state_root=state_root,binding=binding,partition=partition)
+        with retirement.logical_projection(db,partition=partition) as active:
+            _validate_hot_business_connection(active,binding)
+        for job in jobs:
+            with retirement.logical_projection(db,job=job,partition=partition) as archived:
+                _validate_hot_business_connection(archived,binding)
+        retirement.partition_jobs(db,partition)
+
+
+def validate_retirement_readiness(db,policy,retired_count):
+    """Account ORIGINAL terminal-native cache, never a filtered projection."""
+    from . import reference_metadata_retirement as retirement
+    require(type(retired_count) is int and 0<=retired_count<=retirement.MAX_ARCHIVES)
+    maximum=policy.capacity+retired_count
+    cached=db.execute('SELECT uuid FROM readiness_tasks LIMIT ?',(maximum+1,)).fetchall()
+    require(len(cached)<=maximum)
+    completed={row[0] for row in db.execute("SELECT job FROM driver_jobs WHERE stage='completed'")}
+    for entry in cached:
+        indexed.p._uuid(entry[0],'cached native task')
+        require(entry[0] in completed)
+
+
+def _validate_hot_business_connection(db,binding):
     """Bounded read-only claim/object/grant/attempt closure, no clock or TTL writes."""
     p=indexed.p;policy=indexed.policy_from_binding(binding)
     from .reference_driver import _INDEXED_FIXED_CLAIM,_INDEXED_MUTABLE_CLAIM,validate_indexed_fetch_projection
@@ -313,11 +356,16 @@ def recovered_validate(path,intent,identity,root_identity):
         db.execute('PRAGMA synchronous=FULL')
         deadline=time.monotonic()+10
         db.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
+        from . import reference_metadata_retirement as retirement
+        if indexed.policy_from_binding(intent['binding']).policy_id==retirement.POLICY_ID:
+            # Pin the ORIGINAL recovered snapshot before schema/profile checks
+            # as well as before any later business projection.
+            db.execute('BEGIN')
         require(db.execute('PRAGMA quick_check').fetchall()==[('ok',)])
         indexed.validate_profile_connection(db,bootstrap_id=intent['bootstrapId'],binding=intent['binding'],
             root_identity=root_identity,driver_identity=identity)
         require(db.execute('SELECT COUNT(*) FROM driver_binding').fetchone()[0]<=1)
-        validate_business_connection(db,intent['binding'])
+        validate_business_connection(db,intent['binding'],state_root=intent['binding'].get('stateRoot'))
         row=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
         if row is not None:bootstrap._driver_settings(json.loads(row[0]),intent['binding'],indexed=True)
     require(not any(os.path.lexists(str(path)+s) for s in ('-journal','-wal','-shm')))

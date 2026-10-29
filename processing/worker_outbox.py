@@ -3,7 +3,7 @@
 Persist before sending. Send only a claimed immutable payload; a transport success
 is not a durable receipt. Even acknowledged rows and manifests remain retained.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import math
@@ -67,8 +67,11 @@ def _path(value):
 
 class WorkerOutbox:
     def __init__(self, path, *, clock=None, random_source=None,
-                 retry_base_seconds=5, retry_max_seconds=300):
+                 retry_base_seconds=5, retry_max_seconds=300, auxiliary_budget=None):
         self.path = Path(path)
+        from .reference_auxiliary_budget import reject_unbudgeted
+        reject_unbudgeted(self.path,auxiliary_budget)
+        self.auxiliary_budget=auxiliary_budget
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.clock = clock or time.time
         self.random = random_source or random.random
@@ -95,7 +98,15 @@ class WorkerOutbox:
 
     @contextmanager
     def _transaction(self, *, bootstrap=False):
-        db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        from .reference_auxiliary_budget import writer_scope
+        scope=ExitStack()
+        configure=scope.enter_context(writer_scope(self.path,self.auxiliary_budget))
+        try:
+            db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+            scope.callback(db.close)
+            configure(db)
+        except BaseException:
+            scope.close();raise
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA synchronous=FULL")
@@ -110,7 +121,7 @@ class WorkerOutbox:
             db.rollback()
             raise
         finally:
-            db.close()
+            scope.close()
 
     def _observe(self, db):
         value = self.clock()

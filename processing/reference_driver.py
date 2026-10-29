@@ -1162,6 +1162,10 @@ class ReferenceDriver:
             job_id = head['jobId']
             p._slug(job_id, 'job ID')
             request_id = 'driver-' + secrets.token_hex(16)
+            auxiliary=getattr(self.ledger,'auxiliary_budget',None)
+            if auxiliary is not None:
+                auxiliary.require_lifecycle_qualification()
+                auxiliary.reserve_job(job_id,request_id)
             with self._db() as db:
                 if self._indexed is not None:self._indexed.reserve_slot(db,job_id,ledger=self.ledger)
                 db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,'claim_pending',?)",

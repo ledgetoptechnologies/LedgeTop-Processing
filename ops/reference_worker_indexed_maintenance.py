@@ -333,6 +333,26 @@ class _ReadOnlyJournal:
             root_identity=_id(self.root),driver_identity=_id(self.driver_path))
 
 
+class _ProjectedBusinessJournal(_ReadOnlyJournal):
+    """Logical reader for one registered projection of a checked original DB.
+
+    The original journal alone supplies physical/schema/profile authority. The
+    memory connection must be minted and still registered by the retirement
+    context; its MEMORY journal mode is never represented as physical DELETE.
+    """
+    def __init__(self,original,original_db,projected_db,partition,*,job=None):
+        require(type(original) is _ReadOnlyJournal,'indexed_original_journal_required')
+        self.original,self.original_db=original,original_db
+        self.projected_db,self.partition,self.job=projected_db,partition,job
+        self.check(projected_db)
+
+    def check(self,db):
+        from processing import reference_metadata_retirement as retirement
+        require(db is self.projected_db,'indexed_projection_identity_changed')
+        self.original.check(self.original_db)
+        retirement.check_projection(self.original_db,db,partition=self.partition,job=self.job)
+
+
 def _hash_rows(db,table,limit):
     require(db.execute('SELECT COUNT(*) FROM "'+table+'"').fetchone()[0]<=limit,'indexed_maintenance_row_bound')
     columns=list(db.execute('PRAGMA table_info("'+table+'")'))
@@ -411,6 +431,56 @@ def audit_terminal_job(db,ro,row,scratch):
 def inspect_driver(db,root,context,*,running=False):
     """Full terminal audit only at maintenance boundaries, never health polling."""
     intent,receipts=_authority(context,root,running=running);policy=j.policy_from_binding(intent['binding']);ro=_ReadOnlyJournal(intent,root);ro.check(db)
+    from processing import reference_metadata_retirement as retirement
+    if policy.policy_id!=retirement.POLICY_ID:
+        return _inspect_hot_driver(db,root,ro,policy,receipts,binding=intent['binding'])
+    worker,_=_check(context,root,running=running)
+    with retirement.validated_partition(db) as partition:
+        return _inspect_retiring_driver(db,root,ro,policy,receipts,intent,retirement,partition,
+            actual_scratch_root=worker.policy.scratch_root)
+
+
+def _inspect_retiring_driver(db,root,ro,policy,receipts,intent,retirement,partition,*,actual_scratch_root):
+    # The ORIGINAL physical mapping, schema, descriptor and budget above are
+    # mandatory. Projections below only reuse terminal business validation.
+    retired=retirement.partition_jobs(db,partition)
+    # Readiness belongs to the actual database, not the deliberately empty cache
+    # of a business projection. Account every original entry first.
+    from processing.reference_indexed_recovery import validate_retirement_readiness
+    validate_retirement_readiness(db,policy,len(retired))
+    if retired:
+        resolver=getattr(retirement,'validate_archived_closures',None)
+        require(callable(resolver),'indexed_retirement_closure_unavailable')
+        resolver(db,state_root=root,binding=intent['binding'],partition=partition,
+            actual_scratch_root=actual_scratch_root)
+    archive_history=retirement.archive_history(db,partition=partition)
+    with retirement.logical_projection(db,partition=partition) as active:
+        active.row_factory=sqlite3.Row
+        logical_ro=_ProjectedBusinessJournal(ro,db,active,partition)
+        _inspect_hot_driver(active,root,logical_ro,policy,receipts,binding=intent['binding'])
+    for job in retired:
+        with retirement.logical_projection(db,job=job,partition=partition) as archived:
+            archived.row_factory=sqlite3.Row
+            logical_ro=_ProjectedBusinessJournal(ro,db,archived,partition,job=job)
+            _inspect_hot_driver(archived,root,logical_ro,policy,receipts,binding=intent['binding'])
+    tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+    limits={name:policy.retained_jobs for name in tables}
+    limits.update(driver_jobs=policy.retained_jobs+retirement.MAX_ARCHIVES,driver_binding=1,
+        driver_engine_pin=1,readiness_tasks=policy.capacity+len(retired),indexed_profile=1,
+        indexed_objects=10000*policy.capacity,indexed_attempts=10010*policy.capacity,
+        indexed_retired=retirement.MAX_ARCHIVES)
+    # Full archive bytes were bounded, hashed and audited above. Preserve their
+    # exact content-addressed history without feeding32MiB cells to the legacy
+    #4MiB hot-row encoder or replacing any original row with a projection.
+    hashes={name:_hash_rows(db,name,limits[name]) for name in sorted(tables) if name!='indexed_archives'}
+    hashes['indexed_archives']=p.digest(dict(table='indexed_archives',history=archive_history))
+    history={name:value for name,value in hashes.items() if name!='driver_engine_pin'}
+    retirement.partition_jobs(db,partition)
+    return hashes,dict(schemaVersion=1,profile=retirement.POLICY_ID,tables=history,
+        bootstrap=receipts,archives=archive_history)
+
+
+def _inspect_hot_driver(db,root,ro,policy,receipts,*,binding):
     tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
     require(not db.execute("SELECT 1 FROM driver_jobs WHERE typeof(data)!='text' OR length(CAST(data AS BLOB))>8192 LIMIT 1").fetchone(),'indexed_maintenance_projection_bound')
     jobs=list(db.execute('SELECT job,claim_request,stage,data FROM driver_jobs LIMIT 65'))
@@ -444,7 +514,7 @@ def inspect_driver(db,root,context,*,running=False):
     require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==
         (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns),'indexed_scratch_changed_during_audit')
     settings=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
-    if settings:bootstrap._driver_settings(json.loads(settings[0]),intent['binding'],indexed=True)
+    if settings:bootstrap._driver_settings(json.loads(settings[0]),binding,indexed=True)
     limits={name:policy.retained_jobs for name in tables}
     limits.update(driver_binding=1,driver_engine_pin=1,readiness_tasks=policy.capacity,indexed_profile=1,indexed_objects=10000*policy.capacity,indexed_attempts=10010*policy.capacity)
     hashes={name:_hash_rows(db,name,limits[name]) for name in sorted(tables)}

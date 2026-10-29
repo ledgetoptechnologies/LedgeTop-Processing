@@ -5,7 +5,7 @@ reader process no longer holds its lease. Only exact registered read-pin mapping
 are retired. Global strong ownership intentionally retains uncertain sessions even
 if callers lose references; no finalizer unlocks a lease behind a live descriptor.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import errno
 import json
 import os
@@ -43,6 +43,9 @@ class ReaderSession:
     def __init__(self,ledger):
         self.ledger=ledger
         self.path=Path(ledger.path).absolute()
+        from .reference_auxiliary_budget import reject_unbudgeted
+        self.auxiliary_budget=getattr(ledger,'auxiliary_budget',None)
+        reject_unbudgeted(self.path,self.auxiliary_budget)
         self.root=Path(ledger.root).absolute()
         self.lock_path=self.path.with_name(self.path.name+'.readers.lock')
         self._mutex=threading.RLock()
@@ -110,6 +113,7 @@ class ReaderSession:
                     lockIdentity=list(_lock_identity(lock)),marker=marker.hex())
                 self._pid=os.getpid()
                 epoch=secrets.token_hex(32)
+                if self.auxiliary_budget is not None:self.auxiliary_budget.reserve_reader(epoch,'epoch')
                 with self._db(startup=True) as db:
                     for sql in (
                         'CREATE TABLE IF NOT EXISTS reader_session_binding (id INTEGER PRIMARY KEY CHECK(id=1),binding TEXT NOT NULL,current_epoch TEXT NOT NULL)',
@@ -173,7 +177,13 @@ class ReaderSession:
     @contextmanager
     def _db(self,*,startup=False,closing=False):
         self._check_files()
-        db=sqlite3.connect(self.path,timeout=20,isolation_level=None)
+        from .reference_auxiliary_budget import writer_scope
+        scope=ExitStack();configure=scope.enter_context(writer_scope(self.path,self.auxiliary_budget))
+        try:
+            db=sqlite3.connect(self.path,timeout=20,isolation_level=None)
+            scope.callback(db.close);configure(db)
+        except BaseException:
+            scope.close();raise
         db.row_factory=sqlite3.Row
         try:
             db.execute('PRAGMA synchronous=FULL')
@@ -191,7 +201,7 @@ class ReaderSession:
         except Exception:
             db.rollback()
             raise
-        finally:db.close()
+        finally:scope.close()
 
     def _check_files(self):
         if self._pid!=os.getpid() or self._fd is None:
@@ -236,6 +246,7 @@ class ReaderSession:
         with self._mutex:
             self.check()
             reference='reader-'+secrets.token_hex(24)
+            if self.auxiliary_budget is not None:self.auxiliary_budget.reserve_reader(reference,'pin')
             handle=ReadPinHandle(self,reservation,object_id,reference)
             self._handles[reference]=handle
             writes=False

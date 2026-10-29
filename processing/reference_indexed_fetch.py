@@ -22,6 +22,7 @@ from . import reference_protocol as p
 PROTOCOL = 'ltds-indexed-worker-fetch-v1'
 POLICY_ID = 'indexed-worker-fetch-v1'
 THREE_POLICY_ID = 'indexed-worker-fetch-three-retained-v1'
+RETIRING_POLICY_ID = 'indexed-worker-fetch-retiring-v1'
 PAGE_SIZE = 4096
 PAGE_CAP = 16384
 DB_CAP = PAGE_SIZE * PAGE_CAP
@@ -92,23 +93,37 @@ class IndexedPolicy:
 
 _V2_POLICY=IndexedPolicy(POLICY_ID,PAGE_CAP,LIMITS['retainedJobs'])
 _THREE_POLICY=IndexedPolicy(THREE_POLICY_ID,32768,3)
+_RETIRING_POLICY=IndexedPolicy(RETIRING_POLICY_ID,32768,3)
 
 
 def validated_policy(value=None):
     value=_V2_POLICY if value is None else value
-    require(type(value) is IndexedPolicy and value in (_V2_POLICY,_THREE_POLICY),'indexed_policy_unknown')
+    require(type(value) is IndexedPolicy and value in (_V2_POLICY,_THREE_POLICY,_RETIRING_POLICY),'indexed_policy_unknown')
     return value
+
+
+def schema_for_policy(policy=None):
+    policy=validated_policy(policy)
+    if policy.policy_id==RETIRING_POLICY_ID:
+        from .reference_metadata_retirement import schema
+        return schema(SCHEMA)
+    return SCHEMA
 
 
 def compiled_profile_descriptor(policy_id=POLICY_ID):
     # Default descriptor bytes are the already qualified v2 ABI. The larger
     # policy is a separate fresh-state opt-in, never an in-place page-cap edit.
-    require(type(policy_id) is str and policy_id in (POLICY_ID,THREE_POLICY_ID),'indexed_policy_unknown')
+    require(type(policy_id) is str and policy_id in (POLICY_ID,THREE_POLICY_ID,RETIRING_POLICY_ID),'indexed_policy_unknown')
     limits=dict(LIMITS)
-    if policy_id==THREE_POLICY_ID:
+    if policy_id in (THREE_POLICY_ID,RETIRING_POLICY_ID):
         limits.update(databasePageCap=_THREE_POLICY.page_cap,retainedJobs=3,
                       physicalAllowanceBytes=_THREE_POLICY.physical_allowance)
-    schema_sha=p.digest(SCHEMA)
+    selected=_RETIRING_POLICY if policy_id==RETIRING_POLICY_ID else _THREE_POLICY if policy_id==THREE_POLICY_ID else _V2_POLICY
+    if policy_id==RETIRING_POLICY_ID:
+        from .reference_metadata_retirement import MAX_ARCHIVES,MAX_ARCHIVE_BYTES,COPY_HEADROOM
+        limits.update(retirementSchemaVersion=1,archiveJobs=MAX_ARCHIVES,
+                      archiveBytes=MAX_ARCHIVE_BYTES,retirementCopyHeadroomBytes=COPY_HEADROOM)
+    schema_sha=p.digest(schema_for_policy(selected))
     policy=dict(schemaVersion=1,protocol=PROTOCOL,policyId=policy_id,schemaSha256=schema_sha,limits=limits)
     return dict(policy,policySha256=p.digest(policy))
 
@@ -117,7 +132,9 @@ def policy_from_binding(binding):
     require(type(binding) is dict,'indexed_policy_binding_required')
     profile=binding.get('inputCopyAccounting')
     if profile is not None:
-        if encoded(profile)==encoded(dict(schemaVersion=3,fetchJournal=dict(schemaVersion=1,policyId=THREE_POLICY_ID))):
+        if encoded(profile)==encoded(dict(schemaVersion=4,fetchJournal=dict(schemaVersion=1,policyId=RETIRING_POLICY_ID))):
+            selected=_RETIRING_POLICY
+        elif encoded(profile)==encoded(dict(schemaVersion=3,fetchJournal=dict(schemaVersion=1,policyId=THREE_POLICY_ID))):
             selected=_THREE_POLICY
         else:
             require(encoded(profile)==encoded(dict(schemaVersion=2,fetchJournal=dict(schemaVersion=1,policyId=POLICY_ID))),
@@ -224,9 +241,9 @@ def _schema(db):
     return [tuple(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name LIMIT 128")]
 
 
-def _expected_schema():
+def _expected_schema(policy=None):
     with closing(sqlite3.connect(':memory:')) as db:
-        for statement in SCHEMA:db.execute(statement)
+        for statement in schema_for_policy(policy):db.execute(statement)
         return _schema(db)
 
 
@@ -249,7 +266,7 @@ def initialize_fresh_profile(driver_path, *, bootstrap_id, binding, owner):
         require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE)
         require(db.execute('PRAGMA max_page_count='+str(policy.page_cap)).fetchone()[0]==policy.page_cap)
         db.execute('BEGIN IMMEDIATE')
-        for statement in SCHEMA:db.execute(statement)
+        for statement in schema_for_policy(policy):db.execute(statement)
         db.execute('INSERT INTO indexed_profile VALUES(1,?)',(encoded(_profile(bootstrap_id,binding,root_id,identity)).decode(),))
         db.commit()
     fd=os.open(root,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
@@ -261,18 +278,23 @@ def initialize_fresh_profile(driver_path, *, bootstrap_id, binding, owner):
 def validate_profile_connection(db, *, bootstrap_id, binding, root_identity, driver_identity):
     """Logical verification only; never grants a live physical context."""
     policy=policy_from_binding(binding)
+    if policy.policy_id==RETIRING_POLICY_ID:
+        from .reference_metadata_retirement import require_clean_sql_context
+        require_clean_sql_context(db)
     expected=_profile(bootstrap_id,binding,root_identity,driver_identity)
     deadline=time.monotonic()+3;db.set_progress_handler(lambda:int(time.monotonic()>deadline),1000)
     require(db.execute('PRAGMA page_size').fetchone()[0]==PAGE_SIZE and db.execute('PRAGMA page_count').fetchone()[0]<=policy.page_cap)
     require(db.execute('PRAGMA journal_mode').fetchone()[0]=='delete')
-    require(_schema(db)==_expected_schema(),'indexed_schema_changed')
+    require(_schema(db)==_expected_schema(policy),'indexed_schema_changed')
     row=db.execute('SELECT record FROM indexed_profile WHERE singleton=1 AND length(CAST(record AS BLOB))<=16384').fetchone()
     require(row is not None and row[0]==encoded(expected).decode(),'indexed_profile_changed')
     require(not db.execute('SELECT 1 FROM driver_binding WHERE typeof(binding)!=\'text\' OR length(CAST(binding AS BLOB))>16384 LIMIT 1').fetchone(),'indexed_driver_binding_bound')
     driver_binding=db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
     if driver_binding is None:
-        for table in ('driver_jobs','readiness_tasks','driver_engine_pin','indexed_quota','indexed_claims','indexed_objects',
-                      'indexed_seals','indexed_reservations','indexed_grants','indexed_fetch','indexed_attempts'):
+        tables=('driver_jobs','readiness_tasks','driver_engine_pin','indexed_quota','indexed_claims','indexed_objects',
+                      'indexed_seals','indexed_reservations','indexed_grants','indexed_fetch','indexed_attempts')
+        if policy.policy_id==RETIRING_POLICY_ID:tables+=('indexed_archives','indexed_retired')
+        for table in tables:
             require(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is None,'unbound_indexed_history')
     else:
         require(type(driver_binding[0]) is str and len(driver_binding[0].encode())<=16384)
@@ -360,6 +382,9 @@ class IndexedFetchJournal:
         self.check(db);p._slug(job,'indexed job')
         old=db.execute('SELECT charge FROM indexed_quota WHERE job=?',(job,)).fetchone()
         if old:require(old[0]==JOB_CHARGE);return
+        if self.policy.policy_id==RETIRING_POLICY_ID:
+            from .reference_metadata_retirement import reserve_admission
+            reserve_admission(db)
         count,total=db.execute('SELECT COUNT(*),COALESCE(SUM(charge),0) FROM indexed_quota').fetchone()
         require(count<self.policy.retained_jobs and total+JOB_CHARGE+NON_JOB_ALLOWANCE<=self.policy.database_cap,'indexed_metadata_quota_full')
         allocated=sum(getattr(v.lstat(),'st_blocks',0)*512 for v in (self.path,Path(str(self.path)+'-journal')) if os.path.lexists(v))

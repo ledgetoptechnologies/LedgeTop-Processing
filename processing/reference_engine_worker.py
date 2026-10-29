@@ -5,7 +5,7 @@ No daemon or engine is started by import. Uncertain mutations are never replayed
 The injected engine implements NativeEngine; only configured local origins are
 supported by the deployment driver (not supplied by submissions).
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import ipaddress
 import json
@@ -30,8 +30,14 @@ class WorkerHeld(ValueError):
 class ReferenceEngineWorker:
     def __init__(self, path, *, ledger, outbox, engine, engine_id, node_id,
                  authority_id, coordinator_origin, gate_generation, worker_id,
-                 engine_version, allowed_odm_options=()):
+                 engine_version, allowed_odm_options=(), auxiliary_budget=None):
         self.path = Path(path).absolute()
+        from .reference_auxiliary_budget import reject_unbudgeted
+        reject_unbudgeted(self.path,auxiliary_budget)
+        if auxiliary_budget is not None and (getattr(ledger,'auxiliary_budget',None) is not auxiliary_budget
+                or getattr(outbox,'auxiliary_budget',None) is not auxiliary_budget):
+            raise WorkerHeld('auxiliary_writer_composition_required')
+        self.auxiliary_budget=auxiliary_budget
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(x.is_symlink() for x in (self.path, *self.path.parents)):
             raise ValueError('private journal path required')
@@ -85,7 +91,15 @@ class ReferenceEngineWorker:
 
     @contextmanager
     def _db(self):
-        db = sqlite3.connect(self.path, timeout=10)
+        from .reference_auxiliary_budget import writer_scope
+        scope=ExitStack()
+        configure=scope.enter_context(writer_scope(self.path,self.auxiliary_budget))
+        try:
+            db = sqlite3.connect(self.path, timeout=10)
+            scope.callback(db.close)
+            configure(db)
+        except BaseException:
+            scope.close();raise
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA synchronous=FULL')
         try:
@@ -93,7 +107,7 @@ class ReferenceEngineWorker:
                 db.execute('BEGIN IMMEDIATE')
                 yield db
         finally:
-            db.close()
+            scope.close()
 
     def _row(self, job_id):
         with self._db() as db:
