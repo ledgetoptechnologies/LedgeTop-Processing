@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "status": "qualified-worker-image-cached-on-both-hosts-no-worker-activated",
+  "observedAt": "2026-10-29T00:51:57.145399+00:00",
+  "operation": "inactive-image-stage-3b9efcbc3a8243d8ab5b1a7c2d0f161e",
+  "export": {
+    "operation": "inactive-image-stage-3b9efcbc3a8243d8ab5b1a7c2d0f161e",
+    "imageIndex": "sha256:d3cc352beb9de0e4d0a88e4709c88ce990529eda8015aced696f9d6813ae0819",
+    "platformManifest": "sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e",
+    "configDigest": "sha256:3b932e10eac3e0af8976b9ee09997a54530717963d9a04206e2e2eb810c662a0",
+    "platform": "linux/amd64",
+    "archiveBytes": 44515840,
+    "archiveSha256": "a90e38048626744d822eb4bcf5ae16dbf30a4e7f366a0bb26fe1be5380233eae"
+  },
+  "stageHelperSha256": "c0d617a45f1295199f07c463a894015e88703b6851781143b1b5d3a66bc96112",
+  "separateReadbacks": [
+    {
+      "host": "192.168.50.89",
+      "receipt": {
+        "status": "image-cached-only-no-worker-started",
+        "remoteImageId": "sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e",
+        "desktopImageIndex": "sha256:d3cc352beb9de0e4d0a88e4709c88ce990529eda8015aced696f9d6813ae0819",
+        "platformManifest": "sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e",
+        "configDigest": "sha256:3b932e10eac3e0af8976b9ee09997a54530717963d9a04206e2e2eb810c662a0",
+        "archiveSha256": "a90e38048626744d822eb4bcf5ae16dbf30a4e7f366a0bb26fe1be5380233eae",
+        "selectedFiles": 66,
+        "fullInventoryMatched": true,
+        "rootFsMatched": true,
+        "uid": 1000,
+        "existingContainersUnchanged": true,
+        "inertImportOnly": true,
+        "workerActivated": false
+      },
+      "archiveAbsent": true,
+      "containersIndependentlyUnchanged": true,
+      "currentContainers": 17,
+      "imageIdIndependentlyVerified": "sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e"
+    },
+    {
+      "host": "192.168.50.88",
+      "receipt": {
+        "status": "image-cached-only-no-worker-started",
+        "remoteImageId": "sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e",
+        "desktopImageIndex": "sha256:d3cc352beb9de0e4d0a88e4709c88ce990529eda8015aced696f9d6813ae0819",
+        "platformManifest": "sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e",
+        "configDigest": "sha256:3b932e10eac3e0af8976b9ee09997a54530717963d9a04206e2e2eb810c662a0",
+        "archiveSha256": "a90e38048626744d822eb4bcf5ae16dbf30a4e7f366a0bb26fe1be5380233eae",
+        "selectedFiles": 66,
+        "fullInventoryMatched": true,
+        "rootFsMatched": true,
+        "uid": 1000,
+        "existingContainersUnchanged": true,
+        "inertImportOnly": true,
+        "workerActivated": false
+      },
+      "archiveAbsent": true,
+      "containersIndependentlyUnchanged": true,
+      "currentContainers": 5,
+      "imageIdIndependentlyVerified": "sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e"
+    }
+  ],
+  "runtimeChanged": false,
+  "workerActivated": false,
+  "nasChanges": false,
+  "credentialsChanged": false,
+  "publication": false,
+  "temporaryRemoteArchivesRemoved": true,
+  "remaining": [
+    "Actual private worker config/state/scratch assembly and same physical gate/namespace binding",
+    "Viewer app broker/issuer/custody/acceptance integration",
+    "Existing backend updater worker-drain/rebind/health/reopen integration",
+    "Installed synthetic lifecycle and full processing mode acceptance"
+  ]
+}

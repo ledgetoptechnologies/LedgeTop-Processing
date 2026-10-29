@@ -59,10 +59,23 @@ cover acceptance before cleanup and original-grant expiry after actual engine
 commit during a coordinator outage, without manually stepping the driver. See
 [worker service](reference-worker-service.md) and
 [qualification evidence](evidence/reference-worker-service-20261028.json).
-This source is committed but not installed. Its reader-authenticated health is
+This source is committed but no worker service is installed. Its reader-authenticated health is
 bounded liveness/configured identity, not physical container/gate attestation.
 Worker packaging, exact host binding and actual Viewer/NAS integration remain
 required before activation.
+
+The qualified UID1000 worker image is now cached, inactive, on both PCs as
+`sha256:a284e32817b33062b782fb79083813192f98c1e07a2eac63fb12e761f0967a5e`.
+All 66 packaged source files and image layers matched; independent readbacks
+confirmed existing containers unchanged and both temporary transfer archives
+removed. See [worker container](reference-worker-container.md) and
+[inactive image staging evidence](evidence/reference-worker-image-staged-20261028.json).
+This is not worker activation. Existing TLS and scoped coordinator roles are
+available, but worker config/state/scratch and the real Viewer broker still need
+assembly. The existing backend updater must also drain/rebind/check the worker
+before reopening a node after an engine update; its current version has no such
+worker phase. Initial same-gate host Docker inspection alone cannot qualify
+subsequent engine replacements.
 
 The coordinator-only upgrade now has a locally built exact `6bbd468` image and
 an independently tested incremental history validator. The actual image passed
