@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "status": "reviewed-and-pushed-source-only",
+  "repository": "ledgetoptechnologies/LedgeTop-Ops",
+  "branch": "codex/viewer-hierarchy-integration-20261029",
+  "commit": "ebdfe53b33446b19be98e2ffeff68b9c09185e42",
+  "baseCommit": "4b4f7075110372241aa139503d1dfd450e0b6c14",
+  "reuse": "Selective hierarchy-only hunks and component/tests from ccb24bef; no older reference-provider branch merge",
+  "files": 8,
+  "migration": {"version": 42, "name": "viewer_workspace_hierarchy", "gcpReservation": 41},
+  "semantics": "Viewer-owned display organizations, optional groups and exact project assignments; tasks keep their project. No name matching, access grants, Operations membership or share changes.",
+  "tests": {
+    "hierarchyAndMigration": {"passed": 18, "skipped": 0, "milliseconds": 2306.238771},
+    "lifecycleSharingProcessing": {"passed": 69, "skipped": 0, "milliseconds": 8134.457465},
+    "independentFocusedReview": {"passed": 7, "skipped": 0, "findings": 0},
+    "apiToUiGrouping": {"state": "passed", "realAuthenticatedHttp": true, "realSQLite": true, "freshDatabaseConnection": true, "pages": 3, "syntheticCustomers": 2, "projects": 2, "draftTasks": 2, "grantsUnchanged": true, "engineJobs": 0},
+    "uiConsumerCommit": "675be1388fdab17185f9aaef0b727df5ef5ec2e6",
+    "uiGroupingModuleSha256": "e2b661ecf3632ac5eb3ec9ca1dfba5c0cc9229eb13fc5661cdb5f7cd599bccd3",
+    "image": "sha256:8140dd65a57dddaf092665c45b9b204cdc66558b539bda5b1d5961911de0b80d",
+    "environment": "Local Docker, network none except loopback, read-only source/root and disposable tmpfs data",
+    "harnessCorrection": "Initial plain Node/Python image lacked Express; migration tests passed but API module did not load. Corrected cached Viewer dependency image was then used; no source checks were relaxed."
+  },
+  "review": {
+    "patchSha256": "390186386d231b4f5e799889ac25725a519361800eebcb8c4de08431a1ef2332",
+    "receiptSha256": "2017667742fa1d2a3f5b5eca70a96c5bc767e5f458089b69e74d35479422a82d",
+    "result": "accepted scoped source patch"
+  },
+  "coordination": {
+    "viewerChat": "01a16728-6f90-7fa2-9968-3883d150dd83",
+    "uiRequest": "534b401b-a65e-4149-80a4-47b968134c54",
+    "existingUiTopic": "agent-link-4e1f2418-40b3-4d99-b448-7ecef228df7e",
+    "uiOwnerAcknowledgmentVerified": false,
+    "routingCorrection": "Initial Processing-topic recipient explicitly declined UI ownership; the corrected request uses the existing Viewer registry and a new hop-zero chain. No listener or subscription was added."
+  },
+  "remaining": ["Actual GCP41 migration compatibility and current-main reconciliation", "Create/assign UI controls", "Rendered desktop/mobile behavior", "Operator acceptance and controlled installation"],
+  "mainMerged": false,
+  "deployed": false,
+  "nasChanged": false,
+  "clientRecordsChanged": false
+}
