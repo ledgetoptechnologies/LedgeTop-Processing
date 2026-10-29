@@ -56,11 +56,11 @@ acknowledgedAt
 
 IDs use the existing ASCII slug bounds, digests use lower-case SHA256, generation
 is the existing positive safe integer, and time is canonical UTC milliseconds.
-The ACK binds the exact issued custody receipt. The authenticated Processing
+The ACK binds the exact issued custody receipt. Its
 `sourceRetentionReceiptId` refers to the same source receipt named
 `sourceCustodyReceiptId` in the existing local `input-copy-release` record.
-The authenticated Processing
-identity is transport/durable registration authority, never a caller JSON field.
+The authenticated Processing identity is transport/durable registration
+authority, never a caller JSON field.
 Receipt-role uniqueness is enforced in durable stores across source, storage,
 result, terminal and ACK roles. The ACK ID is persisted before the first send;
 exact replay returns the same response, changed bytes under that ID conflict.
