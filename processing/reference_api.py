@@ -25,7 +25,7 @@ class Response:
 class ReferenceAPI:
     def __init__(self, store, *, bearer_tokens, capability_fingerprint,
                  options_fingerprint, allowed_odm_options=(), treedar_available=False,
-                 result_proxy=None, admission_catalog_sha=None):
+                 result_proxy=None, admission_catalog_sha=None, grant_reconciliation=False):
         protocol._hash(capability_fingerprint, "capability fingerprint")
         protocol._hash(options_fingerprint, "options fingerprint")
         if type(bearer_tokens) is not dict or not bearer_tokens:
@@ -37,6 +37,8 @@ class ReferenceAPI:
             protocol._environment(environment)
         if type(treedar_available) is not bool:
             raise ValueError("explicit TreeDar availability boolean required")
+        if type(grant_reconciliation) is not bool:
+            raise ValueError("explicit grant reconciliation boolean required")
         options = frozenset(allowed_odm_options)
         if any(type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", name) for name in options):
             raise ValueError("invalid ODM option allowlist")
@@ -48,6 +50,7 @@ class ReferenceAPI:
         self.treedar_available = treedar_available
         self.result_proxy = result_proxy
         self.admission_catalog_sha=admission_catalog_sha
+        self.grant_reconciliation=grant_reconciliation
         from .reference_terminal import TerminalService
         self.terminal = TerminalService(store)
 
@@ -107,6 +110,13 @@ class ReferenceAPI:
         if method == "GET" and path == protocol.PREFIX + "/capabilities":
             return Response(200, self._capabilities(environment))
         try:
+            reconciliation=re.fullmatch(re.escape(protocol.PREFIX)+r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/transfer-grants/reconcile',path)
+            if reconciliation:
+                if not self.grant_reconciliation:return self._error(404,'not_found')
+                if not self.store.has_reference_scope(reconciliation[1],environment=environment):return self._error(404,'not_found')
+                if method!='POST':return self._error(405,'method_not_allowed')
+                expected=protocol.decode_submission(body)
+                return Response(200,self.store.reconcile_transfer_grant(reconciliation[1],expected,environment=environment))
             if method=='POST' and path==protocol.PREFIX+'/jobs/reconcile':
                 job=self.store.reconcile_submission(protocol.decode_submission(body),environment=environment)
                 return Response(200,job) if job is not None else self._error(404,'submission_unavailable')

@@ -555,6 +555,70 @@ class ReferenceStore:
             row = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
             return json.loads(row[0]) if row else None
 
+    def has_reference_scope(self, job_id, *, environment):
+        """Scalar authorization probe; never select private/input/result JSON."""
+        protocol._slug(job_id,'job ID');protocol._environment(environment)
+        with self.queue._db() as db:
+            return db.execute('''SELECT 1 FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
+              WHERE r.job_id=? AND r.environment=? AND j.environment=? AND j.profile=? LIMIT 1''',
+              (job_id,environment,environment,PROFILE)).fetchone() is not None
+
+    def reconcile_transfer_grant(self, job_id, expected, *, environment):
+        """Historical exact delivery ACK; no token, renewal or download authority.
+
+        Expiry and later job phases do not erase a committed delivery. Failure
+        is UNKNOWN, never evidence that reissuance, deletion or retry is safe.
+        Public caller separately authenticates the Viewer environment.
+        """
+        fields=('schemaVersion','jobId','generation','environment','reservationId',
+                'manifestSha256','nonce','grantSha256')
+        protocol._closed(expected,fields,'grant delivery reconciliation')
+        if type(expected['schemaVersion']) is not int or expected['schemaVersion']!=1:
+            raise ValueError('unsupported grant reconciliation version')
+        protocol._environment(environment);protocol._environment(expected['environment'])
+        protocol._integer(expected['generation'],'generation')
+        for key in ('jobId','reservationId','nonce'):protocol._slug(expected[key],key)
+        for key in ('manifestSha256','grantSha256'):protocol._hash(expected[key],key)
+        if expected['jobId']!=job_id or expected['environment']!=environment:
+            raise Conflict('grant reconciliation binding differs')
+        from .reference_grant_history import decode_history,validate_historical_grant,MAX_NORMALIZED_BYTES,HistoricalGrantHeld
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            # Size/type probes precede materializing any private grant bytes.
+            row=db.execute('''SELECT r.generation,r.environment,j.environment AS queue_environment,r.manifest_sha,r.pipeline_digest,
+              typeof(r.input_json) AS input_kind,length(CAST(r.input_json AS BLOB)) AS input_size,
+              typeof(r.transfer_json) AS request_kind,length(CAST(r.transfer_json AS BLOB)) AS request_size,
+              typeof(g.grant_json) AS kind,length(CAST(g.grant_json AS BLOB)) AS size,
+              typeof(g.digest) AS digest_kind,length(CAST(g.digest AS BLOB)) AS digest_size
+              FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
+              LEFT JOIN reference_transfer_grants g ON g.job_id=r.job_id
+              WHERE r.job_id=? AND j.profile=?''',(job_id,PROFILE)).fetchone()
+            if row is None or row['environment']!=environment or row['queue_environment']!=environment:
+                raise Conflict('grant delivery unavailable')
+            if (row['kind']!='text' or not 0<row['size']<=protocol.MAX_BODY_BYTES
+                    or row['digest_kind']!='text' or row['digest_size']!=64
+                    or row['input_kind']!='text' or not 0<row['input_size']<=MAX_NORMALIZED_BYTES
+                    or row['request_kind']!='text' or not 0<row['request_size']<=4096):
+                raise Conflict('grant delivery unavailable')
+            raw,digest=db.execute('SELECT grant_json,digest FROM reference_transfer_grants WHERE job_id=?',(job_id,)).fetchone()
+            original,request=db.execute('SELECT input_json,transfer_json FROM reference_jobs WHERE job_id=?',(job_id,)).fetchone()
+            try:
+                grant=decode_history(raw,limit=protocol.MAX_BODY_BYTES)
+                validate_historical_grant(grant,job=dict(jobId=job_id,generation=row['generation'],environment=row['environment'],
+                    manifestSha256=row['manifest_sha'],pipelineDigest=row['pipeline_digest'],
+                    submission=decode_history(original,limit=MAX_NORMALIZED_BYTES),transferRequest=decode_history(request,limit=4096)))
+            except HistoricalGrantHeld:
+                raise Conflict('grant delivery unavailable') from None
+            if _json(grant)!=raw or protocol.digest(grant)!=digest or digest!=expected['grantSha256']:
+                raise Conflict('grant delivery differs')
+            if (type(row['generation']) is not int or row['generation']!=expected['generation']
+                    or row['manifest_sha']!=expected['manifestSha256']):
+                raise Conflict('grant delivery differs')
+            for key in ('jobId','generation','environment','reservationId','manifestSha256','nonce'):
+                if type(grant.get(key)) is not type(expected[key]) or grant[key]!=expected[key]:
+                    raise Conflict('grant delivery differs')
+            return dict(expected,receiptType='transfer_grant_reconciliation',accepted=True,mayDownload=False)
+
     def _seal_result(self, db, row, result, *, allow_recovery):
         failure_table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
         if failure_table and db.execute('SELECT 1 FROM reference_worker_failures WHERE job_id=? AND generation=?',
