@@ -88,8 +88,12 @@ The owned disposable volume was removed. See
 [source qualification](evidence/reference-offline-admission-20261028.json).
 This source is not installed and is newer than the cached 66-file worker image.
 Its opt-in SQLite writer ABI forbids unqualified old-source/config rollback.
-Paired maintenance publication of the new engine version is still being wired;
-it must advance routing/cache epochs without rewriting older queued jobs.
+Source `55cfcd9` now qualifies paired maintenance publication of the new engine
+version, advancing routing/cache epochs without rewriting older queued jobs.
+Root independently passed 213 coordinator checks and 52 paired worker-maintenance
+checks. See [runtime publication](reference-runtime-versions.md) and
+[worker maintenance](reference-worker-maintenance.md). Both remain uninstalled;
+the existing installed update timers still point to the older source.
 An isolated Viewer patch packet now passes six Node tests and two actual
 Node/Python tests for exact-original-request reconciliation after a lost
 submission response, changed catalog and coordinator restart. It creates no
@@ -113,6 +117,11 @@ long filenames need separate compatibility work. The reference source broker's
 default 100 requests and five-minute initial transfer window also require
 explicit, qualified settings for this scale. Broker application assembly,
 transfer timing, retry budgets and scratch capacity remain acceptance gates.
+The original broker separately served 10,000 distinct three-byte files over
+verified local HTTPS, plus ten retry requests, in 201.631 seconds. Request caps,
+byte budgets, expiry and original file retention passed. This establishes request
+cardinality with explicit policy, not 50 GB throughput or production integration.
+See [broker request qualification](evidence/reference-broker-10000-requests-20261028.json).
 
 The coordinator-only upgrade now has a locally built exact `6bbd468` image and
 an independently tested incremental history validator. The actual image passed

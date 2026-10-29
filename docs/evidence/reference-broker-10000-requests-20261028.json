@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "status": "synthetic-original-broker-HTTPS-request-cardinality-qualified-not-installed",
+  "authorReceipt": "C:\\Users\\fstor\\.codex\\artifacts\\processing-broker-10k-policy-20261028\\qualification-result.json",
+  "authorReceiptSha256": "e817a378f9470f3246329675901c77944255d4af8a77fb32175ce34340564907",
+  "result": {
+    "scope": "actual private HTTPS request-cardinality policy with tiny synthetic abc files; not50GB or ODM",
+    "cases": {
+      "default100": {
+        "first100Succeeded": true,
+        "request101Status": 429,
+        "totals": {
+          "requests": 100,
+          "used_bytes": 300,
+          "reserved_bytes": 0,
+          "in_flight": 0
+        }
+      },
+      "configured10000": {
+        "explicitPolicy": {
+          "maxGrantTtlMs": 3600000,
+          "maxConcurrentRequests": 2,
+          "maxConcurrentBytes": 67108864,
+          "maxResponseBytes": 16777216,
+          "maxRequests": 10010
+        },
+        "grantTtlSeconds": 3600,
+        "grantByteBudget": 90000,
+        "distinctSuccessfulObjects": 10000,
+        "initialTotals": {
+          "requests": 10000,
+          "used_bytes": 30000,
+          "reserved_bytes": 0,
+          "in_flight": 0
+        },
+        "retrySuccesses": 10,
+        "request10011Status": 429,
+        "finalTotals": {
+          "requests": 10010,
+          "used_bytes": 30030,
+          "reserved_bytes": 0,
+          "in_flight": 0
+        }
+      },
+      "byteBudget": {
+        "totals": {
+          "requests": 1,
+          "used_bytes": 3,
+          "reserved_bytes": 0,
+          "in_flight": 0
+        },
+        "retryStatus": 429
+      },
+      "expiredInitial": {
+        "status": 401,
+        "totals": {
+          "requests": 0,
+          "used_bytes": 0,
+          "reserved_bytes": 0,
+          "in_flight": 0
+        }
+      }
+    },
+    "runtimeActivated": false,
+    "remoteActions": false,
+    "progress": {
+      "completed": 10000,
+      "elapsedSeconds": 201.09992397599999
+    },
+    "sourceRetention": {
+      "distinctFiles": 10000,
+      "totalSourceBytes": 30000,
+      "inodeSizeHashUnchanged": true
+    },
+    "totalHttpRequests": 10115,
+    "elapsedSeconds": 201.631373881,
+    "allAssertionsPassed": true
+  },
+  "rootReview": {
+    "sourceAndReceiptPinsVerified": true,
+    "scriptAndPolicyReviewed": true,
+    "independentFullRunRepeated": false
+  },
+  "notProved": [
+    "50GB payload throughput or one-hour adequacy",
+    "production Viewer app consumer/private configuration",
+    "three retries per object; only ten total retry GETs tested",
+    "scientific processing, claim authority or NAS custody"
+  ],
+  "runtimeActivated": false,
+  "clientDataUsed": false
+}
