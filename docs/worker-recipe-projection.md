@@ -17,10 +17,17 @@ migration or permission to recapture an unexplained mismatch.
 
 The same lab exposed an additional pre-start versus later policy mismatch that
 mount permutation alone did not explain. Its full pre-start recipe was not
-retained, so the cause remains unproven. Preserve that failure. Future capture
+retained. A subsequent config-check-only witness retained complete before/after
+projections and observed Docker changing HostConfig.OomKillDisable from false to
+null on first start. Reinstating that one value and the original mount order
+exactly reconstructs the historical policy digest. See
+`docs/evidence/worker-runtime-startup-witness-20261029.json`.
+
+Keep OomKillDisable bound as observed; do not normalize it away. Future capture
 must retain complete safe private pre-start and post-start projections, compare
-all fields, and establish a reviewed initial policy from known owned resources.
-Do not ignore changed fields or adopt an unknown stopped worker.
+all fields, verify actual readiness and establish the reviewed initial policy
+from that known running recipe. Subsequent stop/start stability still needs
+actual qualification. Do not adopt the failed worker or its former policy.
 
 This source fix does not restart the failed lab worker, update its policy,
 change worker code, establish cold stopped-mapping authority or qualify an

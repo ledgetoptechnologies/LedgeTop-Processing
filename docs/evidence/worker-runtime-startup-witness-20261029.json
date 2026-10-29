@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "scope": "Empty lab startup failure diagnosis and config-check-only real Docker witness",
+  "artifactDirectory": "processing-worker-maintenance-full-lab-20261029",
+  "failedLabOperationId": "c94791ee-bfe7-4c28-8b39-ab3f02472f0a",
+  "backendDiagnosis": {
+    "artifact": "backend-startup-permission-diagnostic.json",
+    "sha256": "f2d922cf112c6e99a581decc40fcbe69875db7658bc0c5c5a0a13df7a6d11e26",
+    "finding": "Backend reported invalid configuration and exited before worker startup. Its nonsecret config was UID1000-owned mode0600 while the root backend had all capabilities dropped; DAC denial is the permission-based diagnosis, not a captured open errno.",
+    "directOpenErrorObserved": false,
+    "oldFilePermissionsChanged": false,
+    "requiredNextRun": "New lab config must be readable to that backend, with exact payload validation; verify native info and empty task list before worker startup."
+  },
+  "witness": {
+    "operationId": "5556c01f-1578-499d-a430-8c2335df289d",
+    "containerId": "a44cdefcd8eca121887e4093af98ac212fbd8c5bf8f7a49e1538823011acb6a8",
+    "imageId": "sha256:b31c1fb4414144a3d8b9804666f567df1a009c54f8cab7c36755ffba280545a8",
+    "command": "Canonical worker entrypoint with --check-config only",
+    "exitCode": 0,
+    "starts": 1,
+    "retainedStopped": true,
+    "network": "none",
+    "oldDatabaseMounts": false,
+    "newEmptyStateScratchGateStayedEmpty": true,
+    "artifact": "check-config-witness/execution-stdout.json",
+    "sha256": "7c4fbd90bb3eb212d24c351b38167baa7f550dd08518dde80328dba790de50c8"
+  },
+  "recipeFindings": {
+    "effectiveMountOrderingVaries": true,
+    "rawAndGoFormattedNormalizedObservationsMatch": true,
+    "onlyOtherFirstStartDifference": "HostConfig.OomKillDisable: false before, null after",
+    "originalPolicyDigestExactlyReconstructed": true,
+    "reconstructionArtifact": "check-config-witness/old-policy-preimage-reconstruction.json",
+    "reconstructionSha256": "34a0840d5f613481d27111144323c0ac38cd2f295a3b9c28ac823ea2089f1796",
+    "normalizingOomKillDisableAuthorized": false,
+    "failedPolicyAdopted": false
+  },
+  "terminalDisposition": {
+    "coordinatorGracefulExitCode": 0,
+    "testNginxStopped": true,
+    "allThirteenContainerIdsAccountedFor": true,
+    "originalFiveServicesUnchanged": true,
+    "allEightKnownTestResourcesStopped": true,
+    "maintenanceScheduled": false,
+    "jobsSubmitted": false,
+    "workerExactStartupExceptionKnown": false,
+    "clientDataOrNasChanges": false
+  },
+  "remaining": "Fresh reviewed lab with readable backend config, native readiness before worker start, complete pre/post projections, post-readiness canonical policy capture, then real repeated update/rollback acceptance."
+}

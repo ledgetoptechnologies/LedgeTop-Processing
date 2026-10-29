@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "scope": "Actual main Linux source-only worker maintenance and canonical recipe regressions",
+  "sourceCommit": "0a1f457dfe090fb557c0d3b60bb5e83e668d63f3",
+  "operation": "recipe-source-main-0a1f457-a9e1ef6dd8ed4d7b98f7526ffc0a3873",
+  "artifactDirectory": "processing-main-recipe-source-0a1f457-20261029",
+  "qualificationSummarySha256": "590e2fe47da39d9609bdf6f9b1cbda6b579138ef53ece2b5b5386971f2103411",
+  "sourceVerification": {
+    "trackedFiles": 590,
+    "pythonFiles": 293,
+    "allHashesIndependentlyMatchedGitBlobs": true,
+    "canonicalModesAndUid1000": true,
+    "sourceInventorySha256": "f8a20874094aa37be601b70624130de7ec2ccf4c002781c913627f5277a4d02c"
+  },
+  "tests": {
+    "selections": ["tests.test_reference_worker_indexed_maintenance", "tests.test_worker_recipe_projection"],
+    "passed": 35,
+    "skipped": 0,
+    "runs": 1,
+    "unittestSeconds": 19.044,
+    "containerSeconds": 20.0129910770047,
+    "strictWarningsClean": true,
+    "logSha256": "b1ad2a47c2e6c97600f44a8b8bcfb63d354928d019d694cd01c3a140f2194d89"
+  },
+  "boundaries": {
+    "runtimeImageId": "sha256:b31c1fb4414144a3d8b9804666f567df1a009c54f8cab7c36755ffba280545a8",
+    "sourceReadOnly": true,
+    "network": "none",
+    "dockerSocket": false,
+    "originalFiveUnchanged": true,
+    "exactAllThirteenUnchanged": true,
+    "temporaryQaContainerAutoRemoved": true,
+    "buildPullPublishing": false,
+    "nasOrClientData": false,
+    "packagedProductionCodeQualified": false,
+    "realDockerMaintenanceQualified": false
+  }
+}
