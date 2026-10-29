@@ -1,0 +1,61 @@
+{
+  "sourceCommit": "0b7db5c58e54d3ce86359e79f04d1d6e9789d37e",
+  "profile": "explicit fresh-worker inputCopyAccounting schemaVersion 1",
+  "defaultEnabled": false,
+  "releaseAuthorityProvided": false,
+  "automaticInputDeletionEnabled": false,
+  "driverQualification": {
+    "linuxPassed": 149,
+    "linuxSkipped": 0,
+    "windowsPassed": 19,
+    "tinyFileObjects": 10000,
+    "tinyFileVerifications": 10000,
+    "tinyFileConfirmations": 10000,
+    "fullLedgerClosureScansDuringFetch": 2,
+    "largeTransferThroughputQualified": false
+  },
+  "rootCombinedQualification": {
+    "total": 191,
+    "passed": 189,
+    "skipped": 2,
+    "seconds": 33.108,
+    "skippedScope": "Pinned Node24/Viewer867 default-profile joint assembly; separately exercised below",
+    "logSha256": "258802563a09c7c8d90e2772d13836ad5f728d6e7cc2ac9ec458345e8114b8a0"
+  },
+  "separateJointQualification": {
+    "nodeVersion": "24.21.0",
+    "pythonVersion": "3.11.2",
+    "viewerFixtureCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+    "defaultProfilePassed": 2,
+    "defaultProfileSeconds": 4.183,
+    "defaultProfileLogSha256": "e2d8dc01775743800233bcc989e8e0d1ee84c0466d3d8f2dbe1c311790dc5fff",
+    "optInProfilePassed": 2,
+    "optInProfileSeconds": 3.569,
+    "optInChecks": "Normal explicit bootstrap and factory, original grant expiry after commit, coordinator outage recovery, exact fetched inputs retained without release authority",
+    "productionViewerApplicationAcceptance": false
+  },
+  "actualLocalImage": {
+    "id": "sha256:da79709a04938e2e76c552196c36678eddbacc66a6be9de5a2aec734d06888fe",
+    "sourceFiles": 71,
+    "sourceInventorySha256": "5c7ce3ea0d13406fbfbe979d67ec28c1af558c93bf19fd4970e5b68009d5c27b",
+    "privateBuildContextFilesMode": "0600",
+    "privateBuildContextDirectoriesMode": "0700",
+    "imageSourceMode": "0644 root-owned",
+    "runtimeUid": 1000,
+    "runtimeCanWriteSource": false,
+    "actualImagePrimitiveTestsPassed": 19,
+    "standaloneFactoryChecksPassed": 4,
+    "standaloneFactoryScope": "Actual image classes, synthetic loopback info-only engine and OpenSSL certificate; TLS context/server construction, not coordinator TLS exchange or real engine processing",
+    "minimalImageFixtureLimitation": "Four original factory tests could not import excluded test-only ops.native_node_fixture; those errors are preserved and not counted as passes",
+    "independentRootReadback": "All 71 raw source hashes, UID/source modes, actual imports and RootFS matched",
+    "registryPublished": false,
+    "runtimeDeployed": false
+  },
+  "remainingWork": [
+    "Actual authenticated worker-scoped source custody and whole-parent finality authority",
+    "Purge-path retention pins and end-to-end release acknowledgements",
+    "Explicit runtime configuration and qualified activation of reference workers",
+    "Indexed immutable journal fast path to remove pre-existing quadratic metadata cost before large-batch readiness",
+    "Production Viewer application integration and successful retained-upload pilot recovery"
+  ]
+}
