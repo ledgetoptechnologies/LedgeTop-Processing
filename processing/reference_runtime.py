@@ -44,6 +44,7 @@ class ReferenceSettings:
     routing_bindings: dict | None = None
     catalog_admission: object | None = None
     runtime_version_publication: object | None = None
+    initial_grant_delivery: object | None = None
 
 
 def _file(path, *, private):
@@ -80,7 +81,7 @@ def load_reference_settings(path, config):
         if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()) + (("runtimeVersionPublication",) if "runtimeVersionPublication" in value else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()) + (("runtimeVersionPublication",) if "runtimeVersionPublication" in value else ()) + (("initialGrantDelivery",) if "initialGrantDelivery" in value else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -164,8 +165,12 @@ def load_reference_settings(path, config):
             if type(policy['schemaVersion']) is not int or policy['schemaVersion']!=1 or admission is None or routing is None or set(config.prototype_node_ids)!=set(('cluster','main')) or not config.prototype_operator_token:
                 raise RuntimeConfigurationError('explicit paired runtime publication required')
             publication=RuntimeVersionPublicationPolicy()
+        initial_delivery=None
+        if 'initialGrantDelivery' in value:
+            from .reference_initial_grant import InitialGrantPolicy
+            initial_delivery=InitialGrantPolicy.from_payload(value['initialGrantDelivery'])
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission,publication)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission,publication,initial_delivery)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -272,7 +277,8 @@ class ReferenceRuntime:
                 from .reference_routing import ReferenceRouting
                 routing=ReferenceRouting(config,settings.workers,authority_id=queue.authority_id,bindings=settings.routing_bindings,ssl_context=worker_context,runtime_versions=self.runtime_versions)
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
-                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",routing=routing)
+                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",routing=routing,
+                initial_grant_policy=settings.initial_grant_delivery)
             admission=None
             if settings.catalog_admission is not None:
                 from .reference_catalog_cache import CatalogAdmission
@@ -289,7 +295,7 @@ class ReferenceRuntime:
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
-                recovery_bindings=recovery)
+                recovery_bindings=recovery,grant_reconciliation=settings.initial_grant_delivery is not None)
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))

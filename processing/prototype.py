@@ -31,13 +31,18 @@ REFERENCE_PROFILE = "reference-pipeline-v1"
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 catalog_admission=False,runtime_version_publication=False):
+                 catalog_admission=False,runtime_version_publication=False,initial_grant_policy=None):
         if type(catalog_admission) is not bool:
             raise ValueError('explicit catalog admission mode required')
         self.catalog_admission = catalog_admission
         if type(runtime_version_publication) is not bool or runtime_version_publication and not catalog_admission:
             raise ValueError('explicit paired runtime publication mode required')
         self.runtime_version_publication=runtime_version_publication
+        if initial_grant_policy is not None:
+            from .reference_initial_grant import InitialGrantPolicy
+            if type(initial_grant_policy) is not InitialGrantPolicy or InitialGrantPolicy.from_payload(initial_grant_policy.payload())!=initial_grant_policy:
+                raise ValueError('concrete initial grant policy required')
+        self.initial_grant_policy=initial_grant_policy
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
@@ -176,6 +181,8 @@ class Queue(Maintenance):
                             or len(maximum)!=1 or type(maximum[0]) is not int or maximum[0]!=32768):
                         raise RuntimeError('catalog SQLite page budget unavailable')
                 db.execute("PRAGMA synchronous=FULL")
+                from .reference_initial_grant import check_policy_binding
+                check_policy_binding(db,self.initial_grant_policy)
                 with db:
                     yield db
                     if os.getpid() != self._creator_pid or self._lock.closed:

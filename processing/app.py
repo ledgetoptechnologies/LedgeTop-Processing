@@ -32,7 +32,8 @@ def make_handler(config: Config):
                   viewer_enabled=config.viewer_enabled,
                   reference_enabled=reference_settings is not None,
                   catalog_admission=reference_settings is not None and reference_settings.catalog_admission is not None,
-                  runtime_version_publication=reference_settings is not None and reference_settings.runtime_version_publication is not None) if config.prototype_state_dir else None
+                  runtime_version_publication=reference_settings is not None and reference_settings.runtime_version_publication is not None,
+                  initial_grant_policy=reference_settings.initial_grant_delivery if reference_settings is not None else None) if config.prototype_state_dir else None
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService

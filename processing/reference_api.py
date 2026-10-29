@@ -110,6 +110,12 @@ class ReferenceAPI:
         if method == "GET" and path == protocol.PREFIX + "/capabilities":
             return Response(200, self._capabilities(environment))
         try:
+            initial_delivery=re.fullmatch(re.escape(protocol.PREFIX)+r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/initial-grant',path)
+            if initial_delivery:
+                if getattr(self.store,'initial_grant_policy',None) is None:return self._error(404,'not_found')
+                if not self.store.has_reference_scope(initial_delivery[1],environment=environment):return self._error(404,'not_found')
+                if method!='POST':return self._error(405,'method_not_allowed')
+                return Response(200,self.store.receive_initial_grant(initial_delivery[1],protocol.decode_submission(body),environment=environment))
             reconciliation=re.fullmatch(re.escape(protocol.PREFIX)+r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/transfer-grants/reconcile',path)
             if reconciliation:
                 if not self.grant_reconciliation:return self._error(404,'not_found')

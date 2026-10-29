@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 1,
+  "scope": "PUBLIC SYNTHETIC KEY/GRANT ONLY; never production authority",
+  "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "profile": {
+    "schemaVersion": 1,
+    "issuerRealm": "synthetic-staging",
+    "keyId": "synthetic-key",
+    "maxEpochs": 0,
+    "maxLifetimeMs": 300000,
+    "brokerCapabilities": {
+      "schemaVersion": 2,
+      "profile": "ltds-renewable-grants-v1",
+      "wholeObject200": true,
+      "maxResponseBytes": 16777216,
+      "maxConcurrentBytes": 67108864,
+      "maxRequestsPerEpoch": 10010,
+      "maxEpochs": 0,
+      "maxEpochTtlMs": 300000,
+      "maxLifetimeMs": 300000,
+      "maxTotalRequests": 10010,
+      "maxTotalBytes": 9007199254740991
+    }
+  },
+  "job": {
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "manifestSha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781",
+    "pipelineDigest": "d16b7af28c9aeb8683472896e4326c9f176bd8ac73c38fe017483799c692b584",
+    "submission": {
+      "schemaVersion": 1,
+      "submissionId": "56f7e8af-73c7-4a51-9903-c59cc68c033b",
+      "manifest": {
+        "id": "manifest-1",
+        "revision": 1,
+        "totalBytes": 120,
+        "objectCount": 2,
+        "inputCounts": {
+          "images": 2,
+          "lidarObjects": 0,
+          "points": 0
+        },
+        "objects": [
+          {
+            "id": "photo-1",
+            "name": "photo-1.jpg",
+            "byteSize": 40,
+            "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+            "kind": "image",
+            "mediaType": "image/jpeg"
+          },
+          {
+            "id": "photo-2",
+            "name": "photo-2.jpg",
+            "byteSize": 80,
+            "sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+            "kind": "image",
+            "mediaType": "image/jpeg"
+          }
+        ],
+        "sha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781"
+      },
+      "pipeline": {
+        "odm": {
+          "requested": true,
+          "options": {},
+          "optionsFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "treedar": {
+          "requested": false,
+          "inputObjectIds": [],
+          "provenanceReceiptId": null
+        },
+        "gaussian_splat": {
+          "requested": false
+        }
+      },
+      "capabilityFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": "staging",
+      "requestDigest": "429a5878bef100f7618ffa7ed08657e804732ceddd167464cd538f6fac98ea83",
+      "manifestSha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781",
+      "pipelineDigest": "d16b7af28c9aeb8683472896e4326c9f176bd8ac73c38fe017483799c692b584"
+    },
+    "transferRequest": {
+      "reservationId": "reservation-1",
+      "generation": 1,
+      "expiresAt": "2026-10-29T12:00:00.000Z",
+      "manifestSha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781",
+      "byteBudget": 360,
+      "nonce": "synthetic-nonce-1"
+    }
+  },
+  "derivedTransferPolicy": {
+    "profile": "ltds-renewable-grants-v1",
+    "maxEpochs": 0,
+    "maxLifetimeMs": 300000,
+    "byteBudget": 360,
+    "attemptBudget": 6
+  },
+  "validationClockMs": 1793275140000,
+  "envelope": {
+    "schemaVersion": 2,
+    "profile": "ltds-renewable-grants-v1",
+    "request": {
+      "schemaVersion": 2,
+      "profile": "ltds-renewable-grants-v1",
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "jobId": "job-1",
+      "generation": 1,
+      "environment": "staging",
+      "reservationId": "reservation-1",
+      "manifestSha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781",
+      "nodeId": "cluster",
+      "workerId": "worker-cluster",
+      "epoch": 0,
+      "predecessorSha256": null,
+      "expiresAt": "2026-10-29T12:00:00.000Z",
+      "nonce": "synthetic-nonce-1"
+    },
+    "issuanceSeed": {
+      "jobId": "job-1",
+      "generation": 1,
+      "environment": "staging",
+      "reservationId": "reservation-1",
+      "nodeId": "cluster",
+      "workerId": "worker-cluster",
+      "manifestSha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781",
+      "requestId": "00000000-0000-4000-8000-000000000001",
+      "epoch": 0,
+      "predecessorSha256": null,
+      "expiresAt": "2026-10-29T12:00:00.000Z",
+      "nonce": "synthetic-nonce-1",
+      "profile": "ltds-renewable-hmac-issuance-v1",
+      "schemaVersion": 1,
+      "keyId": "synthetic-key",
+      "issuerRealm": "synthetic-staging",
+      "objectClosureSha256": "ed733fa96c2e900990c9a205ce86721463150de151808a93181414f62073346e",
+      "policySha256": "764c345604cab0322aac756a47cf8183816cc3ed4c721e7668156d6436ee45e7",
+      "capabilitiesSha256": "bbc47cf2d577113100a4d75d5902217e4fdb5d69be3a44a28edea39dbc339ce4",
+      "requestSha256": "e14fda844b5372962d2ffad251afbdb9cd3701beb2726e67c5c48f34fb9f4937"
+    },
+    "grant": {
+      "jobId": "job-1",
+      "generation": 1,
+      "reservationId": "reservation-1",
+      "manifestSha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781",
+      "environment": "staging",
+      "objectIds": [
+        "photo-1",
+        "photo-2"
+      ],
+      "nonce": "synthetic-nonce-1",
+      "byteBudget": 360,
+      "expiresAt": "2026-10-29T12:00:00.000Z",
+      "token": "UPujNCzHpgPP_OW6yI1nLdhb-TOC6uXtSNRvq6ExrBo"
+    }
+  },
+  "canonicalSeedUtf8Hex": "7b226361706162696c6974696573536861323536223a2262626334376366326435373731313331303061346437356435393032323137653466646235643639626533613434613238656465613339646263333339636534222c22656e7669726f6e6d656e74223a2273746167696e67222c2265706f6368223a302c22657870697265734174223a22323032362d31302d32395431323a30303a30302e3030305a222c2267656e65726174696f6e223a312c226973737565725265616c6d223a2273796e7468657469632d73746167696e67222c226a6f624964223a226a6f622d31222c226b65794964223a2273796e7468657469632d6b6579222c226d616e6966657374536861323536223a2265663136353331326466303831346563666663656664326264373533393965376330646262663738336230653134636131663933333531323935306564373831222c226e6f64654964223a22636c7573746572222c226e6f6e6365223a2273796e7468657469632d6e6f6e63652d31222c226f626a656374436c6f73757265536861323536223a2265643733336661393663326539303039393063396132303563653836373231343633313530646531353138303861393331383134313466363230373333343665222c22706f6c696379536861323536223a2237363463333435363034636162303332326161633735366134376366383138333831366363336564346337323165373636383135366436343336656534356537222c227072656465636573736f72536861323536223a6e756c6c2c2270726f66696c65223a226c7464732d72656e657761626c652d686d61632d69737375616e63652d7631222c22726571756573744964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c2272657175657374536861323536223a2265313466646138343462353337323936326432666661643235316166626462396364333730316265623237323665363763356334386633346662396634393337222c227265736572766174696f6e4964223a227265736572766174696f6e2d31222c22736368656d6156657273696f6e223a312c22776f726b65724964223a22776f726b65722d636c7573746572227d",
+  "hmacSha256Hex": "50fba3342cc7a603cffce5bac88d672dd85bf93382eae5ed48d46faba131ac1a",
+  "grantSha256": "7225e76d1d127c2f23c60b034e6e2963de3011abcc80547a5274d7d271ff9e9e",
+  "envelopeSha256": "f2c8816a5826d6613d8f3efdb59731f8cbf0660cc1225c175035767c4b0c47a2",
+  "receipt": {
+    "schemaVersion": 1,
+    "receiptType": "initial_grant_delivery",
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "reservationId": "reservation-1",
+    "manifestSha256": "ef165312df0814ecffcefd2bd75399e7c0dbbf783b0e14ca1f933512950ed781",
+    "nonce": "synthetic-nonce-1",
+    "requestId": "00000000-0000-4000-8000-000000000001",
+    "requestSha256": "e14fda844b5372962d2ffad251afbdb9cd3701beb2726e67c5c48f34fb9f4937",
+    "grantSha256": "7225e76d1d127c2f23c60b034e6e2963de3011abcc80547a5274d7d271ff9e9e",
+    "envelopeSha256": "f2c8816a5826d6613d8f3efdb59731f8cbf0660cc1225c175035767c4b0c47a2",
+    "accepted": true,
+    "mayDownload": false
+  },
+  "canonicalReceiptUtf8Hex": "7b226163636570746564223a747275652c22656e76656c6f7065536861323536223a2266326338383136613538323664363631336438663365666462353937333166386362663036363063633132323563313735303335373637633462306334376132222c22656e7669726f6e6d656e74223a2273746167696e67222c2267656e65726174696f6e223a312c226772616e74536861323536223a2237323235653736643164313237633266323363363062303334653665323936336465333031316162636338303534376135323734643764323731666639653965222c226a6f624964223a226a6f622d31222c226d616e6966657374536861323536223a2265663136353331326466303831346563666663656664326264373533393965376330646262663738336230653134636131663933333531323935306564373831222c226d6179446f776e6c6f6164223a66616c73652c226e6f6e6365223a2273796e7468657469632d6e6f6e63652d31222c227265636569707454797065223a22696e697469616c5f6772616e745f64656c6976657279222c22726571756573744964223a2230303030303030302d303030302d343030302d383030302d303030303030303030303031222c2272657175657374536861323536223a2265313466646138343462353337323936326432666661643235316166626462396364333730316265623237323665363763356334386633346662396634393337222c227265736572766174696f6e4964223a227265736572766174696f6e2d31222c22736368656d6156657273696f6e223a317d"
+}

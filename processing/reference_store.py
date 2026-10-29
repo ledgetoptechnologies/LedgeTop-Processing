@@ -5,6 +5,7 @@ reservation is an external precondition of reserve(); uncertain reservations
 require reconciliation by its caller, never an automatic engine-lock release.
 """
 import json
+import math
 import hashlib
 import hmac
 import os
@@ -46,7 +47,7 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None, routing=None):
+                 main_node_id=None, routing=None, initial_grant_policy=None):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
@@ -59,6 +60,9 @@ class ReferenceStore:
         self.catalog_admission=None
         self._catalog_identity=None
         self.queue = queue
+        if initial_grant_policy!=getattr(queue,'initial_grant_policy',None):
+            raise ValueError('queue/store initial grant policy differs')
+        self.initial_grant_policy=initial_grant_policy
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
         for value in (local_max_photos, local_max_input_bytes):
@@ -111,6 +115,12 @@ class ReferenceStore:
                 CREATE TABLE IF NOT EXISTS reference_transfer_grants (
                   job_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, digest TEXT NOT NULL);
             """)
+            if self.initial_grant_policy is not None:
+                from .reference_initial_grant import check_policy_binding
+                db.execute('BEGIN IMMEDIATE')
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_initial_policy'").fetchone():
+                    self._quota(db,len(self.initial_grant_policy.canonical.encode())+64)
+                check_policy_binding(db,self.initial_grant_policy,create=True)
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
 
@@ -184,6 +194,10 @@ class ReferenceStore:
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_runtime_versions'").fetchone():
             used+=db.execute('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))+length(digest)),0) FROM reference_runtime_versions').fetchone()[0]
             used+=db.execute('SELECT COALESCE(SUM(length(request_id)+length(node_id)+length(request_sha)+length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))+length(receipt_sha)+length(update_token_sha)+length(row_sha)+16),0) FROM reference_runtime_version_receipts').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_initial_policy'").fetchone():
+            used+=db.execute('SELECT COALESCE(SUM(length(CAST(record AS BLOB))+length(sha)),0) FROM reference_initial_policy').fetchone()[0]
+            used+=db.execute('SELECT COALESCE(SUM(length(job_id)+length(CAST(record AS BLOB))+length(sha)),0) FROM reference_initial_jobs').fetchone()[0]
+            used+=db.execute('SELECT COALESCE(SUM(2*length(job_id)+length(body_sha)+length(CAST(record AS BLOB))+length(CAST(receipt AS BLOB))+64),0) FROM reference_initial_receipts').fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
@@ -213,6 +227,8 @@ class ReferenceStore:
                 if (old["request_digest"], old["environment"]) != (checked["requestDigest"], checked["environment"]):
                     raise Conflict("submissionId belongs to a different reference request")
                 return self._public(self._row(db, old["job_id"])), False
+            if self.initial_grant_policy is not None:
+                self.initial_grant_policy.transfer_policy(checked['manifest'])
             pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
             if pending >= self.max_queued_jobs:
                 raise Conflict("reference pending job quota reached")
@@ -220,8 +236,14 @@ class ReferenceStore:
             if self.catalog_admission is not None:
                 evidence=self.catalog_admission.admit(db,checked,catalog_sha)
             elif catalog_sha is not None:raise ValueError('catalog admission disabled')
-            self._quota(db,len(encoded.encode('utf-8'))+(len(_json(evidence).encode())+64 if evidence is not None else 0))
             job_id = str(uuid.uuid4())
+            initial_marker=None
+            if self.initial_grant_policy is not None:
+                initial_marker=dict(schemaVersion=1,jobId=job_id,generation=1,environment=checked['environment'],
+                    requestDigest=checked['requestDigest'],manifestSha256=checked['manifestSha256'],pipelineDigest=checked['pipelineDigest'],
+                    policySha256=protocol.digest(self.initial_grant_policy.payload()))
+            self._quota(db,len(encoded.encode('utf-8'))+(len(_json(evidence).encode())+64 if evidence is not None else 0)
+                +(len(_json(initial_marker).encode())+len(job_id)+64 if initial_marker is not None else 0))
             # Namespaced request identity also prevents collisions with ordinary
             # multipart/legacy submission IDs in the shared jobs table.
             db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
@@ -231,6 +253,8 @@ class ReferenceStore:
               (job_id, checked["submissionId"], checked["requestDigest"], checked["environment"], encoded,
                checked["manifestSha256"], checked["pipelineDigest"]))
             if evidence is not None:self.catalog_admission.insert_evidence(db,job_id,evidence)
+            if initial_marker is not None:
+                db.execute('INSERT INTO reference_initial_jobs VALUES(?,?,?)',(job_id,_json(initial_marker),protocol.digest(initial_marker)))
             return self._public(self._row(db, job_id)), True
 
     def option_evidence(self,job_id,*,node_id,worker_id,worker_instance_id,claim_token):
@@ -535,6 +559,8 @@ class ReferenceStore:
         from .reference_transfer import validate_grant
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if self.initial_grant_policy is not None and db.execute('SELECT 1 FROM reference_initial_jobs WHERE job_id=?',(job_id,)).fetchone():
+                raise Conflict('initial envelope required; raw grant fallback forbidden')
             row = self._row(db, job_id)
             if row['phase'] != 'awaiting_transfer' or row['status'] != 'running':
                 raise Conflict('job is not awaiting a transfer grant')
@@ -554,6 +580,111 @@ class ReferenceStore:
             self._row(db, job_id)
             row = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
             return json.loads(row[0]) if row else None
+
+    def receive_initial_grant(self,job_id,payload,*,environment,clock=None):
+        """Atomic initial envelope + existing worker-consumable private grant.
+
+        Only admission-marked jobs use this profile. Existing unmarked v1 jobs
+        retain their old path. Exact historical replay is a receipt, not a new
+        bearer/lease/custody/drain authority. Successor epochs are not exposed.
+        """
+        if self.initial_grant_policy is None:raise Conflict('initial delivery disabled')
+        from .reference_initial_grant import validate_initial_envelope
+        from .reference_grant_history import decode_history,MAX_NORMALIZED_BYTES
+        protocol._slug(job_id,'job ID');protocol._environment(environment)
+        body_sha=protocol.digest(payload)
+        if len(protocol.canonical_json(payload))>protocol.MAX_BODY_BYTES:raise ValueError('initial body bound')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('''SELECT r.generation,r.environment,j.environment AS queue_environment,r.manifest_sha,r.pipeline_digest,
+              r.phase,j.status,r.node_id,j.node_id AS queue_node,j.worker_id AS queue_worker,j.claim_hash,
+              c.node_id AS claim_node,c.worker_id,c.instance_id,c.request_id AS claim_request,
+              typeof(r.input_json) AS input_kind,length(CAST(r.input_json AS BLOB)) AS input_size,
+              typeof(r.transfer_json) AS request_kind,length(CAST(r.transfer_json AS BLOB)) AS request_size,
+              typeof(m.record) AS marker_kind,length(CAST(m.record AS BLOB)) AS marker_size,
+              typeof(m.sha) AS marker_sha_kind,length(CAST(m.sha AS BLOB)) AS marker_sha_size,
+              typeof(i.record) AS receipt_kind,length(CAST(i.record AS BLOB)) AS receipt_size,
+              typeof(i.receipt) AS ack_kind,length(CAST(i.receipt AS BLOB)) AS ack_size,
+              typeof(i.body_sha) AS body_kind,length(CAST(i.body_sha AS BLOB)) AS body_size,
+              typeof(g.grant_json) AS grant_kind,length(CAST(g.grant_json AS BLOB)) AS grant_size,
+              typeof(g.digest) AS grant_sha_kind,length(CAST(g.digest AS BLOB)) AS grant_sha_size
+              FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
+              LEFT JOIN reference_claims c ON c.job_id=r.job_id
+              LEFT JOIN reference_initial_jobs m ON m.job_id=r.job_id
+              LEFT JOIN reference_initial_receipts i ON i.job_id=r.job_id
+              LEFT JOIN reference_transfer_grants g ON g.job_id=r.job_id
+              WHERE r.job_id=? AND j.profile=? AND r.environment=? AND j.environment=?
+                AND typeof(r.generation)='integer' AND r.generation BETWEEN 1 AND 9007199254740991
+                AND typeof(r.manifest_sha)='text' AND length(CAST(r.manifest_sha AS BLOB))=64
+                AND typeof(r.pipeline_digest)='text' AND length(CAST(r.pipeline_digest AS BLOB))=64
+                AND typeof(r.phase)='text' AND length(CAST(r.phase AS BLOB))<=32
+                AND typeof(j.status)='text' AND length(CAST(j.status AS BLOB))<=32
+                AND typeof(r.node_id)='text' AND length(CAST(r.node_id AS BLOB)) BETWEEN 1 AND 128
+                AND typeof(j.node_id)='text' AND length(CAST(j.node_id AS BLOB)) BETWEEN 1 AND 128
+                AND typeof(j.worker_id)='text' AND length(CAST(j.worker_id AS BLOB)) BETWEEN 1 AND 128
+                AND typeof(j.claim_hash)='text' AND length(CAST(j.claim_hash AS BLOB))=64
+                AND typeof(c.node_id)='text' AND length(CAST(c.node_id AS BLOB)) BETWEEN 1 AND 128
+                AND typeof(c.worker_id)='text' AND length(CAST(c.worker_id AS BLOB)) BETWEEN 1 AND 128
+                AND typeof(c.instance_id)='text' AND length(CAST(c.instance_id AS BLOB)) BETWEEN 1 AND 128
+                AND typeof(c.request_id)='text' AND length(CAST(c.request_id AS BLOB)) BETWEEN 1 AND 128
+                AND typeof(c.token)='text' AND length(CAST(c.token AS BLOB)) BETWEEN 1 AND 128''',
+              (job_id,PROFILE,environment,environment)).fetchone()
+            if row is None or row['environment']!=environment or row['queue_environment']!=environment:
+                raise Conflict('initial delivery unavailable')
+            if (row['input_kind']!='text' or not 0<row['input_size']<=MAX_NORMALIZED_BYTES
+                    or row['request_kind']!='text' or not 0<row['request_size']<=4096
+                    or row['marker_kind']!='text' or not 0<row['marker_size']<=4096
+                    or row['marker_sha_kind']!='text' or row['marker_sha_size']!=64
+                    or (row['node_id'],row['queue_node'])!=(row['claim_node'],)*2
+                    or row['worker_id']!=row['queue_worker']):
+                raise Conflict('initial delivery unavailable')
+            authority=db.execute("SELECT authority_id FROM coordinator_identity WHERE singleton=1 AND typeof(authority_id)='text' AND length(CAST(authority_id AS BLOB)) BETWEEN 1 AND 128").fetchone()
+            token=db.execute('SELECT token FROM reference_claims WHERE job_id=?',(job_id,)).fetchone()[0]
+            if (authority is None or authority[0]!=self.queue.authority_id or not token.isascii()
+                    or not row['claim_hash'].isascii() or not hmac.compare_digest(row['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
+                raise Conflict('initial parent claim differs')
+            protocol._slug(row['instance_id'],'worker instance');protocol._slug(row['claim_request'],'claim request')
+            parent_claim=dict(authorityId=authority[0],jobId=job_id,generation=row['generation'],environment=environment,
+                nodeId=row['node_id'],workerId=row['worker_id'],workerInstanceId=row['instance_id'],
+                claimRequestId=row['claim_request'],claimTokenSha256=row['claim_hash'])
+            original,request=db.execute('SELECT input_json,transfer_json FROM reference_jobs WHERE job_id=?',(job_id,)).fetchone()
+            submission=decode_history(original,limit=MAX_NORMALIZED_BYTES)
+            reservation=decode_history(request,limit=4096)
+            marker_raw,marker_sha=db.execute('SELECT record,sha FROM reference_initial_jobs WHERE job_id=?',(job_id,)).fetchone()
+            expected_marker=dict(schemaVersion=1,jobId=job_id,generation=row['generation'],environment=environment,
+                requestDigest=submission['requestDigest'],manifestSha256=row['manifest_sha'],pipelineDigest=row['pipeline_digest'],
+                policySha256=protocol.digest(self.initial_grant_policy.payload()))
+            if marker_raw!=_json(expected_marker) or marker_sha!=protocol.digest(expected_marker):raise Conflict('initial admission changed')
+            job=dict(jobId=job_id,generation=row['generation'],environment=environment,manifestSha256=row['manifest_sha'],
+                pipelineDigest=row['pipeline_digest'],submission=submission,transferRequest=reservation)
+            replay=row['receipt_kind']!='null'
+            if replay:
+                if (row['receipt_kind']!='text' or not 0<row['receipt_size']<=16384
+                        or row['ack_kind']!='text' or not 0<row['ack_size']<=4096
+                        or row['body_kind']!='text' or row['body_size']!=64
+                        or row['grant_kind']!='text' or not 0<row['grant_size']<=protocol.MAX_BODY_BYTES
+                        or row['grant_sha_kind']!='text' or row['grant_sha_size']!=64):
+                    raise Conflict('initial receipt unavailable')
+                existing_sha,record_raw,ack_raw=db.execute('SELECT body_sha,record,receipt FROM reference_initial_receipts WHERE job_id=?',(job_id,)).fetchone()
+                if existing_sha!=body_sha:raise Conflict('initial delivery differs')
+                record,ack=validate_initial_envelope(payload,job=job,node_id=row['node_id'],worker_id=row['worker_id'],policy=self.initial_grant_policy)
+                record['parentClaimSha256']=protocol.digest(parent_claim)
+                grant_raw,grant_sha=db.execute('SELECT grant_json,digest FROM reference_transfer_grants WHERE job_id=?',(job_id,)).fetchone()
+                if (record_raw!=_json(record) or ack_raw!=_json(ack) or grant_raw!=_json(payload['grant'])
+                        or grant_sha!=ack['grantSha256']):raise Conflict('initial delivery differs')
+                return ack
+            if row['phase']!='awaiting_transfer' or row['status']!='running' or row['grant_kind']!='null':
+                raise Conflict('fresh owned initial reservation required')
+            now=(clock or time.time)()
+            if type(now) not in (int,float) or not math.isfinite(now):raise Conflict('initial clock unavailable')
+            record,ack=validate_initial_envelope(payload,job=job,node_id=row['node_id'],worker_id=row['worker_id'],
+                policy=self.initial_grant_policy,now_ms=int(now*1000))
+            record['parentClaimSha256']=protocol.digest(parent_claim)
+            grant_raw=_json(payload['grant']);record_raw=_json(record);ack_raw=_json(ack)
+            self._quota(db,len(grant_raw.encode())+len(record_raw.encode())+len(ack_raw.encode())+2*len(job_id)+128)
+            db.execute('INSERT INTO reference_transfer_grants VALUES(?,?,?)',(job_id,grant_raw,ack['grantSha256']))
+            db.execute('INSERT INTO reference_initial_receipts VALUES(?,?,?,?)',(job_id,body_sha,record_raw,ack_raw))
+            return ack
 
     def has_reference_scope(self, job_id, *, environment):
         """Scalar authorization probe; never select private/input/result JSON."""
