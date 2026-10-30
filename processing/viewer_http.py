@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import uuid as uuid_module
 
 from .maintenance import Conflict
+from .viewer_tasks import InputLimitExceeded
 
 
 MAX_UPLOAD_BYTES = 2 * 1024 ** 3
@@ -258,6 +259,9 @@ class ViewerFacade:
         except Conflict:
             handler.close_connection = True
             self._reply(handler, 409, {'error': 'conflict'})
+        except InputLimitExceeded:
+            handler.close_connection = True
+            self._reply(handler, 413, {'error': 'task_input_limit_exceeded'})
         except (ValueError, TypeError, UnicodeError, RecursionError):
             handler.close_connection = True
             self._reply(handler, 400, {'error': 'invalid_request'})

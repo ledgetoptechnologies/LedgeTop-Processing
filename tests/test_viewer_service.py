@@ -215,6 +215,9 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
         self.assertEqual(self.fleet.max_active, 1)
 
+    def test_capabilities_report_the_enforced_cumulative_input_limit(self):
+        self.assertEqual(self.service.capabilities()['ledgetopMaxInputBytes'], self.service.store.max_input_bytes)
+
     def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
         # A lowered synthetic threshold exercises the same boundary without
         # fabricating 1,001 files on disk; the policy's 1,000 boundary is separate.

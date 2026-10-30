@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 from processing.maintenance import Conflict
 from processing.viewer_http import ViewerFacade, CHUNK, MAX_FORM_BYTES
+from processing.viewer_tasks import InputLimitExceeded
 
 
 TOKEN = 'native-viewer-test-token-1234567890123456'
@@ -237,6 +238,16 @@ class ViewerHTTPTests(unittest.TestCase):
         for action in ('cancel', 'remove'):
             self.assertEqual(self.request('/task/' + action, urlencode({'uuid': IDENTIFIER}).encode(),
                 headers={'Content-Type': 'application/x-www-form-urlencoded'})[1], {'success': True})
+
+    def test_input_ceiling_has_a_stable_sanitized_http_error(self):
+        self.initialize()
+        with patch.object(self.service, 'upload', side_effect=InputLimitExceeded('private detail')):
+            with self.assertRaises(HTTPError) as caught:
+                self.request('/task/new/upload/' + IDENTIFIER,
+                             multipart([('images', 'photo.jpg', b'123')]),
+                             headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY})
+        self.assertEqual(caught.exception.code, 413)
+        self.assertEqual(json.load(caught.exception), {'error': 'task_input_limit_exceeded'})
 
     def test_twenty_binary_files_preserve_false_and_cross_chunk_boundaries(self):
         self.initialize()
