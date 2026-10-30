@@ -291,6 +291,69 @@ class CompareTest(CensusFixture):
         self.assertEqual(status, 1)
         self.assertIn({'table': 'viewer_tasks', 'change': 'contentChanged'}, result['database'])
 
+    def generated_allowlist(self, after, *names):
+        census_path = self.save('candidate.json', after)
+        output = self.base / ('allowlist-%d.json' % len(list(self.base.glob('allowlist-*'))))
+        status = state_census.main(['schema-allowlist', str(census_path), *sum((['--object', n] for n in names), []),
+                                    '--output', str(output)])
+        self.assertEqual(status, 0)
+        return output
+
+    def test_generated_schema_allowlist_gates_the_exact_migration(self):
+        self.empty_viewer_tasks()
+        before = self.census()[1]
+        self.migrate()
+        after = self.census()[1]
+        allowlist = self.generated_allowlist(after, 'table:viewer_tasks', 'table:viewer_reservations')
+        if os.name == 'posix':
+            self.assertEqual(stat.S_IMODE(allowlist.stat().st_mode), 0o600)
+        self.assertEqual(set(json.loads(allowlist.read_text())), {'schemaAllowlistVersion', 'objects'})
+        fixed = ['--allow-path', '.:mtime', '--allow-path', self.DB_FIELDS, '--allow-new-table', 'viewer_reservations']
+        status, result = self.compare(before, after, *fixed, '--schema-allowlist', str(allowlist))
+        self.assertEqual(status, 0, result)
+        with self.assertRaises(FileExistsError):
+            state_census.main(['schema-allowlist', str(self.save('c.json', after)), '--object', 'table:jobs',
+                               '--output', str(allowlist)])
+
+    def test_schema_allowlist_generator_refuses_unknown_or_repeated_objects(self):
+        after = self.census()[1]
+        for names in (['table:missing'], ['table:jobs', 'table:jobs'], ['jobs'], ['table:jobs;drop']):
+            with self.assertRaises(SystemExit, msg=names):
+                self.generated_allowlist(after, *names)
+
+    def test_schema_allowlist_loader_rejects_anything_broader(self):
+        digest = 'a' * 64
+        broader = [
+            {'schemaAllowlistVersion': 1, 'objects': {'table:jobs': digest}, 'allowTable': ['jobs']},
+            {'schemaAllowlistVersion': 1, 'objects': {'table:jobs': digest}, 'allowPath': ['viewer-tasks:content']},
+            {'schemaAllowlistVersion': 1, 'objects': {'table:jobs': digest}, 'allowNewTable': ['x']},
+            {'schemaAllowlistVersion': 1, 'objects': {'--allow-table': 'jobs'}},
+            {'schemaAllowlistVersion': 1, 'objects': {'table:jobs': '--allow-path'}},
+            {'schemaAllowlistVersion': 1, 'objects': {'table:jobs': digest + ' --allow-table jobs'}},
+            {'schemaAllowlistVersion': 1, 'objects': {'table:jobs --allow-table x': digest}},
+            {'schemaAllowlistVersion': 1, 'objects': {'table:jobs': 1}},
+            {'schemaAllowlistVersion': 1, 'objects': {}},
+            {'schemaAllowlistVersion': 1, 'objects': ['table:jobs=' + digest]},
+            {'schemaAllowlistVersion': 2, 'objects': {'table:jobs': digest}},
+            {'objects': {'table:jobs': digest}},
+            ['--allow-table', 'jobs'],
+        ]
+        census = self.census()[1]
+        for index, document in enumerate(broader):
+            path = self.save('broad-%d.json' % index, document)
+            with self.assertRaises(SystemExit, msg=document):
+                self.compare(census, census, '--schema-allowlist', str(path))
+        legacy_args = self.base / 'startup-allowlist.args'
+        legacy_args.write_text('--allow-object table:jobs=%s --allow-table jobs\n' % digest)
+        with self.assertRaises(SystemExit):
+            self.compare(census, census, '--schema-allowlist', str(legacy_args))
+
+    def test_conflicting_object_allowances_refuse(self):
+        census = self.census()[1]
+        path = self.save('allow.json', {'schemaAllowlistVersion': 1, 'objects': {'table:jobs': 'a' * 64}})
+        with self.assertRaises(SystemExit):
+            self.compare(census, census, '--schema-allowlist', str(path), '--allow-object', 'table:jobs=' + 'b' * 64)
+
     def test_refuses_wrong_key_and_version(self):
         with self.assertRaises(SystemExit):
             _run(['census', str(self.root)], key='not-a-key')

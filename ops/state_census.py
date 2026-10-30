@@ -24,6 +24,10 @@ exact and narrow:
 - ``--allow-table NAME`` lets the content of a table that exists on **both**
   sides differ.
 - ``--allow-new-table NAME`` lets a table appear only if it is empty.
+- ``--schema-allowlist FILE`` adds exact schema-object allowances from a file
+  written by ``schema-allowlist``. The loader refuses any file that is not
+  exactly ``{schemaAllowlistVersion: 1, objects: {TYPE:NAME: SHA256}}``, so the
+  file can never carry path, table or new-table allowances, or other options.
 
 Equal censuses show equality at the two moments they were taken. They do not
 prove that nothing was written and reverted in between.
@@ -174,14 +178,55 @@ def parse_path_allowances(values, key):
     return allowed
 
 
+OBJECT_NAME = re.compile(r'(?:table|index|view|trigger):[A-Za-z0-9_]{1,128}')
+DIGEST = re.compile(r'[0-9a-f]{64}')
+ALLOWLIST_VERSION = 1
+
+
 def parse_object_allowances(values):
     allowed = {}
     for value in values:
-        match = re.fullmatch(r'((?:table|index|view|trigger):[^=]+)=([0-9a-f]{64})', value)
-        if not match:
+        name, separator, digest = value.partition('=')
+        if not separator or not OBJECT_NAME.fullmatch(name) or not DIGEST.fullmatch(digest):
             raise SystemExit('--allow-object needs TYPE:NAME=SHA256')
-        allowed[match[1]] = match[2]
+        if allowed.setdefault(name, digest) != digest:
+            raise SystemExit('conflicting allowances for ' + name)
     return allowed
+
+
+def load_schema_allowlist(path):
+    """Load a schema-only allowlist file; anything broader or malformed refuses.
+
+    The file can only ever name exact schema-object hashes. It cannot carry
+    path, table or new-table allowances, or command-line options of any kind.
+    """
+    try:
+        document = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError):
+        raise SystemExit('schema allowlist is unreadable or not JSON') from None
+    if (type(document) is not dict or set(document) != {'schemaAllowlistVersion', 'objects'}
+            or document['schemaAllowlistVersion'] != ALLOWLIST_VERSION
+            or type(document['objects']) is not dict or not document['objects']):
+        raise SystemExit('schema allowlist must be exactly {schemaAllowlistVersion: 1, objects: {...}}')
+    for name, digest in document['objects'].items():
+        if not OBJECT_NAME.fullmatch(name) or type(digest) is not str or not DIGEST.fullmatch(digest):
+            raise SystemExit('schema allowlist entries must be TYPE:NAME to a 64-hex SQL hash')
+    return ['%s=%s' % item for item in sorted(document['objects'].items())]
+
+
+def make_schema_allowlist(document, names):
+    """Take exact schema-object hashes for the named objects from a census."""
+    if not names or len(set(names)) != len(names):
+        raise SystemExit('name each schema object exactly once')
+    objects = (document.get('database') or {}).get('objects') or {}
+    result = {}
+    for name in names:
+        if not OBJECT_NAME.fullmatch(name):
+            raise SystemExit('object must be TYPE:NAME')
+        if name not in objects:
+            raise SystemExit('object not present in census: ' + name)
+        result[name] = objects[name]
+    return {'schemaAllowlistVersion': ALLOWLIST_VERSION, 'objects': result}
 
 
 def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_objects=(), allow_new_tables=()):
@@ -259,7 +304,21 @@ def main(argv=None):
     diff.add_argument('after', type=Path)
     for option in ('allow-path', 'allow-table', 'allow-object', 'allow-new-table'):
         diff.add_argument('--' + option, action='append', default=[])
+    diff.add_argument('--schema-allowlist', type=Path,
+                      help='schema-only allowlist file; refuses anything but exact object hashes')
+    make = commands.add_parser('schema-allowlist', help='write exact schema-object hashes from a census')
+    make.add_argument('census', type=Path)
+    make.add_argument('--object', action='append', default=[], required=True)
+    make.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == 'schema-allowlist':
+        document = make_schema_allowlist(json.loads(args.census.read_text()), args.object)
+        descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w') as stream:
+            json.dump(document, stream, sort_keys=True, indent=1)
+            stream.write('\n')
+        load_schema_allowlist(args.output)  # the written file must pass the same strict loader
+        return 0
     if args.command == 'keygen':
         os.umask(0o077)
         descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -273,9 +332,12 @@ def main(argv=None):
         result = census(args.root, key, args.database)
         status = 3 if any(result['tree']['rejected'].values()) else 0
     else:
+        objects = list(args.allow_object)
+        if args.schema_allowlist is not None:
+            objects += load_schema_allowlist(args.schema_allowlist)
         result = compare(json.loads(args.before.read_text()), json.loads(args.after.read_text()), key,
                          allow_paths=args.allow_path, allow_tables=args.allow_table,
-                         allow_objects=args.allow_object, allow_new_tables=args.allow_new_table)
+                         allow_objects=objects, allow_new_tables=args.allow_new_table)
         status = 0 if result['identical'] else 1
     json.dump(result, sys.stdout, sort_keys=True, indent=1)
     sys.stdout.write('\n')

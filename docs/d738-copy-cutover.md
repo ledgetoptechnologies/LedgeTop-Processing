@@ -375,8 +375,11 @@ census "$NEW_VOL" > "$E/census-candidate-isolated.json"
 same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" \
   --allow-path .:mtime --allow-path jobs.sqlite3:bytes,content,mtime \
   --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence \
-  $(cat "$E/startup-allowlist.args")       # reviewed U9 output: exact TYPE:NAME=SHA256 objects; never edited in the run
+  --schema-allowlist "$E/startup-schema-allowlist.json"   # schema-only file; the loader refuses anything broader
 ```
+
+Every other allowance is a fixed literal in this command. Nothing is
+shell-substituted into the argv.
 
 The allowances are deliberately narrow:
 
@@ -390,8 +393,12 @@ The allowances are deliberately narrow:
   - Every schema-object allowance names the **exact** expected SQL hash, as
     `TYPE:NAME=SHA256`. This covers `table:viewer_tasks` after the
     `ALTER TABLE`, the two new tables, and their automatic indexes.
-  - These come from `startup-allowlist.args`, the reviewed output of the U9
-    rehearsal, because SQLite rewrites the stored SQL on `ALTER TABLE`.
+  - These come from `startup-schema-allowlist.json`, the reviewed output of
+    the U9 rehearsal, because SQLite rewrites the stored SQL on `ALTER TABLE`.
+    The loader accepts only
+    `{schemaAllowlistVersion: 1, objects: {TYPE:NAME: SHA256}}` and refuses
+    any other key, value or shape. The file therefore cannot add path, table
+    or new-table allowances, or any other option.
   - Any other change to those objects, or to any other object, fails.
   - The two new tables must be **empty**; nothing relaxes that.
   - Every existing table must keep an identical keyed row digest. Whole-row
@@ -400,11 +407,33 @@ The allowances are deliberately narrow:
     non-empty rows fails conservatively and needs its own review.
   - quick_check, authority, active counts and sidecars must be unchanged.
 
-**The startup allowlist (`startup-allowlist.args`) does not exist yet.** It
-must come from a reviewed rehearsal: start `IMG_NEW` isolated on a synthetic
-copy of this volume shape, then run `compare` with no startup allowances to
-list what its startup writes (for example reference recovery records). Until
-then this gate cannot pass (U9).
+**The startup schema allowlist does not exist yet (U9).** It must come from a
+reviewed rehearsal:
+
+1. Start `IMG_NEW` isolated on a synthetic copy of this volume shape, then stop
+   it and take a census.
+2. Run `compare` with only the fixed literal allowances above. Every remaining
+   difference must be a schema object the release is expected to create or
+   alter.
+3. Generate the file from the rehearsal census, naming each such object
+   explicitly:
+
+   ```sh
+   python3 state_census.py schema-allowlist rehearsal-candidate.json \
+     --object table:viewer_tasks --object table:viewer_reservations \
+     --object table:viewer_option_evidence --object index:<each automatic index> \
+     --output startup-schema-allowlist.json      # mode 0600; refuses to overwrite
+   ```
+
+   The generator refuses an object that is missing from the census, named
+   twice, or malformed. It re-validates its own output through the same strict
+   loader.
+4. Review the file, then copy it into `$E` by SHA-256.
+
+If startup also writes **rows** (for example reference recovery records), the
+schema allowlist cannot express that, by design. The gate then fails until the
+procedure gains a separately reviewed, fixed literal allowance. Until all of
+this is done, the gate cannot pass.
 
 **Stop condition:** `compare` exits non-zero. Any unallowed difference means a
 client reached the candidate, or startup does more than was reviewed.
@@ -495,7 +524,7 @@ check, an observation or a snapshot does not resolve it.
 | U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically (steps 3 and 6). Every entry's contents and metadata are compared under keyed IDs. Allowances are scoped to named fields, exact schema hashes and empty new tables. Remaining limits:<ul><li>equal censuses show **observed** equality at two moments, not the absence of transient writes;</li><li>mtime is compared at whole-second granularity;</li><li>xattrs, ACLs, file capabilities and ctime are not compared;</li><li>the database file is compared per table, not byte for byte;</li><li>sizes and row counts are printed in clear;</li><li>a migration over a non-empty table fails conservatively;</li><li>the exact schema hashes depend on the U9 rehearsal;</li><li>it has never run against the real volume or the a042 image.</li></ul> | Independent review of the census. The U9 rehearsal to produce the exact schema allowances. A live read-only run in the cutover window. Transient writes need prevention (U1, U2), which detection cannot provide. |
 | U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
 | U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |
-| U9 | **Startup allowlist.** | The step 6 gate depends on a list of tables that startup writes, and that list does not exist. | Rehearse `IMG_NEW` isolated on synthetic state, diff the censuses, then review the result. |
+| U9 | **Startup schema allowlist.** | The step 6 gate needs the exact schema-object hashes that the release startup produces, and that file does not exist. The loader and generator now enforce a schema-only format: no path, table or new-table allowances, and no shell-substituted options. But the hashes themselves still need a rehearsal and review. Startup row writes cannot be allowed through this file. | Rehearse `IMG_NEW` isolated on synthetic state, then generate `startup-schema-allowlist.json` with `schema-allowlist` (step 6) and review it. Any startup row writes need a separately reviewed literal allowance. |
 | U10 | **Host-writer check needs root.** | `sudo -n` may be unavailable. | Beau provides an equivalent root check. |
 | U11 | **Engine reachability.** | If `LOCAL_NODE_URL`/`MAIN_NODE_URL` use container names, the candidate cannot reach its engines from its own network. | Read the real `old-inspect.json`. U1's `--network none` sidesteps this during the gated phase. |
 | U12 | **Reconciling ambiguous requests.** | Exit 0 proves only that handlers ended, and the coordinator records nothing about requests it refused or dropped. | Reconcile against Viewer's records (step 4), which needs Viewer's confirmed status vocabulary. |
