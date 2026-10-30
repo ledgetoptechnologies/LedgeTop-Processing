@@ -82,6 +82,22 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
             self.assertTrue(orphan.is_dir());self.assertNotEqual(directory,orphan.name);self.assertTrue((root/'inputs'/directory).is_dir())
         finally:queue.close()
 
+    def test_reserved_replay_rejects_changed_durable_evidence_and_missing_directory(self):
+        cap='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        self.store.reserve(self.identifier,'production',cap)
+        self.store.initialize(self.identifier,'synthetic',[],None,'production',cap,option_evidence=[])
+        args=(self.identifier,'synthetic',[],None,'production',cap)
+        self.assertEqual(self.store.initialize(*args,replay_only=True),{'uuid':self.identifier})
+        with self.queue._db() as db:
+            original=db.execute('SELECT sha256 FROM viewer_option_evidence WHERE uuid=?',(self.identifier,)).fetchone()[0]
+            db.execute('UPDATE viewer_option_evidence SET sha256=? WHERE uuid=?',('0'*64,self.identifier))
+        with self.assertRaises(Conflict):self.store.initialize(*args,replay_only=True)
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_option_evidence SET sha256=? WHERE uuid=?',(original,self.identifier))
+            name=db.execute('SELECT directory FROM viewer_tasks WHERE uuid=?',(self.identifier,)).fetchone()[0]
+        (self.store.root/name).rename(self.store.root/'moved-fixture')
+        with self.assertRaises(Conflict):self.store.initialize(*args,replay_only=True)
+
     def test_upload_hashes_exact_bytes_and_retries_do_not_duplicate(self):
         self.initialize()
         data = b'\0\xffbinary\r\n--not-a-multipart-boundary' * 10000

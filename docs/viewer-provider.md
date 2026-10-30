@@ -133,13 +133,21 @@ wrong capability is hidden as not found, and a cancelled reservation cannot be
 initialized again. This behavior is specific to the coordinator extension and
 must not be assumed for ordinary NodeODM providers.
 
-The service performs live option-catalog validation before checking for an
-existing task. An otherwise identical replay can therefore fail while the
-catalog is unavailable or no longer permits its settings. The pending-drain
-503 test applies to a close announced before reading the initialization body;
+For an already committed reservation-bound initialization, the service checks
+the exact stored request and durable task/evidence state before consulting the
+live option catalog. An identical replay can therefore succeed during a catalog
+outage or after a catalog change. New tasks and unreserved legacy requests still
+require live validation; an overlapping request that arrives before the first
+commit may still fail catalog validation. The pending-drain 503 test applies to a close announced before reading the initialization body;
 an arbitrary 503 or disconnected client does not prove no mutation committed.
 Reconcile the reserved task identity before deciding what to do next. An
 initialization failure after directory creation can leave a private orphan;
 a retry chooses a separate directory rather than adopting or deleting it.
 Tests cover rollback, client disconnect and abrupt process exit immediately after
 directory creation. They do not prove power-loss atomicity or every crash point.
+The replay check verifies the task directory exists, any referenced job exists,
+and recorded option evidence is structurally consistent when evidence is
+required. It does not rehash input or result files or establish their custody.
+Older records with `option_evidence_required=0` have no option evidence to
+check. The outage and changed-catalog test cases inject errors at the catalog
+boundary; they do not prove recovery from every network failure.

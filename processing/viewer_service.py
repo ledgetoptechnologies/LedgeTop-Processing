@@ -170,6 +170,9 @@ class ViewerService:
         return selected
 
     def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
+        if capability is not None:
+            replay = self.store.initialize(identifier, name, options, outputs, environment, capability, replay_only=True)
+            if replay is not None: return replay
         evidence = self._check_options(options or [])
         return self.store.initialize(identifier, name, options, outputs, environment, capability, option_evidence=evidence)
 

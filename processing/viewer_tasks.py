@@ -227,8 +227,9 @@ class TaskStore:
             db.execute("UPDATE viewer_reservations SET state='cancelled' WHERE uuid=?",(identifier,))
             return {'uuid':identifier,'state':'cancelled'}
 
-    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None, option_evidence=None):
+    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None, option_evidence=None, *, replay_only=False):
         checked_uuid(identifier)
+        if type(replay_only) is not bool: raise ValueError('invalid replay mode')
         if (not isinstance(name, str) or len(name) > 256
                 or any(ord(character) < 32 for character in name)):
             raise ValueError('invalid task name')
@@ -268,7 +269,29 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             reserved=self._reservation(db,identifier,environment,capability)
             row = db.execute('SELECT * FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()
-            if reserved is not None and row is not None and row['removed']:raise Conflict('reserved UUID cannot be reset')
+            # A read-only exact replay is permitted only for an authenticated
+            # reservation. Legacy UUIDs always pass through current catalog checks.
+            if replay_only and (reserved is None or row is None): return None
+            if reserved is not None and row is not None and (row['removed'] or row['stage']=='cancelled'):
+                raise Conflict('reserved UUID cannot be reset')
+            if replay_only and row is not None:
+                self._directory(row)
+                self._job(db,row)
+                evidence=db.execute('SELECT definitions,sha256 FROM viewer_option_evidence WHERE uuid=? AND generation=?',(identifier,row['generation'])).fetchone()
+                if row['option_evidence_required'] not in (0,1) or bool(row['option_evidence_required']) != (evidence is not None):
+                    raise Conflict('option evidence unavailable')
+                if evidence is not None:
+                    try:
+                        text=evidence['definitions']
+                        if type(text) is not str or len(text.encode())>262144 or hashlib.sha256(text.encode()).hexdigest()!=evidence['sha256']:
+                            raise ValueError()
+                        definitions=json.loads(text)
+                        if (type(definitions) is not list or canonical(definitions)!=text
+                                or any(type(item) is not dict or type(item.get('name')) is not str for item in definitions)
+                                or sorted(item['name'] for item in definitions)!=sorted(item['name'] for item in options)):
+                            raise ValueError()
+                    except (ValueError,TypeError,KeyError,RecursionError,UnicodeError):
+                        raise Conflict('option evidence unavailable') from None
             if row is not None and row['environment'] != environment:
                 # Authorization and task operations use separate reads. Keep
                 # the original UUID's credential domain stable even while a

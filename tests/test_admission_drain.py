@@ -158,9 +158,23 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(count,1)
             with urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3) as r:self.assertEqual(r.status,200)
         from processing.maintenance import Conflict
-        with patch.object(self.handler.viewer_service,'_check_options',side_effect=Conflict('catalog unavailable')):
-            with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3)
-            self.assertEqual(e.exception.code,409)
+        with patch.object(self.handler.viewer_service,'_check_options',side_effect=Conflict('catalog unavailable')) as catalog:
+            with urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3) as r:self.assertEqual(r.status,200)
+            catalog.assert_not_called()
+            different=multipart([('name',None,b'different'),('options',None,b'[]')])
+            with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=different,headers=init_headers),timeout=3)
+            self.assertEqual(e.exception.code,409);catalog.assert_not_called()
+            for changed in (multipart([('name',None,b'synthetic'),('options',None,b'[{"name":"pc-ept","value":true}]')]),
+                            multipart([('name',None,b'synthetic'),('options',None,b'[]'),('outputs',None,b'["other.zip"]')])):
+                with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=changed,headers=init_headers),timeout=3)
+                self.assertEqual(e.exception.code,409)
+            catalog.assert_not_called()
+            wrong=dict(init_headers);wrong['X-LedgeTop-Capability']='YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI'
+            with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=body,headers=wrong),timeout=3)
+            self.assertEqual(e.exception.code,404);catalog.assert_not_called()
+        with patch.object(self.handler.viewer_service,'_check_options',side_effect=ValueError('option no longer offered')) as catalog:
+            with urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3) as r:self.assertEqual(r.status,200)
+            catalog.assert_not_called()
         self.stop();self.start()
         with patch.object(self.handler.viewer_service,'_check_options',return_value=[]):
             with urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3) as r:self.assertEqual(r.status,200)
