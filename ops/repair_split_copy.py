@@ -53,6 +53,8 @@ def repair_copy(source, copy, *, synthetic_only=False, expected_copy_inode=None)
             for row in rows:
                 if row['removed'] or row['stage']!='running' or row['phase'] not in ('processing','commit_pending','cancel_pending'):
                     raise ValueError('unresolved Viewer task')
+                if db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE job_id=?',(row['job_id'],)).fetchone()[0]!=1:
+                    raise ValueError('job belongs to multiple Viewer tasks')
                 job=db.execute('SELECT * FROM jobs WHERE id=?',(row['job_id'],)).fetchone()
                 expected={'engineTaskId':row['engine_uuid'],'nodeId':row['node_id'],'environment':row['environment'],'cancelled':False}
                 if (job is None or job['status'] not in ('succeeded','failed') or job['profile']!=VIEWER_PROFILE

@@ -569,6 +569,27 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual((copied/'jobs.sqlite3').read_bytes(),before)
         self.make_queue_service()
 
+    @unittest.skipUnless(os.name == 'posix', 'offline repair uses flock')
+    def test_stopped_copy_repair_refuses_duplicate_job_reference(self):
+        import shutil
+        from ops.repair_split_copy import repair_copy
+        identifier=self.submit();self.service.tick();task=self.task(identifier)
+        result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],'environment':task['environment'],'cancelled':False}
+        self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':result})
+        with self.queue._db() as db:
+            columns=[r['name'] for r in db.execute('PRAGMA table_info(viewer_tasks)')]
+            row=list(db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone())
+            row[columns.index('uuid')]=str(uuid.uuid4())
+            row[columns.index('engine_uuid')]=None
+            db.execute('INSERT INTO viewer_tasks VALUES ('+','.join('?' for _ in row)+')',row)
+        self.service.close();self.queue.close()
+        original=self.root/'state';copied=self.root/'copy';shutil.copytree(original,copied)
+        before=(copied/'jobs.sqlite3').read_bytes()
+        with self.assertRaisesRegex(ValueError,'multiple Viewer tasks'):
+            repair_copy(original,copied,synthetic_only=True,expected_copy_inode=(copied.stat().st_dev,copied.stat().st_ino))
+        self.assertEqual((copied/'jobs.sqlite3').read_bytes(),before)
+        self.make_queue_service()
+
     def test_terminal_split_rejects_mismatched_job_binding_before_dispatch(self):
         identifier=self.submit();self.service.tick();task=self.task(identifier)
         result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],
