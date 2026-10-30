@@ -170,12 +170,19 @@ class ComposeNode:
         # Canceled/removed tasks can still have running children. A conservative
         # image-specific allowlist blocks replacement until every engine child
         # has exited. This does not infer idleness from CPU utilization.
-        rows = self.docker(['docker', 'top', identifier, '-eo', 'pid,args']).splitlines()[1:]
+        rows = self.docker(['docker', 'top', identifier, '-eo', 'pid,args']).splitlines()
+        if not rows or rows[0].split() not in (['PID','COMMAND'], ['PID','ARGS']):
+            return False
+        rows = rows[1:]
         server, wrapper, init = 0, 0, 0
+        seen = set()
         for row in rows:
             parts = row.strip().split(None, 1)
             if len(parts) != 2 or not parts[0].isdigit():
                 return False
+            if parts[0] in seen or int(parts[0]) <= 0:
+                return False
+            seen.add(parts[0])
             value = parts[1]
             if re.match(r'^(?:/usr/bin/)?node /var/www/index\.js(?: |$)', value):
                 server += 1

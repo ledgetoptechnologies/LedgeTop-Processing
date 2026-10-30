@@ -327,6 +327,11 @@ class ComposeBoundaryTests(unittest.TestCase):
             self.assertFalse(self.adapter.processing_idle('exact-container'))
         with patch.object(self.adapter, 'docker', return_value='COMMAND\n'):
             self.assertFalse(self.adapter.processing_idle('exact-container'))
+        for listing in ('unexpected header\n7 node /var/www/index.js\n',
+                        'PID COMMAND\n7 node /var/www/index.js\n7 /sbin/docker-init\n',
+                        'PID COMMAND\n0 node /var/www/index.js\n'):
+            with self.subTest(listing=listing), patch.object(self.adapter, 'docker', return_value=listing):
+                self.assertFalse(self.adapter.processing_idle('exact-container'))
 
     def test_only_exact_regular_nodeodx_placeholder_is_not_an_upload(self):
         with patch.object(self.adapter, 'docker', side_effect=['.gitignore\n', 'regular file 1\n', '*']):
