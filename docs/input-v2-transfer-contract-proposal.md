@@ -19,9 +19,12 @@ nor manifest hash is a credential; sources must authorize the requesting
 worker and claimed job, including tenant/environment. Durable authority and
 exclusive-worker fencing are prerequisites, not established by this document.
 
-A proposed short-lived grant adds `{grantId, issuedAt, expiresAt, objectIds,
-rangeBytes, totalRequestBudget, totalByteBudget, token}`. The token is secret,
-scoped to the exact transfer identity and permitted object set; it never enters
+A proposed short-lived grant adds `{grantId, issuedAt, expiresAt, manifestSha256,
+rangeBytes, totalRequestBudget, totalByteBudget, token}`. A compact manifest
+commitment binds the complete permitted object set; do not copy tens of
+thousands of object IDs into each grant. The broker must independently verify
+that each requested ID belongs to that immutable manifest. The token is secret,
+scoped to the exact transfer identity and committed object set; it never enters
 logs or public receipts. The manifest—not the grant alone—defines object size,
 hash and type. Objects are read-only, immutable and hash-verified. There must
 be a documented, interoperable canonical encoding and signature/MAC domain,
@@ -65,11 +68,15 @@ budget. Worker scratch capacity and source broker budget are separate holds.
 ## Expiry, replacement and unknown outcomes
 
 At request admission the broker compares against a durable nondecreasing clock
-observation; clock rollback must not revive an already observed expired grant.
+observation; persist an expiry observation before returning the denial, in a
+transaction that is not rolled back by the denial. Clock rollback must not
+revive an already observed expired grant.
 Proposed initial policy rejects new request admission after expiry but does not
 retroactively release a stream slot or undo a charge. Whether an already-admitted
 stream may finish after expiry, its maximum duration, and how to recover its
-concurrency slot after broker process death require joint agreement and tests.
+concurrency slot after broker process death require a bounded durable in-flight
+record, reconciliation and jointly agreed limits and tests. A restart must not
+assume a still-running stream has stopped merely because its grant expired.
 Never create a new transfer epoch merely because a broker or worker restarts.
 
 Renewal requires a separately authenticated, fenced operation bound to the same
