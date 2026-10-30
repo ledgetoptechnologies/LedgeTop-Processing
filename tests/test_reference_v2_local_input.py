@@ -171,15 +171,22 @@ with NodeGate('synthetic-engine') as g:
   class Lost:
    origin='http://127.0.0.1:3001'
    calls=0
-   def initialize(self,task):self.calls+=1;raise OSError('response lost')
+   def initialize(self,task):self.calls+=1;self.task=task;raise OSError('response lost')
   engine=Lost();db,inode=self.make_init_database();self.addCleanup(db.close)
   with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
    with NodeGate(engineid) as gate:gate.provision('main',origin,authority)
    retain_node_for_verified_input(**shared)
    shared.update(expected_epoch='f'*64,expected_inode=inode,authenticated_claim=self.init_claim())
+   with self.assertRaises(InitHeld):initialize_once(enabled=True,db=db,engine=engine,**dict(shared,expected_inode=(0,0)))
+   with self.assertRaises(InitHeld):initialize_once(enabled=True,db=db,engine=engine,**dict(shared,expected_epoch='e'*64))
+   with self.assertRaises(InitHeld):initialize_once(enabled=True,db=db,engine=engine,**dict(shared,authenticated_claim=dict(self.init_claim(),engineOrigin='http://127.0.0.1:1')))
+   with self.assertRaises(InitHeld):initialize_once(enabled=True,db=db,engine=engine,**dict(shared,authenticated_claim=dict(self.init_claim(),manifestSha256='a'*64)))
+   empty=sqlite3.connect(self.root/'empty.sqlite');self.addCleanup(empty.close);st=(self.root/'empty.sqlite').stat()
+   with self.assertRaises(InitHeld):initialize_once(enabled=True,db=empty,engine=engine,**dict(shared,expected_inode=(st.st_dev,st.st_ino)))
+   self.assertEqual(engine.calls,0)
    with self.assertRaises(OSError):initialize_once(enabled=True,db=db,engine=engine,**shared)
    with self.assertRaisesRegex(InitHeld,'already attempted'):initialize_once(enabled=True,db=db,engine=engine,**shared)
-   self.assertEqual(engine.calls,1)
+   self.assertEqual(engine.calls,1);self.assertEqual(engine.task['options'],self.init_claim()['options'])
    with NodeGate(engineid) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
    with self.ledger._transaction() as sd:self.assertIsNotNone(sd.execute("SELECT 1 FROM input_write_holds WHERE reservation='r1'").fetchone())
 
