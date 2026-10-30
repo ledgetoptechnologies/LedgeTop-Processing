@@ -13,19 +13,28 @@ import uuid
 from . import reference_protocol as p
 from .node_gate import NodeGate
 from .reference_v2_controlled_sqlite import ControlledSQLite
+from .reference_v2_node_preflight import operation_receipt
+from .reference_v2_local_input import verify_complete_input_set
+from .reference_v2_supervised_init import validate_claim
 
 class NodeUuidHeld(ValueError):pass
 
 
 def guarded_initialize(*,enabled=False,intent,fence,gate,engine,job_id,task_name,
- options,tmp_dir,data_dir,tmp_identity,data_identity):
+ binding,manifest_bytes,journal,ledger,reservation_id,engine_id,node_id,origin,authority_id,
+ generation,worker_id,operation_key,authenticated_claim,tmp_dir,data_dir,tmp_identity,data_identity):
  if enabled is not True:raise NodeUuidHeld('UUID guard disabled')
  if type(intent) is not ControlledSQLite or intent.fence is not fence or type(gate) is not NodeGate:raise NodeUuidHeld('supervised owner required')
  p._uuid(job_id,'job id');p._string(task_name,'task name',255)
- if type(options) is not list or len(p.canonical_json(options))>16384:raise NodeUuidHeld('bounded authenticated options required')
+ if binding['jobId']!=job_id or gate.engine_id!=engine_id:raise NodeUuidHeld('job or engine binding differs')
+ options=validate_claim(authenticated_claim,binding,engine_id,engine)
+ receipt=operation_receipt(operation_key=operation_key,binding=binding,reservation_id=reservation_id,engine_id=engine_id,node_id=node_id,origin=origin,authority_id=authority_id,generation=generation,worker_id=worker_id)
  fence.check();state=gate.snapshot();owner=state['reservation']
- if owner is None or owner['job'] is None or owner['job']['id']!=job_id or owner['completionDigest'] is not None:
+ if ((state['nodeId'],state['coordinatorOrigin'],state['authorityId'],state['generation'])!=(node_id,origin,authority_id,generation)
+     or owner is None or owner['receiptId']!=receipt or owner['completionDigest'] is not None
+     or owner['job']!=dict(id=job_id,workerId=worker_id,nodeId=node_id,authorityId=authority_id)):
   raise NodeUuidHeld('bound cooperative node gate required')
+ verify_complete_input_set(fence=fence,journal=journal,ledger=ledger,reservation_id=reservation_id,binding=binding,manifest_bytes=manifest_bytes)
  if intent.lookup(job_id) is not None:raise NodeUuidHeld('prior initialization intent requires reconciliation')
  candidate=str(uuid.uuid4());fds=[]
  try:
@@ -54,8 +63,7 @@ def guarded_initialize(*,enabled=False,intent,fence,gate,engine,job_id,task_name
    if len(ids)!=len(set(ids)) or candidate in ids:raise NodeUuidHeld('engine UUID already exists or census invalid')
    fence.check()
   absence()
-  identity=p.canonical_json(dict(jobId=job_id,engineUuid=candidate,taskName=task_name,options=options,
-             nodeId=state['nodeId'],authorityId=state['authorityId'],gateGeneration=state['generation'],receiptId=owner['receiptId'])).decode()
+  identity=p.canonical_json(dict(binding=binding,reservationId=reservation_id,engineUuid=candidate,taskName=task_name,claim=authenticated_claim,engineId=engine_id,coordinatorOrigin=origin,workerId=worker_id,nodeId=node_id,authorityId=authority_id,gateGeneration=generation,receiptId=receipt)).decode()
   intent.record_once(job_id,identity)
   absence()
   # Any response loss or crash after intent is terminally ambiguous here.
