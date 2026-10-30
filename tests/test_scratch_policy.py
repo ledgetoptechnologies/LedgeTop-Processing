@@ -50,6 +50,57 @@ class ScratchPolicyTests(unittest.TestCase):
         values.update(kwargs)
         self.ledger.accept_receipt('r1', **values)
 
+    def test_input_hold_survives_expiry_rollback_and_cannot_terminal_release(self):
+        self.reserve(input_bytes=0)
+        identity=dict(job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0)
+        hold=self.ledger.begin_input_write_hold('r1',**identity)
+        self.assertEqual(hold,self.ledger.begin_input_write_hold('r1',**identity))
+        self.now=200
+        with self.ledger._transaction() as db:
+            row=self.ledger._reservation(db,'r1');self.assertEqual((row['state'],row['remaining']),('reserved',300))
+        self.now=90
+        self.ledger.observe_input_write_hold('r1',identity=json.loads(hold['identity']),observation='verified')
+        with self.assertRaises(PolicyConflict):self.ledger.set_engine_state('r1','terminal',terminal_attested=True)
+        with self.assertRaises(PolicyConflict):self.ledger.begin_input_write_hold('r1',**dict(identity,object_id='other'))
+        with self.ledger._transaction() as db:
+            row=self.ledger._reservation(db,'r1');self.assertEqual((row['state'],row['remaining']),('reserved',300))
+
+    def test_process_exit_after_hold_retains_reservation(self):
+        import os, subprocess, sys
+        self.reserve(input_bytes=0)
+        code = """import os,sys
+from processing.scratch_policy import ScratchLedger
+l=ScratchLedger(sys.argv[1],sys.argv[2],capacity_probe=lambda _:1000,clock=lambda:100,safety_floor_bytes=100,cleanup_grace_seconds=10)
+l.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0)
+os._exit(73)
+"""
+        result=subprocess.run([sys.executable,'-c',code,str(self.ledger.path),str(self.root)],timeout=20)
+        self.assertEqual(result.returncode,73)
+        self.now=200;self.ledger=self.open()
+        with self.ledger._transaction() as db:
+            row=self.ledger._reservation(db,'r1');self.assertEqual((row['state'],row['remaining']),('reserved',300))
+
+    def test_input_hold_prevents_schema_tampering_and_missing_marker(self):
+        self.reserve();self.ledger.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='o1',ordinal=0)
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            db.execute('CREATE TRIGGER evil AFTER UPDATE ON input_write_holds BEGIN DELETE FROM input_write_holds; END');db.commit()
+        with self.assertRaisesRegex(PolicyConflict,'schema changed'):
+            self.ledger.record_allocated('r1',1)
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            db.execute('DROP TRIGGER evil');db.execute('DELETE FROM input_write_holds');db.commit()
+        with self.assertRaisesRegex(PolicyConflict,'records missing'):
+            self.ledger.record_allocated('r1',1)
+
+    def test_v1_control_charge_survives_hold_version_migration(self):
+        self.reserve();self.ledger.record_allocated('r1',100);receipt=self.control()
+        self.ledger.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0)
+        self.assertEqual(self.ledger.read_control_charge('r1'),receipt)
+        self.assertEqual(self.config()['accountingVersion'],2)
+        self.assertEqual(self.control(),receipt)
+        self.assertEqual(self.config()['accountingVersion'],2)
+        legacy=self.legacy_module()
+        with self.assertRaises(legacy.PolicyConflict):legacy.ScratchLedger(self.ledger.path,self.root,capacity_probe=lambda _:self.free,clock=lambda:self.now,safety_floor_bytes=100,cleanup_grace_seconds=10)
+
     def test_readiness_identity_and_environment(self):
         with self.assertRaises(PolicyConflict):
             self.reserve(worker_ready=False)

@@ -35,6 +35,20 @@ CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
  bytes INTEGER NOT NULL CHECK(typeof(bytes)='integer' AND bytes>0),
  publication TEXT CHECK(publication IS NULL OR length(CAST(publication AS BLOB))<=16384))'''
 
+INPUT_HOLD_SCHEMA = """CREATE TABLE IF NOT EXISTS input_write_holds (
+ reservation TEXT PRIMARY KEY, identity TEXT NOT NULL,
+ observation TEXT)"""
+
+
+def _expected_input_schema():
+    db=sqlite3.connect(':memory:')
+    try:
+        db.execute(INPUT_HOLD_SCHEMA)
+        return tuple(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='input_write_holds' ORDER BY type,name"))
+    finally: db.close()
+
+_INPUT_SCHEMA = _expected_input_schema()
+
 
 class PolicyConflict(ValueError):
     """Identity or state conflict (HTTP adapters may map to 409)."""
@@ -137,12 +151,16 @@ class ScratchLedger:
                 if statement.strip():
                     db.execute(statement)
             db.execute(CONTROL_SCHEMA)
+            db.execute(INPUT_HOLD_SCHEMA)
             expected=sqlite3.connect(':memory:')
             try:
                 expected.execute('PRAGMA synchronous=FULL');expected.execute('BEGIN IMMEDIATE')
                 expected.execute(CONTROL_SCHEMA)
+                expected.execute(INPUT_HOLD_SCHEMA)
                 query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='control_charges' ORDER BY type,name"
                 if [tuple(row) for row in db.execute(query)]!=[tuple(row) for row in expected.execute(query)]:raise PolicyConflict('typed control schema changed')
+                query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='input_write_holds' ORDER BY type,name"
+                if [tuple(row) for row in db.execute(query)]!=[tuple(row) for row in expected.execute(query)]:raise PolicyConflict('input hold schema changed')
             finally:expected.close()
             if db.execute("SELECT job FROM reservations GROUP BY job HAVING COUNT(DISTINCT environment)>1").fetchone():
                 raise PolicyConflict("existing job has conflicting environments")
@@ -189,16 +207,35 @@ class ScratchLedger:
         No cached version flag: the first control charge latches its marker in
         the same transaction as the receipt, counter and retained capacity hold.
         """
+        schema=tuple(tuple(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='input_write_holds' ORDER BY type,name"))
+        if schema != _INPUT_SCHEMA:raise PolicyConflict('input hold schema changed')
         base=dict(root=str(self.root),floor=self.floor,grace=self.grace)
         config=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
         count=db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0]
+        holds=db.execute('SELECT COUNT(*) FROM input_write_holds').fetchone()[0]
         if config is None:raise PolicyConflict('accounting configuration missing')
         if config[0]==_json(base):
-            if count:raise PolicyConflict('control accounting marker missing')
+            if count or holds:raise PolicyConflict('accounting marker missing')
             return base
         versioned=dict(base,accountingVersion=ACCOUNTING_VERSION)
-        if config[0]!=_json(versioned):raise PolicyConflict('unknown accounting version or ledger policy')
-        if not count:raise PolicyConflict('latched control accounting records missing')
+        v2=dict(base,accountingVersion=2)
+        if config[0] not in (_json(versioned), _json(v2)):raise PolicyConflict('unknown accounting version or ledger policy')
+        if config[0]==_json(versioned) and (not count or holds):raise PolicyConflict('invalid v1 accounting records')
+        if config[0]==_json(v2) and not holds:raise PolicyConflict('input hold accounting records missing')
+        for hold in db.execute('SELECT * FROM input_write_holds'):
+            if type(hold['identity']) is not str or len(hold['identity'].encode())>2048:raise PolicyConflict('input hold identity invalid')
+            reservation=self._reservation(db,hold['reservation'])
+            try:identity=json.loads(hold['identity'])
+            except (ValueError,TypeError):raise PolicyConflict('input hold identity invalid') from None
+            if (_json(identity)!=hold['identity'] or set(identity)!={'reservationId','jobId','generation','environment','manifestSha256','objectId','ordinal'}
+                    or identity['reservationId']!=reservation['id'] or identity['jobId']!=reservation['job']
+                    or identity['generation']!=reservation['generation'] or identity['environment']!=reservation['environment']
+                    or identity['manifestSha256']!=json.loads(reservation['settings'])['manifest_sha256']):
+                raise PolicyConflict('input hold identity changed')
+            try:
+                _id(identity['objectId']); _integer(identity['ordinal'],'ordinal')
+            except (ValueError, KeyError, TypeError): raise PolicyConflict('input hold identity invalid') from None
+            if hold['observation'] is not None and hold['observation'] not in ('verified','absent'):raise PolicyConflict('input hold observation invalid')
         # SQL checks precede materialization. Each yielded row has fixed bounded
         # fields; qualify all retained allowances before admission trusts SUM.
         oversized=db.execute('''SELECT 1 FROM control_charges WHERE
@@ -214,7 +251,7 @@ class ScratchLedger:
         for row in cursor:
             reservation=self._reservation(db,row['reservation'])
             self._control(row,reservation)
-        return versioned
+        return v2 if config[0]==_json(v2) else versioned
 
     def _reservation(self, db, reservation_id):
         row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
@@ -239,7 +276,7 @@ class ScratchLedger:
     def _expire(self, db, now):
         # Neither engine-started nor uncertain reservations may expire automatically.
         db.execute("UPDATE reservations SET state='expired', remaining=0 "
-                   "WHERE state='reserved' AND expires<=? AND allocated=0", (now,))
+                   "WHERE state='reserved' AND expires<=? AND allocated=0 AND NOT EXISTS (SELECT 1 FROM input_write_holds WHERE reservation=reservations.id)", (now,))
 
     def reserve(self, *, job_id, generation, reservation_id, manifest_sha256,
                 input_bytes, output_budget, environment, ttl_seconds, worker_ready):
@@ -282,6 +319,43 @@ class ScratchLedger:
             except sqlite3.IntegrityError as exc:
                 raise PolicyConflict("job generation already reserved") from exc
             return dict(self._reservation(db, reservation_id))
+
+    def begin_input_write_hold(self, reservation_id, *, job_id, generation, environment, manifest_sha256, object_id, ordinal):
+        """Latch before touching files; experimental and never a transfer grant.
+
+        Reconciliation records an observation but does not release capacity. Older
+        binaries lacking accounting-version checks must be externally fenced.
+        """
+        for value in (reservation_id, job_id, object_id): _id(value)
+        _integer(generation, 'generation', 1); _integer(ordinal, 'ordinal'); _sha(manifest_sha256)
+        identity=dict(reservationId=reservation_id,jobId=job_id,generation=generation,
+                      environment=environment,manifestSha256=manifest_sha256,objectId=object_id,ordinal=ordinal)
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id); settings=json.loads(row['settings'])
+            if (row['job']!=job_id or row['generation']!=generation or row['environment']!=environment
+                    or settings['manifest_sha256']!=manifest_sha256):raise PolicyConflict('input hold binding differs')
+            old=db.execute('SELECT * FROM input_write_holds WHERE reservation=?',(reservation_id,)).fetchone()
+            if old:
+                if old['identity']!=_json(identity):raise PolicyConflict('input hold identity differs')
+                return dict(old)
+            if row['state']!='reserved' or row['expires']<=self._now(db):raise PolicyConflict('input hold requires live reservation')
+            db.execute('INSERT INTO input_write_holds VALUES(?,?,NULL)',(reservation_id,_json(identity)))
+            db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=2)),))
+            return {'reservation':reservation_id,'identity':_json(identity),'observation':None}
+
+    def observe_input_write_hold(self, reservation_id, *, identity, observation):
+        """Record a caller-verified observation; retain hold even after observation.
+
+        Caller must fence the writer, verify physical bytes or absence and ensure
+        no future writes. This method does not prove these assertions or clear the hold.
+        """
+        _id(reservation_id)
+        if observation not in ('verified','absent'):raise ValueError('invalid input observation')
+        with self._transaction() as db:
+            row=db.execute('SELECT * FROM input_write_holds WHERE reservation=?',(reservation_id,)).fetchone()
+            if row is None or row['identity']!=_json(identity):raise PolicyConflict('input hold identity differs')
+            if row['observation'] not in (None,observation):raise PolicyConflict('input observation differs')
+            db.execute('UPDATE input_write_holds SET observation=? WHERE reservation=?',(observation,reservation_id))
 
     def record_allocated(self, reservation_id, allocated_bytes):
         """Set monotonic total allocation after disk writes; never a delta."""
@@ -374,7 +448,8 @@ class ScratchLedger:
             receipt['receiptSha256']=hashlib.sha256(_json(receipt).encode()).hexdigest()
             db.execute('UPDATE reservations SET allocated=?,remaining=remaining-? WHERE id=?',(target,allowance_bytes,reservation_id))
             db.execute('INSERT INTO control_charges VALUES(?,?,?,?,?,?,NULL)',(reservation_id,charge_id,scope_sha256,_json(identity),_json(receipt),allowance_bytes))
-            db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=ACCOUNTING_VERSION)),))
+            if db.execute('SELECT 1 FROM input_write_holds LIMIT 1').fetchone() is None:
+                db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=ACCOUNTING_VERSION)),))
             return dict(receipt,publicationSha256=None,publicationDescriptor=None)
 
     def publish_control_charge(self,reservation_id,*,charge_id,scope_sha256,parent_binding_sha256,publication_descriptor):
@@ -404,6 +479,8 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
+            if db.execute('SELECT 1 FROM input_write_holds WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('input write hold requires reconciliation')
             if row["state"] == "reserved" and row["expires"] <= now:
                 raise PolicyConflict("lease expired before engine mutation")
             if row["state"] == "expired" or (row["state"] == "terminal" and state != "terminal"):
