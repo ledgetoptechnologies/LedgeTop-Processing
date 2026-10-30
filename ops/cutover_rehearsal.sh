@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ops/cutover_rehearsal.sh D738_IMAGE_ID RELEASE_IMAGE_ID D738_COMPOSE_FILE COMPOSE_SHA256 [REVIEWED_SCHEMA_ALLOWLIST]
-#   ops/cutover_rehearsal.sh --cleanup MANIFEST       # remove exactly a held run's recorded resources
+#   ops/cutover_rehearsal.sh --cleanup MANIFEST       # remove a held run's recorded resources
 #
 # Safety properties:
 # - Image arguments must be full local image IDs (sha256:...); nothing is pulled.
@@ -11,12 +11,20 @@
 #   is: a generated override replaces its ports with two fresh, unused, random
 #   loopback ports, and the rendered configuration is validated before use. The
 #   live 18080/3005 ports are never bound.
-# - The run ID is 96 random bits. Every created container, volume and network
-#   is labelled ltp.rehearsal=<run> and recorded by exact ID in a manifest.
-#   Cleanup removes only manifest entries whose label still matches, and never
-#   matches by name prefix.
-# - On any failure or doubt, nothing is removed: the run is held, with its
-#   manifest and evidence preserved for inspection (then use --cleanup).
+# - The run ID is 96 random bits. Every container, volume and network the run
+#   creates, including short-lived --rm helpers, carries the label
+#   ltp.rehearsal=<run>. Long-lived ones are recorded by exact ID in the manifest.
+# - A label census reconciles the daemon against the manifest on failure, before
+#   success cleanup and before --cleanup. A labelled resource that is not in the
+#   manifest (an interrupted --rm helper, a partial compose up) is reported as
+#   UNRECORDED and never removed. Nothing is ever matched by name prefix.
+# - A failed run removes nothing. Cleanup (after success, or --cleanup) removes
+#   recorded resources one at a time; it may stop partway. Each removal is
+#   dropped from the manifest as it happens, so the manifest always lists what
+#   remains, and anything not verified or not removable is held and reported.
+# - The private synthetic context (runtime.env, census.key, env-*) is kept until
+#   a cleanup has verified that every resource is gone, so a held run can be
+#   compared and reconstructed.
 # - Every Docker call goes through ops/pinned_docker.py. The daemon is never
 #   restarted; that case is reported as unverified.
 set -euo pipefail
@@ -37,6 +45,30 @@ label_of() {  # kind id -> the ltp.rehearsal label, or fails
     *) return 1 ;;
   esac
 }
+labelled() {  # kind run -> exact IDs (volume names) carrying this run's label
+  case "$1" in
+    container) docker ps -aq --no-trunc --filter "label=ltp.rehearsal=$2" ;;
+    volume) docker volume ls -q --filter "label=ltp.rehearsal=$2" ;;
+    network) docker network ls -q --no-trunc --filter "label=ltp.rehearsal=$2" ;;
+  esac
+}
+reconcile() {  # manifest run -> 0 only if the label census succeeded and every labelled resource is recorded
+  local manifest=$1 run=$2 found=0 kind id ids
+  for kind in container volume network; do
+    if ! ids=$(labelled "$kind" "$run"); then echo "UNCERTAIN $kind label census failed"; found=1; continue; fi
+    for id in $ids; do
+      grep -qx "$kind $id" "$manifest" || { echo "UNRECORDED $kind $id carries this run's label; preserved, not removed"; found=1; }
+    done
+  done
+  return $found
+}
+none_left() {  # run -> 0 only if the label census succeeded and found nothing
+  local run=$1 kind ids
+  for kind in container volume network; do
+    ids=$(labelled "$kind" "$run") || return 1
+    [ -z "$ids" ] || return 1
+  done
+}
 remove_owned() {  # manifest run -> 0 only if every recorded resource was verified and removed
   local manifest=$1 run=$2 held=0 kind id label
   for pass_kind in container network volume; do
@@ -45,39 +77,53 @@ remove_owned() {  # manifest run -> 0 only if every recorded resource was verifi
       if ! label=$(label_of "$kind" "$id" 2>/dev/null); then
         echo "HOLD $kind $id: cannot inspect it (already gone or daemon problem); not removed"; held=1; continue; fi
       if [ "$label" != "$run" ]; then echo "HOLD $kind $id: label '$label' is not this run; not removed"; held=1; continue; fi
-      case "$kind" in
-        container) docker container rm -f "$id" >/dev/null || { echo "HOLD $kind $id: removal failed"; held=1; } ;;
-        network) docker network rm "$id" >/dev/null || { echo "HOLD $kind $id: removal failed"; held=1; } ;;
-        volume) docker volume rm "$id" >/dev/null || { echo "HOLD $kind $id: removal failed"; held=1; } ;;
-      esac
+      if case "$kind" in
+           container) docker container rm -f "$id" >/dev/null ;;
+           network) docker network rm "$id" >/dev/null ;;
+           volume) docker volume rm "$id" >/dev/null ;;
+         esac; then
+        sed -i "/^$kind $id\$/d" "$manifest"   # removed: the manifest keeps listing only what remains
+      else
+        echo "HOLD $kind $id: removal failed"; held=1
+      fi
     done < <(tac "$manifest")
   done
   return $held
 }
+drop_private_context() {  # evidence dir: only after a verified complete cleanup
+  rm -f -- "$1/runtime.env" "$1/census.key" "$1"/env-*
+}
 if [ "${1:-}" = --cleanup ]; then
-  manifest=$2; run=$(sed -n 's/^run //p' "$manifest")
+  manifest=$2; run=$(sed -n 's/^run //p' "$manifest" | tr -d '\r')
   [[ "$run" =~ ^claude-reh-[0-9a-f]{24}$ ]] || { echo "manifest has no valid run ID"; exit 2; }
-  grep -v '^run ' "$manifest" > "$manifest.resources"
-  remove_owned "$manifest.resources" "$run" && echo "removed every recorded resource of $run" || { echo "some resources held"; exit 1; }
-  exit 0
+  unrecorded=0; held=0
+  reconcile "$manifest" "$run" || unrecorded=1
+  remove_owned "$manifest" "$run" || held=1
+  if [ "$unrecorded" = 0 ] && [ "$held" = 0 ] && none_left "$run"; then
+    drop_private_context "$(dirname "$manifest")"
+    echo "removed every resource of $run (label census confirms none left); private synthetic context deleted, other evidence kept"
+    exit 0
+  fi
+  echo "some resources of $run remain (see HOLD/UNRECORDED above); the manifest lists the recorded ones still present"
+  exit 1
 fi
 
 OLD_IMAGE=$1; NEW_IMAGE=$2; COMPOSE_FILE=$3; COMPOSE_SHA256=$4; REVIEWED_ALLOWLIST=${5:-}
 RUN=claude-reh-$(python -c 'import secrets;print(secrets.token_hex(12))')
 E=$(mktemp -d)
-MANIFEST=$E/owned-resources.txt
-echo "run $RUN" > "$E/manifest"
-: > "$MANIFEST"
+MANIFEST=$E/manifest
+echo "run $RUN" > "$MANIFEST"
 FINISHED=0
 on_exit() {
-  rm -f "$E/runtime.env" "$E/census.key" "$E/"env-*
-  if [ "$FINISHED" = 1 ] && remove_owned "$MANIFEST" "$RUN"; then
-    rm -rf "$E"
-  else
-    cat "$MANIFEST" >> "$E/manifest"
-    echo "HELD: run $RUN; nothing further removed. Evidence and manifest: $E"
-    echo "      inspect, then: ops/cutover_rehearsal.sh --cleanup $(w "$E/manifest")"
+  if [ "$FINISHED" = 1 ] && reconcile "$MANIFEST" "$RUN" && remove_owned "$MANIFEST" "$RUN" && none_left "$RUN"; then
+    rm -rf -- "$E"
+    return
   fi
+  [ "$FINISHED" = 1 ] || reconcile "$MANIFEST" "$RUN" || true
+  echo "HELD: run $RUN. A failed run removes nothing; a cleanup that stopped partway may have removed some"
+  echo "      recorded resources, and the manifest lists those that remain. Evidence, manifest and the private"
+  echo "      synthetic context are kept in: $E"
+  echo "      inspect, then: ops/cutover_rehearsal.sh --cleanup $(w "$MANIFEST")"
 }
 trap on_exit EXIT
 step() { echo; echo "== $*"; }
@@ -256,7 +302,7 @@ docker image inspect "$OLD_IMAGE" > "$E/old-image.json"
 docker image inspect "$NEW_IMAGE" > "$E/new-image.json"
 [ "$(docker inspect -f '{{range .Mounts}}{{.Name}}{{end}}' "$OLD")" = "$OLD_VOL" ] || fail "unexpected state volume"
 spec isolated "$RUN-dry" --network none --env-out "$(w "$E/env-dry")" > /dev/null || fail "spec refused the compose container"
-rm -f "$E/env-dry"
+
 [ "$(docker ps -aq --filter "volume=$OLD_VOL" | wc -l)" = 1 ] || fail "another container uses the state volume"
 pass "captured; spec accepts the compose-managed container; only the old coordinator uses the volume"
 
@@ -303,7 +349,7 @@ new_volume "$RUN-lease"
 docker run --rm --pull never "${LABEL[@]}" --network none --user 0:0 --mount "type=volume,source=$RUN-lease,destination=/l" \
   --entrypoint sh "$OLD_IMAGE" -c 'chown 10001:10001 /l && chmod 700 /l'
 spec isolated "$RUN-candidate" --network none --env-out "$(w "$E/env-candidate")" > "$E/candidate-spec.json"
-run_spec "$E/candidate-spec.json"; rm -f "$E/env-candidate"
+run_spec "$E/candidate-spec.json"
 docker start "$RUN-candidate" >/dev/null
 healthy "$RUN-candidate" || fail "candidate did not start"
 [ "$(docker inspect -f '{{.Image}}' "$RUN-candidate")" = "$NEW_IMAGE" ] || fail "candidate runs another image"
@@ -346,7 +392,7 @@ same "$E/census-candidate-isolated.json" "$E/census-before-promotion.json" || fa
 CANDIDATE=$(docker inspect -f '{{.Id}}' "$RUN-candidate")
 docker rm "$CANDIDATE" >/dev/null; sed -i "/^container $CANDIDATE\$/d" "$MANIFEST"
 spec promoted "$RUN-promoted" --production-admission held --env-out "$(w "$E/env-promoted")" > "$E/promoted-spec.json"
-run_spec "$E/promoted-spec.json"; rm -f "$E/env-promoted"
+run_spec "$E/promoted-spec.json"
 docker start "$RUN-promoted" >/dev/null
 healthy "$RUN-promoted" || fail "promoted release did not start"
 [ "$(docker port "$RUN-promoted" | sort | tr '\n' ' ')" = "$(printf '8080/tcp -> 127.0.0.1:%s\n8080/tcp -> 127.0.0.1:%s\n' "$OPERATOR_PORT" "$VIEWER_PORT" | sort | tr '\n' ' ')" ] \
@@ -384,7 +430,7 @@ pass "nothing was written while production was held"
 PROMOTED=$(docker inspect -f '{{.Id}}' "$RUN-promoted")
 docker rm "$PROMOTED" >/dev/null; sed -i "/^container $PROMOTED\$/d" "$MANIFEST"
 spec promoted "$RUN-open" --production-admission open --env-out "$(w "$E/env-open")" > "$E/open-spec.json"
-run_spec "$E/open-spec.json"; rm -f "$E/env-open"
+run_spec "$E/open-spec.json"
 docker start "$RUN-open" >/dev/null
 healthy "$RUN-open" || fail "opened release did not start"
 expect_http "production reaches the service after reopening" '404 {"error":"task_not_found"}' \

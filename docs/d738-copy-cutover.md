@@ -129,13 +129,25 @@ ops/cutover_rehearsal.sh --cleanup MANIFEST
 - **Exact ownership:**
   - the run ID is 96 random bits;
   - every container, volume and network it creates is labelled
-    `ltp.rehearsal=<run>` and recorded by exact ID in a manifest;
-  - cleanup removes only manifest entries whose label still matches, and never
-    matches by name prefix.
-- **Hold on uncertainty:** on any failure, nothing is removed. The resources,
-  manifest and evidence are kept, except the synthetic secrets, and
-  `--cleanup MANIFEST` removes them later. A resource that cannot be inspected,
-  carries another label, or fails to remove is held and reported.
+    `ltp.rehearsal=<run>`, including short-lived `--rm` helpers;
+  - long-lived resources are recorded by exact ID in a manifest.
+- **Label census reconciliation:** on failure, before success cleanup and
+  before `--cleanup`, the run's label is counted on the daemon and compared
+  with the manifest. A labelled resource that is not recorded (an interrupted
+  helper, a partial `compose up`) is reported as `UNRECORDED` and preserved,
+  never removed. A failed census is reported as `UNCERTAIN`. Nothing is ever
+  matched by name prefix.
+- **Hold on failure:** a failed run removes nothing.
+- **Sequential cleanup:** cleanup runs after success, or with `--cleanup
+  MANIFEST`. It removes recorded resources one at a time, and **may stop
+  partway**. Each removal is dropped from the manifest as it happens, so the
+  manifest always lists what remains. Anything that cannot be inspected,
+  carries another label, or fails to remove is held and reported, and
+  `--cleanup` can simply be run again.
+- **Private synthetic context:** `runtime.env`, `census.key` and `env-*` are
+  kept with the evidence until a cleanup has removed every resource **and** the
+  label census confirms none is left. Until then, a held run can be compared
+  and reconstructed.
 - **Exact answers:** every HTTP check asserts the exact status and body:
   - held production: `503 {"error":"production_admission_held"}`;
   - staging, production reads and reopened production: an authorized
@@ -175,7 +187,12 @@ It left no labelled resources. The negative checks also passed:
 - a gate failure holds all 8 recorded resources;
 - `--cleanup` refuses a decoy labelled for another run, and an ID it cannot
   inspect;
-- `--cleanup` of the held run removes exactly its resources.
+- a held run keeps `runtime.env`, `census.key` and the manifest;
+- a resource carrying the run's label but missing from the manifest is
+  reported `UNRECORDED` and preserved. `--cleanup` removes the recorded ones,
+  exits non-zero and keeps the private context;
+- once that resource is dealt with, `--cleanup` completes. Only after the label
+  census confirms nothing is left does it delete the private context.
 
 **Not rehearsed:** a Docker daemon restart or host reboot (the shared daemon was
 deliberately left alone), and the exact images.
