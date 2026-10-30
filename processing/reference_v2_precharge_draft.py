@@ -91,7 +91,7 @@ class PrechargeLedger:
    prior=db.execute('SELECT object_id,start,end,bytes FROM charges WHERE request_id=?',(request_id,)).fetchone()
    if prior is not None:
     if prior!=(object_id,start,end,end-start):deny('request identity changed')
-    db.execute('COMMIT');return {'state':'replay_no_body'}
+    self._check_path();db.execute('COMMIT');return {'state':'replay_no_body'}
    length=end-start
    if requests>=MAX_LOCAL_CHARGES:deny('local charge record limit reached')
    if requests>=grant['totalRequestBudget'] or charged+length>grant['totalByteBudget']:deny('budget exhausted')

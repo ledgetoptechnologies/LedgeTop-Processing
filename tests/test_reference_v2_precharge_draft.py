@@ -99,6 +99,21 @@ except PrechargeHeld:print('held')
   try:self.assertEqual(db.execute('SELECT clock_ms FROM transfer').fetchone()[0],1793361602000)
   finally:db.close()
 
+ @unittest.skipUnless(os.name=='posix','rename open SQLite database requires POSIX')
+ def test_replay_rechecks_replaced_path_before_return(self):
+  l=self.ledger();l.precharge(request_id='r1',object_id='empty',start=0,end=0)
+  check=l._check_path;calls=0
+  def replace_on_last_check():
+   nonlocal calls
+   calls+=1
+   if calls==3:
+    os.rename(self.path,Path(self.tmp.name)/'old.sqlite')
+    self.path.write_bytes(b'replacement');self.path.chmod(0o600)
+   check()
+  l._check_path=replace_on_last_check
+  with self.assertRaises(PrechargeHeld):l.precharge(request_id='r1',object_id='empty',start=0,end=0)
+  self.assertEqual(calls,3)
+
  def test_zero_length_is_one_request(self):
   l=self.ledger();self.assertEqual(l.precharge(request_id='r1',object_id='empty',start=0,end=0)['bytes'],0)
   with self.assertRaisesRegex(PrechargeHeld,'budget'):l.precharge(request_id='r2',object_id='empty',start=0,end=0)
