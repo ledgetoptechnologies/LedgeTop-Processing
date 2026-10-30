@@ -8,7 +8,7 @@ import json
 import ssl
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from . import reference_protocol as protocol
 from .worker_outbox import BINDING, OutboxConflict
@@ -89,7 +89,7 @@ class ReferenceSender:
         self._url = origin.rstrip("/") + RESULTS_PATH
         self._bearer = _credential(bearer_token, maximum=4096)
         self._binding_provider = claim_binding_provider
-        self._open = opener or build_opener(_NoRedirects(), HTTPSHandler(context=context)).open
+        self._open = opener or build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=context)).open
         self.timeout, self.lease_seconds = timeout, lease_seconds
 
     def _send(self, delivery):

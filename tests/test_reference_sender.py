@@ -1,10 +1,13 @@
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import ssl
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.request import ProxyHandler, build_opener
 
 from processing import reference_protocol as p
 from processing.reference_sender import (
@@ -76,6 +79,18 @@ class ReferenceSenderTests(unittest.TestCase):
         self.assertIsNotNone(row["payload"])
         self.assertEqual(row["local_metadata"]["ownedPrefix"], "jobs/reservation-1")
         return row
+
+    def test_default_internal_sender_ignores_proxy_environment(self):
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:9",
+                                     "https_proxy": "http://127.0.0.1:9",
+                                     "NO_PROXY": "", "no_proxy": ""}):
+            inherited = build_opener()
+            sender = ReferenceSender(self.outbox, "https://coordinator.example",
+                bearer_token=self.bearer, claim_binding_provider=self.provider)
+        inherited_handlers = [handler for handler in inherited.handlers if isinstance(handler, ProxyHandler)]
+        self.assertTrue(inherited_handlers)
+        self.assertEqual(inherited_handlers[0].proxies.get("https"), "http://127.0.0.1:9")
+        self.assertFalse(any(isinstance(handler, ProxyHandler) for handler in sender._open.__self__.handlers))
 
     def test_exact_contract_and_verified_receipt_acknowledge_without_deleting_metadata(self):
         sender = self.sender()
