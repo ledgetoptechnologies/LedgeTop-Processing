@@ -330,6 +330,7 @@ class ComposeBoundaryTests(unittest.TestCase):
         for listing in ('unexpected header\n7 node /var/www/index.js\n',
                         'PID COMMAND\n7 node /var/www/index.js\n7 /sbin/docker-init\n',
                         'PID COMMAND\n0 node /var/www/index.js\n',
+                        'PID COMMAND\n7 node /var/www/index.js\n007 /sbin/docker-init\n',
                         'PID COMMAND\n² node /var/www/index.js\n',
                         'PID COMMAND\n99999999999 node /var/www/index.js\n'):
             with self.subTest(listing=listing), patch.object(self.adapter, 'docker', return_value=listing):
