@@ -180,5 +180,12 @@
       "jobId is a non-UUID slug",
       "issuedAt year 0000"
     ]
-  }
+  },
+  "invalidRawVectors": [
+    {
+      "name": "year-zero-issued-at",
+      "utf8": "{\"capabilityFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"environment\":\"staging\",\"expiresAt\":\"2026-10-30T12:10:00.000Z\",\"generation\":1,\"grantId\":\"grant-1\",\"issuedAt\":\"0000-01-01T00:00:00.000Z\",\"jobId\":\"11111111-2222-4333-8444-555555555555\",\"manifestSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocolVersion\":2,\"rangeBytes\":16777216,\"sourceId\":\"viewer-1\",\"totalByteBudget\":16777218,\"totalRequestBudget\":3,\"transferEpoch\":\"epoch-1\"}",
+      "expected": "reject"
+    }
+  ]
 }
