@@ -13,7 +13,7 @@ class GrantCandidateVectors(unittest.TestCase):
   self.assertEqual(verify_candidate_grant(self.raw)['sha256'],self.g['sha256'])
   self.assertEqual(hashlib.sha256(DOMAIN+self.raw).hexdigest(),self.g['sha256'])
  def test_closed_schema_uuid_bounds_and_dates(self):
-  cases=[('extra','unexpected'),('jobId','job-1'),('generation',0),('generation',9007199254740992),('rangeBytes',True),('issuedAt','2026-10-30T12:00:00Z'),('expiresAt','2026-10-30T12:00:00.000+00:00'),('environment','prod'),('manifestSha256','A'*64)]
+  cases=[('extra','unexpected'),('jobId','job-1'),('generation',0),('generation',9007199254740992),('rangeBytes',True),('issuedAt','2026-10-30T12:00:00Z'),('issuedAt','0000-01-01T00:00:00.000Z'),('expiresAt','2026-10-30T12:00:00.000+00:00'),('environment','prod'),('manifestSha256','A'*64)]
   for field,value in cases:
    candidate=copy.deepcopy(self.g['payload']);candidate[field]=value
    with self.subTest(field=field,value=value),self.assertRaises(GrantDraftError):verify_candidate_grant(p.canonical_json(candidate))
@@ -30,4 +30,9 @@ class GrantCandidateVectors(unittest.TestCase):
   first=v['first-full-range-lost-insufficient-retry-bytes'];self.assertEqual(first['retry']['remainingBytes'],first['byteBudget']-first['firstRequest']['chargedBytes']);self.assertGreater(first['retry']['end']-first['retry']['start'],first['retry']['remainingBytes'])
   http=v['half-open-http-inclusive'];self.assertEqual(http['requestRange'],f"bytes={http['start']}-{http['endExclusive']-1}");self.assertEqual(http['contentRange'],f"bytes {http['start']}-{http['endExclusive']-1}/{http['objectBytes']}");self.assertEqual(http['contentLength'],http['endExclusive']-http['start'])
   lost=v['lost-last-byte-then-retry'];self.assertEqual(sum(x['chargeBytes'] for x in lost['requests']),lost['chargedBytes']);self.assertEqual(len(lost['requests']),lost['chargedRequests'])
+  empty=v['zero-byte-http'];self.assertEqual((empty['rangeHeader'],empty['status'],empty['contentLength']),(None,200,0))
+  replay=v['same-request-id-replay'];self.assertFalse(replay['replay']['emitBody']);self.assertEqual(replay['replay']['additionalChargeRequests'],0)
+  expiry=v['expiry-observed-before-clock-rollback'];self.assertTrue(expiry['expiryObservationCommittedBeforeDenial']);self.assertEqual(expiry['newAdmission'],'deny')
+  unknown=v['unknown-commit'];self.assertFalse(unknown['emitBody']);self.assertEqual(unknown['action'],'reconcile_exact_identity_before_stream')
+  self.assertEqual(v['status-identity-mismatch']['result'],'deny')
   concurrent=v['concurrent-budget-precharge'];self.assertEqual(concurrent['acceptedCount']+concurrent['deniedCount'],len(concurrent['simultaneousRequests']));self.assertLessEqual(concurrent['chargedBytes'],concurrent['byteBudget'])
