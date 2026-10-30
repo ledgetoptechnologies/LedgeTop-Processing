@@ -9,6 +9,9 @@ from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
 import threading
+from types import SimpleNamespace
+from unittest.mock import patch
+import threading
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -146,6 +149,68 @@ class ViewerHTTPTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.origin = 'http://127.0.0.1:' + str(self.server.server_port)
+
+    def test_real_upload_capacity_reservations_block_concurrent_and_release(self):
+        service=Service(); service.store=SimpleNamespace(root=Path(self.spool.name))
+        service.tasks[IDENTIFIER]={'uuid':IDENTIFIER,'status':{'code':10},'progress':0,'imagesCount':0}
+        facade=ViewerFacade(service,TOKEN,temp_dir=self.spool.name,spool_min_free_bytes=100)
+        body=multipart([('images','first.jpg',b'fixture photo')]); entered=threading.Event(); release=threading.Event(); errors=[]
+        original=service.upload
+        def slow(*args):
+            entered.set()
+            if not release.wait(3): raise RuntimeError('test timed out')
+            return original(*args)
+        service.upload=slow
+        def handler(): return MemoryHandler('/task/new/upload/'+IDENTIFIER+'?token='+TOKEN,body,
+            Content_Type='multipart/form-data; boundary='+BOUNDARY,Content_Length=str(len(body)))
+        first=handler(); second=handler()
+        def run():
+            try: facade.handle(first)
+            except Exception as e: errors.append(e)
+        thread=threading.Thread(target=run)
+        with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100+3*len(body))):
+            try:
+                thread.start();self.assertTrue(entered.wait(2))
+                facade.handle(second);self.assertEqual(second.status,503)
+                self.assertEqual(service.uploads,{})
+                release.set();thread.join(2);self.assertFalse(thread.is_alive());self.assertEqual(errors,[]);self.assertEqual(first.status,200)
+                third=handler();facade.handle(third);self.assertEqual(third.status,200)
+                self.assertEqual(facade.spool_capacity._reserved,0)
+            finally:
+                release.set();thread.join(3)
+
+    def test_http_upload_rejects_before_spooling_when_capacity_low(self):
+        from processing.viewer_http import SpoolCapacity
+        self.initialize()
+        self.facade.spool_capacity=SpoolCapacity(self.spool.name,100)
+        body=multipart([('images','first.jpg',b'fixture')])
+        with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100)):
+            with self.assertRaises(HTTPError) as caught:
+                self.request('/task/new/upload/'+IDENTIFIER,body,headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY})
+        self.assertEqual(caught.exception.code,503)
+        self.assertEqual(self.service.uploads,{})
+        self.assertEqual(self.facade.spool_capacity._reserved,0)
+
+    def test_capacity_released_after_upload_exception(self):
+        from processing.viewer_http import SpoolCapacity
+        gate=SpoolCapacity(self.spool.name,100)
+        with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=1000)):
+            with self.assertRaisesRegex(RuntimeError,'synthetic'):
+                with gate.reserve(100): raise RuntimeError('synthetic')
+            self.assertEqual(gate._reserved,0)
+            with gate.reserve(100): self.assertEqual(gate._reserved,200)
+        self.assertEqual(gate._reserved,0)
+
+    def test_upload_capacity_fails_closed_on_free_space_probe_error(self):
+        service=Service();service.store=SimpleNamespace(root=Path(self.spool.name))
+        service.tasks[IDENTIFIER]={'uuid':IDENTIFIER,'status':{'code':10},'progress':0,'imagesCount':0}
+        facade=ViewerFacade(service,TOKEN,temp_dir=self.spool.name,spool_min_free_bytes=100)
+        body=multipart([('images','first.jpg',b'fixture')]);request=MemoryHandler('/task/new/upload/'+IDENTIFIER+'?token='+TOKEN,body,
+            Content_Type='multipart/form-data; boundary='+BOUNDARY,Content_Length=str(len(body)))
+        with patch('processing.viewer_http.shutil.disk_usage',side_effect=OSError('unavailable')):
+            facade.handle(request)
+        self.assertEqual(request.status,503);self.assertEqual(service.uploads,{})
+        self.assertEqual(facade.spool_capacity._reserved,0)
 
     def tearDown(self):
         self.server.shutdown()

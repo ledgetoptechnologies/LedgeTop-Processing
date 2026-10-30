@@ -32,6 +32,7 @@ class Config:
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
+    viewer_spool_min_free_bytes: int = 0
 
 
 def _node_origin(value: str) -> str:
@@ -104,6 +105,11 @@ def from_environment() -> Config:
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
+    spool_floor_text = os.environ.get('PROCESSING_VIEWER_SPOOL_MIN_FREE_BYTES', '0')
+    if spool_floor_text == '0':
+        spool_floor = 0
+    else:
+        spool_floor = _positive_int(spool_floor_text, 'PROCESSING_VIEWER_SPOOL_MIN_FREE_BYTES', 10 ** 15)
     return Config(
         api_token=token,
         local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
@@ -127,5 +133,5 @@ def from_environment() -> Config:
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
-        admission_drain_enabled=admission == '1',
+        admission_drain_enabled=admission == '1', viewer_spool_min_free_bytes=spool_floor,
     )

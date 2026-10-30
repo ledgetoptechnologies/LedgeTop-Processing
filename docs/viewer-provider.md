@@ -123,3 +123,24 @@ the 200 status and headers may already have been sent. TLS and client
 authentication remain separate. This adds a complete streaming hash pass in
 addition to the existing archive pre-verification and may cost substantial I/O
 for large results. It does not authorize deleting inputs or results.
+
+### Optional Viewer upload spool floor
+
+`PROCESSING_VIEWER_SPOOL_MIN_FREE_BYTES` defaults to `0` (disabled). Set it to a
+positive byte count to enable process-local upload admission for the native
+Viewer facade. Before reading an upload body, the facade reserves twice its
+Content-Length against measured free space and the configured floor. The factor
+covers the temporary multipart spool and the copy into task storage; it also
+includes multipart framing, making the estimate conservative. Insufficient or
+unavailable capacity returns HTTP 503 before parsing the body. Reservations are
+released on success and exceptions. Startup rejects this setting if the spool
+and task storage roots have different filesystem device IDs.
+
+This is not a disk quota, NAS-backed input, or a space reservation recognized by
+other processes. Already used space is reflected in the filesystem free-space
+measurement; in-flight reservations from this facade are tracked in memory.
+External writers, other coordinator processes, filesystem replacement, and
+space consumed after admission can still exhaust disk. It does not reserve
+NodeODX working space or results and does not make a large dataset safe. Keep
+this disabled until the single-owner deployment and filesystem layout have been
+reviewed.
