@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "status": "inactive-existing-updater-incremental-profile-qualified",
+  "candidateApplicationSource": "6bbd468e1177746cb695e43195e75355b0681f23",
+  "candidateImage": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+  "helperSourceCommit": "Defined by the commit containing these exact integrated helper files; separate from candidate app source. Stage and hash exact exported helper bytes before execution.",
+  "sourcePins": {
+    "ops/update_reference_coordinator.py": "5907b8cb290a9472f9a8bed415cfadaf1fd6f5cdfe41e77f0435c913435a90a5",
+    "ops/coordinator_gate_bridge.py": "d0bc2847556f335d568a4750fb06e66a9190d82904ed11c734abcf7423da4eb3",
+    "ops/run_coordinator_update_bridge.py": "f36746c5c87b82922dbe8ead52409897dc2f0abc4f3ee629a085b2f1f6b54a4e",
+    "tests/test_incremental_coordinator_update.py": "63692a1fdcb313d1ec99016d168f7d9f05db75bdbcd9f34ee87fcb4e7aef767f",
+    "tests/test_reference_coordinator_update.py": "81e53bc3e82e13753a99ac6ecbe867af7d8ba1dd6af910995f28249d93ea2b38",
+    "tests/test_coordinator_gate_bridge.py": "3a90c4ff92e7fcb0bec8d0aa83815eab81549cdeafa89fbacffac4f5fb43a457",
+    "tests/test_coordinator_update_controller.py": "df32df8f250cfd920f6d13f13ca1161a74a1e86ae107729cd78ee5e6272dc21d",
+    "docs/coordinator-incremental-upgrade-plan.md": "611aae1f928bf1ebdd3d4839fa87e6eae1864d89bf03bab3c8d77abd380e51c9"
+  },
+  "testedSourcePins": {
+    "ops/update_reference_coordinator.py": "5907b8cb290a9472f9a8bed415cfadaf1fd6f5cdfe41e77f0435c913435a90a5",
+    "ops/coordinator_gate_bridge.py": "d0bc2847556f335d568a4750fb06e66a9190d82904ed11c734abcf7423da4eb3",
+    "ops/run_coordinator_update_bridge.py": "f36746c5c87b82922dbe8ead52409897dc2f0abc4f3ee629a085b2f1f6b54a4e",
+    "tests/test_incremental_coordinator_update.py": "63692a1fdcb313d1ec99016d168f7d9f05db75bdbcd9f34ee87fcb4e7aef767f",
+    "tests/test_reference_coordinator_update.py": "81e53bc3e82e13753a99ac6ecbe867af7d8ba1dd6af910995f28249d93ea2b38",
+    "tests/test_coordinator_gate_bridge.py": "3a90c4ff92e7fcb0bec8d0aa83815eab81549cdeafa89fbacffac4f5fb43a457",
+    "tests/test_coordinator_update_controller.py": "df32df8f250cfd920f6d13f13ca1161a74a1e86ae107729cd78ee5e6272dc21d",
+    "docs/coordinator-incremental-upgrade-plan.md": "8f917a3b01f46028636549f80f37328d7441ab573045cf2c17a7a553f739f5e0"
+  },
+  "documentationAfterTests": "Only plan wording updated after tests to reflect current integrated qualification; code/test pins unchanged.",
+  "tests": {
+    "author": {
+      "passed": 90,
+      "skipped": 0,
+      "seconds": 32.439,
+      "image": "83028785a336"
+    },
+    "independentRoot": {
+      "passed": 90,
+      "skipped": 0,
+      "seconds": 32.113,
+      "image": "sha256:e96d957f3eff3f6a33fa673fa9f8ce211d82969c3724d16ba24721f6b376f42b",
+      "python": "3.13.17",
+      "uid": 10001,
+      "network": "none",
+      "readOnlyRoot": true,
+      "resourceWarningsAsErrors": true,
+      "modules": [
+        "tests.test_incremental_coordinator_update",
+        "tests.test_incremental_coordinator_binding",
+        "tests.test_reference_coordinator_update",
+        "tests.test_coordinator_gate_bridge",
+        "tests.test_coordinator_update_controller"
+      ]
+    },
+    "independentReviewRegression": {
+      "passed": 2,
+      "seconds": 1.014,
+      "scope": "Final exact pins: real incremental three-process bridge/OS gate handshake and foreign owner after durable pending intent."
+    }
+  },
+  "scope": [
+    "Existing ReferenceCoordinatorUpdate prepare/activate/rollback flow, actual local HTTP/Queue/SQLite and original owned API, with synthetic Docker/SSH boundaries.",
+    "Complete original two owned rows retained; only two matching operation requests/receipts and exact owned cancel CAS transitions allowed.",
+    "Lost POST ACK uses exact receipt GET, lost/unknown GET holds; explicit reconciliation never repeats POST.",
+    "Backup executes serialized full-state copy with four owned receipts; no database restoration.",
+    "Gate bridge uses current immutable main/cluster containers/images; helper source identity separate from app source.",
+    "Original historical strict defaults retained."
+  ],
+  "reviewFindingsResolved": [
+    "Expanded incremental digest accepted on actual BridgeGateClient enter/check and RootRelay, with real three-process regression.",
+    "Pending schedule defers ambiguous state comparison but always checks allowed volume owners, with zero-POST foreign owner regression."
+  ],
+  "activationReleased": false,
+  "remoteRuntimeChanged": false,
+  "remoteMaintenanceChanged": false,
+  "remoteStateChanged": false,
+  "nasChanged": false,
+  "remaining": [
+    "Execute reviewed isolated actual private-config/state-copy qualification on cluster.",
+    "Stage exact committed helper source, bind actual source digest/config/engine identities and fresh real gate/sole-owner evidence.",
+    "Only after those gates, separately release/execute authorized live upgrade and verify full runtime acceptance.",
+    "Full goal retains Viewer/NAS assembly, private workers/full processing modes, custody/cleanup, UI and real-data acceptance."
+  ],
+  "fullGoalComplete": false
+}

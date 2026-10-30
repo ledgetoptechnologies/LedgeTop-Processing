@@ -6,7 +6,7 @@ children and relays their live gate challenges. A transport failure is a hold,
 never authorization to retry a deployment or clear a durable node reservation.
 """
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass,asdict
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -15,7 +15,8 @@ import shlex
 import subprocess
 import sys
 
-from ops.coordinator_gate_bridge import BridgeBinding, BridgeError, RootRelay, helper_digest
+from ops.coordinator_gate_bridge import BridgeBinding, BridgeError, RootRelay, helper_digest,incremental_helper_digest
+from ops.incremental_coordinator_binding import IncrementalBinding
 
 
 AUTHORITY = '7131882e-38ce-4d3e-99cc-4ba5a94d2ee8'
@@ -54,7 +55,9 @@ def _private_remote_path(value, *, filename=False):
     return value
 
 
-def validate_config(config):
+def validate_config(config,incremental_binding=None):
+    if incremental_binding is not None and type(incremental_binding) is not IncrementalBinding:raise BridgeError('concrete_incremental_binding_required')
+    expected_helper=incremental_helper_digest() if incremental_binding else helper_digest()
     if (type(config) is not dict
             or set(config) != {'schemaVersion', 'cluster', 'main', 'sessionNonce', 'timeoutSeconds'}
             or type(config['schemaVersion']) is not int or config['schemaVersion'] != 1
@@ -74,7 +77,7 @@ def validate_config(config):
         if (binding.node_id != node or binding.engine_id != ENGINES[node]
                 or binding.authority_id != AUTHORITY
                 or binding.coordinator_origin != 'http://127.0.0.1:18080'
-                or binding.helper_sha256 != helper_digest()):
+                or binding.helper_sha256 != expected_helper):
             raise BridgeError('installed_processing_binding_required')
         bindings[node] = binding
     return bindings
@@ -89,19 +92,25 @@ class RunSpec:
     operation_id: str
     receipt_dir: str
     gate_config: str
+    helper_source_commit: str | None = None
+    incremental_binding: IncrementalBinding | None = None
 
     def __post_init__(self):
-        if self.action not in ('activate', 'rollback'):
+        if self.action not in ('activate', 'rollback') and not (self.action=='reconcile-schedule' and self.incremental_binding is not None):
             raise BridgeError('prepared_update_action_required')
         _commit(self.source_commit); _image(self.image); _image(self.main_image)
         if type(self.operation_id) is not str or not re.fullmatch(r'[a-f0-9]{32}', self.operation_id):
             raise BridgeError('prepared_update_operation_required')
         _private_remote_path(self.receipt_dir)
         _private_remote_path(self.gate_config, filename=True)
+        if self.incremental_binding is not None:
+            if type(self.incremental_binding) is not IncrementalBinding or self.source_commit!=self.incremental_binding.candidate_source or self.main_image!=self.incremental_binding.main_image:raise BridgeError('incremental_application_binding_changed')
+            _commit(self.helper_source_commit)
+        elif self.helper_source_commit is not None:raise BridgeError('helper_source_requires_incremental_profile')
 
     @property
     def source(self):
-        return BASE + '/reference-' + self.source_commit + '/source'
+        return BASE + '/reference-' + (self.helper_source_commit or self.source_commit) + '/source'
 
 
 # These programs are constant code. All variable inputs are one JSON argument,
@@ -115,10 +124,13 @@ assert not any(x.is_symlink() for x in (root,*root.parents))
 sys.path.insert(0,str(root));sys.dont_write_bytecode=True
 from ops import coordinator_gate_bridge as b
 assert pathlib.Path(b.__file__).resolve()==root/'ops/coordinator_gate_bridge.py'
-assert b.helper_digest()==p['helperSha256']
+assert (b.incremental_helper_digest() if p.get('incrementalBinding') else b.helper_digest())==p['helperSha256']
+if p.get('incrementalBinding'):
+ manifest=root.parent/'source-manifest.json';assert manifest.is_file() and not manifest.is_symlink() and manifest.stat().st_size<=1048576
+ assert json.loads(manifest.read_text())['sourceCommit']==p['helperSourceCommit']
 if p['role']=='main':
  r=p['binding'];binding=b.BridgeBinding(engine_id=r['engineId'],node_id=r['nodeId'],authority_id=r['authorityId'],coordinator_origin=r['coordinatorOrigin'],gate_generation=r['generation'],helper_sha256=r['helperSha256'])
- b.serve_main(sys.stdin.buffer,sys.stdout.buffer,binding=binding,operation_id=p['operation'],session_nonce=p['sessionNonce'],engine_probe=b.MainEngineProbe(expected_image=p['expectedMainImage']),timeout_seconds=p['timeoutSeconds'])
+ b.serve_main(sys.stdin.buffer,sys.stdout.buffer,binding=binding,operation_id=p['operation'],session_nonce=p['sessionNonce'],engine_probe=b.MainEngineProbe(expected_image=p['expectedMainImage'],expected_container=p.get('expectedMainContainer')),timeout_seconds=p['timeoutSeconds'])
 else:
  from ops.update_reference_coordinator import main
  raise SystemExit(main(p['arguments']))
@@ -128,17 +140,20 @@ else:
 def ssh_argv(node, spec, config):
     if node not in HOSTS or type(spec) is not RunSpec:
         raise BridgeError('fixed_processing_ssh_target_required')
-    bindings = validate_config(config)
+    bindings = validate_config(config,spec.incremental_binding)
     payload = dict(source=spec.source, role=node, hostname='node' if node == 'main' else 'cluster',
-        helperSha256=helper_digest(), operation=spec.operation_id,
+        helperSha256=incremental_helper_digest() if spec.incremental_binding else helper_digest(), operation=spec.operation_id,
         sessionNonce=config['sessionNonce'], timeoutSeconds=config['timeoutSeconds'])
     if node == 'main':
         payload['binding'] = bindings['main'].public()
         payload['expectedMainImage'] = spec.main_image
+        if spec.incremental_binding:payload['expectedMainContainer']=spec.incremental_binding.main_container
     else:
         payload['arguments'] = [spec.action, '--image', spec.image, '--source-commit', spec.source_commit,
             '--receipt-dir', spec.receipt_dir, '--verified-main-image', spec.main_image,
             '--gate-config', spec.gate_config]
+        if spec.incremental_binding:payload['arguments']+=['--incremental-profile',json.dumps(asdict(spec.incremental_binding),sort_keys=True,separators=(',',':')),'--helper-source-commit',spec.helper_source_commit]
+    if spec.incremental_binding:payload.update(incrementalBinding=asdict(spec.incremental_binding),helperSourceCommit=spec.helper_source_commit)
     command = shlex.join(['python3', '-B', '-c', BOOTSTRAP,
         json.dumps(payload, sort_keys=True, separators=(',', ':'), allow_nan=False)])
     return [str(SSH), *OPTIONS, HOSTS[node], command]
@@ -161,9 +176,9 @@ def _stop_owned(process):
 
 
 def run(spec, config, evidence_dir, *, popen=subprocess.Popen, relay_factory=RootRelay):
-    bindings = validate_config(config)
     if type(spec) is not RunSpec:
         raise BridgeError('prepared_update_spec_required')
+    bindings = validate_config(config,spec.incremental_binding)
     directory = Path(evidence_dir)
     if not directory.is_absolute() or directory.is_symlink():
         raise BridgeError('absolute_new_evidence_directory_required')
@@ -200,10 +215,12 @@ def run(spec, config, evidence_dir, *, popen=subprocess.Popen, relay_factory=Roo
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('activate', 'rollback'))
+    parser.add_argument('action', choices=('activate', 'rollback','reconcile-schedule'))
     for flag in ('source-commit', 'image', 'main-image', 'operation-id', 'receipt-dir',
                  'gate-config', 'local-gate-config', 'evidence-dir'):
         parser.add_argument('--' + flag, required=True)
+    parser.add_argument('--helper-source-commit')
+    parser.add_argument('--incremental-binding',help='explicit local immutable incremental binding JSON path')
     args = parser.parse_args(argv)
     try:
         if os.name != 'nt' or not SSH.is_file():
@@ -212,8 +229,13 @@ def main(argv=None):
         if not config_path.is_absolute() or config_path.is_symlink() or config_path.stat().st_size > 16384:
             raise BridgeError('bounded_local_gate_configuration_required')
         config = json.loads(config_path.read_text(encoding='utf-8'))
+        profile=None
+        if args.incremental_binding:
+            path=Path(args.incremental_binding)
+            if not path.is_absolute() or path.is_symlink() or path.stat().st_size>16384:raise BridgeError('bounded_incremental_binding_required')
+            profile=IncrementalBinding(**json.loads(path.read_text(encoding='utf-8')))
         spec = RunSpec(args.action, args.source_commit, args.image, args.main_image,
-            args.operation_id, args.receipt_dir, args.gate_config)
+            args.operation_id, args.receipt_dir, args.gate_config,args.helper_source_commit,profile)
         return run(spec, config, args.evidence_dir)
     except Exception:
         print('Coordinator update bridge held. Inspect private SSH evidence and the existing checkpoint; do not replay.', file=sys.stderr)
