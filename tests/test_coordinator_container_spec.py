@@ -97,6 +97,13 @@ class ContainerSpecTest(unittest.TestCase):
             with self.assertRaises(spec.SpecError, msg=log):
                 derive(container)
 
+    def test_labels(self):
+        argv = derive(extra_labels=['ltp.rehearsal=claude-reh-abc'])['argv']
+        self.assertEqual(argv[argv.index('--label') + 1], 'ltp.rehearsal=claude-reh-abc')
+        for bad in ('noequals', 'a=b c', 'A=1', 'a=$(x)'):
+            with self.assertRaises(spec.SpecError, msg=bad):
+                derive(extra_labels=[bad])
+
     def test_lease_volume(self):
         result = derive(mode='promoted', network=None, lease_volume='ltp-authority-lease')
         self.assertIn('type=volume,source=ltp-authority-lease,destination=/run/ledgetop-authority-lease', result['argv'])

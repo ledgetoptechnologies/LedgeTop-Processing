@@ -71,7 +71,7 @@ ADDED_KEYS = ('PROCESSING_AUTHORITY_LEASE_DIR', 'PROCESSING_VIEWER_PRODUCTION_AD
 
 
 def derive(container, old_image, new_image, *, mode, volume, name, network=None, lease_dir=None, lease_volume=None,
-           production_admission=None, accept_compose_source=False):
+           production_admission=None, accept_compose_source=False, extra_labels=()):
     if mode not in ('isolated', 'promoted'):
         raise SpecError('mode must be isolated or promoted')
     host, config = container['HostConfig'], container['Config']
@@ -105,7 +105,10 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None,
             raise SpecError('new image changes ' + field + '; review before reuse')
     if config.get('User') != new_image['Config'].get('User'):
         raise SpecError('new image changes User')
-    argv = ['docker', 'create', '--name', name,
+    for label in extra_labels:
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9_.-]{1,128}', label):
+            raise SpecError('labels must be plain KEY=VALUE')
+    argv = ['docker', 'create', '--name', name, *[item for label in extra_labels for item in ('--label', label)],
             '--mount', 'type=volume,source=%s,destination=%s' % (volume, mounts[0]['Destination'])]
     for field in CARRIED:
         if not _empty(host.get(field)):
@@ -171,6 +174,7 @@ def main(argv=None):
     parser.add_argument('--lease-dir', help='host directory holding the authority lease')
     parser.add_argument('--lease-volume', help='named volume holding the authority lease (same daemon only)')
     parser.add_argument('--production-admission', choices=('open', 'held'))
+    parser.add_argument('--label', action='append', default=[], help='KEY=VALUE label for the new container')
     parser.add_argument('--accept-compose-source', action='store_true',
                         help='recreate a compose-managed container outside compose (labels are not carried)')
     args = parser.parse_args(argv)
@@ -179,7 +183,7 @@ def main(argv=None):
         spec = derive(load(args.container), load(args.old_image), load(args.new_image), mode=args.mode,
                       volume=args.volume, name=args.name, network=args.network, lease_dir=args.lease_dir, lease_volume=args.lease_volume,
                       production_admission=args.production_admission,
-                      accept_compose_source=args.accept_compose_source)
+                      accept_compose_source=args.accept_compose_source, extra_labels=args.label)
     except SpecError as error:
         print('refused: ' + str(error), file=sys.stderr)
         return 2

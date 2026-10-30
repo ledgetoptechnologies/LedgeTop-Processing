@@ -108,37 +108,74 @@ every artifact, and inspect. Never improvise a workaround.
 ## End-to-end rehearsal
 
 [ops/cutover_rehearsal.sh](../ops/cutover_rehearsal.sh) runs this runbook on
-synthetic state. Every Docker call goes through the pinned wrapper, and it
-touches only resources named for its own run. The old coordinator is created
-from d738's own `compose.viewer.yaml`, as live. The rehearsal on 2026-10-30
-used Python 3.12 rebuilds of the d738 and PR46 sources, not the exact images.
-It passed:
+synthetic state:
 
-- **Step 0:** the spec script accepts the compose-managed container. This
-  surfaced two fixes:
-  - compose records the state volume as a `Binds` entry;
-  - compose records the daemon's `local` log driver.
-- **Step 1:** no active inbound connection in d738's own namespace (TIME_WAIT
-  excluded).
-- **Step 2:** d738 drains with exit 0, its fence is verified, and the old
-  container is confirmed absent on the recorded daemon.
-- **Step 3:** the archive restores identically into the verification volume
-  and the copy, the original is unchanged, and each volume has its own
-  verified holder.
-- **Step 5:** the candidate is healthy with only loopback and no published
-  ports.
-- **Step 6:** the real release startup passes the gate with exact schema hashes
-  for 5 objects and the exact lease marker.
-- **Step 7:** over the published port, production gets
-  `503 production_admission_held` and staging is admitted. A `compose up` of
-  the old d738 definition while the release runs cannot start, because the
-  release holds the host ports. The release is unaffected and the fence stays
-  verified.
-- **Opening production:** the held phase wrote nothing, and production is
-  admitted after recreating the container with the hold removed.
-- **Rollback:** nothing had been admitted, so the copy was unchanged since the
-  gate. d738 is restored from its original volume through compose with the
-  same authority, the d738 schema, no lease marker and its history kept.
+```
+ops/cutover_rehearsal.sh D738_IMAGE_ID RELEASE_IMAGE_ID D738_COMPOSE_FILE COMPOSE_SHA256 [REVIEWED_SCHEMA_ALLOWLIST]
+ops/cutover_rehearsal.sh --cleanup MANIFEST
+```
+
+**Safety properties**
+
+- **Exact identities:** the images must be full local IDs (`sha256:…`), and the
+  compose file must match the given SHA-256 (d738's `compose.viewer.yaml` blob
+  is `3f0b7ef4…d9ee`). Every `docker run` and `compose up` uses
+  `--pull never`, and the override sets `pull_policy: never`.
+- **Never the live ports:** the d738 compose file is never used as is. A
+  generated override replaces its ports with two fresh, unused, random
+  loopback ports (never 18080, 3005 or 18443). The rendered `compose config` is
+  validated before anything starts: one service, the exact image, pull never,
+  exactly those two ports on 127.0.0.1, and the run's own volume.
+- **Exact ownership:**
+  - the run ID is 96 random bits;
+  - every container, volume and network it creates is labelled
+    `ltp.rehearsal=<run>` and recorded by exact ID in a manifest;
+  - cleanup removes only manifest entries whose label still matches, and never
+    matches by name prefix.
+- **Hold on uncertainty:** on any failure, nothing is removed. The resources,
+  manifest and evidence are kept, except the synthetic secrets, and
+  `--cleanup MANIFEST` removes them later. A resource that cannot be inspected,
+  carries another label, or fails to remove is held and reported.
+- **Exact answers:** every HTTP check asserts the exact status and body:
+  - held production: `503 {"error":"production_admission_held"}`;
+  - staging, production reads and reopened production: an authorized
+    `404 {"error":"task_not_found"}` from the service, proving the request
+    passed authentication and the hold.
+- **Synthetic schema allowlist:** without a reviewed allowlist argument, the
+  gate's schema allowlist is derived from the observed differences and the run
+  says so explicitly. That is a **synthetic comparison exercise, not release
+  schema qualification** (U9). With a reviewed allowlist, the gate must pass
+  against it.
+- **Every Docker call** goes through the pinned wrapper. The daemon is never
+  restarted.
+
+**Results on 2026-10-30.** The run used Python 3.12 rebuilds of the d738 and
+PR46 sources, given by exact local ID; not the exact .89 images. The normal run
+passed every step:
+
+- **Steps 0–1:** exact-identity checks, the validated synthetic compose,
+  capture and quiescence.
+- **Step 2:** d738 drained with exit 0, its fence was verified, and the old
+  container was confirmed absent on the recorded daemon.
+- **Step 3:** the verified copy.
+- **Steps 5–6:** the isolated candidate, then the gate. Only 5 schema objects
+  and the exact marker changed, as a synthetic exercise.
+- **Step 7:** promotion with production held, checked with the exact answers
+  above.
+- **Accidental restart:** `compose up` of the old definition was refused
+  because the release holds its host ports.
+- **Opening production:** the held phase wrote nothing.
+- **Rollback:** d738 came back through compose with the same authority and
+  schema, and its history kept.
+
+It left no labelled resources. The negative checks also passed:
+
+- a tag instead of an ID, or a compose hash mismatch, fails before anything is
+  created;
+- a gate failure holds all 8 recorded resources;
+- `--cleanup` refuses a decoy labelled for another run, and an ID it cannot
+  inspect;
+- `--cleanup` of the held run removes exactly its resources.
 
 **Not rehearsed:** a Docker daemon restart or host reboot (the shared daemon was
 deliberately left alone), and the exact images.
