@@ -160,6 +160,7 @@ with NodeGate('synthetic-engine') as g:
  def init_claim(self):
   return dict(jobId=self.binding['jobId'],manifestSha256=self.binding['manifestSha256'],generation=1,engineId='synthetic-engine',engineOrigin='http://127.0.0.1:3001',options=[dict(name='test-flag',value=True)])
 
+ @unittest.skip("hard-disabled pending SQLite connection-origin qualification")
  def test_initialize_lost_response_never_repeats(self):
   from processing.node_gate import NodeGate
   from processing.reference_v2_node_preflight import retain_node_for_verified_input
@@ -190,6 +191,7 @@ with NodeGate('synthetic-engine') as g:
    with NodeGate(engineid) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
    with self.ledger._transaction() as sd:self.assertIsNotNone(sd.execute("SELECT 1 FROM input_write_holds WHERE reservation='r1'").fetchone())
 
+ @unittest.skip("hard-disabled pending SQLite connection-origin qualification")
  def test_initialize_process_death_never_repeats(self):
   import subprocess,sys
   from processing.node_gate import NodeGate
@@ -228,6 +230,18 @@ initialize_once(enabled=True,db=db,engine=Engine(),fence=f,journal=j,ledger=l,re
     def initialize(self,task):raise AssertionError('duplicate initialize')
    db=sqlite3.connect(self.root/'init.sqlite');self.addCleanup(db.close)
    with self.assertRaisesRegex(InitHeld,'already attempted'):initialize_once(enabled=True,db=db,engine=Engine(),**shared)
+
+ def test_old_open_connection_with_replaced_path_is_refused(self):
+  from processing.reference_v2_init_boundary import initialize_once,InitHeld
+  path=self.root/'swap.sqlite';old=sqlite3.connect(path);self.addCleanup(old.close)
+  old.execute('CREATE TABLE original (id INTEGER)');old.commit()
+  os.rename(path,self.root/'old.sqlite')
+  new=sqlite3.connect(path);new.execute('CREATE TABLE replacement (id INTEGER)');new.commit();new.close()
+  st=path.stat()
+  class Engine:
+   def initialize(self,task):raise AssertionError('must not issue initialize')
+  with self.assertRaisesRegex(InitHeld,'connection-origin'):
+   initialize_once(enabled=True,db=old,engine=Engine(),fence=None,journal=None,ledger=None,reservation_id='r',binding={},manifest_bytes=b'',engine_id='e',node_id='n',origin='x',authority_id='a',generation=1,worker_id='w',operation_key=b'k'*32,expected_epoch='f'*64,expected_inode=(st.st_dev,st.st_ino),authenticated_claim={})
 
  def test_insufficient_remaining_blocks_second_file(self):
   from processing.scratch_policy import PolicyConflict

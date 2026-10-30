@@ -27,11 +27,17 @@ def initialize_once(*, enabled=False, db, engine, fence, journal, ledger,
         authority_id, generation, worker_id, operation_key, expected_epoch, expected_inode, authenticated_claim):
     """Issue at most one initialize after durable intent; never auto-retry.
 
+    This boundary is hard-disabled even when enabled=True.
     `engine.initialize` is injected and must target the configured node. A
     successful response is not proof that upload or commit occurred. On any
     response error or process death, the pending intent remains ambiguous.
     """
     if enabled is not True:raise InitHeld('v2 initialization disabled')
+    # Python sqlite exposes the database pathname, not the inode backing this
+    # particular connection. A path can be replaced after connection open.
+    # Never use this prototype until a controlled connection-origin binding,
+    # external durable epoch, engine identity and option contract are qualified.
+    raise InitHeld('SQLite connection-origin binding not qualified')
     if type(db) is not sqlite3.Connection or db.in_transaction:raise InitHeld('idle private database required')
     db.execute('PRAGMA synchronous=FULL')
     path=db.execute('PRAGMA database_list').fetchone()[2]
