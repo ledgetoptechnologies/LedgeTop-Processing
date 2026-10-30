@@ -124,6 +124,9 @@ publish_next_input(fence=f,journal=j,ledger=l,reservation_id='r1',binding=bindin
    with NodeGate(engine) as gate:
     gate.provision('main',origin,authority);gate.reserve('main',origin,authority,1,receipt);gate.release_empty(receipt,{'job':None})
    with self.assertRaisesRegex(GateError,'previously resolved'):retain_node_for_verified_input(**args)
+   with NodeGate(engine) as gate:
+    state=gate.snapshot();state.pop('lastAcknowledgment');state['lastResolution']={'reservation':{'receiptId':receipt}};gate._save(state)
+   with self.assertRaisesRegex(GateError,'previously resolved'):retain_node_for_verified_input(**args)
 
  def test_gate_reservation_survives_process_exit_before_bind(self):
   import subprocess,sys
