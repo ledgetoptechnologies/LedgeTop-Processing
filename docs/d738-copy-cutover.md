@@ -144,6 +144,15 @@ ops/cutover_rehearsal.sh --cleanup MANIFEST
   manifest always lists what remains. Anything that cannot be inspected,
   carries another label, or fails to remove is held and reported, and
   `--cleanup` can simply be run again.
+- **Exit status:**
+  - `0` only when every step passed **and** cleanup is verified (the label
+    census finds nothing left);
+  - an earlier failure keeps its own non-zero status;
+  - passed steps with an incomplete or unverifiable cleanup exit `3`
+    (`CLEANUP INCOMPLETE`);
+  - `--cleanup` exits non-zero while anything remains.
+
+  `REHEARSAL PASSED` is printed only after cleanup is verified.
 - **Private synthetic context:** `runtime.env`, `census.key` and `env-*` are
   kept with the evidence until a cleanup has removed every resource **and** the
   label census confirms none is left. Until then, a held run can be compared
@@ -192,7 +201,16 @@ It left no labelled resources. The negative checks also passed:
   reported `UNRECORDED` and preserved. `--cleanup` removes the recorded ones,
   exits non-zero and keeps the private context;
 - once that resource is dealt with, `--cleanup` completes. Only after the label
-  census confirms nothing is left does it delete the private context.
+  census confirms nothing is left does it delete the private context;
+- **exit status:** a value that is not an image ID exits `1`. A run whose steps
+  all pass, but with an unrecorded labelled resource injected before cleanup
+  (`CUTOVER_REHEARSAL_FAULT=unrecorded-resource`, test only), exits `3` with
+  `CLEANUP INCOMPLETE`, preserves the injected resource and holds the rest. The
+  normal run exits `0`.
+
+These checks are in
+[ops/cutover_rehearsal_selftest.sh](../ops/cutover_rehearsal_selftest.sh) and
+can be rerun with the same image IDs and compose file.
 
 **Not rehearsed:** a Docker daemon restart or host reboot (the shared daemon was
 deliberately left alone), and the exact images.

@@ -114,16 +114,26 @@ E=$(mktemp -d)
 MANIFEST=$E/manifest
 echo "run $RUN" > "$MANIFEST"
 FINISHED=0
+CLEANUP_INCOMPLETE=3
 on_exit() {
-  if [ "$FINISHED" = 1 ] && reconcile "$MANIFEST" "$RUN" && remove_owned "$MANIFEST" "$RUN" && none_left "$RUN"; then
+  local status=$?   # the run's own status; an earlier failure is never overwritten
+  set +e
+  if [ "$FINISHED" = 1 ] && [ "$status" = 0 ] && reconcile "$MANIFEST" "$RUN" && remove_owned "$MANIFEST" "$RUN" \
+      && none_left "$RUN"; then
     rm -rf -- "$E"
-    return
+    echo "REHEARSAL PASSED: every step passed and cleanup is verified (label census finds nothing left)"
+    exit 0
   fi
-  [ "$FINISHED" = 1 ] || reconcile "$MANIFEST" "$RUN" || true
+  [ "$FINISHED" = 1 ] || reconcile "$MANIFEST" "$RUN"
+  if [ "$status" = 0 ]; then
+    echo "CLEANUP INCOMPLETE: the rehearsal steps passed, but cleanup could not be verified (exit $CLEANUP_INCOMPLETE)"
+    status=$CLEANUP_INCOMPLETE
+  fi
   echo "HELD: run $RUN. A failed run removes nothing; a cleanup that stopped partway may have removed some"
   echo "      recorded resources, and the manifest lists those that remain. Evidence, manifest and the private"
   echo "      synthetic context are kept in: $E"
   echo "      inspect, then: ops/cutover_rehearsal.sh --cleanup $(w "$MANIFEST")"
+  exit "$status"
 }
 trap on_exit EXIT
 step() { echo; echo "== $*"; }
@@ -465,5 +475,13 @@ pass "d738 restored from its original volume through compose: same authority, d7
 
 step "Not verified here"
 echo "UNVERIFIED Docker daemon restart / host reboot (the shared daemon is never restarted)"
-echo "REHEARSAL PASSED on images $OLD_IMAGE (old) and $NEW_IMAGE (release)"
+echo "REHEARSAL STEPS PASSED on images $OLD_IMAGE (old) and $NEW_IMAGE (release); cleanup follows"
+if [ "${CUTOVER_REHEARSAL_FAULT:-}" = unrecorded-resource ]; then
+  # Test-only fault injection: a labelled resource the manifest does not know,
+  # as an interrupted helper would leave. Cleanup must refuse and exit non-zero.
+  docker create "${LABEL[@]}" --name "$RUN-injected-fault" "$OLD_IMAGE" >/dev/null
+  echo "FAULT INJECTED: unrecorded labelled container $RUN-injected-fault"
+elif [ -n "${CUTOVER_REHEARSAL_FAULT:-}" ]; then
+  fail "unknown CUTOVER_REHEARSAL_FAULT"
+fi
 FINISHED=1
