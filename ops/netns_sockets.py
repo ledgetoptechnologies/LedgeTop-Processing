@@ -30,7 +30,11 @@ def summarize(lines):
             connections[port][state] += 1
     inbound = {str(port): states for port, states in sorted(connections.items()) if port in listening}
     outbound = sum(sum(states.values()) for port, states in connections.items() if port not in listening)
-    return {'listening': sorted(listening), 'inboundByLocalPort': inbound, 'otherConnections': outbound}
+    # TIME_WAIT is a connection this side already closed after answering; every
+    # other state (including half-closed ones) may still carry a request.
+    active = sum(count for states in inbound.values() for state, count in states.items() if state != 'time_wait')
+    return {'listening': sorted(listening), 'inboundByLocalPort': inbound, 'activeInbound': active,
+            'otherConnections': outbound}
 
 
 def main():

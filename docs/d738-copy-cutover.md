@@ -15,16 +15,35 @@
 > - **Ingress:** U1–U3. The candidate runs with `--network none` until promotion.
 > - **Production:** U5. Production is held after promotion.
 >
-> **Still open:**
+> **Threat classification** (from the review direction of 2026-10-30): the
+> release gates on *operational* events:
 >
-> - **U4:** unfenced intervals (holder restart, copy-to-lock handover) and a
->   real Docker daemon restart.
+> - a normal reboot;
+> - a Docker daemon restart;
+> - an accidental restart of an existing container;
+> - the runbook's own steps.
+>
+> It does not gate on a hostile, privileged Docker administrator deliberately
+> creating an old container or writing arbitrary host data. That remains a
+> documented trust boundary, not a release blocker. Beau has authorized the
+> necessary operations.
+>
+> **Still open before release:**
+>
+> - **Daemon restart and reboot:** a real Docker daemon restart or host reboot
+>   has not been rehearsed. That is an operational event, so it gates release.
+>   It needs an isolated test daemon; the shared daemon is not restarted.
+> - **Exact image:** an exact-image run of the rehearsal. PR46 head `22525b9`
+>   has been built on .89 from the pinned Python 3.13 base, as
+>   `sha256:62e441c4…2cfd`, and is under independent entrypoint testing.
 > - **U5:** the production hold does not resume Viewer work, so true
->   quiescence and a coordinated recovery are required. There is no
->   authenticated, durable no-admission record.
-> - **U2, U7:** host root and `docker exec` access.
-> - **U8:** volume ownership.
-> - **Exact-image qualification.**
+>   quiescence and a coordinated Viewer recovery are required.
+>
+> **Trust boundary, not release blockers:**
+>
+> - deliberate privileged creation of d738 during an unfenced interval (U4);
+> - host root and `docker exec` access (U2, U7);
+> - volume ownership against a hostile administrator (U8).
 
 This procedure would replace the live cluster coordinator with a frozen
 release image. The live coordinator is:
@@ -85,6 +104,44 @@ every artifact, and inspect. Never improvise a workaround.
 | The coordinator's internal ports: the native/Viewer listener `PROCESSING_PORT` (default 8080) and the reference TLS listener (8443). The host publishes 3005, 18443 and loopback 18080 | reviewer; **confirm from `old-inspect.json`** | step 0 |
 | Viewer's active work lives in `processing_jobs.status IN ('pending','leased')` and in `processing_attempts.status NOT IN ('cancelled','failed','published')` | Viewer `processingRepository.js` at 821186f4; **confirm against the deployed Viewer** | step 1 |
 | The a042 image has `bash` and GNU `tar` (as the python-slim base does) | assumption | step 0 |
+
+## End-to-end rehearsal
+
+[ops/cutover_rehearsal.sh](../ops/cutover_rehearsal.sh) runs this runbook on
+synthetic state. Every Docker call goes through the pinned wrapper, and it
+touches only resources named for its own run. The old coordinator is created
+from d738's own `compose.viewer.yaml`, as live. The rehearsal on 2026-10-30
+used Python 3.12 rebuilds of the d738 and PR46 sources, not the exact images.
+It passed:
+
+- **Step 0:** the spec script accepts the compose-managed container. This
+  surfaced two fixes:
+  - compose records the state volume as a `Binds` entry;
+  - compose records the daemon's `local` log driver.
+- **Step 1:** no active inbound connection in d738's own namespace (TIME_WAIT
+  excluded).
+- **Step 2:** d738 drains with exit 0, its fence is verified, and the old
+  container is confirmed absent on the recorded daemon.
+- **Step 3:** the archive restores identically into the verification volume
+  and the copy, the original is unchanged, and each volume has its own
+  verified holder.
+- **Step 5:** the candidate is healthy with only loopback and no published
+  ports.
+- **Step 6:** the real release startup passes the gate with exact schema hashes
+  for 5 objects and the exact lease marker.
+- **Step 7:** over the published port, production gets
+  `503 production_admission_held` and staging is admitted. A `compose up` of
+  the old d738 definition while the release runs cannot start, because the
+  release holds the host ports. The release is unaffected and the fence stays
+  verified.
+- **Opening production:** the held phase wrote nothing, and production is
+  admitted after recreating the container with the hold removed.
+- **Rollback:** nothing had been admitted, so the copy was unchanged since the
+  gate. d738 is restored from its original volume through compose with the
+  same authority, the d738 schema, no lease marker and its history kept.
+
+**Not rehearsed:** a Docker daemon restart or host reboot (the shared daemon was
+deliberately left alone), and the exact images.
 
 ## Helpers (all read-only, all in this PR)
 
@@ -250,7 +307,7 @@ evidence, saved in `$E`. All checks are read-only.
 | # | Route | Exact mechanism | Pass |
 |---|---|---|---|
 | R1 | Viewer production and staging | The Viewer owner runs, read-only on the Viewer database: `SELECT status,COUNT(*) FROM processing_jobs WHERE status IN ('pending','leased') GROUP BY status;` and `SELECT status,COUNT(*) FROM processing_attempts WHERE status NOT IN ('cancelled','failed','published') GROUP BY status;` | Both return no rows. Pending rows with a future `available_at` count as active |
-| R2 | Requests inside d738 | `docker exec -i "$OLD" python - < "$E/netns_sockets.py"`, three times 10 s apart | `inboundByLocalPort` is `{}` every time |
+| R2 | Requests inside d738 | `docker exec -i "$OLD" python - < "$E/netns_sockets.py"`, three times 10 s apart | `activeInbound` is `0` every time (TIME_WAIT is a connection already answered and closed) |
 | R3 | Host-side listeners | `ss -tanp '( sport = :3005 or sport = :18443 or sport = :18080 )'`, plus every other `HostPort` in `old-inspect.json` | Only `LISTEN` rows, held by `docker-proxy` |
 | R4 | Bridge peers | `docker network inspect <each network in old-networks.txt>` | The members list matches what you expect; every member other than `$OLD` is identified as a non-submitter (for example an engine container) |
 | R5 | Reference workers and broker, both PCs | `pgrep -af 'reference_worker_daemon\|nas_broker\|reference_joint_driver'` and `systemctl --user list-units --all 'ledgetop*'` on .89 and main | No process; no active unit |

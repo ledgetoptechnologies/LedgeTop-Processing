@@ -9,6 +9,7 @@ file; the printed summary names keys, never values.
 
 import argparse
 import json
+import re
 import os
 from pathlib import Path
 import sys
@@ -69,7 +70,7 @@ LEASE_DESTINATION = '/run/ledgetop-authority-lease'
 ADDED_KEYS = ('PROCESSING_AUTHORITY_LEASE_DIR', 'PROCESSING_VIEWER_PRODUCTION_ADMISSION')
 
 
-def derive(container, old_image, new_image, *, mode, volume, name, network=None, lease_dir=None,
+def derive(container, old_image, new_image, *, mode, volume, name, network=None, lease_dir=None, lease_volume=None,
            production_admission=None, accept_compose_source=False):
     if mode not in ('isolated', 'promoted'):
         raise SpecError('mode must be isolated or promoted')
@@ -83,13 +84,20 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None,
     if refused:
         raise SpecError('unreviewed non-default HostConfig: ' + ','.join(refused))
     log = host.get('LogConfig') or {}
-    if log.get('Type') not in (None, '', 'json-file') or log.get('Config'):
+    # Carried exactly: only local, option-free drivers (compose may record the
+    # daemon default, e.g. "local"); anything that ships logs elsewhere refuses.
+    if log.get('Type') not in (None, '', 'json-file', 'local') or log.get('Config'):
         raise SpecError('unreviewed logging configuration')
-    if host.get('Binds'):
-        raise SpecError('bind mounts are not supported')
     mounts = container.get('Mounts') or []
     if len(mounts) != 1 or mounts[0].get('Type') != 'volume' or not mounts[0].get('RW'):
         raise SpecError('exactly one writable named volume mount required')
+    # Compose expresses a named volume as a Binds entry "NAME:DEST[:rw]". Accept
+    # only that exact form for the one state volume; any host path refuses.
+    for entry in host.get('Binds') or []:
+        parts = entry.split(':')
+        if (len(parts) not in (2, 3) or parts[0] != mounts[0].get('Name') or '/' in parts[0]
+                or parts[1] != mounts[0]['Destination'] or parts[2:] not in ([], ['rw'])):
+            raise SpecError('bind mounts are not supported')
     for field in ('Entrypoint', 'Cmd', 'Healthcheck', 'WorkingDir', 'User'):
         if config.get(field) != old_image['Config'].get(field):
             raise SpecError('container overrides image ' + field)
@@ -102,6 +110,12 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None,
     for field in CARRIED:
         if not _empty(host.get(field)):
             argv += _args(field, host[field])
+    if lease_dir is not None and lease_volume is not None:
+        raise SpecError('choose one lease location: a host directory or a named volume')
+    if lease_volume is not None:
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', lease_volume) or lease_volume == volume:
+            raise SpecError('lease volume must be a plain volume name distinct from the state volume')
+        argv += ['--mount', 'type=volume,source=%s,destination=%s' % (lease_volume, LEASE_DESTINATION)]
     if lease_dir is not None:
         if not lease_dir.startswith('/') or ',' in lease_dir or '=' in lease_dir:
             raise SpecError('lease directory must be an absolute host path without commas or equals signs')
@@ -126,6 +140,8 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None,
                 argv += ['--publish', '%s%s:%s' % (ip + ':' if ip else '', binding['HostPort'], port)]
         policy = host.get('RestartPolicy') or {}
         argv += ['--restart', policy.get('Name') or 'no']
+    if log.get('Type'):
+        argv += ['--log-driver', log['Type']]
     argv += ['--env-file', '<private env file>', new_image['Id']]
     env = config.get('Env') or []
     if any('\n' in item or '\r' in item or '=' not in item for item in env):
@@ -134,7 +150,7 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None,
         raise SpecError('old environment already sets a cutover key; review before reuse')
     image_env = set(new_image['Config'].get('Env') or [])
     added = []
-    if lease_dir is not None:
+    if lease_dir is not None or lease_volume is not None:
         added.append('PROCESSING_AUTHORITY_LEASE_DIR=' + LEASE_DESTINATION)
     if production_admission is not None:
         added.append('PROCESSING_VIEWER_PRODUCTION_ADMISSION=' + production_admission)
@@ -153,6 +169,7 @@ def main(argv=None):
     parser.add_argument('--network')
     parser.add_argument('--env-out', required=True, type=Path)
     parser.add_argument('--lease-dir', help='host directory holding the authority lease')
+    parser.add_argument('--lease-volume', help='named volume holding the authority lease (same daemon only)')
     parser.add_argument('--production-admission', choices=('open', 'held'))
     parser.add_argument('--accept-compose-source', action='store_true',
                         help='recreate a compose-managed container outside compose (labels are not carried)')
@@ -160,7 +177,7 @@ def main(argv=None):
     load = lambda path: json.loads(path.read_text())[0]
     try:
         spec = derive(load(args.container), load(args.old_image), load(args.new_image), mode=args.mode,
-                      volume=args.volume, name=args.name, network=args.network, lease_dir=args.lease_dir,
+                      volume=args.volume, name=args.name, network=args.network, lease_dir=args.lease_dir, lease_volume=args.lease_volume,
                       production_admission=args.production_admission,
                       accept_compose_source=args.accept_compose_source)
     except SpecError as error:

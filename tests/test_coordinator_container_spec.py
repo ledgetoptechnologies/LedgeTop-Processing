@@ -74,6 +74,39 @@ class ContainerSpecTest(unittest.TestCase):
         with self.assertRaises(spec.SpecError):
             derive(container, production_admission='held')
 
+    def test_compose_named_volume_bind_and_local_log_driver_are_carried(self):
+        container = copy.deepcopy(CONTAINER)
+        container['HostConfig']['Binds'] = ['state:/state:rw']
+        container['HostConfig']['LogConfig'] = {'Type': 'local', 'Config': {}}
+        argv = derive(container)['argv']
+        self.assertIn('type=volume,source=state-copy,destination=/state', argv)
+        self.assertEqual(argv[argv.index('--log-driver') + 1], 'local')
+        self.assertNotIn('state:/state:rw', argv)
+
+    def test_host_path_binds_and_shipping_log_drivers_refuse(self):
+        for binds in (['/srv/state:/state'], ['state:/elsewhere'], ['other:/state'], ['state:/state:ro'],
+                      ['state:/state', '/etc:/etc']):
+            container = copy.deepcopy(CONTAINER)
+            container['HostConfig']['Binds'] = binds
+            with self.assertRaises(spec.SpecError, msg=binds):
+                derive(container)
+        for log in ({'Type': 'syslog', 'Config': {}}, {'Type': 'local', 'Config': {'max-size': '1m'}},
+                    {'Type': 'fluentd', 'Config': {}}):
+            container = copy.deepcopy(CONTAINER)
+            container['HostConfig']['LogConfig'] = log
+            with self.assertRaises(spec.SpecError, msg=log):
+                derive(container)
+
+    def test_lease_volume(self):
+        result = derive(mode='promoted', network=None, lease_volume='ltp-authority-lease')
+        self.assertIn('type=volume,source=ltp-authority-lease,destination=/run/ledgetop-authority-lease', result['argv'])
+        self.assertIn('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease', result['envFile'])
+        for bad in ('state-copy', 'a,b', '/abs', ''):
+            with self.assertRaises(spec.SpecError, msg=bad):
+                derive(lease_volume=bad)
+        with self.assertRaises(spec.SpecError):
+            derive(lease_volume='lease', lease_dir='/srv/lease')
+
     def test_compose_source_needs_explicit_acceptance_and_labels_are_not_carried(self):
         container = copy.deepcopy(CONTAINER)
         container['Config']['Labels'] = {'com.docker.compose.project': 'p'}

@@ -16,11 +16,20 @@ class NetnsSocketsTest(unittest.TestCase):
         self.assertEqual(result['listening'], [8080, 8443])
         self.assertEqual(result['inboundByLocalPort'], {'8080': {'established': 1, 'time_wait': 1}})
         self.assertEqual(result['otherConnections'], 1)
+        self.assertEqual(result['activeInbound'], 1)  # time_wait is closed; established counts
         self.assertNotIn('0A00', repr(result))
 
     def test_idle(self):
         lines = SAMPLE.splitlines()[:3]
         self.assertEqual(summarize(lines)['inboundByLocalPort'], {})
+
+    def test_only_time_wait_is_inactive(self):
+        lines = SAMPLE.splitlines()[:3] + [SAMPLE.splitlines()[4]]
+        result = summarize(lines)
+        self.assertEqual((result['inboundByLocalPort'], result['activeInbound']), ({'8080': {'time_wait': 1}}, 0))
+        for state in ('08', '01', '03', '04', '09'):  # close_wait, established, syn_recv, fin_wait1, last_ack
+            line = SAMPLE.splitlines()[4].replace(' 06 ', ' %s ' % state)
+            self.assertEqual(summarize(SAMPLE.splitlines()[:3] + [line])['activeInbound'], 1, state)
 
 
 if __name__ == '__main__':
