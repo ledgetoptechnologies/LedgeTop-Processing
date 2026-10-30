@@ -63,6 +63,8 @@ def _require_idle_state(path):
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not {'jobs', 'viewer_tasks'} <= tables:
                 raise ValueError('missing state tables')
+            if 'viewer_upload_intents' in tables and db.execute('SELECT 1 FROM viewer_upload_intents LIMIT 1').fetchone():
+                raise ValueError('unresolved upload intent')
             if db.execute("SELECT 1 FROM jobs WHERE status IS NULL OR status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
                 raise ValueError('nonterminal job')
             if db.execute("SELECT 1 FROM viewer_tasks WHERE stage IS NULL OR stage NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():

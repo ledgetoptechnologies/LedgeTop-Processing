@@ -112,6 +112,60 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
         self.assertEqual(self.store.info(self.identifier)['imagesCount'], 1)
         self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
 
+    def test_upload_intent_survives_process_exit_and_fences_lifecycle(self):
+        for crash_after_link in (False, True):
+            with self.subTest(crash_after_link=crash_after_link):
+                root = self.root / ('crash-' + str(crash_after_link))
+                identifier = str(uuid.uuid4())
+                program = '''import io, os, sys
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]); identifier=sys.argv[2]; after=sys.argv[3]=='True'
+queue=Queue(root/'queue', node_ids=('cluster','main'), treedar_node_ids=('main',), viewer_enabled=True)
+store=TaskStore(queue,root/'inputs'); store.initialize(identifier,'synthetic',[],None,'production')
+original=os.link
+def crash(source,destination,**kwargs):
+    if after: original(source,destination,**kwargs)
+    os._exit(73)
+os.link=crash
+store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9)
+'''
+                proc = subprocess.run([sys.executable, '-c', program, str(root), identifier, str(crash_after_link)], capture_output=True, timeout=15)
+                self.assertEqual(proc.returncode, 73, proc.stderr.decode(errors='replace'))
+                queue = Queue(root/'queue', node_ids=('cluster','main'), treedar_node_ids=('main',), viewer_enabled=True)
+                try:
+                    store = TaskStore(queue,root/'inputs')
+                    self.assertEqual(store.task(identifier)['files'], [])
+                    with self.assertRaises(Conflict): store.commit(identifier)
+                    with self.assertRaises(Conflict): store.cancel(identifier)
+                    with self.assertRaises(Conflict): store.remove(identifier)
+                    with self.assertRaises(Conflict): store.upload(identifier,'photo.jpg',io.BytesIO(b'different'),9)
+                    with queue._db() as db:
+                        intent=db.execute('SELECT * FROM viewer_upload_intents WHERE uuid=?',(identifier,)).fetchone()
+                        db.execute("UPDATE viewer_tasks SET stage='succeeded',phase='succeeded' WHERE uuid=?",(identifier,))
+                    from processing.prototype import _require_idle_state
+                    with self.assertRaisesRegex(RuntimeError, 'production_hold_idle_state_unavailable'):
+                        _require_idle_state(queue.path)
+                    with queue._db() as db:
+                        db.execute("UPDATE viewer_tasks SET stage='uploading',phase='uploading' WHERE uuid=?",(identifier,))
+                    staged=Path(store.task(identifier)['directory']) / (intent['path'] if crash_after_link else intent['temporary'])
+                    original=staged.with_name('saved-owned-fixture')
+                    staged.rename(original)
+                    staged.write_bytes(b'synthetic')
+                    with self.assertRaises(Conflict): store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9)
+                    self.assertEqual(staged.read_bytes(),b'synthetic')
+                    staged.unlink()
+                    original.rename(staged)
+                    store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9)
+                    task=store.task(identifier)
+                    self.assertEqual(len(task['files']),1)
+                    self.assertEqual(Path(task['files'][0]['path']).read_bytes(),b'synthetic')
+                    with queue._db() as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_upload_intents').fetchone()[0],0)
+                finally:
+                    queue.close()
+
     def test_truncated_or_overlong_stream_never_enters_manifest(self):
         self.initialize()
         for body, length in ((b'ab', 3), (b'abcd', 3)):

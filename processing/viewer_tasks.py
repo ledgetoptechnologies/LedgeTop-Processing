@@ -124,6 +124,12 @@ class TaskStore:
                 uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
                 path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
                 is_photo INTEGER NOT NULL, PRIMARY KEY(uuid,name_key))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_upload_intents (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL, directory TEXT NOT NULL,
+                environment TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
+                temporary TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL, is_photo INTEGER NOT NULL, device TEXT NOT NULL,
+                inode TEXT NOT NULL, PRIMARY KEY(uuid,name_key))''')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_incarnations (
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 job_id TEXT, metadata TEXT NOT NULL, files TEXT NOT NULL,
@@ -214,6 +220,7 @@ class TaskStore:
             reserved=self._reservation(db,identifier,environment,capability,allow_cancelled=True)
             if reserved is None:raise KeyError('unknown reservation')
             if reserved['state']=='cancelled':return {'uuid':identifier,'state':'cancelled'}
+            self._no_pending_upload(db, identifier)
             row=db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
             if row is not None:
                 job=self._job(db,row)
@@ -269,6 +276,8 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             reserved=self._reservation(db,identifier,environment,capability)
             row = db.execute('SELECT * FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()
+            if row is not None and row['removed']:
+                self._no_pending_upload(db, identifier)
             # A read-only exact replay is permitted only for an authenticated
             # reservation. Legacy UUIDs always pass through current catalog checks.
             if replay_only and (reserved is None or row is None): return None
@@ -338,6 +347,43 @@ class TaskStore:
             raise ValueError('safe supported input basename required')
         return name.casefold()
 
+    @staticmethod
+    def _no_pending_upload(db, identifier):
+        if db.execute('SELECT 1 FROM viewer_upload_intents WHERE uuid=? LIMIT 1', (identifier,)).fetchone():
+            raise Conflict('unfinished upload requires retry or inspection')
+
+    @staticmethod
+    def _verify_intent_file(path, length, digest):
+        """Verify an owned, immutable-by-convention input before adoption."""
+        initial = os.lstat(path)
+        if not stat.S_ISREG(initial.st_mode):
+            raise Conflict('unfinished upload requires inspection')
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_size != length or
+                    (initial.st_dev, initial.st_ino) != (before.st_dev, before.st_ino)):
+                raise Conflict('unfinished upload requires inspection')
+            calculated = hashlib.sha256()
+            remaining = length
+            while remaining:
+                part = os.read(fd, min(1024 * 1024, remaining))
+                if not part:
+                    raise Conflict('unfinished upload requires inspection')
+                calculated.update(part)
+                remaining -= len(part)
+            if os.read(fd, 1) or calculated.hexdigest() != digest:
+                raise Conflict('unfinished upload requires inspection')
+            after = os.fstat(fd)
+            current = os.lstat(path)
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or (
+                    after.st_dev, after.st_ino) != (current.st_dev, current.st_ino):
+                raise Conflict('unfinished upload requires inspection')
+            return after.st_dev, after.st_ino
+        finally:
+            os.close(fd)
+
     def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         key = self._filename(filename)
         if type(length) is not int or length <= 0:
@@ -351,18 +397,23 @@ class TaskStore:
                 if row['stage'] != 'uploading' or row['job_id']:
                     raise Conflict('task is no longer accepting uploads')
                 directory = self._directory(row)
+                incarnation = (row['generation'], row['directory'], row['environment'])
                 existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                       (identifier, key)).fetchone()
                 total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
                                    (identifier,)).fetchone()[0]
+                pending = db.execute('SELECT COALESCE(SUM(bytes),0), COUNT(*) FROM viewer_upload_intents WHERE uuid=?', (identifier,)).fetchone()
+                own_pending = db.execute('SELECT bytes FROM viewer_upload_intents WHERE uuid=? AND name_key=?', (identifier, key)).fetchone()
+                total += pending[0]
                 count = db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?',
                                    (identifier,)).fetchone()[0]
-                if existing is None and total + length > self.max_input_bytes:
+                if existing is None and own_pending is None and total + length > self.max_input_bytes:
                     raise InputLimitExceeded('task input ceiling exceeded')
-                if existing is None and count >= 100000:
+                if existing is None and own_pending is None and count + pending[1] >= 100000:
                     raise ValueError('task file count ceiling exceeded')
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
+            keep_temporary = False
             try:
                 descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 digest = hashlib.sha256()
@@ -379,12 +430,15 @@ class TaskStore:
                         raise ValueError('input stream length differs')
                     output.flush()
                     os.fsync(output.fileno())
+                    staged = os.fstat(output.fileno())
                 value = digest.hexdigest()
+                sync_directory(directory)
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
                     self._reservation(db,identifier,environment,capability)
                     row = self._row(db, identifier)
-                    if row['stage'] != 'uploading' or row['job_id']:
+                    if (row['stage'] != 'uploading' or row['job_id'] or
+                            (row['generation'], row['directory'], row['environment']) != incarnation):
                         raise Conflict('task is no longer accepting uploads')
                     existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                           (identifier, key)).fetchone()
@@ -392,21 +446,63 @@ class TaskStore:
                         if existing['sha256'] != value or existing['bytes'] != length:
                             raise Conflict('input basename already contains different bytes')
                         return {'success': True, 'uuid': identifier}
-                    total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
-                                       (identifier,)).fetchone()[0]
-                    if total + length > self.max_input_bytes:
-                        raise InputLimitExceeded('task input ceiling exceeded')
-                    os.replace(temporary, final)
-                    sync_directory(directory)
+                    intent = db.execute('SELECT * FROM viewer_upload_intents WHERE uuid=? AND name_key=?', (identifier, key)).fetchone()
+                    if intent is None:
+                        total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?', (identifier,)).fetchone()[0]
+                        total += db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_upload_intents WHERE uuid=?', (identifier,)).fetchone()[0]
+                        count = db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?', (identifier,)).fetchone()[0]
+                        count += db.execute('SELECT COUNT(*) FROM viewer_upload_intents WHERE uuid=?', (identifier,)).fetchone()[0]
+                        if total + length > self.max_input_bytes:
+                            raise InputLimitExceeded('task input ceiling exceeded')
+                        if count >= 100000:
+                            raise ValueError('task file count ceiling exceeded')
+                        keep_temporary = True
+                        db.execute('''INSERT INTO viewer_upload_intents
+                            (uuid,generation,directory,environment,name_key,name,temporary,path,bytes,sha256,is_photo,device,inode)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''', (identifier,row['generation'],row['directory'],row['environment'],
+                            key,filename,temporary.name,final.name,length,value,int(Path(filename).suffix.lower() in PHOTO_SUFFIXES),
+                            str(staged.st_dev), str(staged.st_ino)))
+                    elif (intent['generation'], intent['directory'], intent['environment'], intent['bytes'], intent['sha256']) != (
+                            row['generation'], row['directory'], row['environment'], length, value):
+                        raise Conflict('unfinished upload differs; inspection required')
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    self._reservation(db,identifier,environment,capability)
+                    row = self._row(db, identifier)
+                    intent = db.execute('SELECT * FROM viewer_upload_intents WHERE uuid=? AND name_key=?', (identifier, key)).fetchone()
+                    if (intent is None or row['stage'] != 'uploading' or row['job_id'] or
+                            (row['generation'], row['directory'], row['environment']) != incarnation or
+                            (intent['generation'], intent['directory'], intent['environment'], intent['bytes'], intent['sha256']) !=
+                            (row['generation'], row['directory'], row['environment'], length, value) or
+                            intent['name_key'] != key or self._filename(intent['name']) != key or
+                            intent['is_photo'] != int(Path(intent['name']).suffix.lower() in PHOTO_SUFFIXES) or
+                            not re.fullmatch(r'\.incoming-[0-9a-f]{32}', intent['temporary']) or
+                            not re.fullmatch(r'input-[0-9a-f]{32}', intent['path'])):
+                        raise Conflict('unfinished upload requires inspection')
+                    directory = self._directory(row)
+                    source = directory / intent['temporary']
+                    final = directory / intent['path']
+                    identity = (intent['device'], intent['inode'])
+                    if os.path.lexists(final):
+                        if tuple(map(str, self._verify_intent_file(final, length, value))) != identity:
+                            raise Conflict('unfinished upload requires inspection')
+                    else:
+                        if tuple(map(str, self._verify_intent_file(source, length, value))) != identity:
+                            raise Conflict('unfinished upload requires inspection')
+                        os.link(source, final, follow_symlinks=False)
+                        sync_directory(directory)
+                        if tuple(map(str, self._verify_intent_file(final, length, value))) != identity:
+                            raise Conflict('unfinished upload requires inspection')
                     db.execute('''INSERT INTO viewer_files
                         (uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)''',
-                        (identifier, key, filename, final.name, length, value,
-                         int(Path(filename).suffix.lower() in PHOTO_SUFFIXES)))
+                        (identifier, key, intent['name'], final.name, length, value, intent['is_photo']))
+                    db.execute('DELETE FROM viewer_upload_intents WHERE uuid=? AND name_key=?', (identifier,key))
                     db.execute('UPDATE viewer_tasks SET updated_at=CURRENT_TIMESTAMP WHERE uuid=?', (identifier,))
+                keep_temporary = False
                 return {'success': True, 'uuid': identifier}
             finally:
                 # Only this invocation's randomly named, explicitly owned tmp file.
-                if temporary.exists():
+                if not keep_temporary and temporary.exists():
                     temporary.unlink()
 
     @staticmethod
@@ -420,6 +516,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,environment,capability)
             row = self._row(db, identifier)
+            self._no_pending_upload(db, identifier)
             if row['job_id']:
                 if row['stage'] == 'cancelled':
                     raise Conflict('task is cancelled')
@@ -645,6 +742,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier)
+            self._no_pending_upload(db, identifier)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
                 raise Conflict('active engine task requires confirmed cancellation')
@@ -678,6 +776,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row=self._row(db,identifier)
+            self._no_pending_upload(db, identifier)
             job=self._job(db,row)
             if self._cancelled_never_started(db, row, job):
                 return {'success':True,'uuid':identifier}
@@ -696,6 +795,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier, removed=True)
+            self._no_pending_upload(db, identifier)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
                 raise Conflict('active engine task cannot be removed')
