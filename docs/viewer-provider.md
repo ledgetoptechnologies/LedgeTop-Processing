@@ -6,9 +6,11 @@ is `ledgetop-processing`, not an official ClusterODM build. Dynamic `/options`
 is the fresh exact-definition intersection of configured engines. Engine updates
 must not silently introduce options unsupported by the other node.
 
-Small jobs, at most 1,000 photos and the configured local byte ceiling, use
-cluster first. If cluster is busy/unavailable/draining, they wait for cluster.
-Larger jobs wait for main; they never overflow to cluster. There is one running
+Viewer photo jobs with at most 1,000 photos prefer cluster regardless of input
+bytes. If cluster is busy/unavailable/draining, they wait for cluster. Jobs with
+more photos wait for main; they never overflow to cluster. The independent Viewer
+upload admission cap still applies. This does not change the separate v1
+reference pipeline, which currently retains its local input-byte routing limit. There is one running
 or held job globally, production before staging and FIFO within each class.
 Running staging is allowed to finish when production arrives.
 

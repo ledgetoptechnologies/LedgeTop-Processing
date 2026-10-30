@@ -304,6 +304,17 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(identifier)['node_id'], 'cluster')
         self.assertIsNotNone(claim)
 
+    def test_small_photo_job_uses_cluster_above_old_byte_routing_ceiling(self):
+        # Admission remains separately governed by viewer_max_input_bytes.
+        # A deliberately low former routing ceiling lets this exercise the
+        # real dispatch with only a tiny synthetic upload.
+        self.config.local_max_input_bytes = 1
+        identifier = self.submit()
+        self.assertGreater(self.task(identifier)['input_bytes'], self.config.local_max_input_bytes)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'], 'cluster')
+        self.assertFalse(self.engines['main'].calls)
+
     def test_busy_small_node_waits_without_consuming_main(self):
         identifier = self.submit()
         self.busy['cluster'] = 1
