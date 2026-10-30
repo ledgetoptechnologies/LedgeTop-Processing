@@ -674,34 +674,51 @@ class ReferenceCoordinatorUpdate:
         identifier=state.get('newContainerId')
         if type(identifier) is not str or not re.fullmatch('[a-f0-9]{64}',identifier):
             raise Stopped('quarantine_candidate_identity_required')
-        item=self.t.inspected(identifier)
-        host=item['HostConfig'];network=item.get('NetworkSettings',{})
-        if (item['Id']!=identifier or item['Name']!='/'+NAME or item['Image']!=state['image']
-                or item['Config'].get('Labels',{}).get(LABEL)!=state['operation']
-                or item['State'].get('Running') is not True
-                or host.get('NetworkMode')!='none' or host.get('PortBindings') not in (None,{})
-                or host.get('RestartPolicy',{}).get('Name')!='no'
-                or host.get('RestartPolicy',{}).get('MaximumRetryCount',0)!=0
-                or network.get('Ports') not in (None,{})
-                or set(network.get('Networks',{})) - {'none'}):
-            raise Stopped('quarantine_candidate_not_isolated')
-        # Apply the existing immutable security/mount policy to a copy only,
-        # substituting the three intentional quarantine differences.
-        proxy=copy.deepcopy(item)
-        proxy['HostConfig']['NetworkMode']='bridge'
-        proxy['HostConfig']['RestartPolicy']['Name']='unless-stopped'
-        proxy['HostConfig']['PortBindings']=legacy.REFERENCE_PORTS
-        self.t.facts(proxy,reference=True)
-        if application_environment(self.t,item)!=state['applicationEnvironmentSha256']:
-            raise Stopped('candidate_application_environment_changed')
+        def validate_candidate():
+            item=self.t.inspected(identifier,timeout=3)
+            host=item['HostConfig'];network=item.get('NetworkSettings',{})
+            if (item['Id']!=identifier or item['Name']!='/'+NAME or item['Image']!=state['image']
+                    or item['Config'].get('Labels',{}).get(LABEL)!=state['operation']
+                    or item['State'].get('Running') is not True
+                    or host.get('NetworkMode')!='none' or host.get('PortBindings') not in (None,{})
+                    or host.get('RestartPolicy',{}).get('Name')!='no'
+                    or host.get('RestartPolicy',{}).get('MaximumRetryCount',0)!=0
+                    or network.get('Ports') not in (None,{})
+                    or set(network.get('Networks',{})) - {'none'}):
+                raise Stopped('quarantine_candidate_not_isolated')
+            # Apply the existing security/mount policy to a copy only.
+            proxy=copy.deepcopy(item)
+            proxy['HostConfig']['NetworkMode']='bridge'
+            proxy['HostConfig']['RestartPolicy']['Name']='unless-stopped'
+            proxy['HostConfig']['PortBindings']=legacy.REFERENCE_PORTS
+            self.t.facts(proxy,reference=True)
+            if application_environment(self.t,item)!=state['applicationEnvironmentSha256']:
+                raise Stopped('candidate_application_environment_changed')
+        validate_candidate()
         code=('import json,urllib.request; '
               'r=urllib.request.urlopen("http://127.0.0.1:8080/healthz",timeout=3); '
               'v=json.load(r); print(json.dumps({"status":v.get("status"),'
               '"viewerEnabled":v.get("viewerEnabled"),'
               '"syntheticPrototypeEnabled":v.get("syntheticPrototypeEnabled")}))')
-        value=json.loads(self.t.docker('exec','--user','10001:10001',identifier,'python','-c',code,timeout=10))
-        if value!={'status':'ok','viewerEnabled':True,'syntheticPrototypeEnabled':True}:
-            raise Stopped('quarantine_health_unavailable')
+        deadline=time.monotonic()+10
+        expected={'status':'ok','viewerEnabled':True,'syntheticPrototypeEnabled':True}
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise Stopped('quarantine_health_unavailable')
+            try:
+                value=json.loads(self.t.docker('exec','--user','10001:10001',identifier,'python','-c',code,timeout=min(3,remaining)))
+            except Exception:
+                value=None
+            if value==expected and time.monotonic()<deadline:
+                validate_candidate()
+                if time.monotonic()>=deadline:raise Stopped('quarantine_health_unavailable')
+                break
+            # Only read-only health operations may repeat. Unknown identity or
+            # isolation changes are never retried or converted to success.
+            validate_candidate()
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise Stopped('quarantine_health_unavailable')
+            time.sleep(min(.25,remaining))
         # Health says both app listeners started, not that external TLS or
         # backend integration has been validated.
         return {'isolated':True,'restartDisabled':True,'internalHealth':'ok'}
