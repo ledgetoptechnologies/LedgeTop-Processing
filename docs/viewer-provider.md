@@ -123,3 +123,42 @@ the 200 status and headers may already have been sent. TLS and client
 authentication remain separate. This adds a complete streaming hash pass in
 addition to the existing archive pre-verification and may cost substantial I/O
 for large results. It does not authorize deleting inputs or results.
+
+### Reservation-enabled initialization replay scope
+
+For this coordinator's reservation extension, an identical initialization
+using the same UUID, reservation capability, environment, name, options and
+outputs returns the existing task identity. Different settings conflict, a
+wrong capability is hidden as not found, and a cancelled reservation cannot be
+initialized again. This behavior is specific to the coordinator extension and
+must not be assumed for ordinary NodeODM providers.
+
+For an already committed reservation-bound initialization, the service checks
+the exact stored request and durable task/evidence state before consulting the
+live option catalog. An identical replay can therefore succeed during a catalog
+outage or after a catalog change. New tasks and unreserved legacy requests still
+require live validation; an overlapping request that arrives before the first
+commit may still fail catalog validation. The pending-drain 503 test applies to a close announced before reading the initialization body;
+an arbitrary 503 or disconnected client does not prove no mutation committed.
+Reconcile the reserved task identity before deciding what to do next. An
+initialization failure after directory creation can leave a private orphan;
+a retry chooses a separate directory rather than adopting or deleting it.
+Tests cover rollback, client disconnect and abrupt process exit immediately after
+directory creation. They do not prove power-loss atomicity or every crash point.
+The replay check verifies the task directory exists, any referenced job exists,
+and recorded option evidence is structurally consistent when evidence is
+required. It does not rehash input or result files or establish their custody.
+Older records with `option_evidence_required=0` have no option evidence to
+check. The outage and changed-catalog test cases inject errors at the catalog
+boundary; they do not prove recovery from every network failure.
+
+Archive intent and receipt markers are published from synced, uniquely named
+private temporary files without overwriting existing markers. If a process exits
+after linking a valid task-bound marker but before removing its matching staging
+link, a later download can finish that unlink after identity checks. A crash
+before publication can leave a staging-only orphan; this change does not delete
+it automatically. Foreign or invalid markers and unrelated hardlinks remain
+held for inspection. These checks do not establish Viewer ingestion, provide an
+acknowledgement, or prove power-loss behavior at every filesystem boundary.
+Concurrent recovery tests exercise threads in one coordinator service, whose
+per-task lock serializes them. They do not establish multi-process exclusion.

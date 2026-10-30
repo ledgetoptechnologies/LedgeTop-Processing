@@ -1,5 +1,6 @@
 """Actual Viewer-compatible HTTP + coordinator recovery, synthetic engine only."""
 import hashlib
+import http.client
 import io
 import json
 import multiprocessing
@@ -35,7 +36,7 @@ def synthetic_coordinator(root, control, offline):
     service.probe=lambda role,origin,token:{'ready':True,'taskQueueCount':0,'maxImages':1000 if role=='local' else None}
     original=service.store.update
     def update(task_id, **fields):
-        if offline is False and 'archive_path' in fields:raise OSError('synthetic state write failure')
+        if not offline and 'archive_path' in fields:raise OSError('synthetic state write failure')
         return original(task_id,**fields)
     service.store.update=update
     if offline is True:
@@ -43,10 +44,11 @@ def synthetic_coordinator(root, control, offline):
         engines['cluster'].download=unavailable
     if offline == 'crash-link':
         original_link=os.link
-        def crash_after_link(source,destination):
-            original_link(source,destination)
-            os._exit(73)
-        os.link=crash_after_link
+        def legacy_crash_after_restore_link(source,destination):
+            result=original_link(source,destination)
+            if Path(destination).name=='all.zip' and Path(source).name.startswith('.all.zip.restore-'):os._exit(73)
+            return result
+        os.link=legacy_crash_after_restore_link
     server=ThreadingHTTPServer(('127.0.0.1',0),handler)
     thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.01));thread.start()
     try:
@@ -55,8 +57,24 @@ def synthetic_coordinator(root, control, offline):
             command,identifier=control.recv()
             if command=='stop':break
             if command=='tick':service.tick()
-            elif command=='path':
-                control.send(service.store.task(identifier)['archive_path']);continue
+            elif command=='path':control.send(service.store.task(identifier)['archive_path']);continue
+            elif command=='allow_archive_updates':service.store.update=original
+            elif command=='delete_cached_archive':
+                task=service.store.task(identifier);Path(task['archive_path']).unlink()
+            elif command=='crash_after_restore_link':
+                original_link=os.link
+                def crash_after_restore(source,destination):
+                    result=original_link(source,destination)
+                    if Path(destination).name=='all.zip' and Path(source).name.startswith('.all.zip.restore-'):os._exit(75)
+                    return result
+                patch('processing.viewer_service.os.link',side_effect=crash_after_restore).start()
+            elif command=='crash_after_archive_link':
+                original_link=os.link
+                def crash_after_link(source,destination):
+                    result=original_link(source,destination)
+                    if Path(destination).name=='all.zip':os._exit(74)
+                    return result
+                patch('processing.viewer_service.os.link',side_effect=crash_after_link).start()
             elif command=='finish':
                 task=service.store.task(identifier);engines['cluster'].finish(task['engine_uuid']);service.tick()
             else:raise ValueError('unknown test command')
@@ -154,6 +172,81 @@ class ViewerArchiveHTTPRecoveryTests(unittest.TestCase):
                     if process.is_alive():process.terminate()
                     process.join(5);parent.close()
                     self.assertFalse(process.is_alive())
+    def test_abrupt_process_exit_after_archive_link_recovers_with_node_offline(self):
+        context=multiprocessing.get_context('spawn')
+        with tempfile.TemporaryDirectory() as root:
+            active=[];identifier=str(uuid.uuid4())
+            def launch(offline):
+                parent,child=context.Pipe();process=context.Process(target=synthetic_coordinator,args=(root,child,offline));process.start();child.close();active.append((process,parent))
+                self.assertTrue(parent.poll(5));pid,port,archive=parent.recv();return process,parent,pid,port,archive
+            def request(port,path,body=None,headers=None):
+                return urlopen(Request('http://127.0.0.1:'+str(port)+path+'?token='+TOKEN,data=body,headers=headers or {}),timeout=5)
+            try:
+                first,control,pid1,port,expected=launch(False)
+                init=multipart([('name',None,b'Synthetic survey'),('options',None,b'[]')])
+                with request(port,'/task/new/init',init,{'Content-Type':'multipart/form-data; boundary='+BOUNDARY,'set-uuid':identifier}) as response:self.assertEqual(response.status,200)
+                upload=multipart([('images','photo.jpg',b'owned synthetic image bytes')])
+                with request(port,'/task/new/upload/'+identifier,upload,{'Content-Type':'multipart/form-data; boundary='+BOUNDARY}) as response:self.assertEqual(response.status,200)
+                with request(port,'/task/new/commit/'+identifier,b'') as response:self.assertEqual(response.status,200)
+                for command in ('tick','finish','crash_after_archive_link'):
+                    control.send((command,identifier));self.assertTrue(control.poll(5));self.assertEqual(control.recv(),'ok')
+                with self.assertRaises((OSError,http.client.HTTPException)):
+                    request(port,'/task/'+identifier+'/download/all.zip')
+                first.join(5);self.assertFalse(first.is_alive());self.assertEqual(first.exitcode,74)
+                control.close();active.remove((first,control))
+                second,control,pid2,port,_=launch(True);self.assertNotEqual(pid1,pid2)
+                with request(port,'/task/'+identifier+'/download/all.zip') as response:
+                    self.assertEqual(response.status,200);actual=response.read()
+                self.assertEqual(actual,expected);self.assertEqual(hashlib.sha256(actual).digest(),hashlib.sha256(expected).digest())
+                control.send(('stop',None));second.join(5);self.assertFalse(second.is_alive());self.assertEqual(second.exitcode,0)
+                control.close();active.remove((second,control))
+            finally:
+                for process,parent in active:
+                    if process.is_alive():process.terminate()
+                    process.join(5);parent.close();self.assertFalse(process.is_alive())
+
+    def test_exit_after_restored_archive_link_survives_offline_restart(self):
+        context=multiprocessing.get_context('spawn')
+        with tempfile.TemporaryDirectory() as root:
+            active=[];identifier=str(uuid.uuid4())
+            def launch(offline):
+                parent,child=context.Pipe();process=context.Process(target=synthetic_coordinator,args=(root,child,offline));process.start();child.close();active.append((process,parent))
+                self.assertTrue(parent.poll(5));pid,port,archive=parent.recv();return process,parent,pid,port,archive
+            def request(port,path,body=None,headers=None):
+                return urlopen(Request('http://127.0.0.1:'+str(port)+path+'?token='+TOKEN,data=body,headers=headers or {}),timeout=5)
+            try:
+                first,control,pid1,port,expected=launch(False)
+                init=multipart([('name',None,b'Synthetic survey'),('options',None,b'[]')])
+                with request(port,'/task/new/init',init,{'Content-Type':'multipart/form-data; boundary='+BOUNDARY,'set-uuid':identifier}) as response:self.assertEqual(response.status,200)
+                upload=multipart([('images','photo.jpg',b'owned synthetic image bytes')])
+                with request(port,'/task/new/upload/'+identifier,upload,{'Content-Type':'multipart/form-data; boundary='+BOUNDARY}) as response:self.assertEqual(response.status,200)
+                with request(port,'/task/new/commit/'+identifier,b'') as response:self.assertEqual(response.status,200)
+                for command in ('tick','finish'):
+                    control.send((command,identifier));self.assertTrue(control.poll(5));self.assertEqual(control.recv(),'ok')
+                # First GET establishes receipt and stored archive_path.
+                # The fixture intentionally fails archive_path updates by default;
+                # this scenario enables them explicitly first.
+                control.send(('allow_archive_updates',identifier));self.assertTrue(control.poll(5));self.assertEqual(control.recv(),'ok')
+                with request(port,'/task/'+identifier+'/download/all.zip') as response:self.assertEqual(response.read(),expected)
+                for command in ('delete_cached_archive','crash_after_restore_link'):
+                    control.send((command,identifier));self.assertTrue(control.poll(5));self.assertEqual(control.recv(),'ok')
+                with self.assertRaises((OSError,http.client.HTTPException)):
+                    request(port,'/task/'+identifier+'/download/all.zip')
+                first.join(5);self.assertFalse(first.is_alive());self.assertEqual(first.exitcode,75)
+                control.close();active.remove((first,control))
+                self.assertTrue(list(Path(root).glob('viewer-tasks/*/.all.zip.restore-*')))
+                second,control,pid2,port,_=launch(True);self.assertNotEqual(pid1,pid2)
+                with request(port,'/task/'+identifier+'/download/all.zip') as response:
+                    self.assertEqual(response.status,200);actual=response.read()
+                self.assertEqual(actual,expected);self.assertEqual(hashlib.sha256(actual).digest(),hashlib.sha256(expected).digest())
+                self.assertTrue(list(Path(root).glob('viewer-tasks/*/.all.zip.restore-*')))
+                control.send(('stop',None));second.join(5);self.assertFalse(second.is_alive());self.assertEqual(second.exitcode,0)
+                control.close();active.remove((second,control))
+            finally:
+                for process,parent in active:
+                    if process.is_alive():process.terminate()
+                    process.join(5);parent.close();self.assertFalse(process.is_alive())
+
     def test_published_archive_survives_restart_and_offline_node(self):
         with tempfile.TemporaryDirectory() as root:
             config=Config('test-api-token','http://127.0.0.1:19001','http://127.0.0.1:19002',

@@ -170,6 +170,9 @@ class ViewerService:
         return selected
 
     def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
+        if capability is not None:
+            replay = self.store.initialize(identifier, name, options, outputs, environment, capability, replay_only=True)
+            if replay is not None: return replay
         evidence = self._check_options(options or [])
         return self.store.initialize(identifier, name, options, outputs, environment, capability, option_evidence=evidence)
 
@@ -210,13 +213,35 @@ class ViewerService:
         return {'version': 1, 'task': task['uuid'], 'generation': task['generation'],
                 'job': task['job_id'], 'node': task['node_id'], 'engine': task['engine_uuid']}
 
+    def _recover_metadata_link(self, path):
+        """Finish unlinking one task-owned temp link after interrupted publish."""
+        info=path.lstat()
+        if info.st_nlink==1: return
+        if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink!=2
+                or (os.name!='nt' and info.st_uid!=os.geteuid())):
+            raise Conflict('archive metadata requires inspection')
+        prefix='.'+path.name+'.tmp-'; matches=[]
+        for candidate in path.parent.iterdir():
+            if not candidate.name.startswith(prefix) or not re.fullmatch(r'[0-9a-f]{32}',candidate.name[len(prefix):]): continue
+            stat_candidate=candidate.lstat()
+            if (stat_candidate.st_dev,stat_candidate.st_ino)==(info.st_dev,info.st_ino): matches.append(candidate)
+        if len(matches)!=1: raise Conflict('archive metadata requires inspection')
+        temporary=matches[0];current=path.lstat();linked=temporary.lstat()
+        if ((current.st_dev,current.st_ino,current.st_nlink)!=(info.st_dev,info.st_ino,2)
+                or (linked.st_dev,linked.st_ino)!=(info.st_dev,info.st_ino)):
+            raise Conflict('archive metadata identity changed')
+        temporary.unlink();sync_directory(path.parent)
+        current=path.lstat()
+        if (current.st_dev,current.st_ino,current.st_nlink)!=(info.st_dev,info.st_ino,1):
+            raise Conflict('archive metadata identity changed')
+
     def _read_archive_metadata(self, path):
         try:
             if path.is_symlink(): raise ValueError()
             fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
             with os.fdopen(fd, 'rb') as stream:
                 info = os.fstat(stream.fileno())
-                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink not in (1,2) or info.st_size > 4096
                         or (os.name != 'nt' and info.st_uid != os.geteuid())):
                     raise ValueError()
                 def unique(pairs):
@@ -230,6 +255,35 @@ class ViewerService:
         except (OSError, ValueError, TypeError, KeyError):
             raise Conflict('archive metadata requires inspection') from None
 
+    def _publish_archive_metadata(self, path, value):
+        """Publish a complete, synced marker without overwriting an existing one."""
+        directory=path.parent
+        temporary=directory/('.'+path.name+'.tmp-'+uuid.uuid4().hex)
+        fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+        original=os.fstat(fd)
+        try:
+            with os.fdopen(fd,'wb') as marker:
+                fd=None
+                marker.write(json.dumps(value,sort_keys=True,separators=(',',':')).encode('ascii'))
+                marker.flush();os.fsync(marker.fileno())
+            current=temporary.lstat()
+            if (current.st_dev,current.st_ino)!=(original.st_dev,original.st_ino):
+                raise Conflict('archive metadata identity changed')
+            try: os.link(temporary,path)
+            except FileExistsError: raise Conflict('archive metadata already exists') from None
+            published=path.lstat()
+            if (published.st_dev,published.st_ino)!=(original.st_dev,original.st_ino):
+                raise Conflict('archive metadata identity changed')
+            sync_directory(directory)
+        finally:
+            if fd is not None: os.close(fd)
+            try:
+                current=temporary.lstat()
+                if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino):
+                    temporary.unlink()
+                    sync_directory(directory)
+            except FileNotFoundError: pass
+
     def _archive_receipt(self, task, path):
         """Validate a bounded private receipt, binding it to this incarnation."""
         try:
@@ -240,6 +294,7 @@ class ViewerService:
                     or type(value['bytes']) is not int or not 4 <= value['bytes'] <= self.config.viewer_max_archive_bytes
                     or type(value['sha256']) is not str or not re.fullmatch(r'[a-f0-9]{64}', value['sha256'])):
                 raise ValueError()
+            self._recover_metadata_link(path)
             return value
         except (OSError, ValueError, TypeError, KeyError):
             raise Conflict('archive receipt requires inspection') from None
@@ -394,14 +449,11 @@ class ViewerService:
                     if (type(intent) is not dict or set(intent) != set(expected)
                             or any(type(intent[k]) is not type(v) or intent[k] != v for k, v in expected.items())):
                         raise Conflict('archive intent requires inspection')
+                    self._recover_metadata_link(intent_path)
                 else:
                     if partial.exists() or partial.is_symlink():
                         raise Conflict('partial archive without intent requires inspection')
-                    with intent_path.open('xb') as marker:
-                        os.chmod(intent_path, 0o600)
-                        marker.write(json.dumps(self._archive_identity(task),sort_keys=True,separators=(',',':')).encode('ascii'))
-                        marker.flush();os.fsync(marker.fileno())
-                    sync_directory(path.parent)
+                    self._publish_archive_metadata(intent_path,self._archive_identity(task))
                 if partial.exists() or partial.is_symlink():
                     info = partial.lstat()
                     if (partial.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
@@ -437,11 +489,7 @@ class ViewerService:
                 if total < 4 or not zipfile.is_zipfile(partial):
                     raise EngineUnavailable('archive_transfer_incomplete')
                 receipt = {**self._archive_identity(task), 'bytes': total, 'sha256': digest.hexdigest()}
-                with receipt_path.open('xb') as marker:
-                    os.chmod(receipt_path, 0o600)
-                    marker.write(json.dumps(receipt,sort_keys=True,separators=(',',':')).encode('ascii'))
-                    marker.flush();os.fsync(marker.fileno())
-                sync_directory(path.parent)
+                self._publish_archive_metadata(receipt_path,receipt)
                 os.link(partial, path)
                 partial.unlink()
                 sync_directory(path.parent)
