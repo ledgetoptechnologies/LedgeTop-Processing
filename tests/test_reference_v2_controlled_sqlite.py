@@ -17,6 +17,18 @@ class ControlledSQLiteTest(unittest.TestCase):
   with self.assertRaises(ControlledOpenHeld):c.check()
   c.close()
   with self.assertRaises(ControlledOpenHeld):ControlledSQLite(fence=self.fence,path=self.path,expected_inode=self.inode,expected_epoch='epoch-1')
+ def test_epoch_mutation_and_trigger_are_rejected(self):
+  c=ControlledSQLite(fence=self.fence,path=self.path,expected_inode=self.inode,expected_epoch='epoch-1')
+  other=sqlite3.connect(self.path)
+  try:
+   other.execute("UPDATE trusted_epoch SET epoch='changed'");other.commit()
+   with self.assertRaises(ControlledOpenHeld):c.record_once('11111111-2222-4333-8444-555555555555','pending')
+   other.execute("UPDATE trusted_epoch SET epoch='epoch-1'")
+   other.execute('CREATE TRIGGER bad AFTER INSERT ON trusted_intent BEGIN DELETE FROM trusted_epoch; END');other.commit()
+   with self.assertRaises(ControlledOpenHeld):c.record_once('11111111-2222-4333-8444-555555555555','pending')
+   self.assertEqual(other.execute('SELECT count(*) FROM trusted_intent').fetchone()[0],0)
+  finally:other.close();c.close()
+
  def test_process_exit_after_commit_reopens_intent(self):
   self.fence.close()
   code="""import os,sys
