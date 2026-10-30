@@ -63,6 +63,28 @@ class StateCensusTest(unittest.TestCase):
         for private in ('task-1', 'input-1', 'uploading', 'synthetic-authority-x'):
             self.assertNotIn(private, text)
 
+    def test_detects_changed_symlink_target(self):
+        link = self.root / 'viewer-tasks' / 'link'
+        try:
+            link.symlink_to('task-1')
+        except OSError:
+            self.skipTest('symlinks unavailable')
+        first = _census(self.root)
+        self.assertEqual(first['tree']['symlinks'], 1)
+        link.unlink()
+        link.symlink_to('elsewhere')
+        self.assertNotEqual(first['tree']['treeSha256'], _census(self.root)['tree']['treeSha256'])
+
+    def test_detects_in_place_row_update(self):
+        first = _census(self.root)
+        db = sqlite3.connect(self.root / 'jobs.sqlite3')
+        db.execute("UPDATE jobs SET status='queued' WHERE status='failed'")
+        db.commit()
+        db.close()
+        second = _census(self.root)
+        self.assertEqual(first['database']['rowCounts'], second['database']['rowCounts'])
+        self.assertNotEqual(first['database']['tableSha256']['jobs'], second['database']['tableSha256']['jobs'])
+
     def test_detects_changed_bytes(self):
         first = _census(self.root)
         (self.root / 'viewer-tasks' / 'task-1' / 'input-1').write_bytes(b'changed')

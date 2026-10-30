@@ -1,239 +1,416 @@
 # d738 copy-on-cutover procedure (draft, not executed)
 
-This replaces the live cluster coordinator, source `d738edb2`, image
-`sha256:a04271d0…5837`, container `9dcb112d…09ae`, with a frozen release image.
-The release image runs on a **copy** of the stopped state volume. The original
-volume and container stay untouched, so rollback never runs d738 against a
-schema that the release migrated.
+This procedure replaces the live cluster coordinator with a frozen release
+image. The live coordinator is:
 
-This is a reviewable draft. Nobody has run it. Each live step needs Beau's
-approval for that window. It changes no NAS, Viewer provider settings,
-credentials or engine containers.
+- source `d738edb2`;
+- image `sha256:a04271d0…5837`;
+- container `9dcb112d…09ae`.
 
-## Why copy instead of in-place
+The release image runs on a **verified copy** of the stopped state volume:
 
-On first start the release `TaskStore` runs these schema changes:
+- It starts **isolated**: no published port, on a Docker network it alone
+  belongs to. It is reachable from no client until promotion.
+- Promotion happens only after a census proves the isolated run wrote nothing
+  beyond its startup migration.
+- The original volume and container stay untouched, and are fenced so they
+  cannot run again. Rollback never starts d738 on a schema that the release
+  migrated.
 
-- `ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required`;
-- creates `viewer_reservations`;
-- creates `viewer_option_evidence`.
+Beau has authorized this work. TrueNAS remains under his control, and nothing
+here touches it, the Viewer provider settings, credentials or the engine
+containers. This draft has not been run.
 
-[viewer-option-evidence.md](viewer-option-evidence.md) states this is not
-qualified for downgrade. If d738 were restarted on a migrated database, it would
-ignore reservation capabilities. It would also report `held` as failed
-(status 30), which e206125 fixed. Starting the release on a copy avoids that
-downgrade entirely.
+Every **stop condition** below is mandatory. Hitting one means: stop, keep
+every artifact, and inspect. Never improvise a workaround.
 
-The cost is that **work admitted after cutover is not in the rollback volume.**
-Rollback is only clean while the new coordinator has admitted nothing new
-(step 8).
+## Why copy, isolate and fence
 
-## Facts this procedure relies on
+- **Downgrade:** on first start, the release `TaskStore` migrates the database:
+  - `ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required`;
+  - creates `viewer_reservations`;
+  - creates `viewer_option_evidence`.
 
-| Fact | Source | Re-verify at |
+  [viewer-option-evidence.md](viewer-option-evidence.md) says this is
+  unqualified for downgrade. If d738 ran on a migrated database, it would
+  ignore reservation capabilities and report `held` as failed. Running only the
+  release on the copy avoids the downgrade.
+- **Writes to the copy before promotion:** if the candidate published live
+  ports before health checks, Viewer retries or other clients could write to
+  the copy, and rollback would silently discard those writes. Isolation makes
+  that impossible, rather than asking clients not to.
+- **The same authority twice:** the copy keeps authority `7131882e-…e8`, and
+  `coordinator.lock` lives inside each volume, so the lock cannot prevent two
+  coordinators. Host port binding does not either: Docker bridge peers reach
+  container ports directly. The old container is therefore fenced before it
+  stops (restart policy `no`) and after (disconnected from every network).
+
+## Facts and assumptions
+
+| Item | Source | Re-verified at |
 |---|---|---|
-| Live d738 has no Viewer tasks or files; both NodeODM task lists are empty | Codex read-only check, 2026-10-30 | step 1 |
+| Live d738 has no Viewer tasks or files; both NodeODM task lists are empty | Codex read-only check, 2026-10-30 | steps 1, 4 |
 | Cluster Docker filesystem has about 115 GiB free | Codex, 2026-10-30 | step 0 |
-| On SIGTERM, d738 stops both listeners, then waits without timeout for in-flight handlers, the dispatcher and the reference runtime. It exits 0 after a clean drain and 2 on any drain failure | `processing/app.py` `CoordinatorService.run` at d738 | step 4 |
-| Admission drain is unusable in both d738 and the release (`ADMISSION_DRAIN_QUALIFIED = False`) | `processing/config.py` | — |
-| The release adds only `PROCESSING_ADMISSION_DRAIN_ENABLED` (default `0`) to the environment | config diff d738..f445ce1 | step 5 |
-| The state directory holds `coordinator.lock`, so **two volumes do not share a lock** | 2026-10-28 cutover census | steps 4, 5, 8 |
-| Authority `7131882e-…e8` is stored in `coordinator_identity`; the copy keeps it | cutover evidence | step 3 |
+| On SIGTERM, d738 closes both listeners, then joins its non-daemon handlers, the dispatcher and the reference runtime, with no timeout. It exits 0, or 2 if any drain fails | `processing/app.py` at d738 | step 2 |
+| Exit 0 proves **only** that handlers ended. It does not prove clients received responses or that requests succeeded; a socket failure leaves the outcome ambiguous | review, 2026-10-30 | steps 3, 4 (census and Viewer reconciliation) |
+| Admission drain is unusable in both versions (`ADMISSION_DRAIN_QUALIFIED = False`) | `processing/config.py` | — |
+| The coordinator's internal ports: the native/Viewer listener `PROCESSING_PORT` (default 8080) and the reference TLS listener (8443). The host publishes 3005, 18443 and loopback 18080 | reviewer; **confirm from `old-inspect.json`** | step 0 |
+| Viewer's active work lives in `processing_jobs.status IN ('pending','leased')` and in `processing_attempts.status NOT IN ('cancelled','failed','published')` | Viewer `processingRepository.js` at 821186f4; **confirm against the deployed Viewer** | step 1 |
+| The a042 image has `bash` and GNU `tar` (as the python-slim base does) | assumption | step 0 |
 
-## Step 0 — read-only capture (no approval needed)
+## Helpers (all read-only, all in this PR)
 
-Run on 192.168.50.89. Record everything into a private evidence folder, never
-into Git.
+- [ops/state_census.py](../ops/state_census.py): a census of a **stopped**
+  state directory. It records:
+  - a tree hash covering modes, owners, file bytes, hard-link counts and
+    symlink targets;
+  - counts of symlinks and other non-regular files;
+  - partial `.incoming-*` uploads and spool entries;
+  - SQLite (opened `immutable=1`): quick_check, schema hash, per-table row
+    counts and content hashes, active jobs and Viewer tasks, the authority, and
+    any sidecar files.
+
+  It prints no names, addresses or row contents.
+- [ops/netns_sockets.py](../ops/netns_sockets.py): run inside a container with
+  `docker exec -i`. It counts TCP listeners and peers per local port in that
+  container's own network namespace, which covers bridge, loopback and
+  published access alike.
+- [ops/coordinator_container_spec.py](../ops/coordinator_container_spec.py):
+  derives the candidate's `docker create` argv from saved `docker inspect`
+  output.
+  - It carries reviewed HostConfig fields exactly.
+  - It replaces only the image, volume, name, network, ports and restart
+    policy.
+  - It **refuses** any other non-default setting: bind mounts, compose labels,
+    command or user overrides, static network addresses, and so on.
+  - It writes the environment to a fresh `0600` file and prints key names only.
+
+Copy the three helpers from the frozen release commit to the host's private
+cutover folder, and verify them against that commit by SHA-256.
+
+## Step 0 — private capture, read-only
+
+All commands run on 192.168.50.89 in **bash**:
 
 ```sh
+set -euo pipefail
+umask 077                                  # before any credential-bearing file exists
 OLD=9dcb112da75cd9663f87d63fed422979dd9216f46b7035f809673a2d900d09ae
-E=~/.local/share/ledgetop-processing-prototype/cutover-$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -m 700 -p "$E"
-docker inspect "$OLD" > "$E/old-inspect.json"           # contains env: chmod 600, never share
-chmod 600 "$E/old-inspect.json"
+IMG_OLD=sha256:a04271d08115481d5dd3a8a171b9b609567b823c7d5ea8af34b56b8915db5837
+IMG_NEW=<digest of the locally built image for the frozen release commit>
+RUN=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+E=$HOME/.local/share/ledgetop-processing-prototype/cutover-$RUN
+mkdir -m 700 "$E"                          # fails if it already exists
+cp state_census.py netns_sockets.py coordinator_container_spec.py "$E"/
+docker inspect "$OLD"     > "$E/old-inspect.json"
+docker image inspect "$IMG_OLD" > "$E/old-image.json"
+docker image inspect "$IMG_NEW" > "$E/new-image.json"
 docker inspect -f '{{.State.Status}} {{.RestartCount}} {{.HostConfig.RestartPolicy.Name}} {{.Image}}' "$OLD"
 docker inspect -f '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination}} {{.RW}}{{"\n"}}{{end}}' "$OLD"
 docker inspect -f '{{json .HostConfig.PortBindings}}' "$OLD"
-df -B1 "$(docker info -f '{{.DockerRootDir}}')"
-docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Status}}'
+docker inspect -f '{{range $n, $_ := .NetworkSettings.Networks}}{{$n}}{{"\n"}}{{end}}' "$OLD" > "$E/old-networks.txt"
+VOL=$(docker inspect -f '{{range .Mounts}}{{.Name}}{{end}}' "$OLD")
+docker system df -v > "$E/df.txt"; df -B1 "$(docker info -f '{{.DockerRootDir}}')"
 ```
 
-Abort unless all of these hold:
+**Stop conditions:**
 
-- Exactly one volume mount, of type `volume`. Set `VOL` to its name and `DEST`
-  to its destination; that should be the `PROCESSING_PROTOTYPE_STATE_DIR` value.
-- The image is `sha256:a04271d0…`.
-- The ports include 3005 (the native/Viewer listener) and 18443 (reference TLS).
-- Free space is at least 3× the volume size plus the new image.
-- No other running container publishes 3005 or 18443.
+- The image is not `IMG_OLD`.
+- There is not exactly one writable named volume.
+- The port bindings differ from the facts table.
+- Free space is less than 3× the volume size plus the new image.
+- `coordinator_container_spec.py --mode isolated` refuses the configuration.
+  Run it now as a dry check, writing its env file to `$E/env-dry`, then delete
+  that file with `shred -u`.
 
-## Step 1 — prove every submission route is quiet
+### Every owner and writer of the volume and its mountpoint
 
-An idle queue alone is not proof. Something could be admitted between the
-check and the stop, or could bypass the queue entirely. Close or verify each
-route separately, and record what you saw for each one.
+```sh
+docker ps -a --filter volume="$VOL" --format '{{.ID}}' > "$E/volume-users.txt"   # must be exactly $OLD
+MP=$(docker volume inspect -f '{{.Mountpoint}}' "$VOL")
+for c in $(docker ps -aq); do docker inspect -f '{{.Id}} {{range .Mounts}}{{.Source}} {{end}}' "$c"; done \
+  | grep -F -- "$MP" > "$E/mountpoint-users.txt" || true                          # must list only $OLD
+sudo -n fuser -vm "$MP" 2> "$E/fuser.txt" || true                                 # must show only the $OLD process tree
+```
 
-| # | Route into work | Proof it is quiet | Evidence |
+**Stop conditions:**
+
+- Any container other than `$OLD` uses the volume or its mountpoint.
+- Any host process other than `$OLD`'s holds the mountpoint.
+- `sudo -n` is unavailable. In that case the host-writer check is
+  **unproven**, and this is a blocker until Beau provides an equivalent root
+  check.
+
+## Step 1 — prove every submission route is quiet (exact mechanisms)
+
+An idle queue is necessary but not sufficient. Each route below needs its own
+evidence, saved in `$E`. All checks are read-only.
+
+| # | Route | Exact mechanism | Pass |
 |---|---|---|---|
-| R1 | Viewer production and staging on `:3005` (`/task/new/*`, cancel, remove, download) | Viewer has no non-terminal processing jobs for this provider, **including retries whose `available_at` is in the future**. Beau has declared the freeze window and no human submits during it | Read-only query by the Viewer owner. Record counts only |
-| R2 | Requests already inside d738 when it stops | Stopping d738 closes both listeners first. Exit code **0** proves every in-flight handler finished. **137 or 2 means abort** (step 4) | `State.ExitCode`, `State.OOMKilled` |
-| R3 | Requests arriving after the stop | The port is closed while stopped, and step 5 starts the new container only after the census | `ss -ltn` shows nothing on 3005/18443 between steps 4 and 5 |
-| R4 | Open TCP sessions just before the stop | `ss -tn state established '( sport = :3005 or sport = :18443 )'` shows no peers other than this check | Saved output |
-| R5 | Reference `/ltds/v1` and its workers (staging only) | No worker daemon or broker process is running on either PC, and the reference tables hold no active claims | `ps`/`systemctl --user list-units` on both PCs; census row counts |
-| R6 | Synthetic and operator `/v1/prototype/*` (`processingctl submit-synthetic`, `dispatch`) | No `processingctl dispatch` process is running, and nobody runs `processingctl` during the window | `ps` on .89 |
-| R7 | Direct engine submissions that bypass the coordinator (NodeODX on cluster and main, plus anything holding their tokens) | `/task/list` is empty on both engines **before step 4 and again before step 5**. The legacy ClusterODX container is still stopped. No other container or process on either PC is a NodeODM client | Saved `/task/list` counts; `docker ps -a` on both PCs |
-| R8 | Updaters and maintenance acting during the window (updaters on `020c15c`, owned maintenance schedule) | No updater lock or in-flight operation exists; no scheduled maintenance falls inside the window; neither updater targets the coordinator container | The updater's read-only status; `systemctl --user list-timers` |
-| R9 | Isolated .88 pilot | The pilot Viewer is not configured to send to `.89` | Read-only config check by the Viewer owner |
+| R1 | Viewer production and staging | The Viewer owner runs, read-only on the Viewer database: `SELECT status,COUNT(*) FROM processing_jobs WHERE status IN ('pending','leased') GROUP BY status;` and `SELECT status,COUNT(*) FROM processing_attempts WHERE status NOT IN ('cancelled','failed','published') GROUP BY status;` | Both return no rows. Pending rows with a future `available_at` count as active |
+| R2 | Requests inside d738 | `docker exec -i "$OLD" python - < "$E/netns_sockets.py"`, three times 10 s apart | `inboundByLocalPort` is `{}` every time |
+| R3 | Host-side listeners | `ss -tanp '( sport = :3005 or sport = :18443 or sport = :18080 )'`, plus every other `HostPort` in `old-inspect.json` | Only `LISTEN` rows, held by `docker-proxy` |
+| R4 | Bridge peers | `docker network inspect <each network in old-networks.txt>` | The members list matches what you expect; every member other than `$OLD` is identified as a non-submitter (for example an engine container) |
+| R5 | Reference workers and broker, both PCs | `pgrep -af 'reference_worker_daemon\|nas_broker\|reference_joint_driver'` and `systemctl --user list-units --all 'ledgetop*'` on .89 and main | No process; no active unit |
+| R6 | Operator and synthetic `/v1/prototype/*` | `pgrep -af 'processingctl\|update_reference_coordinator\|run_coordinator_update_bridge'` | No process |
+| R7 | Direct engine submissions | `docker exec -i "$OLD" python -` reading `LOCAL_NODE_URL`/`LOCAL_NODE_TOKEN` and `MAIN_NODE_URL`/`MAIN_NODE_TOKEN` from its own environment, then requesting `/task/list?token=…` and **printing only the counts**. Also `docker ps -a` on both PCs | Both counts are 0. The legacy ClusterODX container is `exited`. No unknown NodeODM-client container exists |
+| R8 | Updaters and maintenance | `python3 <installed update_service.py> status --config <installed config>` for each installed updater, and `systemctl --user list-timers --all` on both PCs | No lock or in-flight operation; no timer due within the window; no updater targets `$OLD` |
+| R9 | The isolated .88 pilot | The Viewer owner confirms read-only that the pilot's provider origin is not `192.168.50.89` | Confirmed |
 
-R2 and R3 are the hard fences: once d738 has stopped cleanly, it can accept
-nothing. The others prove that nothing is left in flight that would fail or be
-lost when it stops, and that no writer outside the coordinator acts while it is
-stopped.
+**Stop condition:** any route fails, or its evidence cannot be produced.
 
-## Step 2 — stop d738 (approval point A)
+## Step 2 — fence and stop d738
 
 ```sh
-docker stop -t 3600 "$OLD"     # never the default 10 s: SIGKILL would skip the drain
+docker update --restart=no "$OLD"          # BEFORE stop: no restart window
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$OLD"        # must print: no
+docker stop -t 3600 "$OLD"                 # never the default 10 s
 docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{.State.FinishedAt}}' "$OLD"
-docker update --restart=no "$OLD"   # approval point A: keeps a daemon restart from reviving it
+while read -r n; do docker network disconnect "$n" "$OLD"; done < "$E/old-networks.txt"
+docker inspect -f '{{len .NetworkSettings.Networks}}' "$OLD"        # must print: 0
 ```
 
-Continue only if the status is `exited`, the exit code is `0` and `OOMKilled` is
-`false`. If the stop takes longer than a few seconds, a request was still in
-flight. That contradicts step 1, so stop and inspect before continuing.
+**Stop conditions:**
 
-Changing the restart policy is a live configuration change and needs approval.
-Without it, a Docker or host restart could start d738 again with `unless-stopped`
-semantics while the new container holds the same authority on a different
-volume.
+- The status is not `exited`, the exit code is not `0`, or `OOMKilled` is
+  `true`.
+- The stop took longer than a few seconds. That means a request was in flight,
+  contradicting R2.
 
-## Step 3 — census, then copy
+Once disconnected, the old container cannot reach clients or engines even if
+something starts it.
+
+## Step 3 — verified backup and copy
+
+The archive is the single source for both the verification volume and the copy.
+A copy that is extracted from the archive and census-matches it proves the
+archive can be restored.
 
 ```sh
-NEW_VOL=${VOL}-release-$(date -u +%Y%m%d)
-IMG_OLD=sha256:a04271d08115481d5dd3a8a171b9b609567b823c7d5ea8af34b56b8915db5837
-CENSUS="--network=none --read-only --user 10001:10001 --entrypoint python"   # quoted; expanded unquoted below
-# 3a. census of the original, read-only
-docker run --rm $CENSUS -v "$VOL:/src:ro" -v "$PWD/state_census.py:/c.py:ro" "$IMG_OLD" /c.py /src > "$E/census-original.json"
-# 3b. offline archive, a third independent copy (streamed to stdout so the host folder needs no UID 10001 write access)
-docker run --rm --network=none --read-only --user 10001:10001 -v "$VOL:/src:ro" --entrypoint tar "$IMG_OLD" -C /src -cpf - . > "$E/state-original.tar"
+NEW_VOL=ltp-state-release-$RUN
+VERIFY_VOL=ltp-state-verify-$RUN
+for v in "$NEW_VOL" "$VERIFY_VOL"; do
+  if docker volume inspect "$v" >/dev/null 2>&1; then echo "volume exists: $v"; exit 1; fi
+done
+census() { docker run --rm --network=none --read-only --user 10001:10001 --entrypoint python \
+  -v "$1:/src:ro" -v "$E/state_census.py:/c.py:ro" "$IMG_OLD" -B /c.py /src; }
+census "$VOL" > "$E/census-original.json"
+# archive streamed to a host file: no pipeline, so docker's exit status is the archive's
+docker run --rm --network=none --read-only --user 10001:10001 -v "$VOL:/src:ro" --entrypoint tar \
+  "$IMG_OLD" --numeric-owner -C /src -cpf - . > "$E/state-original.tar"
+python3 -c 'import os,sys;[os.fsync(os.open(p,os.O_RDONLY)) for p in sys.argv[1:]]' "$E/state-original.tar" "$E"
 sha256sum "$E/state-original.tar" > "$E/state-original.tar.sha256"
-# 3c. new volume and a copy that preserves mode and owner
-docker volume create "$NEW_VOL"
-docker run --rm --network=none --user 0:0 -v "$VOL:/src:ro" -v "$NEW_VOL:/dst" --entrypoint sh "$IMG_OLD" -c 'cd /src && tar -cpf - . | (cd /dst && tar -xpf -)'
-# 3d. census of the copy, and of the original again
-docker run --rm $CENSUS -v "$NEW_VOL:/src:ro" -v "$PWD/state_census.py:/c.py:ro" "$IMG_OLD" /c.py /src > "$E/census-copy.json"
-docker run --rm $CENSUS -v "$VOL:/src:ro" -v "$PWD/state_census.py:/c.py:ro" "$IMG_OLD" /c.py /src > "$E/census-original-after.json"
+for v in "$VERIFY_VOL" "$NEW_VOL"; do
+  docker volume create --label ltp.cutover="$RUN" "$v" >/dev/null
+  test "$(census "$v" | python3 -c 'import json,sys;print(json.load(sys.stdin)["tree"]["entries"])')" = 0
+  sha256sum -c "$E/state-original.tar.sha256"
+  docker run --rm -i --network=none --user 0:0 -v "$v:/dst" --entrypoint tar "$IMG_OLD" \
+    --numeric-owner --same-owner -C /dst -xpf - < "$E/state-original.tar"
+  census "$v" > "$E/census-$v.json"
+done
+census "$VOL" > "$E/census-original-after.json"
 ```
 
-`state_census.py` is [ops/state_census.py](../ops/state_census.py), copied from
-the frozen release commit.
-
-Continue only if all three censuses have the same `treeSha256`, `schemaSha256`,
-`rowCounts` and `authorityId`, and each also shows:
+**All four censuses** (original, verify, copy, original after) must be
+identical in every field, including `tree.root`. Extraction restores the
+volume root's mode and owner. They must also show:
 
 - `quickCheck` is `ok`;
 - `active.jobs` is 0 and `active.viewerTasks` is 0;
-- `incomingPartials` is 0 and `spoolEntries` is 0;
-- `sidecars` is empty (a clean close leaves no `-wal` or `-shm`).
+- `incomingPartials`, `spoolEntries`, `symlinks`, `other` and `hardlinked` are
+  all 0;
+- `sidecars` is empty.
 
-The identical before/after hashes of the original are the proof that the copy
-did not write to it. This census is the second, state-level proof for R1, R5
-and R6: zero active rows **after** the listeners closed, not just before.
+**Stop conditions:**
 
-The tar archive is an offline copy that does not depend on Docker volume
-storage.
+- Any difference between the censuses.
+- Any non-regular file. Links and special files are rejected outright, not
+  handled.
 
-Assumption: the image provides `tar` and `sh` (the python-slim base does), and
-running as UID 0 inside an image with `--network=none` is acceptable for the
-copy alone. If not, use `docker run` with a pinned, cached busybox image
-instead.
+The identical before/after censuses of the original prove that copying never
+wrote to it. This census is also the state-level reconciliation of R1, R5 and
+R6 **after** the listeners closed, which matters because exit 0 alone does not
+prove a request outcome. Keep `VERIFY_VOL` and the archive until Beau accepts
+the release.
 
-## Step 4 — recheck direct engine routes
+## Step 4 — client-side reconciliation and direct-engine recheck
 
-Repeat the R7 `/task/list` checks on both engines, and R8. Then confirm nothing
-listens on 3005 or 18443. If any engine has a task now, it came from outside
-the coordinator. Stop and inspect it.
+1. Repeat R1. Viewer must still have no active job or attempt. If Viewer
+   recorded a request failure during the stop window, the census (zero tasks)
+   is the coordinator's side of that request. Record both sides; do not retry.
+2. Repeat R7 and R8. R7 has no running coordinator to `exec` into, so run its
+   script in a short-lived container: old image, `--rm`, `--read-only`, on the
+   engine network only, environment from `$E/env-dry`, regenerated in mode
+   `0600` and shredded afterwards.
 
-## Step 5 — start the release on the copy (approval point B)
+**Stop condition:** any non-zero count. A task now on an engine came from
+outside the coordinator.
 
-`IMG_NEW` is the locally built and inspected image for the frozen release
-commit, identified by digest. Recreate the old container's `docker run`
-configuration from `old-inspect.json`: user, read-only root, CPU/memory limits,
-tmpfs, environment file, port bindings, network and restart policy. Make only
-these changes:
-
-- the image becomes `IMG_NEW`;
-- the volume becomes `-v "$NEW_VOL:$DEST"`;
-- the name becomes `ledgetop-processing-coordinator-<release-short-sha>`;
-- `PROCESSING_ADMISSION_DRAIN_ENABLED` stays unset or `0`.
-
-Derive the configuration with a reviewed script that diffs the old and new
-`docker inspect` output. Do not hand-copy flags. The environment values contain
-tokens, so print key names only, never values.
+## Step 5 — start the candidate isolated
 
 ```sh
-docker inspect -f '{{.State.Health.Status}} {{.RestartCount}}' "$NEW"   # healthy, 0
+CAND_NET=ltp-candidate-$RUN
+docker network create --driver bridge --label ltp.cutover="$RUN" "$CAND_NET" >/dev/null
+python3 "$E/coordinator_container_spec.py" --container "$E/old-inspect.json" \
+  --old-image "$E/old-image.json" --new-image "$E/new-image.json" --mode isolated \
+  --volume "$NEW_VOL" --name "ltp-coordinator-candidate-$RUN" --network "$CAND_NET" \
+  --env-out "$E/env-candidate" > "$E/candidate-spec.json"
+# review candidate-spec.json (key names only), then run its argv exactly:
+python3 -c 'import json,subprocess,sys;sys.exit(subprocess.run(json.load(open(sys.argv[1]))["argv"]).returncode)' "$E/candidate-spec.json"
+CAND=ltp-coordinator-candidate-$RUN
+docker start "$CAND"
 ```
 
-Never run the census against `NEW_VOL` while `$NEW` is running. The census is
-only valid on a stopped volume.
+Prove the isolation before any check that talks to the candidate:
 
-## Step 6 — post-start verification (all read-only)
+- `docker port "$CAND"` prints nothing.
+- `docker network inspect "$CAND_NET"` lists exactly one container, `$CAND`.
+- From another LAN host (main or .88), connecting to `192.168.50.89` on 3005
+  and 18443 is **refused**.
+- On .89, nothing listens on 3005, 18443 or 18080 (`ss -ltn`).
 
-1. `/healthz` reports ready, and the native and reference listeners are alive.
-2. `/info` and `/options` on 3005 (production and staging tokens) return the
-   fleet option set. The option count and hash match the engines' current
-   catalog.
-3. `/v1/prototype/authority` returns `7131882e-…e8`, and the nodes are
-   `cluster` and `main`, both active.
-4. The jobs history count and status counts match `census-original.json`.
-5. `docker diff "$NEW"` shows no writes outside the volume and tmpfs.
-6. A staging-only Viewer photo job runs end to end, through archive ingestion
-   **and derivatives**. Beau approves this as a separate run. Use the 20-photo
-   selection or a synthetic set, not production.
+Candidate health and reachability checks run **inside** the candidate, using
+its own environment. GET only; no POST:
 
-## Step 7 — open production
+```sh
+docker exec -i "$CAND" python - <<'EOF'
+import json, os, urllib.request
+base = 'http://127.0.0.1:' + os.environ.get('PROCESSING_PORT', '8080')
+def get(path, token=None):
+    request = urllib.request.Request(base + path, headers={'Authorization': 'Bearer ' + token} if token else {})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.status, json.load(response)
+status, health = get('/healthz'); print('healthz', status, health.get('state'))
+for role, key in (('production', 'PROCESSING_VIEWER_TOKEN'), ('staging', 'PROCESSING_VIEWER_STAGING_TOKEN')):
+    status, options = get('/options', os.environ[key]); print(role, 'options', status, len(options))
+status, authority = get('/v1/prototype/authority', os.environ['PROCESSING_PROTOTYPE_OBSERVER_TOKEN'])
+print('authority', status, authority.get('authorityId'))
+EOF
+docker exec -i "$CAND" python - < "$E/netns_sockets.py"   # only this check's own connections
+```
 
-Production may submit only after step 6 passes and Beau accepts it. That ends
-the clean-rollback window: from then on, rollback loses whatever was admitted
-(step 8).
+Also run R7 through `docker exec -i "$CAND"`. The candidate must have
+dispatched nothing.
+
+**Stop conditions:**
+
+- Any isolation proof fails.
+- `/healthz` is not ready.
+- The option count or hash differs from the engines' current catalog.
+- The authority is not `7131882e-…e8`.
+
+Assumptions:
+
+- The headers and authority field above follow the coordinator's documented
+  API. Adjust them to the exact route contracts before running.
+- The reference TLS listener is only checked for being alive, through
+  `/healthz`.
+
+## Step 6 — promotion gate: prove the isolated run wrote nothing
+
+```sh
+docker stop -t 3600 "$CAND"; docker inspect -f '{{.State.ExitCode}}' "$CAND"     # must be 0
+census "$NEW_VOL" > "$E/census-candidate-isolated.json"
+```
+
+Compare against `census-$NEW_VOL.json`:
+
+- Every table present before has an **identical `tableSha256`**, except tables
+  on an explicit startup allowlist.
+- New tables are exactly `viewer_reservations` and `viewer_option_evidence`,
+  plus any allowlisted startup tables. Both new tables have zero rows.
+- `active` is still all zeros, and the tree has no new partial uploads, spool
+  entries, links or special files.
+- The candidate's only `viewer-tasks` changes are allowlisted.
+
+**The startup allowlist does not exist yet.** It must come from a rehearsal:
+start `IMG_NEW` isolated on a synthetic copy of this volume shape, then diff the
+before/after censuses. Example: reference recovery startup records. Until that
+allowlist is reviewed, this gate cannot pass, and the gap is a blocker.
+
+**Stop condition:** any difference not on the allowlist. Any such difference
+means a client reached the candidate, or the startup does more than reviewed.
+
+## Step 7 — promote
+
+```sh
+docker inspect -f '{{.State.Status}} {{.HostConfig.RestartPolicy.Name}} {{len .NetworkSettings.Networks}}' "$OLD"   # exited no 0
+census "$NEW_VOL" | cmp - "$E/census-candidate-isolated.json"    # unchanged since the gate
+docker rm "$CAND"; docker network rm "$CAND_NET"; shred -u "$E/env-candidate"
+python3 "$E/coordinator_container_spec.py" --container "$E/old-inspect.json" \
+  --old-image "$E/old-image.json" --new-image "$E/new-image.json" --mode promoted \
+  --volume "$NEW_VOL" --name "ltp-coordinator-$RUN" --env-out "$E/env-promoted" > "$E/promoted-spec.json"
+python3 -c 'import json,subprocess,sys;sys.exit(subprocess.run(json.load(open(sys.argv[1]))["argv"]).returncode)' "$E/promoted-spec.json"
+docker start "ltp-coordinator-$RUN"; shred -u "$E/env-promoted"
+```
+
+**Promotion is the end of clean rollback.** From here on, any admission —
+production or a staging verification task — exists only on `NEW_VOL`.
+
+After promotion, repeat the step 5 checks through the published ports. Then
+the staging-only Viewer photo job runs through to archive ingestion **and
+derivatives**. Production follows only after that passes and Beau accepts it.
 
 ## Step 8 — rollback
 
-Use rollback when step 5 or 6 fails, or when Beau asks for it.
+- **Before promotion (any failure in steps 5–6):** remove the candidate and its
+  network. Reconnect `$OLD` to the networks in `old-networks.txt` (with their
+  original aliases), restore its restart policy, and `docker start "$OLD"`. The
+  original volume is unchanged, as `census-original-after.json` proves. Nothing
+  is lost.
+- **After promotion, if `NEW_VOL` holds nothing beyond `census-candidate-isolated.json`:**
+  1. stop the promoted container (exit 0);
+  2. take a census and confirm it is unchanged;
+  3. roll back as before.
+- **After promotion, if anything was admitted (including a staging task):**
+  this is a **hold, not an automatic rollback**.
+  1. Stop admitting work; the coordinator has no in-process fence, so this is
+     done at Viewer.
+  2. Keep the promoted container and `NEW_VOL` intact.
+  3. List the tasks and jobs that `NEW_VOL` holds but the original lacks,
+     using a census plus a read-only query of the stopped copy.
+  4. Reconcile each one with Viewer.
 
-```sh
-docker stop -t 3600 "$NEW"; docker inspect -f '{{.State.ExitCode}}' "$NEW"   # 0, else inspect first
-docker update --restart=no "$NEW"
-docker update --restart=unless-stopped "$OLD" && docker start "$OLD"         # untouched original volume
-```
+  Rolling back would lose that coordinator history unless it is preserved and
+  reconciled first. Choosing to do that is Beau's decision. Never copy a
+  migrated `jobs.sqlite3` under d738.
 
-Before rolling back after any admission (step 7 or a staging run), take a
-census of `NEW_VOL`. Each task or job it holds that the original lacks is work
-the rollback would lose, so list them and get Beau's decision. Never copy the
-migrated `jobs.sqlite3` back under d738.
+Keep the following until Beau accepts the release:
 
-Keep `$VOL`, the old container, `NEW_VOL` and the tar archive until Beau
-accepts the release. Cleaning them up is a separate, approved step.
+- `$VOL` and `$OLD` (still fenced);
+- `VERIFY_VOL`, `NEW_VOL` and the archive;
+- `$E`.
 
-## Known limitations
+Cleaning them up is a separate step.
 
-- **No admission fence inside the coordinator.** Quiescence rests on the freeze
-  window (R1), d738's clean SIGTERM drain (R2, R3) and the post-stop census.
-  A Viewer job submitted during the window is refused at TCP level while the
-  coordinator is stopped. How Viewer handles that refusal is not verified here.
-- **The same authority on two volumes.** `coordinator.lock` sits in the volume,
-  so it cannot stop both coordinators from running. The only fences are:
-  - the old container is stopped, with restart policy `no`;
-  - the port binding, since one host port cannot be bound twice;
-  - this procedure.
-- **Engines outside the gate.** Direct NodeODX writers stay outside the
-  cooperative gate. R7 observes them; it does not fence them.
-- **Release env and reference config.** That the reference config loads under
-  the new `reference_runtime` is assumed and must be checked. The local
-  equivalent: start `IMG_NEW` against a synthetic state volume with the same
-  environment key names, before the window.
-- **No live qualification yet.** None of this has run on a live host. Step
-  3's commands were not executed against a real a042 image, and `tar` being in
-  the image is assumed.
+## Remaining gaps (blockers unless noted)
+
+1. **Startup allowlist** for the step 6 gate: requires a rehearsal of `IMG_NEW`
+   on synthetic state. Blocker.
+2. **Host-writer proof** needs root (`fuser -vm` on the volume mountpoint). If
+   `sudo -n` is unavailable, Beau must provide an equivalent. Blocker until
+   then.
+3. **Bridge membership:** isolation removes the candidate from shared networks.
+   The candidate may need its engines via the old network: check whether
+   `LOCAL_NODE_URL`/`MAIN_NODE_URL` use container names. If so, the candidate
+   cannot be isolated by its own network alone. Joining the engine network
+   instead is acceptable only if R4 identifies every member as a
+   non-submitter. Unresolved until `old-inspect.json` is read.
+4. **No in-process admission fence after promotion.** Between promotion and
+   production acceptance, production admission is held only at Viewer. The
+   coordinator cannot accept staging while refusing production unless its
+   credential configuration changes, which this procedure does not do.
+5. **The client side of an ambiguous request** is reconciled from Viewer's
+   records (step 4). The coordinator records nothing about requests it refused
+   or dropped.
+6. **Exact API contracts** for the in-container checks (headers, response
+   fields) must be confirmed against the release source before running.
+7. **Direct NodeODX writers** stay outside the cooperative gate. R7 observes
+   them; it does not fence them.
+8. **Live verification:** none of this has run on a live host. Step 3, minus
+   the host `fsync`, was rehearsed in bash with `set -euo pipefail` on a
+   synthetic volume, using a cached Python image as `IMG_OLD`. All four
+   censuses matched, including the volume root.
+   The container-spec script is tested on synthetic inspect JSON only, not on
+   the real `old-inspect.json`.

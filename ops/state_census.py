@@ -37,12 +37,15 @@ def tree(root):
             relative = path.relative_to(root).as_posix()
             entry = {'path': hashlib.sha256(relative.encode()).hexdigest(),
                      'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid}
-            if stat.S_ISDIR(info.st_mode):
+            if stat.S_ISLNK(info.st_mode):
+                # Never followed; the target is hashed so a changed link changes the tree.
+                entry.update(kind='symlink', target=hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest())
+            elif stat.S_ISDIR(info.st_mode):
                 entry['kind'] = 'directory'
             elif stat.S_ISREG(info.st_mode):
-                entry.update(kind='file', bytes=info.st_size, sha256=_sha256(path))
+                entry.update(kind='file', bytes=info.st_size, links=info.st_nlink, sha256=_sha256(path))
             else:
-                entry['kind'] = 'other'
+                entry.update(kind='other', type=stat.S_IFMT(info.st_mode))
             entries.append(entry)
     entries.sort(key=lambda item: item['path'])
     canonical = json.dumps(entries, sort_keys=True, separators=(',', ':')).encode()
@@ -54,7 +57,9 @@ def tree(root):
             'root': {'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid},
             'regularFiles': sum(1 for e in entries if e['kind'] == 'file'),
             'bytes': sum(e.get('bytes', 0) for e in entries),
+            'symlinks': sum(1 for e in entries if e['kind'] == 'symlink'),
             'other': sum(1 for e in entries if e['kind'] == 'other'),
+            'hardlinked': sum(1 for e in entries if e.get('links', 1) > 1),
             'topLevel': top, 'incomingPartials': incoming,
             'spoolEntries': sum(1 for _ in spool.iterdir()) if spool.is_dir() else None}
 
@@ -68,8 +73,12 @@ def database(path):
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name")]
         schema = hashlib.sha256('\n'.join(row[0] or '' for row in db.execute(
             'SELECT sql FROM sqlite_master ORDER BY type,name')).encode()).hexdigest()
-        counts = {name: db.execute('SELECT COUNT(*) FROM "%s"' % name.replace('"', '""')).fetchone()[0]
-                  for name in tables}
+        counts, digests = {}, {}
+        for name in tables:
+            rows = sorted(repr(tuple(row)) for row in db.execute('SELECT * FROM "%s"' % name.replace('"', '""')))
+            counts[name] = len(rows)
+            # Content digest only: detects in-place updates that keep the row count.
+            digests[name] = hashlib.sha256('\n'.join(rows).encode()).hexdigest()
         active = {}
         if 'jobs' in tables:
             marks = ','.join('?' * len(ACTIVE_JOB_STATUSES))
@@ -84,7 +93,7 @@ def database(path):
         if 'coordinator_identity' in tables:
             row = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
             authority = row[0] if row else None
-        return {'quickCheck': check, 'schemaSha256': schema, 'rowCounts': counts,
+        return {'quickCheck': check, 'schemaSha256': schema, 'rowCounts': counts, 'tableSha256': digests,
                 'active': active, 'authorityId': authority,
                 'sidecars': sorted(p.name for p in Path(path).parent.glob(Path(path).name + '-*'))}
     finally:
