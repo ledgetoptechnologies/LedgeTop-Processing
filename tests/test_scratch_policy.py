@@ -52,7 +52,7 @@ class ScratchPolicyTests(unittest.TestCase):
 
     def test_input_hold_survives_expiry_rollback_and_cannot_terminal_release(self):
         self.reserve(input_bytes=0)
-        identity=dict(job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0)
+        identity=dict(job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0,input_bytes=0,target=0)
         hold=self.ledger.begin_input_write_hold('r1',**identity)
         self.assertEqual(hold,self.ledger.begin_input_write_hold('r1',**identity))
         self.now=200
@@ -71,7 +71,7 @@ class ScratchPolicyTests(unittest.TestCase):
         code = """import os,sys
 from processing.scratch_policy import ScratchLedger
 l=ScratchLedger(sys.argv[1],sys.argv[2],capacity_probe=lambda _:1000,clock=lambda:100,safety_floor_bytes=100,cleanup_grace_seconds=10)
-l.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0)
+l.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0,input_bytes=0,target=0)
 os._exit(73)
 """
         result=subprocess.run([sys.executable,'-c',code,str(self.ledger.path),str(self.root)],timeout=20)
@@ -81,7 +81,7 @@ os._exit(73)
             row=self.ledger._reservation(db,'r1');self.assertEqual((row['state'],row['remaining']),('reserved',300))
 
     def test_input_hold_prevents_schema_tampering_and_missing_marker(self):
-        self.reserve();self.ledger.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='o1',ordinal=0)
+        self.reserve();self.ledger.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='o1',ordinal=0,input_bytes=100,target=1)
         with closing(sqlite3.connect(self.ledger.path)) as db:
             db.execute('CREATE TRIGGER evil AFTER UPDATE ON input_write_holds BEGIN DELETE FROM input_write_holds; END');db.commit()
         with self.assertRaisesRegex(PolicyConflict,'schema changed'):
@@ -93,7 +93,8 @@ os._exit(73)
 
     def test_v1_control_charge_survives_hold_version_migration(self):
         self.reserve();self.ledger.record_allocated('r1',100);receipt=self.control()
-        self.ledger.begin_input_write_hold('r1',job_id='j1',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0)
+        self.reserve(job_id='j2',reservation_id='r2')
+        self.ledger.begin_input_write_hold('r2',job_id='j2',generation=1,environment='production',manifest_sha256='a'*64,object_id='empty',ordinal=0,input_bytes=100,target=0)
         self.assertEqual(self.ledger.read_control_charge('r1'),receipt)
         self.assertEqual(self.config()['accountingVersion'],2)
         self.assertEqual(self.control(),receipt)

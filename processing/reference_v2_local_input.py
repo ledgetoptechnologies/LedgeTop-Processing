@@ -10,6 +10,7 @@ import os
 import stat
 
 from .reference_input_journal import InputJournal
+from .reference_manifest_v2 import decode_manifest_v2
 from .reference_worker_fence_v2 import WorkerFence
 from .scratch_policy import ScratchLedger
 
@@ -28,11 +29,13 @@ def publish_first_input(*, fence, journal, ledger, reservation_id, binding, mani
         raise InputHeld('qualified local components required')
     fence.check()
     journal.seed_manifest(binding,manifest_bytes)
+    manifest=decode_manifest_v2(manifest_bytes)
     item=journal.current(binding)
     if item is None or item['ordinal'] != 0:
         raise InputHeld('only first object supported; hold for reconciliation')
     identity=dict(job_id=binding['jobId'],generation=binding['generation'],environment=binding['environment'],
-                  manifest_sha256=binding['manifestSha256'],object_id=item['objectId'],ordinal=0)
+                  manifest_sha256=binding['manifestSha256'],object_id=item['objectId'],ordinal=0,
+                  input_bytes=manifest['totalBytes'],target=item['target'])
     ledger.begin_input_write_hold(reservation_id,**identity)
     fence.check()
     directory=ledger.ensure_job_directory(reservation_id)

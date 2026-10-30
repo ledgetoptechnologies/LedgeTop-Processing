@@ -227,13 +227,14 @@ class ScratchLedger:
             reservation=self._reservation(db,hold['reservation'])
             try:identity=json.loads(hold['identity'])
             except (ValueError,TypeError):raise PolicyConflict('input hold identity invalid') from None
-            if (_json(identity)!=hold['identity'] or set(identity)!={'reservationId','jobId','generation','environment','manifestSha256','objectId','ordinal'}
+            if (_json(identity)!=hold['identity'] or set(identity)!={'reservationId','jobId','generation','environment','manifestSha256','objectId','ordinal','inputBytes','target'}
                     or identity['reservationId']!=reservation['id'] or identity['jobId']!=reservation['job']
                     or identity['generation']!=reservation['generation'] or identity['environment']!=reservation['environment']
                     or identity['manifestSha256']!=json.loads(reservation['settings'])['manifest_sha256']):
                 raise PolicyConflict('input hold identity changed')
             try:
-                _id(identity['objectId']); _integer(identity['ordinal'],'ordinal')
+                _id(identity['objectId']); _integer(identity['ordinal'],'ordinal'); _integer(identity['inputBytes'],'input bytes'); _integer(identity['target'],'target')
+                if identity['inputBytes'] != json.loads(reservation['settings'])['input_bytes'] or identity['target'] > identity['inputBytes']:raise ValueError('input hold target invalid')
             except (ValueError, KeyError, TypeError): raise PolicyConflict('input hold identity invalid') from None
             if hold['observation'] is not None and hold['observation'] not in ('verified','absent'):raise PolicyConflict('input hold observation invalid')
         # SQL checks precede materialization. Each yielded row has fixed bounded
@@ -320,16 +321,16 @@ class ScratchLedger:
                 raise PolicyConflict("job generation already reserved") from exc
             return dict(self._reservation(db, reservation_id))
 
-    def begin_input_write_hold(self, reservation_id, *, job_id, generation, environment, manifest_sha256, object_id, ordinal):
+    def begin_input_write_hold(self, reservation_id, *, job_id, generation, environment, manifest_sha256, object_id, ordinal, input_bytes, target):
         """Latch before touching files; experimental and never a transfer grant.
 
         Reconciliation records an observation but does not release capacity. Older
         binaries lacking accounting-version checks must be externally fenced.
         """
         for value in (reservation_id, job_id, object_id): _id(value)
-        _integer(generation, 'generation', 1); _integer(ordinal, 'ordinal'); _sha(manifest_sha256)
+        _integer(generation, 'generation', 1); _integer(ordinal, 'ordinal'); _integer(input_bytes, 'input bytes'); _integer(target, 'target'); _sha(manifest_sha256)
         identity=dict(reservationId=reservation_id,jobId=job_id,generation=generation,
-                      environment=environment,manifestSha256=manifest_sha256,objectId=object_id,ordinal=ordinal)
+                      environment=environment,manifestSha256=manifest_sha256,objectId=object_id,ordinal=ordinal,inputBytes=input_bytes,target=target)
         with self._transaction() as db:
             row=self._reservation(db,reservation_id); settings=json.loads(row['settings'])
             if (row['job']!=job_id or row['generation']!=generation or row['environment']!=environment
@@ -338,7 +339,10 @@ class ScratchLedger:
             if old:
                 if old['identity']!=_json(identity):raise PolicyConflict('input hold identity differs')
                 return dict(old)
-            if row['state']!='reserved' or row['expires']<=self._now(db):raise PolicyConflict('input hold requires live reservation')
+            if (row['state']!='reserved' or row['expires']<=self._now(db) or ordinal!=0 or row['allocated']!=0
+                    or settings['input_bytes']!=input_bytes or target>input_bytes
+                    or row['remaining']!=input_bytes+settings['output_budget']):
+                raise PolicyConflict('input hold requires exact live input reservation')
             db.execute('INSERT INTO input_write_holds VALUES(?,?,NULL)',(reservation_id,_json(identity)))
             db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=2)),))
             return {'reservation':reservation_id,'identity':_json(identity),'observation':None}
