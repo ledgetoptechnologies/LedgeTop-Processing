@@ -73,6 +73,21 @@ class V2MetadataLedger:
             FROM reference_v2_staged_jobs''').fetchone()[0]
         if used + extra > self.max_metadata_bytes: raise Conflict('v2 metadata quota reached')
 
+    def find_exact_submission_replay(self, body, *, principal, environment):
+        """Recover an identical committed receipt without consulting current policy."""
+        p._slug(principal,'trusted principal');p._environment(environment)
+        p._closed(body,('schemaVersion','submissionId','manifest','pipeline','capabilityFingerprint'),'v2 submission')
+        p._uuid(body['submissionId'],'submissionId')
+        encoded=p.canonical_json({'principal':principal,'environment':environment,'body':body}).decode()
+        def read(db):
+            row=self._fetch(db,'submission_id',body['submissionId'],principal=principal)
+            if row is None: return None
+            self._verify_row(row)
+            if row['environment']!=environment or row['request_json']!=encoded:
+                raise Conflict('v2 submission unavailable')
+            return {'jobId':row['job_id'],'generation':1,'created':False}
+        return self._run(read)
+
     def submit(self, body, *, principal, environment, capability_fingerprint, allowed_odm_options):
         p._slug(principal, 'trusted principal'); p._environment(environment);p._hash(capability_fingerprint,'capability')
         body=decode_canonical_input_v2(p.canonical_json(body))

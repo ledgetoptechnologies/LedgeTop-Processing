@@ -104,6 +104,110 @@ class ReferenceRuntimeTests(unittest.TestCase):
         with first, second:
             return ReferenceRuntime(queue, self.config, self.settings(), discover=lambda: self.snapshot, **kwargs)
 
+    def test_v2_settings_require_separate_scoped_credentials_and_are_unqualified(self):
+        self.value['schemaVersion']=4
+        token=base64.urlsafe_b64encode(b'x'*32).decode().rstrip('=')
+        self.value['v2MetadataPrincipals']=[{'principalId':'fixture','environment':'staging','bearer':token}]
+        self.write_config();settings=self.settings()
+        self.assertEqual(settings.v2_metadata_bearers[token],{'principalId':'fixture','environment':'staging'})
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,reference_enabled=True)
+        self.addCleanup(queue.close)
+        first,second=self.tls_patches()
+        with first,second,self.assertRaises(RuntimeConfigurationError):
+            ReferenceRuntime(queue,self.config,settings,discover=lambda:self.snapshot)
+        self.value['v2MetadataPrincipals'][0]['bearer']=self.value['viewerBearers']['staging'];self.write_config()
+        with self.assertRaises(RuntimeConfigurationError): self.settings()
+
+    def test_v2_metadata_http_is_authenticated_durable_and_not_scheduled(self):
+        import hashlib
+        from processing import reference_protocol as protocol
+        from processing.reference_manifest_v2 import DOMAIN
+        from processing.reference_v2_metadata_http import ROUTE
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,reference_enabled=True)
+        self.addCleanup(queue.close)
+        token='synthetic-v2-'+'x'*32
+        other='synthetic-v2-'+'y'*32
+        settings=replace(self.settings(),v2_metadata_bearers={token:{'principalId':'fixture','environment':'staging'},other:{'principalId':'other','environment':'staging'}})
+        first,second=self.tls_patches()
+        with first,second,patch('processing.reference_runtime.V2_METADATA_SCHEMA_QUALIFIED',True):
+            runtime=ReferenceRuntime(queue,self.config,settings,discover=lambda:self.snapshot)
+        server=create_reference_http_server(runtime.api)
+        thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.02));thread.start()
+        try:
+            fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
+            capability,options,_=discovered_policy(self.snapshot,self.config)
+            body=copy.deepcopy(fixture);body['schemaVersion']=2;body['capabilityFingerprint']=capability
+            body['pipeline']['odm']['optionsFingerprint']=options;body['pipeline']['odm']['options']={}
+            manifest=body['manifest'];obj=manifest['objects'][0]
+            manifest['objects']=[dict(obj,id='photo-'+str(i),name='photo-'+str(i)+'-'+'q'*130+'.jpg',byteSize=9069903+(i<5240)) for i in range(16832)]
+            manifest['objectCount']=manifest['inputCounts']['images']=16832
+            manifest['totalBytes']=152664612536
+            manifest['inputCounts']['lidarObjects']=manifest['inputCounts']['points']=0
+            manifest['sha256']=hashlib.sha256(DOMAIN+protocol.canonical_json({k:v for k,v in manifest.items() if k!='sha256'})).hexdigest()
+            raw=protocol.canonical_json(body);self.assertGreater(len(raw),protocol.MAX_BODY_BYTES);self.assertLess(len(raw),16*1024*1024)
+            def submit(auth,payload):
+                conn=http.client.HTTPConnection(*server.server_address,timeout=20)
+                try:
+                    conn.request('POST',ROUTE,payload,{'Authorization':auth,'Content-Type':'application/json'})
+                    response=conn.getresponse();return response.status,json.loads(response.read())
+                finally:conn.close()
+            self.assertEqual(submit('Bearer invalid-token-invalid-token-invalid-token',b'{}')[0],401)
+            from processing.reference_http import _protected
+            observed_timeouts=[]
+            def observe_timeout(connection):
+                observed_timeouts.append(connection.gettimeout())
+                return _protected(connection)
+            with patch('processing.reference_http._protected',side_effect=observe_timeout):
+                self.assertEqual(submit('Bearer '+token,b'{}')[0],400)
+            self.assertEqual(observed_timeouts,[10,10])
+            slow=socket.create_connection(server.server_address,timeout=3)
+            try:
+                slow.sendall(('POST '+ROUTE+' HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer '+token+'\r\nContent-Length: 100\r\n\r\n{').encode())
+                deadline=time.monotonic()+3
+                while time.monotonic()<deadline:
+                    if submit('Bearer '+token,b'{}')[0]==503:break
+                    time.sleep(.02)
+                else:self.fail('v2 body slot was not held')
+            finally:slow.close()
+            deadline=time.monotonic()+3
+            while time.monotonic()<deadline:
+                if submit('Bearer '+token,b'{}')[0]==400:break
+                time.sleep(.02)
+            else:self.fail('v2 body slot was not released')
+            # Trickle bytes within the socket timeout; the absolute deadline
+            # must still release the single slot and return 408.
+            with patch('processing.reference_http.V2_BODY_DEADLINE_SECONDS',.25):
+                slow=socket.create_connection(server.server_address,timeout=3)
+                try:
+                    slow.sendall(('POST '+ROUTE+' HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer '+token+'\r\nContent-Length: 100\r\n\r\n').encode())
+                    for _ in range(6):
+                        try:slow.sendall(b'x')
+                        except OSError:break
+                        time.sleep(.07)
+                    try:
+                        response=http.client.HTTPResponse(slow);response.begin();self.assertEqual(response.status,408);response.read()
+                    except (ConnectionResetError,ConnectionAbortedError,BrokenPipeError):
+                        pass  # Unread request bytes may cause a TCP reset.
+                finally:slow.close()
+                self.assertEqual(submit('Bearer '+token,b'{}')[0],400)
+            # Legacy v1 retains its four-MiB limit before consuming a body.
+            conn=http.client.HTTPConnection(*server.server_address,timeout=4)
+            try:
+                conn.putrequest('POST',protocol.PREFIX+'/jobs');conn.putheader('Content-Length',str(protocol.MAX_BODY_BYTES+1));conn.endheaders()
+                self.assertEqual(conn.getresponse().status,413)
+            finally:conn.close()
+            first=submit('Bearer '+token,raw);self.assertEqual(first[0],201);self.assertEqual(first[1]['state'],'metadata_only');self.assertFalse(first[1]['scheduled'])
+            self.assertEqual(submit('Bearer '+other,raw)[0],409)
+            self.snapshot['nodes'][0]['engineVersion']='changed-after-commit'
+            replay=submit('Bearer '+token,raw);self.assertEqual(replay[0],200);self.assertEqual(replay[1]['jobId'],first[1]['jobId'])
+            self.assertEqual(submit('Bearer '+token,raw+b' ')[0],400)
+            with queue._db() as db:
+                self.assertEqual(db.execute('select count(*) from reference_v2_staged_jobs').fetchone()[0],1)
+                self.assertEqual(db.execute('select count(*) from jobs').fetchone()[0],0)
+        finally:
+            server.shutdown();server.server_close();thread.join(3)
+            self.assertFalse(thread.is_alive())
+
     def test_disabled_default_preserves_native_queue_without_reference_profile(self):
         handler = make_handler(self.config)
         self.addCleanup(handler.prototype_queue.close)

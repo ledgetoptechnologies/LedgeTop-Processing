@@ -118,3 +118,27 @@ the 200 status and headers may already have been sent. TLS and client
 authentication remain separate. This adds a complete streaming hash pass in
 addition to the existing archive pre-verification and may cost substantial I/O
 for large results. It does not authorize deleting inputs or results.
+
+## Experimental v2 metadata admission
+
+The isolated schema-4 reference configuration can list dedicated
+`v2MetadataPrincipals`, each with a distinct `principalId`, `environment` and
+private bearer. Production startup remains blocked by the unqualified v2 schema
+gate. When enabled only in an isolated test, the protected reference listener
+accepts canonical UTF-8 JSON at `POST /ltds-reference-v2/metadata-submissions`.
+The body has exactly `schemaVersion`, `submissionId`, `manifest`, `pipeline`,
+and `capabilityFingerprint`; its manifest follows the proposed v2 contract.
+
+A new submission checks the current discovered capability and option policy.
+An exact committed retry by the same principal and environment returns the
+original identifier even if policy has changed; altered content conflicts.
+The `metadata_only` response and `scheduled: false` explicitly mean that no
+job has entered the execution queue. The listener authenticates before reading
+this route's body, limits it to 16 MiB and permits one v2 body at a time with a 30-second absolute
+body-read deadline. Other
+reference routes retain their existing 4 MiB limit.
+
+This route does not issue grants, authorize a worker, transfer data, reserve
+scratch, schedule work, deliver results, or enable Viewer integration. It is
+not a production-ready large-job path, and its contract requires coordination
+with Viewer before activation.

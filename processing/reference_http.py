@@ -6,10 +6,14 @@ import math
 import re
 import socket
 import ssl
+import threading
+import time
 
 from .reference_api import Response
 from .reference_binary import BinaryResponse
 from .reference_protocol import MAX_BODY_BYTES
+
+V2_BODY_DEADLINE_SECONDS = 30.0
 
 
 def _loopback(address):
@@ -161,6 +165,29 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             return False
 
         def _dispatch(self):
+            from .reference_v2_metadata_http import ROUTE as V2_ROUTE
+            if self.path != V2_ROUTE:
+                return self._dispatch_inner(MAX_BODY_BYTES)
+            # A rejected or truncated body must not be reused as another request.
+            self.close_connection = True
+            # Authenticate before reading or allocating the larger v2 body.
+            if len(self.headers.get_all('Authorization', [])) != 1:
+                self.close_connection=True; self._error(400, 'duplicate_or_missing_authorization'); return
+            preflight = getattr(api, 'v2_preflight', None)
+            if preflight is None:
+                self.close_connection=True; self._error(404, 'not_found'); return
+            rejected = preflight(dict(self.headers.items()), protected_transport=_protected(self.connection))
+            if rejected is not None:
+                self.close_connection=True; self._reply(rejected); return
+            if not self.server.v2_body_slot.acquire(blocking=False):
+                self.close_connection=True; self._error(503, 'metadata_busy'); return
+            try:
+                from .reference_input_budget_v2 import MAX_METADATA_BYTES
+                return self._dispatch_inner(MAX_METADATA_BYTES, body_deadline=time.monotonic()+V2_BODY_DEADLINE_SECONDS)
+            finally:
+                self.server.v2_body_slot.release()
+
+        def _dispatch_inner(self, maximum_body, body_deadline=None):
             if "?" in self.path or "#" in self.path:
                 self._error(400, "invalid_request_target")
                 return
@@ -181,7 +208,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 if not re.fullmatch(r"[0-9]+", text):
                     self._error(400, "invalid_content_length")
                     return
-                if len(text) > 10 or int(text) > MAX_BODY_BYTES:
+                if len(text) > 10 or int(text) > maximum_body:
                     self._error(413, "metadata_too_large")
                     return
                 length = int(text)
@@ -189,7 +216,24 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 self._error(400, "unexpected_request_body")
                 return
             try:
-                body = self.rfile.read(length) if length else b""
+                if body_deadline is None:
+                    body = self.rfile.read(length) if length else b""
+                else:
+                    chunks = []
+                    remaining = length
+                    original_timeout = self.connection.gettimeout()
+                    try:
+                        while remaining:
+                            seconds = body_deadline - time.monotonic()
+                            if seconds <= 0: raise TimeoutError('body deadline')
+                            self.connection.settimeout(min(seconds, original_timeout) if original_timeout is not None else seconds)
+                            chunk = self.rfile.read1(min(65536, remaining))
+                            if not chunk: break
+                            chunks.append(chunk); remaining -= len(chunk)
+                        if time.monotonic() > body_deadline: raise TimeoutError('body deadline')
+                        body = b''.join(chunks)
+                    finally:
+                        self.connection.settimeout(original_timeout)
                 if len(body) != length:
                     self._error(400, "truncated_request_body")
                     return
@@ -234,6 +278,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             pass
 
     server = Server((host, port), Handler)
+    server.v2_body_slot = threading.BoundedSemaphore(1)
     try:
         if ssl_context is None:
             if not _loopback(server.socket.getsockname()[0]):

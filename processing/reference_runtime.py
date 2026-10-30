@@ -28,6 +28,7 @@ MAX_CONFIG_BYTES = 64 * 1024
 # This draft schema has not been qualified for upgrade, rollback, or restore.
 # Tests may patch this in an isolated fixture; production must remain closed.
 STAGED_ACK_SCHEMA_QUALIFIED = False
+V2_METADATA_SCHEMA_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -44,6 +45,7 @@ class ReferenceSettings:
     stream_budget: dict
     recovery_bindings: dict | None = None
     staged_ack_bearers: dict | None = None
+    v2_metadata_bearers: dict | None = None
 
 
 def _file(path, *, private):
@@ -77,11 +79,11 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        has_recovery=value['schemaVersion']==2 or (value['schemaVersion']==3 and 'recoveryBindings' in value)
-        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"]==3 else ()), "runtime configuration")
+        has_recovery=value['schemaVersion']==2 or (value['schemaVersion'] in (3,4) and 'recoveryBindings' in value)
+        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"]==3 or (value["schemaVersion"]==4 and "stagedAckPrincipals" in value) else ()) + (("v2MetadataPrincipals",) if value["schemaVersion"]==4 else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -122,7 +124,7 @@ def load_reference_settings(path, config):
                     or any(ord(c) < 33 or ord(c) > 126 for c in token)):
                 raise RuntimeConfigurationError("reference credentials must be separate bounded printable secrets")
         staged=None
-        if value['schemaVersion']==3:
+        if value['schemaVersion']==3 or (value['schemaVersion']==4 and 'stagedAckPrincipals' in value):
             import base64
             staged_config=value['stagedAckPrincipals']
             if type(staged_config) is not list or not 1<=len(staged_config)<=32:
@@ -141,6 +143,24 @@ def load_reference_settings(path, config):
                 if len(raw)!=32 or base64.urlsafe_b64encode(raw).decode().rstrip('=')!=token:raise RuntimeConfigurationError('invalid staged credential')
                 staged[token]={'environment':env,'principalId':principal};credentials.append(token)
             if not config.viewer_enabled:raise RuntimeConfigurationError('native Viewer service required')
+        v2_principals=None
+        if value['schemaVersion']==4:
+            import base64
+            entries=value['v2MetadataPrincipals']
+            if type(entries) is not list or not 1<=len(entries)<=32:
+                raise RuntimeConfigurationError('bounded v2 principals required')
+            v2_principals={}; principal_env={}
+            for entry in entries:
+                p._closed(entry,('principalId','environment','bearer'),'v2 principal')
+                principal,env,token=entry['principalId'],entry['environment'],entry['bearer']
+                p._slug(principal,'v2 principal');p._environment(env)
+                if env not in viewers or (principal in principal_env and principal_env[principal]!=env):
+                    raise RuntimeConfigurationError('v2 principal environment changed')
+                principal_env[principal]=env
+                if type(token) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{43}',token): raise RuntimeConfigurationError('invalid v2 credential')
+                raw_token=base64.urlsafe_b64decode(token+'=')
+                if len(raw_token)!=32 or base64.urlsafe_b64encode(raw_token).decode().rstrip('=')!=token: raise RuntimeConfigurationError('invalid v2 credential')
+                v2_principals[token]={'principalId':principal,'environment':env};credentials.append(token)
         if len(set(credentials)) != len(credentials) or set(credentials) & legacy:
             raise RuntimeConfigurationError("reference credentials must be disjoint from existing credentials")
         budget = value["streamBudget"]
@@ -161,7 +181,7 @@ def load_reference_settings(path, config):
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, staged)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, staged, v2_principals)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -189,10 +209,21 @@ def discovered_policy(snapshot, config):
 
 
 class _DynamicAPI:
-    def __init__(self, control, config, settings, discover, staged_ack=None):
+    def __init__(self, control, config, settings, discover, staged_ack=None, v2_metadata=None):
         self.control, self.config, self.settings, self.discover, self.staged_ack = control, config, settings, discover, staged_ack
+        self.v2_metadata = v2_metadata
+
+    def v2_preflight(self, headers, *, protected_transport):
+        if self.v2_metadata is None: return Response(404, {'error':'not_found'})
+        if protected_transport is not True: return Response(503, {'error':'protected_transport_required'})
+        if self.v2_metadata._identity(headers) is None: return Response(401, {'error':'unauthorized'})
+        return None
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
+        from .reference_v2_metadata_http import ROUTE as V2_ROUTE
+        if path == V2_ROUTE:
+            if self.v2_metadata is None: return Response(404, {'error':'not_found'})
+            return self.v2_metadata.handle(method,path,headers,body,protected_transport=protected_transport)
         from .viewer_staged_ack import ROUTE
         if path.startswith(ROUTE):
             if self.staged_ack is None:return Response(404,{'error':'not_found'})
@@ -289,7 +320,32 @@ class ReferenceRuntime:
                 if staged_tokens & existing or not {binding['environment'] for binding in settings.staged_ack_bearers.values()} <= set(settings.viewer_bearers.values()):
                     raise RuntimeConfigurationError('staged credential scope or separation changed')
                 staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers)
-            self.api = _DynamicAPI(self.control, config, settings, discover, staged)
+            v2=None
+            if settings.v2_metadata_bearers is not None:
+                if not V2_METADATA_SCHEMA_QUALIFIED:
+                    raise RuntimeConfigurationError('v2 metadata schema is not qualified')
+                from .reference_v2_metadata_ledger import V2MetadataLedger
+                from .reference_v2_metadata_http import V2MetadataAPI
+                tokens=set(settings.v2_metadata_bearers)
+                existing=set(settings.viewer_bearers)
+                existing.update(worker[key] for worker in settings.workers.values() for key in ('bearer','resultBearer'))
+                existing.update(settings.staged_ack_bearers or {})
+                existing.update(secret for secret in (config.api_token,config.prototype_operator_token,
+                    config.prototype_observer_token,config.viewer_token,config.viewer_staging_token,
+                    config.local_node_token,config.main_node_token) if secret)
+                if tokens & existing: raise RuntimeConfigurationError('v2 credentials must be separate')
+                principal_env={}
+                for binding in settings.v2_metadata_bearers.values():
+                    p._closed(binding,('principalId','environment'),'v2 principal')
+                    p._slug(binding['principalId'],'v2 principal');p._environment(binding['environment'])
+                    if binding['environment'] not in settings.viewer_bearers.values() or (binding['principalId'] in principal_env and principal_env[binding['principalId']]!=binding['environment']):
+                        raise RuntimeConfigurationError('v2 principal scope changed')
+                    principal_env[binding['principalId']]=binding['environment']
+                def v2_policy():
+                    capability, _, allowed = discovered_policy(discover(), config)
+                    return capability,allowed
+                v2=V2MetadataAPI(V2MetadataLedger(queue,enabled=True),principals=settings.v2_metadata_bearers,policy=v2_policy)
+            self.api = _DynamicAPI(self.control, config, settings, discover, staged, v2)
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
 
