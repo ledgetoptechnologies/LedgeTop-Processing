@@ -285,16 +285,26 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
                 continue
             if was != now and (now is None or object_allowances.get(name) != now):
                 database_differences.append({'object': name})
-        if allow_lease_marker and db['objects'].get(marker_object) != marker_hash:
-            database_differences.append({'object': marker_object, 'change': 'leaseMarkerMissing'})
+        if allow_lease_marker:
+            # Asserted on the after-state unconditionally: a marker that was
+            # already present (even identically malformed or empty in both
+            # censuses) must still have the exact DDL and the single row.
+            present = db['objects'].get(marker_object)
+            if present is None:
+                database_differences.append({'object': marker_object, 'change': 'leaseMarkerMissing'})
+            else:
+                if present != marker_hash:
+                    database_differences.append({'object': marker_object, 'change': 'leaseMarkerSchemaInvalid'})
+                if (db['rowCounts'].get(LEASE_MARKER_TABLE) != 1
+                        or db['tableDigest'].get(LEASE_MARKER_TABLE) != lease_marker_digest(key)):
+                    database_differences.append({'table': LEASE_MARKER_TABLE, 'change': 'leaseMarkerInvalid'})
         for name, expected in sorted(object_allowances.items()):
             if db['objects'].get(name) != expected:
                 database_differences.append({'object': name, 'change': 'allowanceNotMatched'})
         for name in sorted(set(da['tableDigest']) | set(db['tableDigest'])):
             if name not in da['tableDigest']:
                 if allow_lease_marker and name == LEASE_MARKER_TABLE:
-                    if db['rowCounts'][name] != 1 or db['tableDigest'][name] != lease_marker_digest(key):
-                        database_differences.append({'table': name, 'change': 'leaseMarkerInvalid'})
+                    pass  # validated unconditionally above
                 elif name not in allow_new_tables:
                     database_differences.append({'table': name, 'change': 'added'})
                 elif db['rowCounts'][name]:

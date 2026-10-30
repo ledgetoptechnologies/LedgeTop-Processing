@@ -416,6 +416,33 @@ class CompareTest(CensusFixture):
         changes = {item.get('table'): item.get('change') for item in result['database'] if 'table' in item}
         self.assertEqual(changes, {'other_new': 'added', 'viewer_reservations': 'newTableNotEmpty'})
 
+    def test_preexisting_marker_is_validated_even_when_unchanged(self):
+        fixed = ['--allow-path', self.DB_FIELDS, '--allow-path', '.:mtime', '--allow-lease-marker']
+        cases = [
+            ('empty exact marker', None, ()),
+            ('malformed marker', 'CREATE TABLE coordinator_authority_lease (singleton INTEGER, required INTEGER)',
+             ((1, 1),)),
+            ('malformed two-row marker', 'CREATE TABLE coordinator_authority_lease (singleton INTEGER, required INTEGER)',
+             ((1, 1), (2, 1))),
+        ]
+        for label, ddl, rows in cases:
+            db = sqlite3.connect(self.root / 'jobs.sqlite3')
+            db.execute('DROP TABLE IF EXISTS coordinator_authority_lease')
+            db.commit()
+            db.close()
+            self.add_marker(rows=rows, ddl=ddl)
+            same = self.census()[1]
+            status, result = self.compare(same, same, *fixed)
+            self.assertEqual(status, 1, label)
+            self.assertTrue([d for d in result['database'] if d.get('change') in ('leaseMarkerSchemaInvalid', 'leaseMarkerInvalid')],
+                            (label, result['database']))
+
+    def test_preexisting_valid_marker_passes_unchanged(self):
+        self.add_marker()
+        same = self.census()[1]
+        status, result = self.compare(same, same, '--allow-lease-marker')
+        self.assertEqual(status, 0, result)
+
     def test_existing_marker_must_stay_unchanged(self):
         self.empty_viewer_tasks()
         self.add_marker()

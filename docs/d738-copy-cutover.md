@@ -174,7 +174,7 @@ IMG_NEW=<digest of the locally built image for the frozen release commit>
 RUN=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 E=$HOME/.local/share/ledgetop-processing-prototype/cutover-$RUN
 mkdir -m 700 "$E"                          # fails if it already exists
-cp state_census.py netns_sockets.py coordinator_container_spec.py "$E"/
+cp state_census.py netns_sockets.py coordinator_container_spec.py state_fence.py container_absent.py "$E"/
 docker inspect "$OLD"     > "$E/old-inspect.json"
 docker image inspect "$IMG_OLD" > "$E/old-image.json"
 docker image inspect "$IMG_NEW" > "$E/new-image.json"
@@ -266,6 +266,7 @@ docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{
 fence original "$VOL"
 verify_fence original
 docker rm "$OLD"                           # nothing left to restart or reconnect; old-inspect.json + IMG_OLD recreate it
+python3 "$E/container_absent.py" "$OLD"   # confirmed absent: daemon census plus explicit not-found
 ```
 
 **Stop conditions:**
@@ -538,7 +539,8 @@ U6.
 ## Step 7 — promote
 
 ```sh
-docker inspect "$OLD" >/dev/null 2>&1 && exit 1   # the old container must be gone (step 2)
+python3 "$E/container_absent.py" "$OLD"           # exit 0 only with a successful daemon census AND an explicit
+                                                   # "No such container"; a daemon or inspect failure exits 2 and stops here
 verify_fence original; verify_fence verify        # current holders own their locks, from /proc/locks
 census "$NEW_VOL" > "$E/census-before-promotion.json"
 same "$E/census-candidate-isolated.json" "$E/census-before-promotion.json"   # unchanged since the gate, no allowances

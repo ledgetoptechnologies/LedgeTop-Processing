@@ -262,4 +262,13 @@ compare "${FIXED[@]}" --allow-lease-marker --schema-allowlist "$(w "$OUT/allow.j
   && pass "real release startup passes the gate with exact schema hashes and the exact lease marker" \
   || fail "gate failed with exact allowances"
 rm -rf "$OUT" "$KEY"
+
+# 11. Confirmed absence against the real daemon: removed is absent, existing is not.
+GONE=$(docker inspect -f '{{.Id}}' "$RUN-gatecandidate")
+docker rm "$RUN-gatecandidate" >/dev/null
+python "$HERE/container_absent.py" "$GONE" >/dev/null && pass "removed container confirmed absent (census + not-found)" \
+  || fail "removed container not confirmed absent"
+PRESENT=$(docker inspect -f '{{.Id}}' "$RUN-fence-original")
+set +e; python "$HERE/container_absent.py" "$PRESENT" >/dev/null; code=$?; set -e
+[ "$code" = 1 ] && pass "existing container reported present" || fail "existing container not reported present ($code)"
 echo "ALL PASSED"
