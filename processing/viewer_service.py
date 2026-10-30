@@ -271,6 +271,69 @@ class ViewerService:
             if stream is not None: stream.close()
             raise Conflict('archive file requires inspection') from None
 
+    def _restore_recorded_archive(self, task, path, receipt):
+        """Restore only bytes matching the existing task-bound receipt."""
+        directory = Path(task['directory'])
+        if path != directory / 'all.zip' or directory.resolve(strict=True) != directory:
+            raise Conflict('retained archive path requires inspection')
+        temporary = directory / ('.all.zip.restore-' + uuid.uuid4().hex)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(temporary, flags, 0o600)
+        original = os.fstat(fd); stream = None
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                fd = None
+                with self.engines[task['node_id']].download(task['engine_uuid']) as response:
+                    if getattr(response, 'status', 200) != 200:
+                        raise EngineUnavailable('archive_unavailable')
+                    media = response.headers.get('Content-Type', '').split(';')[0].lower()
+                    if media and media not in ('application/zip','application/octet-stream','application/x-zip-compressed'):
+                        raise EngineUnavailable('archive_not_ready')
+                    declared = response.headers.get('Content-Length')
+                    if declared is not None and (not declared.isdigit() or int(declared) != receipt['bytes']):
+                        raise Conflict('archive response differs from retained receipt')
+                    total = 0
+                    while chunk := response.read(1024 ** 2):
+                        total += len(chunk)
+                        if total > receipt['bytes']:
+                            raise Conflict('archive response differs from retained receipt')
+                        output.write(chunk)
+                    if total != receipt['bytes']:
+                        raise EngineUnavailable('archive_transfer_incomplete')
+                output.flush(); os.fsync(output.fileno())
+            stream = self._verify_archive(temporary, receipt)
+            opened = os.fstat(stream.fileno()); observed = temporary.lstat()
+            if (opened.st_dev,opened.st_ino)!=(original.st_dev,original.st_ino) or (observed.st_dev,observed.st_ino)!=(original.st_dev,original.st_ino):
+                raise Conflict('archive restore identity changed')
+            try: os.link(temporary,path)
+            except FileExistsError: raise Conflict('archive restore destination changed') from None
+            linked = path.lstat()
+            if (linked.st_dev,linked.st_ino)!=(opened.st_dev,opened.st_ino):
+                raise Conflict('archive restore identity changed')
+            sync_directory(directory)
+            if os.name == 'nt':
+                stream.close();stream=None
+                temporary.unlink()
+                stream=self._verify_archive(path,receipt)
+                reopened=os.fstat(stream.fileno())
+                if (reopened.st_dev,reopened.st_ino)!=(opened.st_dev,opened.st_ino):
+                    raise Conflict('archive restore identity changed')
+            else:
+                current=temporary.lstat()
+                if (current.st_dev,current.st_ino)!=(original.st_dev,original.st_ino):
+                    raise Conflict('archive restore identity changed')
+                temporary.unlink()
+            sync_directory(directory)
+            result=stream;stream=None
+            return result,receipt['bytes']
+        finally:
+            if fd is not None: os.close(fd)
+            if stream is not None: stream.close()
+            try:
+                current=temporary.lstat()
+                if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino): temporary.unlink()
+            except FileNotFoundError: pass
+
     def download(self, identifier):
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
@@ -384,6 +447,9 @@ class ViewerService:
             receipt_path = path.with_suffix('.zip.receipt')
             if receipt_path.exists() or receipt_path.is_symlink():
                 receipt = self._archive_receipt(task, receipt_path)
+                try: path.lstat()
+                except FileNotFoundError:
+                    return self._restore_recorded_archive(task,path,receipt)
                 return self._verify_archive(path, receipt), receipt['bytes']
             if path.is_symlink() or not path.is_file():
                 raise Conflict('retained archive unavailable')

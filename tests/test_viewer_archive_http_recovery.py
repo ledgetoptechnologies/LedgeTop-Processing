@@ -35,12 +35,18 @@ def synthetic_coordinator(root, control, offline):
     service.probe=lambda role,origin,token:{'ready':True,'taskQueueCount':0,'maxImages':1000 if role=='local' else None}
     original=service.store.update
     def update(task_id, **fields):
-        if not offline and 'archive_path' in fields:raise OSError('synthetic state write failure')
+        if offline is False and 'archive_path' in fields:raise OSError('synthetic state write failure')
         return original(task_id,**fields)
     service.store.update=update
-    if offline:
+    if offline is True:
         def unavailable(_identifier):raise EngineUnavailable('synthetic offline')
         engines['cluster'].download=unavailable
+    if offline == 'crash-link':
+        original_link=os.link
+        def crash_after_link(source,destination):
+            original_link(source,destination)
+            os._exit(73)
+        os.link=crash_after_link
     server=ThreadingHTTPServer(('127.0.0.1',0),handler)
     thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.01));thread.start()
     try:
@@ -49,6 +55,8 @@ def synthetic_coordinator(root, control, offline):
             command,identifier=control.recv()
             if command=='stop':break
             if command=='tick':service.tick()
+            elif command=='path':
+                control.send(service.store.task(identifier)['archive_path']);continue
             elif command=='finish':
                 task=service.store.task(identifier);engines['cluster'].finish(task['engine_uuid']);service.tick()
             else:raise ValueError('unknown test command')
@@ -58,6 +66,47 @@ def synthetic_coordinator(root, control, offline):
 
 
 class ViewerArchiveHTTPRecoveryTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='posix','POSIX crash and hard-link semantics')
+    def test_restored_archive_survives_process_exit_immediately_after_link(self):
+        context=multiprocessing.get_context('spawn')
+        with tempfile.TemporaryDirectory() as root:
+            active=[];identifier=str(uuid.uuid4())
+            def launch(mode):
+                parent,child=context.Pipe();process=context.Process(target=synthetic_coordinator,args=(root,child,mode))
+                process.start();child.close();active.append((process,parent))
+                self.assertTrue(parent.poll(5));pid,port,archive=parent.recv();return process,parent,port,archive
+            def stop(process,parent):
+                parent.send(('stop',None));process.join(5);self.assertFalse(process.is_alive());self.assertEqual(process.exitcode,0)
+                parent.close();active.remove((process,parent))
+            def request(port,path,body=None,headers=None):
+                return urlopen(Request('http://127.0.0.1:'+str(port)+path+'?token='+TOKEN,data=body,headers=headers or {}),timeout=5)
+            try:
+                first,control,port,expected=launch('normal')
+                init=multipart([('name',None,b'Synthetic survey'),('options',None,b'[]')])
+                with request(port,'/task/new/init',init,{'Content-Type':'multipart/form-data; boundary='+BOUNDARY,'set-uuid':identifier}) as response:json.load(response)
+                upload=multipart([('images','photo.jpg',b'synthetic')])
+                with request(port,'/task/new/upload/'+identifier,upload,{'Content-Type':'multipart/form-data; boundary='+BOUNDARY}) as response:json.load(response)
+                with request(port,'/task/new/commit/'+identifier,b'') as response:json.load(response)
+                for action in ('tick','finish'):
+                    control.send((action,identifier));self.assertTrue(control.poll(5));self.assertEqual(control.recv(),'ok')
+                with request(port,'/task/'+identifier+'/download/all.zip') as response:self.assertEqual(response.read(),expected)
+                control.send(('path',identifier));self.assertTrue(control.poll(5));path=Path(control.recv())
+                stop(first,control);path.unlink()
+                crash,control,port,_=launch('crash-link')
+                with self.assertRaises((OSError,HTTPError)):
+                    with request(port,'/task/'+identifier+'/download/all.zip') as response:response.read()
+                crash.join(5);self.assertFalse(crash.is_alive());self.assertEqual(crash.exitcode,73)
+                control.close();active.remove((crash,control))
+                self.assertEqual(path.read_bytes(),expected)
+                orphans=list(path.parent.glob('.all.zip.restore-*'));self.assertEqual(len(orphans),1)
+                second,control,port,_=launch(True)
+                with request(port,'/task/'+identifier+'/download/all.zip') as response:self.assertEqual(response.read(),expected)
+                self.assertTrue(orphans[0].exists());stop(second,control)
+            finally:
+                for process,parent in active:
+                    if process.is_alive():process.terminate()
+                    process.join(5);parent.close();self.assertFalse(process.is_alive())
+
     def test_recovery_across_distinct_coordinator_processes(self):
         context=multiprocessing.get_context('spawn')
         with tempfile.TemporaryDirectory() as root:

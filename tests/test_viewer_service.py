@@ -536,6 +536,59 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.engines['cluster'].download_calls, 2)
         self.assertEqual(len(self.fleet.commits), 1)
 
+    def test_missing_recorded_archive_refetches_only_exact_receipt_bytes_after_restart(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier)
+        with stream:expected=stream.read()
+        path=Path(self.task(identifier)['archive_path']);path.unlink()
+        self.service.close();self.queue.close();self.make_queue_service()
+        stream,length=self.service.download(identifier)
+        with stream:self.assertEqual(stream.read(),expected)
+        self.assertEqual(length,len(expected));self.assertEqual(path.read_bytes(),expected)
+        self.assertEqual(self.engines['cluster'].download_calls,2);self.assertEqual(len(self.fleet.commits),1)
+
+    def test_missing_recorded_archive_rejects_mismatched_node_and_missing_receipt(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        path=Path(self.task(identifier)['archive_path']);path.unlink()
+        changed=bytearray(self.engines['cluster'].archive);changed[10]^=1
+        self.engines['cluster'].archive=bytes(changed)
+        with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertFalse(path.exists())
+        path.with_suffix('.zip.receipt').unlink()
+        before=self.engines['cluster'].download_calls
+        with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertEqual(self.engines['cluster'].download_calls,before)
+
+    def test_missing_recorded_archive_node_unavailable_and_competing_destination_hold(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        path=Path(self.task(identifier)['archive_path']);path.unlink()
+        with patch.object(self.engines['cluster'],'download',side_effect=EngineUnavailable('offline')):
+            with self.assertRaises(EngineUnavailable):self.service.download(identifier)
+        self.assertFalse(path.exists())
+        original=os.link
+        def compete(source,destination):
+            Path(destination).write_bytes(b'foreign')
+            return original(source,destination)
+        with patch('processing.viewer_service.os.link',side_effect=compete):
+            with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertEqual(path.read_bytes(),b'foreign')
+        with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertEqual(path.read_bytes(),b'foreign')
+
+    def test_missing_recorded_archive_interrupted_transfer_can_retry(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        path=Path(self.task(identifier)['archive_path']);path.unlink()
+        orphan=path.parent/'.all.zip.restore-unrelated';orphan.write_bytes(b'unrelated')
+        self.engines['cluster'].interrupt_download_once=True
+        with self.assertRaises(OSError):self.service.download(identifier)
+        self.assertFalse(path.exists());self.assertEqual(orphan.read_bytes(),b'unrelated')
+        stream,_=self.service.download(identifier)
+        with stream:self.assertEqual(stream.read(),self.engines['cluster'].archive)
+        self.assertEqual(orphan.read_bytes(),b'unrelated')
+
     def test_real_service_over_http_returns_receipt_backed_digest(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from urllib.request import urlopen
