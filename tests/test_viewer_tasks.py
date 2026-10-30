@@ -166,6 +166,33 @@ store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9)
                 finally:
                     queue.close()
 
+    def test_reserved_upload_intent_requires_original_capability(self):
+        root=self.root/'reserved-crash'; identifier=str(uuid.uuid4())
+        capability='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        program='''import io, os, sys
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]); identifier=sys.argv[2]; cap=sys.argv[3]
+queue=Queue(root/'queue',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+store=TaskStore(queue,root/'inputs'); store.reserve(identifier,'production',cap)
+store.initialize(identifier,'synthetic',[],None,'production',cap,option_evidence=[])
+os.link=lambda *args,**kwargs:os._exit(73)
+store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9,'production',cap)
+'''
+        proc=subprocess.run([sys.executable,'-c',program,str(root),identifier,capability],capture_output=True,timeout=15)
+        self.assertEqual(proc.returncode,73,proc.stderr.decode(errors='replace'))
+        queue=Queue(root/'queue',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:
+            store=TaskStore(queue,root/'inputs')
+            with self.assertRaises(KeyError): store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9,'staging',capability)
+            with self.assertRaises(KeyError): store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9,'production','Yg'*21+'Yg')
+            with self.assertRaises(Conflict): store.cancel_reservation(identifier,'production',capability)
+            store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9,'production',capability)
+            self.assertEqual(len(store.task(identifier)['files']),1)
+        finally:
+            queue.close()
+
     def test_truncated_or_overlong_stream_never_enters_manifest(self):
         self.initialize()
         for body, length in ((b'ab', 3), (b'abcd', 3)):
