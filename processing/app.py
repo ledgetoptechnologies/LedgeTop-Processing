@@ -22,6 +22,11 @@ def make_handler(config: Config):
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
         reference_settings = load_reference_settings(config.reference_config_path, config)
+    if config.viewer_production_held:
+        if not config.prototype_state_dir:
+            raise RuntimeError('production_hold_idle_state_unavailable')
+        from .prototype import _require_safe_idle_database_file
+        _require_safe_idle_database_file(Path(config.prototype_state_dir) / 'jobs.sqlite3')
     lease = None
     if config.prototype_state_dir:
         from . import authority_lease

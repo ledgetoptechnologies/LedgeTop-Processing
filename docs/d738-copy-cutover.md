@@ -763,7 +763,8 @@ refuses startup if a job or Viewer task is nonterminal, a reservation is
 unresolved, or the state cannot be verified. This includes staging work that
 already exists; staging may be submitted after a successful idle start. A fresh
 or missing database, WAL-mode database, or database with journal sidecars cannot
-pass this check. The state lock excludes cooperating processes using that same
+pass this check. The file is checked before authority lookup and checked again
+under the state lock before SQLite migration. The state lock excludes cooperating processes using that same
 lock; it does not prevent external writers. This is a startup observation, not
 a fence against later submissions, other state copies, or direct engine clients.
 

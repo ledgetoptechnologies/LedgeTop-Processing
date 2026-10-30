@@ -27,12 +27,8 @@ VIEWER_PROFILE = "odm-viewer-v1"
 REFERENCE_PROFILE = "reference-pipeline-v1"
 
 
-def _require_idle_state(path):
-    """Fail closed before migration on a held candidate's existing state.
-
-    The state flock must already be held. This is a point-in-time startup
-    check, not a fence on other volumes, direct engine clients, or later work.
-    """
+def _require_safe_idle_database_file(path):
+    """Reject WAL and sidecars before any SQLite connection is opened."""
     path = Path(path)
     if path.is_symlink() or not path.is_file():
         raise RuntimeError('production_hold_idle_state_unavailable')
@@ -46,6 +42,19 @@ def _require_idle_state(path):
             header = source.read(20)
         if len(header) != 20 or header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x01\x01':
             raise ValueError('unsupported database journal mode')
+    except (OSError, ValueError):
+        raise RuntimeError('production_hold_idle_state_unavailable') from None
+
+
+def _require_idle_state(path):
+    """Check held startup state under its flock, before any migration.
+
+    This is a point-in-time check, not a fence on other volumes, direct
+    engine clients, or noncooperating writers.
+    """
+    path = Path(path)
+    _require_safe_idle_database_file(path)
+    try:
         db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
         try:
             db.execute('BEGIN')

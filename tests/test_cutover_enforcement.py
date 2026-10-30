@@ -223,6 +223,32 @@ class HeldStartupIdleTest(unittest.TestCase):
         self.assertEqual(database.read_bytes(), before)
         authority_lease.acquire(leases, self.state).close()
 
+    @unittest.skipUnless(POSIX, 'open WAL sidecar unlink test is POSIX-specific')
+    def test_handler_rejects_wal_before_authority_sqlite_with_or_without_lease(self):
+        from processing.app import make_handler
+        self.queue.close()
+        database = self.state / 'jobs.sqlite3'; wal = Path(str(database)+'-wal'); shm = Path(str(database)+'-shm')
+        leases = Path(self.temporary.name) / 'leases'; leases.mkdir()
+        writer = sqlite3.connect(database)
+        try:
+            self.assertEqual(writer.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+            writer.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES('wal-job','wal-job','production','treedar-synthetic-v1','queued')")
+            writer.commit()
+            shm.unlink()
+            before = {path: path.read_bytes() for path in (database, wal)}
+            for use_lease in (False, True):
+                values = {'PROCESSING_API_TOKEN': 'a'*40, 'PROCESSING_PROTOTYPE_STATE_DIR': str(self.state),
+                          'PROCESSING_VIEWER_PRODUCTION_ADMISSION': 'held'}
+                if use_lease: values['PROCESSING_AUTHORITY_LEASE_DIR'] = str(leases)
+                with self.subTest(lease=use_lease), patch.dict(os.environ, values, clear=True):
+                    with self.assertRaisesRegex(RuntimeError, 'production_hold_idle_state_unavailable'):
+                        make_handler(from_environment())
+                self.assertFalse(shm.exists())
+                self.assertEqual({path: path.read_bytes() for path in (database, wal)}, before)
+            self.assertEqual(list(leases.iterdir()), [])
+        finally:
+            writer.close()
+
 
 class ProductionHoldTest(unittest.TestCase):
     def setUp(self):
