@@ -8,7 +8,7 @@ memory. Each multipart part is streamed to an unlinked private temporary file.
 from email.parser import BytesHeaderParser
 from email.policy import default as email_policy
 import hmac
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 import shutil
 import threading
 import json
@@ -439,17 +439,18 @@ class ViewerFacade:
             reservation = self.spool_capacity.reserve(length) if self.spool_capacity is not None else nullcontext()
             with reservation:
                 count, seen = 0, set()
-                for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                    if name != 'images':
-                        raise RequestError(400, 'invalid_upload_form')
-                    filename = safe_filename(filename)
-                    if filename.casefold() in seen or not size:
-                        raise RequestError(400, 'duplicate_or_empty_upload')
-                    seen.add(filename.casefold())
-                    capability=self._capability(handler)
-                    if capability is None:self.service.upload(identifier, filename, stream, size)
-                    else:self.service.upload(identifier, filename, stream, size, environment, capability)
-                    count += 1
+                with closing(_multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir)) as parts:
+                    for name, filename, stream, size in parts:
+                        if name != 'images':
+                            raise RequestError(400, 'invalid_upload_form')
+                        filename = safe_filename(filename)
+                        if filename.casefold() in seen or not size:
+                            raise RequestError(400, 'duplicate_or_empty_upload')
+                        seen.add(filename.casefold())
+                        capability=self._capability(handler)
+                        if capability is None:self.service.upload(identifier, filename, stream, size)
+                        else:self.service.upload(identifier, filename, stream, size, environment, capability)
+                        count += 1
                 if not count:
                     raise RequestError(400, 'empty_upload')
             self._reply(handler, 200, {'success': True})

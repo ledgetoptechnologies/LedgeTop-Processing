@@ -144,3 +144,8 @@ space consumed after admission can still exhaust disk. It does not reserve
 NodeODX working space or results and does not make a large dataset safe. Keep
 this disabled until the single-owner deployment and filesystem layout have been
 reviewed.
+This check is per HTTP request. A rejected request is not parsed or written,
+but earlier successful requests and earlier parts of a request that later
+fails can already be stored. A 503 or a broken connection does not prove that
+no data were accepted: the caller must reconcile task state and file identity
+before retrying rather than automatically replaying an uncertain upload.
