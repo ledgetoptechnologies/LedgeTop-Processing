@@ -56,6 +56,16 @@ class QuarantineUpdaterTests(unittest.TestCase):
             self.obj.t.item['NetworkSettings']['Networks']['extra']={}
             with self.assertRaises(u.Stopped):self.obj.verify_quarantined_candidate(self.state)
 
+    def test_none_host_mode_does_not_hide_attached_bridge_or_active_port(self):
+        # Docker can retain HostConfig.NetworkMode=none after a network is
+        # connected and even across a manual container restart.
+        with patch.object(u,'application_environment',return_value=self.state['applicationEnvironmentSha256']):
+            self.obj.t.item['NetworkSettings']['Networks']={'bridge':{}}
+            with self.assertRaises(u.Stopped):self.obj.verify_quarantined_candidate(self.state)
+            self.obj.t.item['NetworkSettings']['Networks']={}
+            self.obj.t.item['NetworkSettings']['Ports']={'8080/tcp':[{'HostIp':'127.0.0.1','HostPort':'8080'}]}
+            with self.assertRaises(u.Stopped):self.obj.verify_quarantined_candidate(self.state)
+
     def test_a75_is_hard_disabled_before_transport_or_mutation(self):
         self.obj.validate=lambda state:None
         for binding in (None,object()):
