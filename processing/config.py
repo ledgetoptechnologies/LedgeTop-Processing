@@ -5,6 +5,8 @@ import os
 import re
 from urllib.parse import urlsplit
 
+ADMISSION_DRAIN_QUALIFIED = False
+
 
 @dataclass(frozen=True)
 class Config:
@@ -29,6 +31,7 @@ class Config:
     viewer_max_input_bytes: int = 20 * 1024 ** 3
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
+    admission_drain_enabled: bool = False
 
 
 def _node_origin(value: str) -> str:
@@ -78,6 +81,11 @@ def from_environment() -> Config:
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    admission = os.environ.get('PROCESSING_ADMISSION_DRAIN_ENABLED', '0')
+    if admission not in ('0', '1') or (admission == '1' and (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not operator)):
+        raise ValueError('admission drain requires persistent state and operator credential')
+    if admission == '1' and ADMISSION_DRAIN_QUALIFIED is not True:
+        raise ValueError('admission drain is not qualified for startup')
     if viewer not in ('0', '1'):
         raise ValueError('PROCESSING_VIEWER_ENABLED must be 0 or 1')
     viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
@@ -119,4 +127,5 @@ def from_environment() -> Config:
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
+        admission_drain_enabled=admission == '1',
     )

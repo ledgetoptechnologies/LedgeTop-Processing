@@ -219,6 +219,15 @@ class _DynamicAPI:
                     result_proxy=self.control.viewer.result_proxy)
             except Exception:
                 return Response(503, {"error": "engine_catalog_unavailable"})
+            if path == p.PREFIX + '/jobs' and method == 'POST':
+                from .admission_drain import AdmissionClosed
+                gate = getattr(self.control.viewer.store.queue, 'admission_drain', None)
+                if gate is not None:
+                    try:
+                        with gate.admit():
+                            return api.handle(method, path, headers, body, protected_transport=protected_transport)
+                    except AdmissionClosed:
+                        return Response(503, {'error': 'admission_draining'})
             return api.handle(method, path, headers, body, protected_transport=protected_transport)
         return self.control.handle(method, path, headers, body, protected_transport=protected_transport)
 

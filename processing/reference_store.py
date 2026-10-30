@@ -280,6 +280,9 @@ class ReferenceStore:
                         job_id, node_id, worker_id, worker_instance_id):
                     raise Conflict("claim request belongs to different worker binding")
                 return self._record(row, True)
+            gate = getattr(self.queue, 'admission_drain', None)
+            if gate is not None and gate._closed(db):
+                return None
             self.queue._refresh_nodes(db)
             if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
                 return None

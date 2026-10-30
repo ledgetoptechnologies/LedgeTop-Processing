@@ -205,6 +205,9 @@ class Queue(Maintenance):
             raise ValueError("worker must declare supported enabled profiles")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            gate = getattr(self, 'admission_drain', None)
+            if gate is not None and gate._closed(db):
+                return None
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
                 return None

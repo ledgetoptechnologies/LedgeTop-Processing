@@ -27,6 +27,20 @@ def make_handler(config: Config):
                   treedar_node_ids=config.treedar_node_ids,
                   viewer_enabled=config.viewer_enabled,
                   reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
+    if queue is not None and config.admission_drain_enabled:
+        from .admission_drain import AdmissionDrain
+        try:
+            queue.admission_drain = AdmissionDrain(queue)
+        except Exception:
+            queue.close()
+            raise
+    elif queue is not None:
+        # Never silently bypass a previously enabled persistent barrier.
+        with queue._db() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
+        if exists:
+            queue.close()
+            raise RuntimeError('admission_drain_configuration_required')
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService
@@ -93,6 +107,11 @@ def make_handler(config: Config):
         def do_GET(self):
             if facade and facade.handle(self):
                 return
+            if self.path == '/v1/prototype/admission-drain':
+                if not self._authorized(operator=True):return
+                gate = getattr(queue, 'admission_drain', None)
+                if gate is None:self._reply(404, {'error': 'not_found'});return
+                self._reply(200, gate.status());return
             if self.path.startswith("/v1/prototype/"):
                 prefix='/v1/prototype/nodes/'
                 if self.path.startswith(prefix) and '/schedule-owned' in self.path[len(prefix):]:
@@ -161,7 +180,7 @@ def make_handler(config: Config):
             if self.path != "/v1/plan" and not prototype:
                 self._reply(404, {"error": "not_found"})
                 return
-            operator = prototype and (self.path.endswith(("/hold", "/resolve"))
+            operator = prototype and (self.path == '/v1/prototype/admission-drain' or self.path.endswith(("/hold", "/resolve"))
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return
@@ -191,8 +210,21 @@ def make_handler(config: Config):
                 else:
                     request=json.loads(raw)
                 if prototype:
-                    if self.path == "/v1/prototype/jobs":
-                        job, created = queue.submit(request)
+                    if self.path == '/v1/prototype/admission-drain':
+                        if not hasattr(queue, 'admission_drain'):
+                            self._reply(404, {'error': 'not_found'}); return
+                        if not isinstance(request, dict) or set(request) != {'closed'}:
+                            raise ValueError('closed required')
+                        self._reply(200, queue.admission_drain.set_closed(request['closed']))
+                    elif self.path == "/v1/prototype/jobs":
+                        from .admission_drain import AdmissionClosed
+                        try:
+                            from contextlib import nullcontext
+                            gate = getattr(queue, 'admission_drain', None)
+                            with gate.admit() if gate is not None else nullcontext():
+                                job, created = queue.submit(request)
+                        except AdmissionClosed:
+                            self._reply(503, {'error': 'admission_draining'}); return
                         self._reply(201 if created else 200, {"job": job})
                     elif self.path == "/v1/prototype/claim":
                         self._reply(200, {"job": queue.claim(request)})

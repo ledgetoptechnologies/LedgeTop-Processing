@@ -282,6 +282,34 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertIsNone(handler.prototype_queue.claim({"workerId": "legacy", "profiles": [VIEWER_PROFILE]}))
         runtime.close()
 
+    def test_shared_admission_drain_blocks_real_reference_submission(self):
+        config = replace(self.config, reference_config_path=str(self.path), admission_drain_enabled=True)
+        first, second = self.tls_patches()
+        with first, second: handler = make_handler(config)
+        self.addCleanup(handler.prototype_queue.close)
+        self.addCleanup(handler.viewer_service.close)
+        runtime = handler.reference_listener
+        runtime.api.discover = lambda: self.snapshot
+        headers = {'Authorization': 'Bearer ' + self.value['viewerBearers']['staging']}
+        caps = runtime.api.handle('GET', '/ltds/v1/capabilities', headers, protected_transport=True)
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
+        fixture['capabilityFingerprint'] = caps.body['capabilityFingerprint']
+        fixture['pipeline']['odm']['optionsFingerprint'] = caps.body['engines']['odm']['optionsFingerprint']
+        handler.prototype_queue.admission_drain.set_closed(True)
+        response = runtime.api.handle('POST','/ltds/v1/jobs',headers,json.dumps(fixture).encode(),protected_transport=True)
+        self.assertEqual(response.status, 503)
+        self.assertEqual(handler.prototype_queue.list(), [])
+        handler.prototype_queue.admission_drain.set_closed(False)
+        response = runtime.api.handle('POST','/ltds/v1/jobs',headers,json.dumps(fixture).encode(),protected_transport=True)
+        self.assertEqual(response.status, 201)
+        job_id = response.body['jobId']
+        claim = dict(node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster',claim_request_id='synthetic-claim')
+        handler.prototype_queue.admission_drain.set_closed(True)
+        self.assertIsNone(runtime.store.claim(job_id, **claim))
+        handler.prototype_queue.admission_drain.set_closed(False)
+        self.assertIsNotNone(runtime.store.claim(job_id, **claim))
+        runtime.close()
+
     def test_actual_catalog_changes_fingerprints_and_stale_admission_is_rejected(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
         self.addCleanup(queue.close)

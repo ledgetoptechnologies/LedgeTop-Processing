@@ -224,7 +224,17 @@ class ViewerFacade:
             if handler.command == 'GET':
                 self._get(handler, path, query, environment)
             elif handler.command == 'POST':
-                self._post(handler, path, environment)
+                guarded = (path in ('/task/ledgetop/reserve', '/task/new/init') or
+                    re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path))
+                gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
+                if guarded and gate is not None:
+                    from .admission_drain import AdmissionClosed
+                    try:
+                        with gate.admit(): self._post(handler, path, environment)
+                    except AdmissionClosed:
+                        raise RequestError(503, 'admission_draining')
+                else:
+                    self._post(handler, path, environment)
             else:
                 raise RequestError(405, 'method_not_allowed')
         except RequestError as error:
