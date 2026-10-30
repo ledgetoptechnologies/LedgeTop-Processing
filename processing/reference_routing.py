@@ -83,7 +83,8 @@ def worker_observation(code,body,*,node,authority_id,worker_id,instance_id,bindi
     return 'ready' if ready else 'unavailable'
 
 class ReferenceRouting:
-    def __init__(self,config,workers,*,authority_id,bindings,ssl_context,timeout=2,runtime_versions=None):
+    def __init__(self,config,workers,*,authority_id,bindings,ssl_context,timeout=2,runtime_versions=None,metadata_capacity_veto=False):
+        if type(metadata_capacity_veto) is not bool:raise RoutingHeld('strict_metadata_capacity_veto_required')
         if (type(config) is not Config or config.reference_main_fallback is not True
                 or set(workers)!=set(('cluster','main')) or set(config.prototype_node_ids)!=set(workers)):
             raise RoutingHeld('explicit_two_node_routing_policy_required')
@@ -117,7 +118,8 @@ class ReferenceRouting:
                 raise RoutingHeld('concrete_original_runtime_registry_required')
         self.runtime_versions=runtime_versions
         self._trust=self._tls_identity()
-        self._identity=(self._nodes,self.timeout,self._tls,self.authority_id,self.runtime_versions)
+        self.metadata_capacity_veto=metadata_capacity_veto
+        self._identity=(self._nodes,self.timeout,self._tls,self.authority_id,self.runtime_versions,self.metadata_capacity_veto)
         self._seal=object();self._sampling=threading.BoundedSemaphore(1)
 
     def _tls_identity(self):
@@ -129,7 +131,8 @@ class ReferenceRouting:
         except Exception:raise RoutingHeld('routing_tls_policy_changed') from None
 
     def _check(self):
-        if ((self._nodes,self.timeout,self._tls,self.authority_id,self.runtime_versions)!=self._identity
+        if (type(self.metadata_capacity_veto) is not bool
+                or (self._nodes,self.timeout,self._tls,self.authority_id,self.runtime_versions,self.metadata_capacity_veto)!=self._identity
                 or self._tls_identity()!=self._trust):raise RoutingHeld('routing_transport_changed')
 
     def _json(self,url,headers):
@@ -138,7 +141,15 @@ class ReferenceRouting:
 
     def _worker(self,node,endpoint,binding=None):
         code,body=self._json(endpoint.worker+HEALTH_PATH,{'Authorization':'Bearer '+endpoint.reader,'Accept':'application/json','Accept-Encoding':'identity'})
-        return worker_observation(code,body,node=node,authority_id=self.authority_id,worker_id=endpoint.worker_id,instance_id=endpoint.instance_id,binding=binding or endpoint.binding)
+        physical=binding or endpoint.binding
+        state=worker_observation(code,body,node=node,authority_id=self.authority_id,worker_id=endpoint.worker_id,instance_id=endpoint.instance_id,binding=physical)
+        if state!='ready' or not self.metadata_capacity_veto:return state
+        from .reference_metadata_capacity import PATH,observation_state
+        code,body=self._json(endpoint.worker+PATH,{'Authorization':'Bearer '+endpoint.reader,'Accept':'application/json','Accept-Encoding':'identity'})
+        veto=observation_state(code,body,identity=dict(identityScope='configured_service',nodeId=node,
+            authorityId=self.authority_id,workerId=endpoint.worker_id,workerInstanceId=endpoint.instance_id,
+            engineId=physical.engine_id,gateGeneration=physical.gate_generation,engineVersion=physical.engine_version))
+        return 'unavailable' if veto=='exhausted' else 'ready' if veto=='not_exhausted' else 'unknown'
 
     def _native(self,node,binding=None):
         endpoint=self._nodes[node]

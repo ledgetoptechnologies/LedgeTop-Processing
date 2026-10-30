@@ -46,6 +46,7 @@ class ReferenceSettings:
     runtime_version_publication: object | None = None
     initial_grant_delivery: object | None = None
     grant_reconciliation: bool = False
+    metadata_capacity_veto: bool = False
 
 
 def _file(path, *, private):
@@ -82,7 +83,7 @@ def load_reference_settings(path, config):
         if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()) + (("runtimeVersionPublication",) if "runtimeVersionPublication" in value else ()) + (("initialGrantDelivery",) if "initialGrantDelivery" in value else ()) + (("grantReconciliation",) if "grantReconciliation" in value else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()) + (("runtimeVersionPublication",) if "runtimeVersionPublication" in value else ()) + (("initialGrantDelivery",) if "initialGrantDelivery" in value else ()) + (("grantReconciliation",) if "grantReconciliation" in value else ()) + (("metadataCapacityVeto",) if "metadataCapacityVeto" in value else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -176,8 +177,15 @@ def load_reference_settings(path, config):
             if type(policy['schemaVersion']) is not int or policy['schemaVersion']!=1:
                 raise RuntimeConfigurationError('explicit grant reconciliation version required')
             reconciliation=True
+        capacity_veto=False
+        if 'metadataCapacityVeto' in value:
+            policy=value['metadataCapacityVeto'];p._closed(policy,('schemaVersion',),'metadata capacity veto')
+            if (type(policy['schemaVersion']) is not int or policy['schemaVersion']!=1
+                    or routing is None or config.reference_main_fallback is not True):
+                raise RuntimeConfigurationError('explicit paired metadata capacity veto required')
+            capacity_veto=True
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission,publication,initial_delivery,reconciliation)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission,publication,initial_delivery,reconciliation,capacity_veto)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -249,6 +257,9 @@ class _DynamicAPI:
 class ReferenceRuntime:
     def __init__(self, queue, config, settings, *, discover=None, server_factory=None,catalog_clock=time.time):
         """Construct services around the existing authority; never create a Queue."""
+        if (type(settings.metadata_capacity_veto) is not bool or settings.metadata_capacity_veto
+                and (config.reference_main_fallback is not True or settings.routing_bindings is None)):
+            raise RuntimeConfigurationError('explicit paired metadata capacity veto required')
         if type(settings.grant_reconciliation) is not bool:
             raise RuntimeConfigurationError('explicit reconciliation mode required')
         if queue.catalog_admission != (settings.catalog_admission is not None):
@@ -284,7 +295,7 @@ class ReferenceRuntime:
             routing=None
             if config.reference_main_fallback:
                 from .reference_routing import ReferenceRouting
-                routing=ReferenceRouting(config,settings.workers,authority_id=queue.authority_id,bindings=settings.routing_bindings,ssl_context=worker_context,runtime_versions=self.runtime_versions)
+                routing=ReferenceRouting(config,settings.workers,authority_id=queue.authority_id,bindings=settings.routing_bindings,ssl_context=worker_context,runtime_versions=self.runtime_versions,metadata_capacity_veto=settings.metadata_capacity_veto)
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",routing=routing,
                 initial_grant_policy=settings.initial_grant_delivery)

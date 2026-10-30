@@ -422,7 +422,8 @@ class WorkerHealthAPI:
         self._service = service
 
     def handle(self, method, path, headers, body=b'', *, protected_transport=False):
-        if path != self.PATH:
+        from processing.reference_metadata_capacity import PATH as capacity_path
+        if path not in (self.PATH,capacity_path):
             return self.result_api.handle(method, path, headers, body, protected_transport=protected_transport)
         if protected_transport is not True:
             return Response(503, {'error':'protected_transport_required'})
@@ -434,8 +435,12 @@ class WorkerHealthAPI:
             return Response(503, {'error':'worker_service_not_started'})
         try:
             health = self._service.health()
-            work = _work_health(self.driver)
             ready = health['state'] == 'ready' and health['driverAlive'] and health['listenerAlive']
+            if path==capacity_path:
+                if not ready:return Response(503,{'error':'metadata_capacity_unavailable'})
+                from processing.reference_metadata_capacity import observe
+                return Response(200,dict(**observe(self.driver),**p.decode_submission(self._identity)))
+            work = _work_health(self.driver)
             return Response(200 if ready else 503, dict(schemaVersion=1, profile='odm_only', scope='service_liveness',
                 **p.decode_submission(self._identity), **health, **work))
         except Exception:
