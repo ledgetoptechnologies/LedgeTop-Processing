@@ -122,7 +122,21 @@ def tree(root, key):
     return summary, entries
 
 
+VIEWER_LEGACY_COLUMNS = ('uuid','generation','directory','name','options','outputs','environment',
+    'stage','phase','job_id','node_id','engine_uuid','claim_token','error','progress','output_lines',
+    'archive_path','removed','created_at','updated_at')
+VIEWER_NEW_COLUMN = 'option_evidence_required'
+# Exact d738â†’aa5b33b SQLite DDL, independently checked against the committed
+# legacy schema and the specific ADD COLUMN statement. Other variants hold.
+VIEWER_LEGACY_SCHEMA_SHA256 = 'e7bbc127917f0c8c21007a79f35b434d00a1446fed25b369e1b3ab7579c628a3'
+VIEWER_MIGRATED_SCHEMA_SHA256 = 'a637e43b58241be981e0c056d8e6fd7d4a83e7c590598f837f6fccfdcf77d424'
+
 def database(path, key):
+    # immutable mode ignores WAL: callers must census stopped, checkpointed
+    # state with no live writer or SQLite sidecar; it is not a live snapshot.
+    with Path(path).open('rb') as stream:
+        header = stream.read(20)
+    header_mode = list(header[18:20]) if len(header) == 20 and header[:16] == b'SQLite format 3\x00' else None
     uri = 'file:' + str(path) + '?mode=ro&immutable=1'
     db = sqlite3.connect(uri, uri=True)
     try:
@@ -147,11 +161,22 @@ def database(path, key):
             active['viewerTasks'] = db.execute(
                 'SELECT COUNT(*) FROM viewer_tasks WHERE removed=0 AND stage NOT IN (%s)' % marks,
                 TERMINAL_STAGES).fetchone()[0]
+        viewer_projection = None
+        if 'viewer_tasks' in tables:
+            column_info = db.execute('PRAGMA table_xinfo(viewer_tasks)').fetchall()
+            columns = tuple(row[1] for row in column_info)
+            if all(row[6] == 0 for row in column_info) and columns in (VIEWER_LEGACY_COLUMNS, VIEWER_LEGACY_COLUMNS + (VIEWER_NEW_COLUMN,)):
+                names = ','.join('"'+name+'"' for name in VIEWER_LEGACY_COLUMNS)
+                rows = sorted(repr(tuple(row)) for row in db.execute('SELECT '+names+' FROM viewer_tasks'))
+                invalid = None if columns == VIEWER_LEGACY_COLUMNS else db.execute(
+                    "SELECT count(*) FROM viewer_tasks WHERE option_evidence_required IS NOT 0 OR typeof(option_evidence_required) != 'integer'").fetchone()[0]
+                viewer_projection = {'columns':list(columns), 'digest':_keyed(key,b'viewer-legacy\0'+'\n'.join(rows).encode()).hexdigest(), 'invalidDefaults':invalid}
         authority = None
         if 'coordinator_identity' in tables:
             row = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
             authority = row[0] if row else None
         return {'quickCheck': check, 'objects': objects, 'rowCounts': counts, 'tableDigest': digests,
+                'viewerTaskProjection': viewer_projection, 'sqliteHeaderMode':header_mode,
                 'active': active, 'authorityId': authority,
                 'sidecars': sorted(p.name for p in Path(path).parent.glob(Path(path).name + '-*'))}
     finally:
@@ -243,7 +268,7 @@ def lease_marker_digest(key):
 
 
 def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_objects=(), allow_new_tables=(),
-            allow_lease_marker=False):
+            allow_lease_marker=False, allow_viewer_task_default_column=False):
     """Return the differences that no allowance covers, as counts and opaque IDs.
 
     ``allow_lease_marker`` permits exactly one thing: the authority-lease marker
@@ -253,6 +278,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
     for document in (before, after):
         if document.get('schemaVersion') != SCHEMA_VERSION:
             raise SystemExit('census schema version %s is not supported' % document.get('schemaVersion'))
+    if allow_viewer_task_default_column and 'viewer_tasks' in allow_tables:
+        raise SystemExit('viewer_tasks cannot use both broad and narrow allowances')
     path_allowances = parse_path_allowances(allow_paths, key)
     object_allowances = parse_object_allowances(allow_objects)
     old, new = before['entries'], after['entries']
@@ -274,6 +301,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
         differences.append({'id': identifier, 'change': change, 'fields': unallowed})
     database_differences = []
     da, db = before.get('database'), after.get('database')
+    if allow_viewer_task_default_column and (da is None or db is None):
+        database_differences.append({'table':'viewer_tasks','change':'legacyProjectionRequiresDatabase'})
     if allow_lease_marker and (da is None or db is None):
         # The marker can only be proven inside a database: never pass vacuously.
         database_differences.append({'database': 'leaseMarkerRequiresDatabase'})
@@ -304,6 +333,23 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
         for name, expected in sorted(object_allowances.items()):
             if db['objects'].get(name) != expected:
                 database_differences.append({'object': name, 'change': 'allowanceNotMatched'})
+        if allow_viewer_task_default_column and (da.get('sidecars') or db.get('sidecars') or da.get('sqliteHeaderMode') != [1,1] or db.get('sqliteHeaderMode') != [1,1]):
+            database_differences.append({'table':'viewer_tasks','change':'requiresCheckpointedDatabase'})
+        old_projection=da.get('viewerTaskProjection');new_projection=db.get('viewerTaskProjection')
+        viewer_qualifies = (isinstance(old_projection,dict) and isinstance(new_projection,dict)
+            and da['objects'].get('table:viewer_tasks')==VIEWER_LEGACY_SCHEMA_SHA256
+            and db['objects'].get('table:viewer_tasks')==VIEWER_MIGRATED_SCHEMA_SHA256
+            and object_allowances.get('table:viewer_tasks')==VIEWER_MIGRATED_SCHEMA_SHA256
+            and old_projection.get('columns')==list(VIEWER_LEGACY_COLUMNS)
+            and new_projection.get('columns')==list(VIEWER_LEGACY_COLUMNS+(VIEWER_NEW_COLUMN,))
+            and old_projection.get('invalidDefaults') is None
+            and type(new_projection.get('invalidDefaults')) is int and new_projection['invalidDefaults']==0
+            and isinstance(old_projection.get('digest'),str) and len(old_projection['digest'])==64
+            and old_projection['digest']==new_projection.get('digest')
+            and 'viewer_tasks' in da['rowCounts'] and 'viewer_tasks' in db['rowCounts']
+            and da['rowCounts']['viewer_tasks']==db['rowCounts']['viewer_tasks'])
+        if allow_viewer_task_default_column and not viewer_qualifies:
+            database_differences.append({'table':'viewer_tasks','change':'legacyProjectionMismatch'})
         for name in sorted(set(da['tableDigest']) | set(db['tableDigest'])):
             if name not in da['tableDigest']:
                 if allow_lease_marker and name == LEASE_MARKER_TABLE:
@@ -316,7 +362,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
             elif name not in db['tableDigest']:
                 database_differences.append({'table': name, 'change': 'removed'})
             elif da['tableDigest'][name] != db['tableDigest'][name] and name not in allow_tables:
-                database_differences.append({'table': name, 'change': 'contentChanged'})
+                qualifies = name=='viewer_tasks' and allow_viewer_task_default_column and viewer_qualifies
+                if not qualifies: database_differences.append({'table': name, 'change': 'contentChanged'})
         for field in ('quickCheck', 'authorityId', 'active', 'sidecars'):
             if da[field] != db[field]:
                 database_differences.append({'field': field})
@@ -345,6 +392,8 @@ def main(argv=None):
     diff.add_argument('after', type=Path)
     for option in ('allow-path', 'allow-table', 'allow-object', 'allow-new-table'):
         diff.add_argument('--' + option, action='append', default=[])
+    diff.add_argument('--allow-viewer-task-default-column', action='store_true',
+                      help='permit only preserved legacy viewer_tasks rows with a new zero-valued option_evidence_required column')
     diff.add_argument('--allow-lease-marker', action='store_true',
                       help='allow and require exactly the authority-lease marker table and its single row')
     diff.add_argument('--schema-allowlist', type=Path,
@@ -381,7 +430,8 @@ def main(argv=None):
         result = compare(json.loads(args.before.read_text()), json.loads(args.after.read_text()), key,
                          allow_paths=args.allow_path, allow_tables=args.allow_table,
                          allow_objects=objects, allow_new_tables=args.allow_new_table,
-                         allow_lease_marker=args.allow_lease_marker)
+                         allow_lease_marker=args.allow_lease_marker,
+                         allow_viewer_task_default_column=args.allow_viewer_task_default_column)
         status = 0 if result['identical'] else 1
     json.dump(result, sys.stdout, sort_keys=True, indent=1)
     sys.stdout.write('\n')
