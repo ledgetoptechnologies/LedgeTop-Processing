@@ -5,7 +5,7 @@ from processing import reference_protocol as p
 from processing.reference_manifest_v2 import DOMAIN
 from processing.reference_input_journal import InputJournal
 from processing.reference_worker_fence_v2 import WorkerFence
-from processing.reference_v2_local_input import publish_next_input,InputHeld
+from processing.reference_v2_local_input import publish_next_input,verify_complete_input_set,InputHeld
 from processing.scratch_policy import ScratchLedger
 
 @unittest.skipUnless(os.name=='posix','POSIX only')
@@ -79,6 +79,18 @@ publish_next_input(fence=f,journal=j,ledger=l,reservation_id='r1',binding=bindin
   self.assertEqual((self.scratch/'jobs/r1/b.input').read_bytes(),b'defg')
   with self.ledger._transaction() as db:self.assertEqual(self.ledger._reservation(db,'r1')['allocated'],7)
   with self.assertRaisesRegex(InputHeld,'hold remains'):self.run_input(None)
+
+ def test_full_barrier_rejects_removed_corrupted_and_extra_files(self):
+  self.setup_input(b'abc',second=b'def');self.run_input(io.BytesIO(b'abc'));self.run_input(io.BytesIO(b'def'))
+  def barrier():return verify_complete_input_set(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw)
+  self.assertEqual(barrier()['objectCount'],2)
+  first=self.scratch/'jobs/r1/a.input';first.unlink()
+  with self.assertRaises(InputHeld):barrier()
+  first.write_bytes(b'xyz');first.chmod(0o600)
+  with self.assertRaises(InputHeld):barrier()
+  first.write_bytes(b'abc');extra=self.scratch/'jobs/r1/unexpected';extra.write_bytes(b'x')
+  with self.assertRaises(InputHeld):barrier()
+  extra.unlink();self.assertEqual(barrier()['state'],'input_set_verified_hold_retained')
 
  def test_insufficient_remaining_blocks_second_file(self):
   from processing.scratch_policy import PolicyConflict

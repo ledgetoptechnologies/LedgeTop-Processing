@@ -98,3 +98,59 @@ def publish_next_input(*, fence, journal, ledger, reservation_id, binding, manif
         journal.complete(binding,item['ordinal'],item['objectId'],item['byteSize'],item['sha256'],item['target'])
         return {'state':'input_verified_hold_retained','objectId':item['objectId']}
     finally:os.close(dfd)
+
+
+def verify_complete_input_set(*, fence, journal, ledger, reservation_id, binding, manifest_bytes):
+    """Reverify all local input bytes; neither engine authority nor hold release.
+
+    This point-in-time result assumes a supervisor excludes all other writers,
+    old workers and cleanup throughout verification and subsequent use. No
+    cooperative lock can enforce that assumption against outside actors.
+    """
+    if os.name != 'posix' or type(fence) is not WorkerFence or type(journal) is not InputJournal or type(ledger) is not ScratchLedger:
+        raise InputHeld('qualified local components required')
+    fence.check();journal.seed_manifest(binding,manifest_bytes)
+    manifest=decode_manifest_v2(manifest_bytes)
+    if journal.current(binding) is not None:raise InputHeld('input journal incomplete')
+    ledger.check_input_write_target(reservation_id,job_id=binding['jobId'],generation=binding['generation'],
+        environment=binding['environment'],manifest_sha256=binding['manifestSha256'],input_bytes=manifest['totalBytes'],
+        allocated_before=manifest['totalBytes'],target=manifest['totalBytes'])
+    relative='jobs/'+reservation_id+'/placeholder';ledger._owned_path(reservation_id,relative)
+    directory=ledger.root/'jobs'/reservation_id
+    dfd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        di=os.fstat(dfd);location=os.stat(directory,follow_symlinks=False)
+        if ((di.st_dev,di.st_ino)!=(location.st_dev,location.st_ino) or di.st_uid!=os.geteuid()
+                or stat.S_IMODE(di.st_mode)!=0o700):raise InputHeld('private directory changed')
+        expected={obj['id']+'.input' for obj in manifest['objects']}
+        if set(os.listdir(dfd))!=expected:raise InputHeld('input file set differs')
+        for obj in manifest['objects']:
+            fence.check();name=obj['id']+'.input'
+            try:fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=dfd)
+            except OSError:raise InputHeld('input file unavailable') from None
+            try:
+                before=os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_uid!=os.geteuid() or before.st_nlink!=1
+                    or stat.S_IMODE(before.st_mode)!=0o600 or before.st_size!=obj['byteSize']):raise InputHeld('input file identity differs')
+                digest=hashlib.sha256();count=0
+                while True:
+                    chunk=os.read(fd,1024*1024)
+                    if not chunk:break
+                    count+=len(chunk)
+                    if count>obj['byteSize']:raise InputHeld('input file exceeds manifest')
+                    digest.update(chunk)
+                after=os.fstat(fd);entry=os.stat(name,dir_fd=dfd,follow_symlinks=False)
+                if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+                    or (entry.st_dev,entry.st_ino)!=(after.st_dev,after.st_ino)
+                    or count!=obj['byteSize'] or digest.hexdigest()!=obj['sha256']):raise InputHeld('input bytes changed')
+            finally:os.close(fd)
+        if set(os.listdir(dfd))!=expected:raise InputHeld('input file set changed')
+        location=os.stat(directory,follow_symlinks=False)
+        if (location.st_dev,location.st_ino)!=(di.st_dev,di.st_ino):raise InputHeld('private directory changed')
+        fence.check()
+        ledger.check_input_write_target(reservation_id,job_id=binding['jobId'],generation=binding['generation'],
+            environment=binding['environment'],manifest_sha256=binding['manifestSha256'],input_bytes=manifest['totalBytes'],
+            allocated_before=manifest['totalBytes'],target=manifest['totalBytes'])
+        if journal.current(binding) is not None:raise InputHeld('input journal changed')
+        return {'state':'input_set_verified_hold_retained','objectCount':manifest['objectCount']}
+    finally:os.close(dfd)
