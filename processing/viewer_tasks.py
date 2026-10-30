@@ -531,6 +531,10 @@ class TaskStore:
                     or row['node_id']!=task['node_id'] or row['claim_token']!=task['claim_token']
                     or row['environment']!=task['environment'] or row['phase'] not in ('processing','commit_pending','cancel_pending')):
                 raise Conflict('engine completion identity changed')
+            job=db.execute('SELECT node_id,environment,profile FROM jobs WHERE id=?',(row['job_id'],)).fetchone()
+            if (job is None or job['node_id']!=row['node_id'] or job['environment']!=row['environment']
+                    or job['profile']!=VIEWER_PROFILE):
+                raise Conflict('engine job binding changed')
             self.queue._complete_in_transaction(db,row['job_id'],
                 {'claimToken':row['claim_token'],'status':status,'result':result})
             db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
