@@ -112,6 +112,43 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
         self.assertEqual(self.store.info(self.identifier)['imagesCount'], 1)
         self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
 
+    def test_process_exit_after_upload_rename_retains_unidentified_orphan(self):
+        root = self.root / 'upload-crash'
+        identifier = str(uuid.uuid4())
+        program = '''import io, os, sys
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root = Path(sys.argv[1]); identifier = sys.argv[2]
+queue = Queue(root / "queue", node_ids=("cluster", "main"), treedar_node_ids=("main",), viewer_enabled=True)
+store = TaskStore(queue, root / "inputs")
+store.initialize(identifier, "synthetic", [], None, "production")
+original = os.replace
+def crash_after_rename(source, destination):
+    original(source, destination)
+    if Path(destination).name.startswith("input-"):
+        os._exit(73)
+os.replace = crash_after_rename
+store.upload(identifier, "photo.jpg", io.BytesIO(b"synthetic"), 9)
+'''
+        proc = subprocess.run([sys.executable, '-c', program, str(root), identifier],
+                              capture_output=True, timeout=15)
+        self.assertEqual(proc.returncode, 73, proc.stderr.decode(errors='replace'))
+        queue = Queue(root / 'queue', node_ids=('cluster', 'main'), treedar_node_ids=('main',), viewer_enabled=True)
+        try:
+            store = TaskStore(queue, root / 'inputs')
+            task = store.task(identifier)
+            directory = Path(task['directory'])
+            orphan, = directory.glob('input-*')
+            self.assertEqual(orphan.read_bytes(), b'synthetic')
+            self.assertEqual(task['files'], [])
+            store.upload(identifier, 'photo.jpg', io.BytesIO(b'synthetic'), 9)
+            self.assertEqual(orphan.read_bytes(), b'synthetic')
+            self.assertEqual(len(list(directory.glob('input-*'))), 2)
+            self.assertEqual(len(store.task(identifier)['files']), 1)
+        finally:
+            queue.close()
+
     def test_truncated_or_overlong_stream_never_enters_manifest(self):
         self.initialize()
         for body, length in ((b'ab', 3), (b'abcd', 3)):
