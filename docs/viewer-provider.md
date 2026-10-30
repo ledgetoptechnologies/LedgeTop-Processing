@@ -142,3 +142,22 @@ This route does not issue grants, authorize a worker, transfer data, reserve
 scratch, schedule work, deliver results, or enable Viewer integration. It is
 not a production-ready large-job path, and its contract requires coordination
 with Viewer before activation.
+
+The gated v2 metadata listener also offers `GET /ltds-reference-v2/capabilities`
+to the same scoped credential. It derives the current capability and options
+fingerprints and supported boolean/nonnegative-integer option definitions from
+the configured engine catalog. Decimal, negative and float options are not
+available under the current canonical v2 wire encoding. This is a temporary
+limitation: full ODM option support needs an agreed shared numeric contract.
+The options fingerprint identifies the full filtered engine policy, which can
+include definitions not listed in the currently representable v2 subset. The response identifies the credential environment,
+advertises the metadata limits and explicitly reports that scheduling and
+transfer are unavailable. Each response uses a fresh discovery snapshot; a
+subsequent new submission can still conflict if the catalog changes.
+New metadata admissions bind the engine options fingerprint and check the
+advertised scalar types and nonnegative safe-integer encoding. Option-specific
+value ranges are not enforced by this
+endpoint and require a defined engine contract before scheduling is enabled.
+Concurrent v2 catalog discovery is limited to one request; callers receive 503
+while discovery is busy. A replay of already committed metadata does not need
+current catalog discovery.

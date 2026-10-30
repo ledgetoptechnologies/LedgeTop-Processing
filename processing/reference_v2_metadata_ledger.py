@@ -88,7 +88,7 @@ class V2MetadataLedger:
             return {'jobId':row['job_id'],'generation':1,'created':False}
         return self._run(read)
 
-    def submit(self, body, *, principal, environment, capability_fingerprint, allowed_odm_options):
+    def submit(self, body, *, principal, environment, capability_fingerprint, allowed_odm_options, options_fingerprint=None):
         p._slug(principal, 'trusted principal'); p._environment(environment);p._hash(capability_fingerprint,'capability')
         body=decode_canonical_input_v2(p.canonical_json(body))
         p._closed(body, ('schemaVersion','submissionId','manifest','pipeline','capabilityFingerprint'), 'v2 submission')
@@ -104,7 +104,7 @@ class V2MetadataLedger:
         surrogate['sha256']=p.manifest_sha256(surrogate)
         p.validate_submission({'schemaVersion':1,'submissionId':body['submissionId'],'manifest':surrogate,
             'pipeline':body['pipeline'],'capabilityFingerprint':capability_fingerprint},environment=environment,
-            capability_fingerprint=capability_fingerprint,available_engines=('odm',),allowed_odm_options=allowed_odm_options)
+            capability_fingerprint=capability_fingerprint,available_engines=('odm',),allowed_odm_options=allowed_odm_options,options_fingerprint=options_fingerprint)
         request={'principal':principal,'environment':environment,'body':body}
         encoded=p.canonical_json(request).decode(); digest=p.digest(request)
         def write(db):

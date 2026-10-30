@@ -220,8 +220,8 @@ class _DynamicAPI:
         return None
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
-        from .reference_v2_metadata_http import ROUTE as V2_ROUTE
-        if path == V2_ROUTE:
+        from .reference_v2_metadata_http import ROUTE as V2_ROUTE, CAPABILITIES_ROUTE
+        if path in (V2_ROUTE,CAPABILITIES_ROUTE):
             if self.v2_metadata is None: return Response(404, {'error':'not_found'})
             return self.v2_metadata.handle(method,path,headers,body,protected_transport=protected_transport)
         from .viewer_staged_ack import ROUTE
@@ -341,9 +341,18 @@ class ReferenceRuntime:
                     if binding['environment'] not in settings.viewer_bearers.values() or (binding['principalId'] in principal_env and principal_env[binding['principalId']]!=binding['environment']):
                         raise RuntimeConfigurationError('v2 principal scope changed')
                     principal_env[binding['principalId']]=binding['environment']
+                v2_discovery_slot=threading.BoundedSemaphore(1)
                 def v2_policy():
-                    capability, _, allowed = discovered_policy(discover(), config)
-                    return capability,allowed
+                    if not v2_discovery_slot.acquire(blocking=False): raise RuntimeConfigurationError('v2 discovery busy')
+                    try:
+                        snapshot=discover()
+                        capability,options,allowed = discovered_policy(snapshot, config)
+                        definitions=sorted((option for option in snapshot['commonOptions'] if option['name'] in allowed and option['type'] in ('bool','boolean','int','integer')),key=lambda option:option['name'])
+                        # Apply the existing metadata-bound serialization/validation.
+                        definitions=p.decode_submission(p.canonical_json(definitions))
+                        return capability,options,definitions
+                    finally:
+                        v2_discovery_slot.release()
                 v2=V2MetadataAPI(V2MetadataLedger(queue,enabled=True),principals=settings.v2_metadata_bearers,policy=v2_policy)
             self.api = _DynamicAPI(self.control, config, settings, discover, staged, v2)
         except Exception:

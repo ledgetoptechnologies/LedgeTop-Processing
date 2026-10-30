@@ -122,15 +122,21 @@ class ReferenceRuntimeTests(unittest.TestCase):
         import hashlib
         from processing import reference_protocol as protocol
         from processing.reference_manifest_v2 import DOMAIN
-        from processing.reference_v2_metadata_http import ROUTE
+        from processing.reference_v2_metadata_http import ROUTE, CAPABILITIES_ROUTE
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,reference_enabled=True)
         self.addCleanup(queue.close)
+        self.snapshot['commonOptions'].append(dict(name='future-float',type='float',value=0.5))
         token='synthetic-v2-'+'x'*32
         other='synthetic-v2-'+'y'*32
         settings=replace(self.settings(),v2_metadata_bearers={token:{'principalId':'fixture','environment':'staging'},other:{'principalId':'other','environment':'staging'}})
-        first,second=self.tls_patches()
+        first,second=self.tls_patches();block_discovery=threading.Event();discovery_entered=threading.Event();release_discovery=threading.Event()
+        def discover():
+            if block_discovery.is_set():
+                discovery_entered.set()
+                if not release_discovery.wait(3): raise RuntimeError('test timeout')
+            return self.snapshot
         with first,second,patch('processing.reference_runtime.V2_METADATA_SCHEMA_QUALIFIED',True):
-            runtime=ReferenceRuntime(queue,self.config,settings,discover=lambda:self.snapshot)
+            runtime=ReferenceRuntime(queue,self.config,settings,discover=discover)
         server=create_reference_http_server(runtime.api)
         thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.02));thread.start()
         try:
@@ -152,6 +158,27 @@ class ReferenceRuntimeTests(unittest.TestCase):
                     response=conn.getresponse();return response.status,json.loads(response.read())
                 finally:conn.close()
             self.assertEqual(submit('Bearer invalid-token-invalid-token-invalid-token',b'{}')[0],401)
+            def get_caps(auth):
+                conn=http.client.HTTPConnection(*server.server_address,timeout=5)
+                try:
+                    conn.request('GET',CAPABILITIES_ROUTE,headers={'Authorization':auth})
+                    response=conn.getresponse();return response.status,json.loads(response.read())
+                finally:conn.close()
+            self.assertEqual(get_caps('Bearer invalid-token-invalid-token-invalid-token')[0],401)
+            status,caps=get_caps('Bearer '+token);self.assertEqual(status,200)
+            self.assertEqual(caps['environment'],'staging');self.assertEqual(caps['capabilityFingerprint'],capability)
+            self.assertEqual(caps['optionsFingerprint'],options);self.assertEqual(caps['limits'],{'metadataBytes':16*1024*1024,'objects':32768})
+            self.assertFalse(caps['schedulingAvailable']);self.assertFalse(caps['transferAvailable'])
+            self.assertEqual(caps['optionValueEncoding'],'boolean_or_nonnegative_safe_integer')
+            self.assertEqual([o['name'] for o in caps['options']],['future-quality','future-toggle'])
+            block_discovery.set();found=[]
+            probe=threading.Thread(target=lambda:found.append(get_caps('Bearer '+token)[0]))
+            try:
+                probe.start();self.assertTrue(discovery_entered.wait(2))
+                self.assertEqual(get_caps('Bearer '+token)[0],503)
+            finally:
+                release_discovery.set();probe.join(3);block_discovery.clear()
+            self.assertFalse(probe.is_alive());self.assertEqual(found,[200])
             from processing.reference_http import _protected
             observed_timeouts=[]
             def observe_timeout(connection):
@@ -196,13 +223,31 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 conn.putrequest('POST',protocol.PREFIX+'/jobs');conn.putheader('Content-Length',str(protocol.MAX_BODY_BYTES+1));conn.endheaders()
                 self.assertEqual(conn.getresponse().status,413)
             finally:conn.close()
+            mismatch=copy.deepcopy(body);mismatch['submissionId']=str(uuid.uuid4());mismatch['pipeline']['odm']['optionsFingerprint']='0'*64
+            self.assertEqual(submit('Bearer '+token,protocol.canonical_json(mismatch))[0],400)
+            mismatch['pipeline']['odm']['optionsFingerprint']=options;mismatch['pipeline']['odm']['options']={'future-toggle':3}
+            self.assertEqual(submit('Bearer '+token,protocol.canonical_json(mismatch))[0],400)
+            for rejected in ({'future-quality':-1},{'future-quality':1.5},{'future-float':1}):
+                mismatch['pipeline']['odm']['options']=rejected
+                self.assertEqual(submit('Bearer '+token,protocol.canonical_json(mismatch))[0],400)
+            tiny=copy.deepcopy(body);tiny['manifest']['objects']=tiny['manifest']['objects'][:1]
+            tiny['manifest']['objectCount']=tiny['manifest']['inputCounts']['images']=1
+            tiny['manifest']['totalBytes']=tiny['manifest']['objects'][0]['byteSize']
+            tiny['manifest']['sha256']=hashlib.sha256(DOMAIN+protocol.canonical_json({k:v for k,v in tiny['manifest'].items() if k!='sha256'})).hexdigest()
+            for valid in (0,2**53-1):
+                tiny['submissionId']=str(uuid.uuid4());tiny['pipeline']['odm']['options']={'future-quality':valid}
+                self.assertEqual(submit('Bearer '+token,protocol.canonical_json(tiny))[0],201)
+            for invalid in (None,2**53):
+                tiny['submissionId']=str(uuid.uuid4());tiny['pipeline']['odm']['options']={'future-quality':invalid}
+                self.assertEqual(submit('Bearer '+token,protocol.canonical_json(tiny))[0],400)
             first=submit('Bearer '+token,raw);self.assertEqual(first[0],201);self.assertEqual(first[1]['state'],'metadata_only');self.assertFalse(first[1]['scheduled'])
             self.assertEqual(submit('Bearer '+other,raw)[0],409)
             self.snapshot['nodes'][0]['engineVersion']='changed-after-commit'
+            self.assertNotEqual(get_caps('Bearer '+token)[1]['capabilityFingerprint'],capability)
             replay=submit('Bearer '+token,raw);self.assertEqual(replay[0],200);self.assertEqual(replay[1]['jobId'],first[1]['jobId'])
             self.assertEqual(submit('Bearer '+token,raw+b' ')[0],400)
             with queue._db() as db:
-                self.assertEqual(db.execute('select count(*) from reference_v2_staged_jobs').fetchone()[0],1)
+                self.assertEqual(db.execute('select count(*) from reference_v2_staged_jobs').fetchone()[0],3)
                 self.assertEqual(db.execute('select count(*) from jobs').fetchone()[0],0)
         finally:
             server.shutdown();server.server_close();thread.join(3)
