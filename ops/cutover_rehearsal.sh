@@ -31,7 +31,8 @@ set -euo pipefail
 umask 077
 export MSYS_NO_PATHCONV=1
 HERE=$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)
-w() { cygpath -w "$1" 2>/dev/null || echo "$1"; }
+# Host path for host tools: Windows paths under Git Bash/MSYS, unchanged elsewhere.
+w() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) DOCKER_LOCAL=npipe:////./pipe/docker_engine;; *) DOCKER_LOCAL=unix:///var/run/docker.sock;; esac
 DAEMON_ID=$(python "$HERE/pinned_docker.py" --host "$DOCKER_LOCAL" -- info --format '{{.ID}}')
 test -n "$DAEMON_ID"
@@ -90,8 +91,11 @@ remove_owned() {  # manifest run -> 0 only if every recorded resource was verifi
   done
   return $held
 }
-drop_private_context() {  # evidence dir: only after a verified complete cleanup
-  rm -f -- "$1/runtime.env" "$1/census.key" "$1"/env-*
+drop_private_context() {  # evidence dir -> 0 only if the private context is verifiably gone
+  local dir=$1 left
+  rm -f -- "$dir/runtime.env" "$dir/census.key" "$dir"/env-* || return 1
+  left=$(find "$dir" -maxdepth 1 \( -name runtime.env -o -name census.key -o -name 'env-*' \) -print -quit) || return 1
+  [ -z "$left" ]
 }
 if [ "${1:-}" = --cleanup ]; then
   manifest=$2; run=$(sed -n 's/^run //p' "$manifest" | tr -d '\r')
@@ -100,7 +104,10 @@ if [ "${1:-}" = --cleanup ]; then
   reconcile "$manifest" "$run" || unrecorded=1
   remove_owned "$manifest" "$run" || held=1
   if [ "$unrecorded" = 0 ] && [ "$held" = 0 ] && none_left "$run"; then
-    drop_private_context "$(dirname "$manifest")"
+    if ! drop_private_context "$(dirname "$manifest")"; then
+      echo "every resource of $run is gone, but the private synthetic context could not be removed; not complete"
+      exit 1
+    fi
     echo "removed every resource of $run (label census confirms none left); private synthetic context deleted, other evidence kept"
     exit 0
   fi
@@ -120,9 +127,12 @@ on_exit() {
   set +e
   if [ "$FINISHED" = 1 ] && [ "$status" = 0 ] && reconcile "$MANIFEST" "$RUN" && remove_owned "$MANIFEST" "$RUN" \
       && none_left "$RUN"; then
-    rm -rf -- "$E"
-    echo "REHEARSAL PASSED: every step passed and cleanup is verified (label census finds nothing left)"
-    exit 0
+    if rm -rf -- "$E" && [ ! -e "$E" ]; then
+      echo "REHEARSAL PASSED: every step passed and cleanup is verified (label census finds nothing left)"
+      exit 0
+    fi
+    echo "CLEANUP INCOMPLETE: every resource is gone, but the evidence directory $E could not be removed (exit $CLEANUP_INCOMPLETE)"
+    exit "$CLEANUP_INCOMPLETE"
   fi
   [ "$FINISHED" = 1 ] || reconcile "$MANIFEST" "$RUN"
   if [ "$status" = 0 ]; then

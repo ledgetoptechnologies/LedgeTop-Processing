@@ -209,8 +209,33 @@ It left no labelled resources. The negative checks also passed:
   normal run exits `0`.
 
 These checks are in
-[ops/cutover_rehearsal_selftest.sh](../ops/cutover_rehearsal_selftest.sh) and
-can be rerun with the same image IDs and compose file.
+[ops/cutover_rehearsal_selftest.sh](../ops/cutover_rehearsal_selftest.sh):
+
+```
+ops/cutover_rehearsal_selftest.sh D738_IMAGE_ID RELEASE_IMAGE_ID D738_COMPOSE_FILE
+```
+
+- **Real assertions:** every check is an assertion. 36 of them cover the
+  normal run and checks 1–8. The self-test exits `0` only if all pass, and `1`
+  with a `FAIL` line for each violated one. It runs under
+  `set -euo pipefail`, and exit statuses are captured explicitly.
+- **Pinned Docker:** every Docker call goes through the same pinned wrapper as
+  the runbook.
+- **Portable paths:** host paths come from one helper, `cygpath` under Git Bash
+  and the plain path elsewhere.
+- **Evidence removal checked:** it removes only the exact evidence folders,
+  recorded resources and test containers of its own runs, and checks each
+  removal.
+- **Verified rehearsal cleanup:** the rehearsal also reports a complete
+  cleanup only after its evidence folder, or the private context under
+  `--cleanup`, is verifiably gone.
+- **Lint:** a test checks that both scripts define `docker` as the pinned
+  wrapper before any use, that no call bypasses it, and that `cygpath` appears
+  only in the path helper.
+
+On 2026-10-30, locally, the self-test passed all 36 checks with no labelled
+resources left. With the compose file's live-port line removed as a deliberate
+violation, it exited `1` and reported each broken expectation.
 
 **Not rehearsed:** a Docker daemon restart or host reboot (the shared daemon was
 deliberately left alone), and the exact images.

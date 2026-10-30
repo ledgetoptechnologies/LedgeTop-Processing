@@ -120,3 +120,37 @@ class RunbookPinningTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RehearsalScriptPinningTest(unittest.TestCase):
+    """The rehearsal and its self-test must pin every Docker call too."""
+
+    SCRIPTS = ('ops/cutover_rehearsal.sh', 'ops/cutover_rehearsal_selftest.sh')
+
+    def code(self, name):
+        # Comments and Python heredoc bodies are not shell Docker calls.
+        text = (ROOT / name).read_text(encoding='utf-8')
+        text = re.sub(r"<<'PY'\n.*?\nPY\n", "<<'PY'\nPY\n", text, flags=re.S)
+        return '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+
+    def test_docker_is_the_pinned_wrapper_before_any_use(self):
+        for name in self.SCRIPTS:
+            code = self.code(name)
+            definition = code.index('docker() {')
+            body = code[definition:code.index('}', definition)]
+            self.assertIn('pinned_docker.py', body, name)
+            self.assertIn('--expect-daemon-id "$DAEMON_ID"', body, name)
+            before = [line for line in code[:definition].splitlines()
+                      if re.search(r'(^|[\s;(|&$])docker\s', line)]
+            self.assertEqual(before, [], name)
+
+    def test_no_bypass_and_portable_paths(self):
+        for name in self.SCRIPTS:
+            code = self.code(name)
+            for pattern in (r'\bcommand\s+docker\b', r'\docker\b', r'/docker\s', r'\bexec\s+docker\b',
+                            r'\bsudo\b[^\n]*\bdocker\b'):
+                self.assertIsNone(re.search(pattern, code), (name, pattern))
+            cygpath_lines = [line for line in code.splitlines() if 'cygpath' in line]
+            self.assertTrue(cygpath_lines, name)
+            for line in cygpath_lines:
+                self.assertTrue(line.startswith('w() { if command -v cygpath'), (name, line))
