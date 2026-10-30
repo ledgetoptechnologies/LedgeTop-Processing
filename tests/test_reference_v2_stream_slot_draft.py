@@ -57,6 +57,15 @@ class SlotTests(PrechargeTests):
   with self.assertRaisesRegex(SlotHeld,'reconciliation'):s.begin(l,request_id='r2',object_id='cloud',start=0,end=4)
   with self.assertRaisesRegex(SlotHeld,'opening slot required'):s.reconcile_opening(l,writer_quiesced=True)
 
+ def test_closing_to_closed_rejects_different_identity(self):
+  from processing.reference_v2_precharge_draft import PrechargeHeld
+  l=self.indexed();s=self.slot()
+  with self.assertRaises(PrechargeHeld):s.begin(l,request_id='r1',object_id='absent',start=0,end=1)
+  identity=s._validate()[3]
+  s._change('opening','closing',identity)
+  with self.assertRaisesRegex(SlotHeld,'identity changed'):s._change('closing','closed',identity+' ')
+  self.assertEqual(s.state(),'closing')
+
  def test_oversized_slot_identity_rejected_before_decode(self):
   s=self.slot();s.close();db=sqlite3.connect(self.slotpath)
   try:db.execute("UPDATE stream_slot SET phase='opening',identity=?",('x'*2049,));db.commit()
