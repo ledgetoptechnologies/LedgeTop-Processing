@@ -23,6 +23,8 @@ from .viewer_limits import MAX_UPLOAD_BYTES
 
 
 MAX_FORM_BYTES = 64 * 1024
+# The only production routes a held facade serves: pure metadata reads.
+HELD_READ_ROUTE = re.compile(r'/info|/options|/task/[^/]+/(info|output)')
 MAX_PART_HEADERS = 16 * 1024
 MAX_PARTS = 64
 CHUNK = 64 * 1024
@@ -183,8 +185,11 @@ class ViewerFacade:
         if type(production_held) is not bool:
             raise ValueError('production hold must be a boolean')
         self.service, self.token, self.staging_token = service, token, staging_token
-        # Cutover hold: production may read but never mutate until reopened by
-        # restarting without the hold. Staging is unaffected.
+        # Cutover hold: production may only use HELD_READ_ROUTES (pure metadata
+        # reads) until reopened by restarting without the hold. Everything else,
+        # including archive download, which can publish markers, write or restore
+        # the archive, contact an engine and record archive_path, is refused
+        # before any service call. Staging is unaffected.
         self.production_held = production_held
         if temp_dir is not None:
             directory = Path(temp_dir)
@@ -227,6 +232,10 @@ class ViewerFacade:
             allowed_query = {'token', 'line'} if output_route else {'token'}
             if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
                 raise RequestError(400, 'invalid_query')
+            if environment == 'production' and self.production_held and not (
+                    handler.command == 'GET' and HELD_READ_ROUTE.fullmatch(path)):
+                # Fail closed: only the explicit read-only routes pass the hold.
+                raise RequestError(503, 'production_admission_held')
             if handler.command == 'GET':
                 # A download can reconstruct and persist the cached archive;
                 # hold admission until the entire stream is closed.
@@ -241,9 +250,6 @@ class ViewerFacade:
                 else:
                     self._get(handler, path, query, environment)
             elif handler.command == 'POST':
-                if environment == 'production' and self.production_held:
-                    # Before any body read or service call: no production state change.
-                    raise RequestError(503, 'production_admission_held')
                 guarded = (path in ('/task/ledgetop/reserve', '/task/ledgetop/cancel',
                                     '/task/new/init', '/task/cancel', '/task/remove') or
                     re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path))

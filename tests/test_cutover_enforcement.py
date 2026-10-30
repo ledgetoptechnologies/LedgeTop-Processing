@@ -166,6 +166,14 @@ class ProductionHoldTest(unittest.TestCase):
             self.assertEqual(handler.rfile.tell(), 0, path)
         self.assertEqual(self.service.calls, [])
 
+    def test_held_production_download_get_is_refused_before_the_service(self):
+        facade = self.facade(True)
+        handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+        facade.handle(handler)
+        self.assertEqual(handler.status, 503)
+        self.assertIn(b'production_admission_held', handler.wfile.getvalue())
+        self.assertIsNone(self.service.download_stream)
+
     def test_held_production_can_still_read(self):
         facade = self.facade(True)
         handler = MemoryHandler('/info?token=' + TOKEN, method='GET')
