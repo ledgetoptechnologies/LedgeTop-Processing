@@ -1,17 +1,32 @@
 """Read-only census and comparison of a stopped coordinator state directory.
 
 ``census`` walks a stopped volume mounted read-only and records, for every
-entry, its kind, mode, owner, size, whole-second mtime and SHA-256 contents.
-SQLite is opened with ``immutable=1``, so no journal, WAL or shared-memory file
-is created. Paths are identified only by HMAC-SHA256 under a per-run secret key
-read from stdin, so guessable client names such as ``DJI_0001.JPG`` cannot be
-recovered from the output by hashing candidates. Row contents, tokens and file
-names are never printed. Symlinks, special files and hard-linked files are
-rejected (exit 3): their copy and restore semantics are not qualified.
+entry, its kind, mode, owner, size, whole-second mtime and contents. SQLite is
+opened with ``immutable=1``, so no journal, WAL or shared-memory file is
+created. Every client-derived value is keyed by HMAC-SHA256 under a per-run
+secret read from stdin: path identifiers, file contents and table digests. A
+known photo or a guessable name such as ``DJI_0001.JPG`` therefore cannot be
+matched against the output without the key. Only schema-object hashes are
+plain SHA-256, because schema SQL is public source, so an exact expected hash
+can be reviewed. Sizes and row counts are printed in clear. Row contents,
+tokens and names are never printed. Symlinks, special files, hard-linked files
+and unreadable entries are rejected (exit 3): their copy and restore semantics
+are not qualified.
 
-``compare`` diffs two census documents made with the same key. Any difference
-that is not explicitly allowed by path, table or schema-object name fails
-(exit 1).
+``compare`` diffs two census documents made with the same key. Allowances are
+exact and narrow:
+
+- ``--allow-path PATH:FIELD[,FIELD]`` lets only the named fields of an entry
+  that exists on both sides differ. Adding, removing or changing the kind of an
+  entry is never allowed.
+- ``--allow-object TYPE:NAME=SHA256`` lets one schema object change only to
+  that exact expected SQL hash. It is never allowed to disappear.
+- ``--allow-table NAME`` lets the content of a table that exists on **both**
+  sides differ.
+- ``--allow-new-table NAME`` lets a table appear only if it is empty.
+
+Equal censuses show equality at the two moments they were taken. They do not
+prove that nothing was written and reverted in between.
 """
 
 import argparse
@@ -28,13 +43,10 @@ import sys
 
 ACTIVE_JOB_STATUSES = ('queued', 'running', 'held')
 TERMINAL_STAGES = ('succeeded', 'failed', 'cancelled')
-FILE_FIELDS = ('kind', 'mode', 'uid', 'gid', 'mtime', 'bytes', 'sha256')
+FILE_FIELDS = ('kind', 'mode', 'uid', 'gid', 'mtime', 'bytes', 'content')
 DIRECTORY_FIELDS = ('kind', 'mode', 'uid', 'gid', 'mtime')
-SCHEMA_VERSION = 2
-
-
-class Rejected(Exception):
-    pass
+ALLOWABLE_FIELDS = frozenset(FILE_FIELDS) - {'kind'}
+SCHEMA_VERSION = 3
 
 
 def read_key(stream):
@@ -44,25 +56,29 @@ def read_key(stream):
     return bytes.fromhex(text)
 
 
+def _keyed(key, data=b''):
+    return hmac.new(key, data, hashlib.sha256)
+
+
 def path_id(key, relative):
-    return hmac.new(key, relative.encode('utf-8', 'surrogateescape'), hashlib.sha256).hexdigest()
+    return _keyed(key, b'path\0' + relative.encode('utf-8', 'surrogateescape')).hexdigest()
 
 
-def _sha256(path):
-    digest = hashlib.sha256()
+def _content(key, path):
+    digest = _keyed(key, b'content\0')
     with open(path, 'rb') as stream:
         for chunk in iter(lambda: stream.read(1 << 20), b''):
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _entry(path, info):
+def _entry(key, path, info):
     entry = {'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid,
              'mtime': int(info.st_mtime)}
     if stat.S_ISDIR(info.st_mode):
         entry['kind'] = 'directory'
     elif stat.S_ISREG(info.st_mode):
-        entry.update(kind='file', bytes=info.st_size, links=info.st_nlink, sha256=_sha256(path))
+        entry.update(kind='file', bytes=info.st_size, links=info.st_nlink, content=_content(key, path))
     elif stat.S_ISLNK(info.st_mode):
         entry['kind'] = 'symlink'
     else:
@@ -72,7 +88,7 @@ def _entry(path, info):
 
 def tree(root, key):
     root = Path(root)
-    entries = {path_id(key, '.'): dict(_entry(root, root.lstat()), root=True)}
+    entries = {path_id(key, '.'): dict(_entry(key, root, root.lstat()), root=True)}
     errors = []
 
     def failed(error):
@@ -83,7 +99,7 @@ def tree(root, key):
         for name in sorted(names) + sorted(files):
             path = Path(directory) / name
             try:
-                entries[path_id(key, path.relative_to(root).as_posix())] = _entry(path, path.lstat())
+                entries[path_id(key, path.relative_to(root).as_posix())] = _entry(key, path, path.lstat())
             except OSError as error:
                 failed(error)
     values = list(entries.values())
@@ -93,7 +109,7 @@ def tree(root, key):
                 'unreadable': len(errors)}
     canonical = json.dumps(sorted(entries.items()), sort_keys=True, separators=(',', ':')).encode()
     spool = root / 'viewer-spool'
-    summary = {'treeSha256': hashlib.sha256(canonical).hexdigest(), 'entries': len(values),
+    summary = {'treeDigest': _keyed(key, canonical).hexdigest(), 'entries': len(values),
                'regularFiles': sum(e['kind'] == 'file' for e in values),
                'bytes': sum(e.get('bytes', 0) for e in values),
                'incomingPartials': sum(1 for _ in root.rglob('.incoming-*')),
@@ -102,7 +118,7 @@ def tree(root, key):
     return summary, entries
 
 
-def database(path):
+def database(path, key):
     uri = 'file:' + str(path) + '?mode=ro&immutable=1'
     db = sqlite3.connect(uri, uri=True)
     try:
@@ -115,8 +131,8 @@ def database(path):
         for name in tables:
             rows = sorted(repr(tuple(row)) for row in db.execute('SELECT * FROM "%s"' % name.replace('"', '""')))
             counts[name] = len(rows)
-            # Content digest only: detects in-place updates that keep the row count.
-            digests[name] = hashlib.sha256('\n'.join(rows).encode()).hexdigest()
+            # Keyed so that a guessed row cannot be confirmed; detects same-count updates.
+            digests[name] = _keyed(key, b'table\0' + '\n'.join(rows).encode()).hexdigest()
         active = {}
         if 'jobs' in tables:
             marks = ','.join('?' * len(ACTIVE_JOB_STATUSES))
@@ -131,7 +147,7 @@ def database(path):
         if 'coordinator_identity' in tables:
             row = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
             authority = row[0] if row else None
-        return {'quickCheck': check, 'objects': objects, 'rowCounts': counts, 'tableSha256': digests,
+        return {'quickCheck': check, 'objects': objects, 'rowCounts': counts, 'tableDigest': digests,
                 'active': active, 'authorityId': authority,
                 'sidecars': sorted(p.name for p in Path(path).parent.glob(Path(path).name + '-*'))}
     finally:
@@ -142,9 +158,30 @@ def census(root, key, database_name='jobs.sqlite3'):
     summary, entries = tree(root, key)
     document = {'schemaVersion': SCHEMA_VERSION, 'tree': summary, 'entries': entries}
     if (Path(root) / database_name).is_file():
-        document['database'] = database(Path(root) / database_name)
-        document['databaseId'] = path_id(key, database_name)
+        document['database'] = database(Path(root) / database_name, key)
     return document
+
+
+def parse_path_allowances(values, key):
+    allowed = {}
+    for value in values:
+        path, separator, fields = value.rpartition(':')
+        names = set(fields.split(',')) if fields else set()
+        if not separator or not path or not names or not names <= ALLOWABLE_FIELDS:
+            raise SystemExit('--allow-path needs PATH:FIELD[,FIELD] with fields from %s'
+                             % ','.join(sorted(ALLOWABLE_FIELDS)))
+        allowed.setdefault(path_id(key, path), set()).update(names)
+    return allowed
+
+
+def parse_object_allowances(values):
+    allowed = {}
+    for value in values:
+        match = re.fullmatch(r'((?:table|index|view|trigger):[^=]+)=([0-9a-f]{64})', value)
+        if not match:
+            raise SystemExit('--allow-object needs TYPE:NAME=SHA256')
+        allowed[match[1]] = match[2]
+    return allowed
 
 
 def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_objects=(), allow_new_tables=()):
@@ -152,40 +189,47 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
     for document in (before, after):
         if document.get('schemaVersion') != SCHEMA_VERSION:
             raise SystemExit('census schema version %s is not supported' % document.get('schemaVersion'))
-    allowed = {path_id(key, path) for path in allow_paths}
+    path_allowances = parse_path_allowances(allow_paths, key)
+    object_allowances = parse_object_allowances(allow_objects)
     old, new = before['entries'], after['entries']
     differences, allowed_changes = [], 0
     for identifier in sorted(set(old) | set(new)):
         a, b = old.get(identifier), new.get(identifier)
         if a is None or b is None:
-            change, fields = ('added' if a is None else 'removed'), []
-        else:
-            names = FILE_FIELDS if 'file' in (a['kind'], b['kind']) else DIRECTORY_FIELDS
-            fields = [field for field in names if a.get(field) != b.get(field)]
-            if not fields:
-                continue
-            change = 'contentChanged' if 'sha256' in fields or 'bytes' in fields else 'metadataChanged'
-        if identifier in allowed:
+            differences.append({'id': identifier, 'change': 'added' if a is None else 'removed', 'fields': []})
+            continue
+        names = FILE_FIELDS if 'file' in (a['kind'], b['kind']) else DIRECTORY_FIELDS
+        fields = [field for field in names if a.get(field) != b.get(field)]
+        if not fields:
+            continue
+        unallowed = [field for field in fields if field not in path_allowances.get(identifier, ())]
+        if not unallowed:
             allowed_changes += 1
-        else:
-            differences.append({'id': identifier, 'change': change, 'fields': fields})
+            continue
+        change = 'contentChanged' if {'content', 'bytes'} & set(unallowed) else 'metadataChanged'
+        differences.append({'id': identifier, 'change': change, 'fields': unallowed})
     database_differences = []
     da, db = before.get('database'), after.get('database')
     if (da is None) != (db is None):
         database_differences.append({'database': 'presence'})
     elif da is not None:
         for name in sorted(set(da['objects']) | set(db['objects'])):
-            if da['objects'].get(name) != db['objects'].get(name) and name.split(':', 1)[1] not in allow_objects:
+            was, now = da['objects'].get(name), db['objects'].get(name)
+            if was != now and (now is None or object_allowances.get(name) != now):
                 database_differences.append({'object': name})
-        for name in sorted(set(da['tableSha256']) | set(db['tableSha256'])):
-            if name not in da['tableSha256']:
+        for name, expected in sorted(object_allowances.items()):
+            if db['objects'].get(name) != expected:
+                database_differences.append({'object': name, 'change': 'allowanceNotMatched'})
+        for name in sorted(set(da['tableDigest']) | set(db['tableDigest'])):
+            if name not in da['tableDigest']:
                 if name not in allow_new_tables:
                     database_differences.append({'table': name, 'change': 'added'})
-                elif db['rowCounts'][name] and name not in allow_tables:
+                elif db['rowCounts'][name]:
+                    # Never relaxed by --allow-table: a new table must be empty.
                     database_differences.append({'table': name, 'change': 'newTableNotEmpty'})
-            elif name not in db['tableSha256']:
+            elif name not in db['tableDigest']:
                 database_differences.append({'table': name, 'change': 'removed'})
-            elif da['tableSha256'][name] != db['tableSha256'][name] and name not in allow_tables:
+            elif da['tableDigest'][name] != db['tableDigest'][name] and name not in allow_tables:
                 database_differences.append({'table': name, 'change': 'contentChanged'})
         for field in ('quickCheck', 'authorityId', 'active', 'sidecars'):
             if da[field] != db[field]:
@@ -198,7 +242,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
     for item in differences:
         counts[item['change']] = counts.get(item['change'], 0) + 1
     return {'identical': not differences and not database_differences, 'fileDifferences': counts,
-            'allowedFileChanges': allowed_changes, 'files': differences, 'database': database_differences}
+            'allowedFileChanges': allowed_changes, 'files': differences, 'database': database_differences,
+            'scope': 'observed equality at two census times; transient writes are not excluded'}
 
 
 def main(argv=None):

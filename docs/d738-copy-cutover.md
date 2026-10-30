@@ -85,21 +85,39 @@ every artifact, and inspect. Never improvise a workaround.
   - `keygen` writes a fresh per-run secret key, mode `0600`, refusing to
     overwrite an existing file.
   - `census` reads the key on stdin. For **every** entry it records kind, mode,
-    owner, group, whole-second mtime, size and SHA-256 contents. Each entry is
-    identified only by HMAC-SHA256 of its relative path under the run key, so
-    client file names cannot be recovered by hashing guesses such as
-    `DJI_0001.JPG`. It also records:
+    owner, group, whole-second mtime, size and contents. Every client-derived
+    value is keyed with HMAC-SHA256 under the run key:
+    - path identifiers;
+    - file contents;
+    - per-table row digests.
+
+    So neither a guessed name such as `DJI_0001.JPG` nor a known photo or row
+    can be matched against the output. Schema-object hashes stay plain SHA-256,
+    because schema SQL is public source and its exact expected hash must be
+    reviewable. Sizes and row counts are printed in clear. It also records:
     - partial `.incoming-*` uploads and spool entries;
-    - SQLite, opened `immutable=1`: quick_check, a SHA-256 per schema object,
-      per-table row counts and content hashes, active jobs and Viewer tasks,
+    - SQLite, opened `immutable=1`: quick_check, active jobs and Viewer tasks,
       the authority, and any sidecar files.
 
     It **rejects** symlinks, special files, hard-linked files and unreadable
     entries, exiting 3. It never prints names, addresses or row contents.
   - `compare` reads the key on stdin and diffs two census documents entry by
-    entry. Any difference not covered by an explicit `--allow-path`,
-    `--allow-object`, `--allow-table` or `--allow-new-table` fails (exit 1).
-    Differences are reported only as counts and opaque IDs.
+    entry. Any difference not covered by an explicit, narrow allowance fails
+    (exit 1):
+    - `--allow-path PATH:FIELD[,FIELD]`: only the named fields of an entry that
+      exists on both sides may differ. Adding or removing an entry, or changing
+      its kind, is never allowable.
+    - `--allow-object TYPE:NAME=SHA256`: that one schema object may change only
+      to the exact expected SQL hash. The allowance is also an assertion: if the
+      object does not end up at that hash, the comparison fails.
+    - `--allow-table NAME`: the content of a table that exists on **both** sides
+      may change.
+    - `--allow-new-table NAME`: a table may appear, but only if empty. No other
+      allowance relaxes that.
+
+    Differences are reported only as counts and opaque IDs. Every result states
+    that equal censuses show equality at two moments, not that no transient
+    write occurred in between.
 - [ops/netns_sockets.py](../ops/netns_sockets.py): run inside a container with
   `docker exec -i`. It counts TCP listeners and peers per local port in that
   container's own network namespace, which covers bridge, loopback and
@@ -355,24 +373,31 @@ Assumptions:
 docker stop -t 3600 "$CAND"; docker inspect -f '{{.State.ExitCode}}' "$CAND"     # must be 0
 census "$NEW_VOL" > "$E/census-candidate-isolated.json"
 same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" \
-  --allow-path . --allow-path jobs.sqlite3 \
-  --allow-object viewer_tasks --allow-object viewer_reservations --allow-object viewer_option_evidence \
+  --allow-path .:mtime --allow-path jobs.sqlite3:bytes,content,mtime \
   --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence \
-  $(cat "$E/startup-allowlist.args")       # from the reviewed rehearsal (U9); never edited during the run
+  $(cat "$E/startup-allowlist.args")       # reviewed U9 output: exact TYPE:NAME=SHA256 objects; never edited in the run
 ```
 
 The allowances are deliberately narrow:
 
-- **Files:** only the volume root's metadata and the database file's bytes may
-  change. Every other file, including every `viewer-tasks` photo and archive,
-  must match in contents and metadata. The database is compared table by table
-  instead.
+- **Files:**
+  - The volume root may change its **mtime only**.
+  - The database file may change only its **size, contents and mtime**. Its
+    mode, owner and group must stay the same, and it may not disappear.
+  - Every other entry, including every `viewer-tasks` photo and archive, must
+    match in contents and every metadata field.
 - **Database:**
-  - The schema may change only for the three migrated objects.
-  - The two new tables must be **empty**; `--allow-new-table` does not permit
-    rows.
-  - Every existing table must keep an identical content digest. This includes
-    `viewer_tasks`: its rows must not change, although its schema may.
+  - Every schema-object allowance names the **exact** expected SQL hash, as
+    `TYPE:NAME=SHA256`. This covers `table:viewer_tasks` after the
+    `ALTER TABLE`, the two new tables, and their automatic indexes.
+  - These come from `startup-allowlist.args`, the reviewed output of the U9
+    rehearsal, because SQLite rewrites the stored SQL on `ALTER TABLE`.
+  - Any other change to those objects, or to any other object, fails.
+  - The two new tables must be **empty**; nothing relaxes that.
+  - Every existing table must keep an identical keyed row digest. Whole-row
+    digests change when a column is added, so the gate passes only because
+    `viewer_tasks` is empty on the live volume (step 1). A migration over
+    non-empty rows fails conservatively and needs its own review.
   - quick_check, authority, active counts and sidecars must be unchanged.
 
 **The startup allowlist (`startup-allowlist.args`) does not exist yet.** It
@@ -384,9 +409,11 @@ then this gate cannot pass (U9).
 **Stop condition:** `compare` exits non-zero. Any unallowed difference means a
 client reached the candidate, or startup does more than was reviewed.
 
-This gate detects any unallowed write to the copy that is still present when
-the candidate stops. It does not prevent writes (U1, U2), and its limits are
-listed under U6.
+This gate detects any unallowed difference that is still present when the
+candidate stops. Equal censuses show equality at two moments, **not** the
+absence of transient writes: something written and then reverted in between is
+invisible. It does not prevent writes (U1, U2), and its limits are listed under
+U6.
 
 ## Step 7 — promote
 
@@ -465,7 +492,7 @@ check, an observation or a snapshot does not resolve it.
 | U3 | **Requests during the isolated phase are only snapshotted.** | `netns_sockets.py` gives a point-in-time snapshot. It now fails on a missing `tcp`/`tcp6` table, but it still sees nothing that connects after it runs. | Combine U1 with the step 6 per-file census gate (U6). This detects leftover writes; it does not prevent them. |
 | U4 | **The old coordinator is not fenced against a Docker administrator.** | `--restart=no` and network disconnection stop only automatic restarts. Anyone in the `docker` group can reconnect and start it while the candidate holds the same authority. | A fence that the coordinator itself enforces: refuse to start when another instance holds the authority, or an external authority lease. No such mechanism exists in d738 or the release. |
 | U5 | **No production admission hold after promotion, except at Viewer.** | Step 7 recreates the container with published ports, exposing it at once to production and staging alike. | Options, each a decision for Beau: start the promoted container with a production Viewer token nobody holds, a credential configuration change; or a qualified in-process admission mode that separates staging from production. Neither exists or is approved. |
-| U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically. `state_census.py` now compares every entry's contents and metadata under keyed path IDs, rejects unsupported file types, and allows only named paths, schema objects and empty new tables (steps 3 and 6). Remaining limits: mtime is compared at whole-second granularity; xattrs, ACLs, file capabilities and ctime are not compared; the database file is compared per table, not byte for byte; it detects writes that are still present at census time on a stopped volume, but does not prevent them (U1, U2); and it has never run against the real volume or the a042 image. | Independent review of the census, then a live read-only run in the cutover window. The census can also be rehearsed on a synthetic copy of the real volume layout. |
+| U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically (steps 3 and 6). Every entry's contents and metadata are compared under keyed IDs. Allowances are scoped to named fields, exact schema hashes and empty new tables. Remaining limits:<ul><li>equal censuses show **observed** equality at two moments, not the absence of transient writes;</li><li>mtime is compared at whole-second granularity;</li><li>xattrs, ACLs, file capabilities and ctime are not compared;</li><li>the database file is compared per table, not byte for byte;</li><li>sizes and row counts are printed in clear;</li><li>a migration over a non-empty table fails conservatively;</li><li>the exact schema hashes depend on the U9 rehearsal;</li><li>it has never run against the real volume or the a042 image.</li></ul> | Independent review of the census. The U9 rehearsal to produce the exact schema allowances. A live read-only run in the cutover window. Transient writes need prevention (U1, U2), which detection cannot provide. |
 | U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
 | U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |
 | U9 | **Startup allowlist.** | The step 6 gate depends on a list of tables that startup writes, and that list does not exist. | Rehearse `IMG_NEW` isolated on synthetic state, diff the censuses, then review the result. |

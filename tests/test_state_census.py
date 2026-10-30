@@ -99,6 +99,20 @@ class CensusTest(CensusFixture):
         _, other_key = _run(['census', str(self.root)], key=bytes(32).hex())
         self.assertFalse(set(document['entries']) & set(other_key['entries']))
 
+    def test_content_and_table_digests_cannot_be_matched_without_key(self):
+        _, document = self.census()
+        text = json.dumps(document)
+        known = hashlib.sha256(b'synthetic photo bytes').hexdigest()
+        self.assertNotIn(known, text)
+        rows = '\n'.join(sorted(repr(row) for row in [(1, 'succeeded'), (2, 'failed')]))
+        self.assertNotIn(hashlib.sha256(rows.encode()).hexdigest(), text)
+        _, other_key = _run(['census', str(self.root)], key=bytes(32).hex())
+        contents = lambda d: {e.get('content') for e in d['entries'].values()} - {None}
+        self.assertFalse(contents(document) & contents(other_key))
+        self.assertNotEqual(document['database']['tableDigest'], other_key['database']['tableDigest'])
+        # Schema SQL is public source, so its hashes stay plain and reviewable.
+        self.assertEqual(document['database']['objects'], other_key['database']['objects'])
+
     def test_rejects_unsupported_file_types(self):
         cases = []
         link = self.root / 'viewer-tasks' / 'link'
@@ -147,7 +161,7 @@ class CompareTest(CensusFixture):
         status, result = self.compare(before, self.census()[1])
         self.assertEqual(status, 1)
         self.assertEqual(result['fileDifferences'], {'contentChanged': 1})
-        self.assertEqual(result['files'][0]['fields'], ['sha256'])
+        self.assertEqual(result['files'][0]['fields'], ['content'])
         self.assertNotIn('DJI', json.dumps(result))
 
     def test_detects_metadata_added_and_removed(self):
@@ -164,45 +178,124 @@ class CompareTest(CensusFixture):
         self.assertEqual(result['fileDifferences']['removed'], 1)
         self.assertEqual(result['fileDifferences']['added'], 1)
 
-    def test_allowances_are_explicit_and_scoped(self):
-        before = self.census()[1]
+    DB_FIELDS = 'jobs.sqlite3:bytes,content,mtime'
+    MIGRATED = "CREATE TABLE viewer_tasks (uuid TEXT, stage TEXT, removed INTEGER, evidence INTEGER NOT NULL DEFAULT 0)"
+    NEW_TABLE = 'CREATE TABLE viewer_reservations (uuid TEXT)'
+
+    def migrate(self, *extra):
         db = sqlite3.connect(self.root / 'jobs.sqlite3')
         db.execute('ALTER TABLE viewer_tasks ADD COLUMN evidence INTEGER NOT NULL DEFAULT 0')
-        db.execute('CREATE TABLE viewer_reservations (uuid TEXT)')
+        db.execute(self.NEW_TABLE)
+        for statement in extra:
+            db.execute(statement)
         db.commit()
         db.close()
-        after = self.census()[1]
-        status, result = self.compare(before, after)
-        self.assertEqual(status, 1)
-        allow = ['--allow-path', '.', '--allow-path', 'jobs.sqlite3', '--allow-object', 'viewer_tasks',
-                 '--allow-object', 'viewer_reservations', '--allow-table', 'viewer_tasks',
-                 '--allow-new-table', 'viewer_reservations']
-        status, result = self.compare(before, after, *allow)
-        self.assertEqual(status, 0, result)
+
+    def allowances(self):
+        digest = lambda sql: hashlib.sha256(sql.encode()).hexdigest()
+        return ['--allow-path', '.:mtime', '--allow-path', self.DB_FIELDS,
+                '--allow-object', 'table:viewer_tasks=' + digest(self.MIGRATED),
+                '--allow-object', 'table:viewer_reservations=' + digest(self.NEW_TABLE),
+                '--allow-new-table', 'viewer_reservations']
+
+    def empty_viewer_tasks(self):
         db = sqlite3.connect(self.root / 'jobs.sqlite3')
-        db.execute("INSERT INTO viewer_reservations VALUES ('x')")
-        db.execute("UPDATE jobs SET status='queued' WHERE status='failed'")
+        db.execute('DELETE FROM viewer_tasks')
         db.commit()
         db.close()
-        status, result = self.compare(before, self.census()[1], *allow)
+
+    def test_exact_migration_passes_only_with_exact_allowances(self):
+        self.empty_viewer_tasks()  # live d738 has no Viewer tasks
+        before = self.census()[1]
+        self.migrate()
+        after = self.census()[1]
+        self.assertEqual(self.compare(before, after)[0], 1)
+        status, result = self.compare(before, after, *self.allowances())
+        self.assertEqual(status, 0, result)
+        self.assertIn('transient writes are not excluded', result['scope'])
+
+    def test_path_allowance_names_fields_and_never_covers_add_remove_or_other_fields(self):
+        with self.assertRaises(SystemExit):
+            self.compare(self.census()[1], self.census()[1], '--allow-path', 'jobs.sqlite3')
+        with self.assertRaises(SystemExit):
+            self.compare(self.census()[1], self.census()[1], '--allow-path', 'jobs.sqlite3:kind')
+        database = self.root / 'jobs.sqlite3'
+        if os.name == 'posix':
+            database.chmod(0o644)
+            self.root.chmod(0o755)
+        before = self.census()[1]
+        if os.name == 'posix':
+            database.chmod(0o640)
+            self.root.chmod(0o700)
+            status, result = self.compare(before, self.census()[1], '--allow-path', self.DB_FIELDS,
+                                          '--allow-path', '.:mtime')
+            self.assertEqual(status, 1)
+            self.assertEqual(sorted(f for item in result['files'] for f in item['fields']), ['mode', 'mode'])
+            database.chmod(0o644)
+            self.root.chmod(0o755)
+        moved = self.base / 'moved.sqlite3'
+        database.rename(moved)
+        status, result = self.compare(before, self.census()[1], '--allow-path', self.DB_FIELDS)
+        self.assertEqual(result['fileDifferences'].get('removed'), 1)
+        moved.rename(database)
+        (self.root / 'viewer-tasks' / 'task-1' / 'DJI_0002.JPG').write_bytes(b'changed')
+        status, result = self.compare(before, self.census()[1], '--allow-path', self.DB_FIELDS,
+                                      '--allow-path', '.:mtime')
+        self.assertEqual(status, 1)
+        self.assertEqual(result['fileDifferences'], {'contentChanged': 1})
+
+    def test_object_allowance_requires_the_exact_expected_schema(self):
+        before = self.census()[1]
+        db = sqlite3.connect(self.root / 'jobs.sqlite3')
+        db.execute('ALTER TABLE viewer_tasks ADD COLUMN something_else TEXT')
+        db.execute(self.NEW_TABLE)
+        db.commit()
+        db.close()
+        status, result = self.compare(before, self.census()[1], *self.allowances())
+        self.assertEqual(status, 1)
+        objects = [item for item in result['database'] if item.get('object') == 'table:viewer_tasks']
+        self.assertTrue(objects)
+        with self.assertRaises(SystemExit):
+            self.compare(before, before, '--allow-object', 'viewer_tasks')
+
+    def test_object_allowance_is_also_an_assertion(self):
+        before = self.census()[1]
+        status, result = self.compare(before, before, *self.allowances())
+        self.assertEqual(status, 1)
+        self.assertIn({'object': 'table:viewer_tasks', 'change': 'allowanceNotMatched'}, result['database'])
+
+    def test_new_table_must_be_empty_even_with_allow_table(self):
+        before = self.census()[1]
+        self.migrate("INSERT INTO viewer_reservations VALUES ('x')", "UPDATE jobs SET status='queued' WHERE status='failed'")
+        status, result = self.compare(before, self.census()[1], *self.allowances(),
+                                      '--allow-table', 'viewer_reservations')
         self.assertEqual(status, 1)
         changes = {item.get('table'): item.get('change') for item in result['database']}
         self.assertEqual(changes['viewer_reservations'], 'newTableNotEmpty')
         self.assertEqual(changes['jobs'], 'contentChanged')
 
-    def test_allowed_path_does_not_hide_other_files(self):
+    def test_existing_table_rows_must_not_change(self):
+        self.empty_viewer_tasks()
         before = self.census()[1]
-        (self.root / 'viewer-tasks' / 'task-1' / 'DJI_0002.JPG').write_bytes(b'changed')
-        status, result = self.compare(before, self.census()[1], '--allow-path', 'jobs.sqlite3',
-                                      '--allow-path', '.')
+        self.migrate("INSERT INTO viewer_tasks VALUES ('b','uploading',0,0)")
+        status, result = self.compare(before, self.census()[1], *self.allowances())
         self.assertEqual(status, 1)
-        self.assertEqual(result['fileDifferences'], {'contentChanged': 1})
+        self.assertIn({'table': 'viewer_tasks', 'change': 'contentChanged'}, result['database'])
+
+    def test_migrating_a_nonempty_table_fails_conservatively(self):
+        # Whole-row digests change when a column is added, so a migration over
+        # existing rows is never silently accepted; it needs its own review.
+        before = self.census()[1]
+        self.migrate()
+        status, result = self.compare(before, self.census()[1], *self.allowances())
+        self.assertEqual(status, 1)
+        self.assertIn({'table': 'viewer_tasks', 'change': 'contentChanged'}, result['database'])
 
     def test_refuses_wrong_key_and_version(self):
         with self.assertRaises(SystemExit):
             _run(['census', str(self.root)], key='not-a-key')
         before = self.census()[1]
-        old = dict(before, schemaVersion=1)
+        old = dict(before, schemaVersion=2)
         with self.assertRaises(SystemExit):
             self.compare(old, before)
 
