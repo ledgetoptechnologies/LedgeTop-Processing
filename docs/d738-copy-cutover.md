@@ -1,10 +1,22 @@
 # d738 copy-on-cutover procedure (draft, not executed, BLOCKED)
 
-> **Status: blocked.** Fourteen review findings are open, listed under
+> **Status: blocked.** Fourteen review findings are listed under
 > [Unresolved blockers](#unresolved-blockers). Each one is a mandatory stop
-> condition until real enforcement **and** verification exist. Nothing in this
+> condition until real enforcement **and** verification exist. U6 now has an
+> implemented, synthetic-tested detector, but no live verification. Nothing in this
 > document proves that the candidate is unreachable, that the old coordinator is
 > fenced, or that rollback is lossless.
+>
+> **Still open, with no enforcement mechanism:**
+>
+> - **Authority:** U4. Two coordinators can hold the same authority. Nothing
+>   stops a Docker administrator from starting d738 again.
+> - **Ingress:** U1, U2, U3 and U5:
+>   - the candidate is reachable from the host;
+>   - other writers are not prevented before promotion;
+>   - socket checks are only snapshots;
+>   - after promotion, production is held only at Viewer.
+> - **Writers and volume ownership:** U7 and U8.
 
 This procedure would replace the live cluster coordinator with a frozen
 release image. The live coordinator is:
@@ -68,17 +80,26 @@ every artifact, and inspect. Never improvise a workaround.
 
 ## Helpers (all read-only, all in this PR)
 
-- [ops/state_census.py](../ops/state_census.py): a census of a **stopped**
-  state directory. It records:
-  - a tree hash covering modes, owners, file bytes, hard-link counts and
-    symlink targets;
-  - counts of symlinks and other non-regular files;
-  - partial `.incoming-*` uploads and spool entries;
-  - SQLite (opened `immutable=1`): quick_check, schema hash, per-table row
-    counts and content hashes, active jobs and Viewer tasks, the authority, and
-    any sidecar files.
+- [ops/state_census.py](../ops/state_census.py) takes a census of a
+  **stopped** state directory, and compares two such censuses.
+  - `keygen` writes a fresh per-run secret key, mode `0600`, refusing to
+    overwrite an existing file.
+  - `census` reads the key on stdin. For **every** entry it records kind, mode,
+    owner, group, whole-second mtime, size and SHA-256 contents. Each entry is
+    identified only by HMAC-SHA256 of its relative path under the run key, so
+    client file names cannot be recovered by hashing guesses such as
+    `DJI_0001.JPG`. It also records:
+    - partial `.incoming-*` uploads and spool entries;
+    - SQLite, opened `immutable=1`: quick_check, a SHA-256 per schema object,
+      per-table row counts and content hashes, active jobs and Viewer tasks,
+      the authority, and any sidecar files.
 
-  It prints no names, addresses or row contents.
+    It **rejects** symlinks, special files, hard-linked files and unreadable
+    entries, exiting 3. It never prints names, addresses or row contents.
+  - `compare` reads the key on stdin and diffs two census documents entry by
+    entry. Any difference not covered by an explicit `--allow-path`,
+    `--allow-object`, `--allow-table` or `--allow-new-table` fails (exit 1).
+    Differences are reported only as counts and opaque IDs.
 - [ops/netns_sockets.py](../ops/netns_sockets.py): run inside a container with
   `docker exec -i`. It counts TCP listeners and peers per local port in that
   container's own network namespace, which covers bridge, loopback and
@@ -204,8 +225,11 @@ VERIFY_VOL=ltp-state-verify-$RUN
 for v in "$NEW_VOL" "$VERIFY_VOL"; do
   if docker volume inspect "$v" >/dev/null 2>&1; then echo "volume exists: $v"; exit 1; fi
 done
-census() { docker run --rm --network=none --read-only --user 10001:10001 --entrypoint python \
-  -v "$1:/src:ro" -v "$E/state_census.py:/c.py:ro" "$IMG_OLD" -B /c.py /src; }
+python3 "$E/state_census.py" keygen "$E/census.key"      # one key for every census in this run
+# Key goes in on stdin: never in argv, the environment or a mounted file. Exit 3 (rejected type) aborts under set -e.
+census() { docker run --rm -i --network=none --read-only --user 10001:10001 --entrypoint python \
+  -v "$1:/src:ro" -v "$E/state_census.py:/c.py:ro" "$IMG_OLD" -B /c.py census /src < "$E/census.key"; }
+same() { python3 "$E/state_census.py" compare "$@" < "$E/census.key" > "$E/compare-$(date -u +%s%N).json"; }
 census "$VOL" > "$E/census-original.json"
 # archive streamed to a host file: no pipeline, so docker's exit status is the archive's
 docker run --rm --network=none --read-only --user 10001:10001 -v "$VOL:/src:ro" --entrypoint tar \
@@ -214,30 +238,34 @@ python3 -c 'import os,sys;[os.fsync(os.open(p,os.O_RDONLY)) for p in sys.argv[1:
 sha256sum "$E/state-original.tar" > "$E/state-original.tar.sha256"
 for v in "$VERIFY_VOL" "$NEW_VOL"; do
   docker volume create --label ltp.cutover="$RUN" "$v" >/dev/null
-  test "$(census "$v" | python3 -c 'import json,sys;print(json.load(sys.stdin)["tree"]["entries"])')" = 0
+  test "$(census "$v" | python3 -c 'import json,sys;print(json.load(sys.stdin)["tree"]["entries"])')" = 1   # root only
   sha256sum -c "$E/state-original.tar.sha256"
   docker run --rm -i --network=none --user 0:0 -v "$v:/dst" --entrypoint tar "$IMG_OLD" \
     --numeric-owner --same-owner -C /dst -xpf - < "$E/state-original.tar"
   census "$v" > "$E/census-$v.json"
 done
 census "$VOL" > "$E/census-original-after.json"
+for c in "census-$VERIFY_VOL" "census-$NEW_VOL" census-original-after; do
+  same "$E/census-original.json" "$E/$c.json"            # no allowances: every file, every field
+done
 ```
 
-**All four censuses** (original, verify, copy, original after) must be
-identical in every field, including `tree.root`. Extraction restores the
-volume root's mode and owner. They must also show:
+`compare` must exit 0 **with no allowances** for the verification volume, the
+copy and the original-after census. That means every regular file's contents,
+mode, owner, group, size and mtime match, and so does every directory's
+metadata, including the volume root. The original census must also show:
 
 - `quickCheck` is `ok`;
 - `active.jobs` is 0 and `active.viewerTasks` is 0;
-- `incomingPartials`, `spoolEntries`, `symlinks`, `other` and `hardlinked` are
-  all 0;
+- `incomingPartials` and `spoolEntries` are 0;
+- every `rejected` counter is 0;
 - `sidecars` is empty.
 
 **Stop conditions:**
 
-- Any difference between the censuses.
-- Any non-regular file. Links and special files are rejected outright, not
-  handled.
+- Any `compare` failure.
+- `census` exits 3. Symlinks, special files, hard links and unreadable entries
+  are rejected outright, not handled.
 
 The identical before/after censuses of the original prove that copying never
 wrote to it. This census is also the state-level reconciliation of R1, R5 and
@@ -321,40 +349,51 @@ Assumptions:
 - The reference TLS listener is only checked for being alive, through
   `/healthz`.
 
-## Step 6 — promotion gate: census comparison (not lossless; U6)
+## Step 6 — promotion gate: per-file census comparison
 
 ```sh
 docker stop -t 3600 "$CAND"; docker inspect -f '{{.State.ExitCode}}' "$CAND"     # must be 0
 census "$NEW_VOL" > "$E/census-candidate-isolated.json"
+same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" \
+  --allow-path . --allow-path jobs.sqlite3 \
+  --allow-object viewer_tasks --allow-object viewer_reservations --allow-object viewer_option_evidence \
+  --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence \
+  $(cat "$E/startup-allowlist.args")       # from the reviewed rehearsal (U9); never edited during the run
 ```
 
-Compare against `census-$NEW_VOL.json`:
+The allowances are deliberately narrow:
 
-- Every table present before has an **identical `tableSha256`**, except tables
-  on an explicit startup allowlist.
-- New tables are exactly `viewer_reservations` and `viewer_option_evidence`,
-  plus any allowlisted startup tables. Both new tables have zero rows.
-- `active` is still all zeros, and the tree has no new partial uploads, spool
-  entries, links or special files.
-- The candidate's only `viewer-tasks` changes are allowlisted.
+- **Files:** only the volume root's metadata and the database file's bytes may
+  change. Every other file, including every `viewer-tasks` photo and archive,
+  must match in contents and metadata. The database is compared table by table
+  instead.
+- **Database:**
+  - The schema may change only for the three migrated objects.
+  - The two new tables must be **empty**; `--allow-new-table` does not permit
+    rows.
+  - Every existing table must keep an identical content digest. This includes
+    `viewer_tasks`: its rows must not change, although its schema may.
+  - quick_check, authority, active counts and sidecars must be unchanged.
 
-**The startup allowlist does not exist yet.** It must come from a rehearsal:
-start `IMG_NEW` isolated on a synthetic copy of this volume shape, then diff the
-before/after censuses. Example: reference recovery startup records. Until that
-allowlist is reviewed, this gate cannot pass, and the gap is a blocker.
+**The startup allowlist (`startup-allowlist.args`) does not exist yet.** It
+must come from a reviewed rehearsal: start `IMG_NEW` isolated on a synthetic
+copy of this volume shape, then run `compare` with no startup allowances to
+list what its startup writes (for example reference recovery records). Until
+then this gate cannot pass (U9).
 
-**Stop condition:** any difference not on the allowlist. Any such difference
-means a client reached the candidate, or the startup does more than reviewed.
+**Stop condition:** `compare` exits non-zero. Any unallowed difference means a
+client reached the candidate, or startup does more than was reviewed.
 
-This gate compares database digests and a few file counters. It does **not**
-compare every regular file's contents outside the database, so it cannot
-establish a lossless rollback (blocker U6).
+This gate detects any unallowed write to the copy that is still present when
+the candidate stops. It does not prevent writes (U1, U2), and its limits are
+listed under U6.
 
 ## Step 7 — promote
 
 ```sh
 docker inspect -f '{{.State.Status}} {{.HostConfig.RestartPolicy.Name}} {{len .NetworkSettings.Networks}}' "$OLD"   # exited no 0
-census "$NEW_VOL" | cmp - "$E/census-candidate-isolated.json"    # unchanged since the gate
+census "$NEW_VOL" > "$E/census-before-promotion.json"
+same "$E/census-candidate-isolated.json" "$E/census-before-promotion.json"   # unchanged since the gate, no allowances
 docker rm "$CAND"; docker network rm "$CAND_NET"; shred -u "$E/env-candidate"
 python3 "$E/coordinator_container_spec.py" --container "$E/old-inspect.json" \
   --old-image "$E/old-image.json" --new-image "$E/new-image.json" --mode promoted \
@@ -384,15 +423,14 @@ production as well as staging. The only production hold is at Viewer
   original aliases), restore its restart policy, and `docker start "$OLD"`.
   `census-original-after.json` shows the original volume was unchanged when
   copied. Anything written to `NEW_VOL` before promotion is **not** carried
-  back. Until U1, U2 and U6 are resolved, that loss cannot be ruled out; treat
-  any unexplained difference as a hold.
+  back. Before rolling back, stop the candidate, take a census of `NEW_VOL`,
+  and `compare` it to `census-$NEW_VOL.json` with the step 6 allowances. A
+  failure means something was written that rollback would discard: **hold**.
 - **After promotion, if `NEW_VOL` holds nothing beyond `census-candidate-isolated.json`:**
   1. stop the promoted container (exit 0);
-  2. take a census and confirm it is unchanged;
-  3. roll back as before.
-
-  Because of U6, "unchanged" covers database digests and counters only, not
-  every file's contents.
+  2. take a census and `compare` it to `census-candidate-isolated.json`, with
+     no allowances;
+  3. roll back only if `compare` exits 0; otherwise hold.
 - **After promotion, if anything was admitted (including a staging task):**
   this is a **hold, not an automatic rollback**.
   1. Stop admitting work; the coordinator has no in-process fence, so this is
@@ -424,10 +462,10 @@ check, an observation or a snapshot does not resolve it.
 |---|---|---|---|
 | U1 | **The candidate is not isolated from the host.** | The dedicated bridge is not `--internal`, and the host and every host process can reach the candidate's bridge IP. "No published port" and "one network member" are observations, not isolation. | Run the candidate with `--network none`, leaving only loopback in its namespace, for the census-gated phase. Engine-dependent checks (`/options`) then move after promotion. This must be shown to boot and must be verified by an independent probe. |
 | U2 | **Other writers before promotion are not prevented.** | Checking published ports and network membership neither stops a host process, nor an admin, nor a later-attached container from writing. | U1's `--network none`, plus a volume-level guard: no container except the candidate may mount `NEW_VOL`. That needs enforcement, not inspection. |
-| U3 | **Requests during the isolated phase are only snapshotted.** | `netns_sockets.py` gives a point-in-time snapshot. It now fails on a missing `tcp`/`tcp6` table, but it still sees nothing that connects after it runs. | Combine U1 with the step 6 census, and a resolved U6. |
+| U3 | **Requests during the isolated phase are only snapshotted.** | `netns_sockets.py` gives a point-in-time snapshot. It now fails on a missing `tcp`/`tcp6` table, but it still sees nothing that connects after it runs. | Combine U1 with the step 6 per-file census gate (U6). This detects leftover writes; it does not prevent them. |
 | U4 | **The old coordinator is not fenced against a Docker administrator.** | `--restart=no` and network disconnection stop only automatic restarts. Anyone in the `docker` group can reconnect and start it while the candidate holds the same authority. | A fence that the coordinator itself enforces: refuse to start when another instance holds the authority, or an external authority lease. No such mechanism exists in d738 or the release. |
 | U5 | **No production admission hold after promotion, except at Viewer.** | Step 7 recreates the container with published ports, exposing it at once to production and staging alike. | Options, each a decision for Beau: start the promoted container with a production Viewer token nobody holds, a credential configuration change; or a qualified in-process admission mode that separates staging from production. Neither exists or is approved. |
-| U6 | **Rollback is not proven lossless.** | Step 6 compares database digests and limited file counts, not every regular file's contents, because the migrated database makes the aggregate `treeSha256` differ. | Extend the census with per-file content hashes, then require every non-database file to be identical before and after the isolated run. Not implemented. |
+| U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically. `state_census.py` now compares every entry's contents and metadata under keyed path IDs, rejects unsupported file types, and allows only named paths, schema objects and empty new tables (steps 3 and 6). Remaining limits: mtime is compared at whole-second granularity; xattrs, ACLs, file capabilities and ctime are not compared; the database file is compared per table, not byte for byte; it detects writes that are still present at census time on a stopped volume, but does not prevent them (U1, U2); and it has never run against the real volume or the a042 image. | Independent review of the census, then a live read-only run in the cutover window. The census can also be rehearsed on a synthetic copy of the real volume layout. |
 | U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
 | U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |
 | U9 | **Startup allowlist.** | The step 6 gate depends on a list of tables that startup writes, and that list does not exist. | Rehearse `IMG_NEW` isolated on synthetic state, diff the censuses, then review the result. |
