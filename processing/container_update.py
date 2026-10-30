@@ -178,7 +178,7 @@ class ComposeNode:
         seen = set()
         for row in rows:
             parts = row.strip().split(None, 1)
-            if len(parts) != 2 or not parts[0].isdigit():
+            if len(parts) != 2 or not re.fullmatch(r'[0-9]{1,10}',parts[0]):
                 return False
             if parts[0] in seen or int(parts[0]) <= 0:
                 return False
