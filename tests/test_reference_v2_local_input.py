@@ -150,6 +150,27 @@ with NodeGate('synthetic-engine') as g:
     engine_id=engine,node_id='main',origin=origin,authority_id=authority,generation=1,worker_id='worker',operation_key=key)
    self.assertEqual(result['state'],'node_and_input_held')
 
+ def test_initialize_lost_response_never_repeats(self):
+  from processing.node_gate import NodeGate
+  from processing.reference_v2_node_preflight import retain_node_for_verified_input
+  from processing.reference_v2_init_boundary import initialize_once,InitHeld
+  self.setup_input(b'abc');self.run_input(io.BytesIO(b'abc'));self.run_input(io.BytesIO(b''))
+  authority=str(uuid.uuid4());key=b'k'*32;engineid='synthetic-engine';origin='https://coordinator.example'
+  shared=dict(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,
+   engine_id=engineid,node_id='main',origin=origin,authority_id=authority,generation=1,worker_id='worker',operation_key=key)
+  class Lost:
+   calls=0
+   def initialize(self,task):self.calls+=1;raise OSError('response lost')
+  engine=Lost();db=sqlite3.connect(self.root/'init.sqlite');self.addCleanup(db.close)
+  with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
+   with NodeGate(engineid) as gate:gate.provision('main',origin,authority)
+   retain_node_for_verified_input(**shared)
+   with self.assertRaises(OSError):initialize_once(enabled=True,db=db,engine=engine,**shared)
+   with self.assertRaisesRegex(InitHeld,'already attempted'):initialize_once(enabled=True,db=db,engine=engine,**shared)
+   self.assertEqual(engine.calls,1)
+   with NodeGate(engineid) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
+   with self.ledger._transaction() as sd:self.assertIsNotNone(sd.execute("SELECT 1 FROM input_write_holds WHERE reservation='r1'").fetchone())
+
  def test_insufficient_remaining_blocks_second_file(self):
   from processing.scratch_policy import PolicyConflict
   self.setup_input(b'abc',second=b'defg');self.run_input(io.BytesIO(b'abc'))
