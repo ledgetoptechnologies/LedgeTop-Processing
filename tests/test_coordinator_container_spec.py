@@ -30,7 +30,7 @@ NEW = {'Id': 'sha256:' + 'b' * 64, 'Config': IMAGE_CONFIG}
 
 
 def derive(container=CONTAINER, new=NEW, **kwargs):
-    options = dict(mode='isolated', volume='state-copy', name='candidate', network='ltp-candidate')
+    options = dict(mode='isolated', volume='state-copy', name='candidate', network='none')
     options.update(kwargs)
     return spec.derive(container, OLD, new, **options)
 
@@ -39,7 +39,7 @@ class ContainerSpecTest(unittest.TestCase):
     def test_isolated_has_no_ports_and_no_restart(self):
         argv = derive()['argv']
         self.assertNotIn('--publish', argv)
-        self.assertEqual(argv[argv.index('--network') + 1], 'ltp-candidate')
+        self.assertEqual(argv[argv.index('--network') + 1], 'none')
         self.assertEqual(argv[argv.index('--restart') + 1], 'no')
         self.assertIn('type=volume,source=state-copy,destination=/state', argv)
         self.assertEqual(argv[-1], NEW['Id'])
@@ -53,9 +53,32 @@ class ContainerSpecTest(unittest.TestCase):
         self.assertEqual(argv[argv.index('--network') + 1], 'ltp')
         self.assertEqual(argv[argv.index('--restart') + 1], 'unless-stopped')
 
-    def test_isolated_requires_dedicated_network(self):
+    def test_isolated_requires_network_none(self):
+        for network in (None, 'ltp-candidate', 'bridge'):
+            with self.assertRaises(spec.SpecError, msg=network):
+                derive(network=network)
+
+    def test_lease_mount_and_production_hold(self):
+        result = derive(mode='promoted', network=None, lease_dir='/srv/ltp-lease', production_admission='held')
+        argv = result['argv']
+        self.assertIn('type=bind,source=/srv/ltp-lease,destination=/run/ledgetop-authority-lease', argv)
+        self.assertIn('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease', result['envFile'])
+        self.assertIn('PROCESSING_VIEWER_PRODUCTION_ADMISSION=held', result['envFile'])
+        for bad in ('relative', '/a,b', '/a=b'):
+            with self.assertRaises(spec.SpecError):
+                derive(lease_dir=bad)
         with self.assertRaises(spec.SpecError):
-            derive(network=None)
+            derive(production_admission='closed')
+        container = copy.deepcopy(CONTAINER)
+        container['Config']['Env'].append('PROCESSING_VIEWER_PRODUCTION_ADMISSION=open')
+        with self.assertRaises(spec.SpecError):
+            derive(container, production_admission='held')
+
+    def test_compose_source_needs_explicit_acceptance_and_labels_are_not_carried(self):
+        container = copy.deepcopy(CONTAINER)
+        container['Config']['Labels'] = {'com.docker.compose.project': 'p'}
+        argv = derive(container, accept_compose_source=True)['argv']
+        self.assertFalse(any('com.docker.compose' in item for item in argv))
 
     def test_refuses_unreviewed_host_config(self):
         for key, value in (('Privileged', True), ('PidMode', 'host'), ('Devices', [{'PathOnHost': '/dev/x'}]),
@@ -92,7 +115,7 @@ class ContainerSpecTest(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 result = spec.main(['--container', str(root / 'c.json'), '--old-image', str(root / 'o.json'),
                                     '--new-image', str(root / 'n.json'), '--mode', 'isolated', '--volume', 'v',
-                                    '--name', 'n', '--network', 'net', '--env-out', str(root / 'env')])
+                                    '--name', 'n', '--network', 'none', '--env-out', str(root / 'env')])
             self.assertEqual(result, 0)
             self.assertNotIn('synthetic-secret-value', output.getvalue())
             self.assertIn('PROCESSING_API_TOKEN', json.loads(output.getvalue())['envKeys'])
@@ -102,7 +125,7 @@ class ContainerSpecTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(FileExistsError):
                 spec.main(['--container', str(root / 'c.json'), '--old-image', str(root / 'o.json'),
                            '--new-image', str(root / 'n.json'), '--mode', 'isolated', '--volume', 'v',
-                           '--name', 'n', '--network', 'net', '--env-out', str(root / 'env')])
+                           '--name', 'n', '--network', 'none', '--env-out', str(root / 'env')])
 
 
 if __name__ == '__main__':

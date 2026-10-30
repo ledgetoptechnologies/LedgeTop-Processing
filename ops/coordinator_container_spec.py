@@ -65,13 +65,18 @@ def _args(name, value):
     raise SpecError('unsupported carried field ' + name)
 
 
-def derive(container, old_image, new_image, *, mode, volume, name, network=None):
+LEASE_DESTINATION = '/run/ledgetop-authority-lease'
+ADDED_KEYS = ('PROCESSING_AUTHORITY_LEASE_DIR', 'PROCESSING_VIEWER_PRODUCTION_ADMISSION')
+
+
+def derive(container, old_image, new_image, *, mode, volume, name, network=None, lease_dir=None,
+           production_admission=None, accept_compose_source=False):
     if mode not in ('isolated', 'promoted'):
         raise SpecError('mode must be isolated or promoted')
     host, config = container['HostConfig'], container['Config']
     labels = config.get('Labels') or {}
-    if any(key.startswith('com.docker.compose.') for key in labels):
-        raise SpecError('compose-managed container: recreate through compose instead')
+    if any(key.startswith('com.docker.compose.') for key in labels) and not accept_compose_source:
+        raise SpecError('compose-managed container: pass accept_compose_source to recreate it outside compose')
     refused = sorted(key for key, value in host.items()
                      if key not in CARRIED + REPLACED + IGNORED
                      and not (key in DEFAULTS and value in DEFAULTS[key]) and not _empty(value))
@@ -97,11 +102,17 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None)
     for field in CARRIED:
         if not _empty(host.get(field)):
             argv += _args(field, host[field])
+    if lease_dir is not None:
+        if not lease_dir.startswith('/') or ',' in lease_dir or '=' in lease_dir:
+            raise SpecError('lease directory must be an absolute host path without commas or equals signs')
+        argv += ['--mount', 'type=bind,source=%s,destination=%s' % (lease_dir, LEASE_DESTINATION)]
+    if production_admission not in (None, 'open', 'held'):
+        raise SpecError('production admission must be open or held')
     networks = sorted((container.get('NetworkSettings') or {}).get('Networks') or {})
     if mode == 'isolated':
-        if not network:
-            raise SpecError('isolated mode requires its own dedicated network')
-        argv += ['--network', network, '--restart', 'no']
+        if network != 'none':
+            raise SpecError('isolated mode requires --network none: a bridge is reachable from the host')
+        argv += ['--network', 'none', '--restart', 'no']
     else:
         if host.get('NetworkMode') in ('host', 'none') or len(networks) != 1:
             raise SpecError('promotion supports exactly one bridge network')
@@ -119,10 +130,17 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None)
     env = config.get('Env') or []
     if any('\n' in item or '\r' in item or '=' not in item for item in env):
         raise SpecError('environment cannot be represented in an env file')
+    if any(item.split('=', 1)[0] in ADDED_KEYS for item in env):
+        raise SpecError('old environment already sets a cutover key; review before reuse')
     image_env = set(new_image['Config'].get('Env') or [])
-    keys = sorted({item.split('=', 1)[0] for item in env})
+    added = []
+    if lease_dir is not None:
+        added.append('PROCESSING_AUTHORITY_LEASE_DIR=' + LEASE_DESTINATION)
+    if production_admission is not None:
+        added.append('PROCESSING_VIEWER_PRODUCTION_ADMISSION=' + production_admission)
+    keys = sorted({item.split('=', 1)[0] for item in env + added})
     return {'argv': argv, 'envKeys': keys, 'oldNetworks': networks,
-            'envFile': [item for item in env if item not in image_env]}
+            'envFile': [item for item in env if item not in image_env] + added}
 
 
 def main(argv=None):
@@ -134,11 +152,17 @@ def main(argv=None):
     parser.add_argument('--name', required=True)
     parser.add_argument('--network')
     parser.add_argument('--env-out', required=True, type=Path)
+    parser.add_argument('--lease-dir', help='host directory holding the authority lease')
+    parser.add_argument('--production-admission', choices=('open', 'held'))
+    parser.add_argument('--accept-compose-source', action='store_true',
+                        help='recreate a compose-managed container outside compose (labels are not carried)')
     args = parser.parse_args(argv)
     load = lambda path: json.loads(path.read_text())[0]
     try:
         spec = derive(load(args.container), load(args.old_image), load(args.new_image), mode=args.mode,
-                      volume=args.volume, name=args.name, network=args.network)
+                      volume=args.volume, name=args.name, network=args.network, lease_dir=args.lease_dir,
+                      production_admission=args.production_admission,
+                      accept_compose_source=args.accept_compose_source)
     except SpecError as error:
         print('refused: ' + str(error), file=sys.stderr)
         return 2

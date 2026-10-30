@@ -177,10 +177,15 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
+        if type(production_held) is not bool:
+            raise ValueError('production hold must be a boolean')
         self.service, self.token, self.staging_token = service, token, staging_token
+        # Cutover hold: production may read but never mutate until reopened by
+        # restarting without the hold. Staging is unaffected.
+        self.production_held = production_held
         if temp_dir is not None:
             directory = Path(temp_dir)
             if (directory.is_symlink() or not directory.is_dir()
@@ -236,6 +241,9 @@ class ViewerFacade:
                 else:
                     self._get(handler, path, query, environment)
             elif handler.command == 'POST':
+                if environment == 'production' and self.production_held:
+                    # Before any body read or service call: no production state change.
+                    raise RequestError(503, 'production_admission_held')
                 guarded = (path in ('/task/ledgetop/reserve', '/task/ledgetop/cancel',
                                     '/task/new/init', '/task/cancel', '/task/remove') or
                     re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path))

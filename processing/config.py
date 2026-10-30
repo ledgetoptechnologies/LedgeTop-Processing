@@ -32,6 +32,8 @@ class Config:
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
+    authority_lease_dir: str = ''
+    viewer_production_held: bool = False
 
 
 def _node_origin(value: str) -> str:
@@ -81,6 +83,12 @@ def from_environment() -> Config:
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
+    if lease_dir and (not os.path.isabs(lease_dir) or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
+        raise ValueError('PROCESSING_AUTHORITY_LEASE_DIR must be an absolute path used with persistent state')
+    production_admission = os.environ.get('PROCESSING_VIEWER_PRODUCTION_ADMISSION', 'open')
+    if production_admission not in ('open', 'held'):
+        raise ValueError('PROCESSING_VIEWER_PRODUCTION_ADMISSION must be open or held')
     admission = os.environ.get('PROCESSING_ADMISSION_DRAIN_ENABLED', '0')
     if admission not in ('0', '1') or (admission == '1' and (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not operator)):
         raise ValueError('admission drain requires persistent state and operator credential')
@@ -128,4 +136,6 @@ def from_environment() -> Config:
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         admission_drain_enabled=admission == '1',
+        authority_lease_dir=lease_dir,
+        viewer_production_held=production_admission == 'held',
     )

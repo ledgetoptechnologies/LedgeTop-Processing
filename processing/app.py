@@ -22,11 +22,26 @@ def make_handler(config: Config):
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
         reference_settings = load_reference_settings(config.reference_config_path, config)
+    lease = None
+    if config.prototype_state_dir:
+        from . import authority_lease
+        if config.authority_lease_dir:
+            # Before any state write: a second holder of this authority refuses here.
+            lease = authority_lease.acquire(config.authority_lease_dir, config.prototype_state_dir)
+        elif authority_lease.required(config.prototype_state_dir):
+            raise RuntimeError('authority_lease_configuration_required')
     queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
                   node_ids=config.prototype_node_ids,
                   treedar_node_ids=config.treedar_node_ids,
                   viewer_enabled=config.viewer_enabled,
                   reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
+    if lease is not None:
+        try:
+            authority_lease.record_required(queue, lease)
+        except Exception:
+            queue.close()
+            raise
+        queue.authority_lease = lease  # held, by this process, until it exits
     if queue is not None and config.admission_drain_enabled:
         from .admission_drain import AdmissionDrain
         try:
@@ -48,7 +63,8 @@ def make_handler(config: Config):
         service = ViewerService(queue, config)
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
+        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
+                              production_held=config.viewer_production_held)
     reference_runtime = None
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime

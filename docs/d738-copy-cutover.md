@@ -7,16 +7,17 @@
 > document proves that the candidate is unreachable, that the old coordinator is
 > fenced, or that rollback is lossless.
 >
-> **Still open, with no enforcement mechanism:**
+> **Enforcement now in source (branch `claude/cutover-enforcement`), tested on a
+> Python 3.12 rebuild of the same sources, not on the exact images or live:**
 >
-> - **Authority:** U4. Two coordinators can hold the same authority. Nothing
->   stops a Docker administrator from starting d738 again.
-> - **Ingress:** U1, U2, U3 and U5:
->   - the candidate is reachable from the host;
->   - other writers are not prevented before promotion;
->   - socket checks are only snapshots;
->   - after promotion, production is held only at Viewer.
-> - **Writers and volume ownership:** U7 and U8.
+> - **Authority:** U4. d738 is fenced by removing its container and holding its
+>   own state lock. Release instances are fenced by a host-wide `flock` lease.
+> - **Ingress:** U1–U3. The candidate runs with `--network none` until promotion.
+> - **Production:** U5. Production is held after promotion.
+>
+> **Still open:** a real Docker daemon restart (U4); host root and `docker exec`
+> access (U2, U7); volume ownership (U8); exact-image qualification; Viewer's
+> handling of 503.
 
 This procedure would replace the live cluster coordinator with a frozen
 release image. The live coordinator is:
@@ -118,6 +119,21 @@ every artifact, and inspect. Never improvise a workaround.
     Differences are reported only as counts and opaque IDs. Every result states
     that equal censuses show equality at two moments, not that no transient
     write occurred in between.
+- [processing/authority_lease.py](../processing/authority_lease.py): the release
+  coordinator takes a host-wide `flock` lease on `<authority>.lease`, in a
+  bind-mounted directory (`PROCESSING_AUTHORITY_LEASE_DIR`), before it writes
+  state.
+  - A second release instance with the same authority refuses to start.
+  - State that has been leased refuses to start without a lease.
+  - **d738 has no lease code and ignores the lease.**
+- [ops/state_fence.py](../ops/state_fence.py): holds d738's own
+  `coordinator.lock` on retained d738 state, read-only, so d738 refuses to start
+  on that state.
+- `PROCESSING_VIEWER_PRODUCTION_ADMISSION=held` (in `processing/viewer_http.py`)
+  refuses every production Viewer POST with 503. Staging is unaffected.
+- [ops/cutover_fence_test.sh](../ops/cutover_fence_test.sh): the isolated
+  container test of all of the above, run on synthetic state with a given d738
+  image and release image.
 - [ops/netns_sockets.py](../ops/netns_sockets.py): run inside a container with
   `docker exec -i`. It counts TCP listeners and peers per local port in that
   container's own network namespace, which covers bridge, loopback and
@@ -209,15 +225,31 @@ evidence, saved in `$E`. All checks are read-only.
 
 **Stop condition:** any route fails, or its evidence cannot be produced.
 
-## Step 2 — guard against automatic restart, then stop d738 (not a fence; U4)
+## Step 2 — stop d738, then fence it with its own state lock
+
+**d738 does not take the new authority lease.** It has no lease code; the
+isolated test shows d738 and a leased release running together on one
+authority. The lease therefore fences only release instances, and d738 needs
+an independent fence: its own `coordinator.lock`.
+
+d738 takes `flock` on `<state>/coordinator.lock` before it writes its database.
+It refuses to start ("prototype state already owned") while another process
+holds that lock. A dedicated holder container keeps the lock on every retained
+d738 state: the original volume, and `VERIFY_VOL` once it exists (step 3). The
+holder has `--network none`, read-only mounts and `--restart always`.
 
 ```sh
 docker update --restart=no "$OLD"          # BEFORE stop: no restart window
-docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$OLD"        # must print: no
 docker stop -t 3600 "$OLD"                 # never the default 10 s
 docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{.State.FinishedAt}}' "$OLD"
-while read -r n; do docker network disconnect "$n" "$OLD"; done < "$E/old-networks.txt"
-docker inspect -f '{{len .NetworkSettings.Networks}}' "$OLD"        # must print: 0
+FENCE=ltp-d738-fence-$RUN
+docker run -d --name "$FENCE" --network none --init --read-only --user 10001:10001 --cap-drop ALL \
+  --security-opt no-new-privileges --restart always \
+  --mount "type=volume,source=$VOL,destination=/fence/original,readonly" \
+  --mount "type=bind,source=$E/state_fence.py,destination=/state_fence.py,readonly" \
+  --entrypoint python "$IMG_NEW" -B /state_fence.py /fence/original
+docker logs "$FENCE"                       # must print {"fenced": 1}
+docker rm "$OLD"                           # nothing left to restart or reconnect; old-inspect.json + IMG_OLD recreate it
 ```
 
 **Stop conditions:**
@@ -226,10 +258,13 @@ docker inspect -f '{{len .NetworkSettings.Networks}}' "$OLD"        # must print
   `true`.
 - The stop took longer than a few seconds. That means a request was in flight,
   contradicting R2.
+- The fence does not report every volume it was given.
 
-Once disconnected and set to `--restart=no`, the old container cannot restart
-**automatically** with network access. This is not a fence: a Docker
-administrator can reconnect and start it (blocker U4).
+Removing the old container means that neither a daemon restart nor a
+reconnect has anything to act on. Recreating d738 deliberately, whether by
+compose or `docker run`, on any fenced state is refused by d738's own lock
+check. After step 3, recreate the fence with `VERIFY_VOL` added. Step 3 copies
+through read-only mounts, so the fence does not block it.
 
 ## Step 3 — verified backup and copy
 
@@ -304,31 +339,39 @@ the release.
 **Stop condition:** any non-zero count. A task now on an engine came from
 outside the coordinator.
 
-## Step 5 — start the candidate without published ports (not isolation; U1–U3)
+## Step 5 — start the candidate with `--network none` and the authority lease
 
 ```sh
-CAND_NET=ltp-candidate-$RUN
-docker network create --driver bridge --label ltp.cutover="$RUN" "$CAND_NET" >/dev/null
+LEASE_HOST_DIR=$HOME/.local/share/ledgetop-processing-prototype/authority-lease   # one fixed host directory for every release instance
+install -d -m 700 "$LEASE_HOST_DIR"; sudo -n chown 10001:10001 "$LEASE_HOST_DIR"   # see U10 if sudo is unavailable
 python3 "$E/coordinator_container_spec.py" --container "$E/old-inspect.json" \
-  --old-image "$E/old-image.json" --new-image "$E/new-image.json" --mode isolated \
-  --volume "$NEW_VOL" --name "ltp-coordinator-candidate-$RUN" --network "$CAND_NET" \
-  --env-out "$E/env-candidate" > "$E/candidate-spec.json"
+  --old-image "$E/old-image.json" --new-image "$E/new-image.json" --mode isolated --network none \
+  --volume "$NEW_VOL" --name "ltp-coordinator-candidate-$RUN" --lease-dir "$LEASE_HOST_DIR" \
+  --accept-compose-source --env-out "$E/env-candidate" > "$E/candidate-spec.json"
 # review candidate-spec.json (key names only), then run its argv exactly:
 python3 -c 'import json,subprocess,sys;sys.exit(subprocess.run(json.load(open(sys.argv[1]))["argv"]).returncode)' "$E/candidate-spec.json"
 CAND=ltp-coordinator-candidate-$RUN
 docker start "$CAND"
 ```
 
-Exposure checks, to run before any check that talks to the candidate. These are
-**observations, not isolation**. The dedicated bridge is not `--internal`, and
-the host and any host process can reach the candidate's bridge IP (blockers U1,
-U2):
+What is enforced here, and was shown in the isolated test:
 
-- `docker port "$CAND"` prints nothing.
-- `docker network inspect "$CAND_NET"` lists exactly one container, `$CAND`.
-- From another LAN host (main or .88), connecting to `192.168.50.89` on 3005
-  and 18443 is **refused**.
-- On .89, nothing listens on 3005, 18443 or 18080 (`ss -ltn`).
+- **No network path to the candidate.** With `--network none` its namespace has
+  only `lo`. There is no bridge interface or address, so neither the host, nor
+  another container, nor a Viewer retry can reach it. The spec script refuses
+  isolated mode on any other network.
+- **One leased release instance.** The candidate takes the authority lease
+  before writing state, and records in the state that a lease is required.
+  Any other release instance, on any copy with this authority and the same
+  lease directory, refuses with `authority_lease_held`. Starting this state
+  without a lease refuses with `authority_lease_configuration_required`.
+- **d738 cannot run beside it.** On the original and verification volumes, the
+  step 2 fence refuses it. On `NEW_VOL`, the candidate's own `coordinator.lock`
+  refuses it.
+
+Not enforced: anyone with `docker exec` or root on the host can still reach
+the candidate or its volume (U2, U7). The candidate cannot reach its engines
+while isolated, so `/options` checks wait for promotion (U11).
 
 Candidate health and reachability checks run **inside** the candidate, using
 its own environment. GET only; no POST:
@@ -447,36 +490,62 @@ U6.
 ## Step 7 — promote
 
 ```sh
-docker inspect -f '{{.State.Status}} {{.HostConfig.RestartPolicy.Name}} {{len .NetworkSettings.Networks}}' "$OLD"   # exited no 0
+docker inspect "$OLD" >/dev/null 2>&1 && exit 1   # the old container must be gone (step 2)
+docker logs "$FENCE" | grep -q '"fenced"'          # fence still holding
 census "$NEW_VOL" > "$E/census-before-promotion.json"
 same "$E/census-candidate-isolated.json" "$E/census-before-promotion.json"   # unchanged since the gate, no allowances
-docker rm "$CAND"; docker network rm "$CAND_NET"; shred -u "$E/env-candidate"
+docker rm "$CAND"; shred -u "$E/env-candidate"
 python3 "$E/coordinator_container_spec.py" --container "$E/old-inspect.json" \
   --old-image "$E/old-image.json" --new-image "$E/new-image.json" --mode promoted \
-  --volume "$NEW_VOL" --name "ltp-coordinator-$RUN" --env-out "$E/env-promoted" > "$E/promoted-spec.json"
+  --volume "$NEW_VOL" --name "ltp-coordinator-$RUN" --lease-dir "$LEASE_HOST_DIR" \
+  --production-admission held --accept-compose-source \
+  --env-out "$E/env-promoted" > "$E/promoted-spec.json"
 python3 -c 'import json,subprocess,sys;sys.exit(subprocess.run(json.load(open(sys.argv[1]))["argv"]).returncode)' "$E/promoted-spec.json"
 docker start "ltp-coordinator-$RUN"; shred -u "$E/env-promoted"
 ```
 
-**Promotion is the end of clean rollback.** From here on, any admission —
-production or a staging verification task — exists only on `NEW_VOL`.
+**Promotion is the end of clean rollback.** From here on, any admission — a
+staging verification task, or production once opened — exists only on
+`NEW_VOL`.
 
-After promotion, repeat **only** step 5's inside-container checks:
-`/healthz`, `/options` for both roles, and the authority. The pre-promotion
-no-published-port checks do not apply to a promoted container, whose ports are
-published by design. Then the staging-only Viewer photo job runs through to
-archive ingestion **and derivatives**. Production follows only after that passes
-and Beau accepts it.
+The promoted container starts with **production admission held**:
 
-Recreating the container with published ports exposes it at once, to
-production as well as staging. The only production hold is at Viewer
-(blocker U5).
+- Every production Viewer POST is refused with `503 production_admission_held`
+  before any body is read or any service is called. That covers init, upload,
+  commit, cancel, remove, reserve and reservation cancel.
+- Production reads and all staging requests are admitted.
+
+So the staging-only Viewer photo job can run through to archive ingestion
+**and derivatives** while production cannot change state. What a production
+Viewer client does with a 503 (retry, back off or fail the job) is not
+verified.
+
+The published host ports also act as a fence against d738: a d738 container
+that publishes the same host port cannot start while the release holds it
+(isolated test).
+
+**Opening production**, once the staging run passes and Beau accepts it:
+
+1. Stop the promoted container (exit 0). Its lease is released.
+2. Recreate it with `--production-admission open`, the same lease directory
+   and the same volume.
+3. Start it.
+
+The lease guarantees that the held and open containers can never run at the
+same time.
 
 ## Step 8 — rollback
 
-- **Before promotion (any failure in steps 5–6):** remove the candidate and its
-  network. Reconnect `$OLD` to the networks in `old-networks.txt` (with their
-  original aliases), restore its restart policy, and `docker start "$OLD"`.
+- **Before promotion (any failure in steps 5–6):**
+  1. Stop and remove the candidate.
+  2. Stop and remove the d738 fence (`docker rm -f "$FENCE"`); d738 cannot
+     start while it holds the lock.
+  3. Recreate d738 from `old-inspect.json` and `IMG_OLD` on the original
+     volume, with its original networks, ports and restart policy, through the
+     same compose definition it came from. Then start it.
+
+  The release's lease file is left in place. d738 ignores it, and the lease
+  only matters if a release instance starts again.
   `census-original-after.json` shows the original volume was unchanged when
   copied. Anything written to `NEW_VOL` before promotion is **not** carried
   back. Before rolling back, stop the candidate, take a census of `NEW_VOL`,
@@ -516,11 +585,11 @@ check, an observation or a snapshot does not resolve it.
 
 | # | Finding | Why the current draft is insufficient | What would resolve it (unverified proposal) |
 |---|---|---|---|
-| U1 | **The candidate is not isolated from the host.** | The dedicated bridge is not `--internal`, and the host and every host process can reach the candidate's bridge IP. "No published port" and "one network member" are observations, not isolation. | Run the candidate with `--network none`, leaving only loopback in its namespace, for the census-gated phase. Engine-dependent checks (`/options`) then move after promotion. This must be shown to boot and must be verified by an independent probe. |
-| U2 | **Other writers before promotion are not prevented.** | Checking published ports and network membership neither stops a host process, nor an admin, nor a later-attached container from writing. | U1's `--network none`, plus a volume-level guard: no container except the candidate may mount `NEW_VOL`. That needs enforcement, not inspection. |
-| U3 | **Requests during the isolated phase are only snapshotted.** | `netns_sockets.py` gives a point-in-time snapshot. It now fails on a missing `tcp`/`tcp6` table, but it still sees nothing that connects after it runs. | Combine U1 with the step 6 per-file census gate (U6). This detects leftover writes; it does not prevent them. |
-| U4 | **The old coordinator is not fenced against a Docker administrator.** | `--restart=no` and network disconnection stop only automatic restarts. Anyone in the `docker` group can reconnect and start it while the candidate holds the same authority. | A fence that the coordinator itself enforces: refuse to start when another instance holds the authority, or an external authority lease. No such mechanism exists in d738 or the release. |
-| U5 | **No production admission hold after promotion, except at Viewer.** | Step 7 recreates the container with published ports, exposing it at once to production and staging alike. | Options, each a decision for Beau: start the promoted container with a production Viewer token nobody holds, a credential configuration change; or a qualified in-process admission mode that separates staging from production. Neither exists or is approved. |
+| U1 | **Candidate reachability before promotion: enforced, not proven live.** | The candidate runs with `--network none` (only `lo`; no bridge interface or address), and the spec script refuses isolated mode on any other network. The isolated test confirmed only loopback. `docker exec` and host root can still reach it. | Exact-image run of the isolated test; host root stays a trust boundary (U2, U7). |
+| U2 | **Other writers before promotion: network path closed, host access not.** | With `--network none` no client can send a request. Release instances are fenced by the lease. d738 is fenced on retained d738 state by the step 2 holder, and on `NEW_VOL` by the candidate's own state lock. Host root, `docker exec` and direct volume writes are not prevented. | A volume-level writer lock (U7). Otherwise accept host root as a trust boundary. |
+| U3 | **In-flight requests during the isolated phase: not applicable with `--network none`.** | Nothing can connect, so the socket snapshot is no longer the only defence. The census gate still shows equality only at two moments. | Exact-image confirmation. |
+| U4 | **Single authority: d738 and release fenced independently; not proven live.** | **d738 does not take the new lease** (shown in the isolated test). Fences:<ul><li>the old container is removed after its clean stop, so a daemon restart or reconnect has nothing to act on;</li><li>a `--network none`, `--restart always` holder keeps d738's own `coordinator.lock` on every retained d738 state, so d738 refuses to start on it even when recreated deliberately (tested, including after the holder process was killed and Docker restarted it);</li><li>a running release holds the lock on `NEW_VOL` and its published ports, so d738 cannot start on that copy or those ports (tested);</li><li>release instances exclude one another through the host-wide `flock` lease (tested).</li></ul>Not proven:<ul><li>a real Docker **daemon** restart. Only a crash of the holder process was tested; after a daemon restart, a d738 created at the same moment could race the holder.</li><li>d738 started on a copy nobody fences, such as a new copy made by hand.</li><li>d738 recreated with different ports while no release is running.</li><li>the exact images (the test used a Python 3.12 rebuild of the same sources).</li></ul> | Exact-image run of `ops/cutover_fence_test.sh` on a non-live host, including a real daemon restart. Retain no unfenced d738 state. |
+| U5 | **Production hold after promotion: implemented in source, not proven live.** | The promoted container starts with `PROCESSING_VIEWER_PRODUCTION_ADMISSION=held`. Every production Viewer POST gets 503 before any body read or service call; staging and production reads are admitted (unit and container tests). Opening production means recreating the container without the hold, and the lease prevents overlap. Not verified: Viewer's reaction to the 503; prototype operator or reference routes, which are not covered by the hold. | Viewer-side check of 503 handling; exact-image run. |
 | U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically (steps 3 and 6). Every entry's contents and metadata are compared under keyed IDs. Allowances are scoped to named fields, exact schema hashes and empty new tables. Remaining limits:<ul><li>equal censuses show **observed** equality at two moments, not the absence of transient writes;</li><li>mtime is compared at whole-second granularity;</li><li>xattrs, ACLs, file capabilities and ctime are not compared;</li><li>the database file is compared per table, not byte for byte;</li><li>sizes and row counts are printed in clear;</li><li>a migration over a non-empty table fails conservatively;</li><li>the exact schema hashes depend on the U9 rehearsal;</li><li>it has never run against the real volume or the a042 image.</li></ul> | Independent review of the census. The U9 rehearsal to produce the exact schema allowances. A live read-only run in the cutover window. Transient writes need prevention (U1, U2), which detection cannot provide. |
 | U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
 | U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |
