@@ -1,4 +1,5 @@
 import copy
+import base64
 import json
 from pathlib import Path
 import unittest
@@ -42,6 +43,16 @@ class InputBudgetTests(unittest.TestCase):
                  raw.replace(b'2026-', b'0000-'), raw + b' ', raw[:-1] + b',"x":"\xff"}']
         for case in cases:
             with self.subTest(raw=case[:60]), self.assertRaises(p.ProtocolError): decode_budget_proposal(case)
+
+    def test_shared_raw_vectors(self):
+        vectors = json.loads((Path(__file__).resolve().parents[1] / 'contracts/input-budget-v2-raw-vectors.json').read_text(encoding='utf-8'))
+        for vector in vectors:
+            raw = base64.b64decode(vector['rawBase64'], validate=True)
+            with self.subTest(name=vector['name']):
+                if vector['accepted']:
+                    self.assertEqual(decode_budget_proposal(raw), plan_input_budget(self.proposal))
+                else:
+                    with self.assertRaises(p.ProtocolError): decode_budget_proposal(raw)
 
     def test_retry_amplification(self):
         for field, value in [('retryRequests',9),('retryBytes',41)]:
