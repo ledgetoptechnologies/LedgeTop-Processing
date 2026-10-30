@@ -34,7 +34,10 @@ REQUEST_OPTIONS = [{'name': 'pc-ept', 'value': True}]
 def synthetic_zip():
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, 'w') as archive:
-        archive.writestr('synthetic-result.txt', b'owned synthetic transfer fixture\n')
+        # Fake engine instances in separate processes represent the same
+        # retained result; ZIP's default current timestamp would change bytes.
+        entry = zipfile.ZipInfo('synthetic-result.txt', date_time=(2020, 1, 1, 0, 0, 0))
+        archive.writestr(entry, b'owned synthetic transfer fixture\n')
     return stream.getvalue()
 
 
