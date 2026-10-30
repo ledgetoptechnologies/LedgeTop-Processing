@@ -514,7 +514,7 @@ class ViewerServiceTests(unittest.TestCase):
         before.close()
         from ops.repair_split_copy import repair_copy
         calls={node:list(engine.calls) for node,engine in self.engines.items()}
-        self.assertEqual(repair_copy(original,copied),1)
+        self.assertEqual(repair_copy(original,copied,synthetic_only=True,expected_copy_inode=(copied.stat().st_dev,copied.stat().st_ino)),1)
         self.assertEqual({node:list(engine.calls) for node,engine in self.engines.items()},calls)
         after=sqlite3.connect(copied/'jobs.sqlite3')
         self.assertEqual(after.execute('SELECT * FROM jobs ORDER BY id').fetchall(),jobs_before)
@@ -546,9 +546,27 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.close();self.queue.close()
         original=self.root/'state';copied=self.root/'copy';shutil.copytree(original,copied)
         before=(copied/'jobs.sqlite3').read_bytes()
-        with self.assertRaises(ValueError):repair_copy(original,copied)
+        with self.assertRaises(ValueError):repair_copy(original,copied,synthetic_only=True,expected_copy_inode=(copied.stat().st_dev,copied.stat().st_ino))
         self.assertEqual((copied/'jobs.sqlite3').read_bytes(),before)
         self.assertEqual((original/'jobs.sqlite3').read_bytes(),before)
+        self.make_queue_service()
+
+    @unittest.skipUnless(os.name == 'posix', 'offline repair uses flock')
+    def test_stopped_copy_repair_is_disabled_and_rejects_triggers(self):
+        import shutil
+        from ops.repair_split_copy import repair_copy
+        identifier=self.submit();self.service.tick();task=self.task(identifier)
+        result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],'environment':task['environment'],'cancelled':False}
+        self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':result})
+        with self.queue._db() as db:
+            db.execute("CREATE TRIGGER test_side_effect AFTER UPDATE ON viewer_tasks BEGIN UPDATE jobs SET result='changed'; END")
+        self.service.close();self.queue.close()
+        original=self.root/'state';copied=self.root/'copy';shutil.copytree(original,copied)
+        before=(copied/'jobs.sqlite3').read_bytes()
+        with self.assertRaisesRegex(ValueError,'disabled'):repair_copy(original,copied)
+        with self.assertRaisesRegex(ValueError,'triggers'):
+            repair_copy(original,copied,synthetic_only=True,expected_copy_inode=(copied.stat().st_dev,copied.stat().st_ino))
+        self.assertEqual((copied/'jobs.sqlite3').read_bytes(),before)
         self.make_queue_service()
 
     def test_terminal_split_rejects_mismatched_job_binding_before_dispatch(self):
