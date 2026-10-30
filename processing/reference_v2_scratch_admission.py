@@ -18,7 +18,9 @@ def reserve_v2_scratch(metadata, scratch, *, job_id, principal, claim_token,
                        worker_identity, worker_ready, output_budget, scratch_ttl, clock, enabled=False):
     """Reserve input and output capacity only for the exact claimed v2 job.
 
-    `worker_identity` is trusted locally configured identity, never user input.
+    `worker_identity` and `worker_ready` are trusted caller assertions, not
+    verified physical fencing. All contenders must use this same scratch ledger;
+    separate databases or restored copies do not share capacity accounting.
     A successful result is not a grant, engine-start authority or receipt of
     any physical files. The scratch TTL is a fixed retry-stable local policy;
     it does not extend the metadata reservation or a broker credential.
@@ -59,6 +61,20 @@ def reserve_v2_scratch(metadata, scratch, *, job_id, principal, claim_token,
     again = metadata.snapshot_bytes(job_id, principal=principal, claim_token=claim_token, clock=clock)
     if again != snapshot:
         raise ScratchAdmissionHeld('metadata changed after reservation')
+    # Reserve's capacity probe can take longer than the entire lease. Observe
+    # scratch time again durably and re-read the exact row before reporting.
+    # This is still a point-in-time observation, not a cross-database atomic
+    # admission or a guarantee that either lease stays live after return.
+    try:
+        with scratch._transaction() as db:
+            current = scratch._reservation(db, reservation['reservationId'])
+            if (current['settings'] != held['settings'] or current['expires'] != held['expires']
+                    or current['state'] != 'reserved' or current['allocated'] != 0
+                    or current['remaining'] != manifest['totalBytes'] + output_budget
+                    or scratch._now(db) >= current['expires']):
+                raise ScratchAdmissionHeld('scratch reservation requires reconciliation')
+    except PolicyConflict:
+        raise ScratchAdmissionHeld('scratch reservation unavailable') from None
     return {'jobId':job_id, 'reservationId':reservation['reservationId'],
             'manifestSha256':manifest['sha256'], 'inputBytes':manifest['totalBytes'],
             'outputBudget':output_budget, 'nodeId':worker_identity['nodeId']}

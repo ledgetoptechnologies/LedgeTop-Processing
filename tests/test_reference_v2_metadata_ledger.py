@@ -39,6 +39,17 @@ class V2LedgerTests(unittest.TestCase):
   scratch.probe=lambda _:1
   with self.assertRaises(ScratchAdmissionHeld):reserve_v2_scratch(self.ledger,scratch,**args,enabled=True)
   scratch.probe=lambda _:10**9
+  # A slow capacity probe can outlive the entire lease before reserve returns.
+  # The fresh durable observation must reject and must not resurrect on rollback.
+  slow_root=Path(self.tmp.name)/'slow-scratch';slow_root.mkdir(mode=0o700);ticks=[1000]
+  def slow_probe(_):ticks[0]=1241;return 10**9
+  slow=ScratchLedger(Path(self.tmp.name)/'slow.sqlite',slow_root,capacity_probe=slow_probe,clock=lambda:ticks[0],safety_floor_bytes=1,cleanup_grace_seconds=0)
+  with self.assertRaisesRegex(ScratchAdmissionHeld,'requires reconciliation'):
+   reserve_v2_scratch(self.ledger,slow,**args,enabled=True)
+  ticks[0]=1000
+  with self.assertRaises(ScratchAdmissionHeld):reserve_v2_scratch(self.ledger,slow,**args,enabled=True)
+  with slow._transaction() as db:
+   row=slow._reservation(db,'reserve');self.assertEqual((row['state'],row['remaining'],row['allocated']),('expired',0,0))
   original=self.ledger.snapshot_bytes;calls=0
   def interrupted(*a,**k):
    nonlocal calls
