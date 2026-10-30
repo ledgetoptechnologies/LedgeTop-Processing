@@ -295,18 +295,18 @@ class ReferenceRuntimeTests(unittest.TestCase):
         fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
         fixture['capabilityFingerprint'] = caps.body['capabilityFingerprint']
         fixture['pipeline']['odm']['optionsFingerprint'] = caps.body['engines']['odm']['optionsFingerprint']
-        handler.prototype_queue.admission_drain.set_closed(True)
+        handler.prototype_queue.admission_drain.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=False,expected_authority=handler.prototype_queue.authority_id)
         response = runtime.api.handle('POST','/ltds/v1/jobs',headers,json.dumps(fixture).encode(),protected_transport=True)
         self.assertEqual(response.status, 503)
         self.assertEqual(handler.prototype_queue.list(), [])
-        handler.prototype_queue.admission_drain.set_closed(False)
+        handler.prototype_queue.admission_drain.set_closed(False,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=True,expected_authority=handler.prototype_queue.authority_id)
         response = runtime.api.handle('POST','/ltds/v1/jobs',headers,json.dumps(fixture).encode(),protected_transport=True)
         self.assertEqual(response.status, 201)
         job_id = response.body['jobId']
         claim = dict(node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster',claim_request_id='synthetic-claim')
-        handler.prototype_queue.admission_drain.set_closed(True)
+        handler.prototype_queue.admission_drain.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=False,expected_authority=handler.prototype_queue.authority_id)
         self.assertIsNone(runtime.store.claim(job_id, **claim))
-        handler.prototype_queue.admission_drain.set_closed(False)
+        handler.prototype_queue.admission_drain.set_closed(False,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=True,expected_authority=handler.prototype_queue.authority_id)
         self.assertIsNotNone(runtime.store.claim(job_id, **claim))
         runtime.close()
 

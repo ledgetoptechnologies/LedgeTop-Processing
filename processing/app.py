@@ -199,7 +199,8 @@ def make_handler(config: Config):
                 return
             try:
                 raw=self.rfile.read(length)
-                if self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'):
+                if (self.path == '/v1/prototype/admission-drain' or
+                        (self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'))):
                     def unique(pairs):
                         value={}
                         for key,item in pairs:
@@ -213,9 +214,9 @@ def make_handler(config: Config):
                     if self.path == '/v1/prototype/admission-drain':
                         if not hasattr(queue, 'admission_drain'):
                             self._reply(404, {'error': 'not_found'}); return
-                        if not isinstance(request, dict) or set(request) != {'closed'}:
-                            raise ValueError('closed required')
-                        self._reply(200, queue.admission_drain.set_closed(request['closed']))
+                        if not isinstance(request, dict) or set(request) != {'closed','requestId','expectedGeneration','expectedClosed','expectedAuthorityId'}:
+                            raise ValueError('exact admission request required')
+                        self._reply(200, queue.admission_drain.set_closed(request['closed'],request_id=request['requestId'],expected_generation=request['expectedGeneration'],expected_closed=request['expectedClosed'],expected_authority=request['expectedAuthorityId']))
                     elif self.path == "/v1/prototype/jobs":
                         from .admission_drain import AdmissionClosed
                         try:
