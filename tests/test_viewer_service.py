@@ -8,6 +8,8 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -707,9 +709,84 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(length, len(self.engines['cluster'].archive))
         self.assertEqual(self.task(identifier)['archive_path'], str(final))
 
+    def test_interrupted_metadata_marker_publication_recovers_without_overwriting(self):
+        # Exit exactly before/after hard-link publication; no external service or data.
+        script="""import json,os,sys
+from pathlib import Path
+from unittest.mock import patch
+from processing.viewer_service import ViewerService
+path=Path(sys.argv[1]);value=json.loads(sys.argv[2]);phase=sys.argv[3];original=os.link
+def interrupted(src,dst):
+ if phase=='after':original(src,dst)
+ os._exit(73)
+with patch('processing.viewer_service.os.link',side_effect=interrupted):
+ ViewerService.__new__(ViewerService)._publish_archive_metadata(path,value)
+"""
+        for marker_kind,phase in (('intent','before'),('intent','after'),('receipt','after')):
+            with self.subTest(marker=marker_kind,phase=phase):
+                identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+                task=self.task(identifier);directory=Path(task['directory']);path=directory/('all.zip.'+marker_kind)
+                value=self.service._archive_identity(task)
+                if marker_kind=='receipt':
+                    data=self.engines['cluster'].archive;(directory/'all.zip.partial').write_bytes(data)
+                    value={**value,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+                process=subprocess.run([sys.executable,'-c',script,str(path),json.dumps(value),phase],capture_output=True,timeout=15)
+                self.assertEqual(process.returncode,73)
+                names=list(directory.glob('.all.zip.'+marker_kind+'.tmp-*'));self.assertEqual(len(names),1)
+                self.assertEqual(path.exists(),phase=='after')
+                with self.service.download(identifier)[0] as stream:self.assertEqual(stream.read(),self.engines['cluster'].archive)
+                self.assertTrue(path.is_file())
+                if phase=='after':self.assertFalse(names[0].exists())
+                else:self.assertTrue(names[0].exists()) # unrelated, uncommitted temp is retained
+
+    def test_concurrent_archive_recovery_uses_one_validated_receipt(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        task=self.task(identifier);directory=Path(task['directory']);data=self.engines['cluster'].archive
+        (directory/'all.zip.partial').write_bytes(data)
+        receipt=directory/'all.zip.receipt';metadata={**self.service._archive_identity(task),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+        receipt.write_text(json.dumps(metadata,sort_keys=True,separators=(',',':')))
+        staged=directory/('.all.zip.receipt.tmp-'+'a'*32);os.link(receipt,staged)
+        barrier=threading.Barrier(2);results=[];errors=[]
+        def download():
+            try:
+                barrier.wait(3)
+                stream,_=self.service.download(identifier)
+                with stream:results.append(stream.read())
+            except Exception as error:errors.append(error)
+        workers=[threading.Thread(target=download) for _ in range(2)]
+        with patch.object(self.engines['cluster'],'download',side_effect=EngineUnavailable('offline')):
+            try:
+                for worker in workers:worker.start()
+                for worker in workers:worker.join(5)
+            finally:
+                barrier.abort()
+                for worker in workers:worker.join(3)
+        self.assertFalse(any(worker.is_alive() for worker in workers));self.assertEqual(errors,[])
+        self.assertEqual(results,[data,data]);self.assertFalse(staged.exists());self.assertEqual(receipt.stat().st_nlink,1)
+        self.assertEqual(self.engines['cluster'].download_calls,0)
+
+    def test_unrelated_metadata_hardlink_is_preserved_and_held(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        task=self.task(identifier);directory=Path(task['directory']);path=directory/'all.zip.intent'
+        path.write_text(json.dumps(self.service._archive_identity(task),sort_keys=True,separators=(',',':')))
+        foreign=directory/'unrelated-link';os.link(path,foreign)
+        with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertTrue(path.exists());self.assertTrue(foreign.exists());self.assertEqual(path.stat().st_nlink,2)
+
+    def test_foreign_or_corrupt_metadata_is_never_overwritten(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        task=self.task(identifier);directory=Path(task['directory']);path=directory/'all.zip.intent';path.write_bytes(b'foreign')
+        temporary=directory/('.all.zip.intent.tmp-'+'a'*32);os.link(path,temporary)
+        with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertEqual(path.read_bytes(),b'foreign');self.assertEqual(temporary.read_bytes(),b'foreign')
+
     def test_receipt_recovers_partial_after_interrupted_publication(self):
         identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
-        with patch('processing.viewer_service.os.link', side_effect=OSError('synthetic interrupted link')):
+        original_link=os.link
+        def interrupt_archive_link(source,destination):
+            if str(destination).endswith('all.zip'): raise OSError('synthetic interrupted link')
+            return original_link(source,destination)
+        with patch('processing.viewer_service.os.link', side_effect=interrupt_archive_link):
             with self.assertRaises(OSError): self.service.download(identifier)
         with patch.object(self.engines['cluster'], 'download', side_effect=EngineUnavailable('offline')):
             stream, _ = self.service.download(identifier)

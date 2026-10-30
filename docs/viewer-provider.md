@@ -151,3 +151,14 @@ required. It does not rehash input or result files or establish their custody.
 Older records with `option_evidence_required=0` have no option evidence to
 check. The outage and changed-catalog test cases inject errors at the catalog
 boundary; they do not prove recovery from every network failure.
+
+Archive intent and receipt markers are published from synced, uniquely named
+private temporary files without overwriting existing markers. If a process exits
+after linking a valid task-bound marker but before removing its matching staging
+link, a later download can finish that unlink after identity checks. A crash
+before publication can leave a staging-only orphan; this change does not delete
+it automatically. Foreign or invalid markers and unrelated hardlinks remain
+held for inspection. These checks do not establish Viewer ingestion, provide an
+acknowledgement, or prove power-loss behavior at every filesystem boundary.
+Concurrent recovery tests exercise threads in one coordinator service, whose
+per-task lock serializes them. They do not establish multi-process exclusion.
