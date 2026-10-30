@@ -32,12 +32,12 @@ class V2LedgerTests(unittest.TestCase):
   kw=dict(principal='producer',claim_token=claim['claimToken'],clock=lambda:1000)
   bound=self.ledger.bind_reservation(first['jobId'],env,plan,**kw);self.assertEqual(bound,self.ledger.bind_reservation(first['jobId'],env,plan,**kw))
   snap=self.ledger.snapshot_bytes(first['jobId'],**kw);self.assertEqual(snap['manifestBytes'],p.canonical_json(m));self.assertEqual(snap['planBytes'],p.canonical_json(plan));self.assertEqual(snap['planSha256'],p.digest(plan));self.assertEqual(snap['reservationBytes'],p.canonical_json(env))
-  with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**dict(kw,clock=lambda:1893456000))
+  with self.assertRaisesRegex(Conflict,'^reservation expired$'):self.ledger.snapshot_bytes(first['jobId'],**dict(kw,clock=lambda:1893456000))
   # Reopen the ledger against the same coordinator epoch so authorization still
   # succeeds and the clock check, not an invalid claim, enforces the hold.
   self.ledger=V2MetadataLedger(self.queue,enabled=True)
-  with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**kw)
-  with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
+  with self.assertRaisesRegex(Conflict,'^reservation expired$'):self.ledger.snapshot_bytes(first['jobId'],**kw)
+  with self.assertRaisesRegex(Conflict,'^reservation expired$'):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
   with self.queue._db() as db:self.assertEqual(db.execute('SELECT high FROM reference_v2_clock WHERE singleton=1').fetchone()[0],1893456000)
   with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],principal='producer',claim_token='wrong',clock=lambda:1000)
   for column in ('plan_sha','reservation_sha'):
@@ -56,12 +56,12 @@ class V2LedgerTests(unittest.TestCase):
   newer=self.ledger.submit(new,**self.kw)
   newclaim=self.ledger.claim_metadata(newer['jobId'],principal='producer',node_id='node-2',worker_id='worker',instance_id='instance',request_id='new-claim')
   newplan=dict(plan,jobId=newer['jobId']);newenv=dict(env,jobId=newer['jobId'])
-  with self.assertRaises(Conflict):self.ledger.bind_reservation(newer['jobId'],newenv,newplan,principal='producer',claim_token=newclaim['claimToken'],clock=lambda:1000)
+  with self.assertRaisesRegex(Conflict,'^reservation expired$'):self.ledger.bind_reservation(newer['jobId'],newenv,newplan,principal='producer',claim_token=newclaim['claimToken'],clock=lambda:1000)
   newplan['expiresAt']='2031-01-01T00:00:00.000Z';newenv['expiresAt']=newplan['expiresAt']
   newkw=dict(principal='producer',claim_token=newclaim['claimToken'],clock=lambda:1000)
   self.assertTrue(self.ledger.bind_reservation(newer['jobId'],newenv,newplan,**newkw)['accepted'])
-  with self.assertRaises(Conflict):self.ledger.snapshot_bytes(newer['jobId'],**dict(newkw,clock=lambda:1924992000))
-  with self.assertRaises(Conflict):self.ledger.snapshot_bytes(newer['jobId'],**newkw)
+  with self.assertRaisesRegex(Conflict,'^reservation expired$'):self.ledger.snapshot_bytes(newer['jobId'],**dict(newkw,clock=lambda:1924992000))
+  with self.assertRaisesRegex(Conflict,'^reservation expired$'):self.ledger.snapshot_bytes(newer['jobId'],**newkw)
   with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
   with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**kw)
   with self.queue._db() as db:self.assertEqual(db.execute('SELECT reservation_sha FROM reference_v2_staged_jobs').fetchone()[0],bound['reservationSha256'])
