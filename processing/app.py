@@ -208,7 +208,8 @@ def make_handler(config: Config):
                             self._reply(200,result if action=='begin' else {'receipt':result} if action=='schedule-owned' else {'node':result})
                     elif operator and self.path.startswith("/v1/prototype/jobs/"):
                         identifier, _, action = self.path[len("/v1/prototype/jobs/"):].rpartition("/")
-                        self._reply(200, {"job": queue.operator(identifier, action, request)})
+                        transition = service.operator if service else queue.operator
+                        self._reply(200, {"job": transition(identifier, action, request)})
                     elif self.path.startswith("/v1/prototype/jobs/") and self.path.endswith("/complete"):
                         identifier = self.path[len("/v1/prototype/jobs/"):-len("/complete")]
                         self._reply(200, {"job": queue.complete(identifier, request)})

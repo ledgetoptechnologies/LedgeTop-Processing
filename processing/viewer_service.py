@@ -227,10 +227,10 @@ class ViewerService:
             job = task['job']
             if not job or job['status'] in ('queued', 'failed', 'succeeded'):
                 return self.store.cancel(identifier)
+            if job['status'] == 'held':
+                raise Conflict('uncertain execution requires inspection')
             if task['phase'] == 'cancel_pending':
                 return {'success': True}
-            if job['status'] == 'held' and job['heldReason'] != 'coordinator_restart':
-                raise Conflict('uncertain execution requires inspection')
             if task['phase'] != 'processing':
                 raise Conflict('submission in progress; inspect before cancelling')
             self.store.update(identifier, phase='cancel_pending')
@@ -247,6 +247,11 @@ class ViewerService:
             # Deliberately retain engine results and all local bytes. Viewer has
             # no successful-ingestion ACK; remove is also its upload-reset route.
             return self.store.remove(identifier)
+
+    def operator(self, identifier, action, request):
+        """Serialize operator state changes with Viewer engine mutations."""
+        with self._lock:
+            return self.queue.operator(identifier, action, request)
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])

@@ -9,6 +9,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
@@ -321,10 +322,60 @@ class ViewerServiceTests(unittest.TestCase):
         self.make_queue_service()
         self.assertEqual(self.task(identifier)['job']['status'], 'held')
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        before = list(self.engines['cluster'].calls)
+        with self.assertRaises(Conflict):
+            self.service.cancel(identifier)
+        self.service.store.update(identifier, phase='cancel_pending')
+        with self.assertRaises(Conflict):
+            self.service.cancel(identifier)
+        self.assertEqual(self.engines['cluster'].calls, before)
+        self.service.store.update(identifier, phase='processing')
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['status']['code'], 40)
         self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
         self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_operator_hold_serializes_with_viewer_cancel(self):
+        identifier = self.submit()
+        self.service.tick()
+        job_id = self.task(identifier)['job_id']
+        before = list(self.engines['cluster'].calls)
+        held, release, cancel_started, cancel_done = (threading.Event() for _ in range(4))
+        outcomes = []
+        original = self.queue.operator
+
+        def blocked_operator(*args):
+            held.set()
+            if not release.wait(5):
+                raise AssertionError('test did not release operator')
+            return original(*args)
+
+        def do_cancel():
+            cancel_started.set()
+            try:
+                self.service.cancel(identifier)
+                outcomes.append('cancelled')
+            except Conflict:
+                outcomes.append('held')
+            finally:
+                cancel_done.set()
+
+        with patch.object(self.queue, 'operator', side_effect=blocked_operator):
+            holder = threading.Thread(target=self.service.operator,
+                args=(job_id, 'hold', {'note': 'synthetic hold'}))
+            holder.start()
+            self.assertTrue(held.wait(5))
+            canceller = threading.Thread(target=do_cancel)
+            canceller.start()
+            self.assertTrue(cancel_started.wait(5))
+            self.assertFalse(cancel_done.wait(0.2))
+            release.set()
+            holder.join(5); canceller.join(5)
+        self.assertFalse(holder.is_alive())
+        self.assertFalse(canceller.is_alive())
+        self.assertEqual(outcomes, ['held'])
+        self.assertEqual(self.engines['cluster'].calls, before)
+        self.assertEqual(self.queue.get(job_id)['status'], 'held')
 
     def test_engine_read_outage_backs_off_and_retains_slot_then_recovers(self):
         first = self.submit()
@@ -364,7 +415,9 @@ class ViewerServiceTests(unittest.TestCase):
                 before = list(self.engines['cluster'].calls)
                 self.service.tick()
                 self.assertEqual(self.engines['cluster'].calls, before)
-                self.assertEqual(self.service.info(identifier)['status']['code'], 30)
+                info = self.service.info(identifier)
+                self.assertEqual(info['status']['code'], 20)
+                self.assertIs(info['ledgetopHeld'], True)
                 # Resolve only the fake's known-not-started engine so the next
                 # independent subcase can use this shared test fixture.
                 job = self.task(identifier)['job']
