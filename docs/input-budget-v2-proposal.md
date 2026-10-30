@@ -1,0 +1,7 @@
+# Provisional input-v2 budget planner
+
+This source-only calculator is not registered as an API, is not enabled in the driver, and leaves v1 unchanged. Its numbers are an estimate, not a broker grant or evidence of charged or remaining capacity. It does not authenticate the job, verify the supplied manifest hash against the objects, enforce expiry against a clock, reserve capacity, reconcile a lost response, or renew grants. The caller supplies retry allowances; these are not safety guarantees. Runtime use requires agreed identity, authorization, durable cumulative precharge and unknown-outcome handling across both parties and restarts.
+
+The checked-in example is shared with Viewer and its aggregate outputs match. This is not a complete interoperable wire contract: JavaScript and Python currently differ for year 0000, JSON numbers spelled as decimals or exponents, and negative zero. Python's standard JSON parser loses the spelling of negative zero. Before accepting wire data, specify and implement a common bounded raw-JSON decoding policy and test shared edge vectors, metadata framing and canonicalization. No digest of the proposal is defined here.
+
+The current estimate counts one request for an empty object and one per range for other objects; adds caller-supplied retries; and rejects totals outside the JavaScript safe integer range. It supports up to 32,768 objects in this isolated planner, but this does not lift the v1 runtime's 10,000-object or metadata limits.
