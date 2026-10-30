@@ -5,7 +5,7 @@ from processing import reference_protocol as p
 from processing.reference_manifest_v2 import DOMAIN
 from processing.reference_input_journal import InputJournal
 from processing.reference_worker_fence_v2 import WorkerFence
-from processing.reference_v2_local_input import publish_first_input,InputHeld
+from processing.reference_v2_local_input import publish_next_input,InputHeld
 from processing.scratch_policy import ScratchLedger
 
 @unittest.skipUnless(os.name=='posix','POSIX only')
@@ -25,10 +25,12 @@ class LocalInputTest(unittest.TestCase):
   self.binding=dict(jobId=str(uuid.uuid4()),environment='staging',generation=1,manifestSha256=m['sha256'],objectsSha256=p.digest(projection),maxAttempts=3)
   self.ledger.reserve(job_id=self.binding['jobId'],generation=1,reservation_id='r1',manifest_sha256=m['sha256'],input_bytes=len(content) if reserve_bytes is None else reserve_bytes,output_budget=100,environment='staging',ttl_seconds=300,worker_ready=True)
  def run_input(self,source):
-  return publish_first_input(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,source=source)
- def test_first_zero_and_second_held(self):
-  self.setup_input(b'');self.run_input(io.BytesIO(b''));self.assertEqual((self.scratch/'jobs/r1/a.input').read_bytes(),b'')
-  with self.assertRaises(InputHeld):self.run_input(io.BytesIO(b''))
+  return publish_next_input(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,source=source)
+ def test_multiple_zero_objects_keep_hold(self):
+  self.setup_input(b'');self.run_input(io.BytesIO(b''));self.run_input(io.BytesIO(b''))
+  self.assertEqual((self.scratch/'jobs/r1/a.input').read_bytes(),b'')
+  self.assertEqual((self.scratch/'jobs/r1/b.input').read_bytes(),b'')
+  with self.assertRaisesRegex(InputHeld,'hold remains'):self.run_input(None)
  def test_ledger_checkpoint_interruption_reconciles_existing_file(self):
   self.setup_input(b'synthetic')
   original=self.journal.complete
@@ -44,7 +46,7 @@ class LocalInputTest(unittest.TestCase):
 from pathlib import Path
 from processing.reference_input_journal import InputJournal
 from processing.reference_worker_fence_v2 import WorkerFence
-from processing.reference_v2_local_input import publish_first_input
+from processing.reference_v2_local_input import publish_next_input
 from processing.scratch_policy import ScratchLedger
 root=Path(sys.argv[1]);binding=json.loads(sys.argv[2]);raw=bytes.fromhex(sys.argv[3])
 f=WorkerFence(root/'lock');db=sqlite3.connect(root/'journal');j=InputJournal(db)
@@ -52,7 +54,7 @@ l=ScratchLedger(root/'ledger',root/'scratch',capacity_probe=lambda _:10000,safet
 original=l.record_allocated
 def crash(*a,**kw):original(*a,**kw);os._exit(73)
 l.record_allocated=crash
-publish_first_input(fence=f,journal=j,ledger=l,reservation_id='r1',binding=binding,manifest_bytes=raw,source=io.BytesIO(b'synthetic'))
+publish_next_input(fence=f,journal=j,ledger=l,reservation_id='r1',binding=binding,manifest_bytes=raw,source=io.BytesIO(b'synthetic'))
 """
   proc=subprocess.run([sys.executable,'-c',code,str(self.root),json.dumps(self.binding),self.raw.hex()],timeout=10)
   self.assertEqual(proc.returncode,73)

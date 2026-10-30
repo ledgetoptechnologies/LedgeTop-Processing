@@ -347,6 +347,25 @@ class ScratchLedger:
             db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=2)),))
             return {'reservation':reservation_id,'identity':_json(identity),'observation':None}
 
+    def check_input_write_target(self, reservation_id, *, job_id, generation, environment, manifest_sha256, input_bytes, allocated_before, target):
+        """Check retained whole-job capacity before and after local object work.
+
+        This is a point-in-time check, not a worker or filesystem fence.
+        """
+        for value in (reservation_id, job_id):_id(value)
+        _integer(generation, 'generation', 1);_sha(manifest_sha256)
+        for value in (input_bytes,allocated_before,target):_integer(value,'input size')
+        if not allocated_before<=target<=input_bytes:raise PolicyConflict('input target outside manifest')
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id);hold=db.execute('SELECT * FROM input_write_holds WHERE reservation=?',(reservation_id,)).fetchone()
+            settings=json.loads(row['settings'])
+            if (hold is None or row['job']!=job_id or row['generation']!=generation or row['environment']!=environment
+                or settings['manifest_sha256']!=manifest_sha256 or settings['input_bytes']!=input_bytes
+                or row['state']!='reserved' or row['allocated'] not in (allocated_before,target)
+                or row['remaining']+row['allocated']!=input_bytes+settings['output_budget']):
+                raise PolicyConflict('input hold or reservation differs')
+            return dict(hold)
+
     def observe_input_write_hold(self, reservation_id, *, identity, observation):
         """Record a caller-verified observation; retain hold even after observation.
 
