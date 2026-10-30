@@ -17,13 +17,13 @@ class LocalInputTest(unittest.TestCase):
   self.db=sqlite3.connect(self.root/'journal');self.addCleanup(self.db.close);self.journal=InputJournal(self.db)
   self.ledger=ScratchLedger(self.root/'ledger',self.scratch,capacity_probe=lambda _:10000,safety_floor_bytes=0,cleanup_grace_seconds=0)
   self.fence=WorkerFence(self.lock);self.addCleanup(self.fence.close)
- def setup_input(self,content,reserve_bytes=None):
-  objects=[dict(id='a',name='a.jpg',byteSize=len(content),sha256=hashlib.sha256(content).hexdigest(),kind='image',mediaType='image/jpeg'),dict(id='b',name='b.jpg',byteSize=0,sha256=hashlib.sha256(b'').hexdigest(),kind='image',mediaType='image/jpeg')]
-  m=dict(id='fixture',revision=1,totalBytes=len(content),objectCount=2,inputCounts=dict(images=2,lidarObjects=0,points=0),objects=objects)
+ def setup_input(self,content,reserve_bytes=None,second=b''):
+  objects=[dict(id='a',name='a.jpg',byteSize=len(content),sha256=hashlib.sha256(content).hexdigest(),kind='image',mediaType='image/jpeg'),dict(id='b',name='b.jpg',byteSize=len(second),sha256=hashlib.sha256(second).hexdigest(),kind='image',mediaType='image/jpeg')]
+  m=dict(id='fixture',revision=1,totalBytes=len(content)+len(second),objectCount=2,inputCounts=dict(images=2,lidarObjects=0,points=0),objects=objects)
   m['sha256']=hashlib.sha256(DOMAIN+p.canonical_json(m)).hexdigest();self.raw=p.canonical_json(m)
   projection=[{k:o[k] for k in ('id','byteSize','sha256')} for o in objects]
   self.binding=dict(jobId=str(uuid.uuid4()),environment='staging',generation=1,manifestSha256=m['sha256'],objectsSha256=p.digest(projection),maxAttempts=3)
-  self.ledger.reserve(job_id=self.binding['jobId'],generation=1,reservation_id='r1',manifest_sha256=m['sha256'],input_bytes=len(content) if reserve_bytes is None else reserve_bytes,output_budget=100,environment='staging',ttl_seconds=300,worker_ready=True)
+  self.ledger.reserve(job_id=self.binding['jobId'],generation=1,reservation_id='r1',manifest_sha256=m['sha256'],input_bytes=len(content)+len(second) if reserve_bytes is None else reserve_bytes,output_budget=100,environment='staging',ttl_seconds=300,worker_ready=True)
  def run_input(self,source):
   return publish_next_input(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,source=source)
  def test_multiple_zero_objects_keep_hold(self):
@@ -68,6 +68,26 @@ publish_next_input(fence=f,journal=j,ledger=l,reservation_id='r1',binding=bindin
   self.setup_input(b'expected',reserve_bytes=1)
   with self.assertRaises(PolicyConflict):self.run_input(io.BytesIO(b'expected'))
   self.assertFalse((self.scratch/'jobs').exists())
+
+ def test_two_inputs_resume_after_second_allocation_commit(self):
+  self.setup_input(b'abc',second=b'defg');self.run_input(io.BytesIO(b'abc'))
+  self.db.close();self.db=sqlite3.connect(self.root/'journal');self.addCleanup(self.db.close);self.journal=InputJournal(self.db)
+  with patch.object(self.journal,'complete',side_effect=RuntimeError('interrupted')):
+   with self.assertRaises(RuntimeError):self.run_input(io.BytesIO(b'defg'))
+  self.db.close();self.db=sqlite3.connect(self.root/'journal');self.addCleanup(self.db.close);self.journal=InputJournal(self.db)
+  self.run_input(None)
+  self.assertEqual((self.scratch/'jobs/r1/b.input').read_bytes(),b'defg')
+  with self.ledger._transaction() as db:self.assertEqual(self.ledger._reservation(db,'r1')['allocated'],7)
+  with self.assertRaisesRegex(InputHeld,'hold remains'):self.run_input(None)
+
+ def test_insufficient_remaining_blocks_second_file(self):
+  from processing.scratch_policy import PolicyConflict
+  self.setup_input(b'abc',second=b'defg');self.run_input(io.BytesIO(b'abc'))
+  db=sqlite3.connect(self.root/'ledger')
+  try:db.execute("UPDATE reservations SET remaining=0 WHERE id='r1'");db.commit()
+  finally:db.close()
+  with self.assertRaises(PolicyConflict):self.run_input(io.BytesIO(b'defg'))
+  self.assertFalse((self.scratch/'jobs/r1/b.part').exists())
 
  def test_bad_bytes_leave_partial_and_hold(self):
   self.setup_input(b'expected')
