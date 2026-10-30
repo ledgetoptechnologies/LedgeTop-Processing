@@ -8,10 +8,11 @@ import ssl
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from processing import reference_protocol as p
 from processing.reference_transfer import (
-    BrokerClient, OBJECT_PREFIX, TransferError, validate_grant,
+    BrokerClient, OBJECT_PREFIX, TransferError, TransferResponseUnavailable, validate_grant,
 )
 
 
@@ -203,6 +204,36 @@ class ReferenceTransferTests(unittest.TestCase):
             self.client().download_object(self.grant(), "image-1", target)
         self.assertFalse(elsewhere.exists())
         self.assertEqual(self.calls, [])
+
+    def test_no_response_has_distinct_bounded_outcome_but_http_and_integrity_do_not(self):
+        target = self.root / 'input.jpg'
+        def unavailable(request, **kwargs):
+            raise URLError('private diagnostic')
+        with self.assertRaises(TransferResponseUnavailable) as caught:
+            BrokerClient('https://broker.example', opener=unavailable).download_object(self.grant(), 'image-1', target)
+        self.assertNotIn('private diagnostic', str(caught.exception))
+        self.assert_no_files()
+        def denied(request, **kwargs):
+            raise HTTPError(request.full_url, 403, 'private', {}, None)
+        with self.assertRaises(TransferError) as caught:
+            BrokerClient('https://broker.example', opener=denied).download_object(self.grant(), 'image-1', target)
+        self.assertNotIsInstance(caught.exception, TransferResponseUnavailable)
+        with self.assertRaises(TransferError) as caught:
+            self.client(body=b'bad').download_object(self.grant(), 'image-1', target)
+        self.assertNotIsInstance(caught.exception, TransferResponseUnavailable)
+        self.assert_no_files()
+
+    def test_tls_errors_direct_or_wrapped_are_never_response_unavailable(self):
+        for error in (ssl.SSLError('private'), URLError(ssl.SSLError('private'))):
+            with self.subTest(error=type(error).__name__):
+                def broken(request, **kwargs):
+                    raise error
+                with self.assertRaises(TransferError) as caught:
+                    BrokerClient('https://broker.example', opener=broken).download_object(
+                        self.grant(), 'image-1', self.root / 'input.jpg')
+                self.assertNotIsInstance(caught.exception, TransferResponseUnavailable)
+                self.assertNotIn('private', str(caught.exception))
+                self.assert_no_files()
 
     def test_transport_and_fsync_errors_are_secret_free_and_retryable(self):
         token = self.raw["token"]
