@@ -14,7 +14,7 @@ import uuid
 from processing import reference_protocol as p
 from processing.reference_runtime import _DynamicAPI
 from processing.reference_http import create_reference_http_server
-from processing.viewer_staged_ack import ROUTE,ViewerStagedAck
+from processing.viewer_staged_ack import ROUTE,NAMESPACE,ViewerStagedAck
 from tests.test_viewer_service import ViewerServiceTests
 
 
@@ -32,17 +32,25 @@ class StagedAckTests(ViewerServiceTests):
             'archiveSha256':receipt['sha256'],'archiveBytes':receipt['bytes'],
             'coordinatorReceiptSha256':hashlib.sha256(p.canonical_json(receipt)).hexdigest(),
             'attemptId':str(uuid.uuid4()),'modelId':str(uuid.uuid4()),
-            'modelVersionId':str(uuid.uuid4()),'stagingCommitId':str(uuid.uuid4())}
-        ack=ViewerStagedAck(self.service,{token:'production'});headers={'Authorization':'Bearer '+token,'X-LedgeTop-Capability':cap}
+            'modelVersionId':str(uuid.uuid4()),'stagingCommitId':str(uuid.uuid4()),
+            'issuer':'viewer-a','audience':self.queue.authority_id,'environment':'production','namespace':NAMESPACE}
+        other=base64.urlsafe_b64encode(b'd'*32).decode().rstrip('=')
+        bindings={token:{'environment':'production','principalId':'viewer-a'},other:{'environment':'production','principalId':'viewer-b'}}
+        ack=ViewerStagedAck(self.service,bindings);headers={'Authorization':'Bearer '+token,'X-LedgeTop-Capability':cap}
         def call(method,request=value,headers=headers):
-            return ack.handle(method,ROUTE+identifier,headers,p.canonical_json(request) if method=='POST' else b'',protected_transport=True)
+            return ack.handle(method,ROUTE+identifier+('/generations/'+str(value['generation']) if method=='GET' else ''),headers,p.canonical_json(request) if method=='POST' else b'',protected_transport=True)
         self.assertEqual(call('GET').status,404)
         commitment=ack.handle('GET',ROUTE+identifier+'/commitment',headers,protected_transport=True)
         self.assertEqual(commitment.status,200)
-        for key in ('taskId','generation','archiveSha256','archiveBytes','coordinatorReceiptSha256'):
+        for key in ('taskId','generation','archiveSha256','archiveBytes','coordinatorReceiptSha256','issuer','audience','environment','namespace'):
             self.assertEqual(commitment.body[key],value[key])
         first=call('POST');self.assertEqual(first.status,200);self.assertTrue(first.body['created'])
         self.assertFalse(call('POST').body['created']);self.assertEqual(call('GET').body['assertion'],value)
+        self.assertEqual(call('GET',headers={'Authorization':'Bearer '+other,'X-LedgeTop-Capability':cap}).status,404)
+        self.assertEqual(call('POST',dict(value,issuer='viewer-b')).status,409)
+        self.assertEqual(call('POST',dict(value,audience=str(uuid.uuid4()))).status,409)
+        self.assertEqual(call('POST',dict(value,environment='staging')).status,409)
+        self.assertEqual(call('POST',dict(value,namespace='other')).status,409)
         changed=dict(value,stagingCommitId=str(uuid.uuid4()));self.assertEqual(call('POST',changed).status,409)
         changed=dict(value,archiveSha256='0'*64);self.assertEqual(call('POST',changed).status,409)
         second=str(uuid.uuid4());second_cap=base64.urlsafe_b64encode(b'c'*32).decode().rstrip('=')
@@ -67,18 +75,24 @@ class StagedAckTests(ViewerServiceTests):
         self.assertEqual(call('GET').body['assertion'],value)
         self.assertEqual(call('POST').status,409)
         self.service.close();self.queue.close();self.make_queue_service()
-        ack=ViewerStagedAck(self.service,{token:'production'})
-        self.assertEqual(call('GET').body['assertion'],value)
+        rotated=base64.urlsafe_b64encode(b'e'*32).decode().rstrip('=')
+        bindings={rotated:{'environment':'production','principalId':'viewer-a'},other:{'environment':'production','principalId':'viewer-b'}}
+        ack=ViewerStagedAck(self.service,bindings)
+        self.assertEqual(call('GET').status,401)
+        headers={'Authorization':'Bearer '+rotated,'X-LedgeTop-Capability':cap}
+        self.assertEqual(call('GET',headers=headers).body['assertion'],value)
+        with self.queue._db() as db:db.execute('UPDATE viewer_tasks SET generation=generation+1 WHERE uuid=?',(identifier,))
+        self.assertEqual(call('GET',headers=headers).body['assertion'],value)
         api=_DynamicAPI(None,None,None,None,ack)
         server=create_reference_http_server(api,'127.0.0.1',0)
         thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.01));thread.start()
         try:
             connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
-            connection.request('GET',ROUTE+identifier,headers=headers)
+            connection.request('GET',ROUTE+identifier+'/generations/'+str(value['generation']),headers=headers)
             response=connection.getresponse();self.assertEqual(response.status,200)
             self.assertEqual(json.loads(response.read())['assertion'],value);connection.close()
             connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
-            connection.putrequest('GET',ROUTE+identifier);connection.putheader('Authorization','Bearer '+token)
+            connection.putrequest('GET',ROUTE+identifier+'/generations/'+str(value['generation']));connection.putheader('Authorization','Bearer '+token)
             connection.putheader('X-LedgeTop-Capability',cap);connection.putheader('X-LedgeTop-Capability',cap);connection.endheaders()
             response=connection.getresponse();self.assertEqual(response.status,400);response.read();connection.close()
         finally:
@@ -94,7 +108,7 @@ class StagedAckTests(ViewerServiceTests):
             try:
                 client=ssl.create_default_context(cafile=str(cert))
                 connection=http.client.HTTPSConnection('127.0.0.1',server.server_port,context=client,timeout=3)
-                connection.request('GET',ROUTE+identifier,headers=headers)
+                connection.request('GET',ROUTE+identifier+'/generations/'+str(value['generation']),headers=headers)
                 response=connection.getresponse();self.assertEqual(response.status,200)
                 self.assertEqual(json.loads(response.read())['assertion'],value);connection.close()
             finally:

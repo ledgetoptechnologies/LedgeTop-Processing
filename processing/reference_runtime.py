@@ -25,6 +25,9 @@ from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
 
 MAX_CONFIG_BYTES = 64 * 1024
+# This draft schema has not been qualified for upgrade, rollback, or restore.
+# Tests may patch this in an isolated fixture; production must remain closed.
+STAGED_ACK_SCHEMA_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -78,7 +81,7 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
         has_recovery=value['schemaVersion']==2 or (value['schemaVersion']==3 and 'recoveryBindings' in value)
-        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckBearers",) if value["schemaVersion"]==3 else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"]==3 else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -121,15 +124,22 @@ def load_reference_settings(path, config):
         staged=None
         if value['schemaVersion']==3:
             import base64
-            staged_config=value['stagedAckBearers']
-            if type(staged_config) is not dict or not staged_config or not set(staged_config)<=set(viewers):
-                raise RuntimeConfigurationError('staged credentials must use configured Viewer environments')
+            staged_config=value['stagedAckPrincipals']
+            if type(staged_config) is not list or not 1<=len(staged_config)<=32:
+                raise RuntimeConfigurationError('bounded staged principals required')
             staged={}
-            for env,token in staged_config.items():
+            principal_env={}
+            for entry in staged_config:
+                p._closed(entry,('principalId','environment','bearer'),'staged principal')
+                env,token,principal=entry['environment'],entry['bearer'],entry['principalId']
+                p._slug(principal,'staged principal');p._environment(env)
+                if env not in viewers or (principal in principal_env and principal_env[principal]!=env):
+                    raise RuntimeConfigurationError('staged principal environment changed')
+                principal_env[principal]=env
                 if type(token) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{43}',token):raise RuntimeConfigurationError('invalid staged credential')
                 raw=base64.urlsafe_b64decode(token+'=')
                 if len(raw)!=32 or base64.urlsafe_b64encode(raw).decode().rstrip('=')!=token:raise RuntimeConfigurationError('invalid staged credential')
-                staged[token]=env;credentials.append(token)
+                staged[token]={'environment':env,'principalId':principal};credentials.append(token)
             if not config.viewer_enabled:raise RuntimeConfigurationError('native Viewer service required')
         if len(set(credentials)) != len(credentials) or set(credentials) & legacy:
             raise RuntimeConfigurationError("reference credentials must be disjoint from existing credentials")
@@ -256,6 +266,8 @@ class ReferenceRuntime:
                 ("main", config.main_node_url, config.main_node_token)]))
             staged=None
             if settings.staged_ack_bearers is not None:
+                if not STAGED_ACK_SCHEMA_QUALIFIED:
+                    raise RuntimeConfigurationError('staged acknowledgment schema is not qualified')
                 from .viewer_staged_ack import ViewerStagedAck
                 if viewer_service is None or viewer_service.queue is not queue:
                     raise RuntimeConfigurationError('staged acknowledgment requires shared Viewer authority')
@@ -265,7 +277,7 @@ class ReferenceRuntime:
                 existing.update(secret for secret in (config.api_token,config.prototype_operator_token,
                     config.prototype_observer_token,config.viewer_token,config.viewer_staging_token,
                     config.local_node_token,config.main_node_token) if secret)
-                if staged_tokens & existing or not set(settings.staged_ack_bearers.values()) <= set(settings.viewer_bearers.values()):
+                if staged_tokens & existing or not {binding['environment'] for binding in settings.staged_ack_bearers.values()} <= set(settings.viewer_bearers.values()):
                     raise RuntimeConfigurationError('staged credential scope or separation changed')
                 staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers)
             self.api = _DynamicAPI(self.control, config, settings, discover, staged)

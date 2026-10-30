@@ -1,10 +1,18 @@
-"""Authenticated Viewer staged-byte assertions; never deletion or custody proof."""
+"""Authenticated Viewer staged-byte assertions; never deletion or custody proof.
+
+This is an unqualified draft. Runtime activation is blocked until migration,
+rollback, restore, credential provisioning, rotation and revocation are
+qualified. Lookup still requires the current task and its live reservation;
+it does not promise access after task removal or reservation cancellation.
+The staging commit is an issuer assertion, not proof of retained Viewer bytes.
+"""
 import hashlib
 import hmac
 import json
 import base64
 from pathlib import Path
 import re
+from types import MappingProxyType
 
 from . import reference_protocol as p
 from .maintenance import Conflict
@@ -12,7 +20,9 @@ from .reference_api import Response
 
 ROUTE = p.PREFIX + '/viewer-staged-acks/'
 FIELDS = ('schemaVersion','taskId','generation','archiveSha256','archiveBytes',
-          'coordinatorReceiptSha256','attemptId','modelId','modelVersionId','stagingCommitId')
+          'coordinatorReceiptSha256','attemptId','modelId','modelVersionId','stagingCommitId',
+          'issuer','audience','environment','namespace')
+NAMESPACE='ledgetop-viewer-staged-byte-claim-v1'
 
 
 class ViewerStagedAck:
@@ -20,17 +30,23 @@ class ViewerStagedAck:
     def __init__(self, service, bearers):
         if service is None or type(bearers) is not dict or not bearers:
             raise ValueError('scoped staged acknowledgment configuration required')
-        for token,environment in bearers.items():
+        principal_environments={}
+        for token,binding in bearers.items():
             if type(token) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{43}',token):
                 raise ValueError('invalid staged acknowledgment credential')
             raw=base64.urlsafe_b64decode(token+'=')
             if len(raw)!=32 or base64.urlsafe_b64encode(raw).decode().rstrip('=')!=token:
                 raise ValueError('invalid staged acknowledgment credential')
-            p._environment(environment)
-        self.service,self._bearers=service,dict(bearers)
+            p._closed(binding,('environment','principalId'),'staged credential binding')
+            p._environment(binding['environment']);p._slug(binding['principalId'],'Viewer principal')
+            prior=principal_environments.setdefault(binding['principalId'],binding['environment'])
+            if prior!=binding['environment']:raise ValueError('principal environment changed')
+        self.service=service
+        self._bearers=MappingProxyType({token:MappingProxyType(dict(binding)) for token,binding in bearers.items()})
         with service.queue._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_staged_acks (
                 task_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL,
+                principal_id TEXT NOT NULL, audience TEXT NOT NULL, namespace TEXT NOT NULL,
                 attempt_id TEXT NOT NULL UNIQUE, staging_commit_id TEXT NOT NULL UNIQUE,
                 assertion_sha256 TEXT NOT NULL, assertion_json TEXT NOT NULL,
                 PRIMARY KEY(task_id,generation))''')
@@ -40,24 +56,33 @@ class ViewerStagedAck:
         auth=[v for k,v in headers.items() if isinstance(k,str) and k.lower()=='authorization']
         caps=[v for k,v in headers.items() if isinstance(k,str) and k.lower()=='x-ledgetop-capability']
         if len(auth)!=1 or not isinstance(auth[0],str) or not auth[0].startswith('Bearer '):return Response(401,{'error':'unauthorized'})
-        supplied=auth[0][7:];environment=None
-        if not supplied.isascii():return Response(401,{'error':'unauthorized'})
-        for token,env in self._bearers.items():
-            if hmac.compare_digest(token,supplied):environment=env
-        if environment is None:return Response(401,{'error':'unauthorized'})
+        supplied=auth[0][7:];binding=None
+        if len(supplied)!=43 or not supplied.isascii():return Response(401,{'error':'unauthorized'})
+        for token,configured in self._bearers.items():
+            if hmac.compare_digest(token,supplied):binding=configured
+        if binding is None:return Response(401,{'error':'unauthorized'})
+        environment,principal=binding['environment'],binding['principalId']
         if len(caps)!=1 or not isinstance(caps[0],str):return Response(404,{'error':'not_found'})
         tail=path[len(ROUTE):] if path.startswith(ROUTE) else ''
         is_commitment=tail.endswith('/commitment')
-        identifier=tail[:-len('/commitment')] if is_commitment else tail
+        is_lookup='/generations/' in tail
+        if is_commitment:identifier=tail[:-len('/commitment')]
+        elif is_lookup:identifier,generation_text=tail.split('/generations/',1)
+        else:identifier=tail
         try:
             p._uuid(identifier,'task ID')
             if method not in ('GET','POST'):return Response(405,{'error':'method_not_allowed'})
             if is_commitment and method!='GET':return Response(405,{'error':'method_not_allowed'})
+            if is_lookup:
+                if method!='GET' or not re.fullmatch(r'[1-9][0-9]{0,15}',generation_text):raise ValueError()
+                lookup_generation=int(generation_text);p._integer(lookup_generation,'generation')
+            elif method=='GET' and not is_commitment:return Response(404,{'error':'not_found'})
             value=None
             if method=='POST':
                 if type(body) is not bytes or len(body)>4096:raise ValueError()
                 value=p.decode_submission(body);p._closed(value,FIELDS,'staged acknowledgment')
                 if type(value['schemaVersion']) is not int or value['schemaVersion']!=1 or value['taskId']!=identifier:raise ValueError()
+                if value['issuer']!=principal or value['audience']!=self.service.queue.authority_id or value['environment']!=environment or value['namespace']!=NAMESPACE:raise Conflict('authorization binding mismatch')
                 p._integer(value['generation'],'generation');p._integer(value['archiveBytes'],'archive bytes')
                 for key in ('archiveSha256','coordinatorReceiptSha256'):p._hash(value[key],key)
                 for key in ('attemptId','modelId','modelVersionId','stagingCommitId'):p._uuid(value[key],key)
@@ -68,8 +93,8 @@ class ViewerStagedAck:
                 if reservation is None:raise KeyError()
                 row=store._row(db,identifier)
                 if row['environment']!=environment:raise KeyError()
-                if method=='GET' and not is_commitment:
-                    prior=db.execute('SELECT assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=? AND environment=?',(identifier,row['generation'],environment)).fetchone()
+                if is_lookup:
+                    prior=db.execute('SELECT assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=? AND environment=? AND principal_id=? AND audience=? AND namespace=?',(identifier,lookup_generation,environment,principal,store.queue.authority_id,NAMESPACE)).fetchone()
                     return Response(200,{'assertion':json.loads(prior[0])}) if prior else Response(404,{'error':'not_found'})
                 task=store._task(db,row)
                 if not task['job'] or task['job']['status']!='succeeded' or not task['archive_path']:
@@ -81,18 +106,19 @@ class ViewerStagedAck:
                 if is_commitment:
                     return Response(200,{'schemaVersion':1,'taskId':identifier,'generation':row['generation'],
                         'archiveSha256':receipt['sha256'],'archiveBytes':receipt['bytes'],
-                        'coordinatorReceiptSha256':receipt_sha})
+                        'coordinatorReceiptSha256':receipt_sha,'issuer':principal,
+                        'audience':store.queue.authority_id,'environment':environment,'namespace':NAMESPACE})
                 if (value['generation']!=row['generation'] or value['archiveSha256']!=receipt['sha256']
                         or value['archiveBytes']!=receipt['bytes'] or value['coordinatorReceiptSha256']!=receipt_sha):
                     raise Conflict('result identity mismatch')
                 encoded=p.canonical_json(value);digest=hashlib.sha256(encoded).hexdigest()
-                old=db.execute('SELECT environment,assertion_sha256,assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=?',(identifier,row['generation'])).fetchone()
-                if old and (old['environment']!=environment or old['assertion_sha256']!=digest or old['assertion_json']!=encoded.decode()):raise Conflict('assertion differs')
+                old=db.execute('SELECT environment,principal_id,audience,namespace,assertion_sha256,assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=?',(identifier,row['generation'])).fetchone()
+                if old and (old['environment']!=environment or old['principal_id']!=principal or old['audience']!=store.queue.authority_id or old['namespace']!=NAMESPACE or old['assertion_sha256']!=digest or old['assertion_json']!=encoded.decode()):raise Conflict('assertion differs')
                 if not old:
                     if db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0]>=100000:raise Conflict('assertion capacity reached')
                     if db.execute('SELECT 1 FROM viewer_staged_acks WHERE attempt_id=? OR staging_commit_id=?',(value['attemptId'],value['stagingCommitId'])).fetchone():
                         raise Conflict('assertion identity already bound')
-                    db.execute('INSERT INTO viewer_staged_acks VALUES (?,?,?,?,?,?,?)',(identifier,row['generation'],environment,value['attemptId'],value['stagingCommitId'],digest,encoded.decode()))
+                    db.execute('INSERT INTO viewer_staged_acks VALUES (?,?,?,?,?,?,?,?,?,?)',(identifier,row['generation'],environment,principal,store.queue.authority_id,NAMESPACE,value['attemptId'],value['stagingCommitId'],digest,encoded.decode()))
                 return Response(200,{'assertion':value,'created':old is None})
         except KeyError:return Response(404,{'error':'not_found'})
         except (p.ProtocolError,ValueError,TypeError):return Response(400,{'error':'invalid_request'})

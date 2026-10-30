@@ -122,15 +122,15 @@ class ReferenceRuntimeTests(unittest.TestCase):
     def test_staged_ack_config_requires_disjoint_canonical_scoped_secret(self):
         self.value['schemaVersion']=3
         token=base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')
-        self.value['stagedAckBearers']={'staging':token};self.write_config()
-        self.assertEqual(self.settings().staged_ack_bearers,{token:'staging'})
-        combined=self.recovery_config();combined['schemaVersion']=3;combined['stagedAckBearers']={'staging':token}
+        self.value['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':token}];self.write_config()
+        self.assertEqual(self.settings().staged_ack_bearers,{token:{'environment':'staging','principalId':'viewer-a'}})
+        combined=self.recovery_config();combined['schemaVersion']=3;combined['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':token}]
         previous=self.value;self.value=combined;self.write_config()
         self.assertIsNotNone(self.settings().recovery_bindings)
         self.value=previous
-        self.value['stagedAckBearers']={'production':token};self.write_config()
+        self.value['stagedAckPrincipals']=[{'environment':'production','principalId':'viewer-a','bearer':token}];self.write_config()
         with self.assertRaises(RuntimeConfigurationError):self.settings()
-        self.value['stagedAckBearers']={'staging':self.value['workers']['cluster']['bearer']};self.write_config()
+        self.value['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':self.value['workers']['cluster']['bearer']}];self.write_config()
         with self.assertRaises(RuntimeConfigurationError):self.settings()
 
     def test_staged_ack_runtime_requires_same_native_authority(self):
@@ -140,9 +140,11 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.addCleanup(queue.close)
         service=ViewerService(queue,self.config);self.addCleanup(service.close)
         self.value['schemaVersion']=3
-        self.value['stagedAckBearers']={'staging':base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')};self.write_config()
+        self.value['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')}];self.write_config()
         with self.assertRaises(RuntimeConfigurationError):self.runtime(queue)
-        runtime=self.runtime(queue,viewer_service=service)
+        with self.assertRaises(RuntimeConfigurationError):self.runtime(queue,viewer_service=service)
+        with patch('processing.reference_runtime.STAGED_ACK_SCHEMA_QUALIFIED',True):
+            runtime=self.runtime(queue,viewer_service=service)
         self.assertIsNotNone(runtime.api.staged_ack)
 
     def test_schema2_loads_closed_frozen_bindings_and_legacy_settings_default_is_none(self):
