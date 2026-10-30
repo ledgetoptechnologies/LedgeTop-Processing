@@ -6,7 +6,9 @@ Native public responses come from ``info``/``output``. Inputs and results surviv
 ``remove``; a reinitialized UUID gets a fresh directory and execution request ID.
 """
 
+import base64
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -21,6 +23,9 @@ from .maintenance import Conflict
 
 
 VIEWER_PROFILE = 'odm-viewer-v1'
+# Tombstones are retained while any delayed request can replay. This explicit
+# finite ceiling bounds authenticated storage use; do not silently purge.
+RESERVATION_LIMIT = 100000
 PHOTO_SUFFIXES = frozenset(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
 INPUT_SUFFIXES = PHOTO_SUFFIXES | frozenset(('.txt', '.json', '.csv'))
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ -]{0,179}\Z')
@@ -115,6 +120,9 @@ class TaskStore:
                 PRIMARY KEY(uuid,generation))''')
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS viewer_engine_uuid
                 ON viewer_tasks(engine_uuid) WHERE engine_uuid IS NOT NULL''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_reservations (
+                uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))''')
 
     def _row(self, db, identifier, *, removed=False):
         checked_uuid(identifier)
@@ -140,7 +148,72 @@ class TaskStore:
             raise Conflict('task execution record unavailable')
         return job
 
-    def initialize(self, identifier, name='', options=None, outputs=None, environment='production'):
+    @staticmethod
+    def _capability_hash(identifier, environment, capability):
+        checked_uuid(identifier)
+        if environment not in ('production','staging') or not isinstance(capability,str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}',capability):
+            raise ValueError('invalid reservation credential')
+        try:raw=base64.urlsafe_b64decode(capability+'=')
+        except Exception:raise ValueError('invalid reservation credential') from None
+        if len(raw)!=32 or base64.urlsafe_b64encode(raw).decode().rstrip('=')!=capability:
+            raise ValueError('invalid reservation credential')
+        return hashlib.sha256(b'ledgetop-viewer-reservation-v1\0'+environment.encode()+b'\0'+identifier.encode()+b'\0'+raw).hexdigest()
+
+    def _reservation(self, db, identifier, environment, capability, *, allow_cancelled=False):
+        row=db.execute('SELECT * FROM viewer_reservations WHERE uuid=?',(identifier,)).fetchone()
+        if row is None:
+            if capability is not None:raise KeyError('unknown reservation')
+            return None
+        try:value=self._capability_hash(identifier,environment,capability)
+        except ValueError:raise KeyError('unknown reservation') from None
+        if row['environment']!=environment or not hmac.compare_digest(row['capability_hash'],value):
+            raise KeyError('unknown reservation')
+        if row['state']=='cancelled' and not allow_cancelled:raise Conflict('task reservation is cancelled')
+        return row
+
+    def reserve(self, identifier, environment, capability):
+        digest=self._capability_hash(identifier,environment,capability)
+        with self._lock,self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM viewer_reservations WHERE uuid=?',(identifier,)).fetchone()
+            if row is not None:
+                self._reservation(db,identifier,environment,capability,allow_cancelled=True)
+                return {'uuid':identifier,'state':row['state']}
+            if db.execute('SELECT 1 FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone():raise Conflict('UUID already belongs to a legacy task')
+            if db.execute('SELECT COUNT(*) FROM viewer_reservations').fetchone()[0]>=RESERVATION_LIMIT:raise Conflict('reservation history limit reached')
+            db.execute("INSERT INTO viewer_reservations(uuid,environment,capability_hash,state) VALUES (?,?,?,'reserved')",(identifier,environment,digest))
+            return {'uuid':identifier,'state':'reserved'}
+
+    def reservation_stats(self):
+        with self.queue._db() as db:
+            used=db.execute('SELECT COUNT(*) FROM viewer_reservations').fetchone()[0]
+        return {'version':1,'capabilityEncoding':'base64url-32','maxRetained':RESERVATION_LIMIT,
+                'remaining':max(0,RESERVATION_LIMIT-used),'retention':'indefinite',
+                'runningCancellation':'requires_inspection'}
+
+    def authorize_reservation(self,identifier,environment,capability):
+        with self.queue._db() as db:self._reservation(db,identifier,environment,capability,allow_cancelled=True)
+
+    def cancel_reservation(self, identifier, environment, capability):
+        with self._lock,self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            reserved=self._reservation(db,identifier,environment,capability,allow_cancelled=True)
+            if reserved is None:raise KeyError('unknown reservation')
+            if reserved['state']=='cancelled':return {'uuid':identifier,'state':'cancelled'}
+            row=db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
+            if row is not None:
+                job=self._job(db,row)
+                if (row['removed'] or row['stage'] not in ('uploading','queued')
+                        or (row['stage']=='uploading' and job is not None)
+                        or (row['stage']=='queued' and (job is None or job['status']!='queued'))):
+                    raise Conflict('execution requires inspection')
+                if job:
+                    db.execute("UPDATE jobs SET status='failed',result=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='queued'",(canonical({'cancelled':True}),job['id']))
+                db.execute("UPDATE viewer_tasks SET stage='cancelled',phase='cancelled',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",(identifier,))
+            db.execute("UPDATE viewer_reservations SET state='cancelled' WHERE uuid=?",(identifier,))
+            return {'uuid':identifier,'state':'cancelled'}
+
+    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
         checked_uuid(identifier)
         if (not isinstance(name, str) or len(name) > 256
                 or any(ord(character) < 32 for character in name)):
@@ -168,7 +241,9 @@ class TaskStore:
             raise ValueError('invalid task environment')
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            reserved=self._reservation(db,identifier,environment,capability)
             row = db.execute('SELECT * FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()
+            if reserved is not None and row is not None and row['removed']:raise Conflict('reserved UUID cannot be reset')
             if row is not None and row['environment'] != environment:
                 # Authorization and task operations use separate reads. Keep
                 # the original UUID's credential domain stable even while a
@@ -212,12 +287,13 @@ class TaskStore:
             raise ValueError('safe supported input basename required')
         return name.casefold()
 
-    def upload(self, identifier, filename, stream, length):
+    def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         key = self._filename(filename)
         if type(length) is not int or not 0 < length <= self.max_input_bytes:
             raise ValueError('invalid input length')
         with self._lock:
             with self.queue._db() as db:
+                self._reservation(db,identifier,environment,capability)
                 row = self._row(db, identifier)
                 if row['stage'] != 'uploading' or row['job_id']:
                     raise Conflict('task is no longer accepting uploads')
@@ -251,6 +327,7 @@ class TaskStore:
                 value = digest.hexdigest()
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
+                    self._reservation(db,identifier,environment,capability)
                     row = self._row(db, identifier)
                     if row['stage'] != 'uploading' or row['job_id']:
                         raise Conflict('task is no longer accepting uploads')
@@ -283,9 +360,10 @@ class TaskStore:
             return row['uuid']
         return str(uuid_module.uuid5(uuid_module.UUID(row['uuid']), 'generation:' + str(row['generation'])))
 
-    def commit(self, identifier):
+    def commit(self, identifier, environment=None, capability=None):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._reservation(db,identifier,environment,capability)
             row = self._row(db, identifier)
             if row['job_id']:
                 if row['stage'] == 'cancelled':
@@ -440,6 +518,7 @@ class TaskStore:
     def cancel(self, identifier):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._reservation(db,identifier,None,None)
             row = self._row(db, identifier)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
@@ -457,6 +536,7 @@ class TaskStore:
     def remove(self, identifier):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._reservation(db,identifier,None,None)
             row = self._row(db, identifier, removed=True)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):

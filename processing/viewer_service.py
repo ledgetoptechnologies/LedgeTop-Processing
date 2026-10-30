@@ -135,6 +135,7 @@ class ViewerService:
         jobs = self.queue.list()
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
                 'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'ledgetopReservations': self.store.reservation_stats(),
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
     def _check_options(self, options):
@@ -143,20 +144,27 @@ class ViewerService:
                 or item.get('name') not in allowed for item in options)):
             raise ValueError('option unavailable on configured engines')
 
-    def initialize(self, identifier, name='', options=None, outputs=None, environment='production'):
+    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
         self._check_options(options or [])
-        return self.store.initialize(identifier, name, options, outputs, environment)
+        return self.store.initialize(identifier, name, options, outputs, environment, capability)
 
-    def upload(self, identifier, filename, stream, length):
-        return self.store.upload(identifier, filename, stream, length)
+    def upload(self, identifier, filename, stream, length, environment=None, capability=None):
+        return self.store.upload(identifier, filename, stream, length, environment, capability)
 
-    def commit(self, identifier):
-        return self.store.commit(identifier)
+    def commit(self, identifier, environment=None, capability=None):
+        return self.store.commit(identifier, environment, capability)
 
     def info(self, identifier):
         return self.store.info(identifier)
 
-    def authorize(self, identifier, environment):
+    def reserve(self, identifier, environment, capability):
+        with self._lock:return self.store.reserve(identifier,environment,capability)
+
+    def cancel_reserved(self, identifier, environment, capability):
+        with self._lock:return self.store.cancel_reservation(identifier,environment,capability)
+
+    def authorize(self, identifier, environment, capability=None):
+        self.store.authorize_reservation(identifier,environment,capability)
         if self.store.task(identifier)['environment'] != environment:
             raise KeyError('unknown task')
 
@@ -223,6 +231,7 @@ class ViewerService:
 
     def cancel(self, identifier):
         with self._lock:
+            self.store.authorize_reservation(identifier,None,None)
             task = self.store.task(identifier)
             job = task['job']
             if not job or job['status'] in ('queued', 'failed', 'succeeded'):

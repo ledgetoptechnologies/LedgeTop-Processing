@@ -247,10 +247,18 @@ class ViewerFacade:
                 pass
         return True
 
-    def _authorize(self, identifier, environment):
+    @staticmethod
+    def _capability(handler):
+        values=handler.headers.get_all('X-LedgeTop-Capability',[])
+        if len(values)>1:raise RequestError(400,'invalid_capability')
+        return values[0] if values else None
+
+    def _authorize(self, identifier, environment, handler):
         authorize = getattr(self.service, 'authorize', None)
         if callable(authorize):
-            authorize(identifier, environment)
+            capability=self._capability(handler)
+            if capability is None:authorize(identifier, environment)
+            else:authorize(identifier, environment, capability)
 
     def _get(self, handler, path, query, environment):
         lengths = handler.headers.get_all('Content-Length', [])
@@ -265,7 +273,7 @@ class ViewerFacade:
             if not route:
                 raise RequestError(404, 'not_found')
             identifier, action = task_uuid(unquote(route[1])), route[2]
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             if action == 'info':
                 value = self.service.info(identifier)
             elif action == 'output':
@@ -305,6 +313,17 @@ class ViewerFacade:
     def _post(self, handler, path, environment):
         if path in ('/info', '/options'):
             raise RequestError(405, 'method_not_allowed')
+        if path in ('/task/ledgetop/reserve','/task/ledgetop/cancel'):
+            length=_length(handler,MAX_FORM_BYTES)
+            if handler.headers.get_content_type()!='application/x-www-form-urlencoded':raise RequestError(415,'form_required')
+            body=handler.rfile.read(length)
+            if len(body)!=length:raise RequestError(400,'truncated_body')
+            values=parse_qs(body.decode('utf-8'),keep_blank_values=True,max_num_fields=2)
+            if set(values)!={'uuid'} or len(values['uuid'])!=1:raise RequestError(400,'invalid_action_form')
+            identifier=task_uuid(values['uuid'][0]);capability=self._capability(handler)
+            if capability is None:raise RequestError(400,'invalid_capability')
+            action=self.service.reserve if path.endswith('/reserve') else self.service.cancel_reserved
+            self._reply(handler,200,action(identifier,environment,capability));return
         if path == '/task/new/init':
             length = _length(handler, MAX_FORM_BYTES)
             identifier = task_uuid(handler.headers.get('set-uuid', ''))
@@ -317,13 +336,16 @@ class ViewerFacade:
                 values[name] = stream.read(size).decode('utf-8')
             options = json.loads(values.get('options', '[]'))
             outputs = json.loads(values['outputs']) if 'outputs' in values else None
-            self._reply(handler, 200, self.service.initialize(identifier, values.get('name', ''), options, outputs, environment))
+            capability=self._capability(handler)
+            if capability is None:result=self.service.initialize(identifier, values.get('name', ''), options, outputs, environment)
+            else:result=self.service.initialize(identifier, values.get('name', ''), options, outputs, environment, capability)
+            self._reply(handler, 200, result)
             return
         upload = re.fullmatch(r'/task/new/upload/([^/]+)', path)
         if upload:
             length = _length(handler, MAX_UPLOAD_BYTES)
             identifier = task_uuid(unquote(upload[1]))
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             count, seen = 0, set()
             for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
                 if name != 'images':
@@ -332,7 +354,9 @@ class ViewerFacade:
                 if filename.casefold() in seen or not size:
                     raise RequestError(400, 'duplicate_or_empty_upload')
                 seen.add(filename.casefold())
-                self.service.upload(identifier, filename, stream, size)
+                capability=self._capability(handler)
+                if capability is None:self.service.upload(identifier, filename, stream, size)
+                else:self.service.upload(identifier, filename, stream, size, environment, capability)
                 count += 1
             if not count:
                 raise RequestError(400, 'empty_upload')
@@ -341,10 +365,13 @@ class ViewerFacade:
         commit = re.fullmatch(r'/task/new/commit/([^/]+)', path)
         if commit:
             identifier = task_uuid(unquote(commit[1]))
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             if _length(handler, MAX_FORM_BYTES, allow_empty=True):
                 raise RequestError(400, 'unexpected_body')
-            self._reply(handler, 200, self.service.commit(identifier))
+            capability=self._capability(handler)
+            if capability is None:result=self.service.commit(identifier)
+            else:result=self.service.commit(identifier,environment,capability)
+            self._reply(handler, 200, result)
             return
         if path in ('/task/cancel', '/task/remove'):
             length = _length(handler, MAX_FORM_BYTES)
@@ -357,7 +384,7 @@ class ViewerFacade:
             if set(values) != {'uuid'} or len(values['uuid']) != 1:
                 raise RequestError(400, 'invalid_action_form')
             identifier = task_uuid(values['uuid'][0])
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             action = self.service.cancel if path.endswith('cancel') else self.service.remove
             self._reply(handler, 200, action(identifier))
             return
