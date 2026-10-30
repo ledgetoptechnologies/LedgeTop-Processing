@@ -8,6 +8,9 @@ memory. Each multipart part is streamed to an unlinked private temporary file.
 from email.parser import BytesHeaderParser
 from email.policy import default as email_policy
 import hmac
+from contextlib import contextmanager
+import shutil
+import threading
 import json
 import hashlib
 import os
@@ -176,8 +179,37 @@ def _length(handler, maximum, *, allow_empty=False):
     return length
 
 
+class SpoolCapacity:
+    """Process-local conservative reservations, not a filesystem quota."""
+    def __init__(self, directory, floor):
+        if type(floor) is not int or floor <= 0 or directory is None:
+            raise ValueError('positive spool floor and directory required')
+        self.directory, self.floor = directory, floor
+        self._lock = threading.Lock()
+        self._reserved = 0
+
+    @contextmanager
+    def reserve(self, request_bytes):
+        # Each part is first spooled and then copied to durable task storage.
+        # Double the whole request is conservative even for many small parts.
+        amount = 2 * request_bytes
+        with self._lock:
+            try:
+                free = shutil.disk_usage(self.directory).free
+            except OSError:
+                raise RequestError(503, 'spool_capacity_unavailable') from None
+            if free - self._reserved - amount < self.floor:
+                raise RequestError(503, 'spool_capacity_unavailable')
+            self._reserved += amount
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._reserved -= amount
+
+
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, spool_min_free_bytes=0):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
@@ -193,6 +225,15 @@ class ViewerFacade:
                 raise ValueError('private existing spool directory required')
             temp_dir = str(directory)
         self.temp_dir = temp_dir
+        if type(spool_min_free_bytes) is not int or spool_min_free_bytes < 0:
+            raise ValueError('nonnegative spool floor required')
+        if spool_min_free_bytes:
+            task_root = getattr(getattr(service, 'store', None), 'root', None)
+            if task_root is None or temp_dir is None or os.stat(temp_dir).st_dev != os.stat(task_root).st_dev:
+                raise ValueError('spool and task storage must share a filesystem')
+            self.spool_capacity = SpoolCapacity(temp_dir, spool_min_free_bytes)
+        else:
+            self.spool_capacity = None
 
     @staticmethod
     def _reply(handler, status, value):
@@ -404,20 +445,23 @@ class ViewerFacade:
             length = _length(handler, MAX_UPLOAD_BYTES)
             identifier = task_uuid(unquote(upload[1]))
             self._authorize(identifier, environment, handler)
-            count, seen = 0, set()
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                if name != 'images':
-                    raise RequestError(400, 'invalid_upload_form')
-                filename = safe_filename(filename)
-                if filename.casefold() in seen or not size:
-                    raise RequestError(400, 'duplicate_or_empty_upload')
-                seen.add(filename.casefold())
-                capability=self._capability(handler)
-                if capability is None:self.service.upload(identifier, filename, stream, size)
-                else:self.service.upload(identifier, filename, stream, size, environment, capability)
-                count += 1
-            if not count:
-                raise RequestError(400, 'empty_upload')
+            from contextlib import nullcontext
+            reservation = self.spool_capacity.reserve(length) if self.spool_capacity is not None else nullcontext()
+            with reservation:
+                count, seen = 0, set()
+                for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
+                    if name != 'images':
+                        raise RequestError(400, 'invalid_upload_form')
+                    filename = safe_filename(filename)
+                    if filename.casefold() in seen or not size:
+                        raise RequestError(400, 'duplicate_or_empty_upload')
+                    seen.add(filename.casefold())
+                    capability=self._capability(handler)
+                    if capability is None:self.service.upload(identifier, filename, stream, size)
+                    else:self.service.upload(identifier, filename, stream, size, environment, capability)
+                    count += 1
+                if not count:
+                    raise RequestError(400, 'empty_upload')
             self._reply(handler, 200, {'success': True})
             return
         commit = re.fullmatch(r'/task/new/commit/([^/]+)', path)

@@ -179,3 +179,23 @@ held for inspection. These checks do not establish Viewer ingestion, provide an
 acknowledgement, or prove power-loss behavior at every filesystem boundary.
 Concurrent recovery tests exercise threads in one coordinator service, whose
 per-task lock serializes them. They do not establish multi-process exclusion.
+### Optional Viewer upload spool floor
+
+`PROCESSING_VIEWER_SPOOL_MIN_FREE_BYTES` defaults to `0` (disabled). Set it to a
+positive byte count to enable process-local upload admission for the native
+Viewer facade. Before reading an upload body, the facade reserves twice its
+Content-Length against measured free space and the configured floor. The factor
+covers the temporary multipart spool and the copy into task storage; it also
+includes multipart framing, making the estimate conservative. Insufficient or
+unavailable capacity returns HTTP 503 before parsing the body. Reservations are
+released on success and exceptions. Startup rejects this setting if the spool
+and task storage roots have different filesystem device IDs.
+
+This is not a disk quota, NAS-backed input, or a space reservation recognized by
+other processes. Already used space is reflected in the filesystem free-space
+measurement; in-flight reservations from this facade are tracked in memory.
+External writers, other coordinator processes, filesystem replacement, and
+space consumed after admission can still exhaust disk. It does not reserve
+NodeODX working space or results and does not make a large dataset safe. Keep
+this disabled until the single-owner deployment and filesystem layout have been
+reviewed.
