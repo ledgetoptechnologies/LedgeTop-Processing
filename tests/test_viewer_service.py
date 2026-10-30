@@ -437,7 +437,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(len(self.fleet.commits), 1)
         self.assertEqual(sum(c[0] == 'commit' for c in self.engines['cluster'].calls), 1)
 
-    def test_running_cancel_does_not_release_slot_until_engine_reports_50(self):
+    def test_running_cancel_status_50_holds_slot_even_after_restart(self):
         identifier = self.submit()
         next_id = self.submit()
         self.service.tick()
@@ -450,9 +450,39 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(sum(c[0] == 'cancel' for c in self.engines['cluster'].calls), 1)
         self.finish(identifier, 50)
         self.service.tick()
-        self.assertEqual(self.service.info(identifier)['status']['code'], 50)
-        self.assertEqual(self.task(next_id)['node_id'], 'cluster')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertTrue(self.service.info(identifier)['ledgetopHeld'])
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertEqual(self.task(identifier)['error'], 'cancel_termination_unverified')
+        self.assertIsNone(self.task(next_id)['node_id'])
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertEqual(self.task(identifier)['error'], 'cancel_termination_unverified')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertIsNone(self.task(next_id)['node_id'])
         self.assertEqual(self.fleet.max_active, 1)
+
+    def test_cancel_hold_survives_crash_before_task_metadata_update(self):
+        identifier = self.submit()
+        next_id = self.submit()
+        self.service.tick()
+        self.service.cancel(identifier)
+        self.finish(identifier, 50)
+        with patch.object(self.service.store, 'update', side_effect=OSError('synthetic crash')):
+            with self.assertRaises(OSError):
+                self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertIsNone(self.task(next_id)['node_id'])
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertIsNone(self.task(next_id)['node_id'])
 
     def test_lost_commit_ack_queued_upstream_retains_slot_until_later_completion(self):
         identifier = self.submit()

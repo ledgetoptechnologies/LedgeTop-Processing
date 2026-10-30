@@ -300,6 +300,12 @@ class ViewerService:
                 fields.update(phase='processing', error=None)
             self.store.update(identifier, **fields)
             return
+        if code == 50:
+            # A native cancellation status does not prove that the engine's
+            # processes have stopped. Preserve the global slot until an
+            # independent physical termination check can resolve the hold.
+            self._hold(task, 'cancel_termination_unverified')
+            return
         status = 'succeeded' if code == 40 else 'failed'
         result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                   'environment': task['environment'], 'cancelled': code == 50}
