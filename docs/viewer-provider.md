@@ -10,7 +10,10 @@ Viewer photo jobs with at most 1,000 photos prefer cluster regardless of input
 bytes. If cluster is busy/unavailable/draining, they wait for cluster. Jobs with
 more photos wait for main; they never overflow to cluster. The independent Viewer
 upload admission cap still applies. This does not change the separate v1
-reference pipeline, which currently retains its local input-byte routing limit. There is one running
+reference pipeline, which currently retains its local input-byte routing limit.
+The `/v1/plan` routing probe follows the same photo-count preference as Viewer.
+Viewer has no free-space reservation check; qualify one before raising its upload
+cap. There is one running
 or held job globally, production before staging and FIFO within each class.
 Running staging is allowed to finish when production arrives.
 
