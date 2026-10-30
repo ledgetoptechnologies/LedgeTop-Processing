@@ -177,7 +177,8 @@
       "totalByteBudget above 9007199254740991",
       "issuedAt missing milliseconds",
       "expiresAt with non-UTC offset",
-      "jobId is a non-UUID slug"
+      "jobId is a non-UUID slug",
+      "issuedAt year 0000"
     ]
   }
 }

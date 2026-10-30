@@ -51,7 +51,7 @@ ASCII `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. SHA-256 strings are 64 lowercase hex ch
 rangeBytes are positive integers and both budgets are nonnegative integers.
 Every integer is at most 9007199254740991 (`2^53-1`); booleans, fractional or
 exponent tokens, negative values and negative zero are invalid. Dates are real
-UTC calendar instants exactly `YYYY-MM-DDTHH:mm:ss.SSSZ`, and expiry must be
+UTC calendar instants in years 0001–9999 exactly `YYYY-MM-DDTHH:mm:ss.SSSZ`, and expiry must be
 later than issuance. Reject UTF-8 BOM, duplicate or unknown keys, missing keys,
 invalid Unicode, floats and extra whitespace; input must equal its canonical
 re-encoding. Canonical bytes are compact UTF-8 JSON with object keys ordered by
