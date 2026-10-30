@@ -15,6 +15,9 @@ class ManifestTests(unittest.TestCase):
         canonical=(Path(__file__).resolve().parents[1]/'contracts/input-v2-manifest-canonical.json').read_bytes()
         self.assertEqual(decode_manifest_v2(canonical),self.expected)
         with self.assertRaises(p.ProtocolError): decode_manifest_v2(canonical+b' ')
+    def test_shared_nonstring_kind_rejected(self):
+        raw=(Path(__file__).resolve().parents[1]/'contracts/input-v2-manifest-kind-array.json').read_bytes()
+        with self.assertRaises(p.ProtocolError): decode_manifest_v2(raw)
     def test_each_field_bound(self):
         for key,value in [('id','other'),('revision',2),('inputCounts',{'images':1,'lidarObjects':1,'points':43})]:
             m=copy.deepcopy(self.manifest);m[key]=value
