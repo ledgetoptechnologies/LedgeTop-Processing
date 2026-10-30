@@ -19,9 +19,9 @@ import uuid as uuid_module
 
 from .maintenance import Conflict
 from .viewer_tasks import InputLimitExceeded
+from .viewer_limits import MAX_UPLOAD_BYTES
 
 
-MAX_UPLOAD_BYTES = 2 * 1024 ** 3
 MAX_FORM_BYTES = 64 * 1024
 MAX_PART_HEADERS = 16 * 1024
 MAX_PARTS = 64

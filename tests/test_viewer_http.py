@@ -348,6 +348,7 @@ class ViewerHTTPTests(unittest.TestCase):
         with patch('processing.viewer_http.MAX_UPLOAD_BYTES', 4):
             handler = self.memory('/task/new/upload/' + IDENTIFIER, b'12345')
             self.assertEqual(handler.status, 413)
+            self.assertEqual(json.loads(handler.wfile.getvalue()), {'error': 'body_too_large'})
         handler = MemoryHandler('/v1/prototype/jobs', method='GET')
         self.assertFalse(self.facade.handle(handler))
         handler = MemoryHandler('/info?token=' + TOKEN, method='DELETE')

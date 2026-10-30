@@ -216,7 +216,9 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.fleet.max_active, 1)
 
     def test_capabilities_report_the_enforced_cumulative_input_limit(self):
+        from processing.viewer_http import MAX_UPLOAD_BYTES
         self.assertEqual(self.service.capabilities()['ledgetopMaxInputBytes'], self.service.store.max_input_bytes)
+        self.assertEqual(self.service.capabilities()['ledgetopMaxUploadRequestBytes'], MAX_UPLOAD_BYTES)
 
     def test_real_http_batch_over_limit_retains_prior_file_and_retries_safely(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

@@ -27,6 +27,7 @@ from .policy import plan
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
+from .viewer_limits import MAX_UPLOAD_BYTES
 
 
 class EngineUnavailable(OSError):
@@ -139,6 +140,7 @@ class ViewerService:
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
                 'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
                 'ledgetopMaxInputBytes': self.store.max_input_bytes,
+                'ledgetopMaxUploadRequestBytes': MAX_UPLOAD_BYTES,
                 'ledgetopReservations': self.store.reservation_stats(),
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
