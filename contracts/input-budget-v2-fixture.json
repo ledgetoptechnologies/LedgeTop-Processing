@@ -1,0 +1,34 @@
+{
+  "proposal": {
+    "protocolVersion": 2,
+    "jobId": "job-1",
+    "environment": "staging",
+    "reservationId": "reservation-1",
+    "generation": 7,
+    "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "capabilityFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expiresAt": "2030-01-01T00:00:00Z",
+    "objects": [
+      {
+        "id": "empty",
+        "byteSize": 0,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      {
+        "id": "photo",
+        "byteSize": 33,
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ],
+    "rangeBytes": 16,
+    "retryRequests": 3,
+    "retryBytes": 8
+  },
+  "expected": {
+    "protocolVersion": 2,
+    "proposalSha256": "5c796f9b27bc9662eb4874b06394619af5db6eb1659efb414ef43396e944ae5f",
+    "requiredRequests": 4,
+    "requestBudget": 7,
+    "byteBudget": 41
+  }
+}
