@@ -25,7 +25,7 @@ from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
 from processing.reference_transfer import BrokerClient
-from processing.scratch_policy import ScratchLedger
+from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.viewer_service import NativeEngine
 from processing.worker_outbox import WorkerOutbox
 from processing.scratch_cleanup import ScratchCleanupExecutor
@@ -466,6 +466,30 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.assertRaises(ValueError) as observed:
             load_config(str(path))
         self.assertNotIn(TOKEN, str(observed.exception))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX ownership and umask required')
+    def test_fetch_creates_private_jobs_directory_with_group_writable_umask(self):
+        previous = os.umask(0o002)
+        try:
+            job = self.submit()
+            self.advance(job, 'awaiting_acceptance')
+        finally:
+            os.umask(previous)
+        jobs = self.scratch / 'jobs'
+        self.assertEqual(jobs.stat().st_mode & 0o777, 0o700)
+        self.assertTrue(list(jobs.glob('*/all.zip')))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX directory mode required')
+    def test_unsafe_existing_jobs_directory_is_refused_without_modification(self):
+        jobs = self.scratch / 'jobs'
+        jobs.mkdir(mode=0o700)
+        jobs.chmod(0o775)
+        sentinel = jobs / 'keep'; sentinel.write_bytes(b'synthetic-retained-data')
+        with self.assertRaisesRegex(PolicyConflict, 'scratch directory is not privately owned'):
+            self.ledger.ensure_job_directory('synthetic-reservation')
+        self.assertEqual(jobs.stat().st_mode & 0o777, 0o775)
+        self.assertEqual(sentinel.read_bytes(), b'synthetic-retained-data')
+        self.assertFalse((jobs / 'synthetic-reservation').exists())
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'exact-object cleanup requires Linux')
     def test_opted_in_background_cleanup_removes_only_accepted_result_after_receipt(self):
