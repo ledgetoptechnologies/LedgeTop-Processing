@@ -173,10 +173,10 @@ with NodeGate('synthetic-engine') as g:
    calls=0
    def initialize(self,task):self.calls+=1;raise OSError('response lost')
   engine=Lost();db,inode=self.make_init_database();self.addCleanup(db.close)
-  shared.update(expected_epoch='f'*64,expected_inode=inode,authenticated_claim=self.init_claim())
   with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
    with NodeGate(engineid) as gate:gate.provision('main',origin,authority)
    retain_node_for_verified_input(**shared)
+   shared.update(expected_epoch='f'*64,expected_inode=inode,authenticated_claim=self.init_claim())
    with self.assertRaises(OSError):initialize_once(enabled=True,db=db,engine=engine,**shared)
    with self.assertRaisesRegex(InitHeld,'already attempted'):initialize_once(enabled=True,db=db,engine=engine,**shared)
    self.assertEqual(engine.calls,1)
