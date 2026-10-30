@@ -12,6 +12,8 @@ from . import reference_protocol as p
 from .reference_input_grant_v2_draft import verify_candidate_grant
 from .reference_manifest_v2 import decode_manifest_v2
 
+MAX_LOCAL_CHARGES=100000
+
 SCHEMA=("CREATE TABLE transfer (id INTEGER PRIMARY KEY CHECK(id=1), grant BLOB NOT NULL, manifest BLOB NOT NULL, grant_sha TEXT NOT NULL, clock_ms INTEGER NOT NULL, requests INTEGER NOT NULL, bytes INTEGER NOT NULL)",
  "CREATE TABLE charges (request_id TEXT PRIMARY KEY, object_id TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, bytes INTEGER NOT NULL)")
 
@@ -61,7 +63,7 @@ class PrechargeLedger:
    if grant['sha256']!=digest or grant['payload']['transferEpoch']!=self.epoch or grant['payload']['manifestSha256']!=manifest['sha256']:raise ValueError()
    if any(type(v) is not int or v<0 for v in (high,requests,charged)):raise ValueError()
    count,total=db.execute('SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM charges').fetchone()
-   if count!=requests or total!=charged or count>100000 or requests>grant['payload']['totalRequestBudget'] or charged>grant['payload']['totalByteBudget']:raise ValueError()
+   if count!=requests or total!=charged or count>MAX_LOCAL_CHARGES or requests>grant['payload']['totalRequestBudget'] or charged>grant['payload']['totalByteBudget']:raise ValueError()
    objects={x['id']:x for x in manifest['objects']}
    for request_id,object_id,start,end,length in db.execute('SELECT request_id,object_id,start,end,bytes FROM charges'):
     p._slug(request_id,'request id');p._slug(object_id,'object id');obj=objects.get(object_id)
@@ -79,17 +81,20 @@ class PrechargeLedger:
    now=_now_ms(self.clock);db.execute('UPDATE transfer SET clock_ms=? WHERE id=1',(max(now,high),));self._check_path();db.execute('COMMIT')
    db.execute('BEGIN IMMEDIATE');grant,manifest,high,requests,charged=self._validate(db)
    high=max(high,_now_ms(self.clock));db.execute('UPDATE transfer SET clock_ms=? WHERE id=1',(high,))
-   if high>=_utc_ms(grant['expiresAt']):
-    self._check_path();db.execute('COMMIT');raise PrechargeHeld('grant expired')
+   def deny(reason):
+    # Preserve the valid second observation on every business denial.
+    self._check_path();db.execute('COMMIT');raise PrechargeHeld(reason)
+   if high>=_utc_ms(grant['expiresAt']):deny('grant expired')
    obj=next((x for x in manifest['objects'] if x['id']==object_id),None)
-   if obj is None:raise PrechargeHeld('object outside manifest')
-   if not ((obj['byteSize']==0 and start==end==0) or (0<=start<end<=obj['byteSize'] and end-start<=grant['rangeBytes'])):raise PrechargeHeld('invalid range')
+   if obj is None:deny('object outside manifest')
+   if not ((obj['byteSize']==0 and start==end==0) or (0<=start<end<=obj['byteSize'] and end-start<=grant['rangeBytes'])):deny('invalid range')
    prior=db.execute('SELECT object_id,start,end,bytes FROM charges WHERE request_id=?',(request_id,)).fetchone()
    if prior is not None:
-    if prior!=(object_id,start,end,end-start):raise PrechargeHeld('request identity changed')
+    if prior!=(object_id,start,end,end-start):deny('request identity changed')
     db.execute('COMMIT');return {'state':'replay_no_body'}
    length=end-start
-   if requests>=grant['totalRequestBudget'] or charged+length>grant['totalByteBudget']:raise PrechargeHeld('budget exhausted')
+   if requests>=MAX_LOCAL_CHARGES:deny('local charge record limit reached')
+   if requests>=grant['totalRequestBudget'] or charged+length>grant['totalByteBudget']:deny('budget exhausted')
    db.execute('SAVEPOINT charge_attempt')
    db.execute('INSERT INTO charges VALUES(?,?,?,?,?)',(request_id,object_id,start,end,length))
    db.execute('UPDATE transfer SET requests=requests+1,bytes=bytes+? WHERE id=1',(length,))

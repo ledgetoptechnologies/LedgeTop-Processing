@@ -84,6 +84,21 @@ except PrechargeHeld:print('held')
   finally:db.close()
   with self.assertRaisesRegex(PrechargeHeld,'accounting invalid'):self.ledger()
 
+ def test_local_record_limit_rejects_next_insert(self):
+  from unittest.mock import patch
+  with patch('processing.reference_v2_precharge_draft.MAX_LOCAL_CHARGES',1):
+   l=self.ledger();l.precharge(request_id='r1',object_id='empty',start=0,end=0)
+   with self.assertRaisesRegex(PrechargeHeld,'record limit'):l.precharge(request_id='r2',object_id='empty',start=0,end=0)
+   self.assertEqual(l.precharge(request_id='r1',object_id='empty',start=0,end=0)['state'],'replay_no_body')
+
+ def test_business_denial_persists_second_observation(self):
+  ticks=iter([1793361600000,1793361602000]);l=PrechargeLedger(self.path,inode=self.inode,epoch='epoch-1',clock=lambda:next(ticks))
+  with self.assertRaisesRegex(PrechargeHeld,'outside manifest'):l.precharge(request_id='r1',object_id='absent',start=0,end=1)
+  self.now=1793361600000;self.ledger().precharge(request_id='r2',object_id='empty',start=0,end=0)
+  db=sqlite3.connect(self.path)
+  try:self.assertEqual(db.execute('SELECT clock_ms FROM transfer').fetchone()[0],1793361602000)
+  finally:db.close()
+
  def test_zero_length_is_one_request(self):
   l=self.ledger();self.assertEqual(l.precharge(request_id='r1',object_id='empty',start=0,end=0)['bytes'],0)
   with self.assertRaisesRegex(PrechargeHeld,'budget'):l.precharge(request_id='r2',object_id='empty',start=0,end=0)
