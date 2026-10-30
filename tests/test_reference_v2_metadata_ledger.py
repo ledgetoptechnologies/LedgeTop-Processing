@@ -1,4 +1,4 @@
-import copy, hashlib, json, tempfile, unittest
+import copy, hashlib, json, tempfile, unittest, uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from processing import reference_protocol as p
@@ -33,6 +33,9 @@ class V2LedgerTests(unittest.TestCase):
   bound=self.ledger.bind_reservation(first['jobId'],env,plan,**kw);self.assertEqual(bound,self.ledger.bind_reservation(first['jobId'],env,plan,**kw))
   snap=self.ledger.snapshot_bytes(first['jobId'],**kw);self.assertEqual(snap['manifestBytes'],p.canonical_json(m));self.assertEqual(snap['planBytes'],p.canonical_json(plan));self.assertEqual(snap['planSha256'],p.digest(plan));self.assertEqual(snap['reservationBytes'],p.canonical_json(env))
   with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**dict(kw,clock=lambda:1893456000))
+  # Reopen the ledger against the same coordinator epoch so authorization still
+  # succeeds and the clock check, not an invalid claim, enforces the hold.
+  self.ledger=V2MetadataLedger(self.queue,enabled=True)
   with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**kw)
   with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
   with self.queue._db() as db:self.assertEqual(db.execute('SELECT high FROM reference_v2_clock WHERE singleton=1').fetchone()[0],1893456000)
@@ -47,6 +50,13 @@ class V2LedgerTests(unittest.TestCase):
   with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**bad)
   self.queue.close();self.queue=Queue(self.tmp.name,node_ids=('cluster','node-2'));self.queue.allowed_profiles.add(PROFILE);self.ledger=V2MetadataLedger(self.queue,enabled=True)
   with self.queue._db() as db:self.assertEqual(db.execute('SELECT high FROM reference_v2_clock WHERE singleton=1').fetchone()[0],1893456000)
+  # Existing claims are deliberately invalid across queue startup epochs. A new
+  # job/claim exercises the persisted clock under a valid new-epoch credential.
+  new=copy.deepcopy(self.raw);new['submissionId']=str(uuid.uuid4())
+  newer=self.ledger.submit(new,**self.kw)
+  newclaim=self.ledger.claim_metadata(newer['jobId'],principal='producer',node_id='node-2',worker_id='worker',instance_id='instance',request_id='new-claim')
+  newplan=dict(plan,jobId=newer['jobId']);newenv=dict(env,jobId=newer['jobId'])
+  with self.assertRaises(Conflict):self.ledger.bind_reservation(newer['jobId'],newenv,newplan,principal='producer',claim_token=newclaim['claimToken'],clock=lambda:1000)
   with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
   with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**kw)
   with self.queue._db() as db:self.assertEqual(db.execute('SELECT reservation_sha FROM reference_v2_staged_jobs').fetchone()[0],bound['reservationSha256'])
@@ -74,6 +84,24 @@ class V2LedgerTests(unittest.TestCase):
   job=self.ledger.submit(self.raw,**self.kw)
   with self.queue._db() as db:db.execute('CREATE TRIGGER unexpected AFTER UPDATE ON reference_v2_staged_jobs BEGIN SELECT 1; END')
   with self.assertRaises(Conflict):self.ledger.claim_metadata(job['jobId'],principal='producer',node_id='node-2',worker_id='worker',instance_id='instance',request_id='claim')
+ def test_clock_table_missing_empty_can_initialize_but_nonempty_refuses_migration(self):
+  with self.queue._db() as db:db.execute('DROP TABLE reference_v2_clock')
+  self.ledger=V2MetadataLedger(self.queue,enabled=True)
+  self.ledger.submit(self.raw,**self.kw)
+  with self.queue._db() as db:db.execute('DROP TABLE reference_v2_clock')
+  with self.assertRaises(Conflict):V2MetadataLedger(self.queue,enabled=True)
+  with self.queue._db() as db:self.assertIsNone(db.execute("SELECT sql FROM sqlite_master WHERE name='reference_v2_clock'").fetchone())
+ def test_missing_or_corrupt_clock_row_fails_closed(self):
+  first=self.ledger.submit(self.raw,**self.kw)
+  claim=self.ledger.claim_metadata(first['jobId'],principal='producer',node_id='cluster',worker_id='worker',instance_id='instance',request_id='claim')
+  m=self.raw['manifest'];plan=dict(protocolVersion=2,jobId=first['jobId'],generation=1,reservationId='reserve',manifestSha256=m['sha256'],environment='staging',capabilityFingerprint=self.raw['capabilityFingerprint'],expiresAt='2030-01-01T00:00:00.000Z',objects=[{k:o[k] for k in ('id','byteSize','sha256')} for o in m['objects']],rangeBytes=16,retryRequests=0,retryBytes=0)
+  calc=plan_input_budget(plan);env={k:calc[k] for k in ('protocolVersion','jobId','generation','reservationId','manifestSha256','environment','capabilityFingerprint','expiresAt','rangeBytes','requestBudget','byteBudget')};env['nonce']='nonce'
+  kw=dict(principal='producer',claim_token=claim['claimToken'],clock=lambda:1000)
+  with self.queue._db() as db:db.execute('DELETE FROM reference_v2_clock')
+  with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
+  with self.queue._db() as db:db.execute("INSERT INTO reference_v2_clock VALUES(1,'invalid')")
+  with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
+  with self.queue._db() as db:self.assertIsNone(db.execute('SELECT reservation_json FROM reference_v2_staged_jobs WHERE job_id=?',(first['jobId'],)).fetchone()[0])
  def test_v2_staging_does_not_block_v1_production_claim(self):
   self.ledger.submit(self.raw,**self.kw)
   store=ReferenceStore(self.queue);raw=self.f['submission'];sub=p.validate_submission(raw,environment='production',capability_fingerprint=raw['capabilityFingerprint'])
