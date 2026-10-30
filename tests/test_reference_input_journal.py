@@ -83,6 +83,27 @@ class InputJournalTests(unittest.TestCase):
         with self.assertRaisesRegex(InputJournalError, 'schema mismatch'):
             self.journal.current(self.binding)
 
+    def test_temp_trigger_rejected_after_seed_and_on_reopen(self):
+        self.journal.seed(self.binding, self.objects)
+        self.db.execute('CREATE TEMP TRIGGER malicious_temp AFTER UPDATE ON main.input_journal_objects BEGIN UPDATE input_journal_jobs SET allocated=999; END')
+        self.db.commit()
+        with self.assertRaisesRegex(InputJournalError, 'schema mismatch'):
+            self.journal.attempt(self.binding, 0)
+        with self.assertRaisesRegex(InputJournalError, 'schema mismatch'):
+            InputJournal(self.db)
+        self.assertEqual(self.db.execute('SELECT allocated FROM input_journal_jobs').fetchone()[0], 0)
+
+    def test_preexisting_temp_shadow_rejected_without_creating_tables(self):
+        db = sqlite3.connect(Path(self.tmp.name) / 'shadow.sqlite')
+        try:
+            db.execute('CREATE TEMP TABLE input_journal_jobs (job TEXT)')
+            db.commit()
+            with self.assertRaisesRegex(InputJournalError, 'schema mismatch'):
+                InputJournal(db)
+            self.assertIsNone(db.execute("SELECT name FROM main.sqlite_master WHERE name='input_journal_jobs'").fetchone())
+        finally:
+            db.close()
+
     def test_altered_existing_table_rejected_before_initialization(self):
         db = sqlite3.connect(Path(self.tmp.name) / 'tampered.sqlite')
         try:

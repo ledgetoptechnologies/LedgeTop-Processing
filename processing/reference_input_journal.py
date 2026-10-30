@@ -71,7 +71,10 @@ class InputJournal:
             raise
 
     def _check_schema(self):
-        if _schema(self.db) != _EXPECTED_SCHEMA:
+        temp = self.db.execute("SELECT 1 FROM sqlite_temp_master WHERE tbl_name IN "
+            "('input_journal_jobs','input_journal_objects') OR name IN "
+            "('input_journal_jobs','input_journal_objects') LIMIT 1").fetchone()
+        if temp is not None or _schema(self.db) != _EXPECTED_SCHEMA:
             raise InputJournalError('input journal schema mismatch')
 
     def seed_manifest(self, binding, manifest_bytes):
