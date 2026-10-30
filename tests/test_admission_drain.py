@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import tempfile
 import threading
@@ -58,7 +59,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertTrue(self.request(path,token=OP)[1]['closed'])
         self.assertEqual(self.request('/v1/prototype/jobs',payload)[0],503)
         status,data=self.request('/v1/prototype/jobs');self.assertEqual(status,200);self.assertEqual(len(data['jobs']),1)
-        for suffix in ('/task/new/init','/task/new/upload/53164287-7755-4c33-ac22-1c02e61959c9','/task/new/commit/53164287-7755-4c33-ac22-1c02e61959c9','/task/ledgetop/reserve'):
+        for suffix in ('/task/new/init','/task/new/upload/53164287-7755-4c33-ac22-1c02e61959c9','/task/new/commit/53164287-7755-4c33-ac22-1c02e61959c9','/task/ledgetop/reserve','/task/ledgetop/cancel','/task/cancel','/task/remove'):
             self.assertEqual(self.request(suffix+'?token='+VIEW,b'')[0],503)
         self.stop();self.start()
         self.assertEqual(self.request('/v1/prototype/jobs',payload)[0],503)
@@ -140,6 +141,69 @@ class AdmissionTests(unittest.TestCase):
         closer.start();self.assertFalse(done.wait(.2));release.set();worker.join(2);closer.join(2)
         self.assertEqual(admitted[0][0],201)
         self.assertEqual(result[0][0],200);self.assertTrue(result[0][1]['closed'])
+
+    def test_close_waits_for_inflight_reserved_cancel_and_blocks_followups(self):
+        entered=threading.Event();release=threading.Event();closed=threading.Event()
+        service=self.handler.viewer_service
+        def slow_cancel(identifier,environment,capability):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('test timeout')
+            return {'uuid':identifier,'state':'cancelled'}
+        identifier=str(uuid.uuid4());body=('uuid='+identifier).encode()
+        headers={'Content-Type':'application/x-www-form-urlencoded','X-LedgeTop-Capability':'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'}
+        url=self.origin+'/task/ledgetop/cancel?token='+VIEW
+        results=[];failures=[]
+        def cancel():
+            try:
+                with urlopen(Request(url,data=body,headers=headers),timeout=4) as response:results.append(response.status)
+            except Exception as error:failures.append(error)
+        def close():
+            try:results.append(self.request('/v1/prototype/admission-drain',operation,OP)[0])
+            except Exception as error:failures.append(error)
+            finally:closed.set()
+        operation=self.operation(True)
+        with patch.object(service,'cancel_reserved',side_effect=slow_cancel) as action:
+            worker=threading.Thread(target=cancel);closer=threading.Thread(target=close)
+            try:
+                worker.start();self.assertTrue(entered.wait(2));closer.start();self.assertFalse(closed.wait(.2))
+                release.set();worker.join(3);closer.join(3)
+                self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive())
+                self.assertEqual(failures,[]);self.assertEqual(results,[200,200])
+                self.assertEqual(self.request('/task/ledgetop/cancel?token='+VIEW,b'')[0],503)
+                self.assertEqual(action.call_count,1)
+            finally:
+                release.set();worker.join(3)
+                if closer.ident is not None:closer.join(3)
+
+    def test_close_waits_for_inflight_download_cache_and_blocks_new_download(self):
+        entered=threading.Event();release=threading.Event();closed=threading.Event()
+        service=self.handler.viewer_service;identifier=str(uuid.uuid4())
+        def recover(identifier):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('test timeout')
+            return io.BytesIO(b'synthetic'),9
+        url=self.origin+'/task/'+identifier+'/download/all.zip?token='+VIEW
+        results=[];failures=[];operation=self.operation(True)
+        def download():
+            try:
+                with urlopen(url,timeout=4) as response:results.append((response.status,response.read()))
+            except Exception as error:failures.append(error)
+        def close():
+            try:results.append((self.request('/v1/prototype/admission-drain',operation,OP)[0],None))
+            except Exception as error:failures.append(error)
+            finally:closed.set()
+        with patch.object(service,'authorize'),patch.object(service,'download',side_effect=recover) as action:
+            worker=threading.Thread(target=download);closer=threading.Thread(target=close)
+            try:
+                worker.start();self.assertTrue(entered.wait(2));closer.start();self.assertFalse(closed.wait(.2))
+                release.set();worker.join(3);closer.join(3)
+                self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertEqual(failures,[])
+                self.assertCountEqual(results,[(200,b'synthetic'),(200,None)])
+                self.assertEqual(self.request('/task/'+identifier+'/download/all.zip?token='+VIEW)[0],503)
+                self.assertEqual(action.call_count,1)
+            finally:
+                release.set();worker.join(3)
+                if closer.ident is not None:closer.join(3)
 
     def test_drain_finishes_running_job_but_prevents_next_claim(self):
         def payload(name):return json.dumps(dict(requestId=name,environment='staging',profile='treedar-synthetic-v1')).encode()

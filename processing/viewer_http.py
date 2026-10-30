@@ -222,9 +222,21 @@ class ViewerFacade:
             if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
                 raise RequestError(400, 'invalid_query')
             if handler.command == 'GET':
-                self._get(handler, path, query, environment)
+                # A download can reconstruct and persist the cached archive;
+                # hold admission until the entire stream is closed.
+                guarded_download = re.fullmatch(r'/task/[^/]+/download/all\.zip', path)
+                gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
+                if guarded_download and gate is not None:
+                    from .admission_drain import AdmissionClosed
+                    try:
+                        with gate.admit(): self._get(handler, path, query, environment)
+                    except AdmissionClosed:
+                        raise RequestError(503, 'admission_draining')
+                else:
+                    self._get(handler, path, query, environment)
             elif handler.command == 'POST':
-                guarded = (path in ('/task/ledgetop/reserve', '/task/new/init') or
+                guarded = (path in ('/task/ledgetop/reserve', '/task/ledgetop/cancel',
+                                    '/task/new/init', '/task/cancel', '/task/remove') or
                     re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path))
                 gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
                 if guarded and gate is not None:
