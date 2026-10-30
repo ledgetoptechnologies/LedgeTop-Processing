@@ -75,15 +75,57 @@ class Stopped(ValueError):pass
 
 # Executed once inside the quarantined container; only loopback reads repeat.
 # A transport timeout is held rather than launching another exec process.
-QUARANTINE_HEALTH_PROBE = '''import json,time,urllib.request
+QUARANTINE_HEALTH_PROBE = '''import json,select,socket,time
 deadline=time.monotonic()+10
 expected={"status":"ok","viewerEnabled":True,"syntheticPrototypeEnabled":True}
+def once():
+ remaining=deadline-time.monotonic()
+ if remaining<=0:raise TimeoutError()
+ s=socket.create_connection(("127.0.0.1",8080),timeout=min(1,remaining))
+ try:
+  s.setblocking(False)
+  request=b"GET /healthz HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n"
+  data=bytearray()
+  while request:
+   left=deadline-time.monotonic()
+   if left<=0 or not select.select([],[s],[],left)[1]:raise TimeoutError()
+   try:sent=s.send(request)
+   except BlockingIOError:continue
+   if sent<=0:raise OSError()
+   request=request[sent:]
+  while b"\\r\\n\\r\\n" not in data:
+   left=deadline-time.monotonic()
+   if left<=0 or not select.select([s],[],[],left)[0]:raise TimeoutError()
+   try:chunk=s.recv(1024)
+   except BlockingIOError:continue
+   if not chunk:raise OSError()
+   data.extend(chunk)
+   if len(data)>8192:raise ValueError()
+  head,body=bytes(data).split(b"\\r\\n\\r\\n",1)
+  lines=head.decode("ascii").split("\\r\\n")
+  if not lines[0].startswith(("HTTP/1.0 200 ","HTTP/1.1 200 ")):raise ValueError()
+  headers={}
+  for line in lines[1:]:
+   key,value=line.split(":",1);key=key.lower()
+   if key in headers:raise ValueError()
+   headers[key]=value.strip()
+  if "transfer-encoding" in headers or not headers.get("content-length","").isdigit():raise ValueError()
+  size=int(headers["content-length"])
+  if size>4096 or len(body)>size:raise ValueError()
+  while len(body)<size:
+   left=deadline-time.monotonic()
+   if left<=0 or not select.select([s],[],[],left)[0]:raise TimeoutError()
+   try:chunk=s.recv(min(4096,size-len(body)))
+   except BlockingIOError:continue
+   if not chunk:raise OSError()
+   body+=chunk
+  return json.loads(body)
+ finally:s.close()
 while True:
  remaining=deadline-time.monotonic()
  if remaining<=0:raise SystemExit(1)
  try:
-  with urllib.request.urlopen("http://127.0.0.1:8080/healthz",timeout=min(1,remaining)) as r:
-   value=json.loads(r.read(4097))
+  value=once()
   observed={k:value.get(k) for k in expected}
   if observed==expected and time.monotonic()<deadline:
    print(json.dumps(observed));break

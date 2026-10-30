@@ -100,9 +100,26 @@ class QuarantineUpdaterTests(unittest.TestCase):
                 self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
-            code=u.QUARANTINE_HEALTH_PROBE.replace('127.0.0.1:8080','127.0.0.1:'+str(server.server_port))
+            code=u.QUARANTINE_HEALTH_PROBE.replace('("127.0.0.1",8080)','("127.0.0.1",'+str(server.server_port)+')')
             result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=5,check=True)
             self.assertEqual(json.loads(result.stdout)['status'],'ok');self.assertEqual(len(requests),2)
+        finally:server.shutdown();server.server_close();thread.join(2);self.assertFalse(thread.is_alive())
+
+    def test_child_absolute_deadline_stops_trickling_response(self):
+        import time
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*_):pass
+            def do_GET(self):
+                self.send_response(200);self.send_header('Content-Length','64');self.end_headers()
+                try:
+                    for _ in range(64):self.wfile.write(b' ');self.wfile.flush();time.sleep(.1)
+                except OSError:pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            code=u.QUARANTINE_HEALTH_PROBE.replace('("127.0.0.1",8080)','("127.0.0.1",'+str(server.server_port)+')').replace('deadline=time.monotonic()+10','deadline=time.monotonic()+0.5')
+            started=time.monotonic();result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=4)
+            self.assertNotEqual(result.returncode,0);self.assertLess(time.monotonic()-started,2)
         finally:server.shutdown();server.server_close();thread.join(2);self.assertFalse(thread.is_alive())
 
     def test_a75_no_rollback_retain_or_reopen_until_explicitly_qualified(self):
