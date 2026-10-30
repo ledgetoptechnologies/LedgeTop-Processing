@@ -67,7 +67,7 @@ class QuarantineUpdaterTests(unittest.TestCase):
         with self.assertRaisesRegex(u.Stopped,'a75_reopen_not_qualified'):self.obj.reopen(self.state,None,None,None)
         self.assertEqual(self.obj.t.calls,[])
 
-    def test_create_rejects_modified_template_even_with_python_optimization(self):
+    def test_create_rejects_modified_template(self):
         with patch.object(self.obj,'create_args',return_value=('create','--network','host','--restart','unless-stopped')):
             with self.assertRaisesRegex(u.Stopped,'quarantine_create_template_changed'):
                 self.obj.quarantine_create_args(self.state)
