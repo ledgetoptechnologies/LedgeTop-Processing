@@ -268,7 +268,8 @@ class V2MetadataLedger:
                     'manifestSha256':request['body']['manifest']['sha256'],
                     'planBytes':row['plan_json'].encode('utf-8'),'planSha256':row['plan_sha'],
                     'reservationBytes':row['reservation_json'].encode('utf-8'),
-                    'reservationSha256':row['reservation_sha']}
+                    'reservationSha256':row['reservation_sha'],
+                    'claimIdentity':{key:claim[key] for key in ('startupId','nodeId','workerId','instanceId')}}
         result = self._run(read)
         if result is _EXPIRED: raise Conflict('reservation expired')
         return result
