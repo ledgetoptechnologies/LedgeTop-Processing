@@ -1,4 +1,5 @@
 import copy
+import base64
 from dataclasses import replace
 import json
 import http.client
@@ -117,6 +118,32 @@ class ReferenceRuntimeTests(unittest.TestCase):
             coordinatorOrigin='http://127.0.0.1:18080',gateGeneration=1,outputBudget=1000)
             for node in self.config.prototype_node_ids}
         return value
+
+    def test_staged_ack_config_requires_disjoint_canonical_scoped_secret(self):
+        self.value['schemaVersion']=3
+        token=base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')
+        self.value['stagedAckBearers']={'staging':token};self.write_config()
+        self.assertEqual(self.settings().staged_ack_bearers,{token:'staging'})
+        combined=self.recovery_config();combined['schemaVersion']=3;combined['stagedAckBearers']={'staging':token}
+        previous=self.value;self.value=combined;self.write_config()
+        self.assertIsNotNone(self.settings().recovery_bindings)
+        self.value=previous
+        self.value['stagedAckBearers']={'production':token};self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
+        self.value['stagedAckBearers']={'staging':self.value['workers']['cluster']['bearer']};self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
+
+    def test_staged_ack_runtime_requires_same_native_authority(self):
+        from processing.viewer_service import ViewerService
+        queue=Queue(self.config.prototype_state_dir,node_ids=self.config.prototype_node_ids,
+                    treedar_node_ids=('main',),viewer_enabled=True,reference_enabled=True)
+        self.addCleanup(queue.close)
+        service=ViewerService(queue,self.config);self.addCleanup(service.close)
+        self.value['schemaVersion']=3
+        self.value['stagedAckBearers']={'staging':base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')};self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.runtime(queue)
+        runtime=self.runtime(queue,viewer_service=service)
+        self.assertIsNotNone(runtime.api.staged_ack)
 
     def test_schema2_loads_closed_frozen_bindings_and_legacy_settings_default_is_none(self):
         legacy=self.settings();self.assertIsNone(legacy.recovery_bindings)

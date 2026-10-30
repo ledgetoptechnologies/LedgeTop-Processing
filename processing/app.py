@@ -39,7 +39,7 @@ def make_handler(config: Config):
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime
         try:
-            reference_runtime = ReferenceRuntime(queue, config, reference_settings)
+            reference_runtime = ReferenceRuntime(queue, config, reference_settings, viewer_service=service)
         except Exception:
             if service:
                 service.close()
