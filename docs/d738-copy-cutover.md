@@ -226,6 +226,12 @@ ops/cutover_rehearsal_selftest.sh D738_IMAGE_ID RELEASE_IMAGE_ID D738_COMPOSE_FI
 - **Evidence removal checked:** it removes only the exact evidence folders,
   recorded resources and test containers of its own runs, and checks each
   removal.
+- **Hold on failure:** the self-test records every evidence folder and test
+  container it still owes a cleanup, and drops each one only after its removal
+  is verified. Its work folder (logs, outputs and those IDs) is removed only
+  when every check passed and nothing is owed. On a failed check, a `set -e`
+  abort or an interruption, it keeps everything, prints `SELF-TEST HELD` with
+  the exact IDs, and exits non-zero.
 - **Verified rehearsal cleanup:** the rehearsal also reports a complete
   cleanup only after its evidence folder, or the private context under
   `--cleanup`, is verifiably gone.
