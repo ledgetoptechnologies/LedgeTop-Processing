@@ -139,7 +139,7 @@
       "requestId": "request-c",
       "commitOutcome": "unknown",
       "emitBody": false,
-      "action": "reconcile_exact_identity_before_stream"
+      "action": "reconcile_then_fresh_request_and_charge"
     },
     {
       "name": "status-identity-mismatch",
