@@ -153,7 +153,7 @@
     "domainSuffixHex": "00",
     "payload": {
       "protocolVersion": 2,
-      "jobId": "job-1",
+      "jobId": "11111111-2222-4333-8444-555555555555",
       "generation": 1,
       "environment": "staging",
       "sourceId": "viewer-1",
@@ -167,8 +167,8 @@
       "totalRequestBudget": 3,
       "totalByteBudget": 16777218
     },
-    "canonicalUtf8": "{\"capabilityFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"environment\":\"staging\",\"expiresAt\":\"2026-10-30T12:10:00.000Z\",\"generation\":1,\"grantId\":\"grant-1\",\"issuedAt\":\"2026-10-30T12:00:00.000Z\",\"jobId\":\"job-1\",\"manifestSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocolVersion\":2,\"rangeBytes\":16777216,\"sourceId\":\"viewer-1\",\"totalByteBudget\":16777218,\"totalRequestBudget\":3,\"transferEpoch\":\"epoch-1\"}",
-    "sha256": "9fd9b2bada01efdd32a55d05dd4531b2207dff1b63c7d6eb7bba0f94be1733b3",
+    "canonicalUtf8": "{\"capabilityFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"environment\":\"staging\",\"expiresAt\":\"2026-10-30T12:10:00.000Z\",\"generation\":1,\"grantId\":\"grant-1\",\"issuedAt\":\"2026-10-30T12:00:00.000Z\",\"jobId\":\"11111111-2222-4333-8444-555555555555\",\"manifestSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"protocolVersion\":2,\"rangeBytes\":16777216,\"sourceId\":\"viewer-1\",\"totalByteBudget\":16777218,\"totalRequestBudget\":3,\"transferEpoch\":\"epoch-1\"}",
+    "sha256": "d8bcd956b1b0d5a488b1e18c49987fd23f81bae4911e71cb3b234a36a2e4fc9a",
     "invalidMutations": [
       "duplicate jobId",
       "unknown member",
@@ -176,7 +176,8 @@
       "generation as 1e0",
       "totalByteBudget above 9007199254740991",
       "issuedAt missing milliseconds",
-      "expiresAt with non-UTC offset"
+      "expiresAt with non-UTC offset",
+      "jobId is a non-UUID slug"
     ]
   }
 }

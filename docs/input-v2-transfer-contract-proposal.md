@@ -44,8 +44,9 @@ byte (`00`). The commitment payload is a closed JSON object with exactly:
 issuer MAC/signature scheme, key identity and envelope remain open. An issuer
 must bind the token and all payload bytes to the same authenticated grant.
 
-All identifiers are nonempty safe ASCII `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`;
-SHA-256 strings are 64 lowercase hex characters; environment is exactly
+`jobId` is a lowercase canonical UUID (`8-4-4-4-12` hex digits, matching
+Processing `reference_protocol._uuid`); the other identifiers are nonempty safe
+ASCII `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. SHA-256 strings are 64 lowercase hex characters; environment is exactly
 `production` or `staging`. `protocolVersion` is integer 2; generation and
 rangeBytes are positive integers and both budgets are nonnegative integers.
 Every integer is at most 9007199254740991 (`2^53-1`); booleans, fractional or
@@ -89,7 +90,10 @@ request ID and charges one request and the full intended response length. A
 committed charge is never refunded solely because a response, stream, process,
 network connection or acknowledgment is lost. A rejected ledger write emits no bytes. If commit outcome is unknown, hold the
 request and send no bytes until durable reconciliation confirms its exact ID
-and charge; the caller reconciles rather than assumes zero charge.
+and charge; the caller reconciles rather than assumes zero charge. Reconciliation alone
+does not authorize sending the original body: without a separately specified
+and proven emission protocol, any subsequent body requires a fresh request ID
+and a new charge.
 Reusing a request ID must not emit a second response body: an exact replay may
 return a bounded status/receipt, while mismatched use is refused. A retry that
 might stream bytes uses a fresh request ID and spends another charge. This rule
