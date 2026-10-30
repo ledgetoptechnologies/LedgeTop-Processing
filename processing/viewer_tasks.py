@@ -22,6 +22,10 @@ import uuid as uuid_module
 from .maintenance import Conflict
 
 
+class OptionEvidenceConflict(Conflict):
+    """A task's admission evidence cannot be trusted."""
+
+
 VIEWER_PROFILE = 'odm-viewer-v1'
 # Tombstones are retained while any delayed request can replay. This explicit
 # finite ceiling bounds authenticated storage use; do not silently purge.
@@ -429,12 +433,12 @@ class TaskStore:
                             (row['uuid'],row['generation'])).fetchone()
         value['option_evidence']=None
         if row['option_evidence_required'] not in (0,1) or bool(row['option_evidence_required']) != (evidence is not None):
-            raise Conflict('option evidence missing or unexpected')
+            raise OptionEvidenceConflict('option evidence missing or unexpected')
         if evidence is not None:
             text=evidence['definitions']
             if (type(text) is not str or len(text.encode())>262144
                     or hashlib.sha256(text.encode()).hexdigest()!=evidence['sha256']):
-                raise Conflict('option evidence changed')
+                raise OptionEvidenceConflict('option evidence changed')
             try:
                 definitions=json.loads(text)
                 if (type(definitions) is not list or canonical(definitions)!=text
@@ -442,7 +446,7 @@ class TaskStore:
                         or sorted(item['name'] for item in definitions)!=sorted(item['name'] for item in value['options'])):
                     raise ValueError()
             except (ValueError,TypeError,KeyError,RecursionError):
-                raise Conflict('option evidence changed') from None
+                raise OptionEvidenceConflict('option evidence changed') from None
             value['option_evidence']=definitions
         files = []
         for item in db.execute('SELECT * FROM viewer_files WHERE uuid=? ORDER BY rowid', (row['uuid'],)):
@@ -463,6 +467,11 @@ class TaskStore:
     def task(self, identifier):
         with self._lock, self.queue._db() as db:
             return self._task(db, self._row(db, identifier))
+
+    def task_environment(self, identifier):
+        """Read only the immutable credential domain without parsing evidence."""
+        with self._lock, self.queue._db() as db:
+            return self._row(db, identifier)['environment']
 
     def list_tasks(self):
         with self._lock, self.queue._db() as db:
@@ -530,7 +539,22 @@ class TaskStore:
         return self.task(identifier)
 
     def info(self, identifier):
-        task = self.task(identifier)
+        try:
+            task = self.task(identifier)
+        except OptionEvidenceConflict:
+            # Never expose evidence, paths or engine text. This is a nonterminal
+            # visibility signal, not an operator resolution or queue mutation.
+            with self._lock, self.queue._db() as db:
+                row=self._row(db,identifier);job=self._job(db,row)
+                # Only signal an active scheduling hold. Do not convert an
+                # already terminal task into a nonterminal status.
+                if job is None or job['status'] not in ('queued','running','held'):
+                    raise
+                code=10 if job['status']=='queued' else 20
+                count=db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=? AND is_photo=1',(identifier,)).fetchone()[0]
+                return {'uuid':identifier,'name':row['name'],'status':{'code':code},
+                        'progress':row['progress'],'imagesCount':count,'dateCreated':row['created_at'],
+                        'ledgetopHeld':True,'ledgetopHoldReason':'option_evidence_invalid'}
         job = task['job']
         state = job['status'] if job else task['stage']
         cancelled_result = (job and state == 'failed' and isinstance(job['result'], dict)

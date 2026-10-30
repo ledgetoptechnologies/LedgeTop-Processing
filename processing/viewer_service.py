@@ -187,7 +187,7 @@ class ViewerService:
 
     def authorize(self, identifier, environment, capability=None):
         self.store.authorize_reservation(identifier,environment,capability)
-        if self.store.task(identifier)['environment'] != environment:
+        if self.store.task_environment(identifier) != environment:
             raise KeyError('unknown task')
 
     def output(self, identifier, line=0):
