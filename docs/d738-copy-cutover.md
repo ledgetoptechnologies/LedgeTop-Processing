@@ -635,7 +635,7 @@ census "$NEW_VOL" > "$E/census-candidate-isolated.json"
 same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" \
   --allow-path .:mtime --allow-path jobs.sqlite3:bytes,content,mtime \
   --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence \
-  --allow-lease-marker \
+  --allow-lease-marker --allow-viewer-task-default-column \
   --schema-allowlist "$E/startup-schema-allowlist.json"   # schema-only file; the loader refuses anything broader
 ```
 
@@ -676,10 +676,15 @@ The allowances are deliberately narrow:
     passed the gate with exact hashes and changed no file except the database
     and the root mtime. The live configuration, including any reference
     runtime, can write more, and must be rehearsed with the exact image (U9).
-  - Every existing table must keep an identical keyed row digest. Whole-row
-    digests change when a column is added, so the gate passes only because
-    `viewer_tasks` is empty on the live volume (step 1). A migration over
-    non-empty rows fails conservatively and needs its own review.
+  - Existing tables must keep identical keyed row digests, except for the
+    narrow `--allow-viewer-task-default-column` check: it requires the exact
+    pinned d738 and aa5 table DDL hashes, the same keyed legacy-column rows
+    and counts, and zero integer values in the sole added column. It refuses
+    broad `viewer_tasks` allowances and needs the same exact migrated DDL in
+    the separately reviewed schema allowlist. Capture both censuses with the
+    new census code; older records lack the required projection and fail.
+    Stopped, checkpointed state with no sidecars and no writer is mandatory;
+    the census cannot enforce writer exclusion.
   - quick_check, authority, active counts and sidecars must be unchanged.
 
 **The startup schema allowlist does not exist yet (U9).** It must come from a
@@ -687,9 +692,11 @@ reviewed rehearsal:
 
 1. Start `IMG_NEW` isolated on a synthetic copy of this volume shape, then stop
    it and take a census.
-2. Run `compare` with only the fixed literal allowances above. Every remaining
-   difference must be a schema object the release is expected to create or
-   alter.
+2. For synthetic discovery only, run `compare` with the fixed literal
+   allowances above plus the independently pinned migrated `viewer_tasks`
+   DDL hash. Every remaining difference must be a schema object the release
+   is expected to create or alter. Never auto-accept observed differences for
+   a real state copy; use an independently reviewed fixed allowlist.
 3. Generate the file from the rehearsal census, naming each such object
    explicitly:
 
@@ -864,7 +871,7 @@ check, an observation or a snapshot does not resolve it.
 | U3 | **In-flight requests during the isolated phase: not applicable with `--network none`.** | Nothing can connect, so the socket snapshot is no longer the only defence. The census gate still shows equality only at two moments. | Exact-image confirmation. |
 | U4 | **Single authority: d738 and release fenced independently; not proven live.** | **d738 does not take the new lease** (shown in the isolated test). Fences:<ul><li>the old container is removed after its clean stop, so a daemon restart or reconnect has nothing to act on;</li><li>one `--network none`, `--restart always` holder per retained d738 volume keeps d738's own `coordinator.lock`, so d738 refuses to start on it even when recreated deliberately;</li><li>`--verify` proves from `/proc/locks`, at the time it runs, that the live holder owns the lock (tested, including after the holder was killed and Docker restarted it);</li><li>a running release holds the lock on `NEW_VOL` and its published ports, so d738 cannot start on that copy or those ports (tested);</li><li>release instances exclude one another through the host-wide `flock` lease (tested).</li></ul>Still unfenced:<ul><li>the interval between a holder's death and its restart;</li><li>the interval between a copy's extraction and its holder or candidate taking the lock;</li><li>a real Docker **daemon** restart (not tested);</li><li>d738 on a copy nobody fences;</li><li>the exact images.</li></ul>A d738 created deliberately during one of those intervals could run. | Exact-image run of `ops/cutover_fence_test.sh` on a non-live host, including a real daemon restart. Retain no unfenced d738 state. |
 | U5 | **Production hold after promotion: a backstop, not resumable.** | Production Viewer POSTs and archive downloads get 503 before service calls; other production reads and staging remain admitted. The HTTP hold does not stop the scheduler, poller or existing jobs. Viewer's isolated tests (mocked adapter, not a live cutover) show that a production request hitting the hold preserves source data and a single attempt, but does **not** resume automatically, and a generic 503 or reset cannot prove to Viewer that no body was read. Prototype operator and reference routes are not covered. | True quiescence (R1) for the whole window. An authenticated, durable no-admission record that Viewer can read is not implemented. Coordinated Viewer recovery for any job that hits the hold. |
-| U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically (steps 3 and 6). Every entry's contents and metadata are compared under keyed IDs. Allowances are scoped to named fields, exact schema hashes and empty new tables. Remaining limits:<ul><li>equal censuses show **observed** equality at two moments, not the absence of transient writes;</li><li>mtime is compared at whole-second granularity;</li><li>xattrs, ACLs, file capabilities and ctime are not compared;</li><li>the database file is compared per table, not byte for byte;</li><li>sizes and row counts are printed in clear;</li><li>a migration over a non-empty table fails conservatively;</li><li>the exact schema hashes depend on the U9 rehearsal;</li><li>it has never run against the real volume or the a042 image.</li></ul> | Independent review of the census. The U9 rehearsal to produce the exact schema allowances. A live read-only run in the cutover window. Transient writes need prevention (U1, U2), which detection cannot provide. |
+| U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically (steps 3 and 6). Every entry's contents and metadata are compared under keyed IDs. Allowances are scoped to named fields, exact schema hashes and empty new tables. Remaining limits:<ul><li>equal censuses show **observed** equality at two moments, not the absence of transient writes;</li><li>mtime is compared at whole-second granularity;</li><li>xattrs, ACLs, file capabilities and ctime are not compared;</li><li>the database file is compared per table, not byte for byte;</li><li>sizes and row counts are printed in clear;</li><li>the narrow d738 Viewer projection requires exact DDL, stopped checkpointed state and newly captured censuses;</li><li>the exact schema hashes depend on the U9 rehearsal;</li><li>it has never run against the real volume or the a042 image.</li></ul> | Independent review of the census. The U9 rehearsal to produce the exact schema allowances. A live read-only run in the cutover window. Transient writes need prevention (U1, U2), which detection cannot provide. |
 | U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
 | U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |
 | U9 | **Startup schema allowlist: shape enforced, test-image result known, live config not rehearsed.** | The loader and generator enforce a schema-only file, and the lease marker has its own exact allowance. With the test image and synthetic state, release startup changed exactly five schema objects plus the marker, and passed the gate. Not yet done: the exact image, the live environment (including any reference runtime, which can write more), and a review of the generated file. | Rehearse the exact `IMG_NEW` with the live environment's key names on synthetic state; generate and review `startup-schema-allowlist.json`. |

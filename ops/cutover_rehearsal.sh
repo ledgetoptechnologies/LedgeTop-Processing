@@ -382,19 +382,25 @@ docker stop -t 60 "$RUN-candidate" >/dev/null
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$RUN-candidate")" = 0 ] || fail "candidate did not drain"
 census "$NEW_VOL" > "$E/census-candidate-isolated.json"
 FIXED=(--allow-path .:mtime --allow-path jobs.sqlite3:bytes,content,mtime
-       --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence --allow-lease-marker)
+       --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence --allow-lease-marker
+       --allow-viewer-task-default-column)
 if [ -n "$REVIEWED_ALLOWLIST" ]; then
   same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" "${FIXED[@]}" \
     --schema-allowlist "$(w "$REVIEWED_ALLOWLIST")" || fail "gate failed against the reviewed allowlist"
   pass "gate passes against the supplied reviewed schema allowlist and the exact lease marker"
 else
-  same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" "${FIXED[@]}" || true
+  # Discovery remains synthetic: the known Viewer table DDL is fixed in the
+  # census implementation. Supplying it here lets the narrow legacy-row check
+  # run before discovering other synthetic-only schema differences.
+  VIEWER_DDL_SHA=a637e43b58241be981e0c056d8e6fd7d4a83e7c590598f837f6fccfdcf77d424
+  same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" "${FIXED[@]}" \
+    --allow-object "table:viewer_tasks=$VIEWER_DDL_SHA" || true
   OBJECTS=$(python -c 'import json,sys
 r=json.load(open(sys.argv[1]))
 other=[d for d in r["database"] if "object" not in d]
-assert not other and not r["files"], (other, r["files"])
+if other or r["files"]: raise SystemExit("startup changed more than schema")
 print(" ".join(sorted(d["object"] for d in r["database"])))' "$(w "$E/last-compare.json")") || fail "startup changed more than schema"
-  ARGS=(); for o in $OBJECTS; do ARGS+=(--object "$o"); done
+  ARGS=(--object table:viewer_tasks); for o in $OBJECTS; do ARGS+=(--object "$o"); done
   python "$HERE/state_census.py" schema-allowlist "$(w "$E/census-candidate-isolated.json")" "${ARGS[@]}" \
     --output "$(w "$E/synthetic-schema-allowlist.json")"
   same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" "${FIXED[@]}" \

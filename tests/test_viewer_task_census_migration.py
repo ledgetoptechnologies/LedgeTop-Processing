@@ -54,6 +54,23 @@ class ViewerTaskProjectionTests(unittest.TestCase):
   self.assertTrue(any(x.get('change')=='requiresCheckpointedDatabase' for x in result['database']))
  def test_hidden_generated_column_fails(self):
   self.db.execute('alter table viewer_tasks add column computed TEXT GENERATED ALWAYS AS (name) VIRTUAL');self.assertFalse(self.compare()['identical'])
+ def test_rehearsal_discovery_with_preserved_nonempty_history(self):
+  self.db.execute('CREATE TABLE viewer_reservations (uuid TEXT PRIMARY KEY)')
+  self.db.execute('CREATE TABLE viewer_option_evidence (uuid TEXT PRIMARY KEY)')
+  self.db.execute(c.LEASE_MARKER_DDL);self.db.execute('INSERT INTO coordinator_authority_lease VALUES (1,1)')
+  self.db.commit();after=c.census(self.root,KEY)
+  fixed=dict(allow_paths=['.:mtime','jobs.sqlite3:bytes,content,mtime'],
+      allow_new_tables=['viewer_reservations','viewer_option_evidence'],allow_lease_marker=True,
+      allow_viewer_task_default_column=True)
+  discovery=c.compare(self.before,after,KEY,allow_objects=[self.expected],**fixed)
+  self.assertTrue(all('object' in x for x in discovery['database']),discovery)
+  names=['table:viewer_tasks']+[x['object'] for x in discovery['database']]
+  allowed=c.make_schema_allowlist(after,names)['objects']
+  final=c.compare(self.before,after,KEY,allow_objects=[k+'='+v for k,v in allowed.items()],**fixed)
+  self.assertTrue(final['identical'],final)
+  self.db.execute("update viewer_tasks set name='changed'");self.db.commit()
+  changed=c.compare(self.before,c.census(self.root,KEY),KEY,allow_objects=[k+'='+v for k,v in allowed.items()],**fixed)
+  self.assertFalse(changed['identical'])
  def test_feature_absent_does_not_pass(self):
   self.db.commit();after=c.census(self.root,KEY)
   result=c.compare(self.before,after,KEY,allow_paths=['.:mtime','jobs.sqlite3:bytes,content,mtime'],allow_objects=[self.expected])
