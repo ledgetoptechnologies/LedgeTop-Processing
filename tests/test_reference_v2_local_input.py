@@ -92,6 +92,43 @@ publish_next_input(fence=f,journal=j,ledger=l,reservation_id='r1',binding=bindin
   with self.assertRaises(InputHeld):barrier()
   extra.unlink();self.assertEqual(barrier()['state'],'input_set_verified_hold_retained')
 
+ def test_node_gate_persists_on_failure_and_exact_replay(self):
+  from processing.node_gate import NodeGate,GateError
+  from processing.reference_v2_node_preflight import retain_node_for_verified_input
+  self.setup_input(b'abc',second=b'def');self.run_input(io.BytesIO(b'abc'));self.run_input(io.BytesIO(b'def'))
+  authority=str(uuid.uuid4()); receipt='a'*32; engine='synthetic-engine'; origin='https://coordinator.example'
+  args=dict(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,
+   engine_id=engine,node_id='main',origin=origin,authority_id=authority,generation=1,worker_id='worker',receipt_id=receipt)
+  with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
+   with NodeGate(engine) as gate:gate.provision('main',origin,authority)
+   first=self.scratch/'jobs/r1/a.input';first.unlink()
+   with self.assertRaises(InputHeld):retain_node_for_verified_input(**args)
+   with NodeGate(engine) as gate:self.assertEqual(gate.snapshot()['reservation']['receiptId'],receipt)
+   with self.assertRaises(GateError):retain_node_for_verified_input(**dict(args,receipt_id='b'*32))
+   first.write_bytes(b'abc');first.chmod(0o600)
+   self.assertEqual(retain_node_for_verified_input(**args)['state'],'node_and_input_held')
+   with NodeGate(engine) as gate:self.assertEqual(gate.snapshot()['reservation']['job']['id'],self.binding['jobId'])
+
+ def test_gate_reservation_survives_process_exit_before_bind(self):
+  import subprocess,sys
+  from processing.node_gate import NodeGate
+  from processing.reference_v2_node_preflight import retain_node_for_verified_input
+  self.setup_input(b'abc',second=b'def');self.run_input(io.BytesIO(b'abc'));self.run_input(io.BytesIO(b'def'))
+  authority=str(uuid.uuid4()); receipt='a'*32; engine='synthetic-engine';origin='https://coordinator.example'
+  with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
+   with NodeGate(engine) as gate:gate.provision('main',origin,authority)
+   code="""import os,sys
+from processing.node_gate import NodeGate
+with NodeGate('synthetic-engine') as g:
+ g.reserve('main','https://coordinator.example',sys.argv[1],1,'a'*32)
+ os._exit(73)
+"""
+   proc=subprocess.run([sys.executable,'-c',code,authority],timeout=10)
+   self.assertEqual(proc.returncode,73)
+   result=retain_node_for_verified_input(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,
+    engine_id=engine,node_id='main',origin=origin,authority_id=authority,generation=1,worker_id='worker',receipt_id=receipt)
+   self.assertEqual(result['state'],'node_and_input_held')
+
  def test_insufficient_remaining_blocks_second_file(self):
   from processing.scratch_policy import PolicyConflict
   self.setup_input(b'abc',second=b'defg');self.run_input(io.BytesIO(b'abc'))
