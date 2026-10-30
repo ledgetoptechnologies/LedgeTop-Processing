@@ -30,14 +30,15 @@ class SlotTests(PrechargeTests):
   from processing.reference_v2_precharge_draft import PrechargeHeld
   l=self.indexed();s=self.slot()
   with self.assertRaises(PrechargeHeld):s.begin(l,request_id='r1',object_id='absent',start=0,end=1)
-  self.assertEqual(s.state(),'opening');s.close()
-  db=sqlite3.connect(self.slotpath)
-  try:db.execute("UPDATE stream_slot SET phase='idle',identity=NULL");db.commit()
-  finally:db.close()
-  s=self.slot();original=l.precharge
+  self.assertEqual(s.state(),'opening')
+  with self.assertRaisesRegex(SlotHeld,'quiescence'):s.reconcile_opening(l,writer_quiesced=False)
+  self.assertEqual(s.reconcile_opening(l,writer_quiesced=True)['state'],'no_charge_closed_no_authority')
+  self.assertEqual(s.state(),'closed');original=l.precharge
   def committed_then_lost(**kw):original(**kw);raise sqlite3.OperationalError('unknown commit')
   with patch.object(l,'precharge',side_effect=committed_then_lost):
    with self.assertRaises(sqlite3.OperationalError):s.begin(l,request_id='r2',object_id='cloud',start=0,end=4)
+  self.assertEqual(s.state(),'opening')
+  self.assertEqual(s.reconcile_opening(l,writer_quiesced=True)['state'],'charged_unknown_held')
   self.assertEqual(s.state(),'opening')
   self.assertEqual(l.precharge(request_id='r2',object_id='cloud',start=0,end=4)['state'],'replay_no_body')
 
@@ -46,6 +47,27 @@ class SlotTests(PrechargeTests):
   try:db.execute("UPDATE stream_slot SET phase='opening',identity=?",('x'*2049,));db.commit()
   finally:db.close()
   with self.assertRaisesRegex(SlotHeld,'bounded slot state'):self.slot()
+
+ def test_process_death_opening_reconciles_only_uncharged(self):
+  code="""import os,sys
+from processing.reference_v2_indexed_precharge_draft import IndexedPrecharge
+from processing.reference_v2_stream_slot_draft import StreamSlot
+l=IndexedPrecharge(sys.argv[1],inode=(int(sys.argv[2]),int(sys.argv[3])),epoch='epoch-1',clock=lambda:1793361600000)
+s=StreamSlot(path=sys.argv[4],inode=(int(sys.argv[5]),int(sys.argv[6])),epoch='epoch-1',lock_directory=sys.argv[7])
+original=l.precharge
+def die(**kw):
+ if sys.argv[8]=='charged':original(**kw)
+ os._exit(73)
+l.precharge=die
+s.begin(l,request_id=sys.argv[9],object_id='cloud',start=0,end=4)
+"""
+  args=[sys.executable,'-c',code,str(self.path),str(self.inode[0]),str(self.inode[1]),str(self.slotpath),str(self.slotinode[0]),str(self.slotinode[1]),str(self.slotdir)]
+  for mode,request in (('nocharge','r1'),('charged','r2')):
+   child=subprocess.run(args+[mode,request],timeout=10);self.assertEqual(child.returncode,73)
+   l=self.indexed();s=self.slot()
+   observed=s.reconcile_opening(l,writer_quiesced=True)['state']
+   self.assertEqual(observed,'no_charge_closed_no_authority' if mode=='nocharge' else 'charged_unknown_held')
+   self.assertEqual(s.state(),'closed' if mode=='nocharge' else 'opening');s.close();l.close()
 
  def test_process_exit_after_charge_retains_slot(self):
   code="""import os,sys

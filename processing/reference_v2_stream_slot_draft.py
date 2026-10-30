@@ -99,6 +99,42 @@ class StreamSlot:
   if charge.get('state')!='charged_no_authority':raise SlotHeld('replay cannot open stream')
   self._change('opening','charged',identity)
   return identity
+ def reconcile_opening(self,ledger,*,writer_quiesced):
+  """Reconcile a retained opening under a cooperative slot lock.
+
+  Caller must independently establish the old writer and all child/remote
+  streams are gone, and fence old and external writers, DB restore and path
+  replacement. The boolean is an assertion, not proof. A found charge remains
+  held; no retry or byte emission is authorized. Only a matching, validated
+  no-charge snapshot can close an opening, while the ledger writer lock is held.
+  """
+  if writer_quiesced is not True:raise SlotHeld('independent writer quiescence required')
+  if type(ledger) is not IndexedPrecharge or ledger.epoch!=self.epoch:raise SlotHeld('exact transfer ledger required')
+  row=self._validate()
+  if row[2]!='opening':raise SlotHeld('opening slot required')
+  identity=json.loads(row[3]);db=ledger._conn
+  if db is None or db.in_transaction or ledger._pid!=os.getpid():raise SlotHeld('idle owned ledger required')
+  try:
+   db.execute('BEGIN IMMEDIATE');grant,_,_,_,_=ledger._refresh()
+   expected=hashlib.sha256(DOMAIN+p.canonical_json(grant)).hexdigest()
+   if (identity['grantSha256']!=expected or identity['jobId']!=grant['jobId']
+       or identity['generation']!=grant['generation'] or identity['environment']!=grant['environment']
+       or identity['sourceId']!=grant['sourceId'] or identity['manifestSha256']!=grant['manifestSha256']):
+    raise SlotHeld('opening transfer binding differs')
+   charge=db.execute('SELECT object_id,start,end,bytes FROM charges WHERE request_id=?',(identity['requestId'],)).fetchone()
+   if charge is not None:
+    if charge!=(identity['objectId'],identity['start'],identity['end'],identity['end']-identity['start']):raise SlotHeld('opening request identity differs')
+    ledger._check_path();db.execute('COMMIT')
+    return {'state':'charged_unknown_held'}
+   # A concurrent cooperating precharge cannot appear while this writer lock is
+   # held. Slot file and ledger remain separately committed; ambiguous failure
+   # still requires inspection and no automatic retry.
+   self._change('opening','closed',row[3]);ledger._check_path();db.execute('COMMIT')
+   return {'state':'no_charge_closed_no_authority'}
+  except Exception:
+   if db.in_transaction:db.execute('ROLLBACK')
+   raise
+
  def finish(self,identity,*,stream_closed):
   if stream_closed is not True:raise SlotHeld('stream closure attestation required')
   # Assertion belongs to caller; this is not an independent process proof.
