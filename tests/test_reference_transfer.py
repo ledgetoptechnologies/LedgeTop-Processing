@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 
 from processing import reference_protocol as p
 from processing.reference_transfer import (
-    BrokerClient, OBJECT_PREFIX, TransferError, TransferResponseUnavailable, validate_grant,
+    BrokerClient, OBJECT_PREFIX, TransferError, TransferResponseUnavailable, TransferObject, ValidatedGrant, validate_grant,
 )
 
 
@@ -117,6 +117,83 @@ class ReferenceTransferTests(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer " + self.raw["token"])
         if os.name != "nt":
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def ranged_fixture(self, payload=b'abcdefghij', *, mutate=None):
+        grant=ValidatedGrant('job-1','reservation-1',1,'staging',1000,
+            (TransferObject('image-1',len(payload),hashlib.sha256(payload).hexdigest()),),'private-token')
+        calls=[]
+        def opener(request, *, timeout):
+            value=request.get_header('Range');calls.append(value)
+            start,end=map(int,value.removeprefix('bytes=').split('-'))
+            data=payload[start:end+1]
+            options={'status':206,'url':request.full_url,'headers':{'Content-Length':str(len(data)),'Content-Range':f'bytes {start}-{end}/{len(payload)}'}}
+            if mutate is not None:data,options=mutate(len(calls),data,options)
+            return Response(data,**options)
+        return grant,calls,BrokerClient('https://broker.example',opener=opener,clock=lambda:self.now,max_response_bytes=4,enable_ranges=True)
+
+    def test_ranges_are_disabled_by_default(self):
+        grant,calls,_=self.ranged_fixture()
+        def opener(request,*,timeout):
+            calls.append(request.get_header('Range'));return Response(b'abcdefghij',url=request.full_url,headers={'Content-Length':'10'})
+        client=BrokerClient('https://broker.example',opener=opener,clock=lambda:self.now,max_response_bytes=4)
+        self.assertEqual(client.download_object(grant,'image-1',self.root/'input.jpg').read_bytes(),b'abcdefghij')
+        self.assertEqual(calls,[None])
+
+    def test_ranged_object_validates_and_publishes_one_complete_file(self):
+        grant,calls,client=self.ranged_fixture()
+        path=client.download_object(grant,'image-1',self.root/'input.jpg')
+        self.assertEqual(path.read_bytes(),b'abcdefghij')
+        self.assertEqual(calls,['bytes=0-3','bytes=4-7','bytes=8-9'])
+        self.assertEqual(list(self.root.iterdir()),[path])
+
+    def test_bad_range_headers_status_redirect_encoding_and_hash_never_publish(self):
+        def changed(case):
+            def mutate(n,data,options):
+                if n==2:
+                    if case=='range':options['headers']['Content-Range']='bytes 0-3/10'
+                    if case=='length':options['headers']['Content-Length']='3'
+                    if case=='missing':del options['headers']['Content-Length']
+                    if case=='status':options['status']=200
+                    if case=='redirect':options['url']='https://elsewhere.example/'
+                    if case=='encoding':options['headers']['Content-Encoding']='gzip'
+                    if case=='short':data=data[:-1]
+                    if case=='corrupt':data=b'zzzz'
+                return data,options
+            return mutate
+        for case in ('range','length','missing','status','redirect','encoding','short','corrupt'):
+            with self.subTest(case=case):
+                grant,calls,client=self.ranged_fixture(mutate=changed(case))
+                with self.assertRaises(TransferError):client.download_object(grant,'image-1',self.root/'input.jpg')
+                self.assert_no_files()
+
+    def test_lost_later_range_keeps_no_partial_and_retry_starts_from_zero(self):
+        def fail_second(n,data,options):
+            if n==2:raise URLError('synthetic unavailable')
+            return data,options
+        grant,calls,client=self.ranged_fixture(mutate=fail_second)
+        with self.assertRaises(TransferResponseUnavailable):client.download_object(grant,'image-1',self.root/'input.jpg')
+        self.assertEqual(calls,['bytes=0-3','bytes=4-7']);self.assert_no_files()
+        grant,calls,client=self.ranged_fixture()
+        client.download_object(grant,'image-1',self.root/'input.jpg')
+        self.assertEqual(calls[0],'bytes=0-3')
+
+    def test_expiry_between_ranges_holds_and_never_publishes(self):
+        def expire_after_first(n,data,options):
+            if n==1:self.now=1000
+            return data,options
+        grant,calls,client=self.ranged_fixture(mutate=expire_after_first)
+        with self.assertRaises(TransferError):client.download_object(grant,'image-1',self.root/'input.jpg')
+        self.assertEqual(calls,['bytes=0-3']);self.assert_no_files()
+
+    def test_zero_byte_object_uses_single_full_request(self):
+        grant=ValidatedGrant('job-1','reservation-1',1,'staging',1000,
+            (TransferObject('empty',0,hashlib.sha256(b'').hexdigest()),),'private-token')
+        calls=[]
+        def opener(request,*,timeout):
+            calls.append(request.get_header('Range'));return Response(b'',url=request.full_url,headers={'Content-Length':'0'})
+        client=BrokerClient('https://broker.example',opener=opener,clock=lambda:self.now,max_response_bytes=4,enable_ranges=True)
+        self.assertEqual(client.download_object(grant,'empty',self.root/'empty.txt').read_bytes(),b'')
+        self.assertEqual(calls,[None])
 
     def test_unknown_object_and_raw_grant_never_open_connection(self):
         for grant, object_id in ((self.grant(), "outside"), (self.raw, "image-1")):
