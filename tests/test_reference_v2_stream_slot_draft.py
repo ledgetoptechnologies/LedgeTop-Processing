@@ -25,6 +25,28 @@ class SlotTests(PrechargeTests):
   l=self.indexed();l.precharge(request_id='r1',object_id='cloud',start=0,end=4);s=self.slot()
   with self.assertRaisesRegex(SlotHeld,'replay'):s.begin(l,request_id='r1',object_id='cloud',start=0,end=4)
   self.assertEqual(s.state(),'opening')
+ def test_denied_precharge_and_unknown_commit_both_remain_opening(self):
+  from unittest.mock import patch
+  from processing.reference_v2_precharge_draft import PrechargeHeld
+  l=self.indexed();s=self.slot()
+  with self.assertRaises(PrechargeHeld):s.begin(l,request_id='r1',object_id='absent',start=0,end=1)
+  self.assertEqual(s.state(),'opening');s.close()
+  db=sqlite3.connect(self.slotpath)
+  try:db.execute("UPDATE stream_slot SET phase='idle',identity=NULL");db.commit()
+  finally:db.close()
+  s=self.slot();original=l.precharge
+  def committed_then_lost(**kw):original(**kw);raise sqlite3.OperationalError('unknown commit')
+  with patch.object(l,'precharge',side_effect=committed_then_lost):
+   with self.assertRaises(sqlite3.OperationalError):s.begin(l,request_id='r2',object_id='cloud',start=0,end=4)
+  self.assertEqual(s.state(),'opening')
+  self.assertEqual(l.precharge(request_id='r2',object_id='cloud',start=0,end=4)['state'],'replay_no_body')
+
+ def test_oversized_slot_identity_rejected_before_decode(self):
+  s=self.slot();s.close();db=sqlite3.connect(self.slotpath)
+  try:db.execute("UPDATE stream_slot SET phase='opening',identity=?",('x'*2049,));db.commit()
+  finally:db.close()
+  with self.assertRaisesRegex(SlotHeld,'bounded slot state'):self.slot()
+
  def test_process_exit_after_charge_retains_slot(self):
   code="""import os,sys
 from processing.reference_v2_indexed_precharge_draft import IndexedPrecharge

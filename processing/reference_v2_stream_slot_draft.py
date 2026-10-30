@@ -4,7 +4,9 @@ The trusted supervisor must fence all noncooperating workers/hosts, prevent
 SQLite and lock-path replacement or restore, and verify source streams are
 closed before finish. A cooperative file lock cannot prove those properties.
 The caller must separately authenticate the grant and enforce expiry at stream
-admission. Pending state survives worker death and is never auto-cleared.
+admission. Pending state survives worker death and is never auto-cleared. Even a denial
+retains opening: independent reconciliation must establish the exact charge
+outcome and prove no writer remains before any future reviewed release.
 """
 import hashlib,json,os,sqlite3,stat
 from pathlib import Path
@@ -42,6 +44,9 @@ class StreamSlot:
   if self.pid!=os.getpid() or self.db is None:raise SlotHeld('slot owner changed')
   self._check_path()
   if tuple(self.db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name'))!=SCHEMA or self.db.execute('SELECT 1 FROM sqlite_temp_master LIMIT 1').fetchone():raise SlotHeld('slot schema changed')
+  if self.db.execute("SELECT 1 FROM stream_slot WHERE typeof(epoch)!='text' OR length(CAST(epoch AS BLOB))>128 OR typeof(phase)!='text' OR length(CAST(phase AS BLOB))>16 OR (identity IS NOT NULL AND (typeof(identity)!='text' OR length(CAST(identity AS BLOB))>2048)) LIMIT 1").fetchone():
+   raise SlotHeld('bounded slot state required')
+  if self.db.execute('SELECT COUNT(*) FROM stream_slot').fetchone()[0]!=1:raise SlotHeld('slot state changed')
   rows=self.db.execute('SELECT id,epoch,phase,identity FROM stream_slot').fetchall()
   if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.epoch or rows[0][2] not in ('idle','opening','charged','closed'):raise SlotHeld('slot state changed')
   if rows[0][2]=='idle' and rows[0][3] is not None:raise SlotHeld('slot idle identity invalid')
