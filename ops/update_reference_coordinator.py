@@ -653,13 +653,18 @@ class ReferenceCoordinatorUpdate:
         """
         args=list(self.create_args(state))
         try:
-            index=args.index('--restart');assert args[index+1]=='unless-stopped';args[index+1]='no'
-            index=args.index('--network');assert args[index+1]=='bridge';args[index+1]='none'
+            index=args.index('--restart')
+            if args[index+1]!='unless-stopped':raise Stopped('quarantine_create_template_changed')
+            args[index+1]='no'
+            index=args.index('--network')
+            if args[index+1]!='bridge':raise Stopped('quarantine_create_template_changed')
+            args[index+1]='none'
             bindings=[]
             while '-p' in args:
                 index=args.index('-p');bindings.append(args[index+1]);del args[index:index+2]
-            assert bindings==['127.0.0.1:18080:8080','192.168.50.89:3005:8080','192.168.50.89:18443:8443']
-        except (ValueError,IndexError,AssertionError):
+            if bindings!=['127.0.0.1:18080:8080','192.168.50.89:3005:8080','192.168.50.89:18443:8443']:
+                raise Stopped('quarantine_create_template_changed')
+        except (ValueError,IndexError):
             raise Stopped('quarantine_create_template_changed') from None
         return tuple(args)
 
@@ -714,6 +719,7 @@ class ReferenceCoordinatorUpdate:
         return dict(**result,sourceCensusSha256=digest(before),sourceRawFiles=before['files'])
 
     def reopen(self,state,gates,api,operator):
+        if state.get('sourceCommit')==QUARANTINED_A75_SOURCE:raise Stopped('a75_reopen_not_qualified')
         if state.get('pendingPlan'):raise Stopped('unknown_schedule_outcome_never_adopted')
         for identifier,plan in state['plans'].items():
             self.check(state,gates)
@@ -746,9 +752,11 @@ class ReferenceCoordinatorUpdate:
 
     def activate(self,state):
         self.validate(state)
-        quarantined = bool(self.incremental_binding and state['sourceCommit']==QUARANTINED_A75_SOURCE)
+        quarantined = state.get('sourceCommit')==QUARANTINED_A75_SOURCE
         if quarantined and QUARANTINED_A75_REVIEWED is not True:
             raise Stopped('a75_quarantine_activation_not_qualified')
+        if quarantined and self.incremental_binding is None:
+            raise Stopped('a75_incremental_profile_required')
         if self.incremental_binding and not incremental_release_reviewed(self.incremental_binding,state['image'],state['sourceCommit']):raise Stopped('incremental_application_migration_review_required')
         if state['phase']!='prepared':raise Stopped('prepared_operation_only_no_replay')
         self.original(state);_env,api,operator=self.t.local_clients();self.activity(state,api)
@@ -822,6 +830,7 @@ class ReferenceCoordinatorUpdate:
         return state
 
     def retain(self,state,gates,item):
+        if state.get('sourceCommit')==QUARANTINED_A75_SOURCE:raise Stopped('a75_retention_not_qualified')
         self.check(state,gates)
         current=self.candidate(state)
         if current is None or current['Id']!=item['Id'] or current['Name']!='/'+NAME:raise Stopped('canonical_candidate_retention_only')
@@ -835,6 +844,7 @@ class ReferenceCoordinatorUpdate:
         self.save(state,'needs_inspection',downgradeRefused=True,replacementRetained=True)
 
     def finish_rollback(self,state,gates):
+        if state.get('sourceCommit')==QUARANTINED_A75_SOURCE:raise Stopped('a75_rollback_not_qualified')
         self.check(state,gates);self.original(state)
         _env,api,operator=self.t.local_clients();self.t.health(api,container_id=self.old_id)
         self.t.sole_owner(self.old_id);self.activity(state,api)
@@ -847,6 +857,7 @@ class ReferenceCoordinatorUpdate:
         return state
 
     def rollback(self,state):
+        if state.get('sourceCommit')==QUARANTINED_A75_SOURCE:raise Stopped('a75_rollback_not_qualified')
         self.validate(state)
         if self.incremental_binding and not incremental_release_reviewed(self.incremental_binding,state['image'],state['sourceCommit']):raise Stopped('incremental_application_migration_review_required')
         if state.get('reopeningStarted') or state.get('pendingPlan'):raise Stopped('reopen_or_schedule_uncertainty_prevents_rollback')

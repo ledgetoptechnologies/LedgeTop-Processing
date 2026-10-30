@@ -49,10 +49,28 @@ class QuarantineUpdaterTests(unittest.TestCase):
             with self.assertRaises(u.Stopped):self.obj.verify_quarantined_candidate(self.state)
 
     def test_a75_is_hard_disabled_before_transport_or_mutation(self):
-        self.obj.validate=lambda state:None;self.obj.incremental_binding=object()
-        with self.assertRaisesRegex(u.Stopped,'a75_quarantine_activation_not_qualified'):
-            self.obj.activate(self.state)
+        self.obj.validate=lambda state:None
+        for binding in (None,object()):
+            self.obj.incremental_binding=binding
+            with self.assertRaisesRegex(u.Stopped,'a75_quarantine_activation_not_qualified'):
+                self.obj.activate(self.state)
+        with patch.object(u,'QUARANTINED_A75_REVIEWED',True):
+            self.obj.incremental_binding=None
+            with self.assertRaisesRegex(u.Stopped,'a75_incremental_profile_required'):
+                self.obj.activate(self.state)
         self.assertEqual(self.obj.t.calls,[])
+
+    def test_a75_no_rollback_retain_or_reopen_until_explicitly_qualified(self):
+        with self.assertRaisesRegex(u.Stopped,'a75_rollback_not_qualified'):self.obj.rollback(self.state)
+        with self.assertRaisesRegex(u.Stopped,'a75_rollback_not_qualified'):self.obj.finish_rollback(self.state,None)
+        with self.assertRaisesRegex(u.Stopped,'a75_retention_not_qualified'):self.obj.retain(self.state,None,None)
+        with self.assertRaisesRegex(u.Stopped,'a75_reopen_not_qualified'):self.obj.reopen(self.state,None,None,None)
+        self.assertEqual(self.obj.t.calls,[])
+
+    def test_create_rejects_modified_template_even_with_python_optimization(self):
+        with patch.object(self.obj,'create_args',return_value=('create','--network','host','--restart','unless-stopped')):
+            with self.assertRaisesRegex(u.Stopped,'quarantine_create_template_changed'):
+                self.obj.quarantine_create_args(self.state)
 
 
 if __name__=='__main__':unittest.main()
