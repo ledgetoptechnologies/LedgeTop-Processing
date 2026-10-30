@@ -99,7 +99,46 @@ class ReservationTests(unittest.TestCase):
   self.reserve();wrong=base64.urlsafe_b64encode(bytes(reversed(range(32)))).decode().rstrip('=')
   with self.assertRaises(KeyError):self.store.cancel_reservation(self.id,'staging',wrong)
   self.assertEqual(self.reserve()['state'],'reserved')
+ def test_inventory_pagination_is_bound_to_mutation_and_capability(self):
+  self.reserve();self.initialize();self.photo()
+  self.store.upload(self.id,'gcp.txt',io.BytesIO(b'GCP'),3,'staging',self.cap)
+  first=self.store.input_inventory(self.id,'staging',self.cap)
+  self.assertEqual([(x['name'],x['bytes'],x['isPhoto']) for x in first['items']], [('a.jpg',4,True),('gcp.txt',3,False)])
+  with self.assertRaises(KeyError):self.store.input_inventory(self.id,'production',self.cap)
+  with self.assertRaises(KeyError):self.store.input_inventory(self.id,'staging',None)
+  with self.queue._db() as db:
+   for i in range(257):
+    name=f'p{i:03}.jpg'
+    db.execute('INSERT INTO viewer_files(uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,1)',(self.id,name,name,name,1,'a'*64))
+  page=self.store.input_inventory(self.id,'staging',self.cap);self.assertEqual(len(page['items']),256);self.assertTrue(page['nextCursor'])
+  body=page['nextCursor'].split('.')[0];decoded=base64.urlsafe_b64decode(body+'='*(-len(body)%4))
+  self.assertNotIn(b'.jpg',decoded);self.assertNotIn(self.cap.encode(),decoded);self.assertNotIn(self.id.encode(),decoded)
+  more=self.store.input_inventory(self.id,'staging',self.cap,page['nextCursor']);self.assertEqual(more['snapshot'],page['snapshot']);self.assertEqual(len(more['items']),3)
+  with self.assertRaises(ValueError):self.store.input_inventory(self.id,'staging',self.cap,page['nextCursor'][:-1]+'!')
+  with self.queue._db() as db:db.execute("UPDATE viewer_files SET bytes=2 WHERE uuid=? AND name_key='a.jpg'",(self.id,))
+  with self.assertRaises(Conflict):self.store.input_inventory(self.id,'staging',self.cap,page['nextCursor'])
+  page=self.store.input_inventory(self.id,'staging',self.cap)
+  with self.queue._db() as db:db.execute("DELETE FROM viewer_files WHERE uuid=? AND name_key='a.jpg'",(self.id,))
+  with self.assertRaises(Conflict):self.store.input_inventory(self.id,'staging',self.cap,page['nextCursor'])
+ def test_inventory_rejects_cancelled_and_legacy_tasks(self):
+  self.reserve();self.initialize();self.photo();self.store.cancel_reservation(self.id,'staging',self.cap)
+  with self.assertRaises(Conflict):self.store.input_inventory(self.id,'staging',self.cap)
+  legacy=str(uuid.uuid4());self.store.initialize(legacy,'legacy',[],None,'production')
+  with self.assertRaises(KeyError):self.store.input_inventory(legacy,'production',None)
 class ReservationHTTPTests(ReservationTests):
+ def test_inventory_http_requires_exact_reservation_and_exposes_only_receipts(self):
+  self.reserve();self.initialize();self.photo();store=self.store
+  class Service:
+   def input_inventory(self,i,e,c,cursor=None):return store.input_inventory(i,e,c,cursor)
+  facade=ViewerFacade(Service(),'production-test-token-0123456789',STAGING,temp_dir=str(self.root))
+  route='/task/'+self.id+'/ledgetop/input-inventory?token='
+  def get(token,cap):
+   h=MemoryHandler(route+token,method='GET',**({'X_LedgeTop_Capability':cap} if cap else {}));facade.handle(h);return h
+  for token,cap in ((STAGING,None),('production-test-token-0123456789',self.cap),(STAGING,'bad')):
+   h=get(token,cap);self.assertEqual(h.status,404);self.assertEqual(json.loads(h.wfile.getvalue()),{'error':'task_not_found'})
+  h=get(STAGING,self.cap);self.assertEqual(h.status,200);value=json.loads(h.wfile.getvalue())
+  self.assertEqual(set(value['items'][0]),{'name','bytes','sha256','isPhoto'});self.assertEqual(value['items'][0]['name'],'a.jpg')
+  self.assertNotIn(self.cap,h.wfile.getvalue().decode());self.assertNotIn(str(self.root),h.wfile.getvalue().decode())
  def test_http_early_cancel_blocks_late_and_legacy_init(self):
   store=self.store
   class Service:
@@ -130,6 +169,39 @@ class ReservationDispatchTests(unittest.TestCase):
   self.service.reserve(identifier,'staging',cap);self.service.initialize(identifier,'test',[],None,'staging',cap)
   self.service.upload(identifier,'a.jpg',io.BytesIO(b'jpeg'),4,'staging',cap);self.service.commit(identifier,'staging',cap)
   return identifier,cap
+ def test_real_http_legacy_info_is_scoped_to_task_environment(self):
+  identifier=str(uuid.uuid4());self.service.initialize(identifier,'legacy',[],None,'production')
+  facade=ViewerFacade(self.service,'production-test-token-0123456789',STAGING,temp_dir=str(self.root))
+  class Handler(BaseHTTPRequestHandler):
+   def log_message(inner,*args):pass
+   def do_GET(inner):facade.handle(inner)
+  server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+  try:
+   url='http://127.0.0.1:'+str(server.server_port)+'/task/'+identifier+'/info?'+urlencode({'token':STAGING})
+   with self.assertRaises(HTTPError) as caught:urlopen(url,timeout=5)
+   self.assertEqual(caught.exception.code,404);self.assertEqual(json.load(caught.exception),{'error':'task_not_found'})
+  finally:server.shutdown();server.server_close();thread.join(5);self.assertFalse(thread.is_alive())
+ def test_real_http_partial_upload_has_exact_photo_and_auxiliary_receipts(self):
+  identifier=str(uuid.uuid4());cap=base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip('=')
+  self.service.reserve(identifier,'staging',cap);self.service.initialize(identifier,'test',[],None,'staging',cap);self.service.store.max_input_bytes=8
+  facade=ViewerFacade(self.service,'production-test-token-0123456789',STAGING,temp_dir=str(self.root))
+  class Handler(BaseHTTPRequestHandler):
+   def log_message(inner,*args):pass
+   def do_POST(inner):facade.handle(inner)
+   def do_GET(inner):facade.handle(inner)
+  server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+  try:
+   base='http://127.0.0.1:'+str(server.server_port)+'/task/';query='?'+urlencode({'token':STAGING})
+   body=multipart([('images','gcp.txt',b'GCP'),('images','a.jpg',b'1234'),('images','b.jpg',b'99')])
+   req=Request(base+'new/upload/'+identifier+query,data=body,headers={'Content-Type':'multipart/form-data; boundary=viewer-test-boundary','X-LedgeTop-Capability':cap})
+   with self.assertRaises(HTTPError) as caught:urlopen(req,timeout=5)
+   self.assertEqual(caught.exception.code,413);self.assertEqual(json.load(caught.exception),{'error':'task_input_limit_exceeded'})
+   req=Request(base+identifier+'/ledgetop/input-inventory'+query,headers={'X-LedgeTop-Capability':cap})
+   with urlopen(req,timeout=5) as response:value=json.load(response)
+   self.assertEqual([(x['name'],x['bytes'],x['isPhoto']) for x in value['items']],[('gcp.txt',3,False),('a.jpg',4,True)])
+   self.assertIsNone(value['nextCursor']);self.assertEqual(self.service.store.info(identifier)['imagesCount'],1)
+   self.assertFalse(list(Path(self.service.store.task(identifier)['directory']).glob('.incoming-*')))
+  finally:server.shutdown();server.server_close();thread.join(5);self.assertFalse(thread.is_alive())
  def test_real_http_cancel_before_init_survives_service_restart(self):
   cap=base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip('=');identifier=str(uuid.uuid4())
   facade=ViewerFacade(self.service,'production-test-token-0123456789',STAGING,temp_dir=str(self.root))

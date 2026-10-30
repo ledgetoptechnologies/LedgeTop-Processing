@@ -141,6 +141,9 @@ class ViewerService:
                 'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
                 'ledgetopMaxInputBytes': self.store.max_input_bytes,
                 'ledgetopMaxUploadRequestBytes': MAX_UPLOAD_BYTES,
+                'ledgetopInputInventory': {'version': 1, 'maxPageSize': 256,
+                                            'evidence': 'committed_database_only',
+                                            'physicalIntegrityVerified': False},
                 'ledgetopReservations': self.store.reservation_stats(),
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
@@ -192,6 +195,9 @@ class ViewerService:
         self.store.authorize_reservation(identifier,environment,capability)
         if self.store.task_environment(identifier) != environment:
             raise KeyError('unknown task')
+
+    def input_inventory(self, identifier, environment, capability, cursor=None):
+        return self.store.input_inventory(identifier, environment, capability, cursor)
 
     def output(self, identifier, line=0):
         task = self.store.task(identifier)

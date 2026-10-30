@@ -124,6 +124,20 @@ class TaskStore:
                 uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
                 path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
                 is_photo INTEGER NOT NULL, PRIMARY KEY(uuid,name_key))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_inventory_revisions (
+                uuid TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision >= 0))''')
+            for operation, ref in (('INSERT', 'NEW'), ('DELETE', 'OLD')):
+                db.execute(f'''CREATE TRIGGER IF NOT EXISTS viewer_inventory_{operation.lower()}
+                    AFTER {operation} ON viewer_files BEGIN
+                    INSERT INTO viewer_inventory_revisions(uuid,revision) VALUES ({ref}.uuid,1)
+                    ON CONFLICT(uuid) DO UPDATE SET revision=revision+1; END''')
+            db.execute('''CREATE TRIGGER IF NOT EXISTS viewer_inventory_update
+                AFTER UPDATE ON viewer_files BEGIN
+                INSERT INTO viewer_inventory_revisions(uuid,revision) VALUES (OLD.uuid,1)
+                    ON CONFLICT(uuid) DO UPDATE SET revision=revision+1;
+                INSERT INTO viewer_inventory_revisions(uuid,revision)
+                    SELECT NEW.uuid,1 WHERE NEW.uuid<>OLD.uuid
+                    ON CONFLICT(uuid) DO UPDATE SET revision=revision+1; END''')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_incarnations (
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 job_id TEXT, metadata TEXT NOT NULL, files TEXT NOT NULL,
@@ -207,6 +221,48 @@ class TaskStore:
 
     def authorize_reservation(self,identifier,environment,capability):
         with self.queue._db() as db:self._reservation(db,identifier,environment,capability,allow_cancelled=True)
+
+    def input_inventory(self, identifier, environment, capability, cursor=None):
+        """Return bounded, reservation-authenticated committed input receipts."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN')
+            reservation = self._reservation(db, identifier, environment, capability)
+            if reservation is None:
+                raise KeyError('unknown reservation')
+            row = self._row(db, identifier)
+            if row['stage'] != 'uploading' or row['job_id'] is not None:
+                raise Conflict('input inventory unavailable')
+            revision_row = db.execute('SELECT revision FROM viewer_inventory_revisions WHERE uuid=?', (identifier,)).fetchone()
+            revision = revision_row['revision'] if revision_row else 0
+            snapshot = {'generation': row['generation'], 'revision': revision}
+            def sign(payload):
+                body = base64.urlsafe_b64encode(canonical(payload).encode()).decode().rstrip('=')
+                scope = (identifier + '\0' + environment + '\0').encode('ascii')
+                mac = hmac.new(capability.encode('ascii'), b'viewer-input-inventory-v1\0' + scope + body.encode('ascii'), hashlib.sha256).digest()
+                return body + '.' + base64.urlsafe_b64encode(mac).decode().rstrip('=')
+            after = 0
+            if cursor is not None:
+                if not isinstance(cursor, str) or len(cursor) > 1024 or cursor.count('.') != 1:
+                    raise ValueError('invalid inventory cursor')
+                body, signature = cursor.split('.')
+                try:
+                    payload = json.loads(base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)))
+                except Exception:
+                    raise ValueError('invalid inventory cursor') from None
+                if (not isinstance(payload, dict) or set(payload) != {'snapshot', 'after'}
+                        or type(payload['after']) is not int or not 0 <= payload['after'] <= 2**53 - 1
+                        or not hmac.compare_digest(sign(payload), cursor)):
+                    raise ValueError('invalid inventory cursor')
+                if payload['snapshot'] != snapshot:
+                    raise Conflict('input inventory changed')
+                after = payload['after']
+            rows = db.execute('''SELECT rowid,name,bytes,sha256,is_photo FROM viewer_files
+                WHERE uuid=? AND rowid>? ORDER BY rowid LIMIT 257''', (identifier, after)).fetchall()
+            page = rows[:256]
+            entries = [{'name': x['name'], 'bytes': x['bytes'], 'sha256': x['sha256'], 'isPhoto': bool(x['is_photo'])} for x in page]
+            return {'version': 1, 'uuid': identifier, 'evidence': 'committed_database_only',
+                    'physicalIntegrityVerified': False, 'snapshot': sign({'snapshot': snapshot, 'after': 0}),
+                    'items': entries, 'nextCursor': sign({'snapshot': snapshot, 'after': page[-1]['rowid']}) if len(rows) > 256 else None}
 
     def cancel_reservation(self, identifier, environment, capability):
         with self._lock,self.queue._db() as db:

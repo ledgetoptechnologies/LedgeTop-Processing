@@ -219,7 +219,8 @@ class ViewerFacade:
             query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
             environment = self._environment(query)
             output_route = re.fullmatch(r'/task/([^/]+)/output', path)
-            allowed_query = {'token', 'line'} if output_route else {'token'}
+            inventory_route = re.fullmatch(r'/task/([^/]+)/ledgetop/input-inventory', path)
+            allowed_query = {'token', 'line'} if output_route else ({'token', 'cursor'} if inventory_route else {'token'})
             if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
                 raise RequestError(400, 'invalid_query')
             if handler.command == 'GET':
@@ -274,6 +275,15 @@ class ViewerFacade:
         elif path == '/options':
             value = self.service.options()
         else:
+            inventory = re.fullmatch(r'/task/([^/]+)/ledgetop/input-inventory', path)
+            if inventory:
+                identifier = task_uuid(unquote(inventory[1]))
+                capability = self._capability(handler)
+                if capability is None:
+                    raise KeyError('unknown reservation')
+                value = self.service.input_inventory(identifier, environment, capability, query.get('cursor', [None])[0])
+                self._reply(handler, 200, value)
+                return
             route = re.fullmatch(r'/task/([^/]+)/(info|output|download/all\.zip)', path)
             if not route:
                 raise RequestError(404, 'not_found')
