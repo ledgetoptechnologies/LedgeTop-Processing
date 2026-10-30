@@ -1,0 +1,12 @@
+{
+  "status": "PROPOSED_NOT_AUTHORITY",
+  "rangeBytes": 16777216,
+  "vectors": [
+    {"name":"empty-object", "objectBytes":0, "baseRequests":1, "baseBytes":0, "retryRequests":1, "retryBytes":0, "requestBudget":2, "byteBudget":0},
+    {"name":"one-byte-beyond-range", "objectBytes":16777217, "baseRequests":2, "baseBytes":16777217, "retryRequests":1, "retryBytes":1, "requestBudget":3, "byteBudget":16777218},
+    {"name":"lost-last-byte-then-retry", "objectBytes":16777217, "requests":[{"start":0,"end":16777216,"outcome":"delivered","chargeBytes":16777216},{"start":16777216,"end":16777217,"outcome":"response_lost","chargeBytes":1},{"start":16777216,"end":16777217,"outcome":"delivered","chargeBytes":1}], "chargedRequests":3, "chargedBytes":16777218},
+    {"name":"same-request-id-replay", "first":{"requestId":"request-a","chargeRequests":1,"chargeBytes":4}, "replay":{"requestId":"request-a","emitBody":false,"additionalChargeRequests":0,"additionalChargeBytes":0}},
+    {"name":"renewal-retains-spend", "budgetRequests":3, "budgetBytes":12, "spentBeforeRenewalRequests":2, "spentBeforeRenewalBytes":8, "remainingAfterRenewalRequests":1, "remainingAfterRenewalBytes":4},
+    {"name":"expiry-observed-before-clock-rollback", "expiresAtSeconds":100, "observedClockSeconds":101, "laterClockSeconds":90, "newAdmission":"deny"}
+  ]
+}
