@@ -4,6 +4,7 @@ The caller must authenticate and verify the manifest binding separately. This
 planner does not reserve broker capacity, reconcile charges or renew grants.
 """
 from datetime import datetime
+import re
 from . import reference_protocol as p
 
 MAX_OBJECTS = 32_768
@@ -21,11 +22,11 @@ def plan_input_budget(proposal):
     for field in ('jobId', 'reservationId'):
         p._slug(proposal[field], field)
     p._environment(proposal['environment'])
-    p._integer(proposal['generation'], 'generation')
+    p._integer(proposal['generation'], 'generation', allow_zero=True)
     for field in ('manifestSha256', 'capabilityFingerprint'):
         p._hash(proposal[field], field)
     expiry = proposal['expiresAt']
-    p._require(type(expiry) is str and len(expiry) <= 40 and expiry.endswith('Z'), 'invalid expiry')
+    p._require(type(expiry) is str and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z', expiry) is not None, 'invalid expiry')
     try:
         datetime.fromisoformat(expiry[:-1] + '+00:00')
     except (ValueError, OverflowError):
@@ -56,6 +57,7 @@ def plan_input_budget(proposal):
                'budget exceeds safe integer')
     encoded = p.canonical_json(proposal)
     p._require(len(encoded) <= MAX_METADATA_BYTES, 'metadata ceiling exceeded')
-    return {'protocolVersion': 2, 'proposalSha256': p.digest(proposal),
-            'requiredRequests': total_requests, 'requestBudget': request_budget,
-            'byteBudget': byte_budget}
+    return {key: proposal[key] for key in ('protocolVersion', 'jobId', 'generation', 'reservationId',
+            'manifestSha256', 'environment', 'capabilityFingerprint', 'expiresAt')} | {
+            'objectCount': len(objects), 'rangeBytes': proposal['rangeBytes'], 'totalBytes': total_bytes,
+            'requiredRequests': total_requests, 'requestBudget': request_budget, 'byteBudget': byte_budget}

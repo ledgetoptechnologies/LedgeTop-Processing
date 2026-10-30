@@ -1,34 +1,21 @@
 {
-  "proposal": {
+  "input": {
     "protocolVersion": 2,
-    "jobId": "job-1",
-    "environment": "staging",
-    "reservationId": "reservation-1",
+    "jobId": "job_1",
     "generation": 7,
+    "reservationId": "reservation_1",
     "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "environment": "staging",
     "capabilityFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "expiresAt": "2030-01-01T00:00:00Z",
+    "expiresAt": "2026-10-31T00:00:00.000Z",
     "objects": [
-      {
-        "id": "empty",
-        "byteSize": 0,
-        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-      },
-      {
-        "id": "photo",
-        "byteSize": 33,
-        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-      }
+      {"id": "empty", "byteSize": 0, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+      {"id": "small", "byteSize": 9, "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+      {"id": "two_ranges", "byteSize": 11, "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
     ],
-    "rangeBytes": 16,
-    "retryRequests": 3,
-    "retryBytes": 8
+    "rangeBytes": 10,
+    "retryRequests": 2,
+    "retryBytes": 5
   },
-  "expected": {
-    "protocolVersion": 2,
-    "proposalSha256": "5c796f9b27bc9662eb4874b06394619af5db6eb1659efb414ef43396e944ae5f",
-    "requiredRequests": 4,
-    "requestBudget": 7,
-    "byteBudget": 41
-  }
+  "expected": {"objectCount": 3, "totalBytes": 20, "requiredRequests": 4, "requestBudget": 6, "byteBudget": 25}
 }
