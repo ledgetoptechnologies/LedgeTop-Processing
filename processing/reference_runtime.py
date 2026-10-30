@@ -45,6 +45,7 @@ class ReferenceSettings:
     catalog_admission: object | None = None
     runtime_version_publication: object | None = None
     initial_grant_delivery: object | None = None
+    grant_reconciliation: bool = False
 
 
 def _file(path, *, private):
@@ -81,7 +82,7 @@ def load_reference_settings(path, config):
         if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()) + (("runtimeVersionPublication",) if "runtimeVersionPublication" in value else ()) + (("initialGrantDelivery",) if "initialGrantDelivery" in value else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()) + (("routingBindings",) if "routingBindings" in value else ()) + (("catalogAdmission",) if "catalogAdmission" in value else ()) + (("runtimeVersionPublication",) if "runtimeVersionPublication" in value else ()) + (("initialGrantDelivery",) if "initialGrantDelivery" in value else ()) + (("grantReconciliation",) if "grantReconciliation" in value else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -169,8 +170,14 @@ def load_reference_settings(path, config):
         if 'initialGrantDelivery' in value:
             from .reference_initial_grant import InitialGrantPolicy
             initial_delivery=InitialGrantPolicy.from_payload(value['initialGrantDelivery'])
+        reconciliation=False
+        if 'grantReconciliation' in value:
+            policy=value['grantReconciliation'];p._closed(policy,('schemaVersion',),'grant reconciliation policy')
+            if type(policy['schemaVersion']) is not int or policy['schemaVersion']!=1:
+                raise RuntimeConfigurationError('explicit grant reconciliation version required')
+            reconciliation=True
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission,publication,initial_delivery)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, routing,admission,publication,initial_delivery,reconciliation)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -242,6 +249,8 @@ class _DynamicAPI:
 class ReferenceRuntime:
     def __init__(self, queue, config, settings, *, discover=None, server_factory=None,catalog_clock=time.time):
         """Construct services around the existing authority; never create a Queue."""
+        if type(settings.grant_reconciliation) is not bool:
+            raise RuntimeConfigurationError('explicit reconciliation mode required')
         if queue.catalog_admission != (settings.catalog_admission is not None):
             raise RuntimeConfigurationError('catalog admission Queue/config mode mismatch')
         if queue.runtime_version_publication!=(settings.runtime_version_publication is not None):
@@ -295,7 +304,7 @@ class ReferenceRuntime:
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
-                recovery_bindings=recovery,grant_reconciliation=settings.initial_grant_delivery is not None)
+                recovery_bindings=recovery,grant_reconciliation=settings.grant_reconciliation or settings.initial_grant_delivery is not None)
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))

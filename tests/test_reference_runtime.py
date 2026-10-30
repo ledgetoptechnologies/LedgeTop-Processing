@@ -111,6 +111,64 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertNotIn(REFERENCE_PROFILE, handler.prototype_queue.allowed_profiles)
         self.assertIn(VIEWER_PROFILE, handler.prototype_queue.allowed_profiles)
 
+    def test_grant_reconciliation_private_setting_is_closed_versioned_and_default_off(self):
+        self.assertIs(self.settings().grant_reconciliation,False)
+        for invalid in (True,False,None,{},dict(schemaVersion=True),dict(schemaVersion=1.0),dict(schemaVersion=2),dict(schemaVersion=1,extra=True)):
+            self.value['grantReconciliation']=invalid;self.write_config()
+            with self.subTest(value=invalid),self.assertRaises(RuntimeConfigurationError):self.settings()
+        self.value['grantReconciliation']={'schemaVersion':1};self.write_config()
+        self.assertIs(self.settings().grant_reconciliation,True)
+        self.assertIsNone(self.settings().initial_grant_delivery)
+
+    def test_actual_runtime_legacy_grant_reconciliation_opt_in_http_is_historical_read_only(self):
+        from processing import reference_protocol as p
+        self.value['grantReconciliation']={'schemaVersion':1};self.write_config()
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        runtime=self.runtime(queue);self.addCleanup(runtime.close)
+        headers={'Authorization':'Bearer '+self.value['viewerBearers']['staging']}
+        caps=runtime.api.handle('GET','/ltds/v1/capabilities',headers,protected_transport=True).body
+        fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
+        raw=fixture['submission'];raw['capabilityFingerprint']=caps['capabilityFingerprint']
+        raw['pipeline']['odm']['optionsFingerprint']=caps['engines']['odm']['optionsFingerprint'];raw['pipeline']['odm']['options']={}
+        reply=runtime.api.handle('POST','/ltds/v1/jobs',headers,p.canonical_json(raw),protected_transport=True)
+        self.assertEqual(reply.status,201,reply.body);job=reply.body
+        runtime.store.claim(job['jobId'],node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster',claim_request_id='runtime-reconciliation')
+        reservation=fixture['transferRequest'];reservation['expiresAt']='1970-01-01T00:20:00.000Z'
+        runtime.store.reserve(job['jobId'],reservation,node_id='cluster')
+        grant=dict(fixture['transferGrant'],**reservation,jobId=job['jobId'])
+        runtime.store.receive_transfer_grant(job['jobId'],grant,clock=lambda:100)
+        expected=dict(schemaVersion=1,jobId=job['jobId'],generation=1,environment='staging',reservationId=grant['reservationId'],
+            manifestSha256=grant['manifestSha256'],nonce=grant['nonce'],grantSha256=p.digest(grant))
+        path='/ltds/v1/jobs/'+job['jobId']+'/transfer-grants/reconcile';before=queue.path.read_bytes()
+        server=create_reference_http_server(runtime.api);thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.02});thread.start()
+        try:
+            for _ in range(2):
+                connection=http.client.HTTPConnection(*server.server_address,timeout=5)
+                try:
+                    connection.request('POST',path,p.canonical_json(expected),headers)
+                    response=connection.getresponse();self.assertEqual(response.status,200)
+                    receipt=json.loads(response.read());self.assertEqual(receipt,dict(expected,receiptType='transfer_grant_reconciliation',accepted=True,mayDownload=False))
+                    self.assertNotIn(grant['token'],json.dumps(receipt))
+                finally:connection.close()
+        finally:server.shutdown();server.server_close();thread.join(5)
+        self.assertFalse(thread.is_alive());self.assertEqual(before,queue.path.read_bytes())
+        self.assertIsNone(runtime.store.initial_grant_policy)
+        with queue._db() as db:self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'reference_initial_*' LIMIT 1").fetchone())
+
+    def test_direct_settings_nonboolean_reconciliation_refused_before_tls(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        with patch('processing.reference_runtime.ssl.SSLContext',side_effect=AssertionError('TLS construction must not run')):
+            with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,self.config,replace(self.settings(),grant_reconciliation=1))
+
+    def test_actual_runtime_reconciliation_default_off_needs_no_discovery_or_body_decode(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        runtime=self.runtime(queue);self.addCleanup(runtime.close)
+        headers={'Authorization':'Bearer '+self.value['viewerBearers']['staging']}
+        with patch.object(runtime.api,'discover',side_effect=AssertionError('receipt routing must not discover')),\
+             patch('processing.reference_api.protocol.decode_submission',side_effect=AssertionError('disabled route must not decode')):
+            reply=runtime.api.handle('POST','/ltds/v1/jobs/unknown/transfer-grants/reconcile',headers,b'{invalid',protected_transport=True)
+        self.assertEqual(reply.status,404)
+
     def recovery_config(self,authority='11111111-1111-4111-8111-111111111111'):
         value=copy.deepcopy(self.value);value['schemaVersion']=2
         value['recoveryBindings']={node:dict(engineId='physical-'+node,authorityId=authority,
