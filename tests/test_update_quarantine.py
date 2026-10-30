@@ -1,6 +1,10 @@
 """Quarantined updater profile: no real services or Docker mutations."""
 import copy
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import subprocess
+import sys
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -17,8 +21,8 @@ class Transport:
         self.calls.append(args)
         if self.health_failures:
             self.health_failures-=1
-            if self.change_after_health:self.item['HostConfig']['NetworkMode']='bridge'
             raise OSError('not yet listening')
+        if self.change_after_health:self.item['HostConfig']['NetworkMode']='bridge'
         return json.dumps({'status':'ok','viewerEnabled':True,'syntheticPrototypeEnabled':True})
 
 
@@ -64,28 +68,42 @@ class QuarantineUpdaterTests(unittest.TestCase):
                 self.obj.activate(self.state)
         self.assertEqual(self.obj.t.calls,[])
 
-    def test_health_retries_once_and_checks_identity_again(self):
-        self.obj.t.health_failures=1
+    def test_health_runs_one_exec_and_checks_identity_again(self):
         with patch.object(u,'application_environment',return_value=self.state['applicationEnvironmentSha256']):
             self.assertEqual(self.obj.verify_quarantined_candidate(self.state)['internalHealth'],'ok')
-        self.assertEqual(sum(call[0]=='exec' for call in self.obj.t.calls),2)
-        self.assertEqual(sum(call[0]=='inspect' for call in self.obj.t.calls),3)
+        self.assertEqual(sum(call[0]=='exec' for call in self.obj.t.calls),1)
+        self.assertEqual(sum(call[0]=='inspect' for call in self.obj.t.calls),2)
 
     def test_identity_change_during_health_retry_fails_closed(self):
-        self.obj.t.health_failures=1;self.obj.t.change_after_health=True
+        self.obj.t.change_after_health=True
         with patch.object(u,'application_environment',return_value=self.state['applicationEnvironmentSha256']):
             with self.assertRaisesRegex(u.Stopped,'quarantine_candidate_not_isolated'):
                 self.obj.verify_quarantined_candidate(self.state)
         self.assertEqual(sum(call[0]=='exec' for call in self.obj.t.calls),1)
 
-    def test_health_deadline_fails_without_mutations(self):
-        self.obj.t.health_failures=100
-        clock=iter((0,1,2,11))
-        with patch.object(u,'application_environment',return_value=self.state['applicationEnvironmentSha256']), \
-             patch.object(u.time,'monotonic',side_effect=lambda:next(clock)), patch.object(u.time,'sleep'):
+    def test_unknown_exec_never_launches_another_child(self):
+        self.obj.t.health_failures=1
+        with patch.object(u,'application_environment',return_value=self.state['applicationEnvironmentSha256']):
             with self.assertRaisesRegex(u.Stopped,'quarantine_health_unavailable'):
                 self.obj.verify_quarantined_candidate(self.state)
+        self.assertEqual(sum(call[0]=='exec' for call in self.obj.t.calls),1)
         self.assertTrue(all(call[0] in ('inspect','exec') for call in self.obj.t.calls))
+
+    def test_child_retries_transient_http_without_extra_exec(self):
+        requests=[]
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*_):pass
+            def do_GET(self):
+                requests.append(1)
+                value={'status':'unavailable'} if len(requests)==1 else {'status':'ok','viewerEnabled':True,'syntheticPrototypeEnabled':True}
+                body=json.dumps(value).encode();self.send_response(503 if len(requests)==1 else 200)
+                self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            code=u.QUARANTINE_HEALTH_PROBE.replace('127.0.0.1:8080','127.0.0.1:'+str(server.server_port))
+            result=subprocess.run([sys.executable,'-c',code],capture_output=True,text=True,timeout=5,check=True)
+            self.assertEqual(json.loads(result.stdout)['status'],'ok');self.assertEqual(len(requests),2)
+        finally:server.shutdown();server.server_close();thread.join(2);self.assertFalse(thread.is_alive())
 
     def test_a75_no_rollback_retain_or_reopen_until_explicitly_qualified(self):
         with self.assertRaisesRegex(u.Stopped,'a75_rollback_not_qualified'):self.obj.rollback(self.state)

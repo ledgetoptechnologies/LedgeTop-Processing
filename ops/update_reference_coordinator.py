@@ -73,6 +73,26 @@ QUALIFIED_INCREMENTAL_PAIRS = frozenset((QUALIFIED_INCREMENTAL_PAIR, (
 INCREMENTAL_MODE='reference-incremental-v1'
 class Stopped(ValueError):pass
 
+# Executed once inside the quarantined container; only loopback reads repeat.
+# A transport timeout is held rather than launching another exec process.
+QUARANTINE_HEALTH_PROBE = '''import json,time,urllib.request
+deadline=time.monotonic()+10
+expected={"status":"ok","viewerEnabled":True,"syntheticPrototypeEnabled":True}
+while True:
+ remaining=deadline-time.monotonic()
+ if remaining<=0:raise SystemExit(1)
+ try:
+  with urllib.request.urlopen("http://127.0.0.1:8080/healthz",timeout=min(1,remaining)) as r:
+   value=json.loads(r.read(4097))
+  observed={k:value.get(k) for k in expected}
+  if observed==expected and time.monotonic()<deadline:
+   print(json.dumps(observed));break
+ except Exception:pass
+ remaining=deadline-time.monotonic()
+ if remaining<=0:raise SystemExit(1)
+ time.sleep(min(.25,remaining))
+'''
+
 
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
@@ -695,30 +715,15 @@ class ReferenceCoordinatorUpdate:
             if application_environment(self.t,item)!=state['applicationEnvironmentSha256']:
                 raise Stopped('candidate_application_environment_changed')
         validate_candidate()
-        code=('import json,urllib.request; '
-              'r=urllib.request.urlopen("http://127.0.0.1:8080/healthz",timeout=3); '
-              'v=json.load(r); print(json.dumps({"status":v.get("status"),'
-              '"viewerEnabled":v.get("viewerEnabled"),'
-              '"syntheticPrototypeEnabled":v.get("syntheticPrototypeEnabled")}))')
-        deadline=time.monotonic()+10
         expected={'status':'ok','viewerEnabled':True,'syntheticPrototypeEnabled':True}
-        while True:
-            remaining=deadline-time.monotonic()
-            if remaining<=0:raise Stopped('quarantine_health_unavailable')
-            try:
-                value=json.loads(self.t.docker('exec','--user','10001:10001',identifier,'python','-c',code,timeout=min(3,remaining)))
-            except Exception:
-                value=None
-            if value==expected and time.monotonic()<deadline:
-                validate_candidate()
-                if time.monotonic()>=deadline:raise Stopped('quarantine_health_unavailable')
-                break
-            # Only read-only health operations may repeat. Unknown identity or
-            # isolation changes are never retried or converted to success.
-            validate_candidate()
-            remaining=deadline-time.monotonic()
-            if remaining<=0:raise Stopped('quarantine_health_unavailable')
-            time.sleep(min(.25,remaining))
+        try:
+            value=json.loads(self.t.docker('exec','--user','10001:10001',identifier,'python','-c',QUARANTINE_HEALTH_PROBE,timeout=15))
+        except Exception:
+            # The exec may still exist after a transport timeout. Never launch
+            # a second child or promote after an ambiguous result.
+            raise Stopped('quarantine_health_unavailable') from None
+        if value!=expected:raise Stopped('quarantine_health_unavailable')
+        validate_candidate()
         # Health says both app listeners started, not that external TLS or
         # backend integration has been validated.
         return {'isolated':True,'restartDisabled':True,'internalHealth':'ok'}
