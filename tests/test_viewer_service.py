@@ -496,6 +496,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(identifier)['status']['code'],40)
         self.assertEqual(len(self.fleet.commits),1)
 
+    @unittest.skipUnless(os.name == 'posix', 'offline repair uses flock')
     def test_stopped_copy_repairs_split_before_held_startup(self):
         import shutil,sqlite3
         identifier=self.submit();self.service.tick();task=self.task(identifier)
@@ -511,21 +512,10 @@ class ViewerServiceTests(unittest.TestCase):
         before=sqlite3.connect(copied/'jobs.sqlite3')
         jobs_before=before.execute('SELECT * FROM jobs ORDER BY id').fetchall()
         before.close()
-        config=SimpleNamespace(**vars(self.config));config.prototype_state_dir=str(copied)
-        queue=Queue(copied,node_ids=('cluster','main'),viewer_enabled=True)
-        service=ViewerService(queue,config,engines=self.engines,probe=self.probe)
+        from ops.repair_split_copy import repair_copy
         calls={node:list(engine.calls) for node,engine in self.engines.items()}
-        try:
-            with queue._db() as db:
-                db.execute("UPDATE viewer_tasks SET claim_token='wrong' WHERE uuid=?",(identifier,))
-            with self.assertRaises(Conflict):service.tick()
-            self.assertNotEqual(service.store.task(identifier)['phase'],'complete')
-            with queue._db() as db:
-                db.execute('UPDATE viewer_tasks SET claim_token=? WHERE uuid=?',(task['claim_token'],identifier))
-            service.tick()
-            self.assertEqual(service.info(identifier)['status']['code'],40)
-            self.assertEqual({node:list(engine.calls) for node,engine in self.engines.items()},calls)
-        finally:service.close();queue.close()
+        self.assertEqual(repair_copy(original,copied),1)
+        self.assertEqual({node:list(engine.calls) for node,engine in self.engines.items()},calls)
         after=sqlite3.connect(copied/'jobs.sqlite3')
         self.assertEqual(after.execute('SELECT * FROM jobs ORDER BY id').fetchall(),jobs_before)
         after.close()
@@ -543,6 +533,23 @@ class ViewerServiceTests(unittest.TestCase):
             db.execute("UPDATE viewer_tasks SET claim_token='wrong' WHERE uuid=?",(identifier,))
         with self.assertRaises(Conflict):self.service.tick()
         self.assertNotEqual(self.task(identifier)['phase'],'complete')
+
+    @unittest.skipUnless(os.name == 'posix', 'offline repair uses flock')
+    def test_stopped_copy_repair_rejects_mismatched_claim_without_changes(self):
+        import shutil
+        from ops.repair_split_copy import repair_copy
+        identifier=self.submit();self.service.tick();task=self.task(identifier)
+        result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],
+                'environment':task['environment'],'cancelled':False}
+        self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':result})
+        with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET claim_token='wrong' WHERE uuid=?",(identifier,))
+        self.service.close();self.queue.close()
+        original=self.root/'state';copied=self.root/'copy';shutil.copytree(original,copied)
+        before=(copied/'jobs.sqlite3').read_bytes()
+        with self.assertRaises(ValueError):repair_copy(original,copied)
+        self.assertEqual((copied/'jobs.sqlite3').read_bytes(),before)
+        self.assertEqual((original/'jobs.sqlite3').read_bytes(),before)
+        self.make_queue_service()
 
     def test_terminal_split_rejects_mismatched_job_binding_before_dispatch(self):
         identifier=self.submit();self.service.tick();task=self.task(identifier)
