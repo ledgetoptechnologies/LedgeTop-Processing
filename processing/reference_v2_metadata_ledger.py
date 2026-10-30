@@ -36,13 +36,18 @@ class V2MetadataLedger:
             found = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_v2_staged_jobs'").fetchone()
             if found is None: db.execute(_DDL)
             elif found[0] != _DDL: raise Conflict('v2 schema unavailable')
-            self._check_schema(db)
+            order=getattr(queue, '_global_order', None)
+            if order is not None: order.attach_v2(db)
+            self._check_schema(db, allow_order=order is not None)
+            if order is not None: order.verify(db)
 
     @staticmethod
-    def _check_schema(db):
+    def _check_schema(db, *, allow_order=False):
         found=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_v2_staged_jobs'").fetchone()
-        extras=db.execute("SELECT 1 FROM sqlite_master WHERE tbl_name='reference_v2_staged_jobs' AND (type='trigger' OR (type='index' AND sql IS NOT NULL)) LIMIT 1").fetchone()
-        if found is None or found[0]!=_DDL or extras is not None: raise Conflict('v2 schema unavailable')
+        extras=db.execute("SELECT name,sql FROM sqlite_master WHERE tbl_name='reference_v2_staged_jobs' AND (type='trigger' OR (type='index' AND sql IS NOT NULL))").fetchall()
+        from .global_enqueue_order import TRIGGERS
+        if any(not allow_order or name not in ('global_order_v2_insert','global_order_v2_identity') or sql!=TRIGGERS[name] for name,sql in extras): raise Conflict('v2 schema unavailable')
+        if found is None or found[0]!=_DDL: raise Conflict('v2 schema unavailable')
 
     @staticmethod
     def _fetch(db, field, value, principal=None):
@@ -61,7 +66,9 @@ class V2MetadataLedger:
             with gate.admit() if gate is not None else nullcontext():
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
-                    self._check_schema(db)
+                    order=getattr(self.queue, '_global_order', None)
+                    self._check_schema(db, allow_order=order is not None)
+                    if order is not None: order.verify(db)
                     if gate is not None and gate._closed(db): raise Conflict('admission closed')
                     return operation(db)
         except AdmissionClosed:
