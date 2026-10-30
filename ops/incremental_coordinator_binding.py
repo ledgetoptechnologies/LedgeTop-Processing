@@ -111,6 +111,96 @@ def _inventory(root):
     return paths
 
 
+def retained_viewer_inventory(root, *, uid=10001):
+    """Offline, bounded inventory of a narrow legacy Viewer input layout.
+
+    The caller must independently fence writers for the entire backup and
+    verification. Archives, incarnations, removed tasks, untracked entries,
+    hardlinks and nonempty spool are refused. This grants no update authority.
+    """
+    root = Path(root).absolute()
+    root_info = root.lstat()
+    require(root.resolve() == root and stat.S_ISDIR(root_info.st_mode) and root_info.st_uid == uid and root_info.st_gid == uid, 'retained_root_changed')
+    with os.scandir(root) as entries:
+        names = []
+        for entry in entries:
+            require(len(names) < 4, 'retained_root_inventory_changed')
+            names.append(entry.name)
+    require(set(names) == {'jobs.sqlite3', 'coordinator.lock', 'viewer-tasks', 'viewer-spool'}, 'retained_root_inventory_changed')
+    for name in ('jobs.sqlite3', 'coordinator.lock'):
+        info = (root / name).lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_gid == uid and info.st_nlink == 1 and info.st_size <= 64 * 1024**2, 'retained_root_file_changed')
+    fd = os.open(root / 'jobs.sqlite3', os.O_RDONLY | os.O_NOFOLLOW)
+    try: header = os.read(fd, 100)
+    finally: os.close(fd)
+    require(len(header) == 100 and header[:16] == b'SQLite format 3\0' and header[16:20] == b'\x10\x00\x01\x01', 'retained_delete_journal_required')
+    viewer = root / 'viewer-tasks'
+    spool = root / 'viewer-spool'
+    for directory in (viewer, spool):
+        info = directory.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == uid and info.st_gid == uid and not stat.S_ISLNK(info.st_mode), 'retained_directory_changed')
+    with os.scandir(spool) as entries:
+        require(next(entries, None) is None, 'retained_spool_not_empty')
+    db = sqlite3.connect('file:' + str(root / 'jobs.sqlite3') + '?mode=ro&immutable=1', uri=True)
+    try:
+        db.execute('BEGIN')
+        tasks = db.execute('SELECT uuid,directory,archive_path,removed FROM viewer_tasks LIMIT 65').fetchall()
+        rows = db.execute('SELECT uuid,path,bytes,sha256 FROM viewer_files LIMIT 4097').fetchall()
+        require(len(tasks) <= 64 and len(rows) <= 4096, 'retained_count_bound')
+        require(db.execute('SELECT COUNT(*) FROM viewer_incarnations').fetchone()[0] == 0, 'retained_incarnations_unsupported')
+        def basename(value):
+            return isinstance(value, str) and value not in ('', '.', '..') and '/' not in value and '\\' not in value and '\x00' not in value
+        by_id = {}
+        for identifier, directory, archive, removed in tasks:
+            require(basename(directory) and archive is None and removed == 0 and identifier not in by_id and directory not in by_id.values(), 'retained_task_unsupported')
+            by_id[identifier] = directory
+        expected = {}
+        for identifier, name, size, sha in rows:
+            require(identifier in by_id and basename(name) and type(size) is int and 0 < size <= 1024**3 and isinstance(sha, str) and re.fullmatch('[0-9a-f]{64}', sha), 'retained_file_metadata_invalid')
+            key = (by_id[identifier], name)
+            require(key not in expected, 'retained_file_ambiguous')
+            expected[key] = (size, sha)
+        require(sum(size for size, _ in expected.values()) <= 1024**3, 'retained_bytes_bound')
+        with os.scandir(viewer) as entries:
+            names = []
+            for entry in entries:
+                require(len(names) < 64, 'retained_count_bound')
+                names.append(entry.name)
+        require(set(names) == set(by_id.values()), 'retained_directory_inventory_changed')
+        files = []
+        for name in sorted(names):
+            directory = viewer / name
+            info = directory.lstat()
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == uid and info.st_gid == uid and not stat.S_ISLNK(info.st_mode), 'retained_directory_changed')
+            files.append([name, 'directory', stat.S_IMODE(info.st_mode)])
+            with os.scandir(directory) as entries:
+                children = []
+                for entry in entries:
+                    require(len(children) < 4096, 'retained_count_bound')
+                    children.append(entry.name)
+            require(set(children) == {item[1] for item in expected if item[0] == name}, 'retained_file_inventory_changed')
+            for child in sorted(children):
+                path = directory / child; before = path.lstat()
+                require(stat.S_ISREG(before.st_mode) and before.st_uid == uid and before.st_gid == uid and before.st_nlink == 1, 'retained_file_changed')
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                try:
+                    opened = os.fstat(fd)
+                    require((opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino), 'retained_file_replaced')
+                    sha = hashlib.sha256(); total = 0
+                    while True:
+                        chunk = os.read(fd, 65536)
+                        if not chunk: break
+                        total += len(chunk); require(total <= expected[(name, child)][0], 'retained_file_grew'); sha.update(chunk)
+                    after = path.lstat()
+                    require((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) == (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns), 'retained_file_changed')
+                    require((total, sha.hexdigest()) == expected[(name, child)], 'retained_file_digest_changed')
+                finally: os.close(fd)
+                files.append([name, child, total, sha.hexdigest(), stat.S_IMODE(before.st_mode)])
+        return files
+    finally:
+        db.close()
+
+
 def owned_row(record,authority):
     """Qualify historical bytes; a valid old receipt grants no current control."""
     require(type(record) is dict and set(record)==set(OWNED_COLUMNS),'owned_row_shape_changed')

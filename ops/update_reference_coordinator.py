@@ -48,6 +48,9 @@ ACTIVATION_REVIEWED = True
 # Historical pair qualified by private-config/state-copy evidence0354562.
 # This is not a generic approval of future coordinator images or worker ABIs.
 INCREMENTAL_ACTIVATION_REVIEWED = True
+# This draft only makes the bounded retained-input backup path testable. It is
+# not a writer fence or qualification of any upgrade pair.
+RETAINED_VIEWER_BACKUP_QUALIFIED = False
 QUALIFIED_INCREMENTAL_PAIR = (
     '671fd2a6bde40088bdfad91ccf67eab45ee3d8d7',
     'sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249',
@@ -307,7 +310,23 @@ def owned_api_probe(operator):
     return dict(operatorLookupVerified=True)
 
 
-def backup_script(*,incremental_profile=False,pilot_reservations=False):
+def backup_script(*,incremental_profile=False,pilot_reservations=False,retained_viewer=False):
+    if type(retained_viewer) is not bool:
+        raise Stopped('explicit_retained_backup_profile_required')
+    if retained_viewer:
+        if RETAINED_VIEWER_BACKUP_QUALIFIED is not True or not incremental_profile or pilot_reservations:
+            raise Stopped('retained_backup_not_qualified')
+        # This profile is deliberately absent from all production call sites.
+        # Its caller must provide an independent offline writer fence. The
+        # historical backup still refuses queued, running and held jobs.
+        census=incremental_census_source()
+        preamble=census+"\nretained_before=retained_viewer_inventory('/source')\n"
+        old="  for table in ('viewer_tasks','viewer_files','viewer_incarnations'):\n   if table in tables:assert db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0\n"
+        if old not in legacy.BACKUP:
+            raise Stopped('retained_backup_template_changed')
+        body=legacy.BACKUP.replace(old,'')
+        tail="assert retained_viewer_inventory(source)==retained_before\nassert retained_viewer_inventory(target)==retained_before\nprint(json.dumps(counts))"
+        return preamble+body.replace('print(json.dumps(counts))',tail)
     if type(pilot_reservations) is not bool or (pilot_reservations and not incremental_profile):
         raise Stopped('explicit_pilot_incremental_backup_required')
     if incremental_profile:
