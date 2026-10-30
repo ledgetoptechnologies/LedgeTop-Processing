@@ -101,6 +101,16 @@ class ContainerAbsentTest(unittest.TestCase):
                         {'status': 1, 'err': 'permission denied'}, {'status': 125, 'err': ''}):
             self.assertEqual(self.run_check(inspect=inspect)[0], 2, inspect)
 
+    def test_not_found_must_be_exact_full_id_and_only_error(self):
+        self.assertEqual(self.run_check(inspect={'status': 1, 'err': '\nError response from daemon: No such container: ' + OLD + '\n'})[0], 0)
+        for error in ('Error: No such container: ' + OTHER,
+                      'Error: No such container: ' + OLD[:12],
+                      'Error: No such container: ' + OLD + '\npermission denied',
+                      'permission denied: no such container'):
+            self.assertEqual(self.run_check(inspect={'status': 1, 'err': error})[0], 2)
+        self.assertEqual(self.run_check(inspect={'status': 1, 'out': 'unexpected',
+                         'err': 'Error: No such container: ' + OLD})[0], 2)
+
     def test_present_container_is_reported(self):
         self.assertEqual(self.run_check(ps={'status': 0, 'out': OLD + '\n' + OTHER + '\n'})[0], 1)
         self.assertEqual(self.run_check(inspect={'status': 0, 'out': OLD + '\n'})[0], 1)

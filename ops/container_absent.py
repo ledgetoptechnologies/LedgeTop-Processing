@@ -30,7 +30,6 @@ import subprocess
 import tempfile
 
 CONTAINER_ID = re.compile(r'[0-9a-f]{64}')
-NOT_FOUND = re.compile(r'no such (container|object)', re.IGNORECASE)
 LOCAL_HOST = re.compile(r'unix:///[^\s]+|npipe:////\./pipe/[A-Za-z0-9_.-]+')
 DEFAULT_HOST = 'unix:///var/run/docker.sock'
 
@@ -75,7 +74,9 @@ def check(container_id, docker=('docker',), host=DEFAULT_HOST, expect_daemon_id=
                                 container_id)
         if status == 0:
             return 1, {'absent': False, 'reason': 'inspect found it', 'containersListed': len(listed)}
-        if status is None or not NOT_FOUND.search(err):
+        # An unrelated or mixed error is not evidence about this exact ID.
+        expected = re.compile(r'(?:Error:|Error response from daemon:) No such (?:container|object): ' + re.escape(container_id), re.IGNORECASE)
+        if status is None or out.strip() or not expected.fullmatch(err.strip()):
             return 2, {'absent': False, 'reason': 'inspect failed without a not-found answer'}
         return 0, {'absent': True, 'containersListed': len(listed), 'host': host}
 
