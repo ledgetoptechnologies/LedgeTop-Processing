@@ -1,0 +1,38 @@
+import os,sqlite3,subprocess,sys,unittest
+from pathlib import Path
+from tests.test_reference_v2_precharge_draft import PrechargeTests
+from processing.reference_v2_indexed_precharge_draft import IndexedPrecharge
+from processing.reference_v2_stream_slot_draft import StreamSlot,SlotHeld,DDL
+from processing.reference_worker_fence_v2 import WorkerFenceHeld
+
+@unittest.skipUnless(os.name=='posix','POSIX only')
+class SlotTests(PrechargeTests):
+ def setUp(self):
+  super().setUp();self.slotdir=Path(self.tmp.name)/'slot';self.slotdir.mkdir(mode=0o700)
+  fd=os.open(self.slotdir/'worker.lock',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.close(fd)
+  self.slotpath=self.slotdir/'slot.sqlite';db=sqlite3.connect(self.slotpath);db.execute(DDL);db.execute("INSERT INTO stream_slot VALUES(1,'epoch-1','idle',NULL)");db.commit();db.close();self.slotpath.chmod(0o600)
+  s=self.slotpath.stat();self.slotinode=(s.st_dev,s.st_ino)
+ def indexed(self):
+  l=IndexedPrecharge(self.path,inode=self.inode,epoch='epoch-1',clock=lambda:self.now);self.addCleanup(l.close);return l
+ def slot(self):
+  slot=StreamSlot(path=self.slotpath,inode=self.slotinode,epoch='epoch-1',lock_directory=self.slotdir);self.addCleanup(slot.close);return slot
+ def test_process_lock_and_clean_closure(self):
+  l=self.indexed();s=self.slot();identity=s.begin(l,request_id='r1',object_id='cloud',start=0,end=4)
+  with self.assertRaises(WorkerFenceHeld):self.slot()
+  with self.assertRaises(SlotHeld):s.finish(identity,stream_closed=False)
+  s.finish(identity,stream_closed=True);self.assertEqual(s.state(),'closed')
+ def test_replay_never_starts_stream_and_holds_slot(self):
+  l=self.indexed();l.precharge(request_id='r1',object_id='cloud',start=0,end=4);s=self.slot()
+  with self.assertRaisesRegex(SlotHeld,'replay'):s.begin(l,request_id='r1',object_id='cloud',start=0,end=4)
+  self.assertEqual(s.state(),'opening')
+ def test_process_exit_after_charge_retains_slot(self):
+  code="""import os,sys
+from processing.reference_v2_indexed_precharge_draft import IndexedPrecharge
+from processing.reference_v2_stream_slot_draft import StreamSlot
+l=IndexedPrecharge(sys.argv[1],inode=(int(sys.argv[2]),int(sys.argv[3])),epoch='epoch-1',clock=lambda:1793361600000)
+s=StreamSlot(path=sys.argv[4],inode=(int(sys.argv[5]),int(sys.argv[6])),epoch='epoch-1',lock_directory=sys.argv[7])
+s.begin(l,request_id='r1',object_id='cloud',start=0,end=4);os._exit(73)
+"""
+  c=subprocess.run([sys.executable,'-c',code,str(self.path),str(self.inode[0]),str(self.inode[1]),str(self.slotpath),str(self.slotinode[0]),str(self.slotinode[1]),str(self.slotdir)],timeout=10)
+  self.assertEqual(c.returncode,73);s=self.slot();self.assertEqual(s.state(),'charged')
+  with self.assertRaisesRegex(SlotHeld,'reconciliation'):s.begin(self.indexed(),request_id='r2',object_id='cloud',start=0,end=4)
