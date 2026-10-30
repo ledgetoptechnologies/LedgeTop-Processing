@@ -33,6 +33,33 @@ order, policy and capability hashes. The bearer must have canonical unpadded
 base64url43-character/32-byte shape. Shape and authenticated binding checks are
 **not HMAC verification or proof of the issuer's secret/key lifecycle**.
 
+Before constructing that envelope, the original authenticated submitting Viewer
+reads `GET /ltds/v1/jobs/{jobId}/initial-grant-context`. This opt-in route returns
+18 closed fields: `schemaVersion`, `profile`, `jobId`, `generation`,
+`environment`, `nodeId`, `workerId`, `manifestSha256`, `pipelineDigest`,
+`objectClosureSha256`, `transferRequest`, `issuerRealm`, `keyId`,
+`transferPolicy`, `brokerCapabilities`, `contextId`, `mayDownload` and
+`contextSha256`. The profile is `ltds-initial-grant-context-v1`, version is 1,
+and `mayDownload` is false. The digest covers canonical public fields excluding
+itself. It contains no credential fingerprint, including transitively through a
+private-record hash. The independent random context ID is minted in the same
+transaction as the original worker claim and fences its exact incarnation.
+
+The submitting bearer is privately bound at admission. GET authenticates that
+same principal and checks current generation, live reservation and immutable
+parent claim. Changed or expired claims, absent context, or an already accepted
+grant return generic 409 (unresolved), never a replacement context. A rotated
+bearer in the same environment cannot take over an admitted job; administrative
+principal continuity is not implemented. These private bindings are not returned.
+
+POST must carry exactly one `X-LTDS-Initial-Context-SHA256` header containing the
+GET digest. It checks the original principal and recomputes that public digest
+from the same transaction's current parent/reservation/policy before insertion.
+The closed envelope and 14-field delivery receipt remain unchanged. Preserve
+the original digest for exact historical POST replay; GET after acceptance is
+not an ACK recovery API. A 409, 404, timeout or failed POST never proves that a
+grant was not accepted and never permits reissuance or raw-v1 fallback.
+
 The existing protected listener and environment-scoped Viewer principal perform
 authentication before any private JSON/body decoding. Current job generation,
 parent queue/reference claim node/worker/token hash/coordinator authority and
@@ -56,6 +83,8 @@ profile. Compatible-source startup refuses omitted/changed/incomplete latched
 policy before Queue schema/clock writers or Viewer writer construction. This
 cannot fence old pre-feature binaries; deployment must stop/fence those writers.
 No automatic policy migration, key-ID rotation or history deletion is supplied.
+This context ABI requires fresh profile state; earlier experimental initial-only
+state without the immutable claim table/principal markers holds at startup.
 
 Renewal/successor routes remain unavailable. Actual authenticated reservation
 extension, read-pin/stream drain, source custody and purge enforcement, secure
@@ -68,3 +97,6 @@ The public synthetic fixture is
 `contracts/reference-initial-grant-v1.contract.json`. Its key and token are test
 material only. It binds complete request/seed/envelope/receipt bytes and an
 initial-only policy; no production credential is minted by this module.
+`contracts/reference-initial-context-v1.contract.json` separately pins the
+18-field public descriptor, canonical bytes and POST header. Neither fixture
+is credential, custody or lease authority.

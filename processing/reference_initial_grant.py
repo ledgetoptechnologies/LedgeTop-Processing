@@ -59,13 +59,45 @@ class InitialGrantPolicy:
 POLICY_SQL="CREATE TABLE reference_initial_policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1), record TEXT NOT NULL CHECK(typeof(record)='text' AND length(CAST(record AS BLOB))<=16384), sha TEXT NOT NULL CHECK(typeof(sha)='text' AND length(sha)=64))"
 JOBS_SQL="CREATE TABLE reference_initial_jobs (job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), record TEXT NOT NULL CHECK(typeof(record)='text' AND length(CAST(record AS BLOB))<=4096), sha TEXT NOT NULL CHECK(typeof(sha)='text' AND length(sha)=64))"
 RECEIPTS_SQL="CREATE TABLE reference_initial_receipts (job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), body_sha TEXT NOT NULL CHECK(typeof(body_sha)='text' AND length(body_sha)=64), record TEXT NOT NULL CHECK(typeof(record)='text' AND length(CAST(record AS BLOB))<=16384), receipt TEXT NOT NULL CHECK(typeof(receipt)='text' AND length(CAST(receipt AS BLOB))<=4096))"
-TABLES=(POLICY_SQL,JOBS_SQL,RECEIPTS_SQL)
+CLAIMS_SQL="CREATE TABLE reference_initial_claims (job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), record TEXT NOT NULL CHECK(typeof(record)='text' AND length(CAST(record AS BLOB))<=8192), sha TEXT NOT NULL CHECK(typeof(sha)='text' AND length(sha)=64))"
+TABLES=(POLICY_SQL,JOBS_SQL,RECEIPTS_SQL,CLAIMS_SQL)
 TRIGGERS=tuple('CREATE TRIGGER '+table+'_'+action.lower()+' BEFORE '+action+' ON '+table+
     " BEGIN SELECT RAISE(ABORT,'immutable initial grant history'); END"
-    for table in ('reference_initial_policy','reference_initial_jobs','reference_initial_receipts') for action in ('UPDATE','DELETE'))+tuple(
+    for table in ('reference_initial_policy','reference_initial_jobs','reference_initial_receipts','reference_initial_claims') for action in ('UPDATE','DELETE'))+tuple(
     'CREATE TRIGGER '+table+'_insert BEFORE INSERT ON '+table+' WHEN EXISTS(SELECT 1 FROM '+table+' WHERE '+key+'=NEW.'+key+
     ") BEGIN SELECT RAISE(ABORT,'immutable initial grant collision'); END"
-    for table,key in (('reference_initial_policy','singleton'),('reference_initial_jobs','job_id'),('reference_initial_receipts','job_id')))
+    for table,key in (('reference_initial_policy','singleton'),('reference_initial_jobs','job_id'),('reference_initial_receipts','job_id'),('reference_initial_claims','job_id')))
+
+
+def claim_context_payload(job,*,node_id,worker_id,policy,context_id,now_ms=None):
+    """PUBLIC-only descriptor: no principal/claim credential or derived verifier.
+
+    Caller must first check private admission principal and immutable claim-fence
+    records. The random context ID is independent of every credential. Its hash
+    is metadata integrity, never authentication, custody or download permission.
+    """
+    p._hash(context_id,'random context ID')
+    submission=job['submission']
+    raw={key:submission[key] for key in ('schemaVersion','submissionId','manifest','pipeline','capabilityFingerprint')}
+    checked=p.validate_submission(raw,environment=job['environment'],capability_fingerprint=submission['capabilityFingerprint'],available_engines=('odm','treedar'))
+    p._require(p.canonical_json(checked)==p.canonical_json(submission)
+        and (checked['manifestSha256'],checked['pipelineDigest'])==(job['manifestSha256'],job['pipelineDigest']),'original context changed')
+    request=job['transferRequest'];p._closed(request,('reservationId','generation','expiresAt','manifestSha256','byteBudget','nonce'),'context reservation')
+    for key in ('reservationId','nonce'):p._slug(request[key],key)
+    p._integer(request['generation'],'generation');p._integer(request['byteBudget'],'byte budget')
+    p._require(request['generation']==job['generation'] and request['manifestSha256']==job['manifestSha256'],'context reservation changed')
+    expiry=renewal.milliseconds(request['expiresAt']);settings=policy.payload()
+    derived=policy.transfer_policy(submission['manifest'],byte_budget=request['byteBudget'])
+    if now_ms is not None:
+        renewal.integer(now_ms);remaining=expiry-now_ms
+        p._require(0<remaining<=settings['maxLifetimeMs'] and remaining<=settings['brokerCapabilities']['maxEpochTtlMs'],'context expiry incompatible')
+    public=dict(schemaVersion=1,profile='ltds-initial-grant-context-v1',jobId=job['jobId'],generation=job['generation'],environment=job['environment'],
+        nodeId=node_id,workerId=worker_id,manifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],
+        objectClosureSha256=p.digest(submission['manifest']['objects']),transferRequest=copy.deepcopy(request),issuerRealm=settings['issuerRealm'],
+        keyId=settings['keyId'],transferPolicy=derived,brokerCapabilities=settings['brokerCapabilities'],contextId=context_id,mayDownload=False)
+    public['contextSha256']=p.digest(public)
+    p._require(len(p.canonical_json(public))<=8192,'public context bound')
+    return public
 
 
 def check_policy_binding(db,policy,*,create=False):
@@ -78,7 +110,7 @@ def check_policy_binding(db,policy,*,create=False):
     p._require([row[1] for row in db.execute('PRAGMA database_list')]==['main','temp'],'initial attached context forbidden')
     if policy is not None:
         p._require(type(policy) is InitialGrantPolicy and InitialGrantPolicy.from_payload(policy.payload())==policy,'concrete initial policy required')
-    exists=db.execute("SELECT 1 FROM sqlite_master WHERE name GLOB 'reference_initial_*' LIMIT 1").fetchone()
+    exists=db.execute("SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'reference_initial_*' LIMIT 1").fetchone()
     if not exists:
         if not create or policy is None:return
         for sql in TABLES+TRIGGERS:db.execute(sql)
@@ -86,9 +118,9 @@ def check_policy_binding(db,policy,*,create=False):
         return
     p._require(policy is not None,'latched initial policy cannot be omitted')
     limit=len(TABLES)+len(TRIGGERS)
-    p._require(db.execute("SELECT 1 FROM sqlite_master WHERE name GLOB 'reference_initial_*' AND sql IS NOT NULL LIMIT 1 OFFSET ?",(limit,)).fetchone() is None,'initial ABI count')
-    p._require(db.execute("SELECT 1 FROM sqlite_master WHERE name GLOB 'reference_initial_*' AND sql IS NOT NULL AND (typeof(sql)!='text' OR length(CAST(sql AS BLOB))>8192) LIMIT 1").fetchone() is None,'initial ABI bounds')
-    observed=tuple(row[0] for row in db.execute("SELECT sql FROM sqlite_master WHERE name GLOB 'reference_initial_*' AND sql IS NOT NULL LIMIT ?",(limit+1,)))
+    p._require(db.execute("SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'reference_initial_*' AND sql IS NOT NULL LIMIT 1 OFFSET ?",(limit,)).fetchone() is None,'initial ABI count')
+    p._require(db.execute("SELECT 1 FROM sqlite_master WHERE lower(name) GLOB 'reference_initial_*' AND sql IS NOT NULL AND (typeof(sql)!='text' OR length(CAST(sql AS BLOB))>8192) LIMIT 1").fetchone() is None,'initial ABI bounds')
+    observed=tuple(row[0] for row in db.execute("SELECT sql FROM sqlite_master WHERE lower(name) GLOB 'reference_initial_*' AND sql IS NOT NULL LIMIT ?",(limit+1,)))
     p._require(sorted(observed)==sorted(TABLES+TRIGGERS),'initial ABI changed')
     p._require(db.execute('SELECT 1 FROM reference_initial_policy LIMIT 1 OFFSET 1').fetchone() is None,'initial policy count')
     p._require(db.execute("SELECT 1 FROM reference_initial_policy WHERE typeof(record)!='text' OR length(CAST(record AS BLOB))>16384 OR typeof(sha)!='text' OR length(sha)!=64 LIMIT 1").fetchone() is None,'initial policy bound')

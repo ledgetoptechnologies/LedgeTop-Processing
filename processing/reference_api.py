@@ -6,6 +6,7 @@ module performs no transfer, execution, token issuance or network requests.
 """
 from dataclasses import dataclass, field
 import hmac
+import hashlib
 import re
 from types import MappingProxyType
 
@@ -81,6 +82,19 @@ class ReferenceAPI:
                                         "admissionVersion": protocol.TREEDAR_ADMISSION_VERSION},
                             "gaussian_splat": {"available": False, "enabled": False}}}
 
+    def _initial_principal_binding(self,headers,environment):
+        """PRIVATE fingerprint only. Never include this in public context/hash."""
+        if self._authenticate(headers)!=environment:raise ValueError('authenticated Viewer required')
+        token=next(value[7:] for name,value in headers.items() if name.lower()=='authorization')
+        return protocol.digest(dict(domain='ltds-initial-viewer-principal-v1',environment=environment,
+            credentialSha256=hashlib.sha256(token.encode('ascii')).hexdigest()))
+
+    @staticmethod
+    def _initial_context_header(headers):
+        values=[value for name,value in headers.items() if name.lower()=='x-ltds-initial-context-sha256']
+        if len(values)!=1:raise ValueError('one initial context digest required')
+        protocol._hash(values[0],'initial context digest');return values[0]
+
     @staticmethod
     def _error(status, code):
         return Response(status, {"error": code})
@@ -110,12 +124,21 @@ class ReferenceAPI:
         if method == "GET" and path == protocol.PREFIX + "/capabilities":
             return Response(200, self._capabilities(environment))
         try:
+            initial_context=re.fullmatch(re.escape(protocol.PREFIX)+r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/initial-grant-context',path)
+            if initial_context:
+                if getattr(self.store,'initial_grant_policy',None) is None:return self._error(404,'not_found')
+                if not self.store.has_reference_scope(initial_context[1],environment=environment):return self._error(404,'not_found')
+                if method!='GET':return self._error(405,'method_not_allowed')
+                if body:raise ValueError('context GET has no body')
+                return Response(200,self.store.initial_grant_context(initial_context[1],environment=environment,
+                    principal_binding=self._initial_principal_binding(headers,environment)))
             initial_delivery=re.fullmatch(re.escape(protocol.PREFIX)+r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/initial-grant',path)
             if initial_delivery:
                 if getattr(self.store,'initial_grant_policy',None) is None:return self._error(404,'not_found')
                 if not self.store.has_reference_scope(initial_delivery[1],environment=environment):return self._error(404,'not_found')
                 if method!='POST':return self._error(405,'method_not_allowed')
-                return Response(200,self.store.receive_initial_grant(initial_delivery[1],protocol.decode_submission(body),environment=environment))
+                return Response(200,self.store.receive_initial_grant(initial_delivery[1],protocol.decode_submission(body),environment=environment,
+                    principal_binding=self._initial_principal_binding(headers,environment),context_sha256=self._initial_context_header(headers)))
             reconciliation=re.fullmatch(re.escape(protocol.PREFIX)+r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/transfer-grants/reconcile',path)
             if reconciliation:
                 if not self.grant_reconciliation:return self._error(404,'not_found')
@@ -150,7 +173,10 @@ class ReferenceAPI:
                     options_fingerprint=self.options_fingerprint,
                     allowed_odm_options=self.allowed_odm_options,
                     available_engines=("odm", "treedar") if self.treedar_available else ("odm",))
-                job, created = self.store.submit(validated,catalog_sha=self.admission_catalog_sha)
+                if getattr(self.store,'initial_grant_policy',None) is not None:
+                    job,created=self.store.submit(validated,catalog_sha=self.admission_catalog_sha,
+                        principal_binding=self._initial_principal_binding(headers,environment))
+                else:job, created = self.store.submit(validated,catalog_sha=self.admission_catalog_sha)
                 return Response(201 if created else 200, job)
             match = re.fullmatch(re.escape(protocol.PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/results|/acceptance|/transfer-grants|/terminal-outcome|/terminal-acceptance)?", path)
             if not match:

@@ -3,7 +3,7 @@
 No real source custody, key lifecycle, worker science, deployment or NAS proof.
 """
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager,closing
 import copy
 import hashlib
 import hmac
@@ -46,6 +46,7 @@ class InitialGrantRouteTests(unittest.TestCase):
         self.addCleanup(self.queue.close)
         self.store=ReferenceStore(self.queue,initial_grant_policy=self.policy)
         self.api=self.control(self.store)
+        self.contexts={}
 
     def control(self,store):
         return ReferenceControlAPI(store,viewer_bearers={tokens.STAGING:'staging',tokens.PRODUCTION:'production'},
@@ -55,7 +56,7 @@ class InitialGrantRouteTests(unittest.TestCase):
             allowed_odm_options={'pc-quality','projection'},grant_reconciliation=True)
 
     def request(self,method,path,body=None,token=tokens.STAGING,**kwargs):
-        return self.api.handle(method,'/ltds/v1'+path,{'Authorization':'Bearer '+token},
+        return self.api.handle(method,'/ltds/v1'+path,{'Authorization':'Bearer '+token,**kwargs.get('headers',{})},
             b'' if body is None else p.canonical_json(body),protected_transport=kwargs.get('protected',True))
 
     def prepare(self):
@@ -63,6 +64,8 @@ class InitialGrantRouteTests(unittest.TestCase):
         job=reply.body;claim=self.store.claim(job['jobId'],node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster',claim_request_id='initial-'+str(uuid.uuid4()))
         reservation=copy.deepcopy(self.fixture['transferRequest']);reservation['expiresAt']=stamp(round((time.time()+100)*1000))
         self.store.reserve(job['jobId'],reservation,node_id='cluster')
+        context=self.request('GET','/jobs/'+job['jobId']+'/initial-grant-context')
+        self.assertEqual(context.status,200,context.body);self.contexts[job['jobId']]=context.body
         private=self.store.get(job['jobId'],private=True)
         request=dict(schemaVersion=2,profile='ltds-renewable-grants-v1',requestId=str(uuid.uuid4()),jobId=job['jobId'],generation=1,
             environment='staging',reservationId=reservation['reservationId'],manifestSha256=job['manifestSha256'],nodeId='cluster',
@@ -75,7 +78,9 @@ class InitialGrantRouteTests(unittest.TestCase):
         envelope=dict(schemaVersion=2,profile='ltds-renewable-grants-v1',request=request,issuanceSeed=seed,grant=grant)
         return job,claim,envelope
 
-    def post(self,job,envelope,**kwargs):return self.request('POST','/jobs/'+job['jobId']+'/initial-grant',envelope,**kwargs)
+    def post(self,job,envelope,**kwargs):
+        kwargs.setdefault('headers',{'X-LTDS-Initial-Context-SHA256':self.contexts[job['jobId']]['contextSha256']})
+        return self.request('POST','/jobs/'+job['jobId']+'/initial-grant',envelope,**kwargs)
 
     def test_actual_control_receives_epoch_zero_worker_reads_unchanged_v1_grant(self):
         job,claim,envelope=self.prepare();ack=self.post(job,envelope)
@@ -105,6 +110,80 @@ class InitialGrantRouteTests(unittest.TestCase):
         changed=profile_payload();changed['keyId']='different-key'
         with self.assertRaises(ValueError):Queue(self.root,node_ids=('cluster','main'),reference_enabled=True,initial_grant_policy=InitialGrantPolicy.from_payload(changed))
         self.assertEqual(before,(self.root/'jobs.sqlite3').read_bytes())
+
+    def test_uppercase_marker_namespace_omission_holds_before_queue_writes(self):
+        for table in ('REFERENCE_INITIAL_POLICY','Reference_Initial_Jobs'):
+            directory=self.root/table;directory.mkdir()
+            path=directory/'jobs.sqlite3'
+            with closing(sqlite3.connect(path)) as db:
+                db.execute('CREATE TABLE '+table+' (record TEXT)');db.commit()
+            before=path.read_bytes()
+            with self.assertRaises(ValueError):Queue(directory,node_ids=('cluster','main'),reference_enabled=True)
+            self.assertEqual(before,path.read_bytes())
+            with self.assertRaises(ValueError):Queue(directory,node_ids=('cluster','main'),reference_enabled=True,initial_grant_policy=self.policy)
+            self.assertEqual(before,path.read_bytes())
+
+    def test_public_context_is_stable_read_only_and_not_a_credential_verifier(self):
+        job,_,_=self.prepare();before=self.queue.path.read_bytes()
+        reply=self.request('GET','/jobs/'+job['jobId']+'/initial-grant-context')
+        self.assertEqual(reply.status,200);self.assertEqual(reply.body,self.contexts[job['jobId']])
+        self.assertEqual(len(reply.body),18)
+        public=copy.deepcopy(reply.body);digest=public.pop('contextSha256')
+        self.assertEqual(p.digest(public),digest)
+        self.assertFalse({'viewerPrincipalBinding','parentClaimSha256','claimToken','claimHash'}&public.keys())
+        self.assertNotIn(tokens.STAGING,json.dumps(reply.body));self.assertEqual(before,self.queue.path.read_bytes())
+
+    def test_principal_rotation_context_change_and_missing_header_fail_closed(self):
+        job,_,envelope=self.prepare()
+        rotated=ReferenceControlAPI(self.store,viewer_bearers={'different-staging-bearer':'staging'},worker_bearers={'synthetic-worker':dict(node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster')},
+            capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
+            options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'],allowed_odm_options={'pc-quality','projection'})
+        headers={'Authorization':'Bearer different-staging-bearer','X-LTDS-Initial-Context-SHA256':self.contexts[job['jobId']]['contextSha256']}
+        for method,suffix,body in [('GET','initial-grant-context',b''),('POST','initial-grant',p.canonical_json(envelope))]:
+            self.assertEqual(rotated.handle(method,'/ltds/v1/jobs/'+job['jobId']+'/'+suffix,headers,body,protected_transport=True).status,409)
+        self.assertNotEqual(self.post(job,envelope,headers={}).status,200)
+        self.assertEqual(self.post(job,envelope,headers={'X-LTDS-Initial-Context-SHA256':'0'*64}).status,409)
+        with self.queue._db() as db:db.execute('UPDATE reference_claims SET instance_id=? WHERE job_id=?',('reacquired-same-worker',job['jobId']))
+        self.assertEqual(self.request('GET','/jobs/'+job['jobId']+'/initial-grant-context').status,409)
+        self.assertEqual(self.post(job,envelope).status,409)
+
+    def test_context_after_delivery_is_unknown_but_exact_historical_post_remains_stable(self):
+        job,_,envelope=self.prepare();first=self.post(job,envelope);self.assertEqual(first.status,200)
+        self.assertEqual(self.request('GET','/jobs/'+job['jobId']+'/initial-grant-context').status,409)
+        self.assertEqual(self.post(job,envelope).body,first.body)
+
+    def test_context_expiry_and_duplicate_digest_header_hold_without_writes(self):
+        job,_,envelope=self.prepare();before=self.queue.path.read_bytes()
+        expiry=__import__('datetime').datetime.fromisoformat(envelope['grant']['expiresAt'].replace('Z','+00:00')).timestamp()
+        with patch('processing.reference_store.time.time',return_value=expiry+1):
+            self.assertEqual(self.request('GET','/jobs/'+job['jobId']+'/initial-grant-context').status,409)
+        digest=self.contexts[job['jobId']]['contextSha256']
+        self.assertEqual(self.post(job,envelope,headers={'X-LTDS-Initial-Context-SHA256':digest,'x-ltds-initial-context-sha256':digest}).status,400)
+        self.assertEqual(before,self.queue.path.read_bytes())
+
+    def test_first_claim_context_is_in_same_transaction(self):
+        original=self.queue._db;attempted=[]
+        @contextmanager
+        def denied():
+            with original() as db:
+                def authorize(action,table,*args):
+                    if action==sqlite3.SQLITE_INSERT and table=='reference_initial_claims':
+                        attempted.append(table);return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+                db.set_authorizer(authorize)
+                try:yield db
+                finally:db.set_authorizer(None)
+        reply=self.request('POST','/jobs',self.fixture['submission']);job=reply.body
+        with patch.object(self.queue,'_db',denied),self.assertRaises(sqlite3.DatabaseError):
+            self.store.claim(job['jobId'],node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster',claim_request_id='atomic-claim')
+        self.assertEqual(attempted,['reference_initial_claims'])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM reference_claims').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT status FROM jobs').fetchone()[0],'queued')
+        claim=self.store.claim(job['jobId'],node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster',claim_request_id='atomic-claim')
+        self.assertIsNotNone(claim)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM reference_initial_claims').fetchone()[0],1)
 
     def test_raw_grant_fallback_and_successor_epoch_are_unavailable(self):
         job,_,envelope=self.prepare()
@@ -189,9 +268,39 @@ class InitialGrantRouteTests(unittest.TestCase):
         connection=http.client.HTTPConnection(*server.server_address,timeout=5)
         try:
             connection.request('POST','/ltds/v1/jobs/'+job['jobId']+'/initial-grant',p.canonical_json(envelope),
-                {'Authorization':'Bearer '+tokens.STAGING,'Content-Type':'application/json'})
+                {'Authorization':'Bearer '+tokens.STAGING,'Content-Type':'application/json',
+                 'X-LTDS-Initial-Context-SHA256':self.contexts[job['jobId']]['contextSha256']})
             response=connection.getresponse();self.assertEqual(response.status,200);self.assertTrue(json.loads(response.read())['accepted'])
         finally:connection.close();server.shutdown();server.server_close();thread.join(5)
+        self.assertFalse(thread.is_alive())
+
+    def test_actual_http_duplicate_context_headers_refused_before_writes(self):
+        job,_,envelope=self.prepare();server=create_reference_http_server(self.api)
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.02});thread.start()
+        digest=self.contexts[job['jobId']]['contextSha256'];body=p.canonical_json(envelope)
+        before=self.queue.path.read_bytes()
+        try:
+            for second_name,second_value in [('X-LTDS-Initial-Context-SHA256',digest),
+                                            ('X-LTDS-Initial-Context-SHA256','0'*64),
+                                            ('x-ltds-initial-context-sha256',digest),
+                                            ('x-ltds-initial-context-sha256','0'*64)]:
+                with self.subTest(name=second_name,same_value=second_value==digest):
+                    connection=http.client.HTTPConnection(*server.server_address,timeout=5)
+                    try:
+                        connection.putrequest('POST','/ltds/v1/jobs/'+job['jobId']+'/initial-grant')
+                        connection.putheader('Authorization','Bearer '+tokens.STAGING)
+                        connection.putheader('Content-Length',str(len(body)))
+                        connection.putheader('X-LTDS-Initial-Context-SHA256',digest)
+                        connection.putheader(second_name,second_value)
+                        connection.endheaders(body)
+                        response=connection.getresponse();self.assertEqual(response.status,400)
+                        self.assertEqual(json.loads(response.read()),{'error':'duplicate_header'})
+                    finally:connection.close()
+                    with self.queue._db() as db:
+                        self.assertEqual(db.execute('SELECT count(*) FROM reference_transfer_grants').fetchone()[0],0)
+                        self.assertEqual(db.execute('SELECT count(*) FROM reference_initial_receipts').fetchone()[0],0)
+                    self.assertEqual(before,self.queue.path.read_bytes())
+        finally:server.shutdown();server.server_close();thread.join(5)
         self.assertFalse(thread.is_alive())
 
     def test_parent_claim_tuple_hash_authority_and_replay_snapshot_are_bound(self):
@@ -233,7 +342,9 @@ class InitialGrantRouteTests(unittest.TestCase):
         expiry=__import__('datetime').datetime.fromisoformat(envelope['grant']['expiresAt'].replace('Z','+00:00')).timestamp()
         for now,error in ((expiry+1,ValueError),(True,Conflict),(float('nan'),Conflict),(float('inf'),Conflict),(None,Conflict)):
             with self.subTest(clock=type(now).__name__),self.assertRaises(error):
-                self.store.receive_initial_grant(job['jobId'],envelope,environment='staging',clock=lambda:now)
+                self.store.receive_initial_grant(job['jobId'],envelope,environment='staging',clock=lambda:now,
+                    principal_binding=self.api.viewer._initial_principal_binding({'Authorization':'Bearer '+tokens.STAGING},'staging'),
+                    context_sha256=self.contexts[job['jobId']]['contextSha256'])
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM reference_transfer_grants').fetchone()[0],0)
             self.assertEqual(db.execute('SELECT count(*) FROM reference_initial_receipts').fetchone()[0],0)
@@ -264,6 +375,22 @@ class InitialGrantRouteTests(unittest.TestCase):
         grant=dict(copy.deepcopy(self.fixture['transferGrant']),**reservation,jobId=job['jobId'])
         self.assertTrue(store.receive_transfer_grant(job['jobId'],grant)['accepted'])
         with queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM reference_initial_jobs').fetchone()[0],0)
+
+
+class InitialContextContractTests(unittest.TestCase):
+    def test_public_context_canonical_cross_language_vector(self):
+        from processing.reference_initial_grant import claim_context_payload
+        root=Path(__file__).resolve().parents[1]/'contracts'
+        original=json.loads((root/'reference-initial-grant-v1.contract.json').read_text())
+        vector=json.loads((root/'reference-initial-context-v1.contract.json').read_text())
+        self.assertEqual(vector['initialFixtureSha256'],p.digest(original))
+        request=original['envelope']['request']
+        context=claim_context_payload(original['job'],node_id=request['nodeId'],worker_id=request['workerId'],
+            policy=InitialGrantPolicy.from_payload(original['profile']),context_id='a'*64,now_ms=original['validationClockMs'])
+        self.assertEqual(context,vector['context']);self.assertEqual(p.canonical_json(context).hex(),vector['canonicalContextUtf8Hex'])
+        self.assertEqual(vector['postHeader'],{'X-LTDS-Initial-Context-SHA256':context['contextSha256']})
+        before=copy.deepcopy(context);digest=before.pop('contextSha256')
+        self.assertEqual(p.digest(before),digest);self.assertEqual(len(context),18)
 
 
 class InitialRuntimeWiringTests(unittest.TestCase):
