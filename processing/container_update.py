@@ -400,12 +400,12 @@ def finalize_deferred(coordinator,operator,node_id,root,*,expected_plan_id,expec
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Standalone node maintenance is disabled; use the managed workflow only after qualifying its ingress fence.')
     for name in ('coordinator', 'node-id', 'node-origin', 'compose-file', 'project', 'service',
                  'docker-engine-id', 'work'):
-        parser.add_argument('--' + name, required=True)
+        parser.add_argument('--' + name)
     parser.add_argument('--exclusive-admission', action='store_true',
-                        help='Attest all engine writers/uploads are fenced through this coordinator')
+                        help='Legacy flag; does not verify ingress or enable this command')
     parser.add_argument('--node-port', type=int, choices=range(1, 65536), default=3000)
     parser.add_argument('--expected-engine',choices=('odx','odm'),default='odx')
     parser.add_argument('--upload-layout',choices=('var-www-tmp-v1',))

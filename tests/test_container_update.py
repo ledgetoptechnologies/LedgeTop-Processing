@@ -327,6 +327,11 @@ class ComposeBoundaryTests(unittest.TestCase):
         self.assertIn('managed node maintenance',result.stdout)
         self.assertFalse((Path(self.temp.name)/'updater.lock').exists())
         self.assertFalse((Path(self.temp.name)/'update.json').exists())
+        empty=subprocess.run([sys.executable,'-m','processing.container_update'],capture_output=True,text=True,timeout=5)
+        self.assertEqual(empty.returncode,2);self.assertIn('Standalone maintenance is disabled',empty.stdout)
+        help_text=subprocess.run([sys.executable,'-m','processing.container_update','--help'],capture_output=True,text=True,timeout=5)
+        self.assertEqual(help_text.returncode,0);self.assertIn('Standalone node maintenance is disabled',help_text.stdout)
+        self.assertIn('does not verify ingress',help_text.stdout)
 
     def test_explicit_context_takes_precedence_over_local_host_variable(self):
         with patch.dict(os.environ, {'DOCKER_HOST': 'unix:///local.sock', 'DOCKER_CONTEXT': 'remote'}), \
