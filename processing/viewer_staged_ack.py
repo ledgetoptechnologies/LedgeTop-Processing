@@ -61,18 +61,20 @@ class ViewerStagedAck:
         if len(caps)!=1 or not isinstance(caps[0],str):return Response(404,{'error':'not_found'})
         tail=path[len(ROUTE):] if path.startswith(ROUTE) else ''
         is_commitment=tail.endswith('/commitment')
+        is_preflight=tail.endswith('/preflight')
         is_lookup='/generations/' in tail
-        if is_commitment:identifier=tail[:-len('/commitment')]
+        if is_preflight:identifier=tail[:-len('/preflight')]
+        elif is_commitment:identifier=tail[:-len('/commitment')]
         elif is_lookup:identifier,generation_text=tail.split('/generations/',1)
         else:identifier=tail
         try:
             p._uuid(identifier,'task ID')
             if method not in ('GET','POST'):return Response(405,{'error':'method_not_allowed'})
-            if is_commitment and method!='GET':return Response(405,{'error':'method_not_allowed'})
+            if (is_commitment or is_preflight) and method!='GET':return Response(405,{'error':'method_not_allowed'})
             if is_lookup:
                 if method!='GET' or not re.fullmatch(r'[1-9][0-9]{0,15}',generation_text):raise ValueError()
                 lookup_generation=int(generation_text);p._integer(lookup_generation,'generation')
-            elif method=='GET' and not is_commitment:return Response(404,{'error':'not_found'})
+            elif method=='GET' and not (is_commitment or is_preflight):return Response(404,{'error':'not_found'})
             value=None
             if method=='POST':
                 if type(body) is not bytes or len(body)>4096:raise ValueError()
@@ -83,6 +85,17 @@ class ViewerStagedAck:
                 for key in ('archiveSha256','coordinatorReceiptSha256'):p._hash(value[key],key)
                 for key in ('attemptId','modelId','modelVersionId','stagingCommitId'):p._uuid(value[key],key)
             store=self.service.store
+            if is_preflight:
+                with self.service._lock,store._lock,store.queue._db() as db:
+                    db.execute('BEGIN')
+                    reservation=store._reservation(db,identifier,environment,caps[0],allow_cancelled=True)
+                    if reservation is None:raise KeyError()
+                    row=db.execute('SELECT generation,environment FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
+                    if row is not None and row['environment']!=environment:raise KeyError()
+                    return Response(200,{'schemaVersion':1,'taskId':identifier,
+                        'generation':row['generation'] if row is not None else None,
+                        'issuer':principal,'audience':store.queue.authority_id,
+                        'environment':environment,'namespace':NAMESPACE})
             with self.service._lock,store._lock,store.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE')
                 if is_lookup:

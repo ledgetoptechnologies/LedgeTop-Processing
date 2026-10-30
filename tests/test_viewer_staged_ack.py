@@ -22,6 +22,36 @@ from tests.test_viewer_service import ViewerServiceTests
 
 
 class StagedAckTests(ViewerServiceTests):
+    def test_preflight_authenticates_without_mutation_or_result_creation(self):
+        token=base64.urlsafe_b64encode(b'a'*32).decode().rstrip('=')
+        wrong=base64.urlsafe_b64encode(b'c'*32).decode().rstrip('=')
+        cap=base64.urlsafe_b64encode(b'b'*32).decode().rstrip('=')
+        staging=base64.urlsafe_b64encode(b'd'*32).decode().rstrip('=')
+        identifier=str(uuid.uuid4());self.service.reserve(identifier,'production',cap)
+        initialize_staged_ack_schema(self.queue)
+        ack=ViewerStagedAck(self.service,{token:{'environment':'production','principalId':'viewer-a'},staging:{'environment':'staging','principalId':'viewer-b'}})
+        headers={'Authorization':'Bearer '+token,'X-LedgeTop-Capability':cap}
+        path=ROUTE+identifier+'/preflight'
+        def call(headers=headers,method='GET',protected=True,path=path):
+            return ack.handle(method,path,headers,protected_transport=protected)
+        with self.queue._db() as db:before=list(db.iterdump())
+        files_before=sorted(str(x.relative_to(self.root)) for x in self.root.rglob('*'))
+        response=call();self.assertEqual(response.status,200)
+        self.assertEqual(response.body,{'schemaVersion':1,'taskId':identifier,'generation':None,'issuer':'viewer-a','audience':self.queue.authority_id,'environment':'production','namespace':NAMESPACE})
+        self.assertEqual(call({'Authorization':'Bearer '+wrong,'X-LedgeTop-Capability':cap}).status,401)
+        self.assertEqual(call({'Authorization':'Bearer '+token,'X-LedgeTop-Capability':wrong}).status,404)
+        self.assertEqual(call({'Authorization':'Bearer '+staging,'X-LedgeTop-Capability':cap}).status,404)
+        self.assertEqual(call({'Authorization':'Bearer '+token}).status,404)
+        self.assertEqual(call(path=ROUTE+str(uuid.uuid4())+'/preflight').status,404)
+        self.assertEqual(call(method='POST').status,405)
+        self.assertEqual(call(protected=False).status,503)
+        with self.queue._db() as db:self.assertEqual(before,list(db.iterdump()))
+        self.assertEqual(files_before,sorted(str(x.relative_to(self.root)) for x in self.root.rglob('*')))
+        self.service.initialize(identifier,'synthetic',[],None,'production',cap)
+        self.assertEqual(call().body['generation'],self.task(identifier)['generation'])
+        self.service.cancel_reserved(identifier,'production',cap)
+        self.assertEqual(call().status,200)
+
     def test_scoped_idempotent_assertion_binds_exact_task_receipt(self):
         token=base64.urlsafe_b64encode(b'a'*32).decode().rstrip('=')
         cap=base64.urlsafe_b64encode(b'b'*32).decode().rstrip('=')
