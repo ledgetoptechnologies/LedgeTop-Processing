@@ -229,8 +229,27 @@ def make_schema_allowlist(document, names):
     return {'schemaAllowlistVersion': ALLOWLIST_VERSION, 'objects': result}
 
 
-def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_objects=(), allow_new_tables=()):
-    """Return the differences that no allowance covers, as counts and opaque IDs."""
+# Must equal processing.authority_lease.MARKER_DDL exactly (a test enforces it).
+# This file runs alone inside the old image, so it cannot import that module.
+LEASE_MARKER_TABLE = 'coordinator_authority_lease'
+LEASE_MARKER_DDL = ('CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), '
+                    'required INTEGER NOT NULL CHECK(required=1))')
+LEASE_MARKER_ROWS = [(1, 1)]
+
+
+def lease_marker_digest(key):
+    rows = sorted(repr(row) for row in LEASE_MARKER_ROWS)
+    return _keyed(key, b'table\0' + '\n'.join(rows).encode()).hexdigest()
+
+
+def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_objects=(), allow_new_tables=(),
+            allow_lease_marker=False):
+    """Return the differences that no allowance covers, as counts and opaque IDs.
+
+    ``allow_lease_marker`` permits exactly one thing: the authority-lease marker
+    table appearing with its exact DDL and its single ``(1, 1)`` row. It also
+    asserts the marker is present afterwards. No other table or row is relaxed.
+    """
     for document in (before, after):
         if document.get('schemaVersion') != SCHEMA_VERSION:
             raise SystemExit('census schema version %s is not supported' % document.get('schemaVersion'))
@@ -258,16 +277,25 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
     if (da is None) != (db is None):
         database_differences.append({'database': 'presence'})
     elif da is not None:
+        marker_object = 'table:' + LEASE_MARKER_TABLE
+        marker_hash = hashlib.sha256(LEASE_MARKER_DDL.encode()).hexdigest()
         for name in sorted(set(da['objects']) | set(db['objects'])):
             was, now = da['objects'].get(name), db['objects'].get(name)
+            if allow_lease_marker and name == marker_object and was is None and now == marker_hash:
+                continue
             if was != now and (now is None or object_allowances.get(name) != now):
                 database_differences.append({'object': name})
+        if allow_lease_marker and db['objects'].get(marker_object) != marker_hash:
+            database_differences.append({'object': marker_object, 'change': 'leaseMarkerMissing'})
         for name, expected in sorted(object_allowances.items()):
             if db['objects'].get(name) != expected:
                 database_differences.append({'object': name, 'change': 'allowanceNotMatched'})
         for name in sorted(set(da['tableDigest']) | set(db['tableDigest'])):
             if name not in da['tableDigest']:
-                if name not in allow_new_tables:
+                if allow_lease_marker and name == LEASE_MARKER_TABLE:
+                    if db['rowCounts'][name] != 1 or db['tableDigest'][name] != lease_marker_digest(key):
+                        database_differences.append({'table': name, 'change': 'leaseMarkerInvalid'})
+                elif name not in allow_new_tables:
                     database_differences.append({'table': name, 'change': 'added'})
                 elif db['rowCounts'][name]:
                     # Never relaxed by --allow-table: a new table must be empty.
@@ -304,6 +332,8 @@ def main(argv=None):
     diff.add_argument('after', type=Path)
     for option in ('allow-path', 'allow-table', 'allow-object', 'allow-new-table'):
         diff.add_argument('--' + option, action='append', default=[])
+    diff.add_argument('--allow-lease-marker', action='store_true',
+                      help='allow and require exactly the authority-lease marker table and its single row')
     diff.add_argument('--schema-allowlist', type=Path,
                       help='schema-only allowlist file; refuses anything but exact object hashes')
     make = commands.add_parser('schema-allowlist', help='write exact schema-object hashes from a census')
@@ -337,7 +367,8 @@ def main(argv=None):
             objects += load_schema_allowlist(args.schema_allowlist)
         result = compare(json.loads(args.before.read_text()), json.loads(args.after.read_text()), key,
                          allow_paths=args.allow_path, allow_tables=args.allow_table,
-                         allow_objects=objects, allow_new_tables=args.allow_new_table)
+                         allow_objects=objects, allow_new_tables=args.allow_new_table,
+                         allow_lease_marker=args.allow_lease_marker)
         status = 0 if result['identical'] else 1
     json.dump(result, sys.stdout, sort_keys=True, indent=1)
     sys.stdout.write('\n')

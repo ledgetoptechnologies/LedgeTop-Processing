@@ -109,16 +109,28 @@ start unleased copy none "$NEW_IMAGE"
 exited_with unleased authority_lease_configuration_required \
   && pass "leased state refuses an unleased start" || fail "unleased start not refused"
 
-# 4. Independent d738 fence: hold d738's own state lock on every retained d738 state.
-CONTAINERS+=("$RUN-fence")
-docker run -d --name "$RUN-fence" --network none --init --read-only --user 10001:10001 --cap-drop ALL \
-  --security-opt no-new-privileges --restart always \
-  --mount "type=volume,source=$RUN-original,destination=/fence/original,readonly" \
-  --mount "type=volume,source=$RUN-spare,destination=/fence/spare,readonly" \
-  --mount "type=bind,source=$HERE/state_fence.py,destination=/state_fence.py,readonly" \
-  --entrypoint python "$NEW_IMAGE" -B /state_fence.py /fence/original /fence/spare >/dev/null
-sleep 2
-docker logs "$RUN-fence" 2>&1 | grep -q '"fenced": 2' || fail "fence did not take both locks"
+# 4. Independent d738 fence: one holder per retained d738 state, verified live.
+fence() {  # volume: start a holder for exactly one volume
+  CONTAINERS+=("$RUN-fence-$1")
+  docker run -d --name "$RUN-fence-$1" --network none --init --read-only --user 10001:10001 --cap-drop ALL \
+    --security-opt no-new-privileges --restart always \
+    --mount "type=volume,source=$RUN-$1,destination=/fence/state,readonly" \
+    --mount "type=bind,source=$HERE/state_fence.py,destination=/state_fence.py,readonly" \
+    --entrypoint python "$NEW_IMAGE" -B /state_fence.py /fence/state >/dev/null
+}
+verified() {  # volume: /proc/locks proves the current holder owns the lock now
+  for _ in $(seq 20); do
+    docker exec "$RUN-fence-$1" python -B /state_fence.py --verify /fence/state 2>/dev/null \
+      | grep -q '"verified": true' && return 0
+    sleep 0.5
+  done
+  return 1
+}
+fence original
+verified original && pass "fence on the original verified live from /proc/locks" || fail "original fence not verified"
+fence spare   # added as a second holder; the first is never recreated or released
+verified spare && verified original && pass "second holder added without releasing the first; both verified" \
+  || fail "fences not both verified"
 before=$(db_sha original)
 start old-fenced original none "$OLD_IMAGE"
 exited_with old-fenced "prototype state already owned" \
@@ -128,12 +140,15 @@ exited_with old-fenced "prototype state already owned" \
 start old-spare spare none "$OLD_IMAGE"
 exited_with old-spare "prototype state already owned" && pass "d738 on the spare copy refused while fenced" \
   || fail "d738 on spare started"
+if docker exec "$RUN-fence-original" python -B /state_fence.py --verify /fence/state /fence/missing >/dev/null 2>&1; then
+  fail "verify passed for a lock it does not hold"; fi
+pass "verify fails for a path the holder does not fence"
 
-# 5. The fence comes back by itself after its process dies (restart policy always).
-restarts=$(docker inspect -f '{{.RestartCount}}' "$RUN-fence")
+# 5. Holder death: Docker restarts it, and verification proves the lock is held again.
+restarts=$(docker inspect -f '{{.RestartCount}}' "$RUN-fence-original")
 # Kill the holder from inside, as a crash would (not "docker stop"). The exec
 # itself is torn down when the container exits, so its status is not checked.
-docker exec "$RUN-fence" python -c 'import os,signal
+docker exec "$RUN-fence-original" python -c 'import os,signal
 for pid in os.listdir("/proc"):
     try:
         if pid.isdigit() and int(pid) not in (1, os.getpid()) and b"state_fence" in open("/proc/%s/cmdline" % pid, "rb").read():
@@ -141,15 +156,16 @@ for pid in os.listdir("/proc"):
     except OSError:
         pass' || true
 for _ in $(seq 40); do
-  [ "$(docker inspect -f '{{.RestartCount}}' "$RUN-fence")" -gt "$restarts" ] && \
-  [ "$(docker inspect -f '{{.State.Running}}' "$RUN-fence")" = true ] && break; sleep 0.5; done
-[ "$(docker inspect -f '{{.RestartCount}}' "$RUN-fence")" -gt "$restarts" ] || fail "fence was not restarted"
-sleep 2
+  [ "$(docker inspect -f '{{.RestartCount}}' "$RUN-fence-original")" -gt "$restarts" ] && \
+  [ "$(docker inspect -f '{{.State.Running}}' "$RUN-fence-original")" = true ] && break; sleep 0.5; done
+[ "$(docker inspect -f '{{.RestartCount}}' "$RUN-fence-original")" -gt "$restarts" ] || fail "fence was not restarted"
+verified original && pass "after the holder was killed and restarted by Docker, ownership verified again" \
+  || fail "restarted fence not verified"
 docker rm -f "$RUN-old-fenced" >/dev/null
 start old-fenced original none "$OLD_IMAGE"
 exited_with old-fenced "prototype state already owned" \
-  && pass "after the fence process was killed and restarted by Docker, d738 is still refused" \
-  || fail "d738 started after fence restart"
+  && pass "after the restart, d738 is still refused" || fail "d738 started after fence restart"
+echo "NOTE the interval between holder death and its restart is unfenced; this test does not close it"
 
 # 6. A running release on the copy blocks d738 on that copy via its own state lock.
 docker rm -f "$RUN-unleased" >/dev/null
@@ -205,4 +221,45 @@ echo "isolated interfaces: $ifaces"
 [ "$ifaces" = "lo " ] && [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$RUN-isolated")" = none ] \
   && pass "network-none candidate has only loopback: no bridge interface or address to reach" \
   || fail "isolated candidate has a non-loopback interface"
+# 10. Promotion gate over a real release startup: the lease marker passes only
+# through its exact allowance, and the schema changes are listed (U9 input).
+copy_volume original gate
+volume gatelease
+docker run --rm --network none --user 0:0 --mount "type=volume,source=$RUN-gatelease,destination=/l" \
+  --entrypoint sh "$OLD_IMAGE" -c 'chown 10001:10001 /l && chmod 700 /l'
+w() { cygpath -w "$1" 2>/dev/null || echo "$1"; }  # host Python on Windows needs host paths
+OUT=$(mktemp -d)
+KEY=$OUT/census.key
+python "$HERE/state_census.py" keygen "$(w "$KEY")"
+census() { docker run --rm -i --network none --read-only --user 10001:10001 --entrypoint python \
+  --mount "type=volume,source=$RUN-$1,destination=/src,readonly" \
+  --mount "type=bind,source=$HERE/state_census.py,destination=/c.py,readonly" "$OLD_IMAGE" -B /c.py census /src < "$KEY"; }
+census gate > "$OUT/before.json"
+start gatecandidate gate none "$NEW_IMAGE" --mount "type=volume,source=$RUN-gatelease,destination=$LEASE_DIR" \
+  -e "PROCESSING_AUTHORITY_LEASE_DIR=$LEASE_DIR"
+healthy gatecandidate || fail "gate candidate did not start"
+docker stop -t 30 "$RUN-gatecandidate" >/dev/null
+[ "$(docker inspect -f '{{.State.ExitCode}}' "$RUN-gatecandidate")" = 0 ] || fail "gate candidate did not drain"
+census gate > "$OUT/after.json"
+FIXED=(--allow-path .:mtime --allow-path jobs.sqlite3:bytes,content,mtime
+       --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence)
+compare() { python "$HERE/state_census.py" compare "$(w "$OUT/before.json")" "$(w "$OUT/after.json")" "$@" < "$KEY"; }
+if compare "${FIXED[@]}" > "$OUT/without-marker.json"; then fail "marker passed without its allowance"; fi
+python -c 'import json,sys;r=json.load(open(sys.argv[1]));assert {"table":"coordinator_authority_lease","change":"added"} in r["database"],r' \
+  "$(w "$OUT/without-marker.json")" || fail "marker not reported without its allowance"
+pass "the lease marker fails the gate unless explicitly allowed"
+compare "${FIXED[@]}" --allow-lease-marker > "$OUT/with-marker.json" || true
+OBJECTS=$(python -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+other=[d for d in r["database"] if "object" not in d]
+assert not other and not r["files"], ("non-schema differences", other, r["files"])
+print(" ".join(sorted(d["object"] for d in r["database"])))' "$(w "$OUT/with-marker.json")") \
+  || fail "startup changed more than schema objects and the marker"
+echo "startup schema objects needing exact allowances: $OBJECTS"
+ARGS=(); for o in $OBJECTS; do ARGS+=(--object "$o"); done
+python "$HERE/state_census.py" schema-allowlist "$(w "$OUT/after.json")" "${ARGS[@]}" --output "$(w "$OUT/allow.json")"
+compare "${FIXED[@]}" --allow-lease-marker --schema-allowlist "$(w "$OUT/allow.json")" > "$OUT/gate.json" \
+  && pass "real release startup passes the gate with exact schema hashes and the exact lease marker" \
+  || fail "gate failed with exact allowances"
+rm -rf "$OUT" "$KEY"
 echo "ALL PASSED"

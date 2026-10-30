@@ -354,6 +354,81 @@ class CompareTest(CensusFixture):
         with self.assertRaises(SystemExit):
             self.compare(census, census, '--schema-allowlist', str(path), '--allow-object', 'table:jobs=' + 'b' * 64)
 
+    def add_marker(self, rows=((1, 1),), ddl=None):
+        from processing.authority_lease import MARKER_DDL
+        db = sqlite3.connect(self.root / 'jobs.sqlite3')
+        db.execute(ddl or MARKER_DDL)
+        db.executemany('INSERT INTO coordinator_authority_lease VALUES (?,?)', rows)
+        db.commit()
+        db.close()
+
+    def test_marker_constant_matches_the_coordinator(self):
+        from processing.authority_lease import MARKER_DDL
+        self.assertEqual(state_census.LEASE_MARKER_DDL, MARKER_DDL)
+
+    def test_exact_lease_marker_is_allowed_only_with_the_flag(self):
+        self.empty_viewer_tasks()
+        before = self.census()[1]
+        self.migrate()
+        self.add_marker()
+        after = self.census()[1]
+        status, result = self.compare(before, after, *self.allowances())
+        self.assertEqual(status, 1)
+        self.assertIn({'table': 'coordinator_authority_lease', 'change': 'added'}, result['database'])
+        status, result = self.compare(before, after, *self.allowances(), '--allow-lease-marker')
+        self.assertEqual(status, 0, result)
+
+    def test_lease_marker_flag_requires_the_marker(self):
+        self.empty_viewer_tasks()
+        before = self.census()[1]
+        self.migrate()
+        status, result = self.compare(before, self.census()[1], *self.allowances(), '--allow-lease-marker')
+        self.assertEqual(status, 1)
+        self.assertIn({'object': 'table:coordinator_authority_lease', 'change': 'leaseMarkerMissing'},
+                      result['database'])
+
+    def test_lease_marker_must_be_exact_ddl_and_single_row(self):
+        self.empty_viewer_tasks()
+        before = self.census()[1]
+        self.migrate()
+        self.add_marker(rows=())
+        status, result = self.compare(before, self.census()[1], *self.allowances(), '--allow-lease-marker')
+        self.assertEqual(status, 1)
+        self.assertIn({'table': 'coordinator_authority_lease', 'change': 'leaseMarkerInvalid'}, result['database'])
+        db = sqlite3.connect(self.root / 'jobs.sqlite3')
+        db.execute('DROP TABLE coordinator_authority_lease')
+        db.commit()
+        db.close()
+        self.add_marker(rows=((1, 1), (2, 7)),
+                        ddl='CREATE TABLE coordinator_authority_lease (singleton INTEGER, required INTEGER)')
+        status, result = self.compare(before, self.census()[1], *self.allowances(), '--allow-lease-marker')
+        self.assertEqual(status, 1)
+        self.assertIn({'object': 'table:coordinator_authority_lease'}, result['database'])
+        self.assertIn({'table': 'coordinator_authority_lease', 'change': 'leaseMarkerInvalid'}, result['database'])
+
+    def test_lease_marker_flag_relaxes_nothing_else(self):
+        self.empty_viewer_tasks()
+        before = self.census()[1]
+        self.migrate("CREATE TABLE other_new (x TEXT)", "INSERT INTO viewer_reservations VALUES ('x')")
+        self.add_marker()
+        status, result = self.compare(before, self.census()[1], *self.allowances(), '--allow-lease-marker')
+        self.assertEqual(status, 1)
+        changes = {item.get('table'): item.get('change') for item in result['database'] if 'table' in item}
+        self.assertEqual(changes, {'other_new': 'added', 'viewer_reservations': 'newTableNotEmpty'})
+
+    def test_existing_marker_must_stay_unchanged(self):
+        self.empty_viewer_tasks()
+        self.add_marker()
+        before = self.census()[1]
+        db = sqlite3.connect(self.root / 'jobs.sqlite3')
+        db.execute('DELETE FROM coordinator_authority_lease')
+        db.commit()
+        db.close()
+        status, result = self.compare(before, self.census()[1], '--allow-path', self.DB_FIELDS,
+                                      '--allow-path', '.:mtime', '--allow-lease-marker')
+        self.assertEqual(status, 1)
+        self.assertIn({'table': 'coordinator_authority_lease', 'change': 'contentChanged'}, result['database'])
+
     def test_refuses_wrong_key_and_version(self):
         with self.assertRaises(SystemExit):
             _run(['census', str(self.root)], key='not-a-key')

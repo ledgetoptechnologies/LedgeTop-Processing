@@ -15,9 +15,16 @@
 > - **Ingress:** U1–U3. The candidate runs with `--network none` until promotion.
 > - **Production:** U5. Production is held after promotion.
 >
-> **Still open:** a real Docker daemon restart (U4); host root and `docker exec`
-> access (U2, U7); volume ownership (U8); exact-image qualification; Viewer's
-> handling of 503.
+> **Still open:**
+>
+> - **U4:** unfenced intervals (holder restart, copy-to-lock handover) and a
+>   real Docker daemon restart.
+> - **U5:** the production hold does not resume Viewer work, so true
+>   quiescence and a coordinated recovery are required. There is no
+>   authenticated, durable no-admission record.
+> - **U2, U7:** host root and `docker exec` access.
+> - **U8:** volume ownership.
+> - **Exact-image qualification.**
 
 This procedure would replace the live cluster coordinator with a frozen
 release image. The live coordinator is:
@@ -129,6 +136,9 @@ every artifact, and inspect. Never improvise a workaround.
 - [ops/state_fence.py](../ops/state_fence.py): holds d738's own
   `coordinator.lock` on retained d738 state, read-only, so d738 refuses to start
   on that state.
+  - Run one holder per volume.
+  - `--verify`, run inside the holder, proves from `/proc/locks` that the live
+    holder owns the lock now.
 - `PROCESSING_VIEWER_PRODUCTION_ADMISSION=held` (in `processing/viewer_http.py`)
   refuses every production Viewer POST with 503. Staging is unaffected.
 - [ops/cutover_fence_test.sh](../ops/cutover_fence_test.sh): the isolated
@@ -234,21 +244,27 @@ an independent fence: its own `coordinator.lock`.
 
 d738 takes `flock` on `<state>/coordinator.lock` before it writes its database.
 It refuses to start ("prototype state already owned") while another process
-holds that lock. A dedicated holder container keeps the lock on every retained
-d738 state: the original volume, and `VERIFY_VOL` once it exists (step 3). The
-holder has `--network none`, read-only mounts and `--restart always`.
+holds that lock. **One holder container per volume** keeps that lock on every
+retained d738 state. Each holder has `--network none`, a read-only mount and
+`--restart always`. Holders are only ever **added**, never recreated to change
+their volumes, so a fenced volume is never released to make room for another.
 
 ```sh
+fence() {   # name volume: start a holder for exactly one volume
+  docker run -d --name "ltp-d738-fence-$1-$RUN" --network none --init --read-only --user 10001:10001 \
+    --cap-drop ALL --security-opt no-new-privileges --restart always \
+    --mount "type=volume,source=$2,destination=/fence/state,readonly" \
+    --mount "type=bind,source=$E/state_fence.py,destination=/state_fence.py,readonly" \
+    --entrypoint python "$IMG_NEW" -B /state_fence.py /fence/state
+}
+verify_fence() {   # name: /proc/locks proves the CURRENT holder owns the lock now
+  docker exec "ltp-d738-fence-$1-$RUN" python -B /state_fence.py --verify /fence/state | grep -q '"verified": true'
+}
 docker update --restart=no "$OLD"          # BEFORE stop: no restart window
 docker stop -t 3600 "$OLD"                 # never the default 10 s
 docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{.State.FinishedAt}}' "$OLD"
-FENCE=ltp-d738-fence-$RUN
-docker run -d --name "$FENCE" --network none --init --read-only --user 10001:10001 --cap-drop ALL \
-  --security-opt no-new-privileges --restart always \
-  --mount "type=volume,source=$VOL,destination=/fence/original,readonly" \
-  --mount "type=bind,source=$E/state_fence.py,destination=/state_fence.py,readonly" \
-  --entrypoint python "$IMG_NEW" -B /state_fence.py /fence/original
-docker logs "$FENCE"                       # must print {"fenced": 1}
+fence original "$VOL"
+verify_fence original
 docker rm "$OLD"                           # nothing left to restart or reconnect; old-inspect.json + IMG_OLD recreate it
 ```
 
@@ -258,13 +274,30 @@ docker rm "$OLD"                           # nothing left to restart or reconnec
   `true`.
 - The stop took longer than a few seconds. That means a request was in flight,
   contradicting R2.
-- The fence does not report every volume it was given.
+- `verify_fence` fails. Historical log lines are not accepted as proof.
+  `--verify` reads `/proc/locks` and passes only if exactly one live holder
+  process owns an exclusive flock on that very file. It fails if the holder
+  died, or if someone else, such as a running d738, holds the lock.
 
 Removing the old container means that neither a daemon restart nor a
 reconnect has anything to act on. Recreating d738 deliberately, whether by
 compose or `docker run`, on any fenced state is refused by d738's own lock
-check. After step 3, recreate the fence with `VERIFY_VOL` added. Step 3 copies
-through read-only mounts, so the fence does not block it.
+check. In step 3, `VERIFY_VOL` gets its own holder **immediately** after
+extraction (`fence verify "$VERIFY_VOL"; verify_fence verify`). The original's
+holder is never touched. Step 3 copies through read-only mounts, so the holders
+do not block it.
+
+**Unfenced intervals that remain** (d738's container no longer exists in any
+of them, so only a d738 created deliberately at that moment could use one):
+
+- from a holder's death until Docker restarts it;
+- from `VERIFY_VOL`'s extraction until its holder starts;
+- from `NEW_VOL`'s extraction until the candidate takes its own state lock in
+  step 5;
+- after a real Docker daemon restart, until the holders are running again
+  (not tested).
+
+Run `verify_fence` for every holder again before steps 5, 6 and 7.
 
 ## Step 3 — verified backup and copy
 
@@ -418,6 +451,7 @@ census "$NEW_VOL" > "$E/census-candidate-isolated.json"
 same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" \
   --allow-path .:mtime --allow-path jobs.sqlite3:bytes,content,mtime \
   --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence \
+  --allow-lease-marker \
   --schema-allowlist "$E/startup-schema-allowlist.json"   # schema-only file; the loader refuses anything broader
 ```
 
@@ -444,6 +478,20 @@ The allowances are deliberately narrow:
     or new-table allowances, or any other option.
   - Any other change to those objects, or to any other object, fails.
   - The two new tables must be **empty**; nothing relaxes that.
+  - `--allow-lease-marker` permits exactly one more thing: the authority-lease
+    marker table `coordinator_authority_lease`. It must appear with its exact
+    DDL and exactly its single `(1, 1)` row, checked by keyed digest. The flag
+    also **requires** the marker afterwards, so a candidate that did not take
+    the lease fails the gate. No other table, row or object is relaxed.
+  - In the isolated container test, a real release startup (test image,
+    synthetic state, no reference configuration) changed exactly these schema
+    objects: `table:viewer_tasks`, `table:viewer_reservations`,
+    `table:viewer_option_evidence`,
+    `index:sqlite_autoindex_viewer_reservations_1` and
+    `index:sqlite_autoindex_viewer_option_evidence_1`. With the marker, it
+    passed the gate with exact hashes and changed no file except the database
+    and the root mtime. The live configuration, including any reference
+    runtime, can write more, and must be rehearsed with the exact image (U9).
   - Every existing table must keep an identical keyed row digest. Whole-row
     digests change when a column is added, so the gate passes only because
     `viewer_tasks` is empty on the live volume (step 1). A migration over
@@ -491,7 +539,7 @@ U6.
 
 ```sh
 docker inspect "$OLD" >/dev/null 2>&1 && exit 1   # the old container must be gone (step 2)
-docker logs "$FENCE" | grep -q '"fenced"'          # fence still holding
+verify_fence original; verify_fence verify        # current holders own their locks, from /proc/locks
 census "$NEW_VOL" > "$E/census-before-promotion.json"
 same "$E/census-candidate-isolated.json" "$E/census-before-promotion.json"   # unchanged since the gate, no allowances
 docker rm "$CAND"; shred -u "$E/env-candidate"
@@ -516,9 +564,32 @@ The promoted container starts with **production admission held**:
 - Production reads and all staging requests are admitted.
 
 So the staging-only Viewer photo job can run through to archive ingestion
-**and derivatives** while production cannot change state. What a production
-Viewer client does with a 503 (retry, back off or fail the job) is not
-verified.
+**and derivatives** while production cannot change state.
+
+**The hold is a backstop, not a way to pause production work.** Viewer's
+isolated tests (12 cases of 503 or connection reset during init, upload and
+commit, with and without a reservation) show what happens when a production
+request hits the hold:
+
+- Viewer keeps its source data and a single attempt, with no duplicate and no
+  removal.
+- But it does **not** resume on its own:
+  - an init refused with 503 and then answered with 404 stays
+    "observation unavailable";
+  - an ambiguous upload needs inspection;
+  - a refused commit may stay held.
+- A generic 503 or connection reset does not tell the client that no body was
+  read. The coordinator's refusal happens before the body is read (unit test),
+  but the client cannot verify that.
+
+So the cutover still requires **true quiescence**: R1 shows no active
+production Viewer job or attempt, and no production submission happens until
+production is opened. Any production job that does hit the hold needs a
+**coordinated recovery** with Viewer. Removing the hold does not resume it.
+
+The published host ports also act as a fence against d738: a d738 container
+that publishes the same host port cannot start while the release holds it
+(isolated test).
 
 The published host ports also act as a fence against d738: a d738 container
 that publishes the same host port cannot start while the release holds it
@@ -538,8 +609,9 @@ same time.
 
 - **Before promotion (any failure in steps 5–6):**
   1. Stop and remove the candidate.
-  2. Stop and remove the d738 fence (`docker rm -f "$FENCE"`); d738 cannot
-     start while it holds the lock.
+  2. Stop and remove the d738 holder for the original volume
+     (`docker rm -f ltp-d738-fence-original-$RUN`); d738 cannot start while it
+     holds the lock. Keep the `VERIFY_VOL` holder.
   3. Recreate d738 from `old-inspect.json` and `IMG_OLD` on the original
      volume, with its original networks, ports and restart policy, through the
      same compose definition it came from. Then start it.
@@ -588,12 +660,12 @@ check, an observation or a snapshot does not resolve it.
 | U1 | **Candidate reachability before promotion: enforced, not proven live.** | The candidate runs with `--network none` (only `lo`; no bridge interface or address), and the spec script refuses isolated mode on any other network. The isolated test confirmed only loopback. `docker exec` and host root can still reach it. | Exact-image run of the isolated test; host root stays a trust boundary (U2, U7). |
 | U2 | **Other writers before promotion: network path closed, host access not.** | With `--network none` no client can send a request. Release instances are fenced by the lease. d738 is fenced on retained d738 state by the step 2 holder, and on `NEW_VOL` by the candidate's own state lock. Host root, `docker exec` and direct volume writes are not prevented. | A volume-level writer lock (U7). Otherwise accept host root as a trust boundary. |
 | U3 | **In-flight requests during the isolated phase: not applicable with `--network none`.** | Nothing can connect, so the socket snapshot is no longer the only defence. The census gate still shows equality only at two moments. | Exact-image confirmation. |
-| U4 | **Single authority: d738 and release fenced independently; not proven live.** | **d738 does not take the new lease** (shown in the isolated test). Fences:<ul><li>the old container is removed after its clean stop, so a daemon restart or reconnect has nothing to act on;</li><li>a `--network none`, `--restart always` holder keeps d738's own `coordinator.lock` on every retained d738 state, so d738 refuses to start on it even when recreated deliberately (tested, including after the holder process was killed and Docker restarted it);</li><li>a running release holds the lock on `NEW_VOL` and its published ports, so d738 cannot start on that copy or those ports (tested);</li><li>release instances exclude one another through the host-wide `flock` lease (tested).</li></ul>Not proven:<ul><li>a real Docker **daemon** restart. Only a crash of the holder process was tested; after a daemon restart, a d738 created at the same moment could race the holder.</li><li>d738 started on a copy nobody fences, such as a new copy made by hand.</li><li>d738 recreated with different ports while no release is running.</li><li>the exact images (the test used a Python 3.12 rebuild of the same sources).</li></ul> | Exact-image run of `ops/cutover_fence_test.sh` on a non-live host, including a real daemon restart. Retain no unfenced d738 state. |
-| U5 | **Production hold after promotion: implemented in source, not proven live.** | The promoted container starts with `PROCESSING_VIEWER_PRODUCTION_ADMISSION=held`. Every production Viewer POST gets 503 before any body read or service call; staging and production reads are admitted (unit and container tests). Opening production means recreating the container without the hold, and the lease prevents overlap. Not verified: Viewer's reaction to the 503; prototype operator or reference routes, which are not covered by the hold. | Viewer-side check of 503 handling; exact-image run. |
+| U4 | **Single authority: d738 and release fenced independently; not proven live.** | **d738 does not take the new lease** (shown in the isolated test). Fences:<ul><li>the old container is removed after its clean stop, so a daemon restart or reconnect has nothing to act on;</li><li>one `--network none`, `--restart always` holder per retained d738 volume keeps d738's own `coordinator.lock`, so d738 refuses to start on it even when recreated deliberately;</li><li>`--verify` proves from `/proc/locks`, at the time it runs, that the live holder owns the lock (tested, including after the holder was killed and Docker restarted it);</li><li>a running release holds the lock on `NEW_VOL` and its published ports, so d738 cannot start on that copy or those ports (tested);</li><li>release instances exclude one another through the host-wide `flock` lease (tested).</li></ul>Still unfenced:<ul><li>the interval between a holder's death and its restart;</li><li>the interval between a copy's extraction and its holder or candidate taking the lock;</li><li>a real Docker **daemon** restart (not tested);</li><li>d738 on a copy nobody fences;</li><li>the exact images.</li></ul>A d738 created deliberately during one of those intervals could run. | Exact-image run of `ops/cutover_fence_test.sh` on a non-live host, including a real daemon restart. Retain no unfenced d738 state. |
+| U5 | **Production hold after promotion: a backstop, not resumable.** | Implemented in source: every production Viewer POST gets 503 before any body read or service call; staging and production reads are admitted (unit and container tests). Viewer's isolated tests (mocked adapter, not a live cutover) show that a production request hitting the hold preserves source data and a single attempt, but does **not** resume automatically, and a generic 503 or reset cannot prove to Viewer that no body was read. So the hold does not replace true quiescence or a coordinated recovery. Prototype operator and reference routes are not covered. | True quiescence (R1) for the whole window. An authenticated, durable no-admission record that Viewer can read is not implemented. Coordinated Viewer recovery for any job that hits the hold. |
 | U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically (steps 3 and 6). Every entry's contents and metadata are compared under keyed IDs. Allowances are scoped to named fields, exact schema hashes and empty new tables. Remaining limits:<ul><li>equal censuses show **observed** equality at two moments, not the absence of transient writes;</li><li>mtime is compared at whole-second granularity;</li><li>xattrs, ACLs, file capabilities and ctime are not compared;</li><li>the database file is compared per table, not byte for byte;</li><li>sizes and row counts are printed in clear;</li><li>a migration over a non-empty table fails conservatively;</li><li>the exact schema hashes depend on the U9 rehearsal;</li><li>it has never run against the real volume or the a042 image.</li></ul> | Independent review of the census. The U9 rehearsal to produce the exact schema allowances. A live read-only run in the cutover window. Transient writes need prevention (U1, U2), which detection cannot provide. |
 | U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
 | U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |
-| U9 | **Startup schema allowlist.** | The step 6 gate needs the exact schema-object hashes that the release startup produces, and that file does not exist. The loader and generator now enforce a schema-only format: no path, table or new-table allowances, and no shell-substituted options. But the hashes themselves still need a rehearsal and review. Startup row writes cannot be allowed through this file. | Rehearse `IMG_NEW` isolated on synthetic state, then generate `startup-schema-allowlist.json` with `schema-allowlist` (step 6) and review it. Any startup row writes need a separately reviewed literal allowance. |
+| U9 | **Startup schema allowlist: shape enforced, test-image result known, live config not rehearsed.** | The loader and generator enforce a schema-only file, and the lease marker has its own exact allowance. With the test image and synthetic state, release startup changed exactly five schema objects plus the marker, and passed the gate. Not yet done: the exact image, the live environment (including any reference runtime, which can write more), and a review of the generated file. | Rehearse the exact `IMG_NEW` with the live environment's key names on synthetic state; generate and review `startup-schema-allowlist.json`. |
 | U10 | **Host-writer check needs root.** | `sudo -n` may be unavailable. | Beau provides an equivalent root check. |
 | U11 | **Engine reachability.** | If `LOCAL_NODE_URL`/`MAIN_NODE_URL` use container names, the candidate cannot reach its engines from its own network. | Read the real `old-inspect.json`. U1's `--network none` sidesteps this during the gated phase. |
 | U12 | **Reconciling ambiguous requests.** | Exit 0 proves only that handlers ended, and the coordinator records nothing about requests it refused or dropped. | Reconcile against Viewer's records (step 4), which needs Viewer's confirmed status vocabulary. |
