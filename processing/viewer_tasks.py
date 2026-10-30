@@ -516,6 +516,26 @@ class TaskStore:
             if len(rows)!=1:raise Conflict('execution metadata unavailable')
             return self._task(db,rows[0])
 
+    def incomplete_terminal_job_ids(self):
+        with self._lock, self.queue._db() as db:
+            return {row[0] for row in db.execute("SELECT t.job_id FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id WHERE t.removed=0 AND t.phase IN ('processing','commit_pending','cancel_pending') AND j.status IN ('succeeded','failed')")}
+
+    def complete_engine_task(self, task, status, result):
+        """Commit the queue terminal state and matching Viewer task together."""
+        if status not in ('succeeded','failed'):
+            raise ValueError('invalid engine completion')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=self._row(db,task['uuid'])
+            if (row['job_id']!=task['job_id'] or row['engine_uuid']!=task['engine_uuid']
+                    or row['node_id']!=task['node_id'] or row['claim_token']!=task['claim_token']
+                    or row['environment']!=task['environment'] or row['phase'] not in ('processing','commit_pending','cancel_pending')):
+                raise Conflict('engine completion identity changed')
+            self.queue._complete_in_transaction(db,row['job_id'],
+                {'claimToken':row['claim_token'],'status':status,'result':result})
+            db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
+                (status,100 if status=='succeeded' else row['progress'],row['uuid']))
+
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path'}

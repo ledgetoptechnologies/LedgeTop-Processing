@@ -468,6 +468,44 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
         self.assertEqual(len(self.fleet.commits), 1)
 
+    def test_terminal_job_and_viewer_update_roll_back_together(self):
+        identifier = self.submit()
+        self.service.tick()
+        engine_uuid = self.task(identifier)['engine_uuid']
+        self.engines['cluster'].finish(engine_uuid)
+        with self.queue._db() as db:
+            db.execute("CREATE TRIGGER fail_terminal BEFORE UPDATE OF stage ON viewer_tasks WHEN NEW.stage='succeeded' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END")
+        with self.assertRaises(Exception):
+            self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['status'], 'running')
+        self.assertNotEqual(task['stage'], 'succeeded')
+        with self.queue._db() as db:
+            db.execute('DROP TRIGGER fail_terminal')
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'succeeded')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 40)
+
+    def test_existing_terminal_split_recovers_after_restart(self):
+        identifier=self.submit();self.service.tick();task=self.task(identifier)
+        result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],
+                'environment':task['environment'],'cancelled':False}
+        self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':result})
+        self.service.close();self.queue.close();self.make_queue_service()
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'],40)
+        self.assertEqual(len(self.fleet.commits),1)
+
+    def test_existing_terminal_split_with_wrong_claim_holds_dispatch(self):
+        identifier=self.submit();self.service.tick();task=self.task(identifier)
+        result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],
+                'environment':task['environment'],'cancelled':False}
+        self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':result})
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_tasks SET claim_token='wrong' WHERE uuid=?",(identifier,))
+        with self.assertRaises(Conflict):self.service.tick()
+        self.assertNotEqual(self.task(identifier)['phase'],'complete')
+
     def test_restart_while_node_offline_retains_slot_then_returns_completed_result(self):
         first=self.submit();second=self.submit()
         self.service.tick();task=self.task(first);engine_uuid=task['engine_uuid']

@@ -589,14 +589,27 @@ class ViewerService:
         status = 'succeeded' if code == 40 else 'failed'
         result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                   'environment': task['environment'], 'cancelled': code == 50}
-        self.queue.complete(task['job_id'], {'claimToken': task['claim_token'], 'status': status, 'result': result})
-        self.store.update(identifier, stage='cancelled' if code == 50 else status,
-                          phase='complete', progress=100 if code == 40 else task['progress'])
+        self.store.complete_engine_task(task, status, result)
 
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
             jobs = self.queue.list()
+            split_jobs = self.store.incomplete_terminal_job_ids()
+            # Older coordinators could commit the job before the Viewer row.
+            # Only replay a terminal result when every persisted identity agrees.
+            for job in jobs:
+                if job['id'] not in split_jobs or job['profile'] != VIEWER_PROFILE:
+                    continue
+                task = self.store.task_for_job(job['id'])
+                if task['phase'] == 'complete':
+                    continue
+                expected = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
+                            'environment': task['environment'], 'cancelled': False}
+                if (not task['engine_uuid'] or not task['node_id'] or not task['claim_token']
+                        or job['result'] != expected):
+                    raise Conflict('terminal Viewer identity requires inspection')
+                self.store.complete_engine_task(task, job['status'], expected)
             for job in jobs:
                 if job['profile'] != VIEWER_PROFILE or job['status'] not in ('running', 'held'):
                     continue

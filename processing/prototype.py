@@ -303,6 +303,11 @@ class Queue(Maintenance):
             return {**job, "claimToken": token}
 
     def complete(self, identifier, payload):
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return self._complete_in_transaction(db, identifier, payload)
+
+    def _complete_in_transaction(self, db, identifier, payload):
         self.fields(payload, ("claimToken", "status", "result"))
         if (not isinstance(payload["claimToken"], str) or len(payload["claimToken"]) > 128
                 or payload["status"] not in ("succeeded", "failed") or not isinstance(payload["result"], dict)):
@@ -310,23 +315,23 @@ class Queue(Maintenance):
         result = json.dumps(payload["result"], sort_keys=True, allow_nan=False, separators=(",", ":"))
         if len(result.encode()) > 4096:
             raise ValueError("result exceeds prototype limit")
-        with self._db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
-            if not row:
-                raise Conflict("unknown job")
-            supplied_hash = hashlib.sha256(payload["claimToken"].encode()).hexdigest()
-            if not row["claim_hash"] or not hmac.compare_digest(supplied_hash, row["claim_hash"]):
-                raise Conflict("invalid claim")
-            if row["status"] in ("succeeded", "failed"):
-                if row["status"] == payload["status"] and row["result"] == result:
-                    return self.public(row)
-                raise Conflict("terminal completion differs")
-            if row["status"] != "running" and not (row['status'] == 'held' and row['held_reason'] == 'coordinator_restart'):
-                raise Conflict("job is held for operator inspection; completion cannot release it")
-            db.execute("UPDATE jobs SET status=?,result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                       (payload["status"], result, identifier))
-            return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
+        if not db.in_transaction:
+            raise ValueError('completion requires a transaction')
+        row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
+        if not row:
+            raise Conflict("unknown job")
+        supplied_hash = hashlib.sha256(payload["claimToken"].encode()).hexdigest()
+        if not row["claim_hash"] or not hmac.compare_digest(supplied_hash, row["claim_hash"]):
+            raise Conflict("invalid claim")
+        if row["status"] in ("succeeded", "failed"):
+            if row["status"] == payload["status"] and row["result"] == result:
+                return self.public(row)
+            raise Conflict("terminal completion differs")
+        if row["status"] != "running" and not (row['status'] == 'held' and row['held_reason'] == 'coordinator_restart'):
+            raise Conflict("job is held for operator inspection; completion cannot release it")
+        db.execute("UPDATE jobs SET status=?,result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (payload["status"], result, identifier))
+        return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
 
     def operator(self, identifier, action, payload):
         """A separate human/operator credential is required by the HTTP layer.
