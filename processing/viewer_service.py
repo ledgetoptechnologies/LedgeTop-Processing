@@ -6,9 +6,12 @@ Completed engine tasks and downloaded archives remain until operator cleanup.
 """
 
 import http.client
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import threading
 import time
 from urllib.error import HTTPError
@@ -181,6 +184,71 @@ class ViewerService:
                 return self.store.output(identifier, line)
         return self.store.output(identifier, line)
 
+    def _archive_identity(self, task):
+        return {'version': 1, 'task': task['uuid'], 'generation': task['generation'],
+                'job': task['job_id'], 'node': task['node_id'], 'engine': task['engine_uuid']}
+
+    def _read_archive_metadata(self, path):
+        try:
+            if path.is_symlink(): raise ValueError()
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+            with os.fdopen(fd, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096
+                        or (os.name != 'nt' and info.st_uid != os.geteuid())):
+                    raise ValueError()
+                def unique(pairs):
+                    result = {}
+                    for key, item in pairs:
+                        if key in result: raise ValueError()
+                        result[key] = item
+                    return result
+                value = json.loads(stream.read(4097), object_pairs_hook=unique)
+            return value
+        except (OSError, ValueError, TypeError, KeyError):
+            raise Conflict('archive metadata requires inspection') from None
+
+    def _archive_receipt(self, task, path):
+        """Validate a bounded private receipt, binding it to this incarnation."""
+        try:
+            value = self._read_archive_metadata(path)
+            expected = self._archive_identity(task)
+            if (type(value) is not dict or set(value) != set(expected) | {'bytes','sha256'}
+                    or any(type(value[k]) is not type(v) or value[k] != v for k, v in expected.items())
+                    or type(value['bytes']) is not int or not 4 <= value['bytes'] <= self.config.viewer_max_archive_bytes
+                    or type(value['sha256']) is not str or not re.fullmatch(r'[a-f0-9]{64}', value['sha256'])):
+                raise ValueError()
+            return value
+        except (OSError, ValueError, TypeError, KeyError):
+            raise Conflict('archive receipt requires inspection') from None
+
+    def _verify_archive(self, path, receipt):
+        stream = None
+        try:
+            if path.is_symlink(): raise ValueError()
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+            stream = os.fdopen(fd, 'rb')
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_size != receipt['bytes']
+                    or (os.name != 'nt' and before.st_uid != os.geteuid())):
+                raise ValueError()
+            digest = hashlib.sha256()
+            while chunk := stream.read(1024 * 1024): digest.update(chunk)
+            if digest.hexdigest() != receipt['sha256'] or not zipfile.is_zipfile(stream):
+                raise ValueError()
+            after = os.fstat(stream.fileno()); current = path.lstat()
+            fields = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            if fields(before) != fields(after): raise ValueError()
+            # Windows may expose link-change time differently through a
+            # handle and pathname after hard-link publication.
+            if fields(after)[:4] != fields(current)[:4]: raise ValueError()
+            if os.name != 'nt' and fields(after)[4] != fields(current)[4]: raise ValueError()
+            stream.seek(0)
+            return stream
+        except (OSError, ValueError):
+            if stream is not None: stream.close()
+            raise Conflict('archive file requires inspection') from None
+
     def download(self, identifier):
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
@@ -192,13 +260,70 @@ class ViewerService:
             path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
             if not task['archive_path']:
                 partial = path.with_suffix('.zip.partial')
-                if partial.exists():
-                    if partial.is_symlink() or not partial.is_file():
+                receipt_path = path.with_suffix('.zip.receipt')
+                intent_path = path.with_suffix('.zip.intent')
+                if receipt_path.exists() or receipt_path.is_symlink():
+                    receipt = self._archive_receipt(task, receipt_path)
+                    final_exists = path.exists() or path.is_symlink()
+                    partial_exists = partial.exists() or partial.is_symlink()
+                    stream = None
+                    try:
+                        if final_exists:
+                            stream = self._verify_archive(path, receipt)
+                            if partial_exists and (partial.is_symlink() or not os.path.samefile(path, partial)):
+                                raise Conflict('competing archive requires inspection')
+                        elif partial_exists:
+                            stream = self._verify_archive(partial, receipt)
+                            os.link(partial, path)
+                        else:
+                            raise Conflict('archive receipt has no file')
+                        current = path.lstat(); opened = os.fstat(stream.fileno())
+                        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                            raise Conflict('archive identity changed during publication')
+                        if partial_exists:
+                            if os.name == 'nt':
+                                # Windows can refuse unlink while a hard-linked
+                                # file is open; revalidate the same inode.
+                                identity = (opened.st_dev, opened.st_ino)
+                                stream.close(); stream = None
+                                partial.unlink()
+                                stream = self._verify_archive(path, receipt)
+                                reopened = os.fstat(stream.fileno())
+                                if (reopened.st_dev, reopened.st_ino) != identity:
+                                    raise Conflict('archive identity changed during publication')
+                            else:
+                                partial.unlink()
+                        sync_directory(path.parent)
+                        self.store.update(identifier, archive_path=str(path))
+                        return stream, receipt['bytes']
+                    except BaseException:
+                        if stream is not None: stream.close()
+                        raise
+                if path.exists() or path.is_symlink():
+                    raise Conflict('archive without receipt requires inspection')
+                if intent_path.exists() or intent_path.is_symlink():
+                    intent = self._read_archive_metadata(intent_path); expected = self._archive_identity(task)
+                    if (type(intent) is not dict or set(intent) != set(expected)
+                            or any(type(intent[k]) is not type(v) or intent[k] != v for k, v in expected.items())):
+                        raise Conflict('archive intent requires inspection')
+                else:
+                    if partial.exists() or partial.is_symlink():
+                        raise Conflict('partial archive without intent requires inspection')
+                    with intent_path.open('xb') as marker:
+                        os.chmod(intent_path, 0o600)
+                        marker.write(json.dumps(self._archive_identity(task),sort_keys=True,separators=(',',':')).encode('ascii'))
+                        marker.flush();os.fsync(marker.fileno())
+                    sync_directory(path.parent)
+                if partial.exists() or partial.is_symlink():
+                    info = partial.lstat()
+                    if (partial.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                            or (os.name != 'nt' and info.st_uid != os.geteuid())):
                         raise Conflict('previous archive path requires inspection')
                     # A GET is safe to repeat; the engine's original is retained.
                     # Only this exact incomplete local transfer is replaced.
                     partial.unlink()
                 total = 0
+                digest = hashlib.sha256()
                 with self.engines[task['node_id']].download(task['engine_uuid']) as response:
                     if getattr(response, 'status', 200) != 200:
                         raise EngineUnavailable('archive_unavailable')
@@ -215,6 +340,7 @@ class ViewerService:
                             total += len(chunk)
                             if total > self.config.viewer_max_archive_bytes:
                                 raise Conflict('archive exceeds configured disk allowance')
+                            digest.update(chunk)
                             output.write(chunk)
                         if declared is not None and total != int(declared):
                             raise EngineUnavailable('archive_transfer_incomplete')
@@ -222,9 +348,21 @@ class ViewerService:
                         os.fsync(output.fileno())
                 if total < 4 or not zipfile.is_zipfile(partial):
                     raise EngineUnavailable('archive_transfer_incomplete')
-                os.replace(partial, path)
+                receipt = {**self._archive_identity(task), 'bytes': total, 'sha256': digest.hexdigest()}
+                with receipt_path.open('xb') as marker:
+                    os.chmod(receipt_path, 0o600)
+                    marker.write(json.dumps(receipt,sort_keys=True,separators=(',',':')).encode('ascii'))
+                    marker.flush();os.fsync(marker.fileno())
+                sync_directory(path.parent)
+                os.link(partial, path)
+                partial.unlink()
                 sync_directory(path.parent)
                 self.store.update(identifier, archive_path=str(path))
+                return self._verify_archive(path, receipt), receipt['bytes']
+            receipt_path = path.with_suffix('.zip.receipt')
+            if receipt_path.exists() or receipt_path.is_symlink():
+                receipt = self._archive_receipt(task, receipt_path)
+                return self._verify_archive(path, receipt), receipt['bytes']
             if path.is_symlink() or not path.is_file():
                 raise Conflict('retained archive unavailable')
             return path.open('rb'), path.stat().st_size

@@ -7,6 +7,7 @@ Viewer output ingestion. No network, Docker, real datasets or host writes.
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -533,6 +534,106 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(self.engines['cluster'].archive).hexdigest())
         self.assertEqual(self.engines['cluster'].download_calls, 2)
         self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_archive_receipt_recovers_after_state_write_failure_and_restart(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        original = self.service.store.update
+        def fail_archive_update(task_id, **fields):
+            if 'archive_path' in fields: raise OSError('synthetic lost state write')
+            return original(task_id, **fields)
+        with patch.object(self.service.store, 'update', side_effect=fail_archive_update):
+            with self.assertRaises(OSError): self.service.download(identifier)
+        task = self.task(identifier); final = Path(task['directory']) / 'all.zip'
+        self.assertIsNone(task['archive_path']); self.assertTrue(final.is_file())
+        self.service.close(); self.queue.close(); self.make_queue_service()
+        with patch.object(self.engines['cluster'], 'download', side_effect=EngineUnavailable('offline')):
+            stream, length = self.service.download(identifier)
+            with stream: self.assertEqual(stream.read(), self.engines['cluster'].archive)
+        self.assertEqual(length, len(self.engines['cluster'].archive))
+        self.assertEqual(self.task(identifier)['archive_path'], str(final))
+
+    def test_receipt_recovers_partial_after_interrupted_publication(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        with patch('processing.viewer_service.os.link', side_effect=OSError('synthetic interrupted link')):
+            with self.assertRaises(OSError): self.service.download(identifier)
+        with patch.object(self.engines['cluster'], 'download', side_effect=EngineUnavailable('offline')):
+            stream, _ = self.service.download(identifier)
+            with stream: self.assertEqual(stream.read(), self.engines['cluster'].archive)
+
+    def test_orphan_without_receipt_or_modified_archive_is_never_adopted(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        task = self.task(identifier); final = Path(task['directory']) / 'all.zip'
+        final.write_bytes(b'foreign data')
+        with self.assertRaises(Conflict): self.service.download(identifier)
+        self.assertEqual(final.read_bytes(), b'foreign data')
+        final.unlink()
+        with patch.object(self.service.store, 'update', side_effect=OSError('synthetic lost state write')):
+            with self.assertRaises(OSError): self.service.download(identifier)
+        final.write_bytes(b'tampered data')
+        with self.assertRaises(Conflict): self.service.download(identifier)
+        self.assertEqual(final.read_bytes(), b'tampered data')
+
+    def test_receipt_for_other_generation_is_never_adopted(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        with patch.object(self.service.store, 'update', side_effect=OSError('synthetic lost state write')):
+            with self.assertRaises(OSError): self.service.download(identifier)
+        task = self.task(identifier); receipt = Path(task['directory']) / 'all.zip.receipt'
+        value = json.loads(receipt.read_text()); value['generation'] += 1
+        receipt.write_text(json.dumps(value))
+        with self.assertRaises(Conflict): self.service.download(identifier)
+
+    def test_unknown_partial_and_malformed_intent_are_not_removed(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        directory = Path(self.task(identifier)['directory']); partial = directory / 'all.zip.partial'
+        partial.write_bytes(b'foreign partial')
+        with self.assertRaises(Conflict): self.service.download(identifier)
+        self.assertEqual(partial.read_bytes(), b'foreign partial')
+        (directory / 'all.zip.intent').write_bytes(b'{incomplete')
+        with self.assertRaises(Conflict): self.service.download(identifier)
+        self.assertEqual(partial.read_bytes(), b'foreign partial')
+
+    def test_competing_archive_is_not_overwritten(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        directory = Path(self.task(identifier)['directory']); final = directory / 'all.zip'
+        original_link = os.link
+        def competing_link(source, destination):
+            final.write_bytes(b'foreign result')
+            return original_link(source, destination)
+        with patch('processing.viewer_service.os.link', side_effect=competing_link):
+            with self.assertRaises(FileExistsError): self.service.download(identifier)
+        self.assertEqual(final.read_bytes(), b'foreign result')
+        with self.assertRaises(Conflict): self.service.download(identifier)
+        self.assertEqual(final.read_bytes(), b'foreign result')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX symlink fixture required')
+    def test_archive_symlinks_do_not_modify_or_read_foreign_target(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        directory = Path(self.task(identifier)['directory']); victim = self.root / 'foreign.bin'
+        victim.write_bytes(b'foreign data')
+        for name in ('all.zip', 'all.zip.partial', 'all.zip.intent', 'all.zip.receipt'):
+            link = directory / name; link.symlink_to(victim)
+            try:
+                with self.subTest(name=name), self.assertRaises(Conflict): self.service.download(identifier)
+                self.assertEqual(victim.read_bytes(), b'foreign data')
+            finally: link.unlink()
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX rename with open descriptor required')
+    def test_recovery_serves_validated_descriptor_and_rechecks_later_reads(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        with patch.object(self.service.store, 'update', side_effect=OSError('synthetic lost state write')):
+            with self.assertRaises(OSError): self.service.download(identifier)
+        task = self.task(identifier); final = Path(task['directory']) / 'all.zip'
+        original = self.service.store.update
+        def replace_after_update(task_id, **fields):
+            result=original(task_id, **fields)
+            if 'archive_path' in fields:
+                replacement=final.with_name('competing.zip');replacement.write_bytes(b'foreign data')
+                os.replace(replacement, final)
+            return result
+        with patch.object(self.service.store, 'update', side_effect=replace_after_update):
+            stream, _ = self.service.download(identifier)
+            with stream:self.assertEqual(stream.read(), self.engines['cluster'].archive)
+        with self.assertRaises(Conflict):self.service.download(identifier)
 
     def test_reset_public_uuid_assigns_new_private_engine_uuid(self):
         identifier = self.submit()
