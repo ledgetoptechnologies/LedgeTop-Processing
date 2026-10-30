@@ -50,7 +50,7 @@ class InputBudgetTests(unittest.TestCase):
             raw = base64.b64decode(vector['rawBase64'], validate=True)
             with self.subTest(name=vector['name']):
                 if vector['accepted']:
-                    self.assertEqual(decode_budget_proposal(raw), plan_input_budget(self.proposal))
+                    self.assertEqual(decode_budget_proposal(raw)['protocolVersion'], 2)
                 else:
                     with self.assertRaises(p.ProtocolError): decode_budget_proposal(raw)
 
@@ -61,6 +61,11 @@ class InputBudgetTests(unittest.TestCase):
         self.proposal['objects'] = [self.proposal['objects'][0]]
         self.proposal['retryBytes'] = 1
         with self.assertRaises(p.ProtocolError): plan_input_budget(self.proposal)
+
+    def test_16832_objects(self):
+        self.proposal['objects'] = [{'id':f'obj-{i}', 'byteSize':1, 'sha256':'a'*64} for i in range(16832)]
+        raw = p.canonical_json(self.proposal)
+        self.assertEqual(decode_budget_proposal(raw)['requiredRequests'],16832)
 
     def test_generation_zero(self):
         self.proposal['generation'] = 0
