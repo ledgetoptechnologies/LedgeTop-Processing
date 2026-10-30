@@ -123,3 +123,23 @@ the 200 status and headers may already have been sent. TLS and client
 authentication remain separate. This adds a complete streaming hash pass in
 addition to the existing archive pre-verification and may cost substantial I/O
 for large results. It does not authorize deleting inputs or results.
+
+### Reservation-enabled initialization replay scope
+
+For this coordinator's reservation extension, an identical initialization
+using the same UUID, reservation capability, environment, name, options and
+outputs returns the existing task identity. Different settings conflict, a
+wrong capability is hidden as not found, and a cancelled reservation cannot be
+initialized again. This behavior is specific to the coordinator extension and
+must not be assumed for ordinary NodeODM providers.
+
+The service performs live option-catalog validation before checking for an
+existing task. An otherwise identical replay can therefore fail while the
+catalog is unavailable or no longer permits its settings. The pending-drain
+503 test applies to a close announced before reading the initialization body;
+an arbitrary 503 or disconnected client does not prove no mutation committed.
+Reconcile the reserved task identity before deciding what to do next. An
+initialization failure after directory creation can leave a private orphan;
+a retry chooses a separate directory rather than adopting or deleting it.
+Tests cover rollback, client disconnect and abrupt process exit immediately after
+directory creation. They do not prove power-loss atomicity or every crash point.

@@ -1,5 +1,7 @@
 import io
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -52,6 +54,33 @@ class ViewerTaskStoreTests(unittest.TestCase):
                          ('Synthetic survey', [{'name': 'pc-ept', 'value': True}], ['all.zip'], 'staging')):
             with self.subTest(settings=settings), self.assertRaises(Conflict):
                 store.initialize(self.identifier, *settings)
+
+    def test_process_exit_after_directory_creation_preserves_orphan_and_reservation(self):
+        root=self.root/'process-exit';identifier=str(uuid.uuid4());cap='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        program="""import os,sys
+from pathlib import Path
+from unittest.mock import patch
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]);identifier=sys.argv[2];cap=sys.argv[3]
+queue=Queue(root/'queue',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+store=TaskStore(queue,root/'inputs');store.reserve(identifier,'production',cap)
+with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os._exit(73)):
+ store.initialize(identifier,'synthetic',[],None,'production',cap,option_evidence=[])
+"""
+        proc=subprocess.run([sys.executable,'-c',program,str(root),identifier,cap],capture_output=True,timeout=15)
+        self.assertEqual(proc.returncode,73)
+        orphan=root/'inputs'/(identifier+'-1');self.assertTrue(orphan.is_dir())
+        queue=Queue(root/'queue',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:
+            store=TaskStore(queue,root/'inputs')
+            with queue._db() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT state FROM viewer_reservations WHERE uuid=?',(identifier,)).fetchone()[0],'reserved')
+            self.assertEqual(store.initialize(identifier,'synthetic',[],None,'production',cap,option_evidence=[]),{'uuid':identifier})
+            with queue._db() as db:directory=db.execute('SELECT directory FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()[0]
+            self.assertTrue(orphan.is_dir());self.assertNotEqual(directory,orphan.name);self.assertTrue((root/'inputs'/directory).is_dir())
+        finally:queue.close()
 
     def test_upload_hashes_exact_bytes_and_retries_do_not_duplicate(self):
         self.initialize()

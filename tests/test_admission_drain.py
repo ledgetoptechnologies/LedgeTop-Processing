@@ -1,4 +1,6 @@
 import json
+import socket
+import http.client
 import io
 import os
 import tempfile
@@ -124,6 +126,103 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.request(path,self.operation(False),OP)[0],200)
         self.assertEqual(self.request(path,self.operation(True),OP)[0],409)
         self.assertFalse(self.request(path,token=OP)[1]['closed'])
+
+    def test_reserved_init_503_before_body_and_lost_reply_restart_replay(self):
+        from tests.test_viewer_http import multipart, BOUNDARY
+        identifier=str(uuid.uuid4());cap='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        headers={'Content-Type':'application/x-www-form-urlencoded','X-LedgeTop-Capability':cap}
+        def reserve():
+            with urlopen(Request(self.origin+'/task/ledgetop/reserve?token='+VIEW,data=('uuid='+identifier).encode(),headers=headers),timeout=3) as r:return r.status
+        self.assertEqual(reserve(),200)
+        body=multipart([('name',None,b'synthetic'),('options',None,b'[]')]);path='/task/new/init?token='+VIEW
+        init_headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY,'set-uuid':identifier,'X-LedgeTop-Capability':cap}
+        gate=self.handler.prototype_queue.admission_drain;gate._closing.set()
+        try:
+            conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=2)
+            try:
+                conn.putrequest('POST',path);conn.putheader('Content-Length',str(len(body)))
+                for key,value in init_headers.items():conn.putheader(key,value)
+                conn.endheaders();self.assertEqual(conn.getresponse().status,503)
+            finally:conn.close()
+        finally:gate._closing.clear()
+        with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM viewer_tasks').fetchone()[0],0)
+        with patch.object(self.handler.viewer_service,'_check_options',return_value=[]):
+            # Send a complete request and disconnect without reading the response.
+            raw=('POST '+path+' HTTP/1.1\r\nHost: localhost\r\nContent-Length: '+str(len(body))+'\r\n'+''.join(k+': '+v+'\r\n' for k,v in init_headers.items())+'\r\n').encode()+body
+            sock=socket.create_connection(('127.0.0.1',self.server.server_port),timeout=2);sock.sendall(raw);sock.close()
+            deadline=time.monotonic()+3
+            while time.monotonic()<deadline:
+                with self.handler.prototype_queue._db() as db: count=db.execute('SELECT count(*) FROM viewer_tasks').fetchone()[0]
+                if count==1:break
+                time.sleep(.02)
+            self.assertEqual(count,1)
+            with urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3) as r:self.assertEqual(r.status,200)
+        from processing.maintenance import Conflict
+        with patch.object(self.handler.viewer_service,'_check_options',side_effect=Conflict('catalog unavailable')):
+            with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3)
+            self.assertEqual(e.exception.code,409)
+        self.stop();self.start()
+        with patch.object(self.handler.viewer_service,'_check_options',return_value=[]):
+            with urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3) as r:self.assertEqual(r.status,200)
+            wrong=dict(init_headers);wrong['X-LedgeTop-Capability']='YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI'
+            with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=body,headers=wrong),timeout=3)
+            self.assertEqual(e.exception.code,404)
+            different=multipart([('name',None,b'different'),('options',None,b'[]')])
+            with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=different,headers=init_headers),timeout=3)
+            self.assertEqual(e.exception.code,409)
+            cancel=Request(self.origin+'/task/ledgetop/cancel?token='+VIEW,data=('uuid='+identifier).encode(),headers=headers)
+            with urlopen(cancel,timeout=3) as r:self.assertEqual(r.status,200)
+            with self.assertRaises(HTTPError) as e:urlopen(Request(self.origin+path,data=body,headers=init_headers),timeout=3)
+            self.assertEqual(e.exception.code,409)
+        with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM viewer_tasks').fetchone()[0],1)
+
+    def test_overlapping_reserved_init_replays_and_conflicts_atomically(self):
+        from tests.test_viewer_http import multipart, BOUNDARY
+        self.stop();self.config=replace(self.config,admission_drain_enabled=False,prototype_state_dir=os.path.join(self.temp.name,'init-race'));self.start()
+        service=self.handler.viewer_service;cap='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        def run_pair(names):
+            identifier=str(uuid.uuid4());reserve=Request(self.origin+'/task/ledgetop/reserve?token='+VIEW,data=('uuid='+identifier).encode(),headers={'Content-Type':'application/x-www-form-urlencoded','X-LedgeTop-Capability':cap})
+            with urlopen(reserve,timeout=3) as r:self.assertEqual(r.status,200)
+            headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY,'set-uuid':identifier,'X-LedgeTop-Capability':cap};barrier=threading.Barrier(2);results=[];errors=[];original=service.store.initialize
+            def simultaneous(*args,**kwargs):barrier.wait(3);return original(*args,**kwargs)
+            def call(name):
+                try:
+                    body=multipart([('name',None,name.encode()),('options',None,b'[]')])
+                    with urlopen(Request(self.origin+'/task/new/init?token='+VIEW,data=body,headers=headers),timeout=5) as r:results.append(r.status)
+                except HTTPError as e:results.append(e.code)
+                except Exception as e:errors.append(e)
+            workers=[threading.Thread(target=call,args=(name,)) for name in names]
+            with patch.object(service,'_check_options',return_value=[]),patch.object(service.store,'initialize',side_effect=simultaneous):
+                try:
+                    for t in workers:t.start()
+                    for t in workers:t.join(5)
+                finally:
+                    barrier.abort()
+                    for t in workers:t.join(3)
+            self.assertFalse(any(t.is_alive() for t in workers));self.assertEqual(errors,[])
+            with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()[0],1)
+            return sorted(results)
+        self.assertEqual(run_pair(('same','same')),[200,200])
+        self.assertEqual(run_pair(('first','second')),[200,409])
+
+    def test_reserved_init_transaction_rollback_preserves_orphan_on_retry(self):
+        from tests.test_viewer_http import multipart, BOUNDARY
+        identifier=str(uuid.uuid4());cap='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        reserve=Request(self.origin+'/task/ledgetop/reserve?token='+VIEW,data=('uuid='+identifier).encode(),headers={'Content-Type':'application/x-www-form-urlencoded','X-LedgeTop-Capability':cap})
+        with urlopen(reserve,timeout=3) as r:self.assertEqual(r.status,200)
+        body=multipart([('name',None,b'synthetic'),('options',None,b'[]')]);url=self.origin+'/task/new/init?token='+VIEW
+        headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY,'set-uuid':identifier,'X-LedgeTop-Capability':cap}
+        with patch.object(self.handler.viewer_service,'_check_options',return_value=[]),patch('processing.viewer_tasks.sync_directory',side_effect=OSError('synthetic failure')):
+            with self.assertRaises(HTTPError) as e:urlopen(Request(url,data=body,headers=headers),timeout=3)
+            self.assertEqual(e.exception.code,503)
+        store=self.handler.viewer_service.store;orphan=store.root/(identifier+'-1')
+        self.assertTrue(orphan.is_dir())
+        with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM viewer_tasks').fetchone()[0],0)
+        with patch.object(self.handler.viewer_service,'_check_options',return_value=[]):
+            with urlopen(Request(url,data=body,headers=headers),timeout=3) as r:self.assertEqual(r.status,200)
+        with self.handler.prototype_queue._db() as db:
+            row=db.execute('SELECT directory FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
+        self.assertTrue(orphan.is_dir());self.assertNotEqual(row['directory'],orphan.name);self.assertTrue((store.root/row['directory']).is_dir())
 
     def test_close_waits_for_inflight_admission(self):
         entered=threading.Event();release=threading.Event();done=threading.Event()
