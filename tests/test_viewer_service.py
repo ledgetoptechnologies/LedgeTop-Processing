@@ -392,6 +392,40 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
         self.assertEqual(len(self.fleet.commits), 1)
 
+    def test_restart_while_node_offline_retains_slot_then_returns_completed_result(self):
+        first=self.submit();second=self.submit()
+        self.service.tick();task=self.task(first);engine_uuid=task['engine_uuid']
+        self.assertEqual(task['node_id'],'cluster');self.assertEqual(task['job']['status'],'running')
+        self.service.close();self.queue.close()
+        # The engine completes while its coordinator is stopped, then becomes
+        # temporarily unavailable to the restarted coordinator.
+        self.engines['cluster'].finish(engine_uuid);self.engines['cluster'].read_unavailable=True
+        self.make_queue_service()
+        self.assertEqual(self.task(first)['job']['status'],'held')
+        self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'],'held')
+        self.assertEqual(self.service.info(first)['status']['code'],20)
+        self.assertEqual(self.task(second)['job']['status'],'queued')
+        self.assertIsNone(self.task(second)['node_id'])
+        self.assertEqual(len(self.fleet.commits),1)
+        self.engines['cluster'].read_unavailable=False
+        self.service._backoff[first]=(0,self.service._backoff[first][1])
+        self.service.tick()
+        self.assertEqual(self.service.info(first)['status']['code'],40)
+        self.assertEqual(self.task(second)['node_id'],'cluster')
+        self.assertEqual(len(self.fleet.commits),2)
+        stream,length=self.service.download(first)
+        with stream:result=stream.read()
+        self.assertEqual(result,self.engines['cluster'].archive);self.assertEqual(length,len(result))
+        self.assertEqual(hashlib.sha256(result).hexdigest(),hashlib.sha256(self.engines['cluster'].archive).hexdigest())
+        self.assertEqual(sum(c[0]=='initialize' for c in self.engines['cluster'].calls),2)
+        self.assertEqual(self.fleet.max_active,1)
+        self.finish(second);self.service.tick()
+        self.service.close();self.queue.close();self.make_queue_service()
+        with patch.object(self.engines['cluster'],'download',side_effect=EngineUnavailable('offline')):
+            stream,_=self.service.download(first)
+            with stream:self.assertEqual(stream.read(),result)
+
     def test_operator_hold_serializes_with_viewer_cancel(self):
         identifier = self.submit()
         self.service.tick()
