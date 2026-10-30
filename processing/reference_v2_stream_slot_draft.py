@@ -48,7 +48,7 @@ class StreamSlot:
    raise SlotHeld('bounded slot state required')
   if self.db.execute('SELECT COUNT(*) FROM stream_slot').fetchone()[0]!=1:raise SlotHeld('slot state changed')
   rows=self.db.execute('SELECT id,epoch,phase,identity FROM stream_slot').fetchall()
-  if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.epoch or rows[0][2] not in ('idle','opening','charged','closed'):raise SlotHeld('slot state changed')
+  if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.epoch or rows[0][2] not in ('idle','opening','charged','closing','closed'):raise SlotHeld('slot state changed')
   if rows[0][2]=='idle' and rows[0][3] is not None:raise SlotHeld('slot idle identity invalid')
   if rows[0][2]!='idle':
    try:
@@ -68,7 +68,7 @@ class StreamSlot:
   try:
    row=self._validate()
    if row[2]!=expected:raise SlotHeld('slot requires reconciliation')
-   if expected in ('opening','charged') and row[3]!=identity:raise SlotHeld('slot identity changed')
+   if expected in ('opening','charged','closing') and row[3]!=identity:raise SlotHeld('slot identity changed')
    self.db.execute('UPDATE stream_slot SET phase=?,identity=? WHERE id=1',(phase,identity));self._check_path();self.db.execute('COMMIT')
   except Exception:
    if self.db.in_transaction:self.db.execute('ROLLBACK')
@@ -129,7 +129,10 @@ class StreamSlot:
    # A concurrent cooperating precharge cannot appear while this writer lock is
    # held. Slot file and ledger remain separately committed; ambiguous failure
    # still requires inspection and no automatic retry.
-   self._change('opening','closed',row[3]);ledger._check_path();db.execute('COMMIT')
+   self._change('opening','closing',row[3]);ledger._check_path();db.execute('COMMIT')
+   # A failure after either commit leaves closing as an explicit hold. No
+   # start/retry is permitted until a separate reviewed recovery resolves it.
+   self._change('closing','closed',row[3])
    return {'state':'no_charge_closed_no_authority'}
   except Exception:
    if db.in_transaction:db.execute('ROLLBACK')

@@ -42,6 +42,20 @@ class SlotTests(PrechargeTests):
   self.assertEqual(s.state(),'opening')
   self.assertEqual(l.precharge(request_id='r2',object_id='cloud',start=0,end=4)['state'],'replay_no_body')
 
+ def test_ledger_commit_failure_after_slot_transition_stays_held(self):
+  from processing.reference_v2_precharge_draft import PrechargeHeld
+  class FailCommit(sqlite3.Connection):
+   def execute(self,sql,*args):
+    if sql=='COMMIT':raise sqlite3.OperationalError('injected commit uncertainty')
+    return super().execute(sql,*args)
+  l=self.indexed();s=self.slot()
+  with self.assertRaises(PrechargeHeld):s.begin(l,request_id='r1',object_id='absent',start=0,end=1)
+  l._conn.close();l._conn=sqlite3.connect(self.path,isolation_level=None,factory=FailCommit);l._version=None
+  with self.assertRaises(sqlite3.OperationalError):s.reconcile_opening(l,writer_quiesced=True)
+  self.assertEqual(s.state(),'closing')
+  with self.assertRaisesRegex(SlotHeld,'reconciliation'):s.begin(l,request_id='r2',object_id='cloud',start=0,end=4)
+  with self.assertRaisesRegex(SlotHeld,'opening slot required'):s.reconcile_opening(l,writer_quiesced=True)
+
  def test_oversized_slot_identity_rejected_before_decode(self):
   s=self.slot();s.close();db=sqlite3.connect(self.slotpath)
   try:db.execute("UPDATE stream_slot SET phase='opening',identity=?",('x'*2049,));db.commit()
