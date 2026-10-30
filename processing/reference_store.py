@@ -212,6 +212,20 @@ class ReferenceStore:
         with self.queue._db() as db:
             return self._record(self._row(db, job_id), private)
 
+    def find_submission_replay(self, submission_id, *, request_digest, environment):
+        """Read-only exact replay; never creates a job for an unsupported shape."""
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._hash(request_digest, 'request digest')
+        protocol._environment(environment)
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            row=db.execute('SELECT job_id,request_digest,environment FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
+            # An absent, changed, or differently scoped identity is deliberately
+            # indistinguishable; none may create a new unsupported job.
+            if row is None or (row['request_digest'],row['environment']) != (request_digest,environment):
+                return None
+            return self._public(self._row(db,row['job_id']))
+
     def find_submission(self, submission_id, *, environment):
         """Recover a lost submit response without issuing another execution."""
         protocol._uuid(submission_id, 'submission ID')
