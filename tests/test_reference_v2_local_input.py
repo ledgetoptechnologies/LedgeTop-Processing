@@ -171,6 +171,41 @@ with NodeGate('synthetic-engine') as g:
    with NodeGate(engineid) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
    with self.ledger._transaction() as sd:self.assertIsNotNone(sd.execute("SELECT 1 FROM input_write_holds WHERE reservation='r1'").fetchone())
 
+ def test_initialize_process_death_never_repeats(self):
+  import subprocess,sys
+  from processing.node_gate import NodeGate
+  from processing.reference_v2_node_preflight import retain_node_for_verified_input
+  from processing.reference_v2_init_boundary import initialize_once,InitHeld
+  self.setup_input(b'abc');self.run_input(io.BytesIO(b'abc'));self.run_input(io.BytesIO(b''))
+  authority=str(uuid.uuid4());key=b'k'*32;engineid='synthetic-engine';origin='https://coordinator.example'
+  shared=dict(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,
+   engine_id=engineid,node_id='main',origin=origin,authority_id=authority,generation=1,worker_id='worker',operation_key=key)
+  with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
+   with NodeGate(engineid) as gate:gate.provision('main',origin,authority)
+   retain_node_for_verified_input(**shared);self.fence.close();self.db.close()
+   code="""import os,sys,json,sqlite3
+from pathlib import Path
+from processing.reference_input_journal import InputJournal
+from processing.reference_worker_fence_v2 import WorkerFence
+from processing.reference_v2_init_boundary import initialize_once
+from processing.scratch_policy import ScratchLedger
+root=Path(sys.argv[1]);binding=json.loads(sys.argv[2]);raw=bytes.fromhex(sys.argv[3]);authority=sys.argv[4]
+f=WorkerFence(root/'lock');jdb=sqlite3.connect(root/'journal');j=InputJournal(jdb)
+l=ScratchLedger(root/'ledger',root/'scratch',capacity_probe=lambda _:10000,safety_floor_bytes=0,cleanup_grace_seconds=0)
+db=sqlite3.connect(root/'init.sqlite')
+class Engine:
+ def initialize(self,task):os._exit(73)
+initialize_once(enabled=True,db=db,engine=Engine(),fence=f,journal=j,ledger=l,reservation_id='r1',binding=binding,manifest_bytes=raw,engine_id='synthetic-engine',node_id='main',origin='https://coordinator.example',authority_id=authority,generation=1,worker_id='worker',operation_key=b'k'*32)
+"""
+   proc=subprocess.run([sys.executable,'-c',code,str(self.root),json.dumps(self.binding),self.raw.hex(),authority],timeout=10)
+   self.assertEqual(proc.returncode,73)
+   self.db=sqlite3.connect(self.root/'journal');self.addCleanup(self.db.close);self.journal=InputJournal(self.db)
+   self.fence=WorkerFence(self.lock);self.addCleanup(self.fence.close);shared.update(fence=self.fence,journal=self.journal)
+   class Engine:
+    def initialize(self,task):self.fail('duplicate initialize')
+   db=sqlite3.connect(self.root/'init.sqlite');self.addCleanup(db.close)
+   with self.assertRaisesRegex(InitHeld,'already attempted'):initialize_once(enabled=True,db=db,engine=Engine(),**shared)
+
  def test_insufficient_remaining_blocks_second_file(self):
   from processing.scratch_policy import PolicyConflict
   self.setup_input(b'abc',second=b'defg');self.run_input(io.BytesIO(b'abc'))
