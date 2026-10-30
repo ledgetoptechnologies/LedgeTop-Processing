@@ -32,6 +32,10 @@ class V2LedgerTests(unittest.TestCase):
   kw=dict(principal='producer',claim_token=claim['claimToken'],clock=lambda:1000)
   bound=self.ledger.bind_reservation(first['jobId'],env,plan,**kw);self.assertEqual(bound,self.ledger.bind_reservation(first['jobId'],env,plan,**kw))
   snap=self.ledger.snapshot_bytes(first['jobId'],**kw);self.assertEqual(snap['manifestBytes'],p.canonical_json(m));self.assertEqual(snap['planBytes'],p.canonical_json(plan));self.assertEqual(snap['planSha256'],p.digest(plan));self.assertEqual(snap['reservationBytes'],p.canonical_json(env))
+  with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**dict(kw,clock=lambda:1893456000))
+  with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**kw)
+  with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
+  with self.queue._db() as db:self.assertEqual(db.execute('SELECT high FROM reference_v2_clock WHERE singleton=1').fetchone()[0],1893456000)
   with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],principal='producer',claim_token='wrong',clock=lambda:1000)
   for column in ('plan_sha','reservation_sha'):
    with self.queue._db() as db:
@@ -42,6 +46,7 @@ class V2LedgerTests(unittest.TestCase):
   bad=dict(kw,claim_token='wrong')
   with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**bad)
   self.queue.close();self.queue=Queue(self.tmp.name,node_ids=('cluster','node-2'));self.queue.allowed_profiles.add(PROFILE);self.ledger=V2MetadataLedger(self.queue,enabled=True)
+  with self.queue._db() as db:self.assertEqual(db.execute('SELECT high FROM reference_v2_clock WHERE singleton=1').fetchone()[0],1893456000)
   with self.assertRaises(Conflict):self.ledger.bind_reservation(first['jobId'],env,plan,**kw)
   with self.assertRaises(Conflict):self.ledger.snapshot_bytes(first['jobId'],**kw)
   with self.queue._db() as db:self.assertEqual(db.execute('SELECT reservation_sha FROM reference_v2_staged_jobs').fetchone()[0],bound['reservationSha256'])

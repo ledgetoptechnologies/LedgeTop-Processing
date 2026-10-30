@@ -23,6 +23,8 @@ _DDL = '''CREATE TABLE reference_v2_staged_jobs (
                 job_id TEXT PRIMARY KEY, submission_id TEXT UNIQUE NOT NULL, principal TEXT NOT NULL,
                 environment TEXT NOT NULL, request_json TEXT NOT NULL, request_sha TEXT NOT NULL,
                 claim_json TEXT, claim_sha TEXT, reservation_json TEXT, reservation_sha TEXT, plan_json TEXT, plan_sha TEXT)'''
+_CLOCK_DDL = '''CREATE TABLE reference_v2_clock (singleton INTEGER PRIMARY KEY CHECK(singleton=1), high REAL NOT NULL)'''
+_EXPIRED = object()
 
 
 class V2MetadataLedger:
@@ -36,6 +38,13 @@ class V2MetadataLedger:
             found = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_v2_staged_jobs'").fetchone()
             if found is None: db.execute(_DDL)
             elif found[0] != _DDL: raise Conflict('v2 schema unavailable')
+            clock = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_v2_clock'").fetchone()
+            if clock is None:
+                if db.execute('SELECT 1 FROM reference_v2_staged_jobs LIMIT 1').fetchone():
+                    raise Conflict('v2 clock migration required')
+                db.execute(_CLOCK_DDL)
+                db.execute('INSERT INTO reference_v2_clock VALUES(1,0)')
+            elif clock[0] != _CLOCK_DDL: raise Conflict('v2 schema unavailable')
             self._check_schema(db)
 
     @staticmethod
@@ -43,6 +52,21 @@ class V2MetadataLedger:
         found=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_v2_staged_jobs'").fetchone()
         extras=db.execute("SELECT 1 FROM sqlite_master WHERE tbl_name='reference_v2_staged_jobs' AND (type='trigger' OR (type='index' AND sql IS NOT NULL)) LIMIT 1").fetchone()
         if found is None or found[0]!=_DDL or extras is not None: raise Conflict('v2 schema unavailable')
+        clock = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_v2_clock'").fetchone()
+        extras = db.execute("SELECT 1 FROM sqlite_master WHERE tbl_name='reference_v2_clock' AND (type='trigger' OR (type='index' AND sql IS NOT NULL)) LIMIT 1").fetchone()
+        if clock is None or clock[0] != _CLOCK_DDL or extras is not None: raise Conflict('v2 schema unavailable')
+
+    @staticmethod
+    def _observe_clock(db, clock):
+        now = clock()
+        row = db.execute('SELECT high FROM reference_v2_clock WHERE singleton=1').fetchone()
+        if (type(now) not in (int,float) or not math.isfinite(now) or now < 0
+                or row is None or type(row[0]) not in (int,float) or not math.isfinite(row[0]) or row[0] < 0
+                or db.execute('SELECT COUNT(*) FROM reference_v2_clock').fetchone()[0] != 1):
+            raise Conflict('v2 clock unavailable')
+        observed = max(now, row[0])
+        db.execute('UPDATE reference_v2_clock SET high=? WHERE singleton=1', (observed,))
+        return observed
 
     @staticmethod
     def _fetch(db, field, value, principal=None):
@@ -208,19 +232,21 @@ class V2MetadataLedger:
                 or envelope['generation']!=1 or envelope['environment']!=row['environment']
                 or envelope['capabilityFingerprint']!=body['capabilityFingerprint'] or envelope['manifestSha256']!=manifest['sha256']
                 or plan['objects']!=[{k:o[k] for k in ('id','byteSize','sha256')} for o in manifest['objects']]): raise Conflict('reservation binding differs')
-            now=clock()
-            if type(now) not in (int,float) or not math.isfinite(now) or now>=expiry: raise Conflict('reservation expired')
+            now=self._observe_clock(db,clock)
+            if now>=expiry: return _EXPIRED
             encoded=p.canonical_json(envelope).decode();digest=p.digest(envelope)
             plan_encoded=p.canonical_json(plan).decode();plan_digest=p.digest(plan)
             if row['reservation_json']:
                 if row['reservation_json']!=encoded or row['reservation_sha']!=digest or row['plan_json']!=plan_encoded or row['plan_sha']!=plan_digest: raise Conflict('reservation already bound')
                 return {'reservationSha256':digest,'accepted':True}
             self._quota(db,len(encoded.encode())+len(plan_encoded.encode()))
-            now=clock()
-            if type(now) not in (int,float) or not math.isfinite(now) or now>=expiry: raise Conflict('reservation expired')
+            now=self._observe_clock(db,clock)
+            if now>=expiry: return _EXPIRED
             db.execute('UPDATE reference_v2_staged_jobs SET reservation_json=?,reservation_sha=?,plan_json=?,plan_sha=? WHERE job_id=?',(encoded,digest,plan_encoded,plan_digest,job_id))
             return {'reservationSha256':digest,'accepted':True}
-        return self._run(write)
+        result = self._run(write)
+        if result is _EXPIRED: raise Conflict('reservation expired')
+        return result
 
     def snapshot_bytes(self, job_id, *, principal, claim_token, clock):
         """Internal current-epoch observation; not broker authorization."""
@@ -235,12 +261,14 @@ class V2MetadataLedger:
                 raise Conflict('v2 metadata claim unavailable')
             reservation=json.loads(row['reservation_json'])
             expiry=datetime.fromisoformat(reservation['expiresAt'].replace('Z','+00:00')).timestamp()
-            now=clock()
-            if type(now) not in (int,float) or not math.isfinite(now) or now>=expiry:
-                raise Conflict('reservation expired')
+            now=self._observe_clock(db,clock)
+            if now>=expiry:
+                return _EXPIRED
             return {'manifestBytes':p.canonical_json(request['body']['manifest']),
                     'manifestSha256':request['body']['manifest']['sha256'],
                     'planBytes':row['plan_json'].encode('utf-8'),'planSha256':row['plan_sha'],
                     'reservationBytes':row['reservation_json'].encode('utf-8'),
                     'reservationSha256':row['reservation_sha']}
-        return self._run(read)
+        result = self._run(read)
+        if result is _EXPIRED: raise Conflict('reservation expired')
+        return result
