@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 import os
 import re
+import sys
 from urllib.parse import urlsplit
 
 ADMISSION_DRAIN_QUALIFIED = False
@@ -32,6 +33,7 @@ class Config:
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
+    admission_socket_deadline_seconds: int = 0
 
 
 def _node_origin(value: str) -> str:
@@ -86,6 +88,12 @@ def from_environment() -> Config:
         raise ValueError('admission drain requires persistent state and operator credential')
     if admission == '1' and ADMISSION_DRAIN_QUALIFIED is not True:
         raise ValueError('admission drain is not qualified for startup')
+    socket_deadline = os.environ.get('PROCESSING_ADMISSION_SOCKET_DEADLINE_SECONDS', '0')
+    if socket_deadline != '0':
+        socket_deadline = _positive_int(socket_deadline, 'PROCESSING_ADMISSION_SOCKET_DEADLINE_SECONDS', 86400)
+        if admission != '1' or sys.platform != 'linux': raise ValueError('socket deadline requires Linux admission drain')
+    else:
+        socket_deadline = 0
     if viewer not in ('0', '1'):
         raise ValueError('PROCESSING_VIEWER_ENABLED must be 0 or 1')
     viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
@@ -128,4 +136,5 @@ def from_environment() -> Config:
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         admission_drain_enabled=admission == '1',
+        admission_socket_deadline_seconds=socket_deadline,
     )

@@ -10,6 +10,11 @@ from email.policy import default as email_policy
 import hmac
 import json
 import hashlib
+from contextlib import contextmanager
+import socket
+import sys
+import logging
+import threading
 import os
 from pathlib import Path
 import re
@@ -26,6 +31,27 @@ MAX_PART_HEADERS = 16 * 1024
 MAX_PARTS = 64
 CHUNK = 64 * 1024
 BOUNDARY = re.compile(r"[0-9A-Za-z'()+_,./:=?-]{1,70}\Z")
+
+
+@contextmanager
+def admission_socket_deadline(handler, seconds):
+    """Interrupt slow client I/O; never release the gate before work exits."""
+    if not seconds:
+        yield
+        return
+    def interrupt():
+        logging.getLogger(__name__).warning('Viewer socket deadline expired; request outcome may be unknown')
+        try: handler.connection.shutdown(socket.SHUT_RDWR)
+        except OSError: pass
+    timer = threading.Timer(seconds, interrupt)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        # Join closes the cancellation race before the server reuses a socket.
+        timer.cancel()
+        timer.join()
 
 
 class RequestError(Exception):
@@ -176,9 +202,13 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None):
+    def __init__(self, service, token, staging_token='', temp_dir=None, admission_socket_deadline_seconds=0):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
+        if (type(admission_socket_deadline_seconds) is not int or not 0 <= admission_socket_deadline_seconds <= 86400
+                or (admission_socket_deadline_seconds and sys.platform != 'linux')):
+            raise ValueError('invalid admission socket deadline')
+        self.admission_socket_deadline_seconds = admission_socket_deadline_seconds
         self.service, self.token, self.staging_token = service, token, staging_token
         if temp_dir is not None:
             directory = Path(temp_dir)
@@ -229,7 +259,8 @@ class ViewerFacade:
                 if guarded_download and gate is not None:
                     from .admission_drain import AdmissionClosed
                     try:
-                        with gate.admit(): self._get(handler, path, query, environment)
+                        with gate.admit(), admission_socket_deadline(handler, self.admission_socket_deadline_seconds):
+                            self._get(handler, path, query, environment)
                     except AdmissionClosed:
                         raise RequestError(503, 'admission_draining')
                 else:
@@ -242,7 +273,8 @@ class ViewerFacade:
                 if guarded and gate is not None:
                     from .admission_drain import AdmissionClosed
                     try:
-                        with gate.admit(): self._post(handler, path, environment)
+                        with gate.admit(), admission_socket_deadline(handler, self.admission_socket_deadline_seconds):
+                            self._post(handler, path, environment)
                     except AdmissionClosed:
                         raise RequestError(503, 'admission_draining')
                 else:
@@ -251,7 +283,8 @@ class ViewerFacade:
                 raise RequestError(405, 'method_not_allowed')
         except RequestError as error:
             handler.close_connection = True
-            self._reply(handler, error.status, {'error': error.code})
+            try: self._reply(handler, error.status, {'error': error.code})
+            except OSError: pass
         except KeyError:
             handler.close_connection = True
             self._reply(handler, 404, {'error': 'task_not_found'})

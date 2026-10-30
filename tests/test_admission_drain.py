@@ -1,6 +1,8 @@
 import json
 import io
 import os
+import socket
+import sys
 import tempfile
 import threading
 import time
@@ -201,6 +203,69 @@ class AdmissionTests(unittest.TestCase):
                 self.assertCountEqual(results,[(200,b'synthetic'),(200,None)])
                 self.assertEqual(self.request('/task/'+identifier+'/download/all.zip?token='+VIEW)[0],503)
                 self.assertEqual(action.call_count,1)
+            finally:
+                release.set();worker.join(3)
+                if closer.ident is not None:closer.join(3)
+
+    @unittest.skipUnless(sys.platform == 'linux','deadline qualified only on Linux')
+    def test_deadline_interrupts_stalled_http_upload_before_close(self):
+        self.stop();self.config=replace(self.config,admission_socket_deadline_seconds=1);self.start()
+        identifier=str(uuid.uuid4());operation=self.operation(True);client=socket.create_connection(('127.0.0.1',self.server.server_port),timeout=2)
+        client.settimeout(3)
+        request=('POST /task/new/init?token='+VIEW+' HTTP/1.1\r\nHost: localhost\r\nset-uuid: '+identifier+'\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: 2000\r\n\r\n--b\r\n').encode()
+        try:
+            client.sendall(request)
+            # Confirm actual request entered the gate before requesting close.
+            gate=self.handler.prototype_queue.admission_drain
+            deadline=time.monotonic()+2
+            while time.monotonic()<deadline:
+                if not gate._lock.acquire(blocking=False):break
+                gate._lock.release();time.sleep(.01)
+            else:self.fail('upload did not acquire admission gate')
+            start=time.monotonic();self.assertEqual(self.request('/v1/prototype/admission-drain',operation,OP)[0],200)
+            self.assertLess(time.monotonic()-start,3)
+        finally:client.close()
+
+    @unittest.skipUnless(sys.platform == 'linux','deadline qualified only on Linux')
+    def test_deadline_interrupts_stalled_http_download_before_close(self):
+        self.stop();self.config=replace(self.config,admission_socket_deadline_seconds=1);self.start()
+        identifier=str(uuid.uuid4());operation=self.operation(True);started=threading.Event()
+        class EndlessOutput:
+            def read(self,n):started.set();return b'x'*n
+            def close(self):pass
+        client=socket.socket();client.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,1024);client.settimeout(3)
+        client.connect(('127.0.0.1',self.server.server_port))
+        with patch.object(self.handler.viewer_service,'authorize'),patch.object(self.handler.viewer_service,'download',return_value=(EndlessOutput(),128*1024*1024)):
+            try:
+                client.sendall(('GET /task/'+identifier+'/download/all.zip?token='+VIEW+' HTTP/1.1\r\nHost: localhost\r\n\r\n').encode())
+                self.assertTrue(started.wait(2));start=time.monotonic()
+                self.assertEqual(self.request('/v1/prototype/admission-drain',operation,OP)[0],200)
+                self.assertLess(time.monotonic()-start,3)
+            finally:client.close()
+
+    @unittest.skipUnless(sys.platform == 'linux','deadline qualified only on Linux')
+    def test_deadline_never_releases_gate_while_application_work_continues(self):
+        self.stop();self.config=replace(self.config,admission_socket_deadline_seconds=1);self.start()
+        entered=threading.Event();release=threading.Event();closed=threading.Event();operation=self.operation(True)
+        identifier=str(uuid.uuid4());errors=[];close_result=[]
+        def blocked(_):
+            entered.set()
+            if not release.wait(4):raise RuntimeError('test timeout')
+            return io.BytesIO(b'x'),1
+        def download():
+            try:urlopen(self.origin+'/task/'+identifier+'/download/all.zip?token='+VIEW,timeout=4).read()
+            except Exception:pass # peer was deliberately disconnected
+        def close():
+            try:close_result.append(self.request('/v1/prototype/admission-drain',operation,OP)[0])
+            except Exception as e:errors.append(e)
+            finally:closed.set()
+        with patch.object(self.handler.viewer_service,'authorize'),patch.object(self.handler.viewer_service,'download',side_effect=blocked):
+            worker=threading.Thread(target=download);closer=threading.Thread(target=close)
+            try:
+                worker.start();self.assertTrue(entered.wait(2));closer.start()
+                self.assertFalse(closed.wait(1.3))
+                release.set();worker.join(3);closer.join(3)
+                self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertEqual(errors,[]);self.assertEqual(close_result,[200])
             finally:
                 release.set();worker.join(3)
                 if closer.ident is not None:closer.join(3)
