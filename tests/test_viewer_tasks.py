@@ -193,6 +193,42 @@ store.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9,'production',cap)
         finally:
             queue.close()
 
+    def test_invalid_upload_intent_schema_is_rejected_by_store_and_held_preflight(self):
+        from processing.prototype import _require_idle_state
+        with self.queue._db() as db:
+            db.execute('DROP TABLE viewer_upload_intents')
+            db.execute('CREATE TABLE viewer_upload_intents (uuid TEXT)')
+        with self.assertRaises(Conflict): TaskStore(self.queue, self.root/'inputs')
+        with self.assertRaisesRegex(RuntimeError, 'production_hold_idle_state_unavailable'):
+            _require_idle_state(self.queue.path)
+
+    def test_upload_intent_extra_schema_objects_hold_startup(self):
+        from processing.prototype import _require_idle_state
+        for ddl, drop in (
+            ('CREATE TRIGGER extra_intent AFTER INSERT ON viewer_upload_intents BEGIN SELECT 1; END', 'DROP TRIGGER extra_intent'),
+            ('CREATE INDEX extra_intent ON viewer_upload_intents(bytes)', 'DROP INDEX extra_intent'),
+        ):
+            with self.subTest(ddl=ddl):
+                with self.queue._db() as db: db.execute(ddl)
+                with self.assertRaises(Conflict): TaskStore(self.queue,self.root/'inputs')
+                with self.assertRaisesRegex(RuntimeError,'production_hold_idle_state_unavailable'):
+                    _require_idle_state(self.queue.path)
+                with self.queue._db() as db: db.execute(drop)
+        _require_idle_state(self.queue.path)
+
+    def test_upload_intent_missing_autoindex_holds_startup(self):
+        from processing.prototype import _require_idle_state
+        import sqlite3
+        db=sqlite3.connect(self.queue.path)
+        try:
+            db.execute('PRAGMA writable_schema=ON')
+            db.execute("DELETE FROM sqlite_master WHERE name='sqlite_autoindex_viewer_upload_intents_1'")
+            db.commit()
+        finally:
+            db.close()
+        with self.assertRaisesRegex(RuntimeError,'production_hold_idle_state_unavailable'):
+            _require_idle_state(self.queue.path)
+
     def test_truncated_or_overlong_stream_never_enters_manifest(self):
         self.initialize()
         for body, length in ((b'ab', 3), (b'abcd', 3)):

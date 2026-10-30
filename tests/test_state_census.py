@@ -76,6 +76,36 @@ class CensusFixture(unittest.TestCase):
 
 
 class CensusTest(CensusFixture):
+    def test_upload_intent_allowance_requires_exact_empty_table(self):
+        from processing.prototype import Queue
+        from processing.viewer_tasks import TaskStore
+        sample=self.base/'sample'; queue=Queue(sample/'queue')
+        try:
+            TaskStore(queue,sample/'inputs')
+            with queue._db() as db:
+                ddl=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_upload_intents'").fetchone()[0]
+        finally:
+            queue.close()
+        before=self.census()[1]
+        with contextlib.closing(sqlite3.connect(self.root/'jobs.sqlite3')) as db:
+            db.execute(ddl); db.commit()
+        after=self.census()[1]
+        flags=('--allow-path','jobs.sqlite3:bytes,content,mtime','--allow-path','.:mtime','--allow-empty-upload-intents')
+        self.assertEqual(self.compare(before,after,*flags)[0],0)
+        with contextlib.closing(sqlite3.connect(self.root/'jobs.sqlite3')) as db:
+            db.execute("INSERT INTO viewer_upload_intents VALUES ('synthetic',1,'d','production','a','a.jpg','t','p',1,'h',1,'1','1')")
+            db.commit()
+        pending=self.census()[1]
+        self.assertEqual(self.compare(before,pending,*flags)[0],1)
+        self.assertEqual(self.compare(pending,pending,*flags)[0],1)
+        with self.assertRaises(SystemExit): self.compare(before,after,*flags,'--allow-table','viewer_upload_intents')
+        with contextlib.closing(sqlite3.connect(self.root/'jobs.sqlite3')) as db:
+            db.execute('DROP TABLE viewer_upload_intents')
+            db.execute('CREATE TABLE viewer_upload_intents (uuid TEXT)')
+            db.commit()
+        malformed=self.census()[1]
+        self.assertEqual(self.compare(before,malformed,*flags)[0],1)
+
     def test_reports_state_and_is_stable_and_read_only(self):
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         status, first = self.census()

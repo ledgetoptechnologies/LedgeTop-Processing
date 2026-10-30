@@ -63,8 +63,16 @@ def _require_idle_state(path):
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not {'jobs', 'viewer_tasks'} <= tables:
                 raise ValueError('missing state tables')
-            if 'viewer_upload_intents' in tables and db.execute('SELECT 1 FROM viewer_upload_intents LIMIT 1').fetchone():
-                raise ValueError('unresolved upload intent')
+            if 'viewer_upload_intents' in tables:
+                schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_upload_intents'").fetchone()
+                indexes = db.execute('PRAGMA index_list(viewer_upload_intents)').fetchall()
+                if (not schema or not isinstance(schema[0], str) or
+                        hashlib.sha256(schema[0].encode()).hexdigest() != '7f7e1921a1402ffddb1fbcc80d97339a0413dce980592a8416a984bc81937cac' or
+                        len(indexes) != 1 or indexes[0][1:5] != ('sqlite_autoindex_viewer_upload_intents_1', 1, 'pk', 0) or
+                        db.execute('PRAGMA index_info(sqlite_autoindex_viewer_upload_intents_1)').fetchall() != [(0,0,'uuid'),(1,4,'name_key')] or
+                        db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='viewer_upload_intents' LIMIT 1").fetchone() or
+                        db.execute('SELECT 1 FROM viewer_upload_intents LIMIT 1').fetchone()):
+                    raise ValueError('unresolved or invalid upload intents')
             if db.execute("SELECT 1 FROM jobs WHERE status IS NULL OR status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
                 raise ValueError('nonterminal job')
             if db.execute("SELECT 1 FROM viewer_tasks WHERE stage IS NULL OR stage NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():

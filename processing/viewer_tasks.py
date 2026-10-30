@@ -130,6 +130,15 @@ class TaskStore:
                 temporary TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL,
                 sha256 TEXT NOT NULL, is_photo INTEGER NOT NULL, device TEXT NOT NULL,
                 inode TEXT NOT NULL, PRIMARY KEY(uuid,name_key))''')
+            intent_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_upload_intents'").fetchone()
+            intent_indexes = [tuple(item) for item in db.execute('PRAGMA index_list(viewer_upload_intents)')]
+            intent_columns = [tuple(item) for item in db.execute('PRAGMA index_info(sqlite_autoindex_viewer_upload_intents_1)')]
+            if (not intent_schema or not isinstance(intent_schema['sql'], str) or
+                    hashlib.sha256(intent_schema['sql'].encode()).hexdigest() != '7f7e1921a1402ffddb1fbcc80d97339a0413dce980592a8416a984bc81937cac' or
+                    len(intent_indexes) != 1 or intent_indexes[0][1:5] != ('sqlite_autoindex_viewer_upload_intents_1', 1, 'pk', 0) or
+                    intent_columns != [(0,0,'uuid'),(1,4,'name_key')] or
+                    db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='viewer_upload_intents' LIMIT 1").fetchone()):
+                raise Conflict('upload intent schema requires inspection')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_incarnations (
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 job_id TEXT, metadata TEXT NOT NULL, files TEXT NOT NULL,

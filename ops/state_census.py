@@ -130,6 +130,10 @@ VIEWER_NEW_COLUMN = 'option_evidence_required'
 # legacy schema and the specific ADD COLUMN statement. Other variants hold.
 VIEWER_LEGACY_SCHEMA_SHA256 = 'e7bbc127917f0c8c21007a79f35b434d00a1446fed25b369e1b3ab7579c628a3'
 VIEWER_MIGRATED_SCHEMA_SHA256 = 'a637e43b58241be981e0c056d8e6fd7d4a83e7c590598f837f6fccfdcf77d424'
+UPLOAD_INTENT_TABLE = 'viewer_upload_intents'
+UPLOAD_INTENT_DDL_SHA256 = '7f7e1921a1402ffddb1fbcc80d97339a0413dce980592a8416a984bc81937cac'
+UPLOAD_INTENT_INDEX = 'index:sqlite_autoindex_viewer_upload_intents_1'
+EMPTY_SQL_SHA256 = hashlib.sha256(b'').hexdigest()
 
 def database(path, key):
     # immutable mode ignores WAL: callers must census stopped, checkpointed
@@ -268,7 +272,7 @@ def lease_marker_digest(key):
 
 
 def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_objects=(), allow_new_tables=(),
-            allow_lease_marker=False, allow_viewer_task_default_column=False):
+            allow_lease_marker=False, allow_viewer_task_default_column=False, allow_empty_upload_intents=False):
     """Return the differences that no allowance covers, as counts and opaque IDs.
 
     ``allow_lease_marker`` permits exactly one thing: the authority-lease marker
@@ -280,6 +284,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
             raise SystemExit('census schema version %s is not supported' % document.get('schemaVersion'))
     if allow_viewer_task_default_column and 'viewer_tasks' in allow_tables:
         raise SystemExit('viewer_tasks cannot use both broad and narrow allowances')
+    if allow_empty_upload_intents and (UPLOAD_INTENT_TABLE in allow_tables or UPLOAD_INTENT_TABLE in allow_new_tables):
+        raise SystemExit('upload intent table cannot use broad allowances')
     path_allowances = parse_path_allowances(allow_paths, key)
     object_allowances = parse_object_allowances(allow_objects)
     old, new = before['entries'], after['entries']
@@ -306,6 +312,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
     if allow_lease_marker and (da is None or db is None):
         # The marker can only be proven inside a database: never pass vacuously.
         database_differences.append({'database': 'leaseMarkerRequiresDatabase'})
+    if allow_empty_upload_intents and (da is None or db is None):
+        database_differences.append({'table': UPLOAD_INTENT_TABLE, 'change': 'requiresDatabase'})
     if (da is None) != (db is None):
         database_differences.append({'database': 'presence'})
     elif da is not None:
@@ -313,6 +321,10 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
         marker_hash = hashlib.sha256(LEASE_MARKER_DDL.encode()).hexdigest()
         for name in sorted(set(da['objects']) | set(db['objects'])):
             was, now = da['objects'].get(name), db['objects'].get(name)
+            if allow_empty_upload_intents and name == 'table:' + UPLOAD_INTENT_TABLE and was is None and now == UPLOAD_INTENT_DDL_SHA256:
+                continue
+            if allow_empty_upload_intents and name == UPLOAD_INTENT_INDEX and was is None and now == EMPTY_SQL_SHA256:
+                continue
             if allow_lease_marker and name == marker_object and was is None and now == marker_hash:
                 continue
             if was != now and (now is None or object_allowances.get(name) != now):
@@ -330,6 +342,14 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
                 if (db['rowCounts'].get(LEASE_MARKER_TABLE) != 1
                         or db['tableDigest'].get(LEASE_MARKER_TABLE) != lease_marker_digest(key)):
                     database_differences.append({'table': LEASE_MARKER_TABLE, 'change': 'leaseMarkerInvalid'})
+        if allow_empty_upload_intents:
+            name = 'table:' + UPLOAD_INTENT_TABLE
+            if (db['objects'].get(name) != UPLOAD_INTENT_DDL_SHA256 or db['objects'].get(UPLOAD_INTENT_INDEX) != EMPTY_SQL_SHA256 or
+                    db['rowCounts'].get(UPLOAD_INTENT_TABLE) != 0):
+                database_differences.append({'table': UPLOAD_INTENT_TABLE, 'change': 'notExactAndEmptyAfter'})
+            if name in da['objects'] and (da['objects'][name] != UPLOAD_INTENT_DDL_SHA256 or da['objects'].get(UPLOAD_INTENT_INDEX) != EMPTY_SQL_SHA256 or
+                    da['rowCounts'].get(UPLOAD_INTENT_TABLE) != 0):
+                database_differences.append({'table': UPLOAD_INTENT_TABLE, 'change': 'notExactAndEmptyBefore'})
         for name, expected in sorted(object_allowances.items()):
             if db['objects'].get(name) != expected:
                 database_differences.append({'object': name, 'change': 'allowanceNotMatched'})
@@ -354,6 +374,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
             if name not in da['tableDigest']:
                 if allow_lease_marker and name == LEASE_MARKER_TABLE:
                     pass  # validated unconditionally above
+                elif allow_empty_upload_intents and name == UPLOAD_INTENT_TABLE:
+                    pass  # exact schema and empty after-state checked above
                 elif name not in allow_new_tables:
                     database_differences.append({'table': name, 'change': 'added'})
                 elif db['rowCounts'][name]:
@@ -396,6 +418,8 @@ def main(argv=None):
                       help='permit only preserved legacy viewer_tasks rows with a new zero-valued option_evidence_required column')
     diff.add_argument('--allow-lease-marker', action='store_true',
                       help='allow and require exactly the authority-lease marker table and its single row')
+    diff.add_argument('--allow-empty-upload-intents', action='store_true',
+                      help='allow only the exact new upload intent table and require it empty on both sides')
     diff.add_argument('--schema-allowlist', type=Path,
                       help='schema-only allowlist file; refuses anything but exact object hashes')
     make = commands.add_parser('schema-allowlist', help='write exact schema-object hashes from a census')
@@ -431,7 +455,8 @@ def main(argv=None):
                          allow_paths=args.allow_path, allow_tables=args.allow_table,
                          allow_objects=objects, allow_new_tables=args.allow_new_table,
                          allow_lease_marker=args.allow_lease_marker,
-                         allow_viewer_task_default_column=args.allow_viewer_task_default_column)
+                         allow_viewer_task_default_column=args.allow_viewer_task_default_column,
+                         allow_empty_upload_intents=args.allow_empty_upload_intents)
         status = 0 if result['identical'] else 1
     json.dump(result, sys.stdout, sort_keys=True, indent=1)
     sys.stdout.write('\n')
