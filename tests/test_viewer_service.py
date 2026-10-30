@@ -225,6 +225,49 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.capabilities()['ledgetopMaxInputBytes'], self.service.store.max_input_bytes)
         self.assertEqual(self.service.capabilities()['ledgetopMaxUploadRequestBytes'], MAX_UPLOAD_BYTES)
 
+    def test_spool_rejection_precedes_body_read_and_storage(self):
+        from types import SimpleNamespace
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import multipart, BOUNDARY, MemoryHandler
+        identifier=self.initialize();spool=self.root/'http-spool';spool.mkdir(mode=0o700)
+        facade=ViewerFacade(self.service,'synthetic-production-token',temp_dir=spool,spool_min_free_bytes=100)
+        body=multipart([('images','first.jpg',b'first')])
+        request=MemoryHandler('/task/new/upload/'+identifier+'?token=synthetic-production-token',body,
+            Content_Type='multipart/form-data; boundary='+BOUNDARY,Content_Length=str(len(body)))
+        with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100)):
+            facade.handle(request)
+        self.assertEqual(request.status,503);self.assertEqual(json.loads(request.wfile.getvalue())['error'],'spool_capacity_unavailable')
+        self.assertEqual(request.rfile.tell(),0);self.assertEqual(self.task(identifier)['files'],[])
+        self.assertEqual(self.service.info(identifier)['imagesCount'],0)
+
+    def test_storage_error_after_first_part_preserves_exact_replay_semantics(self):
+        from types import SimpleNamespace
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import multipart, BOUNDARY, MemoryHandler
+        identifier=self.initialize();spool=self.root/'http-spool';spool.mkdir(mode=0o700)
+        facade=ViewerFacade(self.service,'synthetic-production-token',temp_dir=spool,spool_min_free_bytes=100)
+        def send(parts):
+            body=multipart([('images',name,data) for name,data in parts])
+            request=MemoryHandler('/task/new/upload/'+identifier+'?token=synthetic-production-token',body,
+                Content_Type='multipart/form-data; boundary='+BOUNDARY,Content_Length=str(len(body)))
+            with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100000)):
+                facade.handle(request)
+            return request
+        original=self.service.upload
+        def fail_second(identifier,name,stream,length,*args):
+            if name=='second.jpg':raise OSError('synthetic second part failure')
+            return original(identifier,name,stream,length,*args)
+        with patch.object(self.service,'upload',side_effect=fail_second):
+            response=send([('first.jpg',b'first'),('second.jpg',b'second')])
+        self.assertEqual(response.status,503);self.assertEqual(json.loads(response.wfile.getvalue())['error'],'service_unavailable')
+        task=self.task(identifier);self.assertEqual(self.service.info(identifier)['imagesCount'],1)
+        self.assertEqual(len(task['files']),1);stored=Path(task['files'][0]['path']);self.assertEqual(stored.read_bytes(),b'first')
+        self.assertEqual(send([('first.jpg',b'first')]).status,200)
+        self.assertEqual(send([('first.jpg',b'other')]).status,409)
+        self.assertEqual(stored.read_bytes(),b'first');self.assertEqual(self.service.info(identifier)['imagesCount'],1)
+        self.assertEqual(send([('first.jpg',b'first'),('second.jpg',b'second')]).status,200)
+        self.assertEqual(self.service.info(identifier)['imagesCount'],2);self.assertEqual(stored.read_bytes(),b'first')
+
     def test_real_http_batch_over_limit_retains_prior_file_and_retries_safely(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from urllib.error import HTTPError
