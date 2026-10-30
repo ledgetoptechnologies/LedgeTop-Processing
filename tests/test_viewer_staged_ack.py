@@ -5,6 +5,7 @@ import http.client
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import ssl
 import subprocess
 import threading
@@ -15,6 +16,8 @@ from processing import reference_protocol as p
 from processing.reference_runtime import _DynamicAPI
 from processing.reference_http import create_reference_http_server
 from processing.viewer_staged_ack import ROUTE,NAMESPACE,ViewerStagedAck
+from processing.viewer_staged_ack_schema import initialize_staged_ack_schema
+from contextlib import contextmanager
 from tests.test_viewer_service import ViewerServiceTests
 
 
@@ -36,6 +39,8 @@ class StagedAckTests(ViewerServiceTests):
             'issuer':'viewer-a','audience':self.queue.authority_id,'environment':'production','namespace':NAMESPACE}
         other=base64.urlsafe_b64encode(b'd'*32).decode().rstrip('=')
         bindings={token:{'environment':'production','principalId':'viewer-a'},other:{'environment':'production','principalId':'viewer-b'}}
+        self.assertTrue(initialize_staged_ack_schema(self.queue))
+        self.assertFalse(initialize_staged_ack_schema(self.queue))
         ack=ViewerStagedAck(self.service,bindings);headers={'Authorization':'Bearer '+token,'X-LedgeTop-Capability':cap}
         def call(method,request=value,headers=headers):
             return ack.handle(method,ROUTE+identifier+('/generations/'+str(value['generation']) if method=='GET' else ''),headers,p.canonical_json(request) if method=='POST' else b'',protected_transport=True)
@@ -45,6 +50,13 @@ class StagedAckTests(ViewerServiceTests):
         for key in ('taskId','generation','archiveSha256','archiveBytes','coordinatorReceiptSha256','issuer','audience','environment','namespace'):
             self.assertEqual(commitment.body[key],value[key])
         first=call('POST');self.assertEqual(first.status,200);self.assertTrue(first.body['created'])
+        backup=self.root/'accepted-backup.sqlite3'
+        with sqlite3.connect(self.queue.path) as source,sqlite3.connect(backup) as target:
+            source.backup(target)
+        with self.queue._db() as db,sqlite3.connect(backup) as copy:
+            original=tuple(db.execute('SELECT * FROM viewer_staged_acks').fetchone())
+            self.assertEqual(tuple(copy.execute('SELECT * FROM viewer_staged_acks').fetchone()),original)
+            self.assertNotIn(token,repr(original));self.assertNotIn(cap,repr(original))
         self.assertFalse(call('POST').body['created']);self.assertEqual(call('GET').body['assertion'],value)
         self.assertEqual(call('GET',headers={'Authorization':'Bearer '+other,'X-LedgeTop-Capability':cap}).status,404)
         self.assertEqual(call('POST',dict(value,issuer='viewer-b')).status,409)
@@ -133,5 +145,71 @@ class StagedAckTests(ViewerServiceTests):
         with self.queue._db() as db:
             db.execute('CREATE TABLE viewer_staged_acks (task_id TEXT PRIMARY KEY, assertion_json TEXT NOT NULL)')
         token=base64.urlsafe_b64encode(b'a'*32).decode().rstrip('=')
-        with self.assertRaisesRegex(ValueError,'schema requires migration'):
+        with self.assertRaisesRegex(ValueError,'schema requires inspection'):
             ViewerStagedAck(self.service,{token:{'environment':'production','principalId':'viewer-a'}})
+        with self.assertRaisesRegex(ValueError,'schema requires inspection'):
+            initialize_staged_ack_schema(self.queue)
+        with self.queue._db() as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='viewer_staged_ack_migrations'").fetchone())
+
+    def test_explicit_initialization_on_sqlite_backup_preserves_source_and_rejects_tamper(self):
+        copied=self.root/'isolated-backup.sqlite3'
+        with sqlite3.connect(self.queue.path) as source, sqlite3.connect(copied) as target:
+            source.backup(target)
+        class BackupQueue:
+            @contextmanager
+            def _db(self):
+                db=sqlite3.connect(copied)
+                try:
+                    with db:yield db
+                finally:db.close()
+        backup=BackupQueue()
+        self.assertTrue(initialize_staged_ack_schema(backup))
+        self.assertFalse(initialize_staged_ack_schema(backup))
+        with self.queue._db() as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='viewer_staged_acks'").fetchone())
+        with backup._db() as db:
+            db.execute("INSERT INTO viewer_staged_acks VALUES ('synthetic',1,'staging','viewer','authority','namespace','attempt','commit','verifier','digest','{}')")
+        self.assertFalse(initialize_staged_ack_schema(backup))
+        with backup._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0],1)
+            db.execute("UPDATE viewer_staged_ack_migrations SET migration_id='unexpected'")
+        with self.assertRaisesRegex(ValueError,'migration marker changed'):
+            initialize_staged_ack_schema(backup)
+
+    def test_failed_initialization_rolls_back_both_tables(self):
+        queue=self.queue
+        class FailSecondCreate:
+            def __init__(self,db,point):self.db,self.point=db,point
+            def execute(self,sql,*args):
+                if sql.startswith(self.point):
+                    raise OSError('synthetic migration failure')
+                return self.db.execute(sql,*args)
+        class FailingQueue:
+            def __init__(self,point):self.point=point
+            @contextmanager
+            def _db(self):
+                with queue._db() as db:yield FailSecondCreate(db,self.point)
+        for point in ('CREATE TABLE viewer_staged_ack_migrations','INSERT INTO viewer_staged_ack_migrations'):
+            with self.subTest(point=point):
+                with self.assertRaises(OSError):initialize_staged_ack_schema(FailingQueue(point))
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('viewer_staged_acks','viewer_staged_ack_migrations')").fetchone()[0],0)
+
+    def test_explicit_initializer_refuses_foreign_trigger(self):
+        self.assertTrue(initialize_staged_ack_schema(self.queue))
+        with self.queue._db() as db:
+            db.execute('CREATE TRIGGER foreign_ack AFTER INSERT ON viewer_staged_acks BEGIN SELECT 1; END')
+        with self.assertRaisesRegex(ValueError,'schema requires inspection'):
+            initialize_staged_ack_schema(self.queue)
+
+    def test_explicit_initializer_refuses_foreign_index_and_missing_marker(self):
+        self.assertTrue(initialize_staged_ack_schema(self.queue))
+        with self.queue._db() as db:db.execute('CREATE INDEX foreign_ack_index ON viewer_staged_acks(environment)')
+        with self.assertRaisesRegex(ValueError,'schema requires inspection'):
+            initialize_staged_ack_schema(self.queue)
+        with self.queue._db() as db:
+            db.execute('DROP INDEX foreign_ack_index')
+            db.execute('DELETE FROM viewer_staged_ack_migrations')
+        with self.assertRaisesRegex(ValueError,'migration marker changed'):
+            initialize_staged_ack_schema(self.queue)

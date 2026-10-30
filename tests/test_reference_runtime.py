@@ -144,6 +144,9 @@ class ReferenceRuntimeTests(unittest.TestCase):
         with self.assertRaises(RuntimeConfigurationError):self.runtime(queue)
         with self.assertRaises(RuntimeConfigurationError):self.runtime(queue,viewer_service=service)
         with patch('processing.reference_runtime.STAGED_ACK_SCHEMA_QUALIFIED',True):
+            with self.assertRaises(RuntimeConfigurationError):self.runtime(queue,viewer_service=service)
+            from processing.viewer_staged_ack_schema import initialize_staged_ack_schema
+            initialize_staged_ack_schema(queue)
             runtime=self.runtime(queue,viewer_service=service)
         self.assertIsNotNone(runtime.api.staged_ack)
 

@@ -17,6 +17,7 @@ from types import MappingProxyType
 from . import reference_protocol as p
 from .maintenance import Conflict
 from .reference_api import Response
+from .viewer_staged_ack_schema import validate_staged_ack_schema
 
 ROUTE = p.PREFIX + '/viewer-staged-acks/'
 FIELDS = ('schemaVersion','taskId','generation','archiveSha256','archiveBytes',
@@ -44,17 +45,7 @@ class ViewerStagedAck:
         self.service=service
         self._bearers=MappingProxyType({token:MappingProxyType(dict(binding)) for token,binding in bearers.items()})
         with service.queue._db() as db:
-            db.execute('''CREATE TABLE IF NOT EXISTS viewer_staged_acks (
-                task_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL,
-                principal_id TEXT NOT NULL, audience TEXT NOT NULL, namespace TEXT NOT NULL,
-                attempt_id TEXT NOT NULL UNIQUE, staging_commit_id TEXT NOT NULL UNIQUE,
-                capability_sha256 TEXT NOT NULL,
-                assertion_sha256 TEXT NOT NULL, assertion_json TEXT NOT NULL,
-                PRIMARY KEY(task_id,generation))''')
-            columns=tuple(row[1] for row in db.execute('PRAGMA table_info(viewer_staged_acks)'))
-            if columns!=('task_id','generation','environment','principal_id','audience','namespace',
-                         'attempt_id','staging_commit_id','capability_sha256','assertion_sha256','assertion_json'):
-                raise ValueError('staged acknowledgment schema requires migration')
+            validate_staged_ack_schema(db)
 
     def handle(self,method,path,headers,body=b'',*,protected_transport=False):
         if protected_transport is not True:return Response(503,{'error':'protected_transport_required'})
