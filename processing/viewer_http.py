@@ -231,6 +231,8 @@ class ViewerFacade:
                 # A download can reconstruct and persist the cached archive;
                 # hold admission until the entire stream is closed.
                 guarded_download = re.fullmatch(r'/task/[^/]+/download/all\.zip', path)
+                if guarded_download and environment == 'production' and self.production_held:
+                    raise RequestError(503, 'production_admission_held')
                 gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
                 if guarded_download and gate is not None:
                     from .admission_drain import AdmissionClosed

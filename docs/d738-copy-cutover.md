@@ -159,7 +159,7 @@ ops/cutover_rehearsal.sh --cleanup MANIFEST
   and reconstructed.
 - **Exact answers:** every HTTP check asserts the exact status and body:
   - held production: `503 {"error":"production_admission_held"}`;
-  - staging, production reads and reopened production: an authorized
+  - staging, production task-info reads and reopened production: an authorized
     `404 {"error":"task_not_found"}` from the service, proving the request
     passed authentication and the hold.
 - **Synthetic schema allowlist:** without a reviewed allowlist argument, the
@@ -311,7 +311,8 @@ deliberately left alone), and the exact images.
   options such as `--context` or `-H`, so a command cannot re-point itself.
   A lint test checks that no runbook command bypasses the function.
 - `PROCESSING_VIEWER_PRODUCTION_ADMISSION=held` (in `processing/viewer_http.py`)
-  refuses every production Viewer POST with 503. Staging is unaffected.
+  refuses every production Viewer POST and archive download with 503. Staging
+  is unaffected; the scheduler and existing jobs are not paused.
 - [ops/cutover_fence_test.sh](../ops/cutover_fence_test.sh): the isolated
   container test of all of the above, run on synthetic state with a given d738
   image and release image.
@@ -747,10 +748,14 @@ The promoted container starts with **production admission held**:
 - Every production Viewer POST is refused with `503 production_admission_held`
   before any body is read or any service is called. That covers init, upload,
   commit, cancel, remove, reserve and reservation cancel.
-- Production reads and all staging requests are admitted.
+- Production archive downloads are also refused with the same 503: a download
+  can create or restore cached archive files. Other production reads and all
+  staging requests are admitted.
 
 So the staging-only Viewer photo job can run through to archive ingestion
-**and derivatives** while production cannot change state.
+**and derivatives** while these production HTTP mutations and downloads are held.
+This HTTP hold does not stop the scheduler or existing jobs. The operational
+quiescence checks remain mandatory before promotion.
 
 **The hold is a backstop, not a way to pause production work.** Viewer's
 isolated tests (12 cases of 503 or connection reset during init, upload and
@@ -847,7 +852,7 @@ check, an observation or a snapshot does not resolve it.
 | U2 | **Other writers before promotion: network path closed, host access not.** | With `--network none` no client can send a request. Release instances are fenced by the lease. d738 is fenced on retained d738 state by the step 2 holder, and on `NEW_VOL` by the candidate's own state lock. Host root, `docker exec` and direct volume writes are not prevented. | A volume-level writer lock (U7). Otherwise accept host root as a trust boundary. |
 | U3 | **In-flight requests during the isolated phase: not applicable with `--network none`.** | Nothing can connect, so the socket snapshot is no longer the only defence. The census gate still shows equality only at two moments. | Exact-image confirmation. |
 | U4 | **Single authority: d738 and release fenced independently; not proven live.** | **d738 does not take the new lease** (shown in the isolated test). Fences:<ul><li>the old container is removed after its clean stop, so a daemon restart or reconnect has nothing to act on;</li><li>one `--network none`, `--restart always` holder per retained d738 volume keeps d738's own `coordinator.lock`, so d738 refuses to start on it even when recreated deliberately;</li><li>`--verify` proves from `/proc/locks`, at the time it runs, that the live holder owns the lock (tested, including after the holder was killed and Docker restarted it);</li><li>a running release holds the lock on `NEW_VOL` and its published ports, so d738 cannot start on that copy or those ports (tested);</li><li>release instances exclude one another through the host-wide `flock` lease (tested).</li></ul>Still unfenced:<ul><li>the interval between a holder's death and its restart;</li><li>the interval between a copy's extraction and its holder or candidate taking the lock;</li><li>a real Docker **daemon** restart (not tested);</li><li>d738 on a copy nobody fences;</li><li>the exact images.</li></ul>A d738 created deliberately during one of those intervals could run. | Exact-image run of `ops/cutover_fence_test.sh` on a non-live host, including a real daemon restart. Retain no unfenced d738 state. |
-| U5 | **Production hold after promotion: a backstop, not resumable.** | Implemented in source: every production Viewer POST gets 503 before any body read or service call; staging and production reads are admitted (unit and container tests). Viewer's isolated tests (mocked adapter, not a live cutover) show that a production request hitting the hold preserves source data and a single attempt, but does **not** resume automatically, and a generic 503 or reset cannot prove to Viewer that no body was read. So the hold does not replace true quiescence or a coordinated recovery. Prototype operator and reference routes are not covered. | True quiescence (R1) for the whole window. An authenticated, durable no-admission record that Viewer can read is not implemented. Coordinated Viewer recovery for any job that hits the hold. |
+| U5 | **Production hold after promotion: a backstop, not resumable.** | Production Viewer POSTs and archive downloads get 503 before service calls; other production reads and staging remain admitted. The HTTP hold does not stop the scheduler, poller or existing jobs. Viewer's isolated tests (mocked adapter, not a live cutover) show that a production request hitting the hold preserves source data and a single attempt, but does **not** resume automatically, and a generic 503 or reset cannot prove to Viewer that no body was read. Prototype operator and reference routes are not covered. | True quiescence (R1) for the whole window. An authenticated, durable no-admission record that Viewer can read is not implemented. Coordinated Viewer recovery for any job that hits the hold. |
 | U6 | **Rollback losslessness: detection implemented, not proven live.** | Implemented in source and tested synthetically (steps 3 and 6). Every entry's contents and metadata are compared under keyed IDs. Allowances are scoped to named fields, exact schema hashes and empty new tables. Remaining limits:<ul><li>equal censuses show **observed** equality at two moments, not the absence of transient writes;</li><li>mtime is compared at whole-second granularity;</li><li>xattrs, ACLs, file capabilities and ctime are not compared;</li><li>the database file is compared per table, not byte for byte;</li><li>sizes and row counts are printed in clear;</li><li>a migration over a non-empty table fails conservatively;</li><li>the exact schema hashes depend on the U9 rehearsal;</li><li>it has never run against the real volume or the a042 image.</li></ul> | Independent review of the census. The U9 rehearsal to produce the exact schema allowances. A live read-only run in the cutover window. Transient writes need prevention (U1, U2), which detection cannot provide. |
 | U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
 | U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |

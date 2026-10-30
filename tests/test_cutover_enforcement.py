@@ -181,6 +181,25 @@ class ProductionHoldTest(unittest.TestCase):
         self.assertEqual(handler.status, 200)
         self.assertEqual(self.service.tasks[IDENTIFIER]['status'], {'code': 50})
 
+    def test_held_production_download_never_invokes_service_but_staging_can_download(self):
+        facade = self.facade(True)
+        path = '/task/' + IDENTIFIER + '/download/all.zip?token='
+        handler = MemoryHandler(path + TOKEN, method='GET')
+        with patch.object(self.service, 'download', wraps=self.service.download) as download:
+            facade.handle(handler)
+            self.assertEqual(handler.status, 503)
+            self.assertIn(b'production_admission_held', handler.wfile.getvalue())
+            download.assert_not_called()
+            handler = MemoryHandler(path + STAGING, method='GET')
+            facade.handle(handler)
+            self.assertEqual(handler.status, 200)
+            download.assert_called_once_with(IDENTIFIER)
+
+    def test_open_production_can_download(self):
+        handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+        self.facade(False).handle(handler)
+        self.assertEqual(handler.status, 200)
+
     def test_open_by_default(self):
         handler = self.post(self.facade(False), '/task/cancel', TOKEN)
         self.assertEqual(handler.status, 200)
