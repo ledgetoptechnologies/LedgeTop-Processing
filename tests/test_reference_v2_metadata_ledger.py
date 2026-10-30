@@ -1,6 +1,7 @@
 import copy, hashlib, json, tempfile, unittest, uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 from processing import reference_protocol as p
 from processing.maintenance import Conflict
 from processing.prototype import Queue
@@ -8,6 +9,8 @@ from processing.reference_store import ReferenceStore,PROFILE
 from processing.reference_manifest_v2 import DOMAIN
 from processing.reference_input_budget_v2 import plan_input_budget
 from processing.reference_v2_metadata_ledger import V2MetadataLedger
+from processing.reference_v2_scratch_admission import reserve_v2_scratch, ScratchAdmissionHeld
+from processing.scratch_policy import ScratchLedger
 
 class V2LedgerTests(unittest.TestCase):
  def setUp(self):
@@ -21,6 +24,38 @@ class V2LedgerTests(unittest.TestCase):
  def tearDown(self): self.queue.close();self.tmp.cleanup()
  def test_disabled(self):
   with self.assertRaises(Conflict):V2MetadataLedger(self.queue)
+ def test_internal_scratch_reservation_is_worker_bound_and_retry_stable(self):
+  first=self.ledger.submit(self.raw,**self.kw)
+  claim=self.ledger.claim_metadata(first['jobId'],principal='producer',node_id='cluster',worker_id='worker',instance_id='instance',request_id='claim')
+  m=self.raw['manifest'];plan=dict(protocolVersion=2,jobId=first['jobId'],generation=1,reservationId='reserve',manifestSha256=m['sha256'],environment='staging',capabilityFingerprint=self.raw['capabilityFingerprint'],expiresAt='2030-01-01T00:00:00.000Z',objects=[{k:o[k] for k in ('id','byteSize','sha256')} for o in m['objects']],rangeBytes=16,retryRequests=0,retryBytes=0)
+  calc=plan_input_budget(plan);env={k:calc[k] for k in ('protocolVersion','jobId','generation','reservationId','manifestSha256','environment','capabilityFingerprint','expiresAt','rangeBytes','requestBudget','byteBudget')};env['nonce']='nonce'
+  self.ledger.bind_reservation(first['jobId'],env,plan,principal='producer',claim_token=claim['claimToken'],clock=lambda:1000)
+  root=Path(self.tmp.name)/'scratch';root.mkdir(mode=0o700)
+  scratch=ScratchLedger(Path(self.tmp.name)/'scratch.sqlite',root,capacity_probe=lambda _:10**9,clock=lambda:1000,safety_floor_bytes=1,cleanup_grace_seconds=0)
+  args=dict(job_id=first['jobId'],principal='producer',claim_token=claim['claimToken'],worker_identity=dict(nodeId='cluster',workerId='worker',instanceId='instance'),worker_ready=True,output_budget=100,scratch_ttl=240,clock=lambda:1000)
+  with self.assertRaises(ScratchAdmissionHeld):reserve_v2_scratch(self.ledger,scratch,**args)
+  with self.assertRaises(ScratchAdmissionHeld):reserve_v2_scratch(self.ledger,scratch,**dict(args,worker_ready=False),enabled=True)
+  with self.assertRaises(ScratchAdmissionHeld):reserve_v2_scratch(self.ledger,scratch,**dict(args,worker_identity=dict(nodeId='node-2',workerId='worker',instanceId='instance')),enabled=True)
+  scratch.probe=lambda _:1
+  with self.assertRaises(ScratchAdmissionHeld):reserve_v2_scratch(self.ledger,scratch,**args,enabled=True)
+  scratch.probe=lambda _:10**9
+  original=self.ledger.snapshot_bytes;calls=0
+  def interrupted(*a,**k):
+   nonlocal calls
+   calls+=1
+   if calls==2:raise Conflict('synthetic unavailable')
+   return original(*a,**k)
+  with patch.object(self.ledger,'snapshot_bytes',side_effect=interrupted):
+   with self.assertRaises(Conflict):reserve_v2_scratch(self.ledger,scratch,**args,enabled=True)
+  with scratch._transaction() as db:
+   row=scratch._reservation(db,'reserve');self.assertEqual((row['allocated'],row['remaining']),(0,m['totalBytes']+100))
+  result=reserve_v2_scratch(self.ledger,scratch,**args,enabled=True)
+  self.assertEqual(result,reserve_v2_scratch(self.ledger,scratch,**args,enabled=True))
+  self.assertEqual(result['inputBytes'],m['totalBytes'])
+  with self.assertRaises(ScratchAdmissionHeld):reserve_v2_scratch(self.ledger,scratch,**dict(args,output_budget=101),enabled=True)
+  scratch.record_allocated('reserve',1)
+  with self.assertRaisesRegex(ScratchAdmissionHeld,'requires reconciliation'):
+   reserve_v2_scratch(self.ledger,scratch,**args,enabled=True)
  def test_large_submission_identity_claim_reservation_restart(self):
   first=self.ledger.submit(self.raw,**self.kw);self.assertEqual(self.ledger.submit(self.raw,**self.kw)['jobId'],first['jobId'])
   altered=copy.deepcopy(self.raw);altered['pipeline']['odm']['optionsFingerprint']='c'*64
