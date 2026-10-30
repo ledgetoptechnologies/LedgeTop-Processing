@@ -37,6 +37,30 @@ class LocalInputTest(unittest.TestCase):
   self.journal.complete=original
   self.run_input(None)
   with self.ledger._transaction() as db:self.assertEqual(self.ledger._reservation(db,'r1')['allocated'],9)
+ def test_process_exit_after_scratch_commit_recovers(self):
+  import subprocess,sys
+  self.setup_input(b'synthetic');self.fence.close();self.db.close()
+  code="""import io,json,os,sqlite3,sys
+from pathlib import Path
+from processing.reference_input_journal import InputJournal
+from processing.reference_worker_fence_v2 import WorkerFence
+from processing.reference_v2_local_input import publish_first_input
+from processing.scratch_policy import ScratchLedger
+root=Path(sys.argv[1]);binding=json.loads(sys.argv[2]);raw=bytes.fromhex(sys.argv[3])
+f=WorkerFence(root/'lock');db=sqlite3.connect(root/'journal');j=InputJournal(db)
+l=ScratchLedger(root/'ledger',root/'scratch',capacity_probe=lambda _:10000,safety_floor_bytes=0,cleanup_grace_seconds=0)
+original=l.record_allocated
+def crash(*a,**kw):original(*a,**kw);os._exit(73)
+l.record_allocated=crash
+publish_first_input(fence=f,journal=j,ledger=l,reservation_id='r1',binding=binding,manifest_bytes=raw,source=io.BytesIO(b'synthetic'))
+"""
+  proc=subprocess.run([sys.executable,'-c',code,str(self.root),json.dumps(self.binding),self.raw.hex()],timeout=10)
+  self.assertEqual(proc.returncode,73)
+  self.db=sqlite3.connect(self.root/'journal');self.addCleanup(self.db.close);self.journal=InputJournal(self.db)
+  self.fence=WorkerFence(self.lock);self.addCleanup(self.fence.close)
+  self.run_input(None)
+  with self.ledger._transaction() as db:self.assertEqual(self.ledger._reservation(db,'r1')['allocated'],9)
+
  def test_bad_bytes_leave_partial_and_hold(self):
   self.setup_input(b'expected')
   with self.assertRaises(InputHeld):self.run_input(io.BytesIO(b'wrong'))
