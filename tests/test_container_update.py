@@ -7,6 +7,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import os
 import subprocess
+import sys
 from urllib.parse import urlsplit
 
 from processing.app import make_handler
@@ -311,6 +312,21 @@ class ComposeBoundaryTests(unittest.TestCase):
             self.item['NetworkSettings']['Ports']['3000/tcp'][0]['HostIp'] = '0.0.0.0'
             with self.assertRaises(UpdateError):
                 self.adapter.inspect()
+
+    def test_standalone_cli_refuses_unverified_admission_without_mutation(self):
+        # Use the actual entry point; no coordinator, Docker daemon or secrets
+        # are required or contacted even when the historical flag is supplied.
+        args=[sys.executable,'-m','processing.container_update',
+              '--coordinator','http://127.0.0.1:9','--node-id','cluster',
+              '--node-origin','http://127.0.0.1:9','--compose-file','unused.yaml',
+              '--project','fixture','--service','fixture','--docker-engine-id','fixture',
+              '--work',self.temp.name,'--exclusive-admission']
+        result=subprocess.run(args,capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,2)
+        self.assertIn('Standalone maintenance is disabled',result.stdout)
+        self.assertIn('managed node maintenance',result.stdout)
+        self.assertFalse((Path(self.temp.name)/'updater.lock').exists())
+        self.assertFalse((Path(self.temp.name)/'update.json').exists())
 
     def test_explicit_context_takes_precedence_over_local_host_variable(self):
         with patch.dict(os.environ, {'DOCKER_HOST': 'unix:///local.sock', 'DOCKER_CONTEXT': 'remote'}), \

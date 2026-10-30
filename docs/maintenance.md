@@ -82,11 +82,12 @@ does not kill an updater or prove that its Docker operation stopped.
 
 ## Host update runner
 
-`python -m processing.container_update` is a bounded host command for one
-NodeODX Compose service. The coordinator gets no Docker socket. It supports
-local Unix/npipe Docker endpoints, verifies the pinned Engine identity and exact
-Compose project/service labels, rejects hooks/replicas, and checks that the probe
-origin is the exact private published port of that inspected container.
+The standalone `python -m processing.container_update` command is disabled.
+Its `--exclusive-admission` argument was only an operator assertion and could
+not prevent direct engine requests during replacement. Use the managed node
+maintenance workflow only after its ingress fence and direct-access paths have
+been qualified. The shared updater library remains available to that workflow;
+the coordinator gets no Docker socket.
 
 The logical node-to-host/Engine/project/service association is trusted operator
 configuration, not an enforced fleet registry or global host reservation. Do not
@@ -94,17 +95,7 @@ map two node IDs/controllers to the same service. Existing ClusterODX/direct
 clients must be fenced before claiming exclusive admission; an empty probe alone
 cannot exclude a new request racing from another client.
 
-```sh
-python -m processing.container_update \
-  --coordinator http://127.0.0.1:18080 --node-id cluster \
-  --node-origin http://127.0.0.1:13000 --node-port 3000 \
-  --compose-file /private/node/compose.yaml --project processing-node --service nodeodx \
-  --docker-engine-id VERIFIED_LOCAL_ENGINE_ID \
-  --work /private/new-maintenance-plan-receipt \
-  --exclusive-admission --wait-seconds 86400 --health-seconds 30
-```
-
-The runner needs the worker API credential plus the separate maintenance operator
+The managed runner needs the worker API credential plus the separate maintenance operator
 credential in environment variables; never put secrets in arguments or Git.
 Optional `NODEODX_API_TOKEN` uses the engine's query authentication. Require literal
 127.0.0.1/::1 for its bound probe origin. The receipt directory must be private,
