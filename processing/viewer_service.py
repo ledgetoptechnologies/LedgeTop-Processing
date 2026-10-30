@@ -599,7 +599,7 @@ class ViewerService:
             # Older coordinators could commit the job before the Viewer row.
             # Only replay a terminal result when every persisted identity agrees.
             for job in jobs:
-                if job['id'] not in split_jobs or job['profile'] != VIEWER_PROFILE:
+                if job['id'] not in split_jobs:
                     continue
                 task = self.store.task_for_job(job['id'])
                 if task['phase'] == 'complete':

@@ -506,6 +506,23 @@ class ViewerServiceTests(unittest.TestCase):
         with self.assertRaises(Conflict):self.service.tick()
         self.assertNotEqual(self.task(identifier)['phase'],'complete')
 
+    def test_terminal_split_rejects_mismatched_job_binding_before_dispatch(self):
+        identifier=self.submit();self.service.tick();task=self.task(identifier)
+        result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],
+                'environment':task['environment'],'cancelled':False}
+        self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':result})
+        second=self.submit()
+        for field,bad,original in (('node_id','main',task['node_id']),
+                                   ('environment','staging',task['environment']),
+                                   ('profile','photo-smoke',task['job']['profile'])):
+            with self.subTest(field=field):
+                with self.queue._db() as db:
+                    db.execute('UPDATE jobs SET '+field+'=? WHERE id=?',(bad,task['job_id']))
+                with self.assertRaises(Conflict):self.service.tick()
+                self.assertEqual(self.task(second)['job']['status'],'queued')
+                with self.queue._db() as db:
+                    db.execute('UPDATE jobs SET '+field+'=? WHERE id=?',(original,task['job_id']))
+
     def test_restart_while_node_offline_retains_slot_then_returns_completed_result(self):
         first=self.submit();second=self.submit()
         self.service.tick();task=self.task(first);engine_uuid=task['engine_uuid']
