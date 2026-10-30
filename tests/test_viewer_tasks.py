@@ -163,11 +163,12 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.queue = Queue(self.root / 'queue', node_ids=('cluster', 'main'), treedar_node_ids=('main',))
         self.queue.allowed_profiles.add(VIEWER_PROFILE)
         self.store = TaskStore(self.queue, self.root / 'inputs')
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 30)
-        self.assertEqual(self.store.info(self.identifier)['status']['errorMessage'], 'execution_held')
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
         self.assertIsNone(self.claim())
         self.queue.complete(claimed['id'], {'claimToken': claimed['claimToken'], 'status': 'succeeded', 'result': {}})
         self.assertEqual(self.store.info(self.identifier)['status']['code'], 40)
+        self.assertNotIn('ledgetopHeld', self.store.info(self.identifier))
         self.assertIsNotNone(self.claim())
 
     def test_cancel_queued_is_atomic_and_repeated_cancel_is_safe(self):
@@ -192,7 +193,9 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
         self.assertEqual(self.store.task(self.identifier)['job']['status'], 'held')
         self.queue.operator(claim['id'], 'hold', {'note': 'operator uncertainty requires inspection'})
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 30)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
+        self.assertNotIn('operator uncertainty requires inspection', str(self.store.info(self.identifier)))
 
     def test_cancel_completion_is_truthful_before_metadata_stage_update(self):
         self.ready()
@@ -214,6 +217,22 @@ class ViewerTaskStoreTests(unittest.TestCase):
                 with self.assertRaises(Conflict):
                     self.store.remove(self.identifier)
         self.assertEqual(self.queue.get(claimed['id'])['status'], 'held')
+        self.store.update(self.identifier, stage='cancelled')
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
+        self.store.update(self.identifier, stage='held')
+        # A stale retry may query or repeat commit, but cannot replace inputs,
+        # release the held slot, or create another execution.
+        before = self.store.task(self.identifier)
+        self.assertEqual(self.store.commit(self.identifier), {'success': True, 'uuid': self.identifier})
+        with self.assertRaises(Conflict):
+            self.store.upload(self.identifier, 'late.jpg', io.BytesIO(b'x'), 1)
+        after = self.store.task(self.identifier)
+        self.assertEqual(after['job_id'], before['job_id'])
+        self.assertEqual(after['generation'], before['generation'])
+        self.assertEqual(after['files'], before['files'])
+        self.assertEqual(self.queue.get(claimed['id'])['status'], 'held')
+        self.assertIsNone(self.claim())
 
     def test_remove_reset_uuid_retains_old_inputs_and_execution_history(self):
         old = self.ready()

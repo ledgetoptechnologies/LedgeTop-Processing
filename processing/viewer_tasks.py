@@ -415,26 +415,28 @@ class TaskStore:
         task = self.task(identifier)
         job = task['job']
         state = job['status'] if job else task['stage']
-        recovering = (job and state == 'held' and job['heldReason'] == 'coordinator_restart'
-                      and task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
-                      and task['engine_uuid'] and task['node_id'] and task['claim_token'])
         cancelled_result = (job and state == 'failed' and isinstance(job['result'], dict)
                             and job['result'].get('cancelled') is True)
-        if task['stage'] == 'cancelled' or cancelled_result:
-            code = 50
-        elif recovering:
-            # Retain the shared slot, but do not tell Viewer this recoverable
-            # engine execution failed before its exact UUID is reconciled.
+        if state == 'held':
+            # A hold is nonterminal and retains the shared slot. NodeODM has no
+            # held status; code 20 keeps existing clients polling rather than
+            # misreporting a failure and potentially starting a new attempt.
             code = 20
+        elif task['stage'] == 'cancelled' or cancelled_result:
+            code = 50
         else:
-            code = {'uploading': 10, 'queued': 10, 'running': 20, 'held': 30,
+            code = {'uploading': 10, 'queued': 10, 'running': 20,
                     'failed': 30, 'succeeded': 40}.get(state, 30)
         status = {'code': code}
         if code == 30:
             status['errorMessage'] = task['error'] or ('execution_held' if state == 'held' else 'processing_failed')
-        return {'uuid': identifier, 'name': task['name'], 'status': status,
+        info = {'uuid': identifier, 'name': task['name'], 'status': status,
                 'progress': 100 if code == 40 else task['progress'],
                 'imagesCount': task['images_count'], 'dateCreated': task['created_at']}
+        if state == 'held' and code == 20:
+            # Fixed marker only: held notes and engine error text can be private.
+            info['ledgetopHeld'] = True
+        return info
 
     def output(self, identifier, line=0):
         if type(line) is not int or not 0 <= line <= 2 ** 53 - 1:
