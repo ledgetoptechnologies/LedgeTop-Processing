@@ -87,6 +87,14 @@ class ViewerTaskStoreTests(unittest.TestCase):
             self.photo(name='large.jpg', data=b'123456789')
         self.assertEqual(len(self.store.task(self.identifier)['files']), 1)
         self.assertFalse(list(Path(self.store.task(self.identifier)['directory']).glob('.incoming-*')))
+        # A failed later upload preserves earlier bytes and is safe to retry
+        # after reopening the store; the limit does not remove the source.
+        self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=8)
+        self.photo(data=b'12345678')
+        self.assertEqual(self.store.task(self.identifier)['input_bytes'], 8)
+        with self.assertRaises(InputLimitExceeded):
+            self.photo(name='other.jpg', data=b'1')
+        self.assertEqual(self.store.task(self.identifier)['files'][0]['bytes'], 8)
 
     def test_unsafe_names_identifiers_and_settings_rejected(self):
         for identifier in ('../task', self.identifier.upper(), 'not-a-uuid'):
