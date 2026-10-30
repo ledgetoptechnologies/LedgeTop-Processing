@@ -138,6 +138,7 @@ class ViewerService:
         jobs = self.queue.list()
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
                 'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'ledgetopMaxInputBytes': self.store.max_input_bytes,
                 'ledgetopReservations': self.store.reservation_stats(),
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 

@@ -26,6 +26,10 @@ class OptionEvidenceConflict(Conflict):
     """A task's admission evidence cannot be trusted."""
 
 
+class InputLimitExceeded(ValueError):
+    """A task's configured cumulative input-byte allowance was exceeded."""
+
+
 VIEWER_PROFILE = 'odm-viewer-v1'
 # Tombstones are retained while any delayed request can replay. This explicit
 # finite ceiling bounds authenticated storage use; do not silently purge.
@@ -313,8 +317,10 @@ class TaskStore:
 
     def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         key = self._filename(filename)
-        if type(length) is not int or not 0 < length <= self.max_input_bytes:
+        if type(length) is not int or length <= 0:
             raise ValueError('invalid input length')
+        if length > self.max_input_bytes:
+            raise InputLimitExceeded('task input ceiling exceeded')
         with self._lock:
             with self.queue._db() as db:
                 self._reservation(db,identifier,environment,capability)
@@ -328,8 +334,10 @@ class TaskStore:
                                    (identifier,)).fetchone()[0]
                 count = db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?',
                                    (identifier,)).fetchone()[0]
-                if existing is None and (total + length > self.max_input_bytes or count >= 100000):
-                    raise ValueError('task input ceiling exceeded')
+                if existing is None and total + length > self.max_input_bytes:
+                    raise InputLimitExceeded('task input ceiling exceeded')
+                if existing is None and count >= 100000:
+                    raise ValueError('task file count ceiling exceeded')
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
             try:
@@ -364,7 +372,7 @@ class TaskStore:
                     total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
                                        (identifier,)).fetchone()[0]
                     if total + length > self.max_input_bytes:
-                        raise ValueError('task input ceiling exceeded')
+                        raise InputLimitExceeded('task input ceiling exceeded')
                     os.replace(temporary, final)
                     sync_directory(directory)
                     db.execute('''INSERT INTO viewer_files

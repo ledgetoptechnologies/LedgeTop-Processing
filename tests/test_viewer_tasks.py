@@ -7,7 +7,7 @@ import uuid
 
 from processing.maintenance import Conflict
 from processing.prototype import PROFILE, Queue
-from processing.viewer_tasks import TaskStore, VIEWER_PROFILE
+from processing.viewer_tasks import InputLimitExceeded, TaskStore, VIEWER_PROFILE
 
 
 class ViewerTaskStoreTests(unittest.TestCase):
@@ -80,9 +80,13 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.initialize()
         self.photo(data=b'12345678')
         self.photo(data=b'12345678')
-        with self.assertRaises(ValueError):
+        with self.assertRaises(InputLimitExceeded):
             self.photo(name='other.jpg', data=b'1')
         self.assertEqual(self.store.task(self.identifier)['input_bytes'], 8)
+        with self.assertRaises(InputLimitExceeded):
+            self.photo(name='large.jpg', data=b'123456789')
+        self.assertEqual(len(self.store.task(self.identifier)['files']), 1)
+        self.assertFalse(list(Path(self.store.task(self.identifier)['directory']).glob('.incoming-*')))
 
     def test_unsafe_names_identifiers_and_settings_rejected(self):
         for identifier in ('../task', self.identifier.upper(), 'not-a-uuid'):
