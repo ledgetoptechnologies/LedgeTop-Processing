@@ -150,6 +150,16 @@ with NodeGate('synthetic-engine') as g:
     engine_id=engine,node_id='main',origin=origin,authority_id=authority,generation=1,worker_id='worker',operation_key=key)
    self.assertEqual(result['state'],'node_and_input_held')
 
+ def make_init_database(self):
+  from processing.reference_v2_init_boundary import DDL,META_DDL
+  path=self.root/'init.sqlite';db=sqlite3.connect(path)
+  db.execute(META_DDL);db.execute(DDL);db.execute('INSERT INTO v2_init_epoch VALUES(1,?)',('f'*64,));db.commit()
+  st=path.stat()
+  return db,(st.st_dev,st.st_ino)
+
+ def init_claim(self):
+  return dict(jobId=self.binding['jobId'],manifestSha256=self.binding['manifestSha256'],generation=1,engineId='synthetic-engine',engineOrigin='http://127.0.0.1:3001',options=[dict(name='test-flag',value=True)])
+
  def test_initialize_lost_response_never_repeats(self):
   from processing.node_gate import NodeGate
   from processing.reference_v2_node_preflight import retain_node_for_verified_input
@@ -159,9 +169,11 @@ with NodeGate('synthetic-engine') as g:
   shared=dict(fence=self.fence,journal=self.journal,ledger=self.ledger,reservation_id='r1',binding=self.binding,manifest_bytes=self.raw,
    engine_id=engineid,node_id='main',origin=origin,authority_id=authority,generation=1,worker_id='worker',operation_key=key)
   class Lost:
+   origin='http://127.0.0.1:3001'
    calls=0
    def initialize(self,task):self.calls+=1;raise OSError('response lost')
-  engine=Lost();db=sqlite3.connect(self.root/'init.sqlite');self.addCleanup(db.close)
+  engine=Lost();db,inode=self.make_init_database();self.addCleanup(db.close)
+  shared.update(expected_epoch='f'*64,expected_inode=inode,authenticated_claim=self.init_claim())
   with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
    with NodeGate(engineid) as gate:gate.provision('main',origin,authority)
    retain_node_for_verified_input(**shared)
@@ -183,6 +195,7 @@ with NodeGate('synthetic-engine') as g:
   with patch.dict(os.environ,{'XDG_STATE_HOME':str(self.root/'gate-state')}):
    with NodeGate(engineid) as gate:gate.provision('main',origin,authority)
    retain_node_for_verified_input(**shared);self.fence.close();self.db.close()
+   initdb,inode=self.make_init_database();initdb.close();claim=self.init_claim()
    code="""import os,sys,json,sqlite3
 from pathlib import Path
 from processing.reference_input_journal import InputJournal
@@ -194,15 +207,18 @@ f=WorkerFence(root/'lock');jdb=sqlite3.connect(root/'journal');j=InputJournal(jd
 l=ScratchLedger(root/'ledger',root/'scratch',capacity_probe=lambda _:10000,safety_floor_bytes=0,cleanup_grace_seconds=0)
 db=sqlite3.connect(root/'init.sqlite')
 class Engine:
+ origin='http://127.0.0.1:3001'
  def initialize(self,task):os._exit(73)
-initialize_once(enabled=True,db=db,engine=Engine(),fence=f,journal=j,ledger=l,reservation_id='r1',binding=binding,manifest_bytes=raw,engine_id='synthetic-engine',node_id='main',origin='https://coordinator.example',authority_id=authority,generation=1,worker_id='worker',operation_key=b'k'*32)
+initialize_once(enabled=True,db=db,engine=Engine(),fence=f,journal=j,ledger=l,reservation_id='r1',binding=binding,manifest_bytes=raw,engine_id='synthetic-engine',node_id='main',origin='https://coordinator.example',authority_id=authority,generation=1,worker_id='worker',operation_key=b'k'*32,expected_epoch='f'*64,expected_inode=tuple(json.loads(sys.argv[5])),authenticated_claim=json.loads(sys.argv[6]))
 """
-   proc=subprocess.run([sys.executable,'-c',code,str(self.root),json.dumps(self.binding),self.raw.hex(),authority],timeout=10)
+   proc=subprocess.run([sys.executable,'-c',code,str(self.root),json.dumps(self.binding),self.raw.hex(),authority,json.dumps(inode),json.dumps(claim)],timeout=10)
    self.assertEqual(proc.returncode,73)
    self.db=sqlite3.connect(self.root/'journal');self.addCleanup(self.db.close);self.journal=InputJournal(self.db)
    self.fence=WorkerFence(self.lock);self.addCleanup(self.fence.close);shared.update(fence=self.fence,journal=self.journal)
+   shared.update(expected_epoch='f'*64,expected_inode=inode,authenticated_claim=claim)
    class Engine:
-    def initialize(self,task):self.fail('duplicate initialize')
+    origin='http://127.0.0.1:3001'
+    def initialize(self,task):raise AssertionError('duplicate initialize')
    db=sqlite3.connect(self.root/'init.sqlite');self.addCleanup(db.close)
    with self.assertRaisesRegex(InitHeld,'already attempted'):initialize_once(enabled=True,db=db,engine=Engine(),**shared)
 
