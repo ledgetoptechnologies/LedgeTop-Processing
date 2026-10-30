@@ -2,6 +2,8 @@
 
 The caller owns the SQLite connection and must validate the manifest, verify
 file bytes, and durably record the absolute scratch target before completion.
+Any future runtime integration must use seed_manifest with bytes from an authenticated
+metadata snapshot; the lower-level seed is a test primitive, not an authority gate.
 This primitive does not implement grants, filesystem custody, migration, or a
 fence against older worker binaries. Data-version checks conservatively detect
 commits through other SQLite connections while this connection stays open;
@@ -24,20 +26,53 @@ def _json(value):
     return p.canonical_json(value).decode('utf-8')
 
 
+_TABLES = ("""CREATE TABLE input_journal_jobs (
+                job TEXT PRIMARY KEY, binding TEXT NOT NULL, next_ordinal INTEGER NOT NULL,
+                allocated INTEGER NOT NULL, object_count INTEGER NOT NULL)""",
+           """CREATE TABLE input_journal_objects (
+                job TEXT NOT NULL, ordinal INTEGER NOT NULL, object_id TEXT NOT NULL,
+                size INTEGER NOT NULL, sha256 TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job, ordinal), UNIQUE(job, object_id))""")
+
+
+def _schema(db):
+    return tuple(db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master "
+        "WHERE tbl_name IN ('input_journal_jobs','input_journal_objects') "
+        "OR name IN ('input_journal_jobs','input_journal_objects') ORDER BY type,name"))
+
+
+def _expected_schema():
+    db = sqlite3.connect(':memory:')
+    try:
+        for ddl in _TABLES: db.execute(ddl)
+        return _schema(db)
+    finally:
+        db.close()
+
+
+_EXPECTED_SCHEMA = _expected_schema()
+
+
 class InputJournal:
     def __init__(self, db):
         if not isinstance(db, sqlite3.Connection) or db.in_transaction:
             raise InputJournalError('idle SQLite connection required')
         self.db = db
         self._verified = {}
-        with db:
-            db.execute('''CREATE TABLE IF NOT EXISTS input_journal_jobs (
-                job TEXT PRIMARY KEY, binding TEXT NOT NULL, next_ordinal INTEGER NOT NULL,
-                allocated INTEGER NOT NULL, object_count INTEGER NOT NULL)''')
-            db.execute('''CREATE TABLE IF NOT EXISTS input_journal_objects (
-                job TEXT NOT NULL, ordinal INTEGER NOT NULL, object_id TEXT NOT NULL,
-                size INTEGER NOT NULL, sha256 TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-                done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job, ordinal), UNIQUE(job, object_id))''')
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            existing = _schema(db)
+            if not existing:
+                for ddl in _TABLES: db.execute(ddl)
+            self._check_schema()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    def _check_schema(self):
+        if _schema(self.db) != _EXPECTED_SCHEMA:
+            raise InputJournalError('input journal schema mismatch')
 
     def seed_manifest(self, binding, manifest_bytes):
         """Validate canonical v2 manifest and bind its exact digest and object projection.
@@ -82,6 +117,7 @@ class InputJournal:
         self._verified.pop(job, None)
         try:
             self.db.execute('BEGIN IMMEDIATE')
+            self._check_schema()
             version = self.db.execute('PRAGMA data_version').fetchone()[0]
             row = self.db.execute('SELECT binding,next_ordinal,allocated,object_count FROM input_journal_jobs WHERE job=?', (job,)).fetchone()
             if row is not None:
@@ -126,6 +162,7 @@ class InputJournal:
             raise InputJournalError('idle SQLite connection required')
         try:
             self.db.execute('BEGIN IMMEDIATE')
+            self._check_schema()
             result = self._current(binding)
             self.db.commit()
             return result
@@ -161,6 +198,7 @@ class InputJournal:
             raise InputJournalError('idle SQLite connection required')
         try:
             self.db.execute('BEGIN IMMEDIATE')
+            self._check_schema()
             item = self._current(binding)
             if item is None or item['ordinal'] != ordinal or item['attempts'] >= binding['maxAttempts']:
                 raise InputJournalError('input attempt unavailable')
@@ -181,6 +219,7 @@ class InputJournal:
             raise InputJournalError('idle SQLite connection required')
         try:
             self.db.execute('BEGIN IMMEDIATE')
+            self._check_schema()
             self._require_verified(binding)
             job = self.db.execute('SELECT binding,next_ordinal,allocated FROM input_journal_jobs WHERE job=?', (binding['jobId'],)).fetchone()
             row = self.db.execute('SELECT object_id,size,sha256,done,attempts FROM input_journal_objects WHERE job=? AND ordinal=?', (binding['jobId'],ordinal)).fetchone()

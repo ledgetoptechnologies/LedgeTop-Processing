@@ -70,6 +70,30 @@ class InputJournalTests(unittest.TestCase):
         with self.assertRaises(InputJournalError):
             self.journal.seed(dict(self.binding, objectsSha256=p.digest(extra)), extra)
 
+    def test_trigger_and_extra_index_fail_closed_after_validated_seed(self):
+        self.journal.seed(self.binding, self.objects)
+        self.db.execute('CREATE TRIGGER malicious AFTER UPDATE ON input_journal_objects BEGIN UPDATE input_journal_jobs SET allocated=999; END')
+        self.db.commit()
+        with self.assertRaisesRegex(InputJournalError, 'schema mismatch'):
+            self.journal.attempt(self.binding, 0)
+        self.assertEqual(self.db.execute('SELECT allocated FROM input_journal_jobs').fetchone()[0], 0)
+        self.db.execute('DROP TRIGGER malicious')
+        self.db.execute('CREATE INDEX unexpected ON input_journal_objects(size)')
+        self.db.commit()
+        with self.assertRaisesRegex(InputJournalError, 'schema mismatch'):
+            self.journal.current(self.binding)
+
+    def test_altered_existing_table_rejected_before_initialization(self):
+        db = sqlite3.connect(Path(self.tmp.name) / 'tampered.sqlite')
+        try:
+            db.execute('CREATE TABLE input_journal_jobs (job TEXT PRIMARY KEY)')
+            db.commit()
+            with self.assertRaisesRegex(InputJournalError, 'schema mismatch'):
+                InputJournal(db)
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='input_journal_objects'").fetchone())
+        finally:
+            db.close()
+
     def test_seed_replay_and_conflict_do_not_change_rows(self):
         self.assertTrue(self.journal.seed(self.binding, self.objects))
         self.assertFalse(self.journal.seed(self.binding, self.objects))
