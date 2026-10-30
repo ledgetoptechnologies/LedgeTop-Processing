@@ -22,7 +22,7 @@ import zipfile
 
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
-from .options import catalog, _NoRedirect
+from .options import catalog, discover_node, _NoRedirect
 from .policy import plan
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
@@ -141,15 +141,34 @@ class ViewerService:
                 'ledgetopReservations': self.store.reservation_stats(),
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
-    def _check_options(self, options):
-        allowed = {item['name'] for item in self.options()}
+    def _selected_options(self, node_id):
+        if node_id == 'cluster':
+            role, origin, token = 'local', self.config.local_node_url, self.config.local_node_token
+        elif node_id == 'main':
+            role, origin, token = 'main', self.config.main_node_url, self.config.main_node_token
+        else:
+            raise Conflict('unknown selected node')
+        snapshot = discover_node(role, origin, token)
+        if not snapshot['available']:
+            raise Conflict('selected engine options unavailable')
+        return snapshot['options']
+
+    def _check_options(self, options, *, node_id=None, evidence=None):
+        # Legacy tasks lack admission evidence and retain the conservative
+        # fleet-wide intersection check.
+        definitions = self._selected_options(node_id) if node_id is not None and evidence is not None else self.options()
+        allowed = {item['name'] for item in definitions}
         if (not isinstance(options, list) or any(not isinstance(item, dict)
                 or item.get('name') not in allowed for item in options)):
             raise ValueError('option unavailable on configured engines')
+        selected = [item for item in definitions if item['name'] in {option['name'] for option in options}]
+        if evidence is not None and json.dumps(sorted(selected,key=lambda item:item['name']),sort_keys=True,separators=(',',':'),allow_nan=False) != json.dumps(evidence,sort_keys=True,separators=(',',':'),allow_nan=False):
+            raise Conflict('selected engine option definitions changed')
+        return selected
 
     def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
-        self._check_options(options or [])
-        return self.store.initialize(identifier, name, options, outputs, environment, capability)
+        evidence = self._check_options(options or [])
+        return self.store.initialize(identifier, name, options, outputs, environment, capability, option_evidence=evidence)
 
     def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         return self.store.upload(identifier, filename, stream, length, environment, capability)
@@ -454,13 +473,13 @@ class ViewerService:
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
-            tasks = self.store.list_tasks()
-            for task in tasks:
-                job = task['job']
-                if not job or job['status'] not in ('running', 'held'):
+            jobs = self.queue.list()
+            for job in jobs:
+                if job['profile'] != VIEWER_PROFILE or job['status'] not in ('running', 'held'):
                     continue
                 if job['status'] == 'held' and job['heldReason'] != 'coordinator_restart':
                     continue
+                task = self.store.task_for_job(job['id'])
                 if (task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
                         and task['engine_uuid'] and task['node_id'] and task['claim_token']):
                     self._poll(task)
@@ -473,9 +492,7 @@ class ViewerService:
                             key=lambda j: (j['environment'] != 'production', jobs.index(j)))
             if not queued or queued[0]['profile'] != VIEWER_PROFILE:
                 return
-            task = next((t for t in tasks if t['job_id'] == queued[0]['id']), None)
-            if task is None:
-                raise Conflict('execution metadata unavailable')
+            task = self.store.task_for_job(queued[0]['id'])
             nodes = {}
             for node, role, origin, token in (
                     ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
@@ -488,7 +505,10 @@ class ViewerService:
                 self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
                 return
             node_id = 'cluster' if decision['decision'] == 'local' else 'main'
-            self._check_options(task['options'])
+            # Submission uses the fleet-wide common catalog. At dispatch,
+            # refresh the selected engine specifically so an unrelated node
+            # outage does not strand an already accepted job.
+            self._check_options(task['options'], node_id=node_id, evidence=task['option_evidence'])
             job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
                                    'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
             if not job:

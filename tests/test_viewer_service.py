@@ -163,6 +163,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
         self.service._catalog = lambda: {'ready': self.catalog_ready,
                                          'commonOptions': [dict(item) for item in self.option_catalog]}
+        self.service._selected_options = lambda _node: [dict(item) for item in self.option_catalog]
 
     def tearDown(self):
         self.service.close()
@@ -677,6 +678,107 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertFalse(self.fleet.commits)
         with self.assertRaises(ValueError):
             self.service.initialize(str(uuid.uuid4()), options=[{'name': 'unsupported', 'value': True}])
+
+    def test_queued_small_job_runs_when_main_catalog_is_unavailable(self):
+        identifier = self.submit()
+        self.unavailable.add('main'); self.catalog_ready = False
+        self.service._selected_options = ViewerService._selected_options.__get__(self.service)
+        with patch('processing.viewer_service.discover_node', return_value={'available': True, 'options': OPTIONS}) as discover:
+            self.service.tick()
+        discover.assert_called_once_with('local', self.config.local_node_url, self.config.local_node_token)
+        self.assertEqual(self.task(identifier)['node_id'], 'cluster')
+        self.assertEqual(self.engines['main'].calls, [])
+        self.finish(identifier); self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream: self.assertEqual(stream.read(), self.engines['cluster'].archive)
+
+    def test_new_submission_still_requires_fleet_catalog(self):
+        self.catalog_ready = False
+        with self.assertRaises(Conflict): self.initialize()
+
+    def test_selected_engine_option_refresh_refuses_missing_or_unavailable(self):
+        identifier = self.submit()
+        self.service._selected_options = ViewerService._selected_options.__get__(self.service)
+        for snapshot, error in (({'available':False,'options':[]}, Conflict),
+                                ({'available':True,'options':[item for item in OPTIONS if item['name']!='pc-ept']}, ValueError)):
+            with self.subTest(snapshot=snapshot), patch('processing.viewer_service.discover_node', return_value=snapshot):
+                with self.assertRaises(error): self.service.tick()
+            self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+            self.assertEqual(self.engines['cluster'].calls, [])
+
+    def test_selected_engine_changed_definition_is_refused(self):
+        identifier = self.submit()
+        self.service._selected_options = ViewerService._selected_options.__get__(self.service)
+        changed = [dict(item, type='string') if item['name']=='pc-ept' else dict(item) for item in OPTIONS]
+        with patch('processing.viewer_service.discover_node',return_value={'available':True,'options':changed}):
+            with self.assertRaises(Conflict):self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'],'queued')
+        self.assertEqual(self.engines['cluster'].calls,[])
+
+    def test_new_task_missing_evidence_is_held_even_if_fleet_is_healthy(self):
+        identifier=self.submit()
+        with self.queue._db() as db:db.execute('DELETE FROM viewer_option_evidence WHERE uuid=?',(identifier,))
+        with self.assertRaises(Conflict):self.task(identifier)
+        with self.assertRaises(Conflict):self.service.tick()
+        self.assertEqual(self.engines['cluster'].calls,[])
+
+    def test_corrupt_completed_task_does_not_block_new_job(self):
+        finished=self.submit();self.service.tick();self.finish(finished);self.service.tick()
+        with self.queue._db() as db:db.execute('DELETE FROM viewer_option_evidence WHERE uuid=?',(finished,))
+        next_job=self.submit();self.service.tick()
+        self.assertEqual(self.task(next_job)['job']['status'],'running')
+        with self.assertRaises(Conflict):self.task(finished)
+
+    def test_corrupt_queued_staging_does_not_block_production(self):
+        staging=self.submit(environment='staging');production=self.submit(environment='production')
+        with self.queue._db() as db:db.execute('DELETE FROM viewer_option_evidence WHERE uuid=?',(staging,))
+        self.service.tick()
+        self.assertEqual(self.task(production)['job']['status'],'running')
+        with self.assertRaises(Conflict):self.task(staging)
+
+    def test_legacy_job_without_evidence_still_requires_full_fleet(self):
+        identifier=str(uuid.uuid4())
+        self.service.store.initialize(identifier,'Legacy task',REQUEST_OPTIONS,None,'production')
+        self.upload(identifier);self.service.commit(identifier)
+        self.assertIsNone(self.task(identifier)['option_evidence'])
+        self.catalog_ready=False;self.unavailable.add('main')
+        with self.assertRaises(Conflict):self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'],'queued')
+        self.assertEqual(self.engines['cluster'].calls,[])
+
+    def test_evidence_survives_restart_and_missing_table_migrates_conservatively(self):
+        identifier=self.submit();self.assertIsNotNone(self.task(identifier)['option_evidence'])
+        self.service.close();self.queue.close();self.make_queue_service()
+        self.assertIsNotNone(self.task(identifier)['option_evidence'])
+        self.catalog_ready=False;self.unavailable.add('main')
+        with patch('processing.viewer_service.discover_node',return_value={'available':True,'options':OPTIONS}):
+            self.service._selected_options=ViewerService._selected_options.__get__(self.service)
+            self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'],'cluster')
+
+    def test_missing_evidence_table_is_created_without_backfilling_legacy_job(self):
+        identifier=str(uuid.uuid4())
+        self.service.store.initialize(identifier,'Legacy task',REQUEST_OPTIONS,None,'production')
+        self.upload(identifier);self.service.commit(identifier)
+        with self.queue._db() as db:
+            db.execute('DROP TABLE viewer_option_evidence')
+            db.execute('ALTER TABLE viewer_tasks DROP COLUMN option_evidence_required')
+        self.service.close();self.queue.close();self.make_queue_service()
+        self.assertIsNone(self.task(identifier)['option_evidence'])
+        self.catalog_ready=False;self.unavailable.add('main')
+        with self.assertRaises(Conflict):self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'],'queued')
+
+    def test_large_queued_job_uses_main_when_cluster_catalog_is_unavailable(self):
+        self.config.local_max_photos = 1
+        identifier = self.submit(count=2)
+        self.unavailable.add('cluster'); self.catalog_ready = False
+        self.service._selected_options = ViewerService._selected_options.__get__(self.service)
+        with patch('processing.viewer_service.discover_node', return_value={'available': True, 'options': OPTIONS}) as discover:
+            self.service.tick()
+        discover.assert_called_once_with('main', self.config.main_node_url, self.config.main_node_token)
+        self.assertEqual(self.task(identifier)['node_id'], 'main')
+        self.assertEqual(self.engines['cluster'].calls, [])
 
     def test_native_output_cursor_preserves_blank_and_comma_records(self):
         identifier = self.submit()

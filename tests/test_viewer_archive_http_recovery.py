@@ -31,6 +31,7 @@ def synthetic_coordinator(root, control, offline):
     fleet=FakeFleet();engines={name:FakeEngine(name,fleet) for name in ('cluster','main')}
     service.engines=engines
     service._catalog=lambda:{'ready':True,'commonOptions':[dict(x) for x in OPTIONS]}
+    service._selected_options=lambda _node:[dict(x) for x in OPTIONS]
     service.probe=lambda role,origin,token:{'ready':True,'taskQueueCount':0,'maxImages':1000 if role=='local' else None}
     original=service.store.update
     def update(task_id, **fields):
@@ -116,6 +117,7 @@ class ViewerArchiveHTTPRecoveryTests(unittest.TestCase):
                 handler=make_handler(config);service=handler.viewer_service
                 service.engines=engines
                 service._catalog=lambda:{'ready':True,'commonOptions':[dict(x) for x in OPTIONS]}
+                service._selected_options=lambda _node:[dict(x) for x in OPTIONS]
                 service.probe=lambda role,origin,token:{'ready':True,'taskQueueCount':0,'maxImages':1000 if role=='local' else None}
                 server=ThreadingHTTPServer(('127.0.0.1',0),handler)
                 thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.01));thread.start()

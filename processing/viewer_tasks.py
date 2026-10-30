@@ -110,6 +110,8 @@ class TaskStore:
                 removed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
+            if 'option_evidence_required' not in {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1))')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_files (
                 uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
                 path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -123,6 +125,10 @@ class TaskStore:
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_reservations (
                 uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_option_evidence (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL,
+                definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
+                PRIMARY KEY(uuid,generation))''')
 
     def _row(self, db, identifier, *, removed=False):
         checked_uuid(identifier)
@@ -213,7 +219,7 @@ class TaskStore:
             db.execute("UPDATE viewer_reservations SET state='cancelled' WHERE uuid=?",(identifier,))
             return {'uuid':identifier,'state':'cancelled'}
 
-    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
+    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None, option_evidence=None):
         checked_uuid(identifier)
         if (not isinstance(name, str) or len(name) > 256
                 or any(ord(character) < 32 for character in name)):
@@ -228,6 +234,17 @@ class TaskStore:
             raise ValueError('invalid task options')
         if len({item['name'] for item in options}) != len(options):
             raise ValueError('duplicate option')
+        evidence_text = None
+        if option_evidence is not None:
+            if (type(option_evidence) is not list or len(option_evidence)!=len(options)
+                    or any(type(item) is not dict or type(item.get('name')) is not str for item in option_evidence)
+                    or sorted(item['name'] for item in option_evidence)!=sorted(item['name'] for item in options)):
+                raise ValueError('exact option definitions required')
+            try:
+                evidence_text=canonical(sorted(option_evidence,key=lambda item:item['name']))
+            except (ValueError,TypeError,RecursionError):
+                raise ValueError('invalid option definitions') from None
+            if len(evidence_text.encode())>262144:raise ValueError('option definitions too large')
         if outputs is not None and (not isinstance(outputs, list) or len(outputs) > 1000
                 or any(not isinstance(value, str) or len(value) > 256 for value in outputs)):
             raise ValueError('invalid requested outputs')
@@ -274,9 +291,12 @@ class TaskStore:
             sync_directory(self.root)
             db.execute('DELETE FROM viewer_files WHERE uuid=?', (identifier,))
             db.execute('''INSERT OR REPLACE INTO viewer_tasks
-                (uuid,generation,directory,name,options,outputs,environment)
-                VALUES(?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
-                                          options_text, outputs_text, environment))
+                (uuid,generation,directory,name,options,outputs,environment,option_evidence_required)
+                VALUES(?,?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
+                                          options_text, outputs_text, environment, int(evidence_text is not None)))
+            if evidence_text is not None:
+                db.execute('INSERT INTO viewer_option_evidence(uuid,generation,definitions,sha256) VALUES(?,?,?,?)',
+                    (identifier,generation,evidence_text,hashlib.sha256(evidence_text.encode()).hexdigest()))
             return {'uuid': identifier}
 
     @staticmethod
@@ -405,6 +425,25 @@ class TaskStore:
         value['directory'] = str(directory)
         for field in ('options', 'outputs', 'output_lines'):
             value[field] = json.loads(value[field])
+        evidence=db.execute('SELECT definitions,sha256 FROM viewer_option_evidence WHERE uuid=? AND generation=?',
+                            (row['uuid'],row['generation'])).fetchone()
+        value['option_evidence']=None
+        if row['option_evidence_required'] not in (0,1) or bool(row['option_evidence_required']) != (evidence is not None):
+            raise Conflict('option evidence missing or unexpected')
+        if evidence is not None:
+            text=evidence['definitions']
+            if (type(text) is not str or len(text.encode())>262144
+                    or hashlib.sha256(text.encode()).hexdigest()!=evidence['sha256']):
+                raise Conflict('option evidence changed')
+            try:
+                definitions=json.loads(text)
+                if (type(definitions) is not list or canonical(definitions)!=text
+                        or any(type(item) is not dict or type(item.get('name')) is not str for item in definitions)
+                        or sorted(item['name'] for item in definitions)!=sorted(item['name'] for item in value['options'])):
+                    raise ValueError()
+            except (ValueError,TypeError,KeyError,RecursionError):
+                raise Conflict('option evidence changed') from None
+            value['option_evidence']=definitions
         files = []
         for item in db.execute('SELECT * FROM viewer_files WHERE uuid=? ORDER BY rowid', (row['uuid'],)):
             item = dict(item)
@@ -429,6 +468,13 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             return [self._task(db, row) for row in db.execute(
                 'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
+
+    def task_for_job(self, job_id):
+        """Load only the task selected for dispatch or active reconciliation."""
+        with self._lock, self.queue._db() as db:
+            rows=db.execute('SELECT * FROM viewer_tasks WHERE removed=0 AND job_id=? LIMIT 2',(job_id,)).fetchall()
+            if len(rows)!=1:raise Conflict('execution metadata unavailable')
+            return self._task(db,rows[0])
 
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
