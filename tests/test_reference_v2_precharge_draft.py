@@ -42,6 +42,48 @@ class PrechargeTests(unittest.TestCase):
   with self.assertRaises(sqlite3.OperationalError):l.precharge(request_id='r1',object_id='cloud',start=0,end=4)
   self.assertEqual(self.ledger().precharge(request_id='r1',object_id='cloud',start=0,end=4)['state'],'replay_no_body')
 
+ def test_expiry_during_transaction_commits_clock_without_charge(self):
+  ticks=iter([1793361600000,1793361600000,1793362200001]);l=PrechargeLedger(self.path,inode=self.inode,epoch='epoch-1',clock=lambda:next(ticks))
+  with self.assertRaisesRegex(PrechargeHeld,'expired'):l.precharge(request_id='r1',object_id='cloud',start=0,end=4)
+  self.now=1793361600000
+  with self.assertRaisesRegex(PrechargeHeld,'expired'):self.ledger().precharge(request_id='r2',object_id='cloud',start=0,end=4)
+  db=sqlite3.connect(self.path)
+  try:self.assertEqual(db.execute('SELECT COUNT(*) FROM charges').fetchone()[0],0)
+  finally:db.close()
+
+ def test_contended_lock_observes_clock_after_wait(self):
+  clockfile=Path(self.tmp.name)/'clock';clockfile.write_text('1793361600000')
+  holder_code="""import sqlite3,sys
+c=sqlite3.connect(sys.argv[1],isolation_level=None);c.execute('BEGIN IMMEDIATE');print('locked',flush=True);sys.stdin.readline();c.execute('COMMIT')
+"""
+  charge_code="""import sys
+from pathlib import Path
+from processing.reference_v2_precharge_draft import PrechargeLedger,PrechargeHeld
+l=PrechargeLedger(sys.argv[1],inode=(int(sys.argv[2]),int(sys.argv[3])),epoch='epoch-1',clock=lambda:int(Path(sys.argv[4]).read_text()))
+print('started',flush=True)
+try:l.precharge(request_id='r1',object_id='cloud',start=0,end=4);print('charged')
+except PrechargeHeld:print('held')
+"""
+  holder=subprocess.Popen([sys.executable,'-u','-c',holder_code,str(self.path)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  charge=None
+  try:
+   self.assertEqual(holder.stdout.readline().strip(),'locked')
+   charge=subprocess.Popen([sys.executable,'-u','-c',charge_code,str(self.path),str(self.inode[0]),str(self.inode[1]),str(clockfile)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   self.assertEqual(charge.stdout.readline().strip(),'started');clockfile.write_text('1793362200001');holder.stdin.write('release\n');holder.stdin.flush()
+   out,err=charge.communicate(timeout=10);self.assertEqual(charge.returncode,0,err);self.assertEqual(out.strip(),'held')
+   holder.communicate(timeout=10);self.now=1793361600000
+   with self.assertRaisesRegex(PrechargeHeld,'expired'):self.ledger().precharge(request_id='r2',object_id='cloud',start=0,end=4)
+  finally:
+   for child in (holder,charge):
+    if child and child.poll() is None:child.kill();child.communicate(timeout=5)
+
+ def test_corrupt_charge_object_is_rejected_on_reopen(self):
+  self.ledger().precharge(request_id='r1',object_id='cloud',start=0,end=4)
+  db=sqlite3.connect(self.path)
+  try:db.execute("UPDATE charges SET object_id='outside'");db.commit()
+  finally:db.close()
+  with self.assertRaisesRegex(PrechargeHeld,'accounting invalid'):self.ledger()
+
  def test_zero_length_is_one_request(self):
   l=self.ledger();self.assertEqual(l.precharge(request_id='r1',object_id='empty',start=0,end=0)['bytes'],0)
   with self.assertRaisesRegex(PrechargeHeld,'budget'):l.precharge(request_id='r2',object_id='empty',start=0,end=0)

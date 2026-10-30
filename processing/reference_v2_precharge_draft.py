@@ -61,20 +61,26 @@ class PrechargeLedger:
    if grant['sha256']!=digest or grant['payload']['transferEpoch']!=self.epoch or grant['payload']['manifestSha256']!=manifest['sha256']:raise ValueError()
    if any(type(v) is not int or v<0 for v in (high,requests,charged)):raise ValueError()
    count,total=db.execute('SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM charges').fetchone()
-   if count!=requests or total!=charged or requests>grant['payload']['totalRequestBudget'] or charged>grant['payload']['totalByteBudget']:raise ValueError()
+   if count!=requests or total!=charged or count>100000 or requests>grant['payload']['totalRequestBudget'] or charged>grant['payload']['totalByteBudget']:raise ValueError()
+   objects={x['id']:x for x in manifest['objects']}
+   for request_id,object_id,start,end,length in db.execute('SELECT request_id,object_id,start,end,bytes FROM charges'):
+    p._slug(request_id,'request id');p._slug(object_id,'object id');obj=objects.get(object_id)
+    if obj is None or length!=end-start or not ((obj['byteSize']==0 and start==end==0) or (0<=start<end<=obj['byteSize'] and end-start<=grant['payload']['rangeBytes'])):raise ValueError()
   except (ValueError,TypeError,OverflowError):raise PrechargeHeld('transfer accounting invalid') from None
   return grant['payload'],manifest,high,requests,charged
  def precharge(self,*,request_id,object_id,start,end):
   p._slug(request_id,'request id');p._slug(object_id,'object id')
   p._integer(start,'range start',allow_zero=True);p._integer(end,'range end',allow_zero=True)
-  now=_now_ms(self.clock);db=self._db()
+  db=self._db()
   try:
    # Persist clock independently, so a denial or later rollback cannot revive an
    # expiry already observed by this database. This is not a rollback-proof clock.
    db.execute('BEGIN IMMEDIATE');grant,manifest,high,_,_=self._validate(db)
-   db.execute('UPDATE transfer SET clock_ms=? WHERE id=1',(max(now,high),));self._check_path();db.execute('COMMIT')
+   now=_now_ms(self.clock);db.execute('UPDATE transfer SET clock_ms=? WHERE id=1',(max(now,high),));self._check_path();db.execute('COMMIT')
    db.execute('BEGIN IMMEDIATE');grant,manifest,high,requests,charged=self._validate(db)
-   if high>=_utc_ms(grant['expiresAt']):raise PrechargeHeld('grant expired')
+   high=max(high,_now_ms(self.clock));db.execute('UPDATE transfer SET clock_ms=? WHERE id=1',(high,))
+   if high>=_utc_ms(grant['expiresAt']):
+    self._check_path();db.execute('COMMIT');raise PrechargeHeld('grant expired')
    obj=next((x for x in manifest['objects'] if x['id']==object_id),None)
    if obj is None:raise PrechargeHeld('object outside manifest')
    if not ((obj['byteSize']==0 and start==end==0) or (0<=start<end<=obj['byteSize'] and end-start<=grant['rangeBytes'])):raise PrechargeHeld('invalid range')
@@ -84,8 +90,14 @@ class PrechargeLedger:
     db.execute('COMMIT');return {'state':'replay_no_body'}
    length=end-start
    if requests>=grant['totalRequestBudget'] or charged+length>grant['totalByteBudget']:raise PrechargeHeld('budget exhausted')
+   db.execute('SAVEPOINT charge_attempt')
    db.execute('INSERT INTO charges VALUES(?,?,?,?,?)',(request_id,object_id,start,end,length))
    db.execute('UPDATE transfer SET requests=requests+1,bytes=bytes+? WHERE id=1',(length,))
+   final=max(high,_now_ms(self.clock))
+   if final>=_utc_ms(grant['expiresAt']):
+    db.execute('ROLLBACK TO charge_attempt');db.execute('RELEASE charge_attempt')
+    db.execute('UPDATE transfer SET clock_ms=? WHERE id=1',(final,));self._check_path();db.execute('COMMIT');raise PrechargeHeld('grant expired')
+   db.execute('RELEASE charge_attempt');db.execute('UPDATE transfer SET clock_ms=? WHERE id=1',(final,))
    self._check_path();db.execute('COMMIT')
    return {'state':'charged_no_authority','requestId':request_id,'bytes':length}
   except Exception:
