@@ -237,6 +237,37 @@ class AdmissionTests(unittest.TestCase):
         with self.handler.prototype_queue._db() as db:
             row=db.execute('SELECT directory FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
         self.assertTrue(orphan.is_dir());self.assertNotEqual(row['directory'],orphan.name);self.assertTrue((store.root/row['directory']).is_dir())
+    def test_real_http_taskstore_concurrent_spool_reservation(self):
+        from tests.test_viewer_http import multipart, BOUNDARY
+        from types import SimpleNamespace
+        self.stop();self.config=replace(self.config,viewer_spool_min_free_bytes=100,admission_drain_enabled=False,prototype_state_dir=os.path.join(self.temp.name,'spool-capacity'));self.start()
+        service=self.handler.viewer_service; identifier=str(uuid.uuid4())
+        init=multipart([('name',None,b'synthetic'),('options',None,b'[]')]);url=self.origin+'/task/new/init?token='+VIEW
+        headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY,'set-uuid':identifier}
+        with patch.object(service,'_catalog',return_value={'ready':True,'commonOptions':[]}):
+            with urlopen(Request(url,data=init,headers=headers),timeout=4) as response:self.assertEqual(response.status,200)
+        body=multipart([('images','first.jpg',b'synthetic photo')]);url=self.origin+'/task/new/upload/'+identifier+'?token='+VIEW
+        headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY}
+        entered=threading.Event();release=threading.Event();errors=[];results=[]; original=service.upload
+        def slow(*args,**kwargs):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('test timeout')
+            return original(*args,**kwargs)
+        def submit():
+            try:
+                with urlopen(Request(url,data=body,headers=headers),timeout=4) as response:results.append(response.status)
+            except Exception as error:errors.append(error)
+        with patch.object(service,'upload',side_effect=slow), patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100+3*len(body))):
+            worker=threading.Thread(target=submit)
+            try:
+                worker.start();self.assertTrue(entered.wait(2))
+                with self.assertRaises(HTTPError) as denied:urlopen(Request(url,data=body,headers=headers),timeout=2)
+                self.assertEqual(denied.exception.code,503)
+                release.set();worker.join(3);self.assertFalse(worker.is_alive());self.assertEqual(errors,[]);self.assertEqual(results,[200])
+                self.assertEqual(service.info(identifier)['imagesCount'],1)
+                with urlopen(Request(url,data=body,headers=headers),timeout=4) as response:self.assertEqual(response.status,200)
+            finally:
+                release.set();worker.join(3)
 
     def test_close_waits_for_inflight_admission(self):
         entered=threading.Event();release=threading.Event();done=threading.Event()

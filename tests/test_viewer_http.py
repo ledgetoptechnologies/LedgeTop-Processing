@@ -201,6 +201,29 @@ class ViewerHTTPTests(unittest.TestCase):
             with gate.reserve(100): self.assertEqual(gate._reserved,200)
         self.assertEqual(gate._reserved,0)
 
+    def test_upload_exception_closes_spool_before_reservation_release(self):
+        from processing.viewer_http import SpoolCapacity
+        from contextlib import contextmanager
+        service=Service();service.store=SimpleNamespace(root=Path(self.spool.name))
+        service.tasks[IDENTIFIER]={'uuid':IDENTIFIER,'status':{'code':10},'progress':0,'imagesCount':0}
+        facade=ViewerFacade(service,TOKEN,temp_dir=self.spool.name,spool_min_free_bytes=100)
+        files=[]; real_temporary_file=tempfile.TemporaryFile; observed=[]
+        def temporary(*args,**kwargs):
+            f=real_temporary_file(*args,**kwargs);files.append(f);return f
+        original=facade.spool_capacity.reserve
+        @contextmanager
+        def tracking(length):
+            with original(length):
+                try: yield
+                finally: observed.append(bool(files) and all(f.closed for f in files))
+        facade.spool_capacity.reserve=tracking
+        service.upload=lambda *args: (_ for _ in ()).throw(OSError('synthetic'))
+        body=multipart([('images','first.jpg',b'fixture')]); request=MemoryHandler('/task/new/upload/'+IDENTIFIER+'?token='+TOKEN,body,
+            Content_Type='multipart/form-data; boundary='+BOUNDARY,Content_Length=str(len(body)))
+        with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100000)), patch('processing.viewer_http.tempfile.TemporaryFile',side_effect=temporary):
+            facade.handle(request)
+        self.assertEqual(request.status,503);self.assertEqual(observed,[True]);self.assertEqual(facade.spool_capacity._reserved,0)
+
     def test_upload_capacity_fails_closed_on_free_space_probe_error(self):
         service=Service();service.store=SimpleNamespace(root=Path(self.spool.name))
         service.tasks[IDENTIFIER]={'uuid':IDENTIFIER,'status':{'code':10},'progress':0,'imagesCount':0}
