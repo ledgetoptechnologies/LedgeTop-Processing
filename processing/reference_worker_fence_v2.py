@@ -6,15 +6,15 @@ mount replacement, and prevent callers from directly unlocking or duplicating th
 This does not fence another host, engine, open file descriptor, or root user.
 The caller must treat the Python object and its private descriptors as trusted;
 Python cannot prevent deliberate dup, direct close, or LOCK_UN by that caller.
+Instances stay tracked until explicit close or process exit; use the context manager.
 """
 import os
 from pathlib import Path
 import stat
 import threading
-import weakref
 
 _fork_mutex=threading.Lock()
-_fences=weakref.WeakSet()
+_fences=set()
 
 def _before_fork(): _fork_mutex.acquire()
 def _after_parent(): _fork_mutex.release()
@@ -42,8 +42,8 @@ class WorkerFence:
             flags=os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
             self._dirfd=None;self._fd=None;self.pid=os.getpid();self.path=path
             _fences.add(self)
-            self._dirfd=os.open(path,flags)
             try:
+                self._dirfd=os.open(path,flags)
                 info=os.fstat(self._dirfd)
                 if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:
                     raise WorkerFenceHeld('private worker directory required')
@@ -79,6 +79,7 @@ class WorkerFence:
         # the original open-file description and must retain its lock.
         if self._fd is not None: os.close(self._fd); self._fd=None
         if self._dirfd is not None: os.close(self._dirfd); self._dirfd=None
+        _fences.discard(self)
 
     def close(self):
         with _fork_mutex: self._close_unlocked()
