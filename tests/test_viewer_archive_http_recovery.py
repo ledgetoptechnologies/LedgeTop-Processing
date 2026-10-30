@@ -111,9 +111,21 @@ class ViewerArchiveHTTPRecoveryTests(unittest.TestCase):
                 control.send(('path',identifier));self.assertTrue(control.poll(5));path=Path(control.recv())
                 stop(first,control);path.unlink()
                 crash,control,port,_=launch('crash-link')
-                with self.assertRaises((OSError,HTTPError)):
+                try:
                     with request(port,'/task/'+identifier+'/download/all.zip') as response:response.read()
-                crash.join(5);self.assertFalse(crash.is_alive());self.assertEqual(crash.exitcode,73)
+                except HTTPError as error:
+                    self.fail('restore request returned HTTP %s before the injected crash; child alive=%s exit=%s'
+                              % (error.code, crash.is_alive(), crash.exitcode))
+                except TimeoutError:
+                    self.fail('restore request timed out before the injected crash; child alive=%s exit=%s'
+                              % (crash.is_alive(), crash.exitcode))
+                except (http.client.RemoteDisconnected, ConnectionResetError):
+                    pass  # The killed server may close or reset the connection.
+                else:
+                    self.fail('restore request unexpectedly completed before the injected crash')
+                crash.join(10)
+                self.assertFalse(crash.is_alive(), 'injected crash child did not exit; exit=%s' % crash.exitcode)
+                self.assertEqual(crash.exitcode,73, 'restore child exited for a different reason')
                 control.close();active.remove((crash,control))
                 self.assertEqual(path.read_bytes(),expected)
                 orphans=list(path.parent.glob('.all.zip.restore-*'));self.assertEqual(len(orphans),1)
