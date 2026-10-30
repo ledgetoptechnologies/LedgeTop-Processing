@@ -2,8 +2,8 @@
 
 This is an unqualified draft. Runtime activation is blocked until migration,
 rollback, restore, credential provisioning, rotation and revocation are
-qualified. Lookup still requires the current task and its live reservation;
-it does not promise access after task removal or reservation cancellation.
+qualified. Historical lookup retains the accepted capability verifier; task
+removal or reservation cancellation alone does not revoke that capability.
 The staging commit is an issuer assertion, not proof of retained Viewer bytes.
 """
 import hashlib
@@ -48,8 +48,13 @@ class ViewerStagedAck:
                 task_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL,
                 principal_id TEXT NOT NULL, audience TEXT NOT NULL, namespace TEXT NOT NULL,
                 attempt_id TEXT NOT NULL UNIQUE, staging_commit_id TEXT NOT NULL UNIQUE,
+                capability_sha256 TEXT NOT NULL,
                 assertion_sha256 TEXT NOT NULL, assertion_json TEXT NOT NULL,
                 PRIMARY KEY(task_id,generation))''')
+            columns=tuple(row[1] for row in db.execute('PRAGMA table_info(viewer_staged_acks)'))
+            if columns!=('task_id','generation','environment','principal_id','audience','namespace',
+                         'attempt_id','staging_commit_id','capability_sha256','assertion_sha256','assertion_json'):
+                raise ValueError('staged acknowledgment schema requires migration')
 
     def handle(self,method,path,headers,body=b'',*,protected_transport=False):
         if protected_transport is not True:return Response(503,{'error':'protected_transport_required'})
@@ -89,13 +94,17 @@ class ViewerStagedAck:
             store=self.service.store
             with self.service._lock,store._lock,store.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE')
+                if is_lookup:
+                    prior=db.execute('SELECT capability_sha256,assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=? AND environment=? AND principal_id=? AND audience=? AND namespace=?',(identifier,lookup_generation,environment,principal,store.queue.authority_id,NAMESPACE)).fetchone()
+                    if not prior:raise KeyError()
+                    try: verifier=store._capability_hash(identifier,environment,caps[0])
+                    except ValueError:raise KeyError() from None
+                    if not hmac.compare_digest(prior['capability_sha256'],verifier):raise KeyError()
+                    return Response(200,{'assertion':json.loads(prior['assertion_json'])})
                 reservation=store._reservation(db,identifier,environment,caps[0])
                 if reservation is None:raise KeyError()
                 row=store._row(db,identifier)
                 if row['environment']!=environment:raise KeyError()
-                if is_lookup:
-                    prior=db.execute('SELECT assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=? AND environment=? AND principal_id=? AND audience=? AND namespace=?',(identifier,lookup_generation,environment,principal,store.queue.authority_id,NAMESPACE)).fetchone()
-                    return Response(200,{'assertion':json.loads(prior[0])}) if prior else Response(404,{'error':'not_found'})
                 task=store._task(db,row)
                 if not task['job'] or task['job']['status']!='succeeded' or not task['archive_path']:
                     raise Conflict('result not available')
@@ -118,7 +127,7 @@ class ViewerStagedAck:
                     if db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0]>=100000:raise Conflict('assertion capacity reached')
                     if db.execute('SELECT 1 FROM viewer_staged_acks WHERE attempt_id=? OR staging_commit_id=?',(value['attemptId'],value['stagingCommitId'])).fetchone():
                         raise Conflict('assertion identity already bound')
-                    db.execute('INSERT INTO viewer_staged_acks VALUES (?,?,?,?,?,?,?,?,?,?)',(identifier,row['generation'],environment,principal,store.queue.authority_id,NAMESPACE,value['attemptId'],value['stagingCommitId'],digest,encoded.decode()))
+                    db.execute('INSERT INTO viewer_staged_acks VALUES (?,?,?,?,?,?,?,?,?,?,?)',(identifier,row['generation'],environment,principal,store.queue.authority_id,NAMESPACE,value['attemptId'],value['stagingCommitId'],reservation['capability_hash'],digest,encoded.decode()))
                 return Response(200,{'assertion':value,'created':old is None})
         except KeyError:return Response(404,{'error':'not_found'})
         except (p.ProtocolError,ValueError,TypeError):return Response(400,{'error':'invalid_request'})

@@ -83,6 +83,15 @@ class StagedAckTests(ViewerServiceTests):
         self.assertEqual(call('GET',headers=headers).body['assertion'],value)
         with self.queue._db() as db:db.execute('UPDATE viewer_tasks SET generation=generation+1 WHERE uuid=?',(identifier,))
         self.assertEqual(call('GET',headers=headers).body['assertion'],value)
+        # The existing reserved-task lifecycle does not expose a successful
+        # remove/cancel after completion. Simulate both mutable row changes to
+        # test that the stored verifier, not those rows, authorizes lookup.
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET removed=1 WHERE uuid=?',(identifier,))
+            db.execute("UPDATE viewer_reservations SET state='cancelled' WHERE uuid=?",(identifier,))
+        self.assertEqual(call('GET',headers=headers).body['assertion'],value)
+        self.assertEqual(call('GET',headers={'Authorization':'Bearer '+rotated,'X-LedgeTop-Capability':second_cap}).status,404)
+        self.assertEqual(call('GET',headers={'Authorization':'Bearer '+other,'X-LedgeTop-Capability':cap}).status,404)
         api=_DynamicAPI(None,None,None,None,ack)
         server=create_reference_http_server(api,'127.0.0.1',0)
         thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.01));thread.start()
@@ -119,3 +128,10 @@ class StagedAckTests(ViewerServiceTests):
     def test_listener_route_is_default_disabled(self):
         api=_DynamicAPI(None,None,None,None)
         self.assertEqual(api.handle('GET',ROUTE+str(uuid.uuid4()),{},protected_transport=True).status,404)
+
+    def test_old_unmigrated_ack_schema_is_refused(self):
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_staged_acks (task_id TEXT PRIMARY KEY, assertion_json TEXT NOT NULL)')
+        token=base64.urlsafe_b64encode(b'a'*32).decode().rstrip('=')
+        with self.assertRaisesRegex(ValueError,'schema requires migration'):
+            ViewerStagedAck(self.service,{token:{'environment':'production','principalId':'viewer-a'}})
