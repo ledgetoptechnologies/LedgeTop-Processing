@@ -13,7 +13,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import uuid
 
-from ops.incremental_coordinator_binding import IncrementalBinding,IncrementalHeld,volume_census,compare_transition,compare_pilot_reservation_migration,digest
+from ops.incremental_coordinator_binding import IncrementalBinding,IncrementalHeld,volume_census,compare_transition,compare_pilot_reservation_migration,compare_f24_migration,digest
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore
 from processing.reference_terminal import TerminalService
@@ -94,6 +94,44 @@ class IncrementalCoordinatorTests(unittest.TestCase):
         store.reserve(str(uuid.uuid4()),'staging','A'*43)
         with self.assertRaises(IncrementalHeld):
             volume_census(self.volume,authority=AUTHORITY,uid=os.geteuid(),pilot_reservations=True)
+
+    def test_actual_d738_to_f24_migration_preserves_legacy_rows_and_refuses_new_data(self):
+        old=Path(__file__).parent/'fixtures/coordinator_671/viewer_tasks.py'
+        new=Path(__file__).parent/'fixtures/coordinator_d738_f24/f24_taskstore.py'
+        self.assertEqual(hashlib.sha256(old.read_bytes().replace(b'\r\n',b'\n')).hexdigest(),'2274006b52fab5ee35712d873719e57a71e13594a61e16d9a229783b5b7efd0b')
+        self.assertEqual(hashlib.sha256(new.read_bytes().replace(b'\r\n',b'\n')).hexdigest(),'6fa24d5475fd64ce2603bfa4afc46ad5c33a3636373f86907f99b071c9104565')
+        identifier=str(uuid.uuid4())
+        with self.queue._db() as db:
+            db.execute("INSERT INTO viewer_tasks(uuid,directory,name,options,outputs,environment) VALUES(?,?,?,'[]','[]','staging')",(identifier,identifier,'Synthetic legacy'))
+        baseline=volume_census(self.volume,authority=AUTHORITY,uid=os.geteuid(),legacy_task_rows=True)
+        spec=importlib.util.spec_from_file_location('processing.f24_taskstore_fixture',new)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        module.TaskStore(self.queue,self.volume/'viewer-tasks')
+        candidate=volume_census(self.volume,authority=AUTHORITY,uid=os.geteuid(),pilot_reservations=True,pilot_f24=True,legacy_task_rows=True)
+        compare_f24_migration(candidate,baseline)
+        changed=copy.deepcopy(candidate);changed['tables']['viewer_tasks']['legacyRowsSha256']='f'*64
+        with self.assertRaises(IncrementalHeld):compare_f24_migration(changed,baseline)
+        changed=copy.deepcopy(candidate)
+        next(row for row in changed['schema'] if row[1]=='viewer_option_evidence')[3]='CREATE TABLE viewer_option_evidence (x)'
+        with self.assertRaises(IncrementalHeld):compare_f24_migration(changed,baseline)
+        changed=copy.deepcopy(candidate)
+        reservation=next(row for row in changed['schema'] if row[0]=='table' and row[1]=='viewer_reservations')
+        reservation[3]=reservation[3].replace("'reserved'","'reser ved'")
+        with self.assertRaises(IncrementalHeld):compare_f24_migration(changed,baseline)
+        with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET name='changed' WHERE uuid=?",(identifier,))
+        modified=volume_census(self.volume,authority=AUTHORITY,uid=os.geteuid(),pilot_reservations=True,pilot_f24=True,legacy_task_rows=True)
+        with self.assertRaises(IncrementalHeld):compare_f24_migration(modified,baseline)
+        with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET name='Synthetic legacy' WHERE uuid=?",(identifier,))
+        with self.queue._db() as db:db.execute('UPDATE viewer_tasks SET option_evidence_required=1 WHERE uuid=?',(identifier,))
+        with self.assertRaises(IncrementalHeld):volume_census(self.volume,authority=AUTHORITY,uid=os.geteuid(),pilot_reservations=True,pilot_f24=True,legacy_task_rows=True)
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET option_evidence_required=0 WHERE uuid=?',(identifier,))
+            db.execute("INSERT INTO viewer_reservations VALUES (?, 'staging', 'synthetic', 'reserved')",(identifier,))
+        with self.assertRaises(IncrementalHeld):volume_census(self.volume,authority=AUTHORITY,uid=os.geteuid(),pilot_reservations=True,pilot_f24=True,legacy_task_rows=True)
+        with self.queue._db() as db:
+            db.execute('DELETE FROM viewer_reservations')
+            db.execute("INSERT INTO viewer_option_evidence VALUES (?,1,'[]','synthetic')",(identifier,))
+        with self.assertRaises(IncrementalHeld):volume_census(self.volume,authority=AUTHORITY,uid=os.geteuid(),pilot_reservations=True,pilot_f24=True,legacy_task_rows=True)
 
     def test_actual_archived_predecessor_bytes_and_new_old_reopen_preserve_full_history(self):
         fixture=Path(__file__).parent/'fixtures/coordinator_671';attrs=json.loads((fixture/'fixture.attrs').read_text())

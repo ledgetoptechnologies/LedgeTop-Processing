@@ -24,6 +24,30 @@ def digest(value):return hashlib.sha256(encoded(value)).hexdigest()
 def require(condition,reason):
     if not condition:raise IncrementalHeld(reason)
 
+def sql_shape(sql):
+    """Preserve quoted bytes; this is not a full SQLite token parser.
+
+    Removing unquoted whitespace can conflate distinct SQL tokens; this helper
+    cannot by itself qualify schema for a production activation decision.
+    """
+    require(type(sql) is str,'schema_sql_required')
+    out=[];quoted=None;i=0
+    while i<len(sql):
+        char=sql[i]
+        if quoted is None and (sql[i:i+2] in ('--','/*')):raise IncrementalHeld('schema_comments_refused')
+        if quoted is None and char in ("'",'"','`','['):
+            out.append(char)
+            quoted=']' if char=='[' else char
+        elif quoted is not None and char==quoted:
+            out.append(char)
+            if quoted!=']' and i+1<len(sql) and sql[i+1]==quoted:
+                out.append(quoted);i+=2;continue
+            quoted=None
+        elif quoted is not None or not char.isspace():out.append(char)
+        i+=1
+    require(quoted is None,'unterminated_schema_literal')
+    return ''.join(out)
+
 # Exact qualified preparation profiles; this is not live activation permission.
 BASELINE_OWNED_COUNTS = {
     ('671fd2a6bde40088bdfad91ccf67eab45ee3d8d7', '6bbd468e1177746cb695e43195e75355b0681f23'): 2,
@@ -70,6 +94,10 @@ TABLES={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','
 PILOT_RESERVATION_SQL = """CREATE TABLE viewer_reservations (
                 uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))"""
+F24_OPTION_EVIDENCE_SQL = """CREATE TABLE viewer_option_evidence (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL,
+                definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
+                PRIMARY KEY(uuid,generation))"""
 OWNED_COLUMNS=('request_id','node_id','authority_id','request_sha256','request_json','receipt_json')
 RECEIPT_FIELDS={'schemaVersion','requestId','authorityId','nodeId','requestSha256','expectedRevision','revision','planId','state','drainAt','notBefore','afterJobId','targetImage','receiptSha256'}
 
@@ -104,8 +132,9 @@ def owned_row(record,authority):
     return dict(record)
 
 
-def volume_census(root,*,authority,uid=10001,pilot_reservations=False):
-    require(type(pilot_reservations) is bool,'explicit_pilot_census_required')
+def volume_census(root,*,authority,uid=10001,pilot_reservations=False,pilot_f24=False,legacy_task_rows=False):
+    require(type(pilot_reservations) is bool and type(pilot_f24) is bool and type(legacy_task_rows) is bool,'explicit_pilot_census_required')
+    require(not pilot_f24 or pilot_reservations,'f24_requires_reservation_profile')
     """Bounded current schema1 idle census; read-only SQL/files, no gate creation."""
     root=Path(root).absolute();info=root.lstat()
     require(root.resolve()==root and not any(p.is_symlink() for p in (root,*root.parents)) and stat.S_ISDIR(info.st_mode) and info.st_uid==uid and info.st_gid==uid,'owned_state_root_required')
@@ -140,17 +169,21 @@ def volume_census(root,*,authority,uid=10001,pilot_reservations=False):
     try:
         db.execute('BEGIN');require(db.execute('PRAGMA quick_check').fetchone()[0]=='ok','state_integrity_failed')
         schema=[list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
-        expected_tables = TABLES | ({'viewer_reservations'} if pilot_reservations else set())
+        expected_tables = TABLES | ({'viewer_reservations'} if pilot_reservations else set()) | ({'viewer_option_evidence'} if pilot_f24 else set())
         require({r[1] for r in schema if r[0]=='table'}==expected_tables and not any(r[0] in ('trigger','view') for r in schema),'coordinator_schema_changed')
         if pilot_reservations:
             reservation = [r for r in schema if r[0]=='table' and r[1]=='viewer_reservations']
             require(len(reservation)==1 and ''.join(reservation[0][3].split())==''.join(PILOT_RESERVATION_SQL.split()),'pilot_reservation_schema_changed')
+            if pilot_f24:require(sql_shape(reservation[0][3])==sql_shape(PILOT_RESERVATION_SQL),'f24_reservation_schema_changed')
+        if pilot_f24:
+            evidence=[r for r in schema if r[0]=='table' and r[1]=='viewer_option_evidence']
+            require(len(evidence)==1 and sql_shape(evidence[0][3])==sql_shape(F24_OPTION_EVIDENCE_SQL),'f24_evidence_schema_changed')
         require(all(r[0]!='index' or r[1].startswith('sqlite_autoindex_') or r[1]=='viewer_engine_uuid' for r in schema),'coordinator_index_changed')
         require(db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]==authority,'coordinator_authority_changed')
         tables={}
         for name in sorted(expected_tables):
             count=db.execute('SELECT COUNT(*) FROM "'+name+'"').fetchone()[0]
-            cap=64 if name=='owned_maintenance_schedules' else 12 if name=='jobs' else 2 if name=='nodes' else 1 if name in ('sqlite_sequence','coordinator_identity') else 0
+            cap=64 if name=='owned_maintenance_schedules' or (name=='viewer_tasks' and legacy_task_rows) else 12 if name=='jobs' else 2 if name=='nodes' else 1 if name in ('sqlite_sequence','coordinator_identity') else 0
             require(count<=cap,'table_census_bound')
             columns=[list(row) for row in db.execute('PRAGMA table_info("'+name+'")')]
             total=' + '.join('COALESCE(length(CAST("'+column[1]+'" AS BLOB)),0)' for column in columns)
@@ -158,6 +191,11 @@ def volume_census(root,*,authority,uid=10001,pilot_reservations=False):
             rows=[list(row) for row in db.execute('SELECT * FROM "'+name+'"')];rows.sort(key=encoded)
             require(len(encoded(rows))<=1024**2,'table_byte_bound')
             tables[name]=dict(count=count,sha256=digest(rows),columns=columns)
+            if pilot_f24 and name=='viewer_tasks':
+                require(columns[-1][1:] == ['option_evidence_required','INTEGER',1,'0',0],'f24_marker_column_changed')
+                require(all(row[-1] == 0 and type(row[-1]) is int for row in rows),'f24_legacy_marker_changed')
+                projected=[row[:-1] for row in rows];projected.sort(key=encoded)
+                tables[name]['legacyRowsSha256']=digest(projected)
         require(tables['jobs']['count']==12 and db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]==0,'reviewed_terminal_history_required')
         require(tuple(r[1] for r in db.execute('PRAGMA table_info(owned_maintenance_schedules)'))==OWNED_COLUMNS,'owned_columns_changed')
         owned=[owned_row(dict(zip(OWNED_COLUMNS,row)),authority) for row in db.execute('SELECT * FROM owned_maintenance_schedules ORDER BY request_id')]
@@ -169,6 +207,43 @@ def volume_census(root,*,authority,uid=10001,pilot_reservations=False):
             after=path.lstat();require((after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)==original,'state_changed_during_sql_census')
         return dict(authorityId=authority,schema=schema,tables=tables,files=files,nodeRows=nodes,ownedRows=owned,rootMode=stat.S_IMODE(info.st_mode),sqliteQuickCheck='ok')
     finally:db.close()
+
+
+def compare_f24_migration(observed, baseline):
+    """Compare d738→f24 additive schema offline; never grant activation.
+
+    The caller must separately fence all writers. This bounded comparison is
+    not a backup, rollback authorization, or a live admission fence. The
+    existing census still refuses retained task directories and files.
+    """
+    require(type(observed) is dict and type(baseline) is dict,'f24_census_required')
+    candidate=json.loads(encoded(observed));original=json.loads(encoded(baseline))
+    for name in ('viewer_reservations','viewer_option_evidence'):
+        added=[row for row in candidate.get('schema',[]) if row[2]==name]
+        require(len(added)==2 and {row[0] for row in added}=={'table','index'},'f24_schema_delta_changed')
+        expected_sql=PILOT_RESERVATION_SQL if name=='viewer_reservations' else F24_OPTION_EVIDENCE_SQL
+        table_rows=[row for row in added if row[0]=='table']
+        require(len(table_rows)==1 and sql_shape(table_rows[0][3])==sql_shape(expected_sql),'f24_new_table_schema_changed')
+        require(any(row[0]=='index' and row[1]=='sqlite_autoindex_'+name+'_1' and row[3] is None for row in added),'f24_new_index_changed')
+        table=candidate.get('tables',{}).get(name)
+        require(type(table) is dict and table.get('count')==0 and table.get('sha256')==digest([]),'f24_new_tables_not_empty')
+        require(name not in original.get('tables',{}),'f24_predecessor_schema_changed')
+        candidate['schema']=[row for row in candidate['schema'] if row[2]!=name]
+        del candidate['tables'][name]
+    oldrows=[row for row in original['schema'] if row[0]=='table' and row[1]=='viewer_tasks']
+    newrows=[row for row in candidate['schema'] if row[0]=='table' and row[1]=='viewer_tasks']
+    require(len(oldrows)==len(newrows)==1,'f24_task_schema_missing')
+    oldsql=oldrows[0][3];require(type(oldsql) is str and oldsql.endswith(')'),'f24_predecessor_schema_changed')
+    expected=oldsql[:-1]+', option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1)))'
+    require(sql_shape(newrows[0][3])==sql_shape(expected),'f24_task_schema_changed')
+    newrows[0][3]=oldsql
+    current=candidate['tables']['viewer_tasks'];prior=original['tables']['viewer_tasks']
+    require(current['columns'][-1][1:] == ['option_evidence_required','INTEGER',1,'0',0],'f24_marker_column_changed')
+    require(current.pop('legacyRowsSha256',None)==prior['sha256'],'f24_legacy_rows_changed')
+    current['sha256']=prior['sha256'];current['columns']=current['columns'][:-1]
+    for value in (candidate,original):
+        value['files']=[{k:v for k,v in item.items() if item['path']!='jobs.sqlite3' or k not in ('bytes','sha256')} for item in value['files']]
+    require(candidate==original,'f24_immutable_state_changed')
 
 
 def compare_pilot_reservation_migration(observed, baseline):
