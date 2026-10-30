@@ -25,6 +25,31 @@ class WorkerFenceTests(unittest.TestCase):
             if child.poll() is None: child.kill();child.wait(timeout=5)
             child.stdout.close()
 
+    def test_forked_child_does_not_extend_parent_lock_after_death(self):
+        import signal
+        code = """import os,sys,time
+from processing.reference_worker_fence_v2 import WorkerFence
+f=WorkerFence(sys.argv[1]);child=os.fork()
+if child==0:
+    time.sleep(15);os._exit(0)
+print(child,flush=True)
+time.sleep(60)
+"""
+        parent=subprocess.Popen([sys.executable,'-u','-c',code,str(self.root)],stdout=subprocess.PIPE,text=True)
+        child=None
+        try:
+            child=int(parent.stdout.readline().strip())
+            with self.assertRaises(WorkerFenceHeld):WorkerFence(self.root)
+            parent.kill();parent.wait(timeout=5)
+            os.kill(child,0)  # child is still alive when acquiring the fence
+            with WorkerFence(self.root) as fence:fence.check()
+        finally:
+            if parent.poll() is None:parent.kill();parent.wait(timeout=5)
+            if child is not None:
+                try:os.kill(child,signal.SIGTERM)
+                except ProcessLookupError:pass
+            parent.stdout.close()
+
     def test_replaced_inode_detected_and_unsafe_files_rejected(self):
         with WorkerFence(self.root) as fence:
             (self.root/'worker.lock').unlink()
