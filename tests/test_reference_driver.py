@@ -262,6 +262,63 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'], 'held')
         self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
 
+    def test_unrelated_failure_ack_does_not_release_current_job_gate(self):
+        from processing.reference_failure import make_failure, _receipt
+        # An earlier retained record is due first in the actual shared outbox.
+        other = make_failure(job_id=str(uuid.uuid4()), generation=1, environment='staging',
+            input_manifest_sha256='a'*64, pipeline_digest='b'*64,
+            terminal_state='failed', error_code='synthetic_failure')
+        other_id = self.failures.persist(other, engine_terminal=True)
+        self.transport.code = 30
+        job = self.submit()
+        self.advance(job, 'failure_delivering')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        current_id = data['failureOutboxId']
+        self.assertNotEqual(current_id, other_id)
+        with NodeGate('engine') as gate:
+            before = gate.snapshot()['reservation']
+            self.assertEqual(before['job']['id'], job['jobId'])
+        original_request = self.driver._request
+        original_binding = self.driver._claim_binding
+        def binding(payload):
+            if payload['jobId'] == other['jobId']:
+                return {'claimRequestId': 'synthetic-other', 'claimToken': 'synthetic-token'}
+            return original_binding(payload)
+        def request(method, suffix, payload=None, **kwargs):
+            if suffix == '/terminal-outcomes' and payload['delivery']['outboxId'] == other_id:
+                return 200, _receipt(payload['delivery'], other)
+            return original_request(method, suffix, payload, **kwargs)
+        with patch.object(self.driver, '_claim_binding', side_effect=binding), \
+             patch.object(self.driver, '_request', side_effect=request):
+            result = self.driver.step()
+        self.assertEqual(result['state'], 'failure_delivering')
+        self.assertEqual(self.failures.get(other_id)['state'], 'acknowledged')
+        self.assertNotEqual(self.failures.get(current_id)['state'], 'acknowledged')
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation'], before)
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.assertEqual(self.failures.get(current_id)['state'], 'acknowledged')
+        with NodeGate('engine') as gate:
+            self.assertIsNone(gate.snapshot()['reservation'])
+
+    def test_unrelated_success_ack_does_not_advance_current_job(self):
+        job = self.submit()
+        self.advance(job, 'delivering')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        self.assertNotEqual(self.outbox.get(data['outboxId'])['state'], 'acknowledged')
+        with NodeGate('engine') as gate:
+            before = gate.snapshot()['reservation']
+        with patch.object(self.driver.sender, 'send_next',
+                          return_value={'state': 'acknowledged', 'outboxId': 'a' * 64}):
+            result = self.driver.step()
+        self.assertEqual(result['state'], 'delivering')
+        self.assertEqual(result['deliveryState'], 'other_acknowledged')
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation'], before)
+        self.advance(job, 'awaiting_acceptance')
+
     def test_confirmed_failed_engine_delivers_metadata_without_fake_archive_and_releases_gate(self):
         self.transport.code = 30
         job = self.submit()

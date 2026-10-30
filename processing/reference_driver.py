@@ -640,6 +640,12 @@ class ReferenceDriver:
                 except Exception:
                     pass
                 return {'state': 'failure_delivering', 'jobId': job_id}
+        # claim_next is global to the outbox. A successful attempt may have
+        # acknowledged a different job; only this exact job can release its
+        # physical gate or advance its driver state.
+        completion = self.failure_outbox.get(data['failureOutboxId'])
+        if completion['state'] != 'acknowledged':
+            return {'state': 'failure_delivering', 'jobId': job_id}
         if tree:
             adapter.acknowledge_delivery(job_id)
             self._save(job_id, 'awaiting_failure_acceptance', data)
@@ -847,6 +853,11 @@ class ReferenceDriver:
                 sent = self.sender.send_next()
                 if sent['state'] != 'acknowledged':
                     return {'state': 'delivering', 'jobId': job_id, 'deliveryState': sent['state']}
+            # A shared sender can acknowledge another retained result first.
+            # Never treat that as this job's coordinator receipt.
+            completion = self.outbox.get(data['outboxId'])
+            if completion['state'] != 'acknowledged':
+                return {'state': 'delivering', 'jobId': job_id, 'deliveryState': 'other_acknowledged'}
             if self._kind(job_id) == 'treedar':
                 adapter.acknowledge_delivery(job_id)
                 self._save(job_id, 'awaiting_acceptance', data)
