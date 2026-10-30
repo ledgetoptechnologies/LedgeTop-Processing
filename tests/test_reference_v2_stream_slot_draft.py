@@ -53,6 +53,7 @@ class SlotTests(PrechargeTests):
   l._conn.close();l._conn=sqlite3.connect(self.path,isolation_level=None,factory=FailCommit);l._version=None
   with self.assertRaises(sqlite3.OperationalError):s.reconcile_opening(l,writer_quiesced=True)
   self.assertEqual(s.state(),'closing')
+  l.close();l=self.indexed()
   with self.assertRaisesRegex(SlotHeld,'reconciliation'):s.begin(l,request_id='r2',object_id='cloud',start=0,end=4)
   with self.assertRaisesRegex(SlotHeld,'opening slot required'):s.reconcile_opening(l,writer_quiesced=True)
 
