@@ -289,6 +289,79 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.fleet.max_active, 1)
         self.assertEqual(len(self.fleet.commits), 3)
 
+    def test_running_staging_finishes_before_later_production_then_priority_applies(self):
+        # Use a low synthetic boundary to exercise the real dispatcher without
+        # creating thousands of files. The 1000/1001 boundary is tested by policy.
+        self.config.local_max_photos=1
+        running_staging=self.submit(environment='staging')
+        self.service.tick()
+        self.assertEqual(self.task(running_staging)['node_id'],'cluster')
+        self.assertEqual(self.task(running_staging)['job']['status'],'running')
+        waiting_staging=self.submit(environment='staging')
+        production_large=self.submit(environment='production',count=2)
+        production_small=self.submit(environment='production')
+        self.service.tick()
+        self.assertEqual(self.task(running_staging)['job']['status'],'running')
+        for identifier in (waiting_staging,production_large,production_small):
+            self.assertEqual(self.task(identifier)['job']['status'],'queued')
+            self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertEqual(len(self.fleet.commits),1)
+        self.assertFalse(any(call[0]=='cancel' for engine in self.engines.values() for call in engine.calls))
+        self.finish(running_staging);self.service.tick()
+        self.assertEqual(self.task(production_large)['node_id'],'main')
+        self.assertIsNone(self.task(production_small)['node_id'])
+        self.assertIsNone(self.task(waiting_staging)['node_id'])
+        self.finish(production_large);self.service.tick()
+        self.assertEqual(self.task(production_small)['node_id'],'cluster')
+        self.assertIsNone(self.task(waiting_staging)['node_id'])
+        self.finish(production_small);self.service.tick()
+        self.assertEqual(self.task(waiting_staging)['node_id'],'cluster')
+        self.finish(waiting_staging);self.service.tick()
+        self.assertEqual(self.fleet.max_active,1)
+        self.assertEqual([node for node,_ in self.fleet.commits],['cluster','main','cluster','cluster'])
+        self.assertTrue(all(self.task(identifier)['job']['status']=='succeeded' for identifier in
+            (running_staging,production_large,production_small,waiting_staging)))
+
+    def test_small_production_precedes_large_staging_while_main_busy(self):
+        self.config.local_max_photos=1
+        staging=self.submit(environment='staging',count=2)
+        production=self.submit(environment='production')
+        self.busy['main']=1
+        self.service.tick()
+        self.assertEqual(self.task(production)['node_id'],'cluster')
+        self.assertEqual(self.task(staging)['job']['status'],'queued')
+        self.assertFalse(self.engines['main'].calls)
+        self.finish(production);self.service.tick()
+        self.assertEqual(self.task(staging)['job']['status'],'queued')
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertFalse(self.engines['main'].calls)
+        self.busy['main']=0;self.service.tick()
+        self.assertEqual(self.task(staging)['node_id'],'main')
+        self.finish(staging);self.service.tick()
+        self.assertEqual([node for node,_ in self.fleet.commits],['cluster','main'])
+        self.assertEqual(self.fleet.max_active,1)
+
+    def test_unavailable_large_production_head_keeps_small_and_staging_queued(self):
+        self.config.local_max_photos=1
+        production_large=self.submit(environment='production',count=2)
+        production_small=self.submit(environment='production')
+        staging=self.submit(environment='staging')
+        self.busy['main']=1
+        self.service.tick()
+        for identifier in (production_large,production_small,staging):
+            self.assertEqual(self.task(identifier)['job']['status'],'queued')
+            self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertEqual(self.fleet.commits,[])
+        self.busy['main']=0;self.service.tick()
+        self.assertEqual(self.task(production_large)['node_id'],'main')
+        self.finish(production_large);self.service.tick()
+        self.assertEqual(self.task(production_small)['node_id'],'cluster')
+        self.finish(production_small);self.service.tick()
+        self.assertEqual(self.task(staging)['node_id'],'cluster')
+        self.finish(staging);self.service.tick()
+        self.assertEqual([node for node,_ in self.fleet.commits],['main','cluster','cluster'])
+        self.assertEqual(self.fleet.max_active,1)
+
     def test_tree_running_and_held_block_all_photogrammetry(self):
         tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})
         claim = self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'})
