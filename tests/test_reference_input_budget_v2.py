@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import unittest
 from processing import reference_protocol as p
-from processing.reference_input_budget_v2 import plan_input_budget, MAX_OBJECTS
+from processing.reference_input_budget_v2 import plan_input_budget, decode_budget_proposal, MAX_OBJECTS
 
 class InputBudgetTests(unittest.TestCase):
     def setUp(self):
@@ -29,7 +29,27 @@ class InputBudgetTests(unittest.TestCase):
 
     def test_above_v1_cap(self):
         self.proposal['objects'] = [{'id':f'obj-{i}', 'byteSize':0, 'sha256':'a'*64} for i in range(10001)]
+        self.proposal['retryBytes'] = 0
         self.assertEqual(plan_input_budget(self.proposal)['requiredRequests'],10001)
+
+    def test_canonical_raw_rejections(self):
+        raw = p.canonical_json(self.proposal)
+        self.assertEqual(decode_budget_proposal(raw), plan_input_budget(self.proposal))
+        cases = [raw.replace(b'"protocolVersion":2', b'"protocolVersion":2.0'),
+                 raw.replace(b'"protocolVersion":2', b'"protocolVersion":2e0'),
+                 raw.replace(b'"retryBytes":5', b'"retryBytes":-0'),
+                 raw.replace(b'"protocolVersion":2', b'"protocolVersion":2,"protocolVersion":2'),
+                 raw.replace(b'2026-', b'0000-'), raw + b' ', raw[:-1] + b',"x":"\xff"}']
+        for case in cases:
+            with self.subTest(raw=case[:60]), self.assertRaises(p.ProtocolError): decode_budget_proposal(case)
+
+    def test_retry_amplification(self):
+        for field, value in [('retryRequests',9),('retryBytes',41)]:
+            changed = copy.deepcopy(self.proposal); changed[field] = value
+            with self.assertRaises(p.ProtocolError): plan_input_budget(changed)
+        self.proposal['objects'] = [self.proposal['objects'][0]]
+        self.proposal['retryBytes'] = 1
+        with self.assertRaises(p.ProtocolError): plan_input_budget(self.proposal)
 
     def test_generation_zero(self):
         self.proposal['generation'] = 0

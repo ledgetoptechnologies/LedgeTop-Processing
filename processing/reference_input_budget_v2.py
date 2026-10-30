@@ -5,6 +5,7 @@ planner does not reserve broker capacity, reconcile charges or renew grants.
 """
 from datetime import datetime
 import re
+import json
 from . import reference_protocol as p
 
 MAX_OBJECTS = 32_768
@@ -51,6 +52,8 @@ def plan_input_budget(proposal):
         total_requests += max(1, (item['byteSize'] + proposal['rangeBytes'] - 1) // proposal['rangeBytes'])
         p._require(total_bytes <= p.MAX_SAFE_INTEGER and total_requests <= p.MAX_SAFE_INTEGER,
                    'aggregate exceeds safe integer')
+    p._require(proposal['retryRequests'] <= 2 * total_requests, 'retry request allowance exceeded')
+    p._require(proposal['retryBytes'] <= 2 * total_bytes, 'retry byte allowance exceeded')
     byte_budget = total_bytes + proposal['retryBytes']
     request_budget = total_requests + proposal['retryRequests']
     p._require(byte_budget <= p.MAX_SAFE_INTEGER and request_budget <= p.MAX_SAFE_INTEGER,
@@ -61,3 +64,29 @@ def plan_input_budget(proposal):
             'manifestSha256', 'environment', 'capabilityFingerprint', 'expiresAt')} | {
             'objectCount': len(objects), 'rangeBytes': proposal['rangeBytes'], 'totalBytes': total_bytes,
             'requiredRequests': total_requests, 'requestBudget': request_budget, 'byteBudget': byte_budget}
+
+
+def decode_budget_proposal(raw):
+    """Decode bounded canonical UTF-8 JSON; this is not an authenticated wire API."""
+    p._require(type(raw) is bytes and len(raw) <= MAX_METADATA_BYTES, 'invalid metadata bytes')
+    def integer(token):
+        if not re.fullmatch(r'0|[1-9][0-9]*', token) or len(token) > 16:
+            raise p.ProtocolError('invalid integer token')
+        value = int(token)
+        p._require(value <= p.MAX_SAFE_INTEGER, 'integer exceeds safe range')
+        return value
+    def reject_number(_token):
+        raise p.ProtocolError('non-integer number')
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            p._require(key not in result, 'duplicate JSON key')
+            result[key] = value
+        return result
+    try:
+        value = json.loads(raw.decode('utf-8'), parse_int=integer, parse_float=reject_number,
+                           parse_constant=reject_number, object_pairs_hook=pairs)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise p.ProtocolError('invalid JSON') from None
+    p._require(p.canonical_json(value) == raw, 'noncanonical JSON')
+    return plan_input_budget(value)
