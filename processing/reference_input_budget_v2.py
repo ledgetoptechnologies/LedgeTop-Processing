@@ -66,8 +66,8 @@ def plan_input_budget(proposal):
             'requiredRequests': total_requests, 'requestBudget': request_budget, 'byteBudget': byte_budget}
 
 
-def decode_budget_proposal(raw):
-    """Decode bounded canonical UTF-8 JSON; this is not an authenticated wire API."""
+def decode_canonical_input_v2(raw):
+    """Decode bounded canonical UTF-8 JSON; no authentication is implied."""
     p._require(type(raw) is bytes and len(raw) <= MAX_METADATA_BYTES, 'invalid metadata bytes')
     def integer(token):
         if not re.fullmatch(r'0|[1-9][0-9]*', token) or len(token) > 16:
@@ -89,4 +89,9 @@ def decode_budget_proposal(raw):
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise p.ProtocolError('invalid JSON') from None
     p._require(p.canonical_json(value) == raw, 'noncanonical JSON')
-    return plan_input_budget(value)
+    return value
+
+
+def decode_budget_proposal(raw):
+    """Decode and plan; this is not an authenticated wire API."""
+    return plan_input_budget(decode_canonical_input_v2(raw))

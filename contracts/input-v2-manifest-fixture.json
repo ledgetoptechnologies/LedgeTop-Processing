@@ -1,0 +1,78 @@
+{
+  "manifest": {
+    "id": "manifest-1",
+    "revision": 1,
+    "totalBytes": 19,
+    "objectCount": 3,
+    "inputCounts": {
+      "images": 1,
+      "lidarObjects": 1,
+      "points": 42
+    },
+    "objects": [
+      {
+        "id": "empty",
+        "name": "empty.jpg",
+        "byteSize": 0,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "image",
+        "mediaType": "image/jpeg"
+      },
+      {
+        "id": "cloud",
+        "name": "cloud.laz",
+        "byteSize": 15,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "lidar",
+        "mediaType": "application/vnd.laz"
+      },
+      {
+        "id": "aux",
+        "name": "gcp.txt",
+        "byteSize": 4,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "kind": "auxiliary",
+        "mediaType": "text/plain"
+      }
+    ],
+    "sha256": "a42a2a1295a621cd6b58664bc24477400e04755c1b5c433c52d287fd06c0c2b6"
+  },
+  "expected": {
+    "id": "manifest-1",
+    "revision": 1,
+    "totalBytes": 19,
+    "objectCount": 3,
+    "inputCounts": {
+      "images": 1,
+      "lidarObjects": 1,
+      "points": 42
+    },
+    "objects": [
+      {
+        "id": "empty",
+        "name": "empty.jpg",
+        "byteSize": 0,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "image",
+        "mediaType": "image/jpeg"
+      },
+      {
+        "id": "cloud",
+        "name": "cloud.laz",
+        "byteSize": 15,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "lidar",
+        "mediaType": "application/vnd.laz"
+      },
+      {
+        "id": "aux",
+        "name": "gcp.txt",
+        "byteSize": 4,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "kind": "auxiliary",
+        "mediaType": "text/plain"
+      }
+    ],
+    "sha256": "a42a2a1295a621cd6b58664bc24477400e04755c1b5c433c52d287fd06c0c2b6"
+  }
+}
