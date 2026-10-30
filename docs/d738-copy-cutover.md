@@ -139,6 +139,15 @@ every artifact, and inspect. Never improvise a workaround.
   - Run one holder per volume.
   - `--verify`, run inside the holder, proves from `/proc/locks` that the live
     holder owns the lock now.
+- [ops/container_absent.py](../ops/container_absent.py) proves that a
+  container is absent. It exits 0 only when all of these hold:
+  - a successful daemon census;
+  - an explicit "No such container";
+  - one pinned local daemon: `--host` must be a local unix socket, every
+    `DOCKER_*` variable is removed, `DOCKER_CONFIG` points at a fresh empty
+    directory, and `--expect-daemon-id` matches the ID recorded in step 0.
+
+  Any daemon error, inspect error or other daemon exits 2, never 0.
 - `PROCESSING_VIEWER_PRODUCTION_ADMISSION=held` (in `processing/viewer_http.py`)
   refuses every production Viewer POST with 503. Staging is unaffected.
 - [ops/cutover_fence_test.sh](../ops/cutover_fence_test.sh): the isolated
@@ -175,6 +184,11 @@ RUN=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 E=$HOME/.local/share/ledgetop-processing-prototype/cutover-$RUN
 mkdir -m 700 "$E"                          # fails if it already exists
 cp state_census.py netns_sockets.py coordinator_container_spec.py state_fence.py container_absent.py "$E"/
+# Pin every Docker call that proves anything to the local daemon, recorded once:
+DOCKER_LOCAL=unix:///var/run/docker.sock
+DAEMON_ID=$(env -u DOCKER_HOST -u DOCKER_CONTEXT docker --host "$DOCKER_LOCAL" info --format '{{.ID}}')
+test -n "$DAEMON_ID"; echo "$DAEMON_ID" > "$E/daemon-id.txt"
+ABSENT=(python3 "$E/container_absent.py" --host "$DOCKER_LOCAL" --expect-daemon-id "$DAEMON_ID")
 docker inspect "$OLD"     > "$E/old-inspect.json"
 docker image inspect "$IMG_OLD" > "$E/old-image.json"
 docker image inspect "$IMG_NEW" > "$E/new-image.json"
@@ -266,7 +280,7 @@ docker inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}} {{
 fence original "$VOL"
 verify_fence original
 docker rm "$OLD"                           # nothing left to restart or reconnect; old-inspect.json + IMG_OLD recreate it
-python3 "$E/container_absent.py" "$OLD"   # confirmed absent: daemon census plus explicit not-found
+"${ABSENT[@]}" "$OLD"   # confirmed absent on the recorded daemon: census plus explicit not-found
 ```
 
 **Stop conditions:**
@@ -539,7 +553,7 @@ U6.
 ## Step 7 — promote
 
 ```sh
-python3 "$E/container_absent.py" "$OLD"           # exit 0 only with a successful daemon census AND an explicit
+"${ABSENT[@]}" "$OLD"                              # exit 0 only on the recorded daemon, with a successful census AND an explicit
                                                    # "No such container"; a daemon or inspect failure exits 2 and stops here
 verify_fence original; verify_fence verify        # current holders own their locks, from /proc/locks
 census "$NEW_VOL" > "$E/census-before-promotion.json"

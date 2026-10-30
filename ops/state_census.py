@@ -274,6 +274,9 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
         differences.append({'id': identifier, 'change': change, 'fields': unallowed})
     database_differences = []
     da, db = before.get('database'), after.get('database')
+    if allow_lease_marker and (da is None or db is None):
+        # The marker can only be proven inside a database: never pass vacuously.
+        database_differences.append({'database': 'leaseMarkerRequiresDatabase'})
     if (da is None) != (db is None):
         database_differences.append({'database': 'presence'})
     elif da is not None:

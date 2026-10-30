@@ -437,6 +437,23 @@ class CompareTest(CensusFixture):
             self.assertTrue([d for d in result['database'] if d.get('change') in ('leaseMarkerSchemaInvalid', 'leaseMarkerInvalid')],
                             (label, result['database']))
 
+    def test_lease_marker_flag_requires_a_database_on_both_sides(self):
+        (self.root / 'jobs.sqlite3').unlink()
+        without = self.census()[1]
+        self.assertNotIn('database', without)
+        self.assertEqual(self.compare(without, without)[0], 0)  # no flag: two databaseless trees are equal
+        status, result = self.compare(without, without, '--allow-lease-marker')
+        self.assertEqual(status, 1)
+        self.assertIn({'database': 'leaseMarkerRequiresDatabase'}, result['database'])
+
+    def test_lease_marker_flag_requires_the_after_database(self):
+        self.add_marker()
+        before = self.census()[1]
+        (self.root / 'jobs.sqlite3').unlink()
+        status, result = self.compare(before, self.census()[1], '--allow-lease-marker')
+        self.assertEqual(status, 1)
+        self.assertIn({'database': 'leaseMarkerRequiresDatabase'}, result['database'])
+
     def test_preexisting_valid_marker_passes_unchanged(self):
         self.add_marker()
         same = self.census()[1]

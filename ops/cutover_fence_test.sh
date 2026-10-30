@@ -266,9 +266,17 @@ rm -rf "$OUT" "$KEY"
 # 11. Confirmed absence against the real daemon: removed is absent, existing is not.
 GONE=$(docker inspect -f '{{.Id}}' "$RUN-gatecandidate")
 docker rm "$RUN-gatecandidate" >/dev/null
-python "$HERE/container_absent.py" "$GONE" >/dev/null && pass "removed container confirmed absent (census + not-found)" \
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) LOCAL_HOST=npipe:////./pipe/docker_engine;; *) LOCAL_HOST=unix:///var/run/docker.sock;; esac
+DAEMON=$(docker --host "$LOCAL_HOST" info --format '{{.ID}}')
+ABSENT=(python "$HERE/container_absent.py" --host "$LOCAL_HOST" --expect-daemon-id "$DAEMON")
+"${ABSENT[@]}" "$GONE" >/dev/null && pass "removed container confirmed absent on the pinned daemon (census + not-found)" \
   || fail "removed container not confirmed absent"
+set +e; DOCKER_HOST=tcp://127.0.0.1:9 DOCKER_CONTEXT=does-not-exist "${ABSENT[@]}" "$GONE" >/dev/null; code=$?; set -e
+[ "$code" = 0 ] && pass "DOCKER_HOST/DOCKER_CONTEXT overrides are ignored: still the pinned daemon" \
+  || fail "overrides redirected the absence check ($code)"
+set +e; python "$HERE/container_absent.py" --host "$LOCAL_HOST" --expect-daemon-id not-this-daemon "$GONE" >/dev/null; code=$?; set -e
+[ "$code" = 2 ] && pass "a different daemon ID is never accepted as absence" || fail "daemon ID not enforced ($code)"
 PRESENT=$(docker inspect -f '{{.Id}}' "$RUN-fence-original")
-set +e; python "$HERE/container_absent.py" "$PRESENT" >/dev/null; code=$?; set -e
+set +e; "${ABSENT[@]}" "$PRESENT" >/dev/null; code=$?; set -e
 [ "$code" = 1 ] && pass "existing container reported present" || fail "existing container not reported present ($code)"
 echo "ALL PASSED"
