@@ -182,7 +182,50 @@ class ReferenceAPITests(unittest.TestCase):
         body["manifest"]["sha256"] = p.manifest_sha256(body["manifest"])
         body["pipeline"]["treedar"].update(requested=True, inputObjectIds=["image-1"], provenanceReceiptId="provenance-1")
         self.assertEqual(self.request("POST", "/jobs", body).status, 400)
+        rejected=self.request("POST", "/jobs", body, api=api)
+        self.assertEqual((rejected.status,rejected.body),
+                         (409,{'error': 'treedar_execution_shape_unsupported'}))
+        self.assertEqual(self.store.list(), [])
+        body['pipeline']['odm']['requested'] = False
         self.assertEqual(self.request("POST", "/jobs", body, api=api).status, 201)
+
+    def test_existing_combined_exact_replay_reconciles_without_new_job(self):
+        body=copy.deepcopy(self.fixture['submission'])
+        body['manifest']['objects'][0].update(kind='lidar',name='cloud.las')
+        body['manifest']['inputCounts'].update(images=0,lidarObjects=1)
+        body['manifest']['sha256']=p.manifest_sha256(body['manifest'])
+        body['pipeline']['treedar'].update(requested=True,inputObjectIds=['image-1'],provenanceReceiptId='provenance-1')
+        validated=p.validate_submission(body,environment='staging',capability_fingerprint=body['capabilityFingerprint'],
+            available_engines=('odm','treedar'),allowed_odm_options=set(body['pipeline']['odm']['options']))
+        original,_=self.store.submit(validated)
+        api=self.make_api(treedar_available=True)
+        replay=self.request('POST','/jobs',body,api=api)
+        self.assertEqual((replay.status,replay.body['jobId']),(200,original['jobId']))
+        changed=copy.deepcopy(body);changed['pipeline']['treedar']['provenanceReceiptId']='different-id'
+        conflict=self.request('POST','/jobs',changed,api=api)
+        self.assertEqual((conflict.status,conflict.body),(409,{'error':'treedar_execution_shape_unsupported'}))
+        cross=self.request('POST','/jobs',body,api=api,token=PRODUCTION)
+        self.assertEqual((cross.status,cross.body),(409,{'error':'treedar_execution_shape_unsupported'}))
+        self.assertEqual(len(self.store.list()),1)
+
+    def test_treedar_rejects_multiple_or_mixed_inputs_before_persisting(self):
+        api = self.make_api(treedar_available=True)
+        for second_kind in ('lidar', 'image'):
+            with self.subTest(second_kind=second_kind):
+                body = copy.deepcopy(self.fixture['submission'])
+                first = body['manifest']['objects'][0]
+                first.update(kind='lidar', name='cloud.las')
+                second = dict(first, id='input-two', name='second.laz' if second_kind=='lidar' else 'second.jpg', kind=second_kind)
+                body['manifest']['objects'].append(second)
+                body['manifest']['objectCount'] = 2
+                body['manifest']['totalBytes'] = first['byteSize'] + second['byteSize']
+                body['manifest']['inputCounts'].update(images=int(second_kind=='image'), lidarObjects=1+int(second_kind=='lidar'))
+                body['manifest']['sha256'] = p.manifest_sha256(body['manifest'])
+                body['pipeline']['odm']['requested'] = False
+                body['pipeline']['treedar'].update(requested=True, inputObjectIds=['image-1'], provenanceReceiptId='provenance-1')
+                response=self.request('POST','/jobs',body,api=api)
+                self.assertEqual((response.status,response.body),(409,{'error':'treedar_execution_shape_unsupported'}))
+                self.assertEqual(self.store.list(), [])
 
 
 if __name__ == "__main__":
