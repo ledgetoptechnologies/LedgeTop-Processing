@@ -496,6 +496,44 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(identifier)['status']['code'],40)
         self.assertEqual(len(self.fleet.commits),1)
 
+    def test_stopped_copy_repairs_split_before_held_startup(self):
+        import shutil,sqlite3
+        identifier=self.submit();self.service.tick();task=self.task(identifier)
+        result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],
+                'environment':task['environment'],'cancelled':False}
+        self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':result})
+        self.service.close();self.queue.close()
+        original=self.root/'state'; copied=self.root/'copy'
+        shutil.copytree(original,copied)
+        original_bytes=(original/'jobs.sqlite3').read_bytes()
+        with self.assertRaises(RuntimeError):
+            Queue(copied,node_ids=('cluster','main'),viewer_enabled=True,require_idle_existing=True)
+        before=sqlite3.connect(copied/'jobs.sqlite3')
+        jobs_before=before.execute('SELECT * FROM jobs ORDER BY id').fetchall()
+        before.close()
+        config=SimpleNamespace(**vars(self.config));config.prototype_state_dir=str(copied)
+        queue=Queue(copied,node_ids=('cluster','main'),viewer_enabled=True)
+        service=ViewerService(queue,config,engines=self.engines,probe=self.probe)
+        calls={node:list(engine.calls) for node,engine in self.engines.items()}
+        try:
+            with queue._db() as db:
+                db.execute("UPDATE viewer_tasks SET claim_token='wrong' WHERE uuid=?",(identifier,))
+            with self.assertRaises(Conflict):service.tick()
+            self.assertNotEqual(service.store.task(identifier)['phase'],'complete')
+            with queue._db() as db:
+                db.execute('UPDATE viewer_tasks SET claim_token=? WHERE uuid=?',(task['claim_token'],identifier))
+            service.tick()
+            self.assertEqual(service.info(identifier)['status']['code'],40)
+            self.assertEqual({node:list(engine.calls) for node,engine in self.engines.items()},calls)
+        finally:service.close();queue.close()
+        after=sqlite3.connect(copied/'jobs.sqlite3')
+        self.assertEqual(after.execute('SELECT * FROM jobs ORDER BY id').fetchall(),jobs_before)
+        after.close()
+        self.assertEqual((original/'jobs.sqlite3').read_bytes(),original_bytes)
+        held=Queue(copied,node_ids=('cluster','main'),viewer_enabled=True,require_idle_existing=True)
+        held.close()
+        self.make_queue_service()
+
     def test_existing_terminal_split_with_wrong_claim_holds_dispatch(self):
         identifier=self.submit();self.service.tick();task=self.task(identifier)
         result={'engineTaskId':task['engine_uuid'],'nodeId':task['node_id'],
