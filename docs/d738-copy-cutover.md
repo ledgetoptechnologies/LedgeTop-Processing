@@ -148,6 +148,14 @@ every artifact, and inspect. Never improvise a workaround.
     directory, and `--expect-daemon-id` matches the ID recorded in step 0.
 
   Any daemon error, inspect error or other daemon exits 2, never 0.
+- [ops/pinned_docker.py](../ops/pinned_docker.py): the step 0 `docker`
+  function runs **every** Docker operation in this runbook through it:
+  inspect, update, stop, run, exec, rm, volume and network commands, the census
+  containers and the container-spec argv. It pins `--host` to the local socket,
+  removes every `DOCKER_*` variable, uses a fresh empty `DOCKER_CONFIG`, and
+  re-checks the recorded daemon ID before each command. It refuses global CLI
+  options such as `--context` or `-H`, so a command cannot re-point itself.
+  A lint test checks that no runbook command bypasses the function.
 - `PROCESSING_VIEWER_PRODUCTION_ADMISSION=held` (in `processing/viewer_http.py`)
   refuses every production Viewer POST with 503. Staging is unaffected.
 - [ops/cutover_fence_test.sh](../ops/cutover_fence_test.sh): the isolated
@@ -183,11 +191,15 @@ IMG_NEW=<digest of the locally built image for the frozen release commit>
 RUN=$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 E=$HOME/.local/share/ledgetop-processing-prototype/cutover-$RUN
 mkdir -m 700 "$E"                          # fails if it already exists
-cp state_census.py netns_sockets.py coordinator_container_spec.py state_fence.py container_absent.py "$E"/
+cp state_census.py netns_sockets.py coordinator_container_spec.py state_fence.py container_absent.py pinned_docker.py "$E"/
 # Pin every Docker call that proves anything to the local daemon, recorded once:
 DOCKER_LOCAL=unix:///var/run/docker.sock
-DAEMON_ID=$(env -u DOCKER_HOST -u DOCKER_CONTEXT docker --host "$DOCKER_LOCAL" info --format '{{.ID}}')
+DAEMON_ID=$(python3 "$E/pinned_docker.py" --host "$DOCKER_LOCAL" -- info --format '{{.ID}}')
 test -n "$DAEMON_ID"; echo "$DAEMON_ID" > "$E/daemon-id.txt"
+# From here on, EVERY Docker operation in this runbook goes through this function:
+# pinned --host, all DOCKER_* removed, fresh empty DOCKER_CONFIG, and the recorded
+# daemon ID re-checked before each command. Global options are refused.
+docker() { python3 "$E/pinned_docker.py" --host "$DOCKER_LOCAL" --expect-daemon-id "$DAEMON_ID" -- "$@"; }
 ABSENT=(python3 "$E/container_absent.py" --host "$DOCKER_LOCAL" --expect-daemon-id "$DAEMON_ID")
 docker inspect "$OLD"     > "$E/old-inspect.json"
 docker image inspect "$IMG_OLD" > "$E/old-image.json"
@@ -397,7 +409,9 @@ python3 "$E/coordinator_container_spec.py" --container "$E/old-inspect.json" \
   --volume "$NEW_VOL" --name "ltp-coordinator-candidate-$RUN" --lease-dir "$LEASE_HOST_DIR" \
   --accept-compose-source --env-out "$E/env-candidate" > "$E/candidate-spec.json"
 # review candidate-spec.json (key names only), then run its argv exactly:
-python3 -c 'import json,subprocess,sys;sys.exit(subprocess.run(json.load(open(sys.argv[1]))["argv"]).returncode)' "$E/candidate-spec.json"
+mapfile -d '' -t ARGV < <(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["argv"];assert a[0]=="docker";sys.stdout.write("\0".join(a[1:]))' "$E/candidate-spec.json")
+[ "${#ARGV[@]}" -gt 1 ]
+docker "${ARGV[@]}"                        # the pinned wrapper, never a bare docker
 CAND=ltp-coordinator-candidate-$RUN
 docker start "$CAND"
 ```
@@ -564,7 +578,9 @@ python3 "$E/coordinator_container_spec.py" --container "$E/old-inspect.json" \
   --volume "$NEW_VOL" --name "ltp-coordinator-$RUN" --lease-dir "$LEASE_HOST_DIR" \
   --production-admission held --accept-compose-source \
   --env-out "$E/env-promoted" > "$E/promoted-spec.json"
-python3 -c 'import json,subprocess,sys;sys.exit(subprocess.run(json.load(open(sys.argv[1]))["argv"]).returncode)' "$E/promoted-spec.json"
+mapfile -d '' -t ARGV < <(python3 -c 'import json,sys;a=json.load(open(sys.argv[1]))["argv"];assert a[0]=="docker";sys.stdout.write("\0".join(a[1:]))' "$E/promoted-spec.json")
+[ "${#ARGV[@]}" -gt 1 ]
+docker "${ARGV[@]}"                        # the pinned wrapper, never a bare docker
 docker start "ltp-coordinator-$RUN"; shred -u "$E/env-promoted"
 ```
 

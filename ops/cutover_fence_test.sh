@@ -276,6 +276,12 @@ set +e; DOCKER_HOST=tcp://127.0.0.1:9 DOCKER_CONTEXT=does-not-exist "${ABSENT[@]
   || fail "overrides redirected the absence check ($code)"
 set +e; python "$HERE/container_absent.py" --host "$LOCAL_HOST" --expect-daemon-id not-this-daemon "$GONE" >/dev/null; code=$?; set -e
 [ "$code" = 2 ] && pass "a different daemon ID is never accepted as absence" || fail "daemon ID not enforced ($code)"
+PINNED=(python "$HERE/pinned_docker.py" --host "$LOCAL_HOST" --expect-daemon-id "$DAEMON" --)
+listed=$(DOCKER_HOST=tcp://127.0.0.1:9 DOCKER_CONTEXT=does-not-exist "${PINNED[@]}" ps -a --no-trunc --format '{{.Names}}' | grep -c "^$RUN-fence-")
+[ "$listed" = 2 ] && pass "pinned wrapper reaches the recorded daemon despite DOCKER_HOST/DOCKER_CONTEXT overrides" \
+  || fail "pinned wrapper did not reach the recorded daemon ($listed)"
+set +e; python "$HERE/pinned_docker.py" --host "$LOCAL_HOST" --expect-daemon-id not-this-daemon -- ps >/dev/null 2>&1; code=$?; set -e
+[ "$code" = 125 ] && pass "pinned wrapper refuses to run anything on an unrecorded daemon" || fail "wrapper ran on wrong daemon ($code)"
 PRESENT=$(docker inspect -f '{{.Id}}' "$RUN-fence-original")
 set +e; "${ABSENT[@]}" "$PRESENT" >/dev/null; code=$?; set -e
 [ "$code" = 1 ] && pass "existing container reported present" || fail "existing container not reported present ($code)"
