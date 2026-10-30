@@ -24,7 +24,7 @@ from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
-from processing.reference_transfer import BrokerClient
+from processing.reference_transfer import BrokerClient, TransferResponseUnavailable
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.viewer_service import NativeEngine
 from processing.worker_outbox import WorkerOutbox
@@ -206,6 +206,18 @@ class ReferenceDriverTests(unittest.TestCase):
             if result['state'] == 'held':
                 self.fail('unexpected driver hold: ' + result['reason'])
         self.fail('driver target stage not reached: ' + target)
+
+    def test_unavailable_broker_response_preserves_attempt_cap_across_restart(self):
+        job=self.submit();self.advance(job,'fetching')
+        with patch.object(self.broker,'download_object',side_effect=TransferResponseUnavailable('private')) as download:
+            for _ in range(2):
+                result=self.driver.step()
+                self.assertEqual(result,{'state':'retry_wait','reason':'broker_response_unavailable'})
+            self.driver=self.make_driver()
+            self.assertEqual(self.driver.step(),{'state':'retry_wait','reason':'broker_response_unavailable'})
+            self.assertEqual(self.driver.step(),{'state':'held','reason':'worker_fetch_attempt_budget_exhausted'})
+            self.assertEqual(download.call_count,3)
+        self.assertFalse(any(call[0]=='initialize' for call in self.transport.calls))
 
     def test_arbitrary_images_production_and_next_job_before_viewer_acceptance(self):
         first = self.submit(environment='production', contents=(b'not-abc-one', b'another-photo'))

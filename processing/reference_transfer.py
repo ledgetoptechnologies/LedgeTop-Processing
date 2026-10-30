@@ -14,7 +14,7 @@ import ssl
 import stat
 import time
 from urllib.parse import urlsplit
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
 
 from . import reference_protocol as p
@@ -25,6 +25,10 @@ CHUNK_BYTES = 1024 * 1024
 
 class TransferError(ValueError):
     """Bounded, secret-free transfer failure."""
+
+
+class TransferResponseUnavailable(TransferError):
+    """No response received; broker budget and local cleanup remain uncertain."""
 
 
 def _now(clock):
@@ -172,6 +176,16 @@ class BrokerClient:
             except HTTPError as error:
                 error.close()
                 raise TransferError("broker request rejected") from None
+            except ssl.SSLError:
+                raise TransferError("broker TLS validation failed") from None
+            except URLError as error:
+                if isinstance(error.reason, ssl.SSLError):
+                    raise TransferError("broker TLS validation failed") from None
+                # The broker may have seen the request; this does not establish
+                # that its transfer budget or the local part is untouched.
+                raise TransferResponseUnavailable("broker response unavailable") from None
+            except OSError:
+                raise TransferResponseUnavailable("broker response unavailable") from None
             try:
                 if response.status != 200 or response.geturl() != request.full_url:
                     raise TransferError("unexpected broker response")
@@ -217,6 +231,8 @@ class BrokerClient:
                 finally:
                     os.close(directory_fd)
             return target
+        except TransferResponseUnavailable:
+            raise
         except Exception:
             # Do not expose exception strings from HTTP stacks or injected openers:
             # they can embed request headers and credentials.

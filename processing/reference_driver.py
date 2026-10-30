@@ -25,7 +25,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
-from .reference_transfer import BrokerClient, validate_grant
+from .reference_transfer import BrokerClient, TransferResponseUnavailable, validate_grant
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
@@ -770,7 +770,12 @@ class ReferenceDriver:
                         raise DriverHeld('worker_fetch_attempt_budget_exhausted')
                     data['fetchAttempts'][obj['id']] = attempts + 1
                     self._save(job_id, stage, data)
-                    self.broker.download_object(grant, obj['id'], target)
+                    try:
+                        self.broker.download_object(grant, obj['id'], target)
+                    except TransferResponseUnavailable:
+                        # Attempt and budget remain consumed/uncertain; retain the
+                        # existing cap and grant semantics. No automatic renewal.
+                        raise DriverWait('broker_response_unavailable') from None
                 paths[obj['id']] = relative
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
