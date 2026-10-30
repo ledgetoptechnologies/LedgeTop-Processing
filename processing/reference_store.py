@@ -5,6 +5,7 @@ reservation is an external precondition of reserve(); uncertain reservations
 require reconciliation by its caller, never an automatic engine-lock release.
 """
 import json
+import math
 import hashlib
 import hmac
 import os
@@ -46,12 +47,15 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None):
+                 main_node_id=None, enable_v2_binding=False):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
+        if type(enable_v2_binding) is not bool:
+            raise ValueError("explicit v2 binding setting required")
+        self._enable_v2_binding = enable_v2_binding
         self.queue = queue
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
@@ -105,6 +109,10 @@ class ReferenceStore:
                 CREATE TABLE IF NOT EXISTS reference_transfer_grants (
                   job_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, digest TEXT NOT NULL);
             """)
+            if self._enable_v2_binding:
+                db.execute("""CREATE TABLE IF NOT EXISTS reference_v2_bindings (
+                    job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id),
+                    binding_json TEXT NOT NULL, binding_sha TEXT NOT NULL)""")
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
 
@@ -171,6 +179,8 @@ class ReferenceStore:
             used += db.execute('''SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(epoch_id)+length(request_sha256)
                 +length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0)
                 FROM reference_recovery_receipts''').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_v2_bindings'").fetchone():
+            used += db.execute('SELECT COALESCE(SUM(length(CAST(binding_json AS BLOB))+length(binding_sha)),0) FROM reference_v2_bindings').fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
@@ -483,6 +493,92 @@ class ReferenceStore:
             db.execute("UPDATE reference_jobs SET phase='awaiting_transfer',node_id=?,transfer_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
                        (node_id, encoded, job_id))
             return self._public(self._row(db, job_id))
+
+    def bind_v2_reservation(self, job_id, envelope, manifest, plan, *, node_id,
+                            worker_id, worker_instance_id, claim_token, clock=time.time):
+        """Internal opt-in v1 bridge; not broker authorization or a transfer receipt."""
+        if not self._enable_v2_binding:
+            raise Conflict('v2 reservation binding disabled')
+        from contextlib import nullcontext
+        from .admission_drain import AdmissionClosed
+        gate = getattr(self.queue, 'admission_drain', None)
+        try:
+            with gate.admit() if gate is not None else nullcontext():
+                return self._bind_v2_reservation(job_id, envelope, manifest, plan, node_id=node_id,
+                    worker_id=worker_id, worker_instance_id=worker_instance_id,
+                    claim_token=claim_token, clock=clock)
+        except AdmissionClosed:
+            raise Conflict('coordinator admission closed') from None
+
+    def _bind_v2_reservation(self, job_id, envelope, manifest, plan, *, node_id,
+                             worker_id, worker_instance_id, claim_token, clock):
+        from .reference_manifest_v2 import validate_manifest_v2
+        from .reference_input_budget_v2 import plan_input_budget, decode_canonical_input_v2
+        # Snapshot caller-owned values before validation and persistence.
+        envelope, manifest, plan = (decode_canonical_input_v2(protocol.canonical_json(value))
+                                    for value in (envelope, manifest, plan))
+        protocol._closed(envelope, ('protocolVersion', 'jobId', 'generation', 'reservationId',
+            'manifestSha256', 'environment', 'capabilityFingerprint', 'expiresAt',
+            'rangeBytes', 'requestBudget', 'byteBudget', 'nonce'), 'v2 reservation envelope')
+        validate_manifest_v2(manifest)
+        calculated = plan_input_budget(plan)
+        protocol._slug(envelope['nonce'], 'reservation nonce')
+        for key in ('protocolVersion', 'jobId', 'generation', 'reservationId', 'manifestSha256',
+                    'environment', 'capabilityFingerprint', 'expiresAt', 'rangeBytes',
+                    'requestBudget', 'byteBudget'):
+            if type(envelope[key]) is not type(calculated[key]) or envelope[key] != calculated[key]:
+                raise Conflict('v2 envelope and plan differ')
+        if (envelope['jobId'] != job_id or envelope['manifestSha256'] != manifest['sha256'] or
+                plan['objects'] != [{key: obj[key] for key in ('id', 'byteSize', 'sha256')}
+                                    for obj in manifest['objects']]):
+            raise Conflict('v2 manifest and plan differ')
+        expiry = datetime.fromisoformat(envelope['expiresAt'].replace('Z', '+00:00')).timestamp()
+        now = clock()
+        if type(now) not in (int, float) or not math.isfinite(now) or now >= expiry:
+            raise Conflict('v2 reservation expired')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            snapshot = self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
+                worker_instance_id=worker_instance_id, claim_token=claim_token)
+            if snapshot['status'] != 'running' or snapshot['executionPhase'] != 'awaiting_transfer':
+                raise Conflict('running transfer claim required')
+            row = self._row(db, job_id)
+            submission = json.loads(row['input_json'])
+            persisted = submission['manifest']
+            reservation = json.loads(row['transfer_json']) if row['transfer_json'] else None
+            if (not reservation or any(envelope[key] != reservation[key] for key in
+                ('reservationId', 'generation', 'expiresAt', 'byteBudget', 'nonce'))
+                or envelope['environment'] != row['environment']
+                or envelope['capabilityFingerprint'] != submission['capabilityFingerprint']
+                or {k:v for k,v in manifest.items() if k != 'sha256'} !=
+                   {k:v for k,v in persisted.items() if k != 'sha256'}):
+                raise Conflict('persisted reservation or manifest differs')
+            binding = {'envelope': envelope, 'v1ManifestSha256': row['manifest_sha'],
+                       'authorityId': snapshot['authorityId'], 'nodeId': node_id,
+                       'workerId': worker_id, 'workerInstanceId': worker_instance_id,
+                       'claimRequestId': snapshot['claimRequestId']}
+            encoded = _json(binding)
+            digest = protocol.digest(binding)
+            now = clock()
+            if type(now) not in (int, float) or not math.isfinite(now) or now >= expiry:
+                raise Conflict('v2 reservation expired')
+            old = db.execute('SELECT binding_json,binding_sha FROM reference_v2_bindings WHERE job_id=?', (job_id,)).fetchone()
+            if old:
+                if old['binding_json'] != encoded or old['binding_sha'] != digest:
+                    raise Conflict('v2 reservation already bound')
+                now = clock()
+                if type(now) not in (int, float) or not math.isfinite(now) or now >= expiry:
+                    raise Conflict('v2 reservation expired')
+                return {'accepted': True, 'bindingSha256': digest}
+            gate = getattr(self.queue, 'admission_drain', None)
+            if gate is not None and gate._closed(db):
+                raise Conflict('coordinator admission closed')
+            self._quota(db, len(encoded.encode('utf-8')) + len(digest))
+            now = clock()
+            if type(now) not in (int, float) or not math.isfinite(now) or now >= expiry:
+                raise Conflict('v2 reservation expired')
+            db.execute('INSERT INTO reference_v2_bindings VALUES(?,?,?)', (job_id, encoded, digest))
+            return {'accepted': True, 'bindingSha256': digest}
 
     def set_result_manifest(self, job_id, result):
         with self.queue._db() as db:
