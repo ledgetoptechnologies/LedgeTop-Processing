@@ -536,6 +536,54 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.engines['cluster'].download_calls, 2)
         self.assertEqual(len(self.fleet.commits), 1)
 
+    def test_real_service_over_http_returns_receipt_backed_digest(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.request import urlopen
+        from processing.viewer_http import ViewerFacade
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        facade = ViewerFacade(self.service, 'synthetic-production-token', 'synthetic-staging-token')
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_GET(self): facade.handle(self)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = ('http://127.0.0.1:' + str(server.server_port) + '/task/' + identifier +
+                   '/download/all.zip?token=synthetic-production-token')
+            with urlopen(url, timeout=4) as response:
+                body = response.read()
+                self.assertEqual(response.headers['X-LedgeTop-Archive-SHA256'],
+                                 hashlib.sha256(body).hexdigest())
+            self.assertEqual(body, self.engines['cluster'].archive)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_real_service_and_facade_emit_receipt_backed_archive_digest(self):
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import MemoryHandler
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        facade = ViewerFacade(self.service, 'synthetic-production-token', 'synthetic-staging-token')
+        handler = MemoryHandler('/task/' + identifier + '/download/all.zip?token=synthetic-production-token',
+                                method='GET')
+        facade.handle(handler)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.response_headers['X-LedgeTop-Archive-SHA256'],
+                         hashlib.sha256(handler.wfile.getvalue()).hexdigest())
+        self.assertEqual(handler.wfile.getvalue(), self.engines['cluster'].archive)
+
+    def test_receipt_backed_stream_carries_exact_digest_but_legacy_does_not(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream:
+            self.assertEqual(stream.ledgetop_archive_sha256, hashlib.sha256(stream.read()).hexdigest())
+        task = self.task(identifier)
+        Path(task['archive_path']).with_suffix('.zip.receipt').unlink()
+        stream, _ = self.service.download(identifier)
+        with stream:
+            self.assertFalse(hasattr(stream, 'ledgetop_archive_sha256'))
+
     def test_archive_receipt_recovers_after_state_write_failure_and_restart(self):
         identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
         original = self.service.store.update

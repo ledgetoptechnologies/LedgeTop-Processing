@@ -9,6 +9,7 @@ from email.parser import BytesHeaderParser
 from email.policy import default as email_policy
 import hmac
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -286,20 +287,41 @@ class ViewerFacade:
                 try:
                     if type(length) is not int or length < 0:
                         raise ValueError('invalid download length')
+                    digest = getattr(stream, 'ledgetop_archive_sha256', None)
+                    if digest is not None and (type(digest) is not str or
+                            not re.fullmatch(r'[a-f0-9]{64}', digest)):
+                        raise ValueError('invalid archive identity')
                     handler.send_response(200)
                     handler.send_header('Content-Type', 'application/zip')
                     handler.send_header('Content-Length', str(length))
+                    if digest is not None:
+                        handler.send_header('X-LedgeTop-Archive-SHA256', digest)
                     handler.send_header('Cache-Control', 'no-store')
                     handler.end_headers()
                     remaining = length
+                    calculated = hashlib.sha256() if digest is not None else None
+                    last = None
                     try:
                         while remaining:
                             data = stream.read(min(CHUNK, remaining))
                             if not data or len(data) > remaining:
                                 handler.close_connection = True
                                 return
-                            handler.wfile.write(data)
                             remaining -= len(data)
+                            if calculated is not None:
+                                calculated.update(data)
+                                if last is not None: handler.wfile.write(last)
+                                last = data
+                            else:
+                                handler.wfile.write(data)
+                        # Withhold the last chunk until the complete served
+                        # bytes match the receipt. A mismatch closes a
+                        # truncated 200 response, never a complete false body.
+                        if calculated is not None:
+                            if calculated.hexdigest() != digest:
+                                handler.close_connection = True
+                                return
+                            if last is not None: handler.wfile.write(last)
                     except OSError:
                         handler.close_connection = True
                 finally:

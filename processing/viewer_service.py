@@ -263,6 +263,9 @@ class ViewerService:
             if fields(after)[:4] != fields(current)[:4]: raise ValueError()
             if os.name != 'nt' and fields(after)[4] != fields(current)[4]: raise ValueError()
             stream.seek(0)
+            # Only receipt-backed, fully rehashed archives carry this optional
+            # HTTP identity. It is not an acknowledgement or custody proof.
+            stream.ledgetop_archive_sha256 = receipt['sha256']
             return stream
         except (OSError, ValueError):
             if stream is not None: stream.close()

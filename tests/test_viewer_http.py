@@ -1,6 +1,8 @@
 """Real HTTP and byte-boundary tests for the native Viewer transport."""
 
 import io
+import hashlib
+import http.client
 import json
 from pathlib import Path
 from email.message import Message
@@ -163,6 +165,60 @@ class ViewerHTTPTests(unittest.TestCase):
             ('name', None, b'demo'), ('options', None, b'[{"name":"pc-ept","value":true}]'),
             ('outputs', None, b'["all.zip"]')]), token=token,
             headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY, 'set-uuid': IDENTIFIER})
+
+    def test_archive_digest_header_requires_verified_stream_and_matches_response(self):
+        self.service.tasks[IDENTIFIER] = {'uuid': IDENTIFIER, 'status': {'code': 40}}
+        original = self.service.download
+        def verified(identifier):
+            stream, length = original(identifier)
+            stream.ledgetop_archive_sha256 = hashlib.sha256(self.service.result).hexdigest()
+            return stream, length
+        with patch.object(self.service, 'download', side_effect=verified):
+            handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+            self.facade.handle(handler)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.response_headers['X-LedgeTop-Archive-SHA256'],
+                         hashlib.sha256(handler.wfile.getvalue()).hexdigest())
+        self.assertEqual(handler.wfile.getvalue(), self.service.result)
+
+        handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+        self.facade.handle(handler)
+        self.assertNotIn('X-LedgeTop-Archive-SHA256', handler.response_headers)
+
+    def test_real_http_digest_header_and_truncated_mismatch(self):
+        self.service.tasks[IDENTIFIER] = {'uuid': IDENTIFIER, 'status': {'code': 40}}
+        original = self.service.download
+        def stream_with_digest(digest):
+            def send(identifier):
+                stream, length = original(identifier)
+                stream.ledgetop_archive_sha256 = digest
+                return stream, length
+            return send
+        url = self.origin + '/task/' + IDENTIFIER + '/download/all.zip?' + urlencode({'token': TOKEN})
+        expected = hashlib.sha256(self.service.result).hexdigest()
+        with patch.object(self.service, 'download', side_effect=stream_with_digest(expected)):
+            with urlopen(url, timeout=4) as response:
+                body = response.read()
+                self.assertEqual(response.headers['X-LedgeTop-Archive-SHA256'], expected)
+                self.assertEqual(hashlib.sha256(body).hexdigest(), expected)
+        with patch.object(self.service, 'download', side_effect=stream_with_digest('0' * 64)):
+            with urlopen(url, timeout=4) as response:
+                self.assertEqual(response.headers['X-LedgeTop-Archive-SHA256'], '0' * 64)
+                with self.assertRaises(http.client.IncompleteRead):
+                    response.read()
+
+    def test_digest_mismatch_withholds_final_chunk_and_closes(self):
+        self.service.tasks[IDENTIFIER] = {'uuid': IDENTIFIER, 'status': {'code': 40}}
+        def changed(identifier):
+            stream = BoundedStream(self.service.result)
+            stream.ledgetop_archive_sha256 = hashlib.sha256(b'different').hexdigest()
+            return stream, len(self.service.result)
+        with patch.object(self.service, 'download', side_effect=changed):
+            handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+            self.facade.handle(handler)
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(handler.close_connection)
+        self.assertLess(len(handler.wfile.getvalue()), len(self.service.result))
 
     def test_native_lifecycle_and_streamed_download(self):
         self.assertEqual(self.request('/info')[1]['engine'], 'ledgetop-processing')

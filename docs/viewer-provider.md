@@ -104,3 +104,17 @@ neither was committed, no photogrammetry ran, and exact owned tmp files were
 verified removed. One earlier Windows-only smoke temp directory remains after
 automatic approval review rejected its explicit deletion; other successful smoke
 directories clean themselves after releasing the queue lock.
+
+## Optional archive identity
+
+For a receipt-backed verified archive, the download response may include
+X-LedgeTop-Archive-SHA256 containing 64 lowercase hexadecimal characters.
+The value identifies the full ZIP response body, not a Viewer acceptance or
+custody receipt. Existing archives without a coordinator verification receipt
+omit the header. Clients must require the full declared Content-Length and
+compare the digest before trusting the body. If the bytes change during
+streaming, the coordinator closes a truncated response before its final chunk;
+the 200 status and headers may already have been sent. TLS and client
+authentication remain separate. This adds a complete streaming hash pass in
+addition to the existing archive pre-verification and may cost substantial I/O
+for large results. It does not authorize deleting inputs or results.
