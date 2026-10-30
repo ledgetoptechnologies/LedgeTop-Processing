@@ -27,6 +27,9 @@ class SupervisedInitTest(LocalInputTest):
     def initialize(self,task):self.calls+=1;self.task=task;raise OSError('lost')
    engine=Lost()
    try:
+    for bad in (dict(self.claim,engineOrigin='http://127.0.0.1:2'),dict(self.claim,manifestSha256='f'*64),dict(self.claim,options=[dict(name='flag',value=0.5)])):
+     with self.assertRaises(InitHeld):initialize_once(enabled=True,intent=i,engine=engine,authenticated_claim=bad,**self.shared)
+    self.assertEqual(engine.calls,0)
     with self.assertRaises(OSError):initialize_once(enabled=True,intent=i,engine=engine,authenticated_claim=self.claim,**self.shared)
     with self.assertRaises(InitHeld):initialize_once(enabled=True,intent=i,engine=engine,authenticated_claim=dict(self.claim,options=[]),**self.shared)
     self.assertEqual(engine.calls,1);self.assertEqual(engine.task['options'],self.claim['options'])
