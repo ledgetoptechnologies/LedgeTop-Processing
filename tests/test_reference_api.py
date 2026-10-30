@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from processing import reference_protocol as p
@@ -72,6 +73,39 @@ class ReferenceAPITests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, self.fixture["capabilities"])
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_pending_and_closed_drain_allow_only_exact_existing_claim_replay(self):
+        from processing.admission_drain import AdmissionDrain
+        self.queue.admission_drain=AdmissionDrain(self.queue)
+        job=self.submit(); binding=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_request_id='claim-1')
+        original=self.store.claim(job['jobId'],**binding)
+        gate=self.queue.admission_drain;gate._closing.set()
+        try:
+            self.assertEqual(self.store.claim(job['jobId'],**binding)['claimToken'],original['claimToken'])
+            self.assertIsNone(self.store.claim(job['jobId'],**dict(binding,claim_request_id='new-claim')))
+        finally:gate._closing.clear()
+        gate.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=0,expected_closed=False,expected_authority=self.queue.authority_id)
+        self.assertEqual(self.store.claim(job['jobId'],**binding)['claimToken'],original['claimToken'])
+        self.assertIsNone(self.store.claim(job['jobId'],**dict(binding,claim_request_id='new-claim')))
+
+    def test_closed_replay_reads_job_and_claim_from_one_snapshot(self):
+        from processing.admission_drain import AdmissionDrain
+        with self.queue._db() as db:db.execute('PRAGMA journal_mode=WAL')
+        self.queue.admission_drain=AdmissionDrain(self.queue)
+        job=self.submit();binding=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_request_id='claim-1')
+        original=self.store.claim(job['jobId'],**binding);gate=self.queue.admission_drain;gate._closing.set()
+        real=self.store._row;changed=[]
+        def race(db,identifier):
+            row=real(db,identifier)
+            with self.queue._db() as writer:
+                writer.execute('BEGIN IMMEDIATE');writer.execute('DELETE FROM reference_claims WHERE request_id=?',('claim-1',))
+            changed.append(True)
+            return row
+        try:
+            with patch.object(self.store,'_row',side_effect=race):
+                replay=self.store.claim(job['jobId'],**binding)
+            self.assertTrue(changed);self.assertEqual(replay['claimToken'],original['claimToken'])
+        finally:gate._closing.clear()
 
     def test_submission_idempotency_environment_scoping_and_no_private_data(self):
         job = self.submit()

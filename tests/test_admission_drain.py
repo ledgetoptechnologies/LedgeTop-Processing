@@ -175,6 +175,45 @@ class AdmissionTests(unittest.TestCase):
                 release.set();worker.join(3)
                 if closer.ident is not None:closer.join(3)
 
+    def test_pending_close_rejects_new_upload_and_claim_while_existing_upload_finishes(self):
+        from tests.test_viewer_http import multipart, BOUNDARY
+        entered=threading.Event();release=threading.Event();closed=threading.Event()
+        service=self.handler.viewer_service;identifier=str(uuid.uuid4());results=[];failures=[]
+        job=json.dumps(dict(requestId='queued-pending-close',environment='staging',profile='treedar-synthetic-v1')).encode()
+        self.assertEqual(self.request('/v1/prototype/jobs',job)[0],201)
+        operation=self.operation(True)
+        def slow_upload(*args):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('test timeout')
+            return {'success':True}
+        body=multipart([('images','a.jpg',b'synthetic')]);url=self.origin+'/task/new/upload/'+identifier+'?token='+VIEW
+        def upload():
+            try:
+                with urlopen(Request(url,data=body,headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY}),timeout=4) as response:results.append(response.status)
+            except Exception as error:failures.append(error)
+        def close():
+            try:results.append(self.request('/v1/prototype/admission-drain',operation,OP)[0])
+            except Exception as error:failures.append(error)
+            finally:closed.set()
+        with patch.object(service,'authorize'),patch.object(service,'upload',side_effect=slow_upload) as action:
+            worker=threading.Thread(target=upload);closer=threading.Thread(target=close)
+            try:
+                worker.start();self.assertTrue(entered.wait(2));closer.start()
+                self.assertTrue(self.handler.prototype_queue.admission_drain._closing.wait(2));self.assertFalse(closed.is_set())
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(Request(url,data=body,headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY}),timeout=2)
+                self.assertEqual(denied.exception.code,503)
+                claim=json.dumps({'workerId':'worker','nodeId':'cluster','profiles':['treedar-synthetic-v1']}).encode()
+                self.assertIsNone(self.request('/v1/prototype/claim',claim,API)[1]['job'])
+                self.assertEqual(action.call_count,1)
+                release.set();worker.join(3);closer.join(3)
+                self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertFalse(failures)
+                self.assertEqual(results,[200,200])
+                self.assertEqual(self.request('/v1/prototype/admission-drain',token=OP)[1]['closed'],True)
+            finally:
+                release.set();worker.join(3)
+                if closer.ident is not None:closer.join(3)
+
     def test_close_waits_for_inflight_download_cache_and_blocks_new_download(self):
         entered=threading.Event();release=threading.Event();closed=threading.Event()
         service=self.handler.viewer_service;identifier=str(uuid.uuid4())

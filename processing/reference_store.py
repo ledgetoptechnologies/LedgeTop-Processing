@@ -260,6 +260,29 @@ class ReferenceStore:
             return self._public(row)
 
     def claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
+        from contextlib import nullcontext
+        from .admission_drain import AdmissionClosed
+        gate = getattr(self.queue, 'admission_drain', None)
+        try:
+            with gate.admit() if gate is not None else nullcontext():
+                return self._claim(job_id,node_id=node_id,worker_id=worker_id,
+                                   worker_instance_id=worker_instance_id,claim_request_id=claim_request_id)
+        except AdmissionClosed:
+            # Existing claims are read-only replay and remain recoverable while
+            # closing; a new claim may never cross the barrier.
+            self.queue._known_node(node_id);self.queue.slug(worker_id)
+            for value in (worker_instance_id,claim_request_id):protocol._slug(value,'claim identifier')
+            if PROFILE not in self.queue.allowed_profiles:raise Conflict('reference profile disabled')
+            with self.queue._db() as db:
+                db.execute('BEGIN')
+                row=self._row(db,job_id)
+                old=db.execute('SELECT * FROM reference_claims WHERE request_id=?',(claim_request_id,)).fetchone()
+                if old is None:return None
+                if (old['job_id'],old['node_id'],old['worker_id'],old['instance_id'])!=(job_id,node_id,worker_id,worker_instance_id):
+                    raise Conflict('claim request belongs to different worker binding')
+                return self._record(row,True)
+
+    def _claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
         """PRIVATE worker API: atomically persist ownership and replay envelope.
 
         Exact replay returns the current state and original token, including

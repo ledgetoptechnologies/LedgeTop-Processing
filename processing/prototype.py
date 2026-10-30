@@ -188,6 +188,16 @@ class Queue(Maintenance):
             return self.public(row) if row else None
 
     def claim(self, payload):
+        from contextlib import nullcontext
+        from .admission_drain import AdmissionClosed
+        gate = getattr(self, 'admission_drain', None)
+        try:
+            with gate.admit() if gate is not None else nullcontext():
+                return self._claim(payload)
+        except AdmissionClosed:
+            return None
+
+    def _claim(self, payload):
         expected = ['workerId']
         if isinstance(payload, dict):
             expected.extend(key for key in ('profiles', 'nodeId', 'expectedJobId') if key in payload)

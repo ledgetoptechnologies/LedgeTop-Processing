@@ -16,6 +16,8 @@ class AdmissionDrain:
     def __init__(self, queue):
         self.queue = queue
         self._lock = threading.RLock()
+        self._transition_lock = threading.Lock()
+        self._closing = threading.Event()
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
@@ -40,7 +42,9 @@ class AdmissionDrain:
     def admit(self):
         # Hold the barrier through all admission side effects, including file
         # upload; closing waits until prior admitted requests have returned.
+        if self._closing.is_set(): raise AdmissionClosed()
         with self._lock:
+            if self._closing.is_set(): raise AdmissionClosed()
             with self.queue._db() as db:
                 if self._closed(db): raise AdmissionClosed()
             yield
@@ -53,6 +57,17 @@ class AdmissionDrain:
         try:
             if type(request_id) is not str or str(uuid.UUID(request_id)) != request_id: raise ValueError()
         except (ValueError, AttributeError): raise ValueError('canonical request UUID required') from None
+        # Serialize state transitions while announcing a close before waiting
+        # on a long-lived upload/download. New admissions fail immediately;
+        # the durable close receipt is issued only after active work exits.
+        with self._transition_lock:
+            if value:self._closing.set()
+            try:
+                return self._persist_transition(value,request_id,expected_generation,expected_closed)
+            finally:
+                if value:self._closing.clear()
+
+    def _persist_transition(self, value, request_id, expected_generation, expected_closed):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             current = self._closed(db)
