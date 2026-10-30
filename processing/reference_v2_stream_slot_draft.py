@@ -45,7 +45,18 @@ class StreamSlot:
   rows=self.db.execute('SELECT id,epoch,phase,identity FROM stream_slot').fetchall()
   if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.epoch or rows[0][2] not in ('idle','opening','charged','closed'):raise SlotHeld('slot state changed')
   if rows[0][2]=='idle' and rows[0][3] is not None:raise SlotHeld('slot idle identity invalid')
-  if rows[0][2]!='idle' and (type(rows[0][3]) is not str or len(rows[0][3].encode())>2048):raise SlotHeld('slot identity invalid')
+  if rows[0][2]!='idle':
+   try:
+    raw=rows[0][3]
+    if type(raw) is not str or len(raw.encode())>2048:raise ValueError()
+    identity=json.loads(raw)
+    p._closed(identity,('epoch','grantSha256','jobId','generation','environment','sourceId','manifestSha256','requestId','objectId','start','end'),'slot identity')
+    if p.canonical_json(identity).decode()!=raw or identity['epoch']!=self.epoch:raise ValueError()
+    p._hash(identity['grantSha256'],'grant');p._hash(identity['manifestSha256'],'manifest');p._uuid(identity['jobId'],'job');p._environment(identity['environment'])
+    for name in ('sourceId','requestId','objectId'):p._slug(identity[name],name)
+    p._integer(identity['generation'],'generation');p._integer(identity['start'],'start',allow_zero=True);p._integer(identity['end'],'end',allow_zero=True)
+    if identity['end']<identity['start']:raise ValueError()
+   except (ValueError,TypeError,KeyError):raise SlotHeld('slot identity invalid') from None
   return rows[0]
  def _change(self,expected,phase,identity):
   self.db.execute('BEGIN IMMEDIATE')
