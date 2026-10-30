@@ -389,6 +389,9 @@ class ViewerService:
     def cancel(self, identifier):
         with self._lock:
             self.store.authorize_reservation(identifier,None,None)
+            cancelled = self.store.cancel_never_started(identifier)
+            if cancelled is not None:
+                return cancelled
             task = self.store.task(identifier)
             job = task['job']
             if not job or job['status'] in ('queued', 'failed', 'succeeded'):

@@ -542,16 +542,16 @@ class TaskStore:
         try:
             task = self.task(identifier)
         except OptionEvidenceConflict:
-            # Never expose evidence, paths or engine text. This is a nonterminal
-            # visibility signal, not an operator resolution or queue mutation.
+            # Evidence is never returned; only exact cancellation or a hold.
             with self._lock, self.queue._db() as db:
                 row=self._row(db,identifier);job=self._job(db,row)
-                # Only signal an active scheduling hold. Do not convert an
-                # already terminal task into a nonterminal status.
+                count=db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=? AND is_photo=1',(identifier,)).fetchone()[0]
+                if self._cancelled_never_started(db,row,job):
+                    return {'uuid':identifier,'name':row['name'],'status':{'code':50},
+                            'progress':row['progress'],'imagesCount':count,'dateCreated':row['created_at']}
                 if job is None or job['status'] not in ('queued','running','held'):
                     raise
                 code=10 if job['status']=='queued' else 20
-                count=db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=? AND is_photo=1',(identifier,)).fetchone()[0]
                 return {'uuid':identifier,'name':row['name'],'status':{'code':code},
                         'progress':row['progress'],'imagesCount':count,'dateCreated':row['created_at'],
                         'ledgetopHeld':True,'ledgetopHoldReason':'option_evidence_invalid'}
@@ -602,6 +602,39 @@ class TaskStore:
                 return {'success': True, 'uuid': identifier}
             db.execute("UPDATE viewer_tasks SET stage='cancelled',phase='cancelled',updated_at=CURRENT_TIMESTAMP WHERE uuid=?", (identifier,))
             return {'success': True, 'uuid': identifier}
+
+    def _never_started_identity(self, db, row, job):
+        return bool(job and job['profile'] == VIEWER_PROFILE
+            and job['environment'] == row['environment']
+            and job['request_id'] == self._request_id(row)
+            and all(row[k] is None for k in ('node_id','engine_uuid','claim_token'))
+            and all(job[k] is None for k in ('worker_id','claim_hash','node_id','held_reason'))
+            and db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE job_id=?', (job['id'],)).fetchone()[0] == 1
+            and not db.execute('SELECT 1 FROM viewer_incarnations WHERE job_id=? LIMIT 1', (job['id'],)).fetchone())
+
+    def _cancelled_never_started(self, db, row, job):
+        return (self._never_started_identity(db, row, job) and job['status'] == 'failed'
+                and job['result'] == canonical({'cancelled':True})
+                and row['stage'] == 'cancelled' and row['phase'] == 'cancelled')
+
+    def cancel_never_started(self, identifier):
+        """Cancel or acknowledge an unambiguously unclaimed job atomically."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._reservation(db,identifier,None,None)
+            row=self._row(db,identifier)
+            job=self._job(db,row)
+            if self._cancelled_never_started(db, row, job):
+                return {'success':True,'uuid':identifier}
+            if not job or job['status'] != 'queued':
+                return None
+            if (not self._never_started_identity(db, row, job) or job['result'] is not None
+                    or row['stage'] != 'queued' or row['phase'] not in ('queued','waiting_node')):
+                raise Conflict('queued execution identity uncertain')
+            db.execute("UPDATE jobs SET status='failed',result=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='queued'",
+                       (canonical({'cancelled':True}),job['id']))
+            db.execute("UPDATE viewer_tasks SET stage='cancelled',phase='cancelled',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",(identifier,))
+            return {'success':True,'uuid':identifier}
 
     def remove(self, identifier):
         with self._lock, self.queue._db() as db:
