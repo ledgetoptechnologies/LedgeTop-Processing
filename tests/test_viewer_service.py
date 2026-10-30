@@ -218,6 +218,43 @@ class ViewerServiceTests(unittest.TestCase):
     def test_capabilities_report_the_enforced_cumulative_input_limit(self):
         self.assertEqual(self.service.capabilities()['ledgetopMaxInputBytes'], self.service.store.max_input_bytes)
 
+    def test_real_http_batch_over_limit_retains_prior_file_and_retries_safely(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.error import HTTPError
+        from urllib.request import Request, urlopen
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import multipart, BOUNDARY
+        identifier = self.initialize()
+        self.service.store.max_input_bytes = 8
+        spool = self.root / 'http-spool'; spool.mkdir(mode=0o700)
+        facade = ViewerFacade(self.service, 'synthetic-production-token', temp_dir=spool)
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_POST(self): facade.handle(self)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            url = f'http://127.0.0.1:{server.server_port}/task/new/upload/{identifier}?token=synthetic-production-token'
+            def upload(parts):
+                request = Request(url, data=multipart(parts), headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY})
+                return urlopen(request, timeout=4)
+            with self.assertRaises(HTTPError) as caught:
+                upload([('images', 'one.jpg', b'123456'), ('images', 'two.jpg', b'789')])
+            self.assertEqual(caught.exception.code, 413)
+            self.assertEqual(json.load(caught.exception), {'error': 'task_input_limit_exceeded'})
+            task = self.task(identifier)
+            self.assertEqual(task['input_bytes'], 6)
+            self.assertEqual([f['name'] for f in task['files']], ['one.jpg'])
+            self.assertEqual(Path(task['files'][0]['path']).read_bytes(), b'123456')
+            self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
+            self.assertEqual(list(spool.iterdir()), [])
+            with upload([('images', 'one.jpg', b'123456')]) as response:
+                self.assertEqual(json.load(response), {'success': True})
+            self.assertEqual(self.task(identifier)['input_bytes'], 6)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
     def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
         # A lowered synthetic threshold exercises the same boundary without
         # fabricating 1,001 files on disk; the policy's 1,000 boundary is separate.
