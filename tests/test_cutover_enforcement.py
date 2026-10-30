@@ -1,6 +1,7 @@
 """Authority lease and production admission hold used for the d738 cutover."""
 
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from unittest.mock import patch
 from processing import authority_lease
 from processing.config import from_environment
 from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
 from processing.viewer_http import ViewerFacade
 from tests.test_viewer_http import IDENTIFIER, STAGING, TOKEN, MemoryHandler, Service
 
@@ -132,6 +134,94 @@ class StartupEnforcementTest(unittest.TestCase):
             with patch.dict(os.environ, {**self.environment(self.state, lease=False), **extra}, clear=True):
                 with self.assertRaises(ValueError):
                     from_environment()
+
+
+class HeldStartupIdleTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.state = Path(self.temporary.name) / 'state'
+        self.queue = Queue(self.state, viewer_enabled=True)
+        self.store = TaskStore(self.queue, self.state / 'viewer-tasks')
+
+    def tearDown(self):
+        self.queue.close()
+        self.temporary.cleanup()
+
+    def rejected_without_database_change(self):
+        self.queue.close()
+        database = self.state / 'jobs.sqlite3'
+        before = database.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'production_hold_idle_state_unavailable'):
+            Queue(self.state, viewer_enabled=True, require_idle_existing=True)
+        self.assertEqual(database.read_bytes(), before)
+        # The failed startup must release its state lock.
+        self.queue = Queue(self.state, viewer_enabled=True)
+        self.queue.close()
+
+    def test_refuses_queued_and_running_jobs_in_either_environment(self):
+        for environment in ('production', 'staging'):
+            for status in ('queued', 'running'):
+                with self.subTest(environment=environment, status=status):
+                    job, _ = self.queue.submit({'requestId': environment + status, 'environment': environment, 'profile': 'treedar-synthetic-v1'})
+                    with self.queue._db() as db: db.execute('UPDATE jobs SET status=? WHERE id=?', (status, job['id']))
+                    self.rejected_without_database_change()
+                    self.queue = Queue(self.state, viewer_enabled=True)
+                    with self.queue._db() as db: db.execute('DELETE FROM jobs')
+
+    def test_refuses_uploading_task_and_unresolved_reservation(self):
+        self.store.initialize(IDENTIFIER, 'synthetic', [], None, 'production')
+        self.rejected_without_database_change()
+
+    def test_refuses_reservation_without_task(self):
+        self.store.reserve(IDENTIFIER, 'production', 'YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE')
+        self.rejected_without_database_change()
+
+    def test_refuses_unrecognized_state(self):
+        job, _ = self.queue.submit({'requestId': 'unknown', 'environment': 'production', 'profile': 'treedar-synthetic-v1'})
+        with self.queue._db() as db: db.execute("UPDATE jobs SET status='unexpected' WHERE id=?", (job['id'],))
+        self.rejected_without_database_change()
+
+    def test_idle_state_starts_and_can_accept_staging_later(self):
+        self.queue.close()
+        self.queue = Queue(self.state, viewer_enabled=True, require_idle_existing=True)
+        job, _ = self.queue.submit({'requestId': 'later', 'environment': 'staging', 'profile': 'treedar-synthetic-v1'})
+        self.assertEqual(job['status'], 'queued')
+        self.queue.close()
+
+    def test_missing_database_fails_closed(self):
+        self.queue.close()
+        with self.assertRaisesRegex(RuntimeError, 'production_hold_idle_state_unavailable'):
+            Queue(Path(self.temporary.name) / 'missing', require_idle_existing=True)
+
+    def test_wal_with_uncheckpointed_job_is_refused_without_creating_sidecars(self):
+        self.queue.close()
+        database = self.state / 'jobs.sqlite3'
+        writer = sqlite3.connect(database)
+        try:
+            self.assertEqual(writer.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+            writer.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES('wal-job','wal-job','production','treedar-synthetic-v1','queued')")
+            writer.commit()
+            paths = [database, Path(str(database)+'-wal'), Path(str(database)+'-shm')]
+            before = {path: path.read_bytes() for path in paths}
+            with self.assertRaisesRegex(RuntimeError, 'production_hold_idle_state_unavailable'):
+                Queue(self.state, viewer_enabled=True, require_idle_existing=True)
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+        finally:
+            writer.close()
+
+    def test_actual_handler_refuses_before_migration_and_releases_authority_lease(self):
+        from processing.app import make_handler
+        job, _ = self.queue.submit({'requestId': 'queued', 'environment': 'production', 'profile': 'treedar-synthetic-v1'})
+        self.queue.close()
+        leases = Path(self.temporary.name) / 'leases'; leases.mkdir()
+        database = self.state / 'jobs.sqlite3'; before = database.read_bytes()
+        values = {'PROCESSING_API_TOKEN': 'a'*40, 'PROCESSING_PROTOTYPE_STATE_DIR': str(self.state),
+                  'PROCESSING_AUTHORITY_LEASE_DIR': str(leases), 'PROCESSING_VIEWER_PRODUCTION_ADMISSION': 'held'}
+        with patch.dict(os.environ, values, clear=True):
+            with self.assertRaisesRegex(RuntimeError, 'production_hold_idle_state_unavailable'):
+                make_handler(from_environment())
+        self.assertEqual(database.read_bytes(), before)
+        authority_lease.acquire(leases, self.state).close()
 
 
 class ProductionHoldTest(unittest.TestCase):

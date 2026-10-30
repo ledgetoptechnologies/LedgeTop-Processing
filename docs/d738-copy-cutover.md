@@ -757,6 +757,16 @@ So the staging-only Viewer photo job can run through to archive ingestion
 This HTTP hold does not stop the scheduler or existing jobs. The operational
 quiescence checks remain mandatory before promotion.
 
+When starting with this hold enabled, the coordinator also checks its existing
+database under the state lock before migrations or starting the dispatcher. It
+refuses startup if a job or Viewer task is nonterminal, a reservation is
+unresolved, or the state cannot be verified. This includes staging work that
+already exists; staging may be submitted after a successful idle start. A fresh
+or missing database, WAL-mode database, or database with journal sidecars cannot
+pass this check. The state lock excludes cooperating processes using that same
+lock; it does not prevent external writers. This is a startup observation, not
+a fence against later submissions, other state copies, or direct engine clients.
+
 **The hold is a backstop, not a way to pause production work.** Viewer's
 isolated tests (12 cases of 503 or connection reset during init, upload and
 commit, with and without a reservation) show what happens when a production

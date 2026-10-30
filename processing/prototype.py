@@ -27,9 +27,53 @@ VIEWER_PROFILE = "odm-viewer-v1"
 REFERENCE_PROFILE = "reference-pipeline-v1"
 
 
+def _require_idle_state(path):
+    """Fail closed before migration on a held candidate's existing state.
+
+    The state flock must already be held. This is a point-in-time startup
+    check, not a fence on other volumes, direct engine clients, or later work.
+    """
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError('production_hold_idle_state_unavailable')
+    try:
+        # WAL reads can create shared-memory files, and immutable SQLite reads
+        # can silently ignore uncheckpointed WAL data. Until that case is
+        # qualified, refuse it and any outstanding journal/sidecar outright.
+        if any(os.path.lexists(str(path) + suffix) for suffix in ('-wal', '-shm', '-journal')):
+            raise ValueError('database sidecars require inspection')
+        with path.open('rb') as source:
+            header = source.read(20)
+        if len(header) != 20 or header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x01\x01':
+            raise ValueError('unsupported database journal mode')
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            db.execute('BEGIN')
+            if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise ValueError('invalid database')
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {'jobs', 'viewer_tasks'} <= tables:
+                raise ValueError('missing state tables')
+            if db.execute("SELECT 1 FROM jobs WHERE status IS NULL OR status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
+                raise ValueError('nonterminal job')
+            if db.execute("SELECT 1 FROM viewer_tasks WHERE stage IS NULL OR stage NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
+                raise ValueError('nonterminal task')
+            if 'viewer_reservations' in tables and db.execute("""SELECT 1 FROM viewer_reservations r
+                LEFT JOIN viewer_tasks t ON t.uuid=r.uuid
+                WHERE r.state IS NULL OR r.state NOT IN ('reserved','cancelled')
+                   OR (r.state='reserved' AND (t.uuid IS NULL OR t.stage IS NULL OR t.stage NOT IN ('succeeded','failed','cancelled')))
+                LIMIT 1""").fetchone():
+                raise ValueError('unresolved reservation')
+        finally:
+            db.close()
+    except (sqlite3.Error, OSError, ValueError, TypeError, IndexError):
+        raise RuntimeError('production_hold_idle_state_unavailable') from None
+
+
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
-                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None):
+                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
+                 require_idle_existing=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
@@ -78,6 +122,12 @@ class Queue(Maintenance):
         # Optional recovery persists this epoch with its restart overlay.
         self.startup_id = str(uuid.uuid4())
         self.path = root / "jobs.sqlite3"
+        if require_idle_existing:
+            try:
+                _require_idle_state(self.path)
+            except BaseException:
+                self._lock.close()
+                raise
         with self._db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,

@@ -30,11 +30,19 @@ def make_handler(config: Config):
             lease = authority_lease.acquire(config.authority_lease_dir, config.prototype_state_dir)
         elif authority_lease.required(config.prototype_state_dir):
             raise RuntimeError('authority_lease_configuration_required')
-    queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
-                  node_ids=config.prototype_node_ids,
-                  treedar_node_ids=config.treedar_node_ids,
-                  viewer_enabled=config.viewer_enabled,
-                  reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
+    try:
+        queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
+                      node_ids=config.prototype_node_ids,
+                      treedar_node_ids=config.treedar_node_ids,
+                      viewer_enabled=config.viewer_enabled,
+                      reference_enabled=reference_settings is not None,
+                      require_idle_existing=config.viewer_production_held) if config.prototype_state_dir else None
+    except BaseException:
+        if lease is not None:
+            lease.close()
+        raise
+    if config.viewer_production_held and queue is None:
+        raise RuntimeError('production_hold_idle_state_unavailable')
     if lease is not None:
         try:
             authority_lease.record_required(queue, lease)
