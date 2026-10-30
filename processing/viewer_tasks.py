@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import sys
 import threading
 import uuid as uuid_module
 
@@ -30,10 +31,15 @@ class InputLimitExceeded(ValueError):
     """A task's configured cumulative input-byte allowance was exceeded."""
 
 
+class InputVerificationLimitExceeded(ValueError):
+    """The optional per-file verification work bound was exceeded."""
+
+
 VIEWER_PROFILE = 'odm-viewer-v1'
 # Tombstones are retained while any delayed request can replay. This explicit
 # finite ceiling bounds authenticated storage use; do not silently purge.
 RESERVATION_LIMIT = 100000
+MAX_INVENTORY_VERIFY_BYTES = 128 * 1024 ** 2
 PHOTO_SUFFIXES = frozenset(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
 INPUT_SUFFIXES = PHOTO_SUFFIXES | frozenset(('.txt', '.json', '.csv'))
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ -]{0,179}\Z')
@@ -263,6 +269,80 @@ class TaskStore:
             return {'version': 1, 'uuid': identifier, 'evidence': 'committed_database_only',
                     'physicalIntegrityVerified': False, 'snapshot': sign({'snapshot': snapshot, 'after': 0}),
                     'items': entries, 'nextCursor': sign({'snapshot': snapshot, 'after': page[-1]['rowid']}) if len(rows) > 256 else None}
+
+    def verify_input_receipt(self, identifier, environment, capability, name):
+        """Hash one owned input with a fixed work cap; does not assert custody."""
+        if sys.platform != 'linux' or not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY'):
+            raise Conflict('input verification unavailable')
+        def snapshot(db):
+            reservation = self._reservation(db, identifier, environment, capability)
+            if reservation is None:
+                raise KeyError('unknown reservation')
+            task = self._row(db, identifier)
+            if task['stage'] != 'uploading' or task['job_id'] is not None:
+                raise Conflict('input inventory unavailable')
+            key = self._filename(name)
+            item = db.execute('SELECT name,path,bytes,sha256 FROM viewer_files WHERE uuid=? AND name_key=?', (identifier,key)).fetchone()
+            if item is None:
+                raise KeyError('unknown input')
+            rev = db.execute('SELECT revision FROM viewer_inventory_revisions WHERE uuid=?',(identifier,)).fetchone()
+            return dict(task), dict(item), rev['revision'] if rev else 0
+        with self._lock:
+            with self.queue._db() as db:
+                db.execute('BEGIN')
+                task, item, revision = snapshot(db)
+            if item['bytes'] > MAX_INVENTORY_VERIFY_BYTES:
+                raise InputVerificationLimitExceeded('input verification work limit exceeded')
+            directory = self._directory(task)
+            path = directory / item['path']
+            if path.parent != directory or path.is_symlink():
+                raise Conflict('input receipt unavailable')
+            parent_fd = None
+            try:
+                parent_before = directory.lstat()
+                parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                parent_open = os.fstat(parent_fd)
+                if ((parent_before.st_dev, parent_before.st_ino) != (parent_open.st_dev, parent_open.st_ino)
+                        or (os.name != 'nt' and parent_open.st_uid != os.geteuid())):
+                    raise Conflict('input receipt unavailable')
+                fd = os.open(item['path'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                with os.fdopen(fd, 'rb') as source:
+                    before = os.fstat(source.fileno())
+                    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != item['bytes']
+                            or (os.name != 'nt' and before.st_uid != os.geteuid())):
+                        raise Conflict('input receipt unavailable')
+                    digest = hashlib.sha256()
+                    remaining = item['bytes']
+                    while remaining:
+                        chunk = source.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise Conflict('input receipt unavailable')
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if source.read(1):
+                        raise Conflict('input receipt unavailable')
+                    after = os.fstat(source.fileno())
+                    named = os.stat(item['path'], dir_fd=parent_fd, follow_symlinks=False)
+                    parent_after = directory.lstat()
+                    identity = lambda s: (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
+                    if (identity(before) != identity(after) or before.st_ctime_ns != after.st_ctime_ns
+                            or identity(after) != identity(named) or
+                            (parent_after.st_dev, parent_after.st_ino) != (parent_open.st_dev, parent_open.st_ino)
+                            or not hmac.compare_digest(digest.hexdigest(), item['sha256'])):
+                        raise Conflict('input receipt unavailable')
+            except OSError:
+                raise Conflict('input receipt unavailable') from None
+            finally:
+                if parent_fd is not None:
+                    os.close(parent_fd)
+            with self.queue._db() as db:
+                db.execute('BEGIN')
+                latest_task, latest_item, latest_revision = snapshot(db)
+                if (latest_task['generation'] != task['generation'] or latest_item != item
+                        or latest_revision != revision):
+                    raise Conflict('input inventory changed')
+            return {'version':1,'uuid':identifier,'name':item['name'],'bytes':item['bytes'],
+                    'sha256':item['sha256'],'evidence':'sha256_at_read_time','custodyVerified':False}
 
     def cancel_reservation(self, identifier, environment, capability):
         with self._lock,self.queue._db() as db:

@@ -1,4 +1,4 @@
-import base64,io,json,tempfile,threading,unittest,uuid
+import base64,hashlib,io,json,sys,tempfile,threading,unittest,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.parse import urlencode
 from urllib.request import Request,urlopen
@@ -125,6 +125,56 @@ class ReservationTests(unittest.TestCase):
   with self.assertRaises(Conflict):self.store.input_inventory(self.id,'staging',self.cap)
   legacy=str(uuid.uuid4());self.store.initialize(legacy,'legacy',[],None,'production')
   with self.assertRaises(KeyError):self.store.input_inventory(legacy,'production',None)
+ @unittest.skipUnless(sys.platform=='linux','verification restricted to Linux')
+ def test_input_verification_hashes_owned_bytes_and_fails_closed(self):
+  self.reserve();self.initialize();self.photo()
+  receipt=self.store.verify_input_receipt(self.id,'staging',self.cap,'A.JPG')
+  self.assertEqual(receipt['sha256'],hashlib.sha256(b'jpeg').hexdigest())
+  self.assertEqual(receipt['evidence'],'sha256_at_read_time');self.assertIs(receipt['custodyVerified'],False)
+  with self.assertRaises(KeyError):self.store.verify_input_receipt(self.id,'production',self.cap,'a.jpg')
+  path=Path(self.store.task(self.id)['files'][0]['path']);path.write_bytes(b'xxxx')
+  with self.assertRaises(Conflict):self.store.verify_input_receipt(self.id,'staging',self.cap,'a.jpg')
+  path.unlink()
+  with self.assertRaises(Conflict):self.store.verify_input_receipt(self.id,'staging',self.cap,'a.jpg')
+ @unittest.skipUnless(sys.platform=='linux','verification restricted to Linux')
+ def test_input_verification_enforces_bounded_work(self):
+  from processing.viewer_tasks import InputVerificationLimitExceeded
+  self.reserve();self.initialize();self.photo()
+  with patch('processing.viewer_tasks.MAX_INVENTORY_VERIFY_BYTES',3):
+   with self.assertRaises(InputVerificationLimitExceeded):self.store.verify_input_receipt(self.id,'staging',self.cap,'a.jpg')
+ @unittest.skipUnless(sys.platform=='linux','verification restricted to Linux')
+ def test_input_verification_rejects_symlink(self):
+  self.reserve();self.initialize();self.photo();path=Path(self.store.task(self.id)['files'][0]['path'])
+  target=self.root/'external';target.write_bytes(b'jpeg');path.unlink()
+  try:path.symlink_to(target)
+  except (OSError,NotImplementedError):self.skipTest('symlink unsupported')
+  with self.assertRaises(Conflict):self.store.verify_input_receipt(self.id,'staging',self.cap,'a.jpg')
+ @unittest.skipUnless(sys.platform=='linux','verification restricted to Linux')
+ def test_input_verification_detects_concurrent_inventory_mutation(self):
+  self.reserve();self.initialize();self.photo();other=TaskStore(self.queue,self.root/'inputs')
+  original=self.store._directory;done=[]
+  def mutate(task):
+   result=original(task)
+   if not done:
+    done.append(True);other.upload(self.id,'b.jpg',io.BytesIO(b'new'),3,'staging',self.cap)
+   return result
+  with patch.object(self.store,'_directory',side_effect=mutate):
+   with self.assertRaises(Conflict):self.store.verify_input_receipt(self.id,'staging',self.cap,'a.jpg')
+ @unittest.skipUnless(sys.platform=='linux','verification restricted to Linux')
+ def test_input_verification_rejects_file_growth(self):
+  import os
+  self.reserve();self.initialize()
+  payload=b'x'*(1024*1024+3);self.store.upload(self.id,'a.jpg',io.BytesIO(payload),len(payload),'staging',self.cap)
+  path=Path(self.store.task(self.id)['files'][0]['path']);original=os.fstat;changed=[]
+  def grow(fd):
+   result=original(fd)
+   if result.st_size==len(payload) and not changed:
+    changed.append(True)
+    with path.open('ab') as output:output.write(b'extra')
+   return result
+  with patch('processing.viewer_tasks.os.fstat',side_effect=grow):
+   with self.assertRaises(Conflict):self.store.verify_input_receipt(self.id,'staging',self.cap,'a.jpg')
+  self.assertTrue(changed)
 class ReservationHTTPTests(ReservationTests):
  def test_inventory_http_requires_exact_reservation_and_exposes_only_receipts(self):
   self.reserve();self.initialize();self.photo();store=self.store
@@ -202,6 +252,21 @@ class ReservationDispatchTests(unittest.TestCase):
    self.assertIsNone(value['nextCursor']);self.assertEqual(self.service.store.info(identifier)['imagesCount'],1)
    self.assertFalse(list(Path(self.service.store.task(identifier)['directory']).glob('.incoming-*')))
   finally:server.shutdown();server.server_close();thread.join(5);self.assertFalse(thread.is_alive())
+ @unittest.skipUnless(sys.platform=='linux','verification restricted to Linux')
+ def test_verification_http_is_disabled_by_default_and_scoped(self):
+  identifier=str(uuid.uuid4());cap=base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip('=')
+  self.service.reserve(identifier,'staging',cap);self.service.initialize(identifier,'test',[],None,'staging',cap)
+  self.service.upload(identifier,'a.jpg',io.BytesIO(b'jpeg'),4,'staging',cap)
+  facade=ViewerFacade(self.service,'production-test-token-0123456789',STAGING,temp_dir=str(self.root))
+  body=urlencode({'name':'a.jpg'}).encode()
+  def post(token,credential):
+   h=MemoryHandler('/task/'+identifier+'/ledgetop/verify-input?token='+token,body,Content_Type='application/x-www-form-urlencoded',Content_Length=str(len(body)),X_LedgeTop_Capability=credential)
+   facade.handle(h);return h
+  self.assertEqual(post(STAGING,cap).status,404)
+  self.service._input_verification_enabled=True
+  self.assertEqual(post('production-test-token-0123456789',cap).status,404)
+  result=post(STAGING,cap);self.assertEqual(result.status,200)
+  self.assertEqual(json.loads(result.wfile.getvalue())['sha256'],hashlib.sha256(b'jpeg').hexdigest())
  def test_real_http_cancel_before_init_survives_service_restart(self):
   cap=base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip('=');identifier=str(uuid.uuid4())
   facade=ViewerFacade(self.service,'production-test-token-0123456789',STAGING,temp_dir=str(self.root))

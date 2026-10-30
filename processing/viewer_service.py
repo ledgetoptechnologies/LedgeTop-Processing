@@ -122,6 +122,7 @@ class ViewerService:
         self._thread = None
         self._backoff = {}
         self._downloads = {}
+        self._input_verification_enabled = False  # Experimental; never enabled by runtime configuration.
 
     def _catalog(self):
         return catalog([('local', self.config.local_node_url, self.config.local_node_token),
@@ -198,6 +199,11 @@ class ViewerService:
 
     def input_inventory(self, identifier, environment, capability, cursor=None):
         return self.store.input_inventory(identifier, environment, capability, cursor)
+
+    def verify_input_receipt(self, identifier, environment, capability, name):
+        if not self._input_verification_enabled:
+            raise KeyError('unknown route')
+        return self.store.verify_input_receipt(identifier, environment, capability, name)
 
     def output(self, identifier, line=0):
         task = self.store.task(identifier)

@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import uuid as uuid_module
 
 from .maintenance import Conflict
-from .viewer_tasks import InputLimitExceeded
+from .viewer_tasks import InputLimitExceeded, InputVerificationLimitExceeded
 from .viewer_limits import MAX_UPLOAD_BYTES
 
 
@@ -241,6 +241,9 @@ class ViewerFacade:
         except InputLimitExceeded:
             handler.close_connection = True
             self._reply(handler, 413, {'error': 'task_input_limit_exceeded'})
+        except InputVerificationLimitExceeded:
+            handler.close_connection = True
+            self._reply(handler, 413, {'error': 'input_verification_limit_exceeded'})
         except (ValueError, TypeError, UnicodeError, RecursionError):
             handler.close_connection = True
             self._reply(handler, 400, {'error': 'invalid_request'})
@@ -349,6 +352,23 @@ class ViewerFacade:
     def _post(self, handler, path, environment):
         if path in ('/info', '/options'):
             raise RequestError(405, 'method_not_allowed')
+        verification = re.fullmatch(r'/task/([^/]+)/ledgetop/verify-input', path)
+        if verification:
+            length = _length(handler, MAX_FORM_BYTES)
+            if handler.headers.get_content_type() != 'application/x-www-form-urlencoded':
+                raise RequestError(415, 'form_required')
+            body = handler.rfile.read(length)
+            if len(body) != length:
+                raise RequestError(400, 'truncated_body')
+            values = parse_qs(body.decode('utf-8'), keep_blank_values=True, max_num_fields=2)
+            if set(values) != {'name'} or len(values['name']) != 1:
+                raise RequestError(400, 'invalid_action_form')
+            capability = self._capability(handler)
+            if capability is None:
+                raise KeyError('unknown reservation')
+            identifier = task_uuid(unquote(verification[1]))
+            self._reply(handler, 200, self.service.verify_input_receipt(identifier, environment, capability, values['name'][0]))
+            return
         if path in ('/task/ledgetop/reserve','/task/ledgetop/cancel'):
             length=_length(handler,MAX_FORM_BYTES)
             if handler.headers.get_content_type()!='application/x-www-form-urlencoded':raise RequestError(415,'form_required')
