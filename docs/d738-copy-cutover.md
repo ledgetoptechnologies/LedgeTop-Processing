@@ -1,21 +1,28 @@
-# d738 copy-on-cutover procedure (draft, not executed)
+# d738 copy-on-cutover procedure (draft, not executed, BLOCKED)
 
-This procedure replaces the live cluster coordinator with a frozen release
-image. The live coordinator is:
+> **Status: blocked.** Fourteen review findings are open, listed under
+> [Unresolved blockers](#unresolved-blockers). Each one is a mandatory stop
+> condition until real enforcement **and** verification exist. Nothing in this
+> document proves that the candidate is unreachable, that the old coordinator is
+> fenced, or that rollback is lossless.
+
+This procedure would replace the live cluster coordinator with a frozen
+release image. The live coordinator is:
 
 - source `d738edb2`;
 - image `sha256:a04271d0…5837`;
 - container `9dcb112d…09ae`.
 
-The release image runs on a **verified copy** of the stopped state volume:
+The design intent:
 
-- It starts **isolated**: no published port, on a Docker network it alone
-  belongs to. It is reachable from no client until promotion.
-- Promotion happens only after a census proves the isolated run wrote nothing
-  beyond its startup migration.
-- The original volume and container stay untouched, and are fenced so they
-  cannot run again. Rollback never starts d738 on a schema that the release
-  migrated.
+- The release image runs on a verified copy of the stopped state volume.
+- The candidate starts with no published port, and is promoted only after a
+  census gate.
+- The original volume and container stay untouched, so rollback never starts
+  d738 on a schema that the release migrated.
+
+The steps below reduce exposure. They are **not** isolation or fencing
+guarantees; see the blockers.
 
 Beau has authorized this work. TrueNAS remains under his control, and nothing
 here touches it, the Viewer provider settings, credentials or the engine
@@ -24,7 +31,7 @@ containers. This draft has not been run.
 Every **stop condition** below is mandatory. Hitting one means: stop, keep
 every artifact, and inspect. Never improvise a workaround.
 
-## Why copy, isolate and fence
+## Why copy, and what remains unfenced
 
 - **Downgrade:** on first start, the release `TaskStore` migrates the database:
   - `ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required`;
@@ -37,13 +44,14 @@ every artifact, and inspect. Never improvise a workaround.
   release on the copy avoids the downgrade.
 - **Writes to the copy before promotion:** if the candidate published live
   ports before health checks, Viewer retries or other clients could write to
-  the copy, and rollback would silently discard those writes. Isolation makes
-  that impossible, rather than asking clients not to.
+  the copy, and rollback would silently discard those writes. Removing published
+  ports narrows that exposure, but does not eliminate it (blockers U1–U3).
 - **The same authority twice:** the copy keeps authority `7131882e-…e8`, and
   `coordinator.lock` lives inside each volume, so the lock cannot prevent two
   coordinators. Host port binding does not either: Docker bridge peers reach
-  container ports directly. The old container is therefore fenced before it
-  stops (restart policy `no`) and after (disconnected from every network).
+  container ports directly. Setting restart policy `no` and disconnecting the
+  old container's networks guard only against automatic restarts. They do not
+  fence a Docker administrator (blocker U4).
 
 ## Facts and assumptions
 
@@ -130,7 +138,9 @@ docker ps -a --filter volume="$VOL" --format '{{.ID}}' > "$E/volume-users.txt"  
 MP=$(docker volume inspect -f '{{.Mountpoint}}' "$VOL")
 for c in $(docker ps -aq); do docker inspect -f '{{.Id}} {{range .Mounts}}{{.Source}} {{end}}' "$c"; done \
   | grep -F -- "$MP" > "$E/mountpoint-users.txt" || true                          # must list only $OLD
-sudo -n fuser -vm "$MP" 2> "$E/fuser.txt" || true                                 # must show only the $OLD process tree
+set +e; sudo -n fuser -vm "$MP" 2> "$E/fuser.txt"; FUSER=$?; set -e
+echo "fuser exit $FUSER" >> "$E/fuser.txt"   # 0: users listed, 1: none found, anything else: the check failed
+test "$FUSER" -le 1                         # never masked; see blocker U7
 ```
 
 **Stop conditions:**
@@ -160,7 +170,7 @@ evidence, saved in `$E`. All checks are read-only.
 
 **Stop condition:** any route fails, or its evidence cannot be produced.
 
-## Step 2 — fence and stop d738
+## Step 2 — guard against automatic restart, then stop d738 (not a fence; U4)
 
 ```sh
 docker update --restart=no "$OLD"          # BEFORE stop: no restart window
@@ -178,8 +188,9 @@ docker inspect -f '{{len .NetworkSettings.Networks}}' "$OLD"        # must print
 - The stop took longer than a few seconds. That means a request was in flight,
   contradicting R2.
 
-Once disconnected, the old container cannot reach clients or engines even if
-something starts it.
+Once disconnected and set to `--restart=no`, the old container cannot restart
+**automatically** with network access. This is not a fence: a Docker
+administrator can reconnect and start it (blocker U4).
 
 ## Step 3 — verified backup and copy
 
@@ -247,7 +258,7 @@ the release.
 **Stop condition:** any non-zero count. A task now on an engine came from
 outside the coordinator.
 
-## Step 5 — start the candidate isolated
+## Step 5 — start the candidate without published ports (not isolation; U1–U3)
 
 ```sh
 CAND_NET=ltp-candidate-$RUN
@@ -262,7 +273,10 @@ CAND=ltp-coordinator-candidate-$RUN
 docker start "$CAND"
 ```
 
-Prove the isolation before any check that talks to the candidate:
+Exposure checks, to run before any check that talks to the candidate. These are
+**observations, not isolation**. The dedicated bridge is not `--internal`, and
+the host and any host process can reach the candidate's bridge IP (blockers U1,
+U2):
 
 - `docker port "$CAND"` prints nothing.
 - `docker network inspect "$CAND_NET"` lists exactly one container, `$CAND`.
@@ -307,7 +321,7 @@ Assumptions:
 - The reference TLS listener is only checked for being alive, through
   `/healthz`.
 
-## Step 6 — promotion gate: prove the isolated run wrote nothing
+## Step 6 — promotion gate: census comparison (not lossless; U6)
 
 ```sh
 docker stop -t 3600 "$CAND"; docker inspect -f '{{.State.ExitCode}}' "$CAND"     # must be 0
@@ -332,6 +346,10 @@ allowlist is reviewed, this gate cannot pass, and the gap is a blocker.
 **Stop condition:** any difference not on the allowlist. Any such difference
 means a client reached the candidate, or the startup does more than reviewed.
 
+This gate compares database digests and a few file counters. It does **not**
+compare every regular file's contents outside the database, so it cannot
+establish a lossless rollback (blocker U6).
+
 ## Step 7 — promote
 
 ```sh
@@ -348,21 +366,33 @@ docker start "ltp-coordinator-$RUN"; shred -u "$E/env-promoted"
 **Promotion is the end of clean rollback.** From here on, any admission —
 production or a staging verification task — exists only on `NEW_VOL`.
 
-After promotion, repeat the step 5 checks through the published ports. Then
-the staging-only Viewer photo job runs through to archive ingestion **and
-derivatives**. Production follows only after that passes and Beau accepts it.
+After promotion, repeat **only** step 5's inside-container checks:
+`/healthz`, `/options` for both roles, and the authority. The pre-promotion
+no-published-port checks do not apply to a promoted container, whose ports are
+published by design. Then the staging-only Viewer photo job runs through to
+archive ingestion **and derivatives**. Production follows only after that passes
+and Beau accepts it.
+
+Recreating the container with published ports exposes it at once, to
+production as well as staging. The only production hold is at Viewer
+(blocker U5).
 
 ## Step 8 — rollback
 
 - **Before promotion (any failure in steps 5–6):** remove the candidate and its
   network. Reconnect `$OLD` to the networks in `old-networks.txt` (with their
-  original aliases), restore its restart policy, and `docker start "$OLD"`. The
-  original volume is unchanged, as `census-original-after.json` proves. Nothing
-  is lost.
+  original aliases), restore its restart policy, and `docker start "$OLD"`.
+  `census-original-after.json` shows the original volume was unchanged when
+  copied. Anything written to `NEW_VOL` before promotion is **not** carried
+  back. Until U1, U2 and U6 are resolved, that loss cannot be ruled out; treat
+  any unexplained difference as a hold.
 - **After promotion, if `NEW_VOL` holds nothing beyond `census-candidate-isolated.json`:**
   1. stop the promoted container (exit 0);
   2. take a census and confirm it is unchanged;
   3. roll back as before.
+
+  Because of U6, "unchanged" covers database digests and counters only, not
+  every file's contents.
 - **After promotion, if anything was admitted (including a staging task):**
   this is a **hold, not an automatic rollback**.
   1. Stop admitting work; the coordinator has no in-process fence, so this is
@@ -384,33 +414,30 @@ Keep the following until Beau accepts the release:
 
 Cleaning them up is a separate step.
 
-## Remaining gaps (blockers unless noted)
+## Unresolved blockers
 
-1. **Startup allowlist** for the step 6 gate: requires a rehearsal of `IMG_NEW`
-   on synthetic state. Blocker.
-2. **Host-writer proof** needs root (`fuser -vm` on the volume mountpoint). If
-   `sudo -n` is unavailable, Beau must provide an equivalent. Blocker until
-   then.
-3. **Bridge membership:** isolation removes the candidate from shared networks.
-   The candidate may need its engines via the old network: check whether
-   `LOCAL_NODE_URL`/`MAIN_NODE_URL` use container names. If so, the candidate
-   cannot be isolated by its own network alone. Joining the engine network
-   instead is acceptable only if R4 identifies every member as a
-   non-submitter. Unresolved until `old-inspect.json` is read.
-4. **No in-process admission fence after promotion.** Between promotion and
-   production acceptance, production admission is held only at Viewer. The
-   coordinator cannot accept staging while refusing production unless its
-   credential configuration changes, which this procedure does not do.
-5. **The client side of an ambiguous request** is reconciled from Viewer's
-   records (step 4). The coordinator records nothing about requests it refused
-   or dropped.
-6. **Exact API contracts** for the in-container checks (headers, response
-   fields) must be confirmed against the release source before running.
-7. **Direct NodeODX writers** stay outside the cooperative gate. R7 observes
-   them; it does not fence them.
-8. **Live verification:** none of this has run on a live host. Step 3, minus
-   the host `fsync`, was rehearsed in bash with `set -euo pipefail` on a
-   synthetic volume, using a cached Python image as `IMG_OLD`. All four
-   censuses matched, including the volume root.
-   The container-spec script is tested on synthetic inspect JSON only, not on
-   the real `old-inspect.json`.
+Each item is a **mandatory stop condition**. The cutover must not start until
+the item has real enforcement **and** independent verification. A procedural
+check, an observation or a snapshot does not resolve it.
+
+| # | Finding | Why the current draft is insufficient | What would resolve it (unverified proposal) |
+|---|---|---|---|
+| U1 | **The candidate is not isolated from the host.** | The dedicated bridge is not `--internal`, and the host and every host process can reach the candidate's bridge IP. "No published port" and "one network member" are observations, not isolation. | Run the candidate with `--network none`, leaving only loopback in its namespace, for the census-gated phase. Engine-dependent checks (`/options`) then move after promotion. This must be shown to boot and must be verified by an independent probe. |
+| U2 | **Other writers before promotion are not prevented.** | Checking published ports and network membership neither stops a host process, nor an admin, nor a later-attached container from writing. | U1's `--network none`, plus a volume-level guard: no container except the candidate may mount `NEW_VOL`. That needs enforcement, not inspection. |
+| U3 | **Requests during the isolated phase are only snapshotted.** | `netns_sockets.py` gives a point-in-time snapshot. It now fails on a missing `tcp`/`tcp6` table, but it still sees nothing that connects after it runs. | Combine U1 with the step 6 census, and a resolved U6. |
+| U4 | **The old coordinator is not fenced against a Docker administrator.** | `--restart=no` and network disconnection stop only automatic restarts. Anyone in the `docker` group can reconnect and start it while the candidate holds the same authority. | A fence that the coordinator itself enforces: refuse to start when another instance holds the authority, or an external authority lease. No such mechanism exists in d738 or the release. |
+| U5 | **No production admission hold after promotion, except at Viewer.** | Step 7 recreates the container with published ports, exposing it at once to production and staging alike. | Options, each a decision for Beau: start the promoted container with a production Viewer token nobody holds, a credential configuration change; or a qualified in-process admission mode that separates staging from production. Neither exists or is approved. |
+| U6 | **Rollback is not proven lossless.** | Step 6 compares database digests and limited file counts, not every regular file's contents, because the migrated database makes the aggregate `treeSha256` differ. | Extend the census with per-file content hashes, then require every non-database file to be identical before and after the isolated run. Not implemented. |
+| U7 | **There is no lock on host writers.** | `fuser -vm` is a point-in-time, filesystem-wide observation. Its exit status is no longer masked, but it does not prevent a writer from appearing later. | A writer lock on the volume (for example a mount that only the candidate can make), verified independently. |
+| U8 | **Volume creation is TOCTOU, and emptiness is not ownership.** | `docker volume inspect` followed by `docker volume create` can race, and an empty census does not prove this run created or exclusively owns the volume. | Create the volume once with a unique label, and refuse unless the creation call itself reports a new volume and no other container mounts it. Docker reuses an existing name silently, so this needs a verified mechanism. |
+| U9 | **Startup allowlist.** | The step 6 gate depends on a list of tables that startup writes, and that list does not exist. | Rehearse `IMG_NEW` isolated on synthetic state, diff the censuses, then review the result. |
+| U10 | **Host-writer check needs root.** | `sudo -n` may be unavailable. | Beau provides an equivalent root check. |
+| U11 | **Engine reachability.** | If `LOCAL_NODE_URL`/`MAIN_NODE_URL` use container names, the candidate cannot reach its engines from its own network. | Read the real `old-inspect.json`. U1's `--network none` sidesteps this during the gated phase. |
+| U12 | **Reconciling ambiguous requests.** | Exit 0 proves only that handlers ended, and the coordinator records nothing about requests it refused or dropped. | Reconcile against Viewer's records (step 4), which needs Viewer's confirmed status vocabulary. |
+| U13 | **API contracts unconfirmed.** | The headers and response fields in the inside-container checks, and Viewer's status list, are unconfirmed. | Confirm them against the release source and the deployed Viewer. |
+| U14 | **Direct NodeODX writers.** | They are observed (R7), not fenced. | Outside this procedure; they remain outside the cooperative gate. |
+
+**Validation status:** none of this has run on a live host. Step 3, minus the
+host `fsync`, was rehearsed in bash on a synthetic volume, and all four
+censuses matched. The helpers pass their synthetic tests; the container-spec
+script has never seen a real `old-inspect.json`.

@@ -2,7 +2,9 @@
 
 Run inside a container with ``docker exec -i <id> python - < netns_sockets.py``.
 This covers listeners and peers that reach the container over a Docker bridge,
-loopback or published ports alike, which host ``ss`` cannot see.
+loopback or published ports alike, which host ``ss`` cannot see. It is a
+point-in-time snapshot, not a fence: a connection opened after it runs is not
+seen.
 """
 
 import json
@@ -34,11 +36,9 @@ def summarize(lines):
 def main():
     lines = []
     for name in ('/proc/net/tcp', '/proc/net/tcp6'):
-        try:
-            with open(name) as stream:
-                lines.extend(stream.read().splitlines())
-        except FileNotFoundError:
-            pass
+        # A missing table is not evidence of no sockets: fail instead of skipping.
+        with open(name) as stream:
+            lines.extend(stream.read().splitlines())
     json.dump(summarize(lines), sys.stdout, sort_keys=True)
     sys.stdout.write('\n')
 
