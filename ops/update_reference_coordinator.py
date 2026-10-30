@@ -51,6 +51,9 @@ INCREMENTAL_ACTIVATION_REVIEWED = True
 # This draft only makes the bounded retained-input backup path testable. It is
 # not a writer fence or qualification of any upgrade pair.
 RETAINED_VIEWER_BACKUP_QUALIFIED = False
+# Explicit future-only profile; no current release may activate this path.
+QUARANTINED_A75_REVIEWED = False
+QUARANTINED_A75_SOURCE = 'a75f699706e2798a0d88f4295b2ba2f1f648ca14'
 QUALIFIED_INCREMENTAL_PAIR = (
     '671fd2a6bde40088bdfad91ccf67eab45ee3d8d7',
     'sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249',
@@ -641,6 +644,63 @@ class ReferenceCoordinatorUpdate:
             '-p','127.0.0.1:18080:8080','-p','192.168.50.89:3005:8080','-p','192.168.50.89:18443:8443',
             '--label',LABEL+'='+state['operation'],state['image'])
 
+    def quarantine_create_args(self, state):
+        """Create the same candidate without any ingress or restart on reboot.
+
+        The private state/TLS mounts remain necessary for real startup; callers
+        must already own and fence those resources before this function is used.
+        No promotion path is implemented here.
+        """
+        args=list(self.create_args(state))
+        try:
+            index=args.index('--restart');assert args[index+1]=='unless-stopped';args[index+1]='no'
+            index=args.index('--network');assert args[index+1]=='bridge';args[index+1]='none'
+            bindings=[]
+            while '-p' in args:
+                index=args.index('-p');bindings.append(args[index+1]);del args[index:index+2]
+            assert bindings==['127.0.0.1:18080:8080','192.168.50.89:3005:8080','192.168.50.89:18443:8443']
+        except (ValueError,IndexError,AssertionError):
+            raise Stopped('quarantine_create_template_changed') from None
+        return tuple(args)
+
+    def verify_quarantined_candidate(self,state):
+        """Inspect the exact isolated candidate, then probe its native health internally."""
+        import copy
+        identifier=state.get('newContainerId')
+        if type(identifier) is not str or not re.fullmatch('[a-f0-9]{64}',identifier):
+            raise Stopped('quarantine_candidate_identity_required')
+        item=self.t.inspected(identifier)
+        host=item['HostConfig'];network=item.get('NetworkSettings',{})
+        if (item['Id']!=identifier or item['Name']!='/'+NAME or item['Image']!=state['image']
+                or item['Config'].get('Labels',{}).get(LABEL)!=state['operation']
+                or item['State'].get('Running') is not True
+                or host.get('NetworkMode')!='none' or host.get('PortBindings') not in (None,{})
+                or host.get('RestartPolicy',{}).get('Name')!='no'
+                or host.get('RestartPolicy',{}).get('MaximumRetryCount',0)!=0
+                or network.get('Ports') not in (None,{})
+                or set(network.get('Networks',{})) - {'none'}):
+            raise Stopped('quarantine_candidate_not_isolated')
+        # Apply the existing immutable security/mount policy to a copy only,
+        # substituting the three intentional quarantine differences.
+        proxy=copy.deepcopy(item)
+        proxy['HostConfig']['NetworkMode']='bridge'
+        proxy['HostConfig']['RestartPolicy']['Name']='unless-stopped'
+        proxy['HostConfig']['PortBindings']=legacy.REFERENCE_PORTS
+        self.t.facts(proxy,reference=True)
+        if application_environment(self.t,item)!=state['applicationEnvironmentSha256']:
+            raise Stopped('candidate_application_environment_changed')
+        code=('import json,urllib.request; '
+              'r=urllib.request.urlopen("http://127.0.0.1:8080/healthz",timeout=3); '
+              'v=json.load(r); print(json.dumps({"status":v.get("status"),'
+              '"viewerEnabled":v.get("viewerEnabled"),'
+              '"syntheticPrototypeEnabled":v.get("syntheticPrototypeEnabled")}))')
+        value=json.loads(self.t.docker('exec','--user','10001:10001',identifier,'python','-c',code,timeout=10))
+        if value!={'status':'ok','viewerEnabled':True,'syntheticPrototypeEnabled':True}:
+            raise Stopped('quarantine_health_unavailable')
+        # Health says both app listeners started, not that external TLS or
+        # backend integration has been validated.
+        return {'isolated':True,'restartDisabled':True,'internalHealth':'ok'}
+
     def backup(self,state,gates):
         self.check(state,gates)
         # Historical copier hashes every byte and fsyncs files/directories. Its
@@ -686,6 +746,9 @@ class ReferenceCoordinatorUpdate:
 
     def activate(self,state):
         self.validate(state)
+        quarantined = bool(self.incremental_binding and state['sourceCommit']==QUARANTINED_A75_SOURCE)
+        if quarantined and QUARANTINED_A75_REVIEWED is not True:
+            raise Stopped('a75_quarantine_activation_not_qualified')
         if self.incremental_binding and not incremental_release_reviewed(self.incremental_binding,state['image'],state['sourceCommit']):raise Stopped('incremental_application_migration_review_required')
         if state['phase']!='prepared':raise Stopped('prepared_operation_only_no_replay')
         self.original(state);_env,api,operator=self.t.local_clients();self.activity(state,api)
@@ -729,13 +792,21 @@ class ReferenceCoordinatorUpdate:
                 self.save(state,'rename_old_pending',backup=backed)
                 self.mutation(state,gates,'rename',self.old_id,state['rollbackName'])
                 self.save(state,'create_pending')
-                identifier=self.mutation(state,gates,*self.create_args(state)).strip()
+                identifier=self.mutation(state,gates,*(self.quarantine_create_args(state) if quarantined else self.create_args(state))).strip()
                 if not re.fullmatch(r'[a-f0-9]{64}',identifier):raise Stopped('create_response_unknown')
                 self.save(state,'created',newContainerId=identifier)
-                self.candidate(state)
+                if not quarantined:self.candidate(state)
                 self.save(state,'start_pending')
                 self.mutation(state,gates,'start',identifier)
                 self.save(state,'started',replacementStarted=True)
+                if quarantined:
+                    gates.check()
+                    evidence=self.verify_quarantined_candidate(state)
+                    gates.check()
+                    self.save(state,'quarantine_verified',quarantineEvidence=evidence)
+                    # No exposed-port promotion or old-version rollback has
+                    # been qualified. Preserve the exact isolated candidate.
+                    raise Stopped('quarantine_promotion_not_qualified')
                 self.t.health(api,container_id=identifier);self.t.sole_owner(identifier)
                 self.check(state,gates);self.activity(state,api);self.plans(state,api)
                 self.compare(state,self.census(state,container=identifier),drained,allow_owned=True)
