@@ -32,6 +32,21 @@ class InputJournalTests(unittest.TestCase):
         self.db.close(); self.db = sqlite3.connect(self.path); self.journal = InputJournal(self.db)
         self.assertFalse(self.journal.seed(self.binding, self.objects))
 
+    def test_v2_manifest_digest_and_projection_are_bound_on_seed(self):
+        from processing.reference_manifest_v2 import decode_manifest_v2
+        raw = (Path(__file__).resolve().parents[1] / 'contracts/input-v2-manifest-canonical.json').read_bytes().strip()
+        manifest = decode_manifest_v2(raw)
+        objects = [{key: obj[key] for key in ('id', 'byteSize', 'sha256')} for obj in manifest['objects']]
+        self.binding.update(manifestSha256=manifest['sha256'], objectsSha256=p.digest(objects))
+        with self.assertRaises(InputJournalError):
+            self.journal.seed_manifest(dict(self.binding, manifestSha256='f'*64), raw)
+        with self.assertRaises(InputJournalError):
+            self.journal.seed_manifest(dict(self.binding, objectsSha256='f'*64), raw)
+        self.assertTrue(self.journal.seed_manifest(self.binding, raw))
+        self.assertEqual(self.journal.current(self.binding)['byteSize'], 0)
+        with self.assertRaises(InputJournalError):
+            self.journal.seed_manifest(self.binding, raw.replace(b'empty.jpg', b'alter.jpg'))
+
     def test_v2_zero_size_reopens_after_attempt_and_completion(self):
         self.objects = [dict(id='empty', byteSize=0, sha256=hashlib.sha256(b'').hexdigest())]
         self.binding['objectsSha256'] = p.digest(self.objects)

@@ -39,6 +39,24 @@ class InputJournal:
                 size INTEGER NOT NULL, sha256 TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                 done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job, ordinal), UNIQUE(job, object_id))''')
 
+    def seed_manifest(self, binding, manifest_bytes):
+        """Validate canonical v2 manifest and bind its exact digest and object projection.
+
+        Digest validation does not authenticate origin or prove file custody; the
+        caller must obtain these bytes from the claimed durable metadata snapshot.
+        """
+        from .reference_manifest_v2 import decode_manifest_v2
+        try:
+            manifest = decode_manifest_v2(manifest_bytes)
+            if binding['manifestSha256'] != manifest['sha256']:
+                raise InputJournalError('manifest binding conflict')
+            objects = [{key: obj[key] for key in ('id', 'byteSize', 'sha256')} for obj in manifest['objects']]
+            if binding['objectsSha256'] != p.digest(objects):
+                raise InputJournalError('object projection conflict')
+        except (KeyError, TypeError, ValueError):
+            raise InputJournalError('invalid v2 manifest binding') from None
+        return self.seed(binding, objects)
+
     def seed(self, binding, objects):
         """Seed once from a validated manifest; exact binding replay is idempotent."""
         if self.db.in_transaction:
