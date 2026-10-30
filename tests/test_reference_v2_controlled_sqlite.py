@@ -35,7 +35,7 @@ class ControlledSQLiteTest(unittest.TestCase):
 from processing.reference_worker_fence_v2 import WorkerFence
 from processing.reference_v2_controlled_sqlite import ControlledSQLite
 f=WorkerFence(sys.argv[1]);c=ControlledSQLite(fence=f,path=sys.argv[2],expected_inode=(int(sys.argv[3]),int(sys.argv[4])),expected_epoch='epoch-1')
-c.db.execute('PRAGMA synchronous=FULL');c.db.execute('BEGIN IMMEDIATE');c.db.execute(\"INSERT INTO intent VALUES('pending')\");c.db.execute('COMMIT');os._exit(73)
+c.record_once('11111111-2222-4333-8444-555555555555','pending');os._exit(73)
 """
   proc=subprocess.run([sys.executable,'-c',code,str(self.lock),str(self.path),str(self.inode[0]),str(self.inode[1])],timeout=10)
   self.assertEqual(proc.returncode,73);self.fence=WorkerFence(self.lock);self.addCleanup(self.fence.close)
