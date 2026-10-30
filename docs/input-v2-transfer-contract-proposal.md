@@ -94,8 +94,9 @@ and charge; the caller reconciles rather than assumes zero charge. Reconciliatio
 does not authorize sending the original body: without a separately specified
 and proven emission protocol, any subsequent body requires a fresh request ID
 and a new charge.
-Reusing a request ID must not emit a second response body: an exact replay may
-return a bounded status/receipt, while mismatched use is refused. A retry that
+Reusing any charged request ID never emits a body, even when the original
+body was never sent: an exact replay may return a bounded status/receipt, while
+mismatched use is refused. A retry that
 might stream bytes uses a fresh request ID and spends another charge. This rule
 avoids a request-ID replay becoming an unmetered re-download. Atomicity and
 crash recovery apply across all broker processes; direct-object routes that
