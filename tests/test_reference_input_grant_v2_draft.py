@@ -23,6 +23,10 @@ class GrantCandidateVectors(unittest.TestCase):
   duplicate=self.raw[:-1]+b',"jobId":"11111111-2222-4333-8444-555555555555"}'
   for raw in (duplicate,b'\xef\xbb\xbf'+self.raw,b' '+self.raw,self.raw.replace(b'"protocolVersion":2',b'"protocolVersion":2.0'),self.raw.replace(b'"generation":1',b'"generation":1e0'),self.raw.replace(b'"generation":1',b'"generation":-0')):
    with self.subTest(raw=raw[:24]),self.assertRaises(GrantDraftError):verify_candidate_grant(raw)
+ def test_shared_invalid_raw_vectors(self):
+  for vector in self.v['invalidRawVectors']:
+   with self.subTest(name=vector['name']),self.assertRaises(GrantDraftError):verify_candidate_grant(vector['utf8'].encode('utf8'))
+
  def test_range_and_budget_examples(self):
   v={x['name']:x for x in self.v['vectors']};r=self.v['rangeBytes']
   for name in ('empty-object','one-byte-beyond-range'):
@@ -33,6 +37,6 @@ class GrantCandidateVectors(unittest.TestCase):
   empty=v['zero-byte-http'];self.assertEqual((empty['rangeHeader'],empty['status'],empty['contentLength']),(None,200,0))
   replay=v['same-request-id-replay'];self.assertFalse(replay['replay']['emitBody']);self.assertEqual(replay['replay']['additionalChargeRequests'],0)
   expiry=v['expiry-observed-before-clock-rollback'];self.assertTrue(expiry['expiryObservationCommittedBeforeDenial']);self.assertEqual(expiry['newAdmission'],'deny')
-  unknown=v['unknown-commit'];self.assertFalse(unknown['emitBody']);self.assertEqual(unknown['action'],'reconcile_exact_identity_before_stream')
+  unknown=v['unknown-commit'];self.assertFalse(unknown['emitBody']);self.assertEqual(unknown['action'],'reconcile_then_fresh_request_and_charge')
   self.assertEqual(v['status-identity-mismatch']['result'],'deny')
   concurrent=v['concurrent-budget-precharge'];self.assertEqual(concurrent['acceptedCount']+concurrent['deniedCount'],len(concurrent['simultaneousRequests']));self.assertLessEqual(concurrent['chargedBytes'],concurrent['byteBudget'])
