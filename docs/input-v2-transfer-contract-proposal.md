@@ -25,11 +25,46 @@ commitment binds the complete permitted object set; do not copy tens of
 thousands of object IDs into each grant. The broker must independently verify
 that each requested ID belongs to that immutable manifest. The token is secret,
 scoped to the exact transfer identity and committed object set; it never enters
-logs or public receipts. The manifest—not the grant alone—defines object size,
-hash and type. Objects are read-only, immutable and hash-verified. There must
-be a documented, interoperable canonical encoding and signature/MAC domain,
-but this draft does not choose one. A grant is not proof of disk reservation,
+logs or public receipts. The manifestâ€”not the grant aloneâ€”defines object size,
+hash and type. Objects are read-only, immutable and hash-verified. The candidate canonical grant encoding and commitment domain below are normative
+for this proposal; issuer authentication, key management and authorization remain
+open. The encoding is not the v1 manifest encoding or a deployed protocol. A grant is not proof of disk reservation,
 engine capacity or permission to delete data.
+
+## Candidate canonical grant bytes and digest
+
+This section is a precise proposal for cross-language review, not yet agreed.
+The grant commitment is `SHA-256(domain || canonical_bytes)`, where `domain` is
+exactly the UTF-8 bytes `ledgetop.reference.input-grant.v2` followed by one NUL
+byte (`00`). The commitment payload is a closed JSON object with exactly:
+`protocolVersion`, `jobId`, `generation`, `environment`, `sourceId`,
+`manifestSha256`, `capabilityFingerprint`, `transferEpoch`, `grantId`,
+`issuedAt`, `expiresAt`, `rangeBytes`, `totalRequestBudget`, and
+`totalByteBudget`. The bearer token and commitment itself are not in these bytes;
+issuer MAC/signature scheme, key identity and envelope remain open. An issuer
+must bind the token and all payload bytes to the same authenticated grant.
+
+All identifiers are nonempty safe ASCII `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`;
+SHA-256 strings are 64 lowercase hex characters; environment is exactly
+`production` or `staging`. `protocolVersion` is integer 2; generation and
+rangeBytes are positive integers and both budgets are nonnegative integers.
+Every integer is at most 9007199254740991 (`2^53-1`); booleans, fractional or
+exponent tokens, negative values and negative zero are invalid. Dates are real
+UTC calendar instants exactly `YYYY-MM-DDTHH:mm:ss.SSSZ`, and expiry must be
+later than issuance. Reject UTF-8 BOM, duplicate or unknown keys, missing keys,
+invalid Unicode, floats and extra whitespace; input must equal its canonical
+re-encoding. Canonical bytes are compact UTF-8 JSON with object keys ordered by
+ASCII code point, no spaces, ASCII-only payload strings and JSON string escapes
+for quotes, backslashes and control characters. Exact canonical examples and a
+hex digest are in the vector file. No float option or non-ASCII name contract
+is implied by this grant format.
+
+The source validates the authenticated grant and exact transfer identity before
+looking up the requested object; membership is checked against the immutable
+manifest for that source and generation. A source cannot grant an object from a
+different job or source merely because its ID or hash matches. This compact
+commitment avoids embedding all object IDs in every grant; broker storage,
+manifest lookup and metadata limits still require measured qualification.
 
 ## Request, charging and range semantics
 
@@ -37,8 +72,12 @@ Proposed read request: an authenticated object GET with a new unpredictable
 `requestId` and a single half-open byte range `[start,end)` where
 `0 <= start < end <= size`, and `end-start <= rangeBytes`. For a zero-byte
 object propose a distinct whole-object empty request, charged as one request and
-zero bytes. The final HTTP representation, exact header encoding and zero-byte
-response must be agreed before implementation. A successful response binds
+zero bytes. For nonempty objects, encode `[start,end)` as HTTP `Range: bytes=start-(end-1)`;
+require status 206, exact `Content-Range: bytes start-(end-1)/size`,
+`Content-Length: end-start`, and identity encoding. The empty-object request
+has no Range header and requires status 200, `Content-Length: 0`, and an empty
+body. Exact header parsing, integer bounds and malformed/multiple ranges fail
+closed. A successful response binds
 object ID, exact range, total object size and bytes; redirects, content encoding,
 truncation and incorrect range are errors. The worker verifies whole-object
 size and SHA-256 before publishing a local input. Range verification alone does
@@ -48,8 +87,9 @@ Before opening or streaming any source bytes, the broker atomically validates
 identity, expiry, object/range and remaining budget; durably inserts the unique
 request ID and charges one request and the full intended response length. A
 committed charge is never refunded solely because a response, stream, process,
-network connection or acknowledgment is lost. A rejected or uncertain ledger
-write emits no bytes; the caller reconciles rather than assumes zero charge.
+network connection or acknowledgment is lost. A rejected ledger write emits no bytes. If commit outcome is unknown, hold the
+request and send no bytes until durable reconciliation confirms its exact ID
+and charge; the caller reconciles rather than assumes zero charge.
 Reusing a request ID must not emit a second response body: an exact replay may
 return a bounded status/receipt, while mismatched use is refused. A retry that
 might stream bytes uses a fresh request ID and spends another charge. This rule
@@ -63,7 +103,8 @@ first attempts plus an explicit bounded retry allowance; renewal must not reset
 or silently increase them. Deny an attempt if request or byte charge exceeds
 remaining budget, and retain prior charges if the worker abandons a partial
 file. Concurrent request precharges serialize against the same cumulative
-budget. Worker scratch capacity and source broker budget are separate holds.
+budget; each accepted request has its own unique ID, and only the number whose
+charges fit may stream. A commit error is not evidence that no charge occurred. Worker scratch capacity and source broker budget are separate holds.
 
 ## Expiry, replacement and unknown outcomes
 
@@ -86,7 +127,10 @@ cumulative balances, and issuance or revocation cannot make an uncertain read
 free. Whether prior grants are revoked atomically or overlap, and whether the
 budget may ever be increased through a separate audited operation, are open
 choices; implement neither until jointly specified. If a request response is
-lost, a non-authorizing status lookup may report committed charge and outcome;
+lost, a status lookup authenticated to the same worker and transfer identity may
+report committed charge and outcome; it must compare the exact request ID and
+identity and reject a changed ID, job, source, manifest, epoch or environment.
+The status response is non-authorizing and
 it cannot assert file delivery or release scratch. If status is unavailable,
 the worker retains partial work and the spent-or-unknown budget and does not
 assume a new request is free.
@@ -101,7 +145,7 @@ current provisional planner and does not approve a production cap.
 
 ## Decisions and qualification still needed
 
-1. Agree identities, signed raw framing, grant issuer and worker authentication,
+1. Review and agree these proposed canonical identities and raw bytes, grant issuer and worker authentication,
    tenant/source isolation, and capability negotiation in both languages.
 2. Agree per-range HTTP framing, zero-byte behavior, expiry-in-flight and
    concurrency-slot recovery; set measured object count, byte and request caps.
