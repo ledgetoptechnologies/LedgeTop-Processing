@@ -112,10 +112,11 @@ def _entry(key, path, info):
 
 def tree(root, key):
     root = Path(root)
-    entries = {path_id(key, '.'): dict(_entry(key, root, root.lstat()), root=True)}
+    root_info = root.lstat()
+    entries = {path_id(key, '.'): dict(_entry(key, root, root_info), root=True)}
     errors = []
     directories = []
-    pending = [root]
+    pending = [(root, root_info)]
     discovered = 1
     incoming = 0
     spool_entries = None
@@ -139,9 +140,11 @@ def tree(root, key):
         return tuple(sorted(names))
 
     while pending:
-        directory = pending.pop()
+        directory, observed = pending.pop()
         try:
             before = directory_identity(directory.lstat())
+            if before != directory_identity(observed):
+                raise OSError('census directory changed')
             names = names_in(directory)
             if directory_identity(directory.lstat()) != before:
                 raise OSError('census directory changed')
@@ -158,7 +161,7 @@ def tree(root, key):
                 if name.startswith('.incoming-'):
                     incoming += 1
                 if stat.S_ISDIR(info.st_mode):
-                    pending.append(path)
+                    pending.append((path, info))
         except OSError as error:
             failed(error)
 

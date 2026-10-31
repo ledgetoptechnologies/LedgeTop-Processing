@@ -77,6 +77,25 @@ class CensusFixture(unittest.TestCase):
 
 
 class CensusTest(CensusFixture):
+    def test_queued_directory_replaced_before_scan_is_rejected(self):
+        original_entry = state_census._entry
+        target = self.root / 'viewer-tasks'
+        moved = self.base / 'original-viewer-tasks'
+        replaced = False
+        def replace(key, path, info):
+            nonlocal replaced
+            result = original_entry(key, path, info)
+            if path == target and not replaced:
+                replaced = True
+                target.rename(moved)
+                target.mkdir()
+            return result
+        with mock.patch('ops.state_census._entry', side_effect=replace):
+            summary, _ = state_census.tree(self.root, KEY)
+        self.assertTrue(replaced)
+        self.assertGreater(summary['rejected']['unreadable'], 0)
+        self.assertEqual((moved / 'task-1' / 'DJI_0001.JPG').read_bytes(), b'synthetic photo bytes')
+
     def test_add_or_remove_after_directory_scan_is_rejected(self):
         original_entry = state_census._entry
         for change in ('add', 'remove'):
