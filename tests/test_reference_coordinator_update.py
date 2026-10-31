@@ -107,6 +107,49 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.assertRaises(module.Stopped):
             module.compatible(after,before,allow_owned=True)
 
+    def test_synthetic_preopen_archive_migration_backup_and_unchanged_rollback_snapshot(self):
+        # This is a qualification experiment only: it never changes updater policy.
+        before=module.volume_census(self.volume,uid=os.geteuid())
+        backup=self.root/'preopen-backup';shutil.copytree(self.volume,backup)
+        # The fixture is quiescent; use SQLite's backup API for a consistent DB copy.
+        source=sqlite3.connect(self.volume/'jobs.sqlite3');target=sqlite3.connect(backup/'jobs.sqlite3')
+        try:source.backup(target)
+        finally:target.close();source.close()
+        module.compatible(module.volume_census(backup,uid=os.geteuid(),offline=True),before)
+        store=TaskStore(self.queue,self.volume/'viewer-tasks');store.enable_archive_status()
+        after=module.volume_census(self.volume,uid=os.geteuid())
+        self.assertEqual(set(after['tables']),set(before['tables']))
+        for name in before['tables']:
+            self.assertEqual((after['tables'][name]['count'],after['tables'][name]['sha256']),
+                             (before['tables'][name]['count'],before['tables'][name]['sha256']))
+            if name!='viewer_tasks':self.assertEqual(after['tables'][name]['columns'],before['tables'][name]['columns'])
+        old=before['tables']['viewer_tasks']['columns'];new=after['tables']['viewer_tasks']['columns']
+        self.assertEqual(new[:len(old)],old)
+        self.assertEqual([row[1:5] for row in new[len(old):]],
+                         [['archive_state','TEXT',1,"'pending'"],['archive_reason','TEXT',0,None]])
+        before_sql=next(row[3] for row in before['schema'] if row[0]=='table' and row[1]=='viewer_tasks')
+        after_sql=next(row[3] for row in after['schema'] if row[0]=='table' and row[1]=='viewer_tasks')
+        self.assertEqual(after_sql,before_sql[:-1]+", archive_state TEXT NOT NULL DEFAULT 'pending', archive_reason TEXT)")
+        self.assertEqual([row for row in after['schema'] if row[2]!='viewer_tasks'],
+                         [row for row in before['schema'] if row[2]!='viewer_tasks'])
+        # Existing guards must still reject the changed candidate, in either direction.
+        for kwargs in ({'allow_owned':True},{'allow_owned':True,'allow_viewer_additions':True}):
+            with self.assertRaises(module.Stopped):module.compatible(after,before,**kwargs)
+        # The untouched pre-upgrade copy remains census-compatible; no live restore.
+        module.compatible(module.volume_census(backup,uid=os.geteuid(),offline=True),before)
+
+    def test_synthetic_preopen_new_viewer_work_blocks_baseline_restore(self):
+        before=module.volume_census(self.volume,uid=os.geteuid())
+        store=TaskStore(self.queue,self.volume/'viewer-tasks');store.enable_archive_status()
+        identifier='22222222-2222-4222-8222-222222222222'
+        store.initialize(identifier,name='synthetic',options=[],outputs=[],environment='production')
+        # The real census rejects the new Viewer task directory before it
+        # reaches its additional nonempty-table guard.
+        with self.assertRaises(AssertionError):
+            module.volume_census(self.volume,uid=os.geteuid())
+        self.assertEqual(store.task(identifier)['uuid'],identifier)
+        self.assertEqual(before['tables']['viewer_tasks']['count'],0)
+
     def test_viewer_extra_tables_partial_schema_holds(self):
         with self.queue._db() as db:db.execute('DROP TABLE viewer_option_evidence')
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
