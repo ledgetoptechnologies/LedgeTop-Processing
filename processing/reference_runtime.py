@@ -205,6 +205,25 @@ class _DynamicAPI:
             environment = self.control.viewer._authenticate(headers)
             if environment is None:
                 return Response(401, {"error": "unauthorized"})
+            if path == p.PREFIX + '/jobs' and method == 'POST':
+                # Exact committed replays do not need a live options catalog.
+                # Keep the same admission-drain boundary as normal POSTs.
+                from contextlib import nullcontext
+                from .admission_drain import AdmissionClosed
+                try:
+                    payload = p.decode_submission(body)
+                    if type(payload) is dict and 'submissionId' in payload:
+                        gate = getattr(self.control.viewer.store.queue, 'admission_drain', None)
+                        with gate.admit() if gate is not None else nullcontext():
+                            replay = self.control.viewer.store.find_submission_replay(payload['submissionId'],
+                                request_digest=p.digest(payload), environment=environment)
+                        if replay is not None:return Response(200,replay)
+                except AdmissionClosed:
+                    return Response(503, {'error':'admission_draining'})
+                except p.ProtocolError:
+                    pass  # Normal validation still handles malformed requests.
+                except Exception:
+                    return Response(503, {'error':'admission_lookup_unavailable'})
             try:
                 snapshot = self.discover()
                 capability, options, allowed = discovered_policy(snapshot, self.config)
