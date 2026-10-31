@@ -3,6 +3,8 @@ import json
 import hashlib
 import queue
 import signal
+import sqlite3
+import stat
 import os
 from pathlib import Path
 import subprocess
@@ -10,12 +12,14 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 import uuid
 
 from tests.test_viewer_service import synthetic_zip
 from tests.test_viewer_http import BOUNDARY, multipart
+from tests.viewer_archive_rehearsal_server import Rehearsal
 
 
 def read_response(process):
@@ -43,6 +47,34 @@ def cleanup(process):
 
 
 class RehearsalServerTest(unittest.TestCase):
+    @unittest.skipUnless(os.name=='posix','dirfd and no-follow required')
+    def test_input_evidence_rejects_symlink_and_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);task=root/'viewer-tasks'/'task';task.mkdir(parents=True)
+            identifier=str(uuid.uuid4());source=task/'photo.bin';source.write_bytes(b'synthetic')
+            with sqlite3.connect(root/'jobs.sqlite3') as db:
+                db.execute('CREATE TABLE viewer_tasks(uuid TEXT,directory TEXT)')
+                db.execute('CREATE TABLE viewer_files(uuid TEXT,name TEXT,path TEXT,bytes INTEGER,sha256 TEXT)')
+                db.execute('INSERT INTO viewer_tasks VALUES (?,?)',(identifier,'task'))
+                db.execute('INSERT INTO viewer_files VALUES (?,?,?,?,?)',(identifier,'photo.jpg','photo.bin',9,hashlib.sha256(b'synthetic').hexdigest()))
+            fixture=Rehearsal(str(root),'unused',identifier)
+            source.unlink();source.symlink_to('other')
+            with self.assertRaises((OSError,ValueError)):fixture.input_evidence(identifier,'photo.jpg')
+            source.unlink();task.rename(task.with_name('other'));task.symlink_to('other',target_is_directory=True)
+            with self.assertRaises((OSError,ValueError)):fixture.input_evidence(identifier,'photo.jpg')
+            task.unlink();task.with_name('other').rename(task)
+            source.write_bytes(b'synthetic');replacement=task/'replacement';replacement.write_bytes(b'synthetic')
+            original=os.fstat;seen=0
+            def replace_on_second_file_stat(fd):
+                nonlocal seen
+                value=original(fd)
+                if stat.S_ISREG(value.st_mode):
+                    seen+=1
+                    if seen==2:os.replace(replacement,source)
+                return value
+            with patch('tests.viewer_archive_rehearsal_server.os.fstat',side_effect=replace_on_second_file_stat):
+                with self.assertRaises(ValueError):fixture.input_evidence(identifier,'photo.jpg')
+
     def test_unprepared_accepts_client_submission_and_explicit_finish(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)/'state';root.mkdir();archive=Path(tmp)/'synthetic.zip';archive.write_bytes(synthetic_zip())

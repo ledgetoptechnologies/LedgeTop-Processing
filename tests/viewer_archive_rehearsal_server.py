@@ -5,6 +5,7 @@ owns the temporary work directory and supplied synthetic ZIP. No live engines
 or NAS are accessed. This is a test fixture, not a deployment entry point.
 """
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import multiprocessing
@@ -64,17 +65,26 @@ class Rehearsal:
         if type(filename) is not str or not filename or len(filename)>255 or Path(filename).name!=filename:
             raise ValueError('bounded filename required')
         db_path=Path(self.root)/'jobs.sqlite3'
-        with sqlite3.connect(db_path.as_uri()+'?mode=ro',uri=True) as db:
+        with closing(sqlite3.connect(db_path.as_uri()+'?mode=ro',uri=True)) as db:
             rows=db.execute('SELECT t.directory,f.path,f.bytes,f.sha256 FROM viewer_tasks t JOIN viewer_files f ON f.uuid=t.uuid WHERE t.uuid=? AND f.name=?',(identifier,filename)).fetchall()
         if len(rows)!=1:raise ValueError('one matching fixture input required')
         directory,relative,size,expected=rows[0]
-        root=Path(self.root).resolve();path=(root/'viewer-tasks'/directory/relative).resolve()
-        if root not in path.parents or type(size) is not int or not 0<=size<=16*1024*1024:
+        if (type(directory) is not str or not directory or Path(directory).name!=directory or directory in ('.','..')
+                or type(relative) is not str or not relative or Path(relative).name!=relative or relative in ('.','..')
+                or type(size) is not int or not 0<=size<=16*1024*1024):
             raise ValueError('bounded fixture input required')
-        descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+        flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+        root_fd=spool_fd=task_fd=descriptor=None
         try:
+            root_fd=os.open(self.root,flags)
+            spool_fd=os.open('viewer-tasks',flags,dir_fd=root_fd)
+            task_fd=os.open(directory,flags,dir_fd=spool_fd)
+            descriptor=os.open(relative,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=task_fd)
             before=os.fstat(descriptor)
-            if not stat.S_ISREG(before.st_mode) or before.st_size!=size:raise ValueError('fixture input changed')
+            named=os.stat(relative,dir_fd=task_fd,follow_symlinks=False)
+            if (not stat.S_ISREG(before.st_mode) or before.st_size!=size
+                    or (before.st_dev,before.st_ino)!=(named.st_dev,named.st_ino)):
+                raise ValueError('fixture input changed')
             digest=hashlib.sha256()
             with os.fdopen(descriptor,'rb',closefd=False) as stream:
                 remaining=size
@@ -84,10 +94,23 @@ class Rehearsal:
                     digest.update(chunk);remaining-=len(chunk)
                 if stream.read(1):raise ValueError('fixture input grew')
             after=os.fstat(descriptor)
-            if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or digest.hexdigest()!=expected:
+            named_after=os.stat(relative,dir_fd=task_fd,follow_symlinks=False)
+            task_after=os.stat(directory,dir_fd=spool_fd,follow_symlinks=False)
+            opened_task=os.fstat(task_fd)
+            spool_after=os.stat('viewer-tasks',dir_fd=root_fd,follow_symlinks=False)
+            opened_spool=os.fstat(spool_fd)
+            root_after=os.lstat(self.root);opened_root=os.fstat(root_fd)
+            if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)
+                    or (after.st_dev,after.st_ino)!=(named_after.st_dev,named_after.st_ino)
+                    or (opened_task.st_dev,opened_task.st_ino)!=(task_after.st_dev,task_after.st_ino)
+                    or (opened_spool.st_dev,opened_spool.st_ino)!=(spool_after.st_dev,spool_after.st_ino)
+                    or (opened_root.st_dev,opened_root.st_ino)!=(root_after.st_dev,root_after.st_ino)
+                    or digest.hexdigest()!=expected):
                 raise ValueError('fixture input changed')
             return {'bytes':size,'sha256':expected}
-        finally:os.close(descriptor)
+        finally:
+            for fd in (descriptor,task_fd,spool_fd,root_fd):
+                if fd is not None:os.close(fd)
 
     def request(self, route, body=None, headers=None):
         url = 'http://127.0.0.1:%d%s?token=%s' % (self.port, route, TOKEN)
