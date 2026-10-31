@@ -4,6 +4,10 @@ A separate session row establishes new-vs-legacy authority. Existing receiving
 rows without that row are never adopted. No migration or cleanup is provided.
 """
 import json
+import hashlib
+import os
+import secrets
+import threading
 from . import reference_protocol as p
 from .direct_output_slot import open_slot
 from .viewer_archive_spool import ViewerArchiveSpool,SpoolHeld
@@ -13,7 +17,7 @@ from .direct_slot_capture import _exists
 class SyntheticChunkSpool:
     def __init__(self,spool,*,synthetic_fixture=False):
         if synthetic_fixture is not True or type(spool) is not ViewerArchiveSpool:raise SpoolHeld('synthetic_fixture_required')
-        self.spool=spool
+        self.spool=spool;self._pid=os.getpid();self._active={};self._permit_lock=threading.Lock()
 
     def _binding(self,metadata):
         return dict(jobId=metadata['jobId'],taskId=metadata['viewerTaskId'],generation=metadata['viewerGeneration'],
@@ -35,6 +39,8 @@ class SyntheticChunkSpool:
         fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(job,)).fetchone()
         if not status or status['status']!='running' or (fence and fence['stop_requested']):
             raise SpoolHeld('chunk_admission_held')
+        if db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():
+            raise SpoolHeld('chunk_permit_requires_inspection')
 
     def begin(self,job,identity,token):
         with self.spool._admit():
@@ -78,6 +84,60 @@ class SyntheticChunkSpool:
             journal=SyntheticChunkJournal(slot,self._binding(metadata),legacy_state='new',synthetic_fixture=True)
             return metadata,sha,key,slot,journal
         except BaseException:slot.close();raise
+
+    def admit_chunk(self,job,identity,token,operation_id,index,offset,length,sha256):
+        """Persist a synthetic operation permit before reading any body.
+
+        Active permits never auto-resume after interruption. This is a direct
+        call only, not a network-facing authentication boundary.
+        """
+        from .viewer_chunk_journal import MAX_CHUNK,MAX_CHUNKS
+        p._slug(operation_id,'chunk operation');p._hash(sha256,'chunk sha256')
+        if type(index) is not int or not 0<=index<MAX_CHUNKS or type(offset) is not int or offset<0 or type(length) is not int or not 1<=length<=MAX_CHUNK:
+            raise SpoolHeld('chunk_spec_invalid')
+        spec=p.canonical_json(dict(index=index,offset=offset,length=length,sha256=sha256)).decode()
+        with self.spool.claims.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');metadata,_,_,session,row=self._snapshot(db,job,identity,token)
+            self._admit_operation(db,job)
+            if not session or not row or session['state']!='ready' or row['state']!='receiving' or offset+length>metadata['archiveBytes']:
+                raise SpoolHeld('chunk_state_changed')
+            prior=db.execute('SELECT specification,state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id=?',(job,operation_id)).fetchone()
+            if prior:
+                if (prior['specification'],prior['state'])!=(spec,'finished'):raise SpoolHeld('chunk_permit_requires_inspection')
+                return dict(state='finished')
+            if db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():
+                raise SpoolHeld('chunk_permit_requires_inspection')
+            db.execute("INSERT INTO viewer_worker_chunk_permits VALUES(?,?,?,'active')",(job,operation_id,spec))
+        nonce=secrets.token_hex(16)
+        with self._permit_lock:self._active[(job,operation_id)]=nonce
+        return dict(state='active',permit=nonce)
+
+    def write_admitted(self,job,identity,token,operation_id,permit_nonce,index,offset,data):
+        """Finish a previously admitted operation even if a hold follows."""
+        from .viewer_chunk_journal import MAX_CHUNK
+        if type(data) is not bytes or not 1<=len(data)<=MAX_CHUNK or os.getpid()!=self._pid:raise SpoolHeld('chunk_spec_invalid')
+        with self._permit_lock:
+            expected_nonce=self._active.pop((job,operation_id),None)
+        if not expected_nonce or not isinstance(permit_nonce,str) or not secrets.compare_digest(expected_nonce,permit_nonce):
+            raise SpoolHeld('chunk_permit_requires_inspection')
+        spec=p.canonical_json(dict(index=index,offset=offset,length=len(data),sha256=hashlib.sha256(data).hexdigest())).decode()
+        with self.spool._admit():
+            metadata,sha,key,slot,journal=self._open(job,identity,token)
+            try:
+                with self.spool.claims.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE');_,current_sha,current_key,session,row=self._snapshot(db,job,identity,token)
+                    permit=db.execute('SELECT specification,state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id=?',(job,operation_id)).fetchone()
+                    if (current_sha!=sha or current_key!=key or session['state']!='ready' or row['state']!='receiving'
+                            or not permit or permit['specification']!=spec or permit['state'] not in ('active','finished')):
+                        raise SpoolHeld('chunk_permit_changed')
+                receipt=journal.write(index,offset,data)
+                with self.spool.claims.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE');self._snapshot(db,job,identity,token)
+                    permit=db.execute('SELECT specification,state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id=?',(job,operation_id)).fetchone()
+                    if not permit or permit['specification']!=spec or permit['state'] not in ('active','finished'):raise SpoolHeld('chunk_permit_changed')
+                    if permit['state']=='active':db.execute("UPDATE viewer_worker_chunk_permits SET state='finished' WHERE job_id=? AND operation_id=?",(job,operation_id))
+                return receipt
+            finally:slot.close()
 
     def write(self,job,identity,token,index,offset,data):
         with self.spool._admit():

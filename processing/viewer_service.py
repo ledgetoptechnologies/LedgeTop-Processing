@@ -681,7 +681,7 @@ class ViewerService:
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
             with self.queue._db() as db:
-                if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_chunk_sessions','viewer_worker_completions','viewer_worker_active_permit_hold')").fetchone():
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_chunk_sessions','viewer_worker_chunk_permits','viewer_worker_completions','viewer_worker_active_permit_hold')").fetchone():
                     # This draft cannot dispatch or reconcile node enrollment.
                     # Never fall through to legacy direct engine mutations.
                     return

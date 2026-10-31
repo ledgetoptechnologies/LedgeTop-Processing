@@ -281,3 +281,11 @@ begin, write and finish with coordinator hold state. A chunk admitted before a
 hold may finish; new operations after the hold fail closed. This is a local
 transaction boundary, not a network pre-body permit or in-flight revocation.
 No authenticated TLS chunk ingress or sender has been implemented.
+
+The next synthetic direct-call draft records a claim-bound active chunk permit
+before receiving bytes. A process-local single-use nonce ties completion to
+the admitting process; an interrupted active permit holds after restart and
+blocks direct-write bypass. A hold prevents new permits, while an already
+admitted operation may finish. This is still not a TLS route, remotely
+authenticated network boundary or continuously revocable lease. The new
+permit table changes the exact disabled schema; old databases are not migrated.

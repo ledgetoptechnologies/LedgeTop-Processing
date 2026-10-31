@@ -1,5 +1,6 @@
 """Synthetic coordinator database integration; no transport route."""
 import unittest
+import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -56,6 +57,32 @@ class ChunkSpoolTests(unittest.TestCase):
         with self.assertRaises(SpoolHeld):self.chunk.write(self.job,self.identity,self.token,1,4,self.archive[4:])
         with self.assertRaises(SpoolHeld):self.chunk.finish(self.job,self.identity,self.token,1)
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
+    def test_durable_admission_survives_hold_only_in_own_process(self):
+        self.chunk.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
+        permit=self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest)
+        self.assertEqual(permit['state'],'active')
+        other=SyntheticChunkSpool(self.base.spool,synthetic_fixture=True)
+        with self.assertRaisesRegex(SpoolHeld,'chunk_permit_requires_inspection'):
+            other.write_admitted(self.job,self.identity,self.token,'chunk-0',permit['permit'],0,0,data)
+        self.assertEqual(self.base.fixture.claims.mutation_hold(self.job,self.identity,self.token)['state'],'held')
+        receipt=self.chunk.write_admitted(self.job,self.identity,self.token,'chunk-0',permit['permit'],0,0,data)
+        self.assertEqual(receipt['schemaVersion'],1)
+        with self.assertRaises(SpoolHeld):self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-1',1,8,1,hashlib.sha256(b'x').hexdigest())
+        self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
+    def test_interrupted_admission_does_not_auto_resume(self):
+        self.chunk.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
+        self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest)
+        restarted=SyntheticChunkSpool(self.base.spool,synthetic_fixture=True)
+        with self.assertRaisesRegex(SpoolHeld,'chunk_permit_requires_inspection'):
+            restarted.write(self.job,self.identity,self.token,0,0,data)
+        with self.assertRaisesRegex(SpoolHeld,'chunk_permit_requires_inspection'):
+            restarted.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest)
+        with self.base.fixture.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_worker_chunk_permits WHERE job_id=?',(self.job,)).fetchone()['state'],'active')
 
     def test_legacy_receiving_is_never_adopted(self):
         def fail():yield b'x';raise OSError('interrupted')
