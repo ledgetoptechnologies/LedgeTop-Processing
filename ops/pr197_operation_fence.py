@@ -43,7 +43,7 @@ class OperationFence:
             self.close();raise
 
     def check(self):
-        if os.getpid()!=self.pid or len(self.fds)!=2:raise OperationFenceHeld('fence_owner_changed')
+        if os.getpid()!=self.pid or len(self.fds)!=2 or any(fd is None for fd in self.fds):raise OperationFenceHeld('fence_owner_changed')
         try:
             owners=held_flocks(Path('/proc/locks').read_text())
             for fd,(path,dev,ino) in zip(self.fds,self.facts):
@@ -56,7 +56,8 @@ class OperationFence:
         except OSError:raise OperationFenceHeld('operation_lock_unavailable') from None
 
     def close(self):
-        for fd in reversed(self.fds):os.close(fd)
+        for fd in reversed(self.fds):
+            if fd is not None:os.close(fd)
         self.fds=[];self.facts=[]
 
     def __exit__(self,*_):self.close()
