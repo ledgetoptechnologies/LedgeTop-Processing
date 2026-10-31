@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import stat
@@ -243,11 +243,17 @@ class ComposeNode:
             raise UpdateError('persistent engine data mount required')
         def relevant(path):
             return isinstance(path, str) and (path == target or path.startswith(target + '/') or target.startswith(path.rstrip('/') + '/'))
-        tmpfs = service.get('tmpfs') or []
+        tmpfs = service.get('tmpfs', [])
         if isinstance(tmpfs, str):
             tmpfs = [tmpfs]
-        if (service.get('volumes_from') or not isinstance(tmpfs, list)
-                or any(not isinstance(p, str) or relevant(p.split(':', 1)[0]) for p in tmpfs)):
+        def unsafe_tmpfs(value):
+            if not isinstance(value, str):
+                return True
+            path = value.split(':', 1)[0]
+            return (not path.startswith('/') or str(PurePosixPath(path)) != path
+                    or '..' in PurePosixPath(path).parts or relevant(path))
+        if (service.get('volumes_from') or service.get('configs') or service.get('secrets')
+                or not isinstance(tmpfs, list) or any(unsafe_tmpfs(p) for p in tmpfs)):
             raise UpdateError('unsupported engine data mount source')
         current = [m for m in observed if isinstance(m, dict) and relevant(m.get('Destination'))]
         future = [m for m in proposed if isinstance(m, dict) and relevant(m.get('target'))]

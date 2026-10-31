@@ -13,7 +13,9 @@ supervisor loop, timer, image pull, qualifier, or deployment entry point.
 Before a managed replacement, the Compose adapter requires `/var/www/data`
 to be an existing read-write bind mount or named Docker volume and requires the
 resolved replacement to use that same mount. It rejects overlay-only data and
-overlapping mounts. This check prevents the replacement from intentionally
+overlapping mounts. Services using Compose configs, secrets or `volumes_from`
+are held because their additional mounts cannot be safely verified here. This
+check prevents the replacement from intentionally
 dropping the current mount; it does not migrate existing overlay data, make a
 backup, verify its contents, exclude other writers, or establish that a volume
 survives host loss. Migrate and independently verify existing data before

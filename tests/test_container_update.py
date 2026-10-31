@@ -424,6 +424,8 @@ class ComposeBoundaryTests(unittest.TestCase):
         with self.assertRaises(UpdateError): guard(volume,service,{})
         with self.assertRaises(UpdateError): guard(volume,{**service,'tmpfs':['/var/www/data:rw']},{'logical':{'name':'project_actual'}})
         with self.assertRaises(UpdateError): guard(volume,{**service,'volumes_from':['other']},{'logical':{'name':'project_actual'}})
+        for extra in ({'configs':[{'source':'config','target':'/var/www/data/x'}]}, {'secrets':[{'source':'key','target':'/var/www/data/key'}]}, {'tmpfs':['/var/www/other/../data']}):
+            with self.subTest(extra=extra), self.assertRaises(UpdateError): guard(volume,{**service,**extra},{'logical':{'name':'project_actual'}})
         with self.assertRaises(UpdateError): guard(volume,{'volumes':[{**service['volumes'][0],'volume':{'subpath':'other'}}]},{'logical':{'name':'project_actual'}})
         with self.assertRaises(UpdateError): guard({'Mounts':[{**volume['Mounts'][0],'SubPath':'other'}]},service,{'logical':{'name':'project_actual'}})
         bind = {'Mounts':[{'Type':'bind','Source':'/srv/node/data','Destination':'/var/www/data','RW':True}]}
