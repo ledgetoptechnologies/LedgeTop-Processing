@@ -60,8 +60,10 @@ def _spool_policy(value):
 
 def _preflight_spool_settings(settings,config,queue,policy):
     """Validate direct settings and existing spool state without schema writes."""
-    if settings.recovery_bindings is not None or settings.staged_ack_bearers is not None:
-        raise RuntimeConfigurationError('archive schema cannot combine optional policies')
+    if settings.recovery_bindings is not None:
+        raise RuntimeConfigurationError('archive schema cannot combine recovery policies')
+    if settings.staged_ack_bearers is not None and not STAGED_ACK_SCHEMA_QUALIFIED:
+        raise RuntimeConfigurationError('staged acknowledgment schema is not qualified')
     listener=settings.listener
     p._closed(listener,('host','port','certificate','privateKey','clientCA'),'TLS listener')
     if (type(listener['host']) is not str or not listener['host'] or any(ord(c)<=32 for c in listener['host'])
@@ -79,6 +81,28 @@ def _preflight_spool_settings(settings,config,queue,policy):
         p._closed(worker,('bearer','workerId','instanceId','resultOrigin','resultBearer'),'reference worker')
         queue._known_node(node);queue.slug(worker['workerId']);p._slug(worker['instanceId'],'worker instance ID')
         _origin(worker['resultOrigin']);credentials.extend((worker['bearer'],worker['resultBearer']))
+    if settings.staged_ack_bearers is not None:
+        import base64
+        principals=settings.staged_ack_bearers
+        if type(principals) is not dict or not 1<=len(principals)<=32 or not config.viewer_enabled:
+            raise RuntimeConfigurationError('staged principals invalid')
+        environments={}
+        for token,binding in principals.items():
+            p._closed(binding,('environment','principalId'),'staged principal')
+            env,principal=binding['environment'],binding['principalId']
+            p._environment(env);p._slug(principal,'staged principal')
+            if env not in viewers.values() or (principal in environments and environments[principal]!=env):
+                raise RuntimeConfigurationError('staged principal environment changed')
+            environments[principal]=env
+            if type(token) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{43}',token):
+                raise RuntimeConfigurationError('invalid staged credential')
+            raw=base64.urlsafe_b64decode(token+'=')
+            if len(raw)!=32 or base64.urlsafe_b64encode(raw).decode().rstrip('=')!=token:
+                raise RuntimeConfigurationError('invalid staged credential')
+            credentials.append(token)
+        with queue._db() as db:
+            from .viewer_staged_ack_schema import validate_staged_ack_schema
+            validate_staged_ack_schema(db)
     legacy={secret for secret in (config.api_token,config.prototype_operator_token,config.prototype_observer_token,
             config.viewer_token,config.viewer_staging_token,config.local_node_token,config.main_node_token) if secret}
     if (any(type(token) is not str or not 32<=len(token)<=4096 or any(ord(c)<33 or ord(c)>126 for c in token)
@@ -133,11 +157,11 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
         has_recovery=value['schemaVersion']==2 or (value['schemaVersion']==3 and 'recoveryBindings' in value)
-        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"]==3 else ()) + (("viewerArchiveSpool",) if value["schemaVersion"]==4 else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"] in (3,5) else ()) + (("viewerArchiveSpool",) if value["schemaVersion"] in (4,5) else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -178,7 +202,7 @@ def load_reference_settings(path, config):
                     or any(ord(c) < 33 or ord(c) > 126 for c in token)):
                 raise RuntimeConfigurationError("reference credentials must be separate bounded printable secrets")
         staged=None
-        if value['schemaVersion']==3:
+        if value['schemaVersion'] in (3,5):
             import base64
             staged_config=value['stagedAckPrincipals']
             if type(staged_config) is not list or not 1<=len(staged_config)<=32:
@@ -217,7 +241,7 @@ def load_reference_settings(path, config):
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
         spool=None
-        if value['schemaVersion']==4:
+        if value['schemaVersion'] in (4,5):
             if not config.viewer_worker_claim_enabled:raise RuntimeConfigurationError('Viewer worker claims required')
             spool=_spool_policy(value['viewerArchiveSpool'])
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
@@ -382,7 +406,7 @@ class ReferenceRuntime:
                     config.local_node_token,config.main_node_token) if secret)
                 if staged_tokens & existing or not {binding['environment'] for binding in settings.staged_ack_bearers.values()} <= set(settings.viewer_bearers.values()):
                     raise RuntimeConfigurationError('staged credential scope or separation changed')
-                staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers)
+                staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers,spool=viewer_spool)
             self.api = _DynamicAPI(self.control, config, settings, discover, staged)
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None

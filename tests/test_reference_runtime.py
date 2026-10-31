@@ -109,6 +109,31 @@ class ReferenceRuntimeTests(unittest.TestCase):
         del self.value['viewerArchiveSpool'];self.write_config()
         with self.assertRaises(RuntimeConfigurationError):load_reference_settings(str(self.path),enabled)
 
+    @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'Linux allocation required')
+    def test_combined_ack_spool_preflight_is_scoped_and_nonmutating(self):
+        from processing.direct_output_slot import _identity
+        from processing.reference_runtime import _preflight_spool_settings
+        from processing.viewer_staged_ack_schema import initialize_staged_ack_schema
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True,viewer_enabled=True)
+        self.addCleanup(queue.close)
+        initialize_staged_ack_schema(queue)
+        root=self.root/'combined-spool';root.mkdir(mode=0o700);fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+        try:identity=_identity(fd)
+        finally:os.close(fd)
+        token=base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')
+        self.value.update(schemaVersion=5,viewerArchiveSpool=dict(root=str(root),rootIdentity=identity,maxArchiveBytes=65536),
+                          stagedAckPrincipals=[dict(environment='staging',principalId='viewer-a',bearer=token)])
+        self.write_config();config=replace(self.config,viewer_worker_claim_enabled=True)
+        settings=load_reference_settings(str(self.path),config)
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        with queue._db() as db:before=[tuple(row) for row in db.execute(query)]
+        with self.assertRaises(RuntimeConfigurationError):_preflight_spool_settings(settings,config,queue,settings.viewer_archive_spool)
+        with patch('processing.reference_runtime.STAGED_ACK_SCHEMA_QUALIFIED',True):
+            _preflight_spool_settings(settings,config,queue,settings.viewer_archive_spool)
+            overlapping=replace(settings,viewer_bearers={token:'staging'})
+            with self.assertRaisesRegex(RuntimeConfigurationError,'credential scope invalid'):_preflight_spool_settings(overlapping,config,queue,settings.viewer_archive_spool)
+        with queue._db() as db:self.assertEqual([tuple(row) for row in db.execute(query)],before)
+
     def test_rejected_archive_runtime_leaves_schema_untouched(self):
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True,viewer_enabled=True)
         self.addCleanup(queue.close)

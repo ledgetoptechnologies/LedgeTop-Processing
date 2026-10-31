@@ -122,3 +122,10 @@ runtime schema 3 and schema 4 are mutually exclusive, spool settings explicitly
 reject staged principals, and both schema qualification flags remain false.
 There is no cross-language staged-ACK or crash/replay verification yet. Synthetic
 handler replay is not proof of process-crash durability or real Viewer custody.
+
+The disabled combined schema-5 draft accepts a separately scoped staged-byte
+principal and provisioned spool together only after the existing schema and
+credential preflight succeeds. Runtime qualification flags remain false. Tests
+patch a guard only inside isolated fixtures; the combined assembled TLS runtime,
+staging-only Viewer clients and process-kill/lost-response replay have not yet
+been validated. This is not a production activation or a custody guarantee.

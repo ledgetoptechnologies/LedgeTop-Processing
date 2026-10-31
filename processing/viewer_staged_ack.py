@@ -30,7 +30,7 @@ NAMESPACE='ledgetop-viewer-staged-byte-claim-v1'
 
 class ViewerStagedAck:
     """One immutable assertion per task generation; no acceptance side effects."""
-    def __init__(self, service, bearers):
+    def __init__(self, service, bearers, *, spool=None):
         if service is None or type(bearers) is not dict or not bearers:
             raise ValueError('scoped staged acknowledgment configuration required')
         principal_environments={}
@@ -44,7 +44,12 @@ class ViewerStagedAck:
             p._environment(binding['environment']);p._slug(binding['principalId'],'Viewer principal')
             prior=principal_environments.setdefault(binding['principalId'],binding['environment'])
             if prior!=binding['environment']:raise ValueError('principal environment changed')
+        if spool is not None:
+            from .viewer_archive_spool import ViewerArchiveSpool
+            if type(spool) is not ViewerArchiveSpool or spool.claims.queue is not service.queue:
+                raise ValueError('shared Viewer spool authority required')
         self.service=service
+        self.spool=spool if spool is not None else getattr(service,'viewer_spool',None)
         self._bearers=MappingProxyType({token:MappingProxyType(dict(binding)) for token,binding in bearers.items()})
         with service.queue._db() as db:
             validate_staged_ack_schema(db)
@@ -99,7 +104,7 @@ class ViewerStagedAck:
                         'issuer':principal,'audience':store.queue.authority_id,
                         'environment':environment,'namespace':NAMESPACE})
             with ExitStack() as held:
-                reader=None;spool=getattr(self.service,'viewer_spool',None)
+                reader=None;spool=self.spool
                 if not is_lookup and spool is not None:
                     with store.queue._db() as preliminary:
                         preliminary.execute('BEGIN')
