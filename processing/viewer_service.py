@@ -132,6 +132,7 @@ class ViewerService:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
+        self._unexpected_dispatch_failure = threading.Event()
         self._backoff = {}
         self._downloads = {}
 
@@ -742,6 +743,18 @@ class ViewerService:
                 else:
                     self._hold(current, 'engine_submission_uncertain')
 
+    def dispatcher_status(self):
+        """Process-local observation only; no job, exception, or credential data."""
+        thread = self._thread
+        if thread is None:
+            state = 'not_started'
+        elif thread.is_alive():
+            state = 'stopping' if self._stop.is_set() else 'running'
+        else:
+            state = 'stopped' if self._stop.is_set() else 'not_running'
+        return {'enabled': True, 'threadState': state,
+                'unexpectedFailureObserved': self._unexpected_dispatch_failure.is_set()}
+
     def start(self):
         if self._thread:
             raise RuntimeError('dispatcher already started')
@@ -753,9 +766,9 @@ class ViewerService:
             try:
                 self.tick()
             except Exception:
-                # No replay of mutations. Intents/claims remain durable; a
-                # restart retains their slot for reconciliation or inspection.
-                pass
+                # Sticky, sanitized process-local signal. Never expose exception
+                # text; no mutation replay or queue policy change is implied.
+                self._unexpected_dispatch_failure.set()
             self._stop.wait(2)
 
     def close(self):
