@@ -15,9 +15,25 @@ from .prototype import Queue, Conflict
 from .options import catalog
 
 MAX_BODY = 8192
+VIEWER_WORKER_CLAIM_QUALIFIED = False
 
 
 def make_handler(config: Config):
+    if config.viewer_worker_claim_enabled and not VIEWER_WORKER_CLAIM_QUALIFIED:
+        raise RuntimeError('viewer_worker_claim_schema_unqualified')
+    if config.prototype_state_dir:
+        # Refuse a downgrade of an enrolled database before Queue opens it.
+        # Older binaries that ignore this marker require a separate host fence.
+        import sqlite3
+        from contextlib import closing
+        database = Path(config.prototype_state_dir) / 'jobs.sqlite3'
+        if database.exists():
+            if database.is_symlink() or database.absolute().resolve()!=database.absolute():
+                raise RuntimeError('viewer_worker_claim_database_invalid')
+            with closing(sqlite3.connect(database.absolute().as_uri()+'?mode=ro',uri=True)) as db:
+                marker=db.execute("SELECT 1 FROM sqlite_master WHERE name='viewer_worker_claims'").fetchone()
+            if marker and not config.viewer_worker_claim_enabled:
+                raise RuntimeError('viewer_worker_claim_configuration_required')
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings

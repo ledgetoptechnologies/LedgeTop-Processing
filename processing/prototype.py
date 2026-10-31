@@ -286,6 +286,11 @@ class Queue(Maintenance):
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
                 return None
+            if row['profile']=='odm-viewer-v1' and db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='viewer_worker_claims'").fetchone():
+                # Once enrolled mode has ever created its durable marker,
+                # generic claims cannot bypass the authenticated worker path.
+                return None
             if row['profile'] == REFERENCE_PROFILE:
                 # Reference claims also persist an idempotent private envelope
                 # and enforce input-dependent routing in ReferenceStore.claim.

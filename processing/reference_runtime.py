@@ -265,11 +265,19 @@ class ReferenceRuntime:
                 admit_read=self._admit_read, ssl_context=worker_context)
             workers = {worker["bearer"]: dict(node_id=node, worker_id=worker["workerId"],
                 worker_instance_id=worker["instanceId"]) for node, worker in settings.workers.items()}
+            viewer_claims=None
+            if config.viewer_worker_claim_enabled:
+                if viewer_service is None or viewer_service.queue is not queue:
+                    raise RuntimeConfigurationError('Viewer worker claims require shared Viewer authority')
+                from .viewer_worker_claim import ViewerWorkerClaims
+                viewer_claims=ViewerWorkerClaims(queue,viewer_service.store,
+                    local_max_photos=config.local_max_photos,local_max_input_bytes=config.local_max_input_bytes,
+                    node_environments=dict(config.viewer_worker_claim_env_policy))
             placeholder = p.digest({"runtime": "discovery_required"})
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
-                recovery_bindings=recovery)
+                recovery_bindings=recovery,viewer_claims=viewer_claims)
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))

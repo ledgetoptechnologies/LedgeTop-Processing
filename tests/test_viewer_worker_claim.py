@@ -1,0 +1,241 @@
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from urllib.error import HTTPError
+from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
+
+from processing.config import Config
+from processing.app import make_handler
+from processing.prototype import Queue
+from processing.reference_delivery import DeliveryReceiver
+from processing.reference_http import create_reference_http_server
+from processing.reference_store import ReferenceStore
+from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.viewer_service import ViewerService
+from processing.viewer_tasks import TaskStore, VIEWER_PROFILE
+from processing.viewer_worker_claim import ViewerWorkerClaims
+
+TOKEN_A='a'*32;TOKEN_B='b'*32;TOKEN_MAIN='m'*32
+ENV_POLICY={'cluster':('production','staging'),'main':('production','staging')}
+TASK='22222222-2222-4222-8222-222222222222'
+ROUTE='/ltds/worker/v1/viewer-claims'
+
+
+@unittest.skipUnless(shutil.which('openssl'),'openssl required for loopback TLS')
+class ViewerWorkerClaimTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
+        self.cert=self.root/'cert';self.key=self.root/'key'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=synthetic-loopback','-addext','subjectAltName=IP:127.0.0.1',
+            '-addext','basicConstraints=critical,CA:TRUE','-keyout',str(self.key),'-out',str(self.cert)],
+            check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+        self.tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);self.tls.load_cert_chain(self.cert,self.key)
+        self.client=ssl.create_default_context(cafile=str(self.cert))
+        self.server=None;self.thread=None;self.queue=None
+        self.start_queue()
+        self.store.initialize(TASK,name='synthetic',options=[],outputs=[],environment='production')
+        self.store.upload(TASK,'photo.jpg',io.BytesIO(b'synthetic'),9,environment='production')
+        self.store.commit(TASK,environment='production')
+        self.job=self.store.task(TASK)['job_id']
+        self.claims=ViewerWorkerClaims(self.queue,self.store,local_max_photos=1000,local_max_input_bytes=100000,node_environments=ENV_POLICY)
+        self.start_server()
+
+    def start_queue(self):
+        self.queue=Queue(self.root/'state',node_ids=('cluster','main'),viewer_enabled=True,reference_enabled=True)
+        self.store=TaskStore(self.queue,self.root/'state'/'viewer-tasks')
+
+    def start_server(self):
+        workers={TOKEN_A:dict(node_id='cluster',worker_id='worker-a',worker_instance_id='instance-a'),
+                 TOKEN_B:dict(node_id='cluster',worker_id='worker-b',worker_instance_id='instance-b'),
+                 TOKEN_MAIN:dict(node_id='main',worker_id='worker-main',worker_instance_id='instance-main')}
+        reference=ReferenceStore(self.queue)
+        self.api=ReferenceWorkerAPI(reference,DeliveryReceiver(reference),bearer_workers=workers,viewer_claims=self.claims)
+        self.server=create_reference_http_server(self.api,ssl_context=self.tls)
+        self.thread=threading.Thread(target=self.server.serve_forever,kwargs={'poll_interval':.05},daemon=True);self.thread.start()
+        self.origin='https://127.0.0.1:'+str(self.server.server_port)
+
+    def stop_server(self):
+        if self.server is not None:
+            self.server.shutdown();self.server.server_close();self.thread.join(5)
+            self.assertFalse(self.thread.is_alive());self.server=None
+
+    def tearDown(self):
+        self.stop_server()
+        if self.queue is not None:self.queue.close()
+        self.tmp.cleanup()
+
+    def request(self,request_id='request-1',*,token=TOKEN_A,environment='production',job=None):
+        data=json.dumps(dict(jobId=job or self.job,claimRequestId=request_id,environment=environment)).encode()
+        request=Request(self.origin+ROUTE,data=data,method='POST',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+        try:
+            with build_opener(ProxyHandler({}),HTTPSHandler(context=self.client)).open(request,timeout=3) as response:
+                return response.status,json.load(response)
+        except HTTPError as error:
+            with error:return error.code,json.load(error)
+
+    def test_authenticated_claim_replay_after_restart_and_no_legacy_dispatch(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(claim['state'],'claimed_unenrolled')
+        self.assertEqual(claim['viewerTaskId'],TASK);self.assertEqual(claim['nodeId'],'cluster')
+        self.assertEqual(claim['imageCount'],1);self.assertEqual(claim['inputBytes'],9)
+        self.assertNotIn('photo.jpg',json.dumps(claim));self.assertNotIn('synthetic',json.dumps(claim))
+        self.assertEqual(self.request(),(200,claim))
+        self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
+        class Bomb:
+            def __getattribute__(self,name):raise AssertionError('engine access forbidden')
+        service=ViewerService(self.queue,Config('x'*32,'','',1000,100000,viewer_enabled=True),store=self.store,
+                              engines={'cluster':Bomb(),'main':Bomb()},probe=lambda *a: self.fail('probe forbidden'))
+        service.tick();self.assertEqual(self.store.task(TASK)['phase'],'worker_claimed')
+        self.stop_server();self.queue.close();self.queue=None
+        self.start_queue();self.claims=ViewerWorkerClaims(self.queue,self.store,local_max_photos=1000,local_max_input_bytes=100000,node_environments=ENV_POLICY)
+        self.start_server()
+        self.assertEqual(self.request(),(200,claim))
+        self.assertEqual(self.queue.get(self.job)['status'],'held')
+
+    def test_wrong_identity_environment_node_and_request_fail(self):
+        self.assertEqual(self.request(token='z'*32)[0],401)
+        self.assertEqual(self.request(environment='staging')[0],409)
+        self.assertEqual(self.request(token=TOKEN_MAIN)[0],409)
+        first=self.request();self.assertEqual(first[0],200)
+        self.assertEqual(self.request('different')[0],409)
+        self.assertEqual(self.request(token=TOKEN_B)[0],409)
+        self.assertEqual(self.request(),first)
+
+    def test_authenticated_node_cannot_claim_environment_outside_policy(self):
+        self.stop_server()
+        self.claims=ViewerWorkerClaims(self.queue,self.store,local_max_photos=1000,local_max_input_bytes=100000,
+            node_environments={'cluster':('staging',),'main':('production',)})
+        self.start_server()
+        self.assertEqual(self.request()[0],409)
+        self.assertEqual(self.queue.get(self.job)['status'],'queued')
+
+    def test_replay_rejects_changed_stored_options_or_claim_identity(self):
+        self.assertEqual(self.request()[0],200)
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_tasks SET options=? WHERE uuid=?",('[{\"name\":\"x\",\"value\":1}]',TASK))
+        self.assertEqual(self.request()[0],409)
+        self.assertEqual(self.queue.get(self.job)['status'],'running')
+
+    def test_unrecognized_claim_schema_blocks_requests(self):
+        with self.queue._db() as db:
+            db.execute('CREATE TRIGGER unexpected_claim_trigger AFTER INSERT ON viewer_worker_claims BEGIN SELECT 1; END')
+        self.assertEqual(self.request()[0],409)
+        self.assertEqual(self.queue.get(self.job)['status'],'queued')
+
+    def test_disabled_route_and_extra_gate_claim_do_not_authorize(self):
+        reference=ReferenceStore(self.queue)
+        api=ReferenceWorkerAPI(reference,DeliveryReceiver(reference),bearer_workers={
+            TOKEN_A:dict(node_id='cluster',worker_id='worker-a',worker_instance_id='instance-a')})
+        body=json.dumps(dict(jobId=self.job,claimRequestId='fixture',environment='production')).encode()
+        self.assertEqual(api.handle('POST',ROUTE,{'Authorization':'Bearer '+TOKEN_A},body,protected_transport=True).status,404)
+        self.assertEqual(self.api.handle('POST',ROUTE,{'Authorization':'Bearer '+TOKEN_A},body,protected_transport=False).status,503)
+        extra=json.dumps(dict(jobId=self.job,claimRequestId='fixture',environment='production',gate='untrusted')).encode()
+        self.assertEqual(self.api.handle('POST',ROUTE,{'Authorization':'Bearer '+TOKEN_A},extra,protected_transport=True).status,400)
+        self.assertEqual(self.queue.get(self.job)['status'],'queued')
+
+    def test_competing_authenticated_workers_get_one_claim(self):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures=[pool.submit(self.request,'request-'+str(i),token=token) for i,token in enumerate((TOKEN_A,TOKEN_B))]
+            outcomes=[future.result(timeout=5) for future in futures]
+        self.assertEqual(sorted(value[0] for value in outcomes),[200,409])
+        with self.queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM viewer_worker_claims').fetchone()[0],1)
+
+    def test_missing_input_and_changed_plan_hold_without_claim(self):
+        task=self.store.task(TASK);Path(task['files'][0]['path']).unlink()
+        self.assertEqual(self.request()[0],409)
+        self.assertEqual(self.queue.get(self.job)['status'],'queued')
+        with self.queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM viewer_worker_claims').fetchone()[0],0)
+
+    def test_corrupt_photo_classification_holds_without_claim(self):
+        with self.queue._db() as db:db.execute('UPDATE viewer_files SET is_photo=2 WHERE uuid=?',(TASK,))
+        self.assertEqual(self.request()[0],409)
+        self.assertEqual(self.queue.get(self.job)['status'],'queued')
+
+    def test_failed_transaction_cannot_expose_a_partial_claim(self):
+        with self.queue._db() as db:
+            db.execute("CREATE TRIGGER injected_failure BEFORE UPDATE ON viewer_tasks BEGIN SELECT RAISE(ABORT,'synthetic'); END")
+        self.assertEqual(self.request()[0],500)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM viewer_worker_claims').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE id=?',(self.job,)).fetchone()[0],'queued')
+            db.execute('DROP TRIGGER injected_failure')
+        self.assertEqual(self.request()[0],200)
+
+    def test_production_head_precedes_queued_staging(self):
+        staging='33333333-3333-4333-8333-333333333333'
+        self.store.initialize(staging,name='fixture staging',options=[],outputs=[],environment='staging')
+        self.store.upload(staging,'photo.jpg',io.BytesIO(b'staging'),7,environment='staging')
+        self.store.commit(staging,environment='staging')
+        staging_job=self.store.task(staging)['job_id']
+        self.assertEqual(self.request(environment='staging',job=staging_job)[0],409)
+        self.assertEqual(self.request()[0],200)
+
+    def test_process_killed_after_commit_before_tls_response_replays(self):
+        self.stop_server();self.queue.close();self.queue=None
+        ready=self.root/'child-ready';committed=self.root/'child-committed'
+        code='''import sys,ssl,time
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+from processing.viewer_worker_claim import ViewerWorkerClaims
+from processing.reference_store import ReferenceStore
+from processing.reference_delivery import DeliveryReceiver
+from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_http import create_reference_http_server
+root,cert,key,ready,committed=sys.argv[1:];root=Path(root)
+q=Queue(root/'state',node_ids=('cluster','main'),viewer_enabled=True,reference_enabled=True)
+t=TaskStore(q,root/'state'/'viewer-tasks');claims=ViewerWorkerClaims(q,t,local_max_photos=1000,local_max_input_bytes=100000,node_environments={'cluster':('production','staging'),'main':('production','staging')})
+s=ReferenceStore(q);api=ReferenceWorkerAPI(s,DeliveryReceiver(s),bearer_workers={'a'*32:dict(node_id='cluster',worker_id='worker-a',worker_instance_id='instance-a')},viewer_claims=claims)
+class Delay:
+ def handle(self,*args,**kwargs):
+  response=api.handle(*args,**kwargs)
+  if response.status==200:Path(committed).write_text('committed');time.sleep(30)
+  return response
+tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(cert,key)
+server=create_reference_http_server(Delay(),ssl_context=tls);Path(ready).write_text(str(server.server_port));server.serve_forever()
+'''
+        child=subprocess.Popen([sys.executable,'-c',code,str(self.root),str(self.cert),str(self.key),str(ready),str(committed)],
+                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        def wait_file(path):
+            deadline=time.monotonic()+5
+            while not path.exists() and time.monotonic()<deadline:
+                if child.poll() is not None:self.fail('child exited before barrier')
+                time.sleep(.02)
+            self.assertTrue(path.exists())
+        def send():
+            body=json.dumps(dict(jobId=self.job,claimRequestId='lost-response',environment='production')).encode()
+            request=Request('https://127.0.0.1:'+ready.read_text()+ROUTE,data=body,method='POST',
+                            headers={'Authorization':'Bearer '+TOKEN_A,'Content-Type':'application/json'})
+            with build_opener(ProxyHandler({}),HTTPSHandler(context=self.client)).open(request,timeout=5) as response:
+                return response.status
+        try:
+            wait_file(ready)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending=pool.submit(send);wait_file(committed);child.kill();child.wait(timeout=5)
+                with self.assertRaises(Exception):pending.result(timeout=5)
+        finally:
+            if child.poll() is None:child.kill();child.wait(timeout=5)
+        self.start_queue();self.claims=ViewerWorkerClaims(self.queue,self.store,local_max_photos=1000,local_max_input_bytes=100000,node_environments=ENV_POLICY)
+        self.start_server()
+        recovered=self.request('lost-response');self.assertEqual(recovered[0],200)
+        self.assertEqual(self.request('lost-response'),recovered)
+        self.assertEqual(self.queue.get(self.job)['status'],'held')
+        self.assertEqual(recovered[1]['state'],'claimed_unenrolled')
+
+    def test_persisted_claim_marker_prevents_unqualified_restart(self):
+        self.stop_server();self.queue.close();self.queue=None
+        with self.assertRaisesRegex(RuntimeError,'configuration_required'):
+            make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state')))
+        with self.assertRaisesRegex(RuntimeError,'schema_unqualified'):
+            make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state'),viewer_worker_claim_enabled=True))

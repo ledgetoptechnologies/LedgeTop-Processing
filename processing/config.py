@@ -34,6 +34,8 @@ class Config:
     admission_drain_enabled: bool = False
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
+    viewer_worker_claim_enabled: bool = False
+    viewer_worker_claim_env_policy: tuple = ()
 
 
 def _node_origin(value: str) -> str:
@@ -83,6 +85,18 @@ def from_environment() -> Config:
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    worker_claim = os.environ.get('PROCESSING_VIEWER_WORKER_CLAIM_ENABLED', '0')
+    if worker_claim not in ('0','1') or (worker_claim=='1' and
+            (viewer!='1' or not os.environ.get('PROCESSING_REFERENCE_CONFIG'))):
+        raise ValueError('Viewer worker claims require Viewer and reference runtime')
+    worker_env_policy=[]
+    if worker_claim=='1':
+        if set(node_ids)!={'cluster','main'}:raise ValueError('Viewer worker claims require exact node roles')
+        for node in node_ids:
+            values=os.environ.get('PROCESSING_VIEWER_WORKER_'+node.upper()+'_ENVIRONMENTS','').split(',')
+            if not values or any(value not in ('production','staging') for value in values) or len(set(values))!=len(values):
+                raise ValueError('explicit per-node Viewer worker environments required')
+            worker_env_policy.append((node,tuple(values)))
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
     if lease_dir and (not os.path.isabs(lease_dir) or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
         raise ValueError('PROCESSING_AUTHORITY_LEASE_DIR must be an absolute path used with persistent state')
@@ -138,4 +152,6 @@ def from_environment() -> Config:
         admission_drain_enabled=admission == '1',
         authority_lease_dir=lease_dir,
         viewer_production_held=production_admission == 'held',
+        viewer_worker_claim_enabled=worker_claim == '1',
+        viewer_worker_claim_env_policy=tuple(worker_env_policy),
     )

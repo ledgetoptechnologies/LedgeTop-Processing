@@ -19,7 +19,7 @@ PREFIX = "/ltds/worker/v1"
 
 
 class ReferenceWorkerAPI:
-    def __init__(self, store, receiver, *, bearer_workers, recovery_bindings=None):
+    def __init__(self, store, receiver, *, bearer_workers, recovery_bindings=None, viewer_claims=None):
         if type(bearer_workers) is not dict or not bearer_workers:
             raise ValueError("explicit private worker bearer configuration required")
         workers = {}
@@ -38,6 +38,7 @@ class ReferenceWorkerAPI:
         from .reference_terminal import TerminalService
         self.terminal = TerminalService(store)
         self._workers = MappingProxyType(workers)
+        self.viewer_claims = viewer_claims
         self.recovery = None
         if recovery_bindings is not None:
             from .reference_recovery import ClaimRecoveryService
@@ -127,6 +128,9 @@ class ReferenceWorkerAPI:
         if identity is None:
             return self._error(401, "unauthorized")
         try:
+            if method == 'POST' and path == PREFIX + '/viewer-claims':
+                if self.viewer_claims is None:return self._error(404,'not_found')
+                return Response(200,self.viewer_claims.claim(protocol.decode_submission(body),identity))
             if method == 'GET' and path == PREFIX + '/authority':
                 return Response(200, {'authorityId': self.store.queue.authority_id})
             if method == 'GET' and path == PREFIX + '/next':

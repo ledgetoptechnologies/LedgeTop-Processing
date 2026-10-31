@@ -648,6 +648,11 @@ class ViewerService:
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
+            with self.queue._db() as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='viewer_worker_claims'").fetchone():
+                    # This draft cannot dispatch or reconcile node enrollment.
+                    # Never fall through to legacy direct engine mutations.
+                    return
             jobs = self.queue.list()
             split_jobs = self.store.incomplete_terminal_job_ids()
             # Older coordinators could commit the job before the Viewer row.
