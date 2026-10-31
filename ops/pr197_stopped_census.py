@@ -70,7 +70,7 @@ def stopped_census(root,key,*,limits=None):
         # The predecessor's own flock is held throughout this read. It stops
         # cooperating coordinators on this exact inode, not privileged or
         # uncooperative writers, and is released when this function returns.
-        lock=os.open('coordinator.lock',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+        lock=os.open('coordinator.lock',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
         lock_info=os.fstat(lock)
         named_lock=os.stat('coordinator.lock',dir_fd=directory,follow_symlinks=False)
         if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink!=1 or

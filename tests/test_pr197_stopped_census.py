@@ -111,5 +111,16 @@ class StoppedCensusTests(unittest.TestCase):
         with self.assertRaises(CensusHeld):self.inspect()
         self.assertFalse(lock.exists())
 
+    def test_fifo_lock_is_rejected_without_blocking(self):
+        import signal
+        lock=self.root/'coordinator.lock';lock.unlink();os.mkfifo(lock)
+        previous=signal.signal(signal.SIGALRM,lambda *_:self.fail('FIFO open blocked'))
+        try:
+            signal.alarm(3)
+            with self.assertRaisesRegex(CensusHeld,'coordinator_lock_identity_required'):self.inspect()
+        finally:
+            signal.alarm(0);signal.signal(signal.SIGALRM,previous)
+        self.assertTrue(lock.exists())
+
 
 if __name__=='__main__':unittest.main()
