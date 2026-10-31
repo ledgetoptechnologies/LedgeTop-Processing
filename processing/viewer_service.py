@@ -346,6 +346,15 @@ class ViewerService:
         directory = Path(task['directory'])
         if path != directory / 'all.zip' or directory.resolve(strict=True) != directory:
             raise Conflict('retained archive path requires inspection')
+        # A crash may have left a previous restore in progress. Its bytes and
+        # ownership are not proven by its name, so preserve it for inspection
+        # and refuse to create another potentially large copy on each retry.
+        # The coordinator's single-authority fence and per-task lock serialize
+        # restores; this check is not a replacement for that fence.
+        with os.scandir(directory) as entries:
+            if any(re.fullmatch(r'\.all\.zip\.restore-[a-f0-9]{32}', entry.name)
+                   for entry in entries):
+                raise Conflict('previous archive restore requires inspection')
         temporary = directory / ('.all.zip.restore-' + uuid.uuid4().hex)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
         fd = os.open(temporary, flags, 0o600)

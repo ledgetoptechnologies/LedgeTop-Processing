@@ -1026,6 +1026,27 @@ class ViewerServiceTests(unittest.TestCase):
         with stream:self.assertEqual(stream.read(),self.engines['cluster'].archive)
         self.assertEqual(orphan.read_bytes(),b'unrelated')
 
+    def test_crashed_restore_is_preserved_and_blocks_new_copies(self):
+        for recorded in (True, False):
+            with self.subTest(recorded=recorded):
+                identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+                stream,_=self.service.download(identifier);stream.close()
+                task=self.task(identifier);path=Path(task['archive_path'])
+                if not recorded:self.service.store.update(identifier,archive_path=None)
+                path.unlink()
+                orphan=path.parent/('.all.zip.restore-'+'a'*32)
+                orphan.write_bytes(b'incomplete retained bytes')
+                receipt=path.with_suffix('.zip.receipt');before=receipt.read_bytes()
+                calls=self.engines['cluster'].download_calls
+                for _ in range(2):
+                    with self.assertRaisesRegex(Conflict,'previous archive restore'):
+                        self.service.download(identifier)
+                self.assertEqual(orphan.read_bytes(),b'incomplete retained bytes')
+                self.assertEqual(receipt.read_bytes(),before)
+                self.assertFalse(path.exists())
+                self.assertEqual(self.engines['cluster'].download_calls,calls)
+                self.assertEqual(self.task(identifier)['job']['status'],'succeeded')
+
     def test_real_service_over_http_returns_receipt_backed_digest(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from urllib.request import urlopen
