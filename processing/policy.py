@@ -29,7 +29,9 @@ def plan(photo_count: int, input_bytes: int, local: dict, main: dict,
     # report a stricter ceiling than configuration; a failed/untrusted probe
     # must never turn a small job into opportunistic main-node fallback.
     queue_count = local.get("taskQueueCount") if isinstance(local, dict) else None
-    credible = isinstance(local, dict) and local.get("ready") is True and type(queue_count) is int and queue_count >= 0
+    credible = (isinstance(local, dict) and local.get("ready") is True
+                and type(queue_count) is int and queue_count == 0
+                and all(local.get(key, "active") == "active" for key in ("state", "maintenanceState")))
     limit = local.get("maxImages") if credible else None
     ceiling = min(local_max_photos, limit) if type(limit) is int and limit > 0 else local_max_photos
     local_size_ok = photo_count <= ceiling

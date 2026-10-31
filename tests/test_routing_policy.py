@@ -73,7 +73,12 @@ class RoutingPolicyTests(unittest.TestCase):
         for state in ({'ready':False,'maxImages':40},{'ready':True,'maxImages':True},
                       {'ready':True,'maxImages':'40'},{'ready':True,'maxImages':0},
                       {'ready':True,'maxImages':40,'taskQueueCount':None},
-                      {'ready':True,'maxImages':40,'taskQueueCount':True}):
+                      {'ready':True,'maxImages':40,'taskQueueCount':True},
+                      {'ready':True,'maxImages':40,'taskQueueCount':1},
+                      {'ready':True,'maxImages':40,'state':'draining'},
+                      {'ready':True,'maxImages':40,'state':None},
+                      {'ready':True,'maxImages':40,'maintenanceState':'updating'},
+                      {'ready':True,'maxImages':40,'maintenanceState':False}):
             with self.subTest(state=state):
                 self.local={'ready':True,'taskQueueCount':0,'maxImages':1000,**state}
                 self.assertEqual(self.route(41)['decision'],'wait')
