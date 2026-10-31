@@ -1,4 +1,5 @@
 import array
+import errno
 import fcntl
 import hashlib
 import os
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 from ops.authority_handoff import offer,HandoffHeld,DockerProcessAttestor
 from ops.pr197_operation_fence import OperationFence
-from processing.authority_lease import acquire_transferred,LeaseUnavailable
+from processing.authority_lease import acquire_transferred,AuthorityLease,LeaseUnavailable
 
 
 @unittest.skipUnless(os.name=='posix' and hasattr(os,'pidfd_open') and hasattr(socket,'SO_PEERCRED'),'Linux FD fixture required')
@@ -74,6 +75,75 @@ class AuthorityTransferTests(unittest.TestCase):
             try:
                 with self.assertRaises(BlockingIOError):fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
             finally:os.close(probe)
+        # Once the supervisor exits, the durable intent still blocks ordinary
+        # startup on the newer binary even though the flock is available.
+        with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
+            AuthorityLease(self.leases,self.authority)
+        self.assertTrue(self.intent.exists())
+
+    def test_marker_created_after_first_check_refuses_and_closes_lease(self):
+        real=fcntl.flock;triggered=[]
+        def race(fd,mode):
+            real(fd,mode)
+            if not triggered:
+                triggered.append(True);self.intent.write_bytes(b'synthetic-uncertain-intent')
+        with patch('fcntl.flock',side_effect=race):
+            with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
+                AuthorityLease(self.leases,self.authority)
+        self.assertTrue(self.intent.exists())
+        probe=os.open(self.leases/(self.authority+'.lease'),os.O_RDONLY)
+        try:real(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finally:os.close(probe)
+
+    def test_orphan_ack_alone_also_blocks_startup(self):
+        Path(str(self.intent)+'.ack').write_bytes(b'synthetic-ack')
+        with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
+            AuthorityLease(self.leases,self.authority)
+
+    def test_marker_stat_errors_fail_closed(self):
+        original=Path.lstat
+        for error in (errno.EIO,errno.EACCES):
+            def fail(path,*args,**kwargs):
+                if path==self.intent:raise OSError(error,'synthetic stat failure')
+                return original(path,*args,**kwargs)
+            with self.subTest(error=error),patch.object(Path,'lstat',fail):
+                with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_marker_unavailable'):
+                    AuthorityLease(self.leases,self.authority)
+
+    def test_marker_stat_error_after_flock_closes_descriptor(self):
+        original=Path.lstat;calls=[]
+        def fail(path,*args,**kwargs):
+            if path==self.intent:
+                calls.append(True)
+                if len(calls)==2:raise OSError(errno.EIO,'synthetic stat failure')
+            return original(path,*args,**kwargs)
+        with patch.object(Path,'lstat',fail):
+            with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_marker_unavailable'):
+                AuthorityLease(self.leases,self.authority)
+        fd=os.open(self.leases/(self.authority+'.lease'),os.O_RDONLY)
+        try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finally:os.close(fd)
+
+    @unittest.skipUnless(hasattr(os,'fork'),'separate-process fixture required')
+    def test_killed_supervisor_after_intent_blocks_newer_startup(self):
+        from ops import authority_handoff
+        left,right=socket.socketpair();self.addCleanup(left.close);self.addCleanup(right.close)
+        child=os.fork()
+        if child==0:
+            signal.alarm(10)
+            try:
+                original=authority_handoff._write_once
+                def die(path,payload):
+                    original(path,payload);os.kill(os.getpid(),signal.SIGKILL)
+                with OperationFence(self.state,self.leases,self.authority,enabled=True) as fence, \
+                     patch.object(authority_handoff,'_write_once',side_effect=die), \
+                     patch.object(self.attestor,'inspect',return_value=123):
+                    offer(left,fence,self.attestor,self.intent,operation_id=self.operation,expected_uid=os.geteuid())
+            finally:os._exit(3)
+        _,status=os.waitpid(child,0)
+        self.assertTrue(os.WIFSIGNALED(status));self.assertTrue(self.intent.exists())
+        with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
+            AuthorityLease(self.leases,self.authority)
 
     def test_host_attestor_rejects_container_pid_and_cgroup_mismatches(self):
         from types import SimpleNamespace

@@ -29,6 +29,14 @@ class LeaseUnavailable(RuntimeError):
     pass
 
 
+def _require_no_handoff_markers(*paths):
+    for path in paths:
+        try:path.lstat()
+        except FileNotFoundError:continue
+        except OSError:raise LeaseUnavailable('authority_handoff_marker_unavailable') from None
+        raise LeaseUnavailable('authority_handoff_requires_reconciliation')
+
+
 def existing_authority(state_dir):
     """Read the stored authority without creating or modifying any state."""
     path = Path(state_dir) / 'jobs.sqlite3'
@@ -53,6 +61,12 @@ class AuthorityLease:
             raise LeaseUnavailable('authority_lease_directory_unavailable')
         self.authority = authority
         self.path = directory / (authority + '.lease')
+        intent = directory / (authority + '.handoff-intent')
+        receipt = directory / (authority + '.handoff-intent.ack')
+        # A durable transfer intent means GO may have reached another
+        # coordinator, even when the prior lock owner is gone. Ordinary startup
+        # never resolves or clears it. Legacy binaries do not enforce this.
+        _require_no_handoff_markers(intent,receipt)
         import fcntl
         try:
             descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -60,6 +74,10 @@ class AuthorityLease:
             raise LeaseUnavailable('authority_lease_unavailable') from None
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _require_no_handoff_markers(intent,receipt)
+        except LeaseUnavailable:
+            os.close(descriptor)
+            raise
         except OSError:
             os.close(descriptor)
             raise LeaseUnavailable('authority_lease_held') from None
