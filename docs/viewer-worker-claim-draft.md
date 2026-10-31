@@ -13,12 +13,14 @@ bearer to its configured node, worker and instance. An explicit per-node list
 of allowed production/staging environments is mandatory; the request's
 environment must agree with that policy and the durable Viewer job. A single
 SQLite transaction checks the global production-priority queue head, idle slot,
-node state, conservative small-node-first selection, Viewer task generation,
+node maintenance state, conservative small-node-first selection, Viewer task generation,
 persisted file rows and option evidence; creates a private claim, token and
 engine UUID; and marks both job and Viewer task claimed. The returned state is
 `claimed_unenrolled`. It is not permission to start the engine. Same principal,
 request and unchanged task binding replay the identical token and response;
-conflicting request, node, worker, environment or stored metadata holds.
+conflicting request, node, worker, environment or stored metadata holds. A
+replay after a coordinator restart may return the same response while the job
+is held; neither replay nor the token authorizes node reservation or dispatch.
 
 The input digest covers the *stored upload-time inventory* (names, byte counts,
 recorded hashes and photo flags). The claim checks each path is a regular
@@ -36,8 +38,12 @@ matching feature configuration is refused. This does not fence older binaries
 that ignore the marker, a pre-existing in-flight dispatcher, direct NodeODM
 clients, privileged Docker access or an unrelated coordinator state copy.
 Per-node environment policy is shared by the configured workers on that node;
-it is not a distinct per-worker authorization policy. Unknown or unavailable
-node state and wrong role are held; small jobs do not fall back to main here.
+it is not a distinct per-worker authorization policy. Unknown nodes, nodes
+whose stored maintenance state blocks work, and wrong roles are held; small
+jobs do not fall back to main here. A stored `active` or `scheduled` state is
+not a health check, heartbeat, engine reachability check or NodeGate proof: a
+physically offline node can still receive a durable claim and remain awaiting
+enrollment.
 
 The persisted marker and its new schema have no qualified upgrade, rollback,
 backup or host fencing integration. Before this could be activated, a real
