@@ -333,6 +333,7 @@ class ReferenceRuntime:
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
         self._projection_owner=None;self._projection_binding=None;self._closed=False
+        self._lifecycle_lock=threading.RLock()
         try:
             projection=settings.viewer_projection_environments
             if projection is not None:
@@ -444,6 +445,9 @@ class ReferenceRuntime:
             self._streams.release()
 
     def start(self):
+        with self._lifecycle_lock:return self._start_locked()
+
+    def _start_locked(self):
         if self._closed:raise RuntimeConfigurationError("reference listener is closed")
         if self._server is not None:
             return
@@ -471,6 +475,9 @@ class ReferenceRuntime:
             raise RuntimeConfigurationError("reference listener start failed") from None
 
     def close(self):
+        with self._lifecycle_lock:return self._close_locked()
+
+    def _close_locked(self):
         self._closed=True
         if self._server is not None:
             server, thread = self._server, self._thread

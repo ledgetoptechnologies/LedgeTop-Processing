@@ -162,3 +162,8 @@ false outside tests. Existing production Viewer behavior remains unchanged.
 The current fixture creates the synthetic task through TaskStore before testing
 NodeODM-compatible status and download; it does not yet test submission through
 the Viewer HTTP interface or prove Viewer custody.
+The runtime serializes start and close on one lifecycle lock so concurrent
+starts cannot create untracked listeners and close cannot miss a starting
+listener or leave its projection bound. Thread creation or `thread.start()`
+does not prove that a listener remains alive or healthy afterward; independent
+health monitoring and recovery remain necessary.

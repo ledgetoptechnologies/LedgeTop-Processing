@@ -1,4 +1,5 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import base64
 from dataclasses import replace
 import json
@@ -499,6 +500,38 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(server.events[-1], "closed")
         self.assertFalse(server.daemon_threads)
         self.assertTrue(server.block_on_close)
+
+    def test_listener_lifecycle_serializes_concurrent_start_and_close(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
+        self.addCleanup(queue.close)
+        for operation in ('close','start'):
+            with self.subTest(contender=operation):
+                server=FakeServer();entered=threading.Event();release=threading.Event();contender=threading.Event();calls=[]
+                def factory(*args,**kwargs):
+                    calls.append(True);entered.set()
+                    if not release.wait(5):raise RuntimeError('factory barrier timeout')
+                    return server
+                runtime=self.runtime(queue,server_factory=factory)
+                owner=SimpleNamespace(_lock=threading.RLock(),_runtime_projection=None)
+                binding=(object(),('staging',));runtime._projection_owner=owner;runtime._projection_binding=binding
+                def compete():
+                    contender.set()
+                    return runtime.close() if operation=='close' else runtime.start()
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    first=pool.submit(runtime.start)
+                    try:
+                        self.assertTrue(entered.wait(5));second=pool.submit(compete)
+                        self.assertTrue(contender.wait(5))
+                    finally:release.set()
+                    first.result(timeout=10);second.result(timeout=10)
+                self.assertEqual(len(calls),1)
+                if operation=='start':
+                    self.assertIs(owner._runtime_projection,binding)
+                    runtime.close()
+                self.assertIsNone(owner._runtime_projection)
+                self.assertIsNone(runtime._server)
+                self.assertEqual(server.events.count('shutdown'),1)
+                self.assertEqual(server.events.count('closed'),1)
 
     def test_plaintext_or_missing_tls_configuration_cannot_construct_listener(self):
         self.value["listener"].pop("privateKey")
