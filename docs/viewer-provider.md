@@ -37,7 +37,24 @@ remain able to bypass host software controls. Legacy ClusterODX is retained stop
 
 Use the cluster's single existing coordinator and state volume. Never start a
 second real dispatcher for staging. `compose.viewer.yaml` requires explicit
-existing volume, immutable image, private runtime env path and LAN bind address.
+existing volume, immutable image, private runtime env path, LAN bind address,
+and `PROCESSING_AUTHORITY_LEASE_HOST_DIR`: the absolute path of an existing
+directory writable by container UID/GID 10001. The Compose file mounts this
+directory at `/run/ledgetop-authority-lease` and sets
+`PROCESSING_AUTHORITY_LEASE_DIR` to that path, overriding the runtime env value.
+Compose will not create a missing host directory. The state must already contain
+its coordinator authority; the lease is not a fresh-state initialization path.
+Compose resolves a relative source against its project directory; it does not
+enforce an absolute value, so the operator must provide and verify an absolute
+path to avoid accidentally selecting a different lease directory.
+
+Every lease-aware coordinator that could run the same authority must use the
+same underlying lease files and a filesystem whose `flock` locks are effective
+between those processes. Equal directory names on different PCs do not provide
+a shared lock. Do not assume a network filesystem supplies the required lock
+semantics without independently qualifying it. This is not a high-availability
+or distributed-fencing setup: older software that ignores the lease, a different
+lease directory, and privileged writers remain outside its protection.
 The native facade is opt-in through `PROCESSING_VIEWER_ENABLED=1`.
 
 Viewer registration uses an exact origin with no path or query. Add the origin
