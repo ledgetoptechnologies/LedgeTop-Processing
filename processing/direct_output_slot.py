@@ -145,7 +145,7 @@ def _open_root(path, expected):
 def _reject_chunk_markers(root_fd,name):
     # Matching entries are unsafe even if partial, unknown or symlinks.
     with os.scandir(root_fd) as entries:
-        if any(entry.name.startswith(name+'.chunks-v1.') for entry in entries):
+        if any(entry.name.startswith((name+'.chunks-v1.',name+'.chunks-v2.')) for entry in entries):
             raise SlotHeld('slot_chunk_journal_requires_inspection')
 
 

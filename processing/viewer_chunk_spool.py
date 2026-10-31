@@ -29,6 +29,9 @@ class SyntheticChunkSpool:
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_geometry'").fetchone():
             if db.execute('SELECT 1 FROM viewer_chunk_v2_geometry WHERE job_id=?',(job,)).fetchone():
                 raise SpoolHeld('v2_session_requires_inspection')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_slots'").fetchone():
+            if db.execute('SELECT 1 FROM viewer_chunk_v2_slots WHERE job_id=?',(job,)).fetchone():
+                raise SpoolHeld('v2_session_requires_inspection')
         session=db.execute('SELECT * FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone()
         spool=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(job,)).fetchone()
         if session and (not spool or session['metadata_sha']!=sha or session['slot_key']!=key

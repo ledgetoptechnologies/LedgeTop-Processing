@@ -7,10 +7,19 @@ from . import reference_protocol as p
 from .viewer_archive_spool import ViewerArchiveSpool,SpoolHeld
 from .viewer_chunk_spool import SyntheticChunkSpool
 
-DDL='CREATE TABLE viewer_chunk_v2_geometry (job_id TEXT PRIMARY KEY, binding TEXT NOT NULL)'
+DDL="CREATE TABLE viewer_chunk_v2_geometry (job_id TEXT PRIMARY KEY, binding TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('negotiated','creating','ready','sealed')))"
 MAX_BYTES=4*1024*1024*1024
 MAX_CHUNK_BYTES=1024*1024
 MAX_CHUNKS=4096
+
+def verify_geometry_schema(db):
+    expected=sqlite3.connect(':memory:')
+    try:
+        expected.execute(DDL)
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='viewer_chunk_v2_geometry' ORDER BY type,name"
+        if [tuple(x) for x in db.execute(query)]!=[tuple(x) for x in expected.execute(query)]:
+            raise SpoolHeld('v2_schema_requires_inspection')
+    finally:expected.close()
 
 def geometry(archive_bytes,chunk_bytes,version):
     if type(version) is not int or version!=2:raise SpoolHeld('v2_version_required')
@@ -41,13 +50,11 @@ class SyntheticV2Geometry:
             objects=db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='viewer_chunk_v2_geometry' ORDER BY type,name").fetchall()
             if not objects:
                 db.execute(DDL)
-            expected=sqlite3.connect(':memory:')
-            try:
-                expected.execute(DDL)
-                schema=lambda conn:[tuple(x) for x in conn.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='viewer_chunk_v2_geometry' ORDER BY type,name")]
-                if schema(db)!=schema(expected):raise SpoolHeld('v2_schema_requires_inspection')
-            finally:expected.close()
+            verify_geometry_schema(db)
             old=db.execute('SELECT binding FROM viewer_chunk_v2_geometry WHERE job_id=?',(job,)).fetchone()
+            if not old and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_slots'").fetchone():
+                if db.execute('SELECT 1 FROM viewer_chunk_v2_slots WHERE job_id=?',(job,)).fetchone():
+                    raise SpoolHeld('v2_geometry_missing_for_slot')
             if old and old['binding']!=encoded:raise SpoolHeld('v2_geometry_changed')
-            if not old:db.execute('INSERT INTO viewer_chunk_v2_geometry VALUES (?,?)',(job,encoded))
+            if not old:db.execute("INSERT INTO viewer_chunk_v2_geometry VALUES (?,?,'negotiated')",(job,encoded))
             return dict(state='held_no_transfer',binding=binding)
