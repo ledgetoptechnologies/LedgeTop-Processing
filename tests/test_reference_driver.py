@@ -745,7 +745,8 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
 
             self.queue = Queue(self.root / 'queue', reference_enabled=True)
             self.store = ReferenceStore(self.queue)
-            self.api = ReferenceControlAPI(self.store, viewer_bearers={VIEWER: 'staging'},
+            production_viewer = 'synthetic-production-viewer-token'
+            self.api = ReferenceControlAPI(self.store, viewer_bearers={VIEWER: 'staging', production_viewer: 'production'},
                 worker_bearers={TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
                 capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
                 options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'])
@@ -790,16 +791,18 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             from processing.reference_result_api import ReferenceResultAPI
             from processing.reference_result_proxy import ResultProxy
             read_token = 'synthetic-worker-result-reader-credential'
-            result_api = ReferenceResultAPI(ReferenceResults(self.worker), bearer_readers={read_token: dict(
-                node_id='cluster', worker_id='worker', environments=['staging'], share_policy=lambda _metadata: True)})
+            production_reader = 'synthetic-production-result-reader-credential'
+            result_api = ReferenceResultAPI(ReferenceResults(self.worker), bearer_readers={
+                read_token: dict(node_id='cluster', worker_id='worker', environments=['staging'], share_policy=lambda _metadata: True),
+                production_reader: dict(node_id='cluster', worker_id='worker', environments=['production'], share_policy=lambda _metadata: True)})
             result_server = create_reference_http_server(result_api, ssl_context=server_context)
             result_thread = threading.Thread(target=result_server.serve_forever)
             result_thread.start()
             self.api.viewer.result_proxy = ResultProxy({'cluster': 'https://127.0.0.1:' + str(result_server.server_port)},
                 worker_bearers={'cluster': read_token}, admit_read=lambda _binding: nullcontext(), ssl_context=client_context)
             path = '/ltds/v1/jobs/' + job['jobId']
-            def viewer_request(suffix, payload=None):
-                headers = {'Authorization': 'Bearer ' + VIEWER}
+            def viewer_request(suffix, payload=None, *, token=VIEWER):
+                headers = {'Authorization': 'Bearer ' + token}
                 body = None
                 if payload is not None:
                     headers['Content-Type'] = 'application/json'
@@ -814,12 +817,44 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             received = viewer_request('/results/' + obj['id'])
             self.assertEqual(received, ARCHIVE)
             self.assertEqual(hashlib.sha256(received).hexdigest(), obj['sha256'])
+            from urllib.error import HTTPError
+            worker_url = ('https://127.0.0.1:' + str(result_server.server_port) +
+                          '/ltds/worker/v1/jobs/' + job['jobId'] + '/results/' + obj['id'])
+            for token, expected in ((production_reader, 404), (VIEWER, 401)):
+                request = Request(worker_url, headers={'Authorization': 'Bearer ' + token,
+                    'X-Result-Generation': '1', 'X-Result-Sha256': obj['sha256'],
+                    'X-Result-Manifest-Sha256': manifest['resultManifestSha256']})
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(request, context=client_context, timeout=5)
+                self.assertEqual(denied.exception.code, expected)
+                denied.exception.close()
             receipt = dict(schemaVersion=1, receiptId='synthetic-viewer-receipt',
                 storageReceiptId='synthetic-viewer-storage', jobId=job['jobId'], generation=1,
                 environment='staging', inputManifestSha256=job['manifestSha256'],
                 pipelineDigest=job['pipelineDigest'], resultManifestSha256=manifest['resultManifestSha256'],
                 acceptedObjectIds=[obj['id']], acceptedAt='2026-10-27T22:00:00Z',
                 validationVersion='ltds-reference-v1')
+            # A valid token for another environment must not read or accept
+            # this job, even when given the exact job ID and a valid receipt.
+            # Failure must leave the actual cleanup paths unable to run.
+            for token, expected in ((production_viewer, 404), ('synthetic-invalid-viewer-token', 401)):
+                for suffix, payload in (('/results', None), ('/results/' + obj['id'], None),
+                                        ('/acceptance', receipt)):
+                    with self.subTest(token=token, suffix=suffix):
+                        with self.assertRaises(HTTPError) as denied:
+                            viewer_request(suffix, payload, token=token)
+                        self.assertEqual(denied.exception.code, expected)
+                        denied.exception.close()
+            wrong_receipt = dict(receipt, resultManifestSha256='0' * 64)
+            with self.assertRaises(HTTPError) as denied:
+                viewer_request('/acceptance', wrong_receipt)
+            self.assertEqual(denied.exception.code, 400)
+            denied.exception.close()
+            self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+            self.driver.step()
+            self.assertTrue(archive[0].exists())
+            with sqlite3.connect(fixture_db) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM calls WHERE action='remove'").fetchone()[0], 0)
             partial = dict(receipt, receiptId='synthetic-partial-receipt',
                 storageReceiptId='synthetic-partial-storage', acceptedObjectIds=[])
             self.assertFalse(json.loads(viewer_request('/acceptance', partial))['fullyAccepted'])
