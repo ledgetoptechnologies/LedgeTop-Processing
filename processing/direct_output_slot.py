@@ -143,6 +143,10 @@ def _open_root(path, expected):
 
 
 def open_slot(root, expected_root, binding_digest, budget, *, max_budget, create=False):
+    return _open_slot(root,expected_root,binding_digest,budget,max_budget=max_budget,create=create)
+
+
+def _open_slot(root, expected_root, binding_digest, budget, *, max_budget, create=False, allow_capture=False):
     """Allocate or reopen a slot; never overwrite, truncate, unlink or clean up.
 
     Existing incomplete/ambiguous files are held. A complete metadata record
@@ -170,6 +174,11 @@ def open_slot(root, expected_root, binding_digest, budget, *, max_budget, create
         _file(fd, expected_root)
         try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError: raise SlotHeld('slot_busy') from None
+        if not allow_capture:
+            for suffix in ('.intent','.seal'):
+                try: os.stat('slot-'+binding_digest+suffix,dir_fd=root_fd,follow_symlinks=False)
+                except FileNotFoundError: continue
+                raise SlotHeld('slot_capture_requires_inspection')
         if create:
             os.posix_fallocate(fd, 0, budget)
             _file(fd, expected_root, size=budget); os.fsync(fd)
