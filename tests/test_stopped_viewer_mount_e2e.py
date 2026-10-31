@@ -53,6 +53,9 @@ def try_save_recovery_metadata(ident, volumes, containers, reason):
 @unittest.skipUnless(os.environ.get('LEDGETOP_DOCKER_MOUNT_E2E') == '1', 'requires local Docker')
 class MountRestoreE2E(unittest.TestCase):
     def test_backup_remount_restore(self):
+        image_compat = os.environ.get('LEDGETOP_IMAGE_COMPAT_E2E') == '1'
+        old_image = 'sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004'
+        candidate_image = 'sha256:4d4d6b7c4af869a611a7a55e911ceb9cd1cb4610b4374c942dc5ad60d21a2254'
         ident = 'codex-viewer-e2e-' + uuid.uuid4().hex
         volume = ident + '-backup'
         scratch_volume = ident + '-scratch'
@@ -72,15 +75,16 @@ class MountRestoreE2E(unittest.TestCase):
                     uncertain = True
                 raise
 
-        def run(*mounts, code):
+        def run(*mounts, code, image='python:3.12-slim', uid=None):
             name = ident + '-run-' + str(len(container_names))
             container_names.append(name)
             # In addition to the client timeout, each task process has its
             # own deadline, including if the daemon starts it much later.
+            options = ['--user', uid] if uid else []
             return docker('run', '--rm', '-i', '--name', name, '--label', 'ledgetop.codex.owner=' + ident,
-                          '--network', 'none', '--memory', '256m',
+                          '--network', 'none', '--memory', '256m', *options,
                           '--cpus', '1', '-v', str(repo) + ':/work:ro', *mounts,
-                          '-w', '/work', 'python:3.12-slim', 'python', '-B', '-c',
+                          '-w', '/work' if image == 'python:3.12-slim' else '/app', image, 'python', '-B', '-c',
                           'import signal,sys; signal.alarm(120); exec(sys.stdin.read())', code=code)
 
         def volume_create(name, *options):
@@ -108,7 +112,40 @@ class MountRestoreE2E(unittest.TestCase):
                    '--network', 'none', '--memory', '128m', '--cpus', '0.25',
                    '--mount', scratch, 'python:3.12-slim', 'python', '-c',
                    'import time; time.sleep(120)')
-            run('--mount', scratch, code=f'''\
+            if image_compat:
+                for image, revision in ((old_image, '693cb7eca32295da959a4f42399f317577ef8a8a'),
+                                        (candidate_image, 'd90e81a01efec5ccf004eb3ade48e7480a273398')):
+                    observed = json.loads(docker('image', 'inspect', image).stdout)[0]
+                    if observed.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != revision:
+                        raise RuntimeError('exact image revision required')
+                run('--mount', scratch, '--mount', f'type=volume,src={volume},dst=/backups', code=f'''\
+from pathlib import Path
+import os
+p=Path('/scratch/{ident}'); p.mkdir(mode=0o700); (p/'source').mkdir(mode=0o700)
+(p/'leases').mkdir(mode=0o700); (p/'restore-parent').mkdir(mode=0o700)
+a='12345678-1234-1234-1234-123456789abc'; (p/'leases'/(a+'.lease')).touch(mode=0o600)
+for path in (p,p/'source',p/'leases',p/'restore-parent',p/'leases'/(a+'.lease'),Path('/backups')):
+    os.chown(path,10001,10001)
+Path('/backups').chmod(0o700)
+''')
+                run('--mount', scratch, image=old_image, uid='10001:10001', code=f'''\
+from pathlib import Path
+import io
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+p=Path('/scratch/{ident}'); root=p/'source'
+q=Queue(root, node_ids=('cluster','main'), viewer_enabled=True)
+with q._db() as db: db.execute("UPDATE coordinator_identity SET authority_id='12345678-1234-1234-1234-123456789abc' WHERE singleton=1")
+t=TaskStore(q, root/'viewer-tasks'); uid='12345678-1234-4234-8234-123456789abc'
+t.initialize(uid,name='synthetic task',options=[],outputs=[],environment='production')
+t.upload(uid,'photo.jpg',io.BytesIO(b'synthetic-image'),15,environment='production')
+with q._db() as db: db.execute("UPDATE viewer_tasks SET stage='succeeded',phase='complete' WHERE uuid=?",(uid,))
+(root/'viewer-spool').mkdir(mode=0o700)
+assert t.task(uid)['images_count']==1
+q.close()
+''')
+            else:
+                run('--mount', scratch, code=f'''\
 from pathlib import Path
 import sqlite3
 p=Path('/scratch/{ident}'); p.mkdir(mode=0o700); s=p/'source'; s.mkdir(mode=0o700)
@@ -119,7 +156,7 @@ d=sqlite3.connect(s/'jobs.sqlite3'); d.executescript("CREATE TABLE jobs(id INTEG
 ''')
             run('--mount', scratch,
                 '--mount', f'type=volume,src={scratch_volume},dst=/source,readonly,volume-subpath={ident}/source',
-                '--mount', f'type=volume,src={volume},dst=/backups', code=f'''\
+                '--mount', f'type=volume,src={volume},dst=/backups', uid='10001:10001' if image_compat else None, code=f'''\
 from pathlib import Path
 import json, os
 from ops.stopped_viewer_backup import backup
@@ -129,17 +166,61 @@ fd=os.open(p/'inventory.json',os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
 with os.fdopen(fd,'w') as f:
     json.dump({{'inventory':r['snapshot']}},f); f.flush(); os.fsync(f.fileno())
 ''')
+            if image_compat:
+                run('--mount', scratch, image=candidate_image, uid='10001:10001', code=f'''\
+from pathlib import Path
+import os, shutil
+from processing.app import make_handler
+from processing.config import from_environment
+p=Path('/scratch/{ident}'); source=p/'source'; candidate=p/'candidate'
+shutil.copytree(source,candidate)
+os.environ.update(PROCESSING_API_TOKEN='a'*32,PROCESSING_PROTOTYPE_STATE_DIR=str(candidate),
+ PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_VIEWER_ENABLED='1',
+ PROCESSING_VIEWER_TOKEN='b'*32,LOCAL_NODE_URL='http://127.0.0.1:19991',MAIN_NODE_URL='http://127.0.0.1:19992')
+h=make_handler(from_environment()); task=h.viewer_service.store.task('12345678-1234-4234-8234-123456789abc')
+assert task['name']=='synthetic task' and task['stage']=='succeeded' and task['images_count']==1
+assert Path(task['files'][0]['path']).read_bytes()==b'synthetic-image'
+h.viewer_service.close(); h.prototype_queue.close()
+''')
+                run('--mount', scratch, uid='10001:10001', code=f'''\
+from pathlib import Path
+from ops.state_census import census
+p=Path('/scratch/{ident}'); key=bytes(range(32))
+before=census(p/'source',key); after=census(p/'candidate',key)
+for field in ('objects','rowCounts','tableDigest','viewerTaskProjection','authorityId','active'):
+    assert before['database'][field]==after['database'][field], field
+assert before['database']['rowCounts']['viewer_tasks']==1
+assert before['database']['rowCounts']['viewer_files']==1
+''')
             run('--mount', scratch,
                 '--mount', f'type=volume,src={volume},dst=/backup,readonly,volume-subpath=snapshot',
-                code=f'''\
+                uid='10001:10001' if image_compat else None, code=f'''\
 from pathlib import Path
 import sqlite3
 from ops.stopped_viewer_restore import restore, read_inventory
 p=Path('/scratch/{ident}'); destination=p/'restore-parent'/'restored'
 restore(Path('/backup'),destination,p/'leases','12345678-1234-1234-1234-123456789abc',bytes(range(32)),read_inventory(p/'inventory.json'),stopped_writers_confirmed=True,independent_destination_confirmed=True,original_inventory_trusted=True)
-assert (destination/'viewer-tasks/photo').read_bytes()==bytes(range(256))*7
+assert {image_compat!r} or (destination/'viewer-tasks/photo').read_bytes()==bytes(range(256))*7
 assert (destination/'jobs.sqlite3').read_bytes()==(p/'source/jobs.sqlite3').read_bytes()
-d=sqlite3.connect(destination/'jobs.sqlite3'); assert d.execute('SELECT * FROM viewer_tasks').fetchall()==[('synthetic','succeeded',0)]; d.close()
+d=sqlite3.connect(destination/'jobs.sqlite3')
+if {image_compat!r}: assert d.execute('SELECT name,stage FROM viewer_tasks').fetchall()==[('synthetic task','succeeded')]
+else: assert d.execute('SELECT * FROM viewer_tasks').fetchall()==[('synthetic','succeeded',0)]
+d.close()
+''')
+            if image_compat:
+                run('--mount', scratch, image=old_image, uid='10001:10001', code=f'''\
+from pathlib import Path
+import os
+from processing.app import make_handler
+from processing.config import from_environment
+root=Path('/scratch/{ident}/restore-parent/restored')
+os.environ.update(PROCESSING_API_TOKEN='a'*32,PROCESSING_PROTOTYPE_STATE_DIR=str(root),
+ PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_VIEWER_ENABLED='1',
+ PROCESSING_VIEWER_TOKEN='b'*32,LOCAL_NODE_URL='http://127.0.0.1:19991',MAIN_NODE_URL='http://127.0.0.1:19992')
+h=make_handler(from_environment()); task=h.viewer_service.store.task('12345678-1234-4234-8234-123456789abc')
+assert task['name']=='synthetic task' and task['stage']=='succeeded' and task['images_count']==1
+assert Path(task['files'][0]['path']).read_bytes()==b'synthetic-image'
+h.viewer_service.close(); h.prototype_queue.close()
 ''')
         finally:
             primary_error = sys.exc_info()[1]

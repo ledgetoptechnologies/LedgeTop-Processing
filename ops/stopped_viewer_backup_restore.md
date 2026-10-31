@@ -36,3 +36,13 @@ directory read-only using a Docker volume subpath, restores to another
 filesystem, checks rows and bytes, and removes its own temporary resources.
 Run it on a Docker host with `python:3.12-slim` available by setting
 `LEDGETOP_DOCKER_MOUNT_E2E=1` and invoking the module with `unittest`.
+
+With `LEDGETOP_IMAGE_COMPAT_E2E=1` also set, this test requires the exact local
+predecessor and candidate images pinned in the test. The predecessor builds a
+synthetic terminal Viewer task and photo; the candidate initializes its actual
+coordinator/Viewer handler on a separate copy; keyed database schema and row
+digests and the photo are compared; and the predecessor initializes against the
+independently restored backup. Backup and restore run as UID/GID 10001. No
+listening API, real processing, live state, writer-fence or daemon-restart
+recovery is tested; the synthetic task was marked terminal for the fixture.
+This image-specific result does not qualify later candidate revisions.
