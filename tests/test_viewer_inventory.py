@@ -85,4 +85,34 @@ class InventoryTests(unittest.TestCase):
   store=TaskStore(q,root/'inputs')
   with q._db() as db:self.assertEqual(db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'viewer_inventory_%'").fetchone()[0],0)
   with self.assertRaises(Conflict):store.input_inventory(self.id,'staging',self.cap)
+  with q._db() as db:db.execute('DROP TABLE viewer_upload_intents')  # PR66-shaped input.
+  upgraded=TaskStore(q,root/'inputs',inventory_enabled=True)
+  with q._db() as db:self.assertEqual(db.execute("SELECT count(*) FROM sqlite_master WHERE name LIKE 'viewer_inventory_%'").fetchone()[0],13)
+  TaskStore(q,upgraded.root)  # installed schema remains safe with feature disabled
+ def test_held_startup_accepts_exact_schema_but_rejects_pending_and_extra_trigger(self):
+  from processing.prototype import _require_idle_state
+  with self.q._db() as db:
+   db.execute("UPDATE viewer_tasks SET stage='succeeded' WHERE uuid=?",(self.id,))
+   db.execute("UPDATE viewer_reservations SET state='cancelled' WHERE uuid=?",(self.id,))
+  _require_idle_state(self.q.path)
+  TaskStore(self.q,self.s.root)  # Disabled startup can validate the installed bundle.
+  with self.q._db() as db:
+   row=db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(self.id,)).fetchone()
+   db.execute('INSERT INTO viewer_upload_intents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(self.id,row['generation'],row['directory'],'staging','p.jpg','p.jpg','.incoming-x','input-x',1,'a'*64,1,'1','2'))
+  with self.assertRaises(RuntimeError):_require_idle_state(self.q.path)
+  with self.q._db() as db:
+   db.execute('DELETE FROM viewer_upload_intents')
+   db.execute('CREATE TRIGGER extra_intent AFTER INSERT ON viewer_upload_intents BEGIN SELECT 1; END')
+  with self.assertRaises(RuntimeError):_require_idle_state(self.q.path)
+  with self.assertRaises(Conflict):TaskStore(self.q,self.s.root)
+ def test_partial_or_malformed_inventory_schema_blocks_all_startup(self):
+  from processing.prototype import _require_idle_state
+  with self.q._db() as db:
+   db.execute("UPDATE viewer_tasks SET stage='succeeded' WHERE uuid=?",(self.id,));db.execute("UPDATE viewer_reservations SET state='cancelled' WHERE uuid=?",(self.id,))
+   db.execute('DROP TRIGGER viewer_inventory_viewer_files_insert')
+  with self.assertRaises(Conflict):TaskStore(self.q,self.s.root)
+  with self.assertRaises(RuntimeError):_require_idle_state(self.q.path)
+  with self.q._db() as db:db.execute('CREATE TRIGGER viewer_inventory_viewer_files_insert AFTER INSERT ON viewer_files BEGIN SELECT 1; END')
+  with self.assertRaises(Conflict):TaskStore(self.q,self.s.root,inventory_enabled=True)
+  with self.assertRaises(RuntimeError):_require_idle_state(self.q.path)
 if __name__=='__main__':unittest.main()

@@ -30,14 +30,8 @@ class InputLimitExceeded(ValueError):
     """A task's configured cumulative input-byte allowance was exceeded."""
 
 
-_INVENTORY_TABLE = "CREATE TABLE viewer_inventory_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0))"
-_INVENTORY_TRIGGERS = {}
-for _table in ('viewer_files', 'viewer_upload_intents', 'viewer_tasks', 'viewer_reservations'):
-    for _event in ('INSERT', 'UPDATE', 'DELETE'):
-        _name = f'viewer_inventory_{_table}_{_event.lower()}'
-        _INVENTORY_TRIGGERS[_name] = (f"CREATE TRIGGER {_name} AFTER {_event} ON {_table} BEGIN "
-            "UPDATE viewer_inventory_revision SET revision=revision+1 WHERE id=1 AND revision<9007199254740991; "
-            "SELECT CASE WHEN changes()!=1 THEN RAISE(ABORT,'inventory revision unavailable') END; END")
+from .viewer_inventory_schema import validate as validate_inventory_schema, install as install_inventory_schema
+
 
 VIEWER_PROFILE = 'odm-viewer-v1'
 # Tombstones are retained while any delayed request can replay. This explicit
@@ -147,13 +141,14 @@ class TaskStore:
                 sha256 TEXT NOT NULL, is_photo INTEGER NOT NULL, device TEXT NOT NULL,
                 inode TEXT NOT NULL, PRIMARY KEY(uuid,name_key))''')
             intent_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_upload_intents'").fetchone()
+            inventory_revision = validate_inventory_schema(db)
             intent_indexes = [tuple(item) for item in db.execute('PRAGMA index_list(viewer_upload_intents)')]
             intent_columns = [tuple(item) for item in db.execute('PRAGMA index_info(sqlite_autoindex_viewer_upload_intents_1)')]
             if (not intent_schema or not isinstance(intent_schema['sql'], str) or
                     hashlib.sha256(intent_schema['sql'].encode()).hexdigest() != '7f7e1921a1402ffddb1fbcc80d97339a0413dce980592a8416a984bc81937cac' or
                     len(intent_indexes) != 1 or intent_indexes[0][1:5] != ('sqlite_autoindex_viewer_upload_intents_1', 1, 'pk', 0) or
                     intent_columns != [(0,0,'uuid'),(1,4,'name_key')] or
-                    db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='viewer_upload_intents' LIMIT 1").fetchone()):
+                    (inventory_revision is None and db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='viewer_upload_intents' LIMIT 1").fetchone())):
                 raise Conflict('upload intent schema requires inspection')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_incarnations (
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -169,32 +164,7 @@ class TaskStore:
                 definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
                 PRIMARY KEY(uuid,generation))''')
             if inventory_enabled:
-                self._install_inventory_schema(db)
-
-    @staticmethod
-    def _inventory_schema(db):
-        names = ['viewer_inventory_revision', *_INVENTORY_TRIGGERS]
-        placeholders = ','.join('?' for _ in names)
-        rows = db.execute(f'SELECT name,type,sql FROM sqlite_master WHERE name IN ({placeholders})', names).fetchall()
-        actual = {r['name']:(r['type'],r['sql']) for r in rows}
-        expected = {'viewer_inventory_revision':('table',_INVENTORY_TABLE), **{n:('trigger',sql) for n,sql in _INVENTORY_TRIGGERS.items()}}
-        if actual != expected:
-            raise Conflict('inventory revision schema unavailable')
-        row = db.execute('SELECT id,revision,typeof(revision) AS kind FROM viewer_inventory_revision').fetchall()
-        if len(row)!=1 or row[0]['id']!=1 or row[0]['kind']!='integer' or not 0 <= row[0]['revision'] <= 9007199254740991:
-            raise Conflict('inventory revision unavailable')
-        return row[0]['revision']
-
-    @classmethod
-    def _install_inventory_schema(cls, db):
-        names = ['viewer_inventory_revision', *_INVENTORY_TRIGGERS]
-        placeholders = ','.join('?' for _ in names)
-        present = db.execute(f'SELECT count(*) FROM sqlite_master WHERE name IN ({placeholders})', names).fetchone()[0]
-        if present == 0:
-            db.execute(_INVENTORY_TABLE)
-            db.execute('INSERT INTO viewer_inventory_revision(id,revision) VALUES(1,0)')
-            for sql in _INVENTORY_TRIGGERS.values(): db.execute(sql)
-        cls._inventory_schema(db)
+                install_inventory_schema(db)
 
     def _row(self, db, identifier, *, removed=False):
         checked_uuid(identifier)
@@ -661,7 +631,7 @@ class TaskStore:
             raise ValueError('invalid inventory cursor')
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN')
-            revision = self._inventory_schema(db)
+            revision = validate_inventory_schema(db, required=True)
             reservation = self._reservation(db, identifier, environment, capability, allow_cancelled=True)
             if reservation is None:
                 raise KeyError('unknown task')

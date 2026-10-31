@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 from .maintenance import Conflict, Maintenance
+from .viewer_inventory_schema import validate as validate_inventory_schema
 
 
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -63,6 +64,7 @@ def _require_idle_state(path):
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not {'jobs', 'viewer_tasks'} <= tables:
                 raise ValueError('missing state tables')
+            inventory_revision = validate_inventory_schema(db)
             if 'viewer_upload_intents' in tables:
                 schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_upload_intents'").fetchone()
                 indexes = db.execute('PRAGMA index_list(viewer_upload_intents)').fetchall()
@@ -70,7 +72,7 @@ def _require_idle_state(path):
                         hashlib.sha256(schema[0].encode()).hexdigest() != '7f7e1921a1402ffddb1fbcc80d97339a0413dce980592a8416a984bc81937cac' or
                         len(indexes) != 1 or indexes[0][1:5] != ('sqlite_autoindex_viewer_upload_intents_1', 1, 'pk', 0) or
                         db.execute('PRAGMA index_info(sqlite_autoindex_viewer_upload_intents_1)').fetchall() != [(0,0,'uuid'),(1,4,'name_key')] or
-                        db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='viewer_upload_intents' LIMIT 1").fetchone() or
+                        (inventory_revision is None and db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='viewer_upload_intents' LIMIT 1").fetchone()) or
                         db.execute('SELECT 1 FROM viewer_upload_intents LIMIT 1').fetchone()):
                     raise ValueError('unresolved or invalid upload intents')
             if db.execute("SELECT 1 FROM jobs WHERE status IS NULL OR status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
@@ -85,7 +87,7 @@ def _require_idle_state(path):
                 raise ValueError('unresolved reservation')
         finally:
             db.close()
-    except (sqlite3.Error, OSError, ValueError, TypeError, IndexError):
+    except (sqlite3.Error, OSError, ValueError, TypeError, IndexError, Conflict):
         raise RuntimeError('production_hold_idle_state_unavailable') from None
 
 

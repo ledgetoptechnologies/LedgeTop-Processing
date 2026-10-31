@@ -134,6 +134,16 @@ UPLOAD_INTENT_TABLE = 'viewer_upload_intents'
 UPLOAD_INTENT_DDL_SHA256 = '7f7e1921a1402ffddb1fbcc80d97339a0413dce980592a8416a984bc81937cac'
 UPLOAD_INTENT_INDEX = 'index:sqlite_autoindex_viewer_upload_intents_1'
 EMPTY_SQL_SHA256 = hashlib.sha256(b'').hexdigest()
+# Kept locally because this utility runs standalone in the old image.
+INVENTORY_DDL = "CREATE TABLE viewer_inventory_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0))"
+INVENTORY_OBJECTS = {'table:viewer_inventory_revision': hashlib.sha256(INVENTORY_DDL.encode()).hexdigest()}
+for _table in ('viewer_files', 'viewer_upload_intents', 'viewer_tasks', 'viewer_reservations'):
+    for _event in ('INSERT', 'UPDATE', 'DELETE'):
+        _name = f'viewer_inventory_{_table}_{_event.lower()}'
+        _sql = (f"CREATE TRIGGER {_name} AFTER {_event} ON {_table} BEGIN "
+                "UPDATE viewer_inventory_revision SET revision=revision+1 WHERE id=1 AND revision<9007199254740991; "
+                "SELECT CASE WHEN changes()!=1 THEN RAISE(ABORT,'inventory revision unavailable') END; END")
+        INVENTORY_OBJECTS['trigger:'+_name] = hashlib.sha256(_sql.encode()).hexdigest()
 
 def database(path, key):
     # immutable mode ignores WAL: callers must census stopped, checkpointed
@@ -179,8 +189,16 @@ def database(path, key):
         if 'coordinator_identity' in tables:
             row = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
             authority = row[0] if row else None
+        inventory_valid = None
+        inventory_triggers = sorted(name for name, in db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('viewer_files','viewer_upload_intents','viewer_tasks','viewer_reservations','viewer_inventory_revision')"))
+        inventory_indexes = sorted(name for name, in db.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='viewer_inventory_revision'"))
+        if 'viewer_inventory_revision' in tables:
+            inventory_valid = False
+            if objects.get('table:viewer_inventory_revision') == INVENTORY_OBJECTS['table:viewer_inventory_revision']:
+                row = db.execute("SELECT count(*), sum(CASE WHEN id=1 AND typeof(revision)='integer' AND revision BETWEEN 0 AND 9007199254740991 THEN 1 ELSE 0 END) FROM viewer_inventory_revision").fetchone()
+                inventory_valid = row == (1,1)
         return {'quickCheck': check, 'objects': objects, 'rowCounts': counts, 'tableDigest': digests,
-                'viewerTaskProjection': viewer_projection, 'sqliteHeaderMode':header_mode,
+                'viewerTaskProjection': viewer_projection, 'inventoryRevisionValid':inventory_valid, 'inventoryTriggers':inventory_triggers, 'inventoryIndexes':inventory_indexes, 'sqliteHeaderMode':header_mode,
                 'active': active, 'authorityId': authority,
                 'sidecars': sorted(p.name for p in Path(path).parent.glob(Path(path).name + '-*'))}
     finally:
@@ -272,7 +290,8 @@ def lease_marker_digest(key):
 
 
 def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_objects=(), allow_new_tables=(),
-            allow_lease_marker=False, allow_viewer_task_default_column=False, allow_empty_upload_intents=False):
+            allow_lease_marker=False, allow_viewer_task_default_column=False, allow_empty_upload_intents=False,
+            allow_inventory_revision=False):
     """Return the differences that no allowance covers, as counts and opaque IDs.
 
     ``allow_lease_marker`` permits exactly one thing: the authority-lease marker
@@ -286,6 +305,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
         raise SystemExit('viewer_tasks cannot use both broad and narrow allowances')
     if allow_empty_upload_intents and (UPLOAD_INTENT_TABLE in allow_tables or UPLOAD_INTENT_TABLE in allow_new_tables):
         raise SystemExit('upload intent table cannot use broad allowances')
+    if allow_inventory_revision and ('viewer_inventory_revision' in allow_tables or 'viewer_inventory_revision' in allow_new_tables):
+        raise SystemExit('inventory revision cannot use broad allowances')
     path_allowances = parse_path_allowances(allow_paths, key)
     object_allowances = parse_object_allowances(allow_objects)
     old, new = before['entries'], after['entries']
@@ -314,6 +335,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
         database_differences.append({'database': 'leaseMarkerRequiresDatabase'})
     if allow_empty_upload_intents and (da is None or db is None):
         database_differences.append({'table': UPLOAD_INTENT_TABLE, 'change': 'requiresDatabase'})
+    if allow_inventory_revision and (da is None or db is None):
+        database_differences.append({'table':'viewer_inventory_revision','change':'requiresDatabase'})
     if (da is None) != (db is None):
         database_differences.append({'database': 'presence'})
     elif da is not None:
@@ -321,6 +344,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
         marker_hash = hashlib.sha256(LEASE_MARKER_DDL.encode()).hexdigest()
         for name in sorted(set(da['objects']) | set(db['objects'])):
             was, now = da['objects'].get(name), db['objects'].get(name)
+            if allow_inventory_revision and name in INVENTORY_OBJECTS and was is None and now == INVENTORY_OBJECTS[name]:
+                continue
             if allow_empty_upload_intents and name == 'table:' + UPLOAD_INTENT_TABLE and was is None and now == UPLOAD_INTENT_DDL_SHA256:
                 continue
             if allow_empty_upload_intents and name == UPLOAD_INTENT_INDEX and was is None and now == EMPTY_SQL_SHA256:
@@ -350,6 +375,25 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
             if name in da['objects'] and (da['objects'][name] != UPLOAD_INTENT_DDL_SHA256 or da['objects'].get(UPLOAD_INTENT_INDEX) != EMPTY_SQL_SHA256 or
                     da['rowCounts'].get(UPLOAD_INTENT_TABLE) != 0):
                 database_differences.append({'table': UPLOAD_INTENT_TABLE, 'change': 'notExactAndEmptyBefore'})
+        if allow_inventory_revision:
+            def inventory_objects(document):
+                return {name:value for name,value in document['objects'].items() if name.split(':',1)[-1].startswith('viewer_inventory_')}
+            old_objects, new_objects = inventory_objects(da), inventory_objects(db)
+            if new_objects != INVENTORY_OBJECTS or old_objects not in ({}, INVENTORY_OBJECTS):
+                database_differences.append({'table':'viewer_inventory_revision','change':'schemaMismatch'})
+            expected_triggers=sorted(name.split(':',1)[1] for name in INVENTORY_OBJECTS if name.startswith('trigger:'))
+            if db.get('inventoryTriggers') != expected_triggers or da.get('inventoryTriggers') != (expected_triggers if old_objects else []):
+                database_differences.append({'table':'viewer_inventory_revision','change':'unexpectedTrigger'})
+            if db.get('inventoryIndexes') != [] or da.get('inventoryIndexes') != []:
+                database_differences.append({'table':'viewer_inventory_revision','change':'unexpectedIndex'})
+            if db['rowCounts'].get('viewer_inventory_revision') != 1 or db.get('inventoryRevisionValid') is not True:
+                database_differences.append({'table':'viewer_inventory_revision','change':'invalidRowCount'})
+            if old_objects and da.get('inventoryRevisionValid') is not True:
+                database_differences.append({'table':'viewer_inventory_revision','change':'invalidBeforeRow'})
+            if not old_objects:
+                expected = _keyed(key,b'table\0'+repr((1,0)).encode()).hexdigest()
+                if db['tableDigest'].get('viewer_inventory_revision') != expected:
+                    database_differences.append({'table':'viewer_inventory_revision','change':'invalidInitialRow'})
         for name, expected in sorted(object_allowances.items()):
             if db['objects'].get(name) != expected:
                 database_differences.append({'object': name, 'change': 'allowanceNotMatched'})
@@ -376,6 +420,8 @@ def compare(before, after, key, *, allow_paths=(), allow_tables=(), allow_object
                     pass  # validated unconditionally above
                 elif allow_empty_upload_intents and name == UPLOAD_INTENT_TABLE:
                     pass  # exact schema and empty after-state checked above
+                elif allow_inventory_revision and name == 'viewer_inventory_revision':
+                    pass  # exact initial row checked above
                 elif name not in allow_new_tables:
                     database_differences.append({'table': name, 'change': 'added'})
                 elif db['rowCounts'][name]:
@@ -420,6 +466,8 @@ def main(argv=None):
                       help='allow and require exactly the authority-lease marker table and its single row')
     diff.add_argument('--allow-empty-upload-intents', action='store_true',
                       help='allow only the exact new upload intent table and require it empty on both sides')
+    diff.add_argument('--allow-inventory-revision', action='store_true',
+                      help='allow the exact inventory revision schema and initial row')
     diff.add_argument('--schema-allowlist', type=Path,
                       help='schema-only allowlist file; refuses anything but exact object hashes')
     make = commands.add_parser('schema-allowlist', help='write exact schema-object hashes from a census')
@@ -456,7 +504,8 @@ def main(argv=None):
                          allow_objects=objects, allow_new_tables=args.allow_new_table,
                          allow_lease_marker=args.allow_lease_marker,
                          allow_viewer_task_default_column=args.allow_viewer_task_default_column,
-                         allow_empty_upload_intents=args.allow_empty_upload_intents)
+                         allow_empty_upload_intents=args.allow_empty_upload_intents,
+                         allow_inventory_revision=args.allow_inventory_revision)
         status = 0 if result['identical'] else 1
     json.dump(result, sys.stdout, sort_keys=True, indent=1)
     sys.stdout.write('\n')

@@ -76,6 +76,32 @@ class CensusFixture(unittest.TestCase):
 
 
 class CensusTest(CensusFixture):
+    def test_inventory_revision_allowance_requires_exact_bundle_and_initial_row(self):
+        from processing.viewer_inventory_schema import TABLE, TRIGGERS
+        from ops.state_census import INVENTORY_OBJECTS
+        expected={'table:viewer_inventory_revision':hashlib.sha256(TABLE.encode()).hexdigest(),
+                  **{'trigger:'+name:hashlib.sha256(sql.encode()).hexdigest() for name,sql in TRIGGERS.items()}}
+        self.assertEqual(expected,INVENTORY_OBJECTS)
+        with contextlib.closing(sqlite3.connect(self.root/'jobs.sqlite3')) as db:
+            for name in ('viewer_files','viewer_upload_intents','viewer_reservations'):
+                db.execute('CREATE TABLE '+name+' (synthetic TEXT)')
+            db.commit()
+        before=self.census()[1]
+        with contextlib.closing(sqlite3.connect(self.root/'jobs.sqlite3')) as db:
+            db.execute(TABLE);db.execute('INSERT INTO viewer_inventory_revision VALUES (1,0)')
+            for sql in TRIGGERS.values():db.execute(sql)
+            db.commit()
+        after=self.census()[1]
+        flags=('--allow-path','jobs.sqlite3:bytes,content,mtime','--allow-path','.:mtime','--allow-inventory-revision')
+        self.assertEqual(self.compare(before,after,*flags)[0],0)
+        self.assertEqual(self.compare(before,after,*flags[:-1])[0],1)
+        with self.assertRaises(SystemExit):self.compare(before,after,*flags,'--allow-table','viewer_inventory_revision')
+        with contextlib.closing(sqlite3.connect(self.root/'jobs.sqlite3')) as db:
+            db.execute('UPDATE viewer_inventory_revision SET revision=1');db.commit()
+        self.assertEqual(self.compare(before,self.census()[1],*flags)[0],1)
+        with contextlib.closing(sqlite3.connect(self.root/'jobs.sqlite3')) as db:
+            db.execute('UPDATE viewer_inventory_revision SET revision=0');db.execute('DROP TRIGGER viewer_inventory_viewer_files_insert');db.commit()
+        self.assertEqual(self.compare(before,self.census()[1],*flags)[0],1)
     def test_upload_intent_allowance_requires_exact_empty_table(self):
         from processing.prototype import Queue
         from processing.viewer_tasks import TaskStore
