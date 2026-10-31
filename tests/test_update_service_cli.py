@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 import uuid
 from contextlib import redirect_stderr,redirect_stdout
@@ -163,7 +164,7 @@ class ReadinessTests(unittest.TestCase):
         with NodeGate(self.config.registry_policy.engine_id) as gate:gate.provision('main',self.api.origin,self.queue.authority_id)
         self.idle_calls=0
         def idle():self.idle_calls+=1;return True
-        adapter=SimpleNamespace(_context=lambda path:(None,None,SimpleNamespace(idle=idle)))
+        adapter=SimpleNamespace(_operation=lambda:nullcontext(),_context=lambda path:(None,None,SimpleNamespace(idle=idle)))
         self.idle,self.schedule=module.readiness_probes(self.config,adapter,self.api)
 
     def test_actual_gate_and_http_idle_then_occupied_reservation_waits_unchanged(self):

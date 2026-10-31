@@ -12,9 +12,40 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import threading
 
 class MaintenanceAuthorityBusy(RuntimeError):
     pass
+
+
+_local = threading.local()
+
+
+class _Lease:
+    def __init__(self, fd, path, ancestry):
+        self.fd, self.path, self.ancestry = fd, path, ancestry
+        self.pid = os.getpid()
+        info = os.fstat(fd)
+        self.identity = (info.st_dev, info.st_ino)
+
+    def check(self):
+        if self.pid != os.getpid():
+            raise MaintenanceAuthorityBusy('maintenance_authority_process_changed')
+        try:
+            for path, expected in self.ancestry:
+                info = path.lstat()
+                if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                        or (info.st_dev, info.st_ino) != expected):
+                    raise MaintenanceAuthorityBusy('maintenance_authority_ancestor_changed')
+            opened, linked = os.fstat(self.fd), self.path.lstat()
+            if (not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(linked.st_mode)
+                    or opened.st_nlink != 1 or linked.st_nlink != 1
+                    or opened.st_uid != os.geteuid() or opened.st_mode & 0o077
+                    or (opened.st_dev, opened.st_ino) != self.identity
+                    or (linked.st_dev, linked.st_ino) != self.identity):
+                raise MaintenanceAuthorityBusy('maintenance_authority_lock_changed')
+        except OSError:
+            raise MaintenanceAuthorityBusy('maintenance_authority_path_unavailable') from None
 
 
 def local_engine_id():
@@ -55,6 +86,17 @@ def maintenance_authority(engine_id):
     if os.name == 'nt':
         raise MaintenanceAuthorityBusy('linux_maintenance_authority_required')
     import fcntl
+    leases = getattr(_local, 'leases', None)
+    if leases is None:
+        leases = _local.leases = {}
+    if engine_id in leases:
+        lease = leases[engine_id]
+        lease.check()
+        try:
+            yield lease
+        finally:
+            lease.check()
+        return
     root = authority_root(engine_id).absolute()
     if any(path.is_symlink() for path in (root, *root.parents)):
         raise MaintenanceAuthorityBusy('private_authority_root_required')
@@ -65,6 +107,12 @@ def maintenance_authority(engine_id):
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise MaintenanceAuthorityBusy('private_authority_root_required')
     path = root / 'maintenance-authority.lock'
+    ancestry = []
+    for part in (root, *root.parents):
+        current = part.lstat()
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+            raise MaintenanceAuthorityBusy('private_authority_root_required')
+        ancestry.append((part, (current.st_dev, current.st_ino)))
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     locked = False
     try:
@@ -79,7 +127,14 @@ def maintenance_authority(engine_id):
         except BlockingIOError:
             raise MaintenanceAuthorityBusy('maintenance_authority_busy') from None
         locked = True
-        yield
+        lease = _Lease(fd, path, ancestry)
+        lease.check()  # Recheck pathname and ancestors after flock, before any read.
+        leases[engine_id] = lease
+        try:
+            yield lease
+        finally:
+            leases.pop(engine_id, None)
+            lease.check()  # A replaced path makes the operation uncertain.
     finally:
         if locked:
             fcntl.flock(fd, fcntl.LOCK_UN)

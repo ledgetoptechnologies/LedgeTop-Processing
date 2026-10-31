@@ -181,6 +181,7 @@ def compose(configuration):
     from processing.update_supervisor import UpdateSupervisor
     from processing.update_capacity import ImageStagingCapacity
     from ops.update_maintenance_adapter import UpdateMaintenanceAdapter
+    from processing.maintenance_authority import maintenance_authority
     c=configuration;raw=c.raw
     if code_binding_sha256()!=raw['codeBindingSha256']:raise ServiceConfigurationError('reviewed_source_changed')
     for key in ('registry','qualification','supervisor','service'):private_path(raw[key]['statePath'])
@@ -190,11 +191,14 @@ def compose(configuration):
     qualifier=StartupQualifier(raw['qualification']['statePath'],c.startup_policy,registry=registry)
     if qualifier.policy_sha256!=c.supervisor_policy.qualification_policy_sha256:
         raise ServiceConfigurationError('qualification_policy_changed')
-    api,operator=control_clients(raw['maintenance']['managedRoot'])
-    adapter=UpdateMaintenanceAdapter(raw['maintenance']['managedRoot'],state_path=raw['maintenance']['statePath'],
-        receipt_root=raw['maintenance']['receiptRoot'],api=api,operator=operator,node_id=c.supervisor_policy.node_id,
-        authority_id=c.supervisor_policy.authority_id,engine_id=c.registry_policy.engine_id,
-        adapter_id=c.supervisor_policy.maintenance_adapter_id,window=c.window)
+    # The adapter constructor takes this same reentrant lease. Lock before
+    # reading maintenance.json or maintenance.env to avoid stale clients.
+    with maintenance_authority(c.registry_policy.engine_id):
+        api,operator=control_clients(raw['maintenance']['managedRoot'])
+        adapter=UpdateMaintenanceAdapter(raw['maintenance']['managedRoot'],state_path=raw['maintenance']['statePath'],
+            receipt_root=raw['maintenance']['receiptRoot'],api=api,operator=operator,node_id=c.supervisor_policy.node_id,
+            authority_id=c.supervisor_policy.authority_id,engine_id=c.registry_policy.engine_id,
+            adapter_id=c.supervisor_policy.maintenance_adapter_id,window=c.window)
     supervisor=UpdateSupervisor(raw['supervisor']['statePath'],c.supervisor_policy,registry=registry,qualifier=qualifier,maintenance=adapter)
     return supervisor,capacity,adapter,api
 
@@ -203,6 +207,11 @@ def readiness_probes(configuration,adapter,api):
     from processing.node_gate import NodeGate,GateBusy
     c=configuration
     def idle(status):
+        # _context reads mutable gateway and Compose inputs. The adapter also
+        # checks that its enrolled fingerprints are still the same.
+        with adapter._operation():
+            return idle_locked(status)
+    def idle_locked(status):
         authority=api.json('GET','/v1/prototype/authority')
         if authority!={'authorityId':c.supervisor_policy.authority_id}:raise ServiceConfigurationError('coordinator_authority_changed')
         current=api.json('GET','/v1/prototype/nodes/'+c.supervisor_policy.node_id)['node']
