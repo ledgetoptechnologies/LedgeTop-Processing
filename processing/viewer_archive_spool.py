@@ -7,6 +7,8 @@ storage hardware durability, source authenticity or downstream Viewer custody.
 import hashlib
 import json
 import os
+import threading
+from contextlib import contextmanager
 
 from . import reference_protocol as p
 from .direct_output_slot import _identity,_open_root,open_slot
@@ -21,6 +23,7 @@ class ViewerArchiveSpool:
         if type(claims) is not ViewerWorkerClaims or enabled is not True:raise SpoolHeld('spool_disabled')
         p._integer(max_archive_bytes,'spool limit')
         self.claims=claims;self.root=str(root);self.root_identity=json.loads(p.canonical_json(root_identity));self.max_bytes=max_archive_bytes
+        self._work=threading.BoundedSemaphore(2)
         fd=_open_root(self.root,self.root_identity)
         try:os.fsync(fd)
         finally:os.close(fd)
@@ -58,7 +61,16 @@ class ViewerArchiveSpool:
             digest.update(data);offset+=len(data)
         slot._check();return digest.hexdigest()
 
+    @contextmanager
+    def _admit(self):
+        if not self._work.acquire(blocking=False):raise SpoolHeld('spool_capacity_unavailable')
+        try:yield
+        finally:self._work.release()
+
     def lookup(self,job_id,identity,token):
+        with self._admit():return self._lookup(job_id,identity,token)
+
+    def _lookup(self,job_id,identity,token):
         """Authenticated status; sealed replay is rehashed before returning."""
         p._uuid(job_id,'job ID')
         with self.claims.queue._db() as db:
@@ -80,6 +92,9 @@ class ViewerArchiveSpool:
         finally:slot.close()
 
     def receive(self,job_id,identity,token,chunks,*,expected_length=None):
+        with self._admit():return self._receive(job_id,identity,token,chunks,expected_length=expected_length)
+
+    def _receive(self,job_id,identity,token,chunks,*,expected_length=None):
         """Preauthorize before consuming chunks; unfinished attempts always hold."""
         p._uuid(job_id,'job ID')
         with self.claims.queue._db() as db:

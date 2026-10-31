@@ -90,6 +90,24 @@ class ReferenceRuntimeTests(unittest.TestCase):
         if os.name != "nt":
             self.path.chmod(0o600)
 
+    @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'Linux allocation required')
+    def test_archive_spool_config_requires_exact_provisioned_root_and_claims(self):
+        from processing.direct_output_slot import _identity
+        root=self.root/'archive-spool';root.mkdir(mode=0o700)
+        fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+        try:identity=_identity(fd)
+        finally:os.close(fd)
+        self.value['schemaVersion']=4
+        self.value['viewerArchiveSpool']=dict(root=str(root),rootIdentity=identity,maxArchiveBytes=65536)
+        self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
+        enabled=replace(self.config,viewer_worker_claim_enabled=True)
+        self.assertEqual(load_reference_settings(str(self.path),enabled).viewer_archive_spool,self.value['viewerArchiveSpool'])
+        self.value['viewerArchiveSpool']['rootIdentity']=[identity[0],identity[1]+1,identity[2]];self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):load_reference_settings(str(self.path),enabled)
+        del self.value['viewerArchiveSpool'];self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):load_reference_settings(str(self.path),enabled)
+
     def settings(self):
         return load_reference_settings(str(self.path), self.config)
 

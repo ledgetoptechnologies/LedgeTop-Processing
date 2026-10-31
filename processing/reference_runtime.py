@@ -28,6 +28,7 @@ MAX_CONFIG_BYTES = 64 * 1024
 # This draft schema has not been qualified for upgrade, rollback, or restore.
 # Tests may patch this in an isolated fixture; production must remain closed.
 STAGED_ACK_SCHEMA_QUALIFIED = False
+VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -44,6 +45,17 @@ class ReferenceSettings:
     stream_budget: dict
     recovery_bindings: dict | None = None
     staged_ack_bearers: dict | None = None
+    viewer_archive_spool: dict | None = None
+
+
+def _spool_policy(value):
+    p._closed(value,('root','rootIdentity','maxArchiveBytes'),'Viewer archive spool')
+    if type(value['root']) is not str:raise RuntimeConfigurationError('explicit spool root required')
+    p._integer(value['maxArchiveBytes'],'spool archive limit')
+    from .direct_output_slot import _open_root
+    fd=_open_root(value['root'],value['rootIdentity'])
+    try:return p.decode_submission(p.canonical_json(value))
+    finally:os.close(fd)
 
 
 def _file(path, *, private):
@@ -77,11 +89,11 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
         has_recovery=value['schemaVersion']==2 or (value['schemaVersion']==3 and 'recoveryBindings' in value)
-        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"]==3 else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"]==3 else ()) + (("viewerArchiveSpool",) if value["schemaVersion"]==4 else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -160,8 +172,12 @@ def load_reference_settings(path, config):
                     physical["coordinatorOrigin"],physical["gateGeneration"],physical["outputBudget"])
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
+        spool=None
+        if value['schemaVersion']==4:
+            if not config.viewer_worker_claim_enabled:raise RuntimeConfigurationError('Viewer worker claims required')
+            spool=_spool_policy(value['viewerArchiveSpool'])
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, staged)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, staged, spool)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -191,6 +207,9 @@ def discovered_policy(snapshot, config):
 class _DynamicAPI:
     def __init__(self, control, config, settings, discover, staged_ack=None):
         self.control, self.config, self.settings, self.discover, self.staged_ack = control, config, settings, discover, staged_ack
+
+    def handle_archive(self,path,headers,length,chunks,*,protected_transport=False):
+        return self.control.handle_archive(path,headers,length,chunks,protected_transport=protected_transport)
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         from .viewer_staged_ack import ROUTE
@@ -273,11 +292,20 @@ class ReferenceRuntime:
                 viewer_claims=ViewerWorkerClaims(queue,viewer_service.store,
                     local_max_photos=config.local_max_photos,local_max_input_bytes=config.local_max_input_bytes,
                     node_environments=dict(config.viewer_worker_claim_env_policy))
+            viewer_spool=None
+            if settings.viewer_archive_spool is not None:
+                if not VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED:
+                    raise RuntimeConfigurationError('Viewer archive spool schema is not qualified')
+                if viewer_claims is None:raise RuntimeConfigurationError('Viewer worker claims required')
+                policy=_spool_policy(settings.viewer_archive_spool)
+                from .viewer_archive_spool import ViewerArchiveSpool
+                viewer_spool=ViewerArchiveSpool(viewer_claims,root=policy['root'],root_identity=policy['rootIdentity'],
+                                                max_archive_bytes=policy['maxArchiveBytes'],enabled=True)
             placeholder = p.digest({"runtime": "discovery_required"})
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
-                recovery_bindings=recovery,viewer_claims=viewer_claims)
+                recovery_bindings=recovery,viewer_claims=viewer_claims,viewer_spool=viewer_spool)
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))

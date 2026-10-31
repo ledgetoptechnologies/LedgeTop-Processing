@@ -17,6 +17,9 @@ from processing.viewer_archive_spool import ViewerArchiveSpool,SpoolHeld
 from processing.viewer_local_result import _local,send_metadata,send_archive,LocalResultHeld
 from processing.reference_http import create_reference_http_server
 from processing.viewer_worker_claim import ViewerWorkerClaims
+from processing.reference_runtime import ReferenceRuntime,ReferenceSettings,RuntimeConfigurationError
+from processing.config import Config
+from processing.viewer_service import ViewerService
 from tests.test_viewer_result_metadata import ViewerResultMetadataTests
 
 
@@ -149,6 +152,94 @@ class ViewerArchiveSpoolTests(unittest.TestCase):
             connection.endheaders();response=connection.getresponse();self.assertEqual(response.status,404);response.read()
         finally:connection.close()
         self.assertEqual(list(self.root.glob('*.alloc')),[])
+
+    def test_upload_and_lookup_share_bounded_hash_budget(self):
+        self.assertTrue(self.spool._work.acquire(blocking=False));self.assertTrue(self.spool._work.acquire(blocking=False))
+        try:
+            with DaemonStateLock(self.base.base.base.base.worker) as owner:
+                worker=self.base.worker(owner);claim,reader=self.source(worker)
+                length=reader.length;reader.close()
+                for method,suffix in (('GET','archive-receipt'),('POST','archive')):
+                    connection=http.client.HTTPSConnection('127.0.0.1',self.fixture.server.server_port,context=self.fixture.client,timeout=3)
+                    try:
+                        connection.putrequest(method,'/ltds/worker/v1/viewer-claims/'+claim['jobId']+'/'+suffix)
+                        connection.putheader('Authorization','Bearer '+'a'*32);connection.putheader('X-Claim-Token',claim['claimToken'])
+                        if method=='POST':
+                            connection.putheader('Content-Type','application/octet-stream');connection.putheader('Content-Length',str(length))
+                        connection.endheaders();response=connection.getresponse()
+                        self.assertNotEqual(response.status,200);response.read()
+                    finally:connection.close()
+        finally:self.spool._work.release();self.spool._work.release()
+        self.assertEqual(list(self.root.glob('*.alloc')),[])
+
+    def test_concurrent_receipt_hashes_block_upload_before_body(self):
+        with DaemonStateLock(self.base.base.base.base.worker) as owner:
+            worker=self.base.worker(owner);send_archive(worker,synthetic_fixture=True)
+            claim,reader=self.source(worker);length=reader.length;reader.close()
+            entered=threading.Event();release=threading.Event();lock=threading.Lock();counts=[0]
+            original=ViewerArchiveSpool._lookup
+            def blocked(spool,*args):
+                with lock:
+                    counts[0]+=1
+                    if counts[0]==2:entered.set()
+                if not release.wait(5):raise RuntimeError('test barrier timeout')
+                return original(spool,*args)
+            def lookup():
+                connection=http.client.HTTPSConnection('127.0.0.1',self.fixture.server.server_port,context=self.fixture.client,timeout=5)
+                try:
+                    connection.request('GET','/ltds/worker/v1/viewer-claims/'+claim['jobId']+'/archive-receipt',
+                                       headers={'Authorization':'Bearer '+'a'*32,'X-Claim-Token':claim['claimToken']})
+                    response=connection.getresponse();response.read();return response.status
+                finally:connection.close()
+            with patch.object(ViewerArchiveSpool,'_lookup',blocked):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures=[pool.submit(lookup) for _ in range(2)]
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        connection=http.client.HTTPSConnection('127.0.0.1',self.fixture.server.server_port,context=self.fixture.client,timeout=3)
+                        try:
+                            connection.putrequest('POST','/ltds/worker/v1/viewer-claims/'+claim['jobId']+'/archive')
+                            connection.putheader('Authorization','Bearer '+'a'*32);connection.putheader('X-Claim-Token',claim['claimToken'])
+                            connection.putheader('Content-Type','application/octet-stream');connection.putheader('Content-Length',str(length))
+                            connection.endheaders();response=connection.getresponse();self.assertNotEqual(response.status,200);response.read()
+                        finally:connection.close()
+                    finally:release.set()
+                    results=[future.result(timeout=5) for future in futures]
+                    self.assertTrue(all(status in (200,500) for status in results));self.assertIn(200,results)
+
+    def test_actual_assembled_runtime_tls_archive_delegation(self):
+        queue=self.fixture.queue
+        config=Config('legacy-'+'l'*32,'http://127.0.0.1:19001','http://127.0.0.1:19002',1000,100000,
+                      prototype_state_dir=str(self.fixture.root/'state'),prototype_node_ids=('cluster','main'),
+                      viewer_enabled=True,viewer_worker_claim_enabled=True,
+                      viewer_worker_claim_env_policy=(('cluster',('production','staging')),('main',('production','staging'))))
+        workers={'cluster':dict(bearer='a'*32,workerId='worker-a',instanceId='instance-a',resultOrigin='https://127.0.0.1:1234',resultBearer='r'*32),
+                 'main':dict(bearer='m'*32,workerId='worker-main',instanceId='instance-main',resultOrigin='https://127.0.0.1:1235',resultBearer='s'*32)}
+        settings=ReferenceSettings(dict(host='127.0.0.1',port=0,certificate=str(self.fixture.cert),privateKey=str(self.fixture.key),clientCA=str(self.fixture.cert)),
+            {'v'*32:'production'},workers,dict(maxConcurrent=1,maxObjectBytes=65536),
+            viewer_archive_spool=dict(root=str(self.root),rootIdentity=self.root_identity,maxArchiveBytes=65536))
+        service=ViewerService(queue,config,store=self.fixture.store,engines={},probe=lambda *a:None)
+        with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,config,settings,viewer_service=service)
+        with patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True):
+            runtime=ReferenceRuntime(queue,config,settings,viewer_service=service);runtime.start()
+            try:
+                with DaemonStateLock(self.base.base.base.base.worker) as owner:
+                    worker=self.base.worker(owner);claim,reader=self.source(worker)
+                    connection=http.client.HTTPSConnection('127.0.0.1',runtime._server.server_port,context=self.fixture.client,timeout=5)
+                    try:
+                        connection.putrequest('POST','/ltds/worker/v1/viewer-claims/'+claim['jobId']+'/archive')
+                        connection.putheader('Authorization','Bearer '+'a'*32);connection.putheader('X-Claim-Token',claim['claimToken'])
+                        connection.putheader('Content-Type','application/octet-stream');connection.putheader('Content-Length',str(reader.length))
+                        connection.endheaders()
+                        with reader:
+                            while True:
+                                chunk=reader.read(64)
+                                if not chunk:break
+                                connection.send(chunk)
+                        response=connection.getresponse();self.assertEqual(response.status,200)
+                        self.assertEqual(json.loads(response.read())['archiveSha256'],self.base.record['archiveSha256'])
+                    finally:connection.close()
+            finally:runtime.close()
 
     def test_node_kill_after_coordinator_receipt_replays_without_resend(self):
         code='''import json,os,signal,sys
