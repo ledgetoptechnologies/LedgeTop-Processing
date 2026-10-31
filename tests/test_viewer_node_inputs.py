@@ -98,9 +98,25 @@ class NodeInputsTests(unittest.TestCase):
             self.assertEqual(grant['taskName'],'synthetic')
             self.assertEqual(grant['kind'],'synthetic_execution_grant')
             self.assertEqual(inputs.request_execution_grant(),grant)
+            with self.base.fixture.queue._db() as db:
+                db.execute("UPDATE viewer_tasks SET name='synthetic' WHERE uuid=?",(inputs.claim['viewerTaskId'],))
         with DaemonStateLock(self.base.worker) as owner:
             self.assertEqual(self.make(owner).request_execution_grant(),grant)
         self.assertEqual(self.base.fixture.queue.get(self.base.fixture.job)['status'],'running')
+
+    def test_grant_rejects_plan_name_tampering_before_and_after_issuance(self):
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner);inputs.freeze_inventory();inputs.transfer(self.object_id(inputs))
+            with self.base.fixture.queue._db() as db:
+                db.execute("UPDATE viewer_worker_plans SET task_name='forged' WHERE job_id=?",(inputs.claim['jobId'],))
+            with self.assertRaises(EnrollmentHeld):inputs.request_execution_grant()
+            with self.base.fixture.queue._db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_grants').fetchone()[0],0)
+                db.execute("UPDATE viewer_worker_plans SET task_name='synthetic' WHERE job_id=?",(inputs.claim['jobId'],))
+            inputs.request_execution_grant()
+            with self.base.fixture.queue._db() as db:
+                db.execute("UPDATE viewer_worker_plans SET task_name='forged' WHERE job_id=?",(inputs.claim['jobId'],))
+            with self.assertRaises(EnrollmentHeld):inputs.request_execution_grant()
 
     def test_grant_holds_after_input_mutation(self):
         with DaemonStateLock(self.base.worker) as owner:
@@ -110,6 +126,17 @@ class NodeInputsTests(unittest.TestCase):
             with self.assertRaises(InputHeld):inputs.request_execution_grant()
         with self.base.fixture.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_grants').fetchone()[0],0)
+
+    def test_worker_rejects_changed_grant_name(self):
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner);inputs.freeze_inventory();inputs.transfer(self.object_id(inputs))
+            original=ViewerNodeEnrollment._request
+            def change(worker,request,**kwargs):
+                value=original(worker,request,**kwargs)
+                if kwargs.get('kind')=='execution-grant':value['taskName']='forged'
+                return value
+            with patch.object(ViewerNodeEnrollment,'_request',change):
+                with self.assertRaisesRegex(InputHeld,'execution_grant_changed'):inputs.request_execution_grant()
 
     def test_lost_grant_response_replays_without_new_identity(self):
         with DaemonStateLock(self.base.worker) as owner:

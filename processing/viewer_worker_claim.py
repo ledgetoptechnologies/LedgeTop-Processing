@@ -149,7 +149,7 @@ class ViewerWorkerClaims:
         value=dict(schemaVersion=1,authorityId=self.queue.authority_id,jobId=job['id'],viewerTaskId=task['uuid'],viewerGeneration=task['generation'],
             environment=task['environment'],nodeId=identity['node_id'],workerId=identity['worker_id'],
             workerInstanceId=identity['worker_instance_id'],engineTaskId=engine_uuid,
-            inputInventorySha256=p.digest(manifest),pipelineSha256=hashlib.sha256(settings).hexdigest(),
+            inputInventorySha256=p.digest(manifest),pipelineSha256=hashlib.sha256(settings).hexdigest(),taskNameSha256=p.digest(item['name']),
             imageCount=item['images_count'],inputBytes=item['input_bytes'],state='claimed_unenrolled')
         return (value,manifest,source,settings.decode(),item['name']) if include_manifest else value
 
@@ -236,7 +236,7 @@ class ViewerWorkerClaims:
             or task['node_id']!=row['node_id'] or task['engine_uuid']!=saved['engineTaskId']
             or task['claim_token']!=row['token'] or job['node_id']!=row['node_id'] or job['worker_id']!=row['worker_id']):
             raise Conflict('Viewer inventory ownership changed')
-        p._hash(saved['inputInventorySha256'],'input inventory digest')
+        p._hash(saved['inputInventorySha256'],'input inventory digest');p._hash(saved['taskNameSha256'],'task name digest')
         if require_enrollment:
             receipt=db.execute('SELECT attestation,receipt FROM viewer_worker_enrollments WHERE job_id=?',(job_id,)).fetchone()
             if not receipt or not hmac.compare_digest(receipt['receipt'],p.digest(json.loads(receipt['attestation']))):
@@ -270,7 +270,7 @@ class ViewerWorkerClaims:
             job=db.execute('SELECT status FROM jobs WHERE id=?',(job_id,)).fetchone()
             inventory=db.execute('SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM viewer_worker_inventory WHERE job_id=?',(job_id,)).fetchone()
             if (not enrollment or not plan or not job or job['status']!='running' or type(plan['task_name']) is not str or len(plan['task_name'])>256
-                or any(ord(char)<32 for char in plan['task_name'])
+                or any(ord(char)<32 for char in plan['task_name']) or p.digest(plan['task_name'])!=saved['taskNameSha256']
                 or payload['enrollmentReceipt']!=enrollment['receipt'] or payload['inputInventorySha256']!=saved['inputInventorySha256']
                 or payload['pipelineSha256']!=saved['pipelineSha256'] or payload['inputBytes']!=saved['inputBytes']
                 or tuple(inventory)!=(payload['inputCount'],payload['inputBytes'])):
@@ -283,7 +283,7 @@ class ViewerWorkerClaims:
             grant=dict(schemaVersion=1,kind='synthetic_execution_grant',authorityId=saved['authorityId'],jobId=job_id,viewerTaskId=saved['viewerTaskId'],
                 viewerGeneration=saved['viewerGeneration'],environment=saved['environment'],nodeId=saved['nodeId'],
                 workerId=saved['workerId'],workerInstanceId=saved['workerInstanceId'],engineTaskId=saved['engineTaskId'],
-                taskName=plan['task_name'],inputInventorySha256=saved['inputInventorySha256'],pipelineSha256=saved['pipelineSha256'],
+                taskName=plan['task_name'],taskNameSha256=saved['taskNameSha256'],inputInventorySha256=saved['inputInventorySha256'],pipelineSha256=saved['pipelineSha256'],
                 enrollmentReceipt=enrollment['receipt'],inputCount=payload['inputCount'],inputBytes=payload['inputBytes'])
             encoded=p.canonical_json(grant).decode();old=db.execute('SELECT request,grant_value FROM viewer_worker_grants WHERE job_id=?',(job_id,)).fetchone()
             if old:

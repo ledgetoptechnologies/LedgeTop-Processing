@@ -191,7 +191,7 @@ class ViewerNodeEnrollment:
 
     def _validate_claim(self,claim,request):
         fields=('schemaVersion','authorityId','jobId','viewerTaskId','viewerGeneration','environment','nodeId',
-            'workerId','workerInstanceId','engineTaskId','inputInventorySha256','pipelineSha256','imageCount',
+            'workerId','workerInstanceId','engineTaskId','inputInventorySha256','pipelineSha256','taskNameSha256','imageCount',
             'inputBytes','state','claimRequestId','claimToken')
         p._closed(claim,fields,'Viewer claim');c=self.config
         if (type(claim['schemaVersion']) is not int or claim['schemaVersion']!=1 or claim['state']!='claimed_unenrolled'
@@ -202,7 +202,7 @@ class ViewerNodeEnrollment:
             raise EnrollmentHeld('claim_binding_mismatch')
         for field in ('jobId','viewerTaskId','engineTaskId'):p._uuid(claim[field],field)
         for field in ('viewerGeneration','imageCount','inputBytes'):p._integer(claim[field],field)
-        for field in ('inputInventorySha256','pipelineSha256'):p._hash(claim[field],field)
+        for field in ('inputInventorySha256','pipelineSha256','taskNameSha256'):p._hash(claim[field],field)
         return claim
 
     def _check_gate(self,gate):

@@ -228,11 +228,12 @@ class ViewerNodeInputs:
                     viewerTaskId=self.claim['viewerTaskId'],viewerGeneration=self.claim['viewerGeneration'],
                     environment=self.claim['environment'],nodeId=self.claim['nodeId'],workerId=self.claim['workerId'],
                     workerInstanceId=self.claim['workerInstanceId'],engineTaskId=self.claim['engineTaskId'],
-                    inputInventorySha256=request['inputInventorySha256'],pipelineSha256=request['pipelineSha256'],
+                    inputInventorySha256=request['inputInventorySha256'],pipelineSha256=request['pipelineSha256'],taskNameSha256=self.claim['taskNameSha256'],
                     enrollmentReceipt=request['enrollmentReceipt'],inputCount=request['inputCount'],inputBytes=request['inputBytes'])
                 p._closed(grant,(*expected.keys(),'taskName'),'execution grant')
                 if (any(grant[k]!=v or type(grant[k]) is not type(v) for k,v in expected.items()) or type(grant['taskName']) is not str
-                        or len(grant['taskName'])>256 or any(ord(char)<32 for char in grant['taskName'])):
+                        or len(grant['taskName'])>256 or any(ord(char)<32 for char in grant['taskName'])
+                        or p.digest(grant['taskName'])!=self.claim['taskNameSha256']):
                     raise InputHeld('execution_grant_changed')
                 encoded=p.canonical_json(grant).decode();request_text=p.canonical_json(request).decode()
                 with self._db() as db:
