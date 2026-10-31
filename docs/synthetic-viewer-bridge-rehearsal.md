@@ -33,3 +33,5 @@ The full-mode retention check follows the `per-object-v1` input layout. The scri
 The archive verifier intentionally rejects links, special files, traversal, duplicate paths, unsafe modes and unexpected or missing extracted paths. It assumes the task-owned private export directory and its ancestors are not concurrently modified by the same user or root; it is not an independent sandbox against a hostile same-UID process. Git archive uses a fixed 0022 mask so source modes do not depend on host umask.
 
 The export bind root becomes mode 0755 for the non-root Viewer container; its enclosing run directory must remain owned by the operator and mode 0700. The verifier checks both before the client starts.
+
+Full mode sends the synthetic archive through the disabled fixture-only chunk TLS sender and checks all chunk permits and the promoted durable coordinator receipt before the Viewer downloads it. This is one small synthetic archive, not a real NodeODM result or a large-data qualification. The full-mode run does not itself test killing and restarting the sender.
