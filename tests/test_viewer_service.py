@@ -834,6 +834,20 @@ class ViewerServiceTests(unittest.TestCase):
                                                          'workerStopped': True})
                 self.engines['cluster'].fail = None
 
+    def test_contradictory_native_init_ack_holds_photo_job_without_upload(self):
+        from processing.viewer_service import NativeEngine
+        identifier=self.submit()
+        engine=NativeEngine('http://127.0.0.1:3001')
+        self.engines['cluster']=engine
+        def reply(_method,_route,**kwargs):
+            return {'uuid':kwargs['headers']['set-uuid'],'success':False}
+        with patch.object(engine.client,'json',side_effect=reply) as send,patch.object(engine,'upload') as upload:
+            self.service.tick()
+            self.assertEqual(self.task(identifier)['job']['status'],'held')
+            self.assertEqual(self.task(identifier)['error'],'engine_submission_uncertain')
+            self.service.tick()
+            self.assertEqual(send.call_count,1);upload.assert_not_called()
+
     def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
         identifier = self.submit()
         self.engines['cluster'].fail = 'commit'
