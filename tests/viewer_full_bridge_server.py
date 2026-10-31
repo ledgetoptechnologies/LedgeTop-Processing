@@ -17,7 +17,9 @@ from processing.config import Config
 from processing.direct_output_slot import _identity
 from processing.viewer_archive_spool import ViewerArchiveSpool
 from processing.viewer_http import ViewerFacade
-from processing.viewer_local_result import capture,send_metadata,send_archive,send_completion
+from processing.viewer_local_result import capture,send_completion
+from processing.viewer_chunk_spool import SyntheticChunkSpool
+from processing.viewer_synthetic_chunk_sender import send as send_chunks
 from processing.viewer_service import ViewerService,NativeEngine
 from processing.viewer_synthetic_submission import submit
 from processing.viewer_worker_claim import ViewerWorkerClaims
@@ -82,6 +84,7 @@ def main():
         finally:os.close(fd)
         spool=ViewerArchiveSpool(fixture.claims,root=spool_root,root_identity=spool_identity,max_archive_bytes=65536,enabled=True)
         fixture.api.viewer_spool=spool
+        fixture.api.viewer_chunks=SyntheticChunkSpool(spool,synthetic_fixture=True)
         config=Config('synthetic-legacy-token',discover_origin,discover_origin,1000,100000,
                       prototype_state_dir=str(fixture.root/'state'),viewer_enabled=True)
         service=ViewerService(fixture.queue,config,store=fixture.store,engines={},viewer_spool=spool,viewer_completion_projection=True)
@@ -118,7 +121,17 @@ def main():
                     if b'"name": "dsm", "value": true' not in synthetic.calls[0][3] or b'\r\n\r\nsynthetic\r\n' not in synthetic.calls[1][3]:
                         raise RuntimeError('engine plan or bytes mismatch')
                     result=capture(inputs.worker,NativeEngine(synthetic.origin),synthetic_fixture=True)
-                    send_metadata(inputs.worker,synthetic_fixture=True);send_archive(inputs.worker,synthetic_fixture=True)
+                    receipt=send_chunks(inputs.worker,synthetic_fixture=True,chunk_bytes=256)
+                    if (receipt['kind']!='viewer-coordinator-archive-receipt'
+                            or receipt['archiveSha256']!=result['archiveSha256']
+                            or receipt['archiveBytes']!=len(synthetic.archive)):
+                        raise RuntimeError('promoted archive receipt mismatch')
+                    with fixture.queue._db() as db:
+                        session=db.execute('SELECT state,chunk_count FROM viewer_worker_chunk_sessions WHERE job_id=?',(fixture.job,)).fetchone()
+                        permits=db.execute("SELECT COUNT(*) FROM viewer_worker_chunk_permits WHERE job_id=? AND state='finished'",(fixture.job,)).fetchone()[0]
+                        row=db.execute('SELECT state,receipt FROM viewer_worker_spool WHERE job_id=?',(fixture.job,)).fetchone()
+                    if not session or session['state']!='sealed' or session['chunk_count']<2 or permits!=session['chunk_count'] or not row or row['state']!='sealed' or json.loads(row['receipt'])!=receipt:
+                        raise RuntimeError('chunk promotion state mismatch')
                     send_completion(inputs.worker,synthetic_fixture=True)
                     if result['archiveSha256']!=hashlib.sha256(synthetic.archive).hexdigest():raise RuntimeError('archive hash mismatch')
                 done.set()
