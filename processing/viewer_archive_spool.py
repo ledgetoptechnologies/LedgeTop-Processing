@@ -273,6 +273,9 @@ class ViewerArchiveSpool:
         p._uuid(job_id,'job ID')
         with self.claims.queue._db() as db:
             db.execute('BEGIN IMMEDIATE');metadata=self._metadata(db,job_id,identity,token)
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_geometry'").fetchone():
+                if db.execute('SELECT 1 FROM viewer_chunk_v2_geometry WHERE job_id=?',(job_id,)).fetchone():
+                    raise SpoolHeld('v2_session_requires_inspection')
             if expected_length is not None and (type(expected_length) is not int or expected_length!=metadata['archiveBytes']):
                 raise SpoolHeld('spool_length_mismatch')
             metadata_sha=p.digest(metadata);slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=job_id,metadataSha256=metadata_sha))
