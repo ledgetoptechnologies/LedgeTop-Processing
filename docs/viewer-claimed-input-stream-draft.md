@@ -20,4 +20,6 @@ An isolated multipart transport seam can stream from an already-held input alloc
 
 The transport holds its slot's cooperative operation lock for the complete send and acknowledgement. Its 120-second socket timeout is an idle timeout, not a total deadline; DNS or repeated progress can extend the operation indefinitely. The calling runtime needs a separately tested total-deadline and interruption policy before use.
 
+Acknowledgement parsing requires exactly one bounded Content-Length and complete body at that HTTP message boundary; it does not prove physical socket EOF or rule out bytes outside that framed message. Duplicate JSON keys, nonfinite constants and floating-point overflow are rejected at any nesting depth.
+
 The synthetic tests use an actual TLS coordinator endpoint, temporary files, process interruption and an isolated container. The 10,000-entry test exercises coordinator metadata only; it does not establish transfer throughput, real reboot behavior, 50 GB capacity, Viewer integration, or an end-to-end production workflow. No live NodeODM or TrueNAS is involved.

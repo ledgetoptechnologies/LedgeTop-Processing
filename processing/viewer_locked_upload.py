@@ -7,6 +7,7 @@ This module is not wired to a worker runtime or any live dispatch path.
 import hashlib
 import http.client
 import json
+import math
 import os
 import uuid
 
@@ -27,6 +28,12 @@ def _unique_pairs(pairs):
 
 def _reject_constant(value):
     raise ValueError('nonfinite JSON value')
+
+
+def _finite_float(value):
+    result=float(value)
+    if not math.isfinite(result):raise ValueError('nonfinite JSON value')
+    return result
 
 
 def upload_locked(engine, identifier, item, slot, expected_identity):
@@ -85,11 +92,12 @@ def _upload_locked(engine, identifier, item, slot, expected_identity):
         if len(lengths)!=1 or response.headers.get_all('Transfer-Encoding',[]):
             raise SmokeError('upload acknowledgment uncertain')
         length=lengths[0]
-        if not length.isascii() or not length.isdecimal() or len(length)>5 or not 1<=int(length)<=65536:
+        if not length.isascii() or not length.isdecimal() or len(length)>20 or not 1<=int(length)<=65536:
             raise SmokeError('upload acknowledgment uncertain')
         raw=response.read(int(length))
         if len(raw)!=int(length) or response.read(1):raise SmokeError('upload acknowledgment uncertain')
-        result=json.loads(raw.decode('utf-8'),object_pairs_hook=_unique_pairs,parse_constant=_reject_constant)
+        result=json.loads(raw.decode('utf-8'),object_pairs_hook=_unique_pairs,parse_constant=_reject_constant,
+                          parse_float=_finite_float)
         if not isinstance(result,dict) or result.get('success') is not True or 'error' in result:
             raise SmokeError('upload acknowledgment uncertain')
         slot._check()

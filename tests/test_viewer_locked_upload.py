@@ -105,10 +105,18 @@ class LockedUploadTests(unittest.TestCase):
         self.assertEqual(len(self.requests),1)
 
     def test_duplicate_keys_and_nonfinite_are_uncertain(self):
-        for body in (b'{"success":true,"success":true}',b'{"success":true,"x":NaN}'):
+        for body in (b'{"success":true,"success":true}',b'{"success":true,"x":NaN}',
+                     b'{"success":true,"nested":[{"x":1e999}]}'):
             with self.subTest(body=body):
                 self.raw_response=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body
                 with self.assertRaisesRegex(SmokeError,'uncertain'):self.execute()
+
+    def test_maximum_sized_valid_response(self):
+        prefix=b'{"success":true,"pad":"';suffix=b'"}'
+        body=prefix+b'x'*(65536-len(prefix)-len(suffix))+suffix
+        self.assertEqual(len(body),65536)
+        self.raw_response=b'HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n'+body
+        self.execute()
 
     def test_conflicting_framing_is_uncertain(self):
         for headers in (b'Content-Length: 16\r\nTransfer-Encoding: chunked',
