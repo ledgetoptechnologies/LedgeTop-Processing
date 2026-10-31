@@ -142,6 +142,7 @@ assert (destination/'jobs.sqlite3').read_bytes()==(p/'source/jobs.sqlite3').read
 d=sqlite3.connect(destination/'jobs.sqlite3'); assert d.execute('SELECT * FROM viewer_tasks').fetchall()==[('synthetic','succeeded',0)]; d.close()
 ''')
         finally:
+            primary_error = sys.exc_info()[1]
             # A timed-out Docker client can leave its container behind. Only
             # reconcile exact names whose labels prove ownership, and retain
             # every volume if any container's identity or removal is unclear.
@@ -168,7 +169,9 @@ d=sqlite3.connect(destination/'jobs.sqlite3'); assert d.execute('SELECT * FROM v
                             raise RuntimeError('volume removal unverified')
                 except BaseException:
                     try_save_recovery_metadata(ident, [volume, scratch_volume], container_names, 'cleanup outcome uncertain')
-                    raise
+                    if primary_error is None:
+                        raise
+                    print('Warning: Docker cleanup could not be verified; resources may remain.', file=sys.stderr)
 
 
 class OwnershipTest(unittest.TestCase):
@@ -253,6 +256,32 @@ class OwnershipTest(unittest.TestCase):
                 MountRestoreE2E('test_backup_remount_restore').test_backup_remount_restore()
         self.assertIn('resource outcome remains unknown', stderr.getvalue())
         self.assertNotIn('private path', stderr.getvalue())
+
+    def test_cleanup_failure_does_not_replace_primary_error(self):
+        token = '1234567890abcdef1234567890abcdef'
+        ident = 'codex-viewer-e2e-' + token
+        calls = {'list': 0, 'inspect': 0}
+        def fake(argv, **kwargs):
+            args = argv[1:]
+            if args[:2] == ['volume', 'ls']:
+                calls['list'] += 1
+                output = '' if calls['list'] == 1 else ident + '-scratch\n'
+            elif args[:2] == ['volume', 'inspect']:
+                calls['inspect'] += 1
+                if calls['inspect'] > 1:
+                    raise OSError('daemon unavailable')
+                output = json.dumps([{'Labels': {'ledgetop.codex.owner': ident}}])
+            else:
+                output = ''
+            return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
+        stderr = io.StringIO()
+        with mock.patch.object(uuid, 'uuid4') as new_id, mock.patch.object(subprocess, 'run', side_effect=fake), \
+             mock.patch(__name__ + '.save_recovery_metadata') as record, contextlib.redirect_stderr(stderr):
+            new_id.return_value.hex = token
+            with self.assertRaisesRegex(RuntimeError, 'refusing existing volume'):
+                MountRestoreE2E('test_backup_remount_restore').test_backup_remount_restore()
+        self.assertIn('cleanup could not be verified', stderr.getvalue())
+        self.assertEqual(record.call_args.args[3], 'cleanup outcome uncertain')
 
     def test_test_container_has_independent_deadline(self):
         token = '1234567890abcdef1234567890abcdef'
