@@ -54,13 +54,29 @@ class RoutingPolicyTests(unittest.TestCase):
         for field, value in (("taskQueueCount", True), ("taskQueueCount", "0"),
                              ("taskQueueCount", None), ("taskQueueCount", -1),
                              ("maxImages", True), ("maxImages", "1000"),
-                             ("maxImages", 0), ("maxImages", 40),
+                             ("maxImages", 0),
                              ("state", "held"), ("state", "updating"),
                              ("maintenanceState", "draining"), ("ready", 1)):
             with self.subTest(field=field, value=value):
                 self.local = {"ready": True, "taskQueueCount": 0, "maxImages": 1000,
                               field: value}
                 self.assertEqual(self.route()["decision"], "wait")
+
+    def test_stricter_advertised_photo_ceiling_routes_only_overflow_to_main(self):
+        self.local['maxImages']=40
+        self.assertEqual(self.route(40)['decision'],'local')
+        self.assertEqual(self.route(41),{'decision':'main','reason':'exceeds_local_limits'})
+        self.main['ready']=False
+        self.assertEqual(self.route(41),{'decision':'wait','reason':'main_unavailable'})
+
+    def test_unhealthy_or_malformed_local_probe_never_causes_implicit_fallback(self):
+        for state in ({'ready':False,'maxImages':40},{'ready':True,'maxImages':True},
+                      {'ready':True,'maxImages':'40'},{'ready':True,'maxImages':0},
+                      {'ready':True,'maxImages':40,'taskQueueCount':None},
+                      {'ready':True,'maxImages':40,'taskQueueCount':True}):
+            with self.subTest(state=state):
+                self.local={'ready':True,'taskQueueCount':0,'maxImages':1000,**state}
+                self.assertEqual(self.route(41)['decision'],'wait')
 
     def test_explicit_fallback_never_uses_main_without_capacity(self):
         self.local["ready"] = False

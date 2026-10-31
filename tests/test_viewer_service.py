@@ -272,6 +272,19 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.engines['cluster'].calls, [])
         self.assertEqual(self.fleet.max_active, 1)
 
+    def test_stricter_advertised_limit_routes_production_to_main_before_staging(self):
+        staging=self.submit(environment='staging');production=self.submit(count=2)
+        original_probe=self.service.probe
+        def restricted(role,origin,token):
+            result=original_probe(role,origin,token)
+            if role=='local':result['maxImages']=1
+            return result
+        self.service.probe=restricted;self.service.tick()
+        self.assertEqual(self.task(production)['node_id'],'main')
+        self.assertIsNone(self.task(staging)['node_id']);self.assertEqual(self.engines['cluster'].calls,[])
+        self.finish(production);self.service.tick();self.service.tick()
+        self.assertEqual(self.task(staging)['node_id'],'cluster');self.assertEqual(self.fleet.max_active,1)
+
     def test_priority_fifo_and_global_execution_slot_across_nodes(self):
         staging = self.submit(environment='staging')
         production_first = self.submit(count=2)
