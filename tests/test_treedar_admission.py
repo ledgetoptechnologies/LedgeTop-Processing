@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 import warnings
 
-from processing.treedar_admission import AdmissionPolicy, AdmissionError, validate_lidar
+from processing.treedar_admission import AdmissionPolicy, AdmissionError, validate_lidar, _ground_noncollinear
 
 
 DEPENDENCIES = all(importlib.util.find_spec(name) is not None for name in ('laspy', 'numpy', 'pyproj'))
@@ -53,6 +53,27 @@ def write_projected_forest(path, *, crs=32616, classified=True, shift=(500000, 4
     path = Path(path).with_suffix('.laz' if compressed else '.las')
     cloud.write(path)
     return dict(path=path, pointCount=len(cloud.points), groundPointCount=int((cloud.classification == 2).sum()))
+
+
+class GroundGeometryTests(unittest.TestCase):
+    def test_near_duplicate_baseline_is_order_independent_across_chunks(self):
+        # With a 1e-9 metre X scale, the first two points are 1 nm apart.
+        # These are non-collinear even when their floating cross product is
+        # below the former fixed 1e-6 threshold.
+        points = [(0, 0), (1, 0), (0, 100), (10, 20)]
+        for order in (points, list(reversed(points)), points[1:] + points[:1]):
+            basis = []
+            found = False
+            for start in range(0, len(order), 2):
+                if not found:
+                    found = _ground_noncollinear(basis, order[start:start + 2])
+            self.assertTrue(found)
+
+    def test_collinear_points_and_large_integer_arithmetic(self):
+        basis = []
+        self.assertFalse(_ground_noncollinear(basis, [(0, 0), (1, 1), (2, 2)]))
+        self.assertFalse(_ground_noncollinear(basis, [(2**31 - 1, 2**31 - 1)]))
+        self.assertTrue(_ground_noncollinear(basis, [(-(2**31), 2**31 - 1)]))
 
 
 class AdmissionPolicyTests(unittest.TestCase):
@@ -237,6 +258,22 @@ class TreeDarAdmissionTests(unittest.TestCase):
             with self.subTest(replace_path=replace_path), patch.object(self.laspy, 'open', changed):
                 with self.assertRaisesRegex(AdmissionError, 'input_changed_during_admission'):
                     self.validate()
+
+    def test_ground_with_tiny_first_baseline_is_admitted_in_either_order(self):
+        cloud = self.laspy.read(self.path)
+        cloud.x = 500000 + (self.np.asarray(cloud.x) - 500000) / 4
+        cloud.change_scaling(scales=self.np.array([1e-8, 0.001, 0.001]))
+        cloud.X[1] = cloud.X[0] + 1
+        cloud.Y[1] = cloud.Y[0]
+        cloud.write(self.path)
+        first = self.validate()
+        cloud = self.laspy.read(self.path)
+        cloud.points = cloud.points[self.np.arange(len(cloud.points) - 1, -1, -1)]
+        cloud.write(self.path)
+        second = self.validate()
+        self.assertEqual(first['pointCount'], second['pointCount'])
+        self.assertEqual(first['groundPointCount'], second['groundPointCount'])
+        self.assertEqual(first['groundCoverage'], second['groundCoverage'])
 
     def test_point_count_header_tamper_and_invalid_return_metadata_rejected(self):
         for count in (4554,4556):
