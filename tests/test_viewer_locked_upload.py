@@ -18,12 +18,14 @@ class LockedUploadTests(unittest.TestCase):
     def setUp(self):
         self.base=NodeInputsTests('test_tls_inventory_then_actual_verified_transfer_and_restart')
         self.base.setUp();self.addCleanup(self.base.doCleanups)
-        self.requests=[];self.drop=False;outer=self
+        self.requests=[];self.drop=False;self.raw_response=None;outer=self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 length=int(self.headers['Content-Length']);data=self.rfile.read(length)
                 outer.requests.append((self.path,self.headers['Content-Type'],data))
                 if outer.drop or len(data)!=length:self.close_connection=True;return
+                if outer.raw_response is not None:
+                    self.connection.sendall(outer.raw_response);self.close_connection=True;return
                 raw=b'{"success":true}';self.send_response(200);self.send_header('Content-Length',str(len(raw)))
                 self.end_headers();self.wfile.write(raw)
             def log_message(self,*args):pass
@@ -35,7 +37,7 @@ class LockedUploadTests(unittest.TestCase):
         self.server.shutdown();self.server.server_close();self.thread.join(5)
         self.assertFalse(self.thread.is_alive())
 
-    def execute(self,*,wrong_hash=False,wrong_identity=False,mutate=False):
+    def execute(self,*,wrong_hash=False,wrong_identity=False,mutate=False,contend=False):
         with DaemonStateLock(self.base.base.worker) as owner:
             inputs=self.base.make(owner);inputs.fetch_plan();inputs.freeze_inventory()
             object_id=self.base.object_id(inputs);inputs.transfer(object_id)
@@ -50,14 +52,24 @@ class LockedUploadTests(unittest.TestCase):
                     engine=NativeEngine('http://127.0.0.1:'+str(self.server.server_port))
                     identity=json.loads(row[2])
                     if wrong_identity:identity['allocation'][1]+=1
-                    original=http.client.HTTPConnection.send;changed=[False]
+                    original=http.client.HTTPConnection.send;changed=[False];threads=[];done=threading.Event()
                     def send(connection,data):
                         result=original(connection,data)
-                        if mutate and data.startswith(b'--processing-') and not changed[0]:
-                            changed[0]=True;os.pwrite(slot._fd,b'different',0)
+                        if (mutate or contend) and data.startswith(b'--processing-') and not changed[0]:
+                            changed[0]=True
+                            if mutate:os.pwrite(slot._fd,b'different',0)
+                            else:
+                                def writer():slot.write_at(0,b'synthetic');done.set()
+                                thread=threading.Thread(target=writer);threads.append(thread);thread.start()
+                                self.assertFalse(done.wait(.1))
                         return result
-                    with patch.object(http.client.HTTPConnection,'send',send):
-                        upload_locked(engine,inputs.claim['engineTaskId'],item,slot,identity)
+                    try:
+                        with patch.object(http.client.HTTPConnection,'send',send):
+                            upload_locked(engine,inputs.claim['engineTaskId'],item,slot,identity)
+                    finally:
+                        for thread in threads:thread.join(5)
+                        self.assertTrue(all(not thread.is_alive() for thread in threads))
+                    if contend:self.assertTrue(done.is_set())
                 finally:slot.close()
             return inputs.claim['engineTaskId']
 
@@ -79,7 +91,28 @@ class LockedUploadTests(unittest.TestCase):
     def test_noncooperative_mutation_aborts_before_multipart_completion(self):
         with self.assertRaisesRegex(SmokeError,'hash changed'):self.execute(mutate=True)
 
+    def test_same_object_writer_waits_until_upload_finishes(self):
+        self.execute(contend=True)
+
     def test_lost_ack_is_uncertain_without_automatic_retry(self):
         self.drop=True
         with self.assertRaisesRegex(SmokeError,'uncertain'):self.execute()
         self.assertEqual(len(self.requests),1)
+
+    def test_truncated_valid_json_prefix_is_uncertain(self):
+        self.raw_response=b'HTTP/1.1 200 OK\r\nContent-Length: 30\r\n\r\n{"success":true}'
+        with self.assertRaisesRegex(SmokeError,'uncertain'):self.execute()
+        self.assertEqual(len(self.requests),1)
+
+    def test_duplicate_keys_and_nonfinite_are_uncertain(self):
+        for body in (b'{"success":true,"success":true}',b'{"success":true,"x":NaN}'):
+            with self.subTest(body=body):
+                self.raw_response=b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body
+                with self.assertRaisesRegex(SmokeError,'uncertain'):self.execute()
+
+    def test_conflicting_framing_is_uncertain(self):
+        for headers in (b'Content-Length: 16\r\nTransfer-Encoding: chunked',
+                        b'Content-Length: 16\r\nContent-Length: 16'):
+            with self.subTest(headers=headers):
+                self.raw_response=b'HTTP/1.1 200 OK\r\n'+headers+b'\r\n\r\n{"success":true}'
+                with self.assertRaisesRegex(SmokeError,'uncertain'):self.execute()

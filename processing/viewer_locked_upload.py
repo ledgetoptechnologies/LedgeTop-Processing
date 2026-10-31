@@ -17,6 +17,18 @@ from .viewer_tasks import TaskStore
 from .viewer_service import NativeEngine
 
 
+def _unique_pairs(pairs):
+    value={}
+    for key,item in pairs:
+        if key in value:raise ValueError('duplicate key')
+        value[key]=item
+    return value
+
+
+def _reject_constant(value):
+    raise ValueError('nonfinite JSON value')
+
+
 def upload_locked(engine, identifier, item, slot, expected_identity):
     """Send one exact slot through NativeEngine's multipart upload wire route.
 
@@ -26,6 +38,11 @@ def upload_locked(engine, identifier, item, slot, expected_identity):
     """
     if type(engine) is not NativeEngine or type(slot) is not OutputSlot:
         raise SmokeError('locked upload requires native engine and slot')
+    with slot._operation_lock:
+        return _upload_locked(engine,identifier,item,slot,expected_identity)
+
+
+def _upload_locked(engine, identifier, item, slot, expected_identity):
     p._uuid(identifier,'engine task ID')
     p._closed(item,('name','bytes','sha256'),'upload item')
     TaskStore._filename(item['name']);p._integer(item['bytes'],'input bytes');p._hash(item['sha256'],'input hash')
@@ -64,9 +81,15 @@ def upload_locked(engine, identifier, item, slot, expected_identity):
         slot._check();connection.send(suffix)
         response=connection.getresponse()
         if not 200<=response.status<300:raise SmokeError('upload acknowledgment uncertain')
-        raw=response.read(65537)
-        if len(raw)>65536:raise SmokeError('upload acknowledgment uncertain')
-        result=json.loads(raw)
+        lengths=response.headers.get_all('Content-Length',[])
+        if len(lengths)!=1 or response.headers.get_all('Transfer-Encoding',[]):
+            raise SmokeError('upload acknowledgment uncertain')
+        length=lengths[0]
+        if not length.isascii() or not length.isdecimal() or len(length)>5 or not 1<=int(length)<=65536:
+            raise SmokeError('upload acknowledgment uncertain')
+        raw=response.read(int(length))
+        if len(raw)!=int(length) or response.read(1):raise SmokeError('upload acknowledgment uncertain')
+        result=json.loads(raw.decode('utf-8'),object_pairs_hook=_unique_pairs,parse_constant=_reject_constant)
         if not isinstance(result,dict) or result.get('success') is not True or 'error' in result:
             raise SmokeError('upload acknowledgment uncertain')
         slot._check()
