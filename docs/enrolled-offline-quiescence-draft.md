@@ -1,0 +1,7 @@
+# Draft enrolled offline stopped-state guard
+
+This Linux-only context manager is an isolated prerequisite, not an updater, Docker adapter, deployment command or complete quiescence proof. A trusted supervisor must first stop the exact candidate cleanly, verify the Docker daemon, immutable image and mounts, and exclude competing containers and direct node ingress. No host adapter is supplied.
+
+While the context is open, it holds exclusive kernel locks on the candidate state and its enrolled legacy state. Before any SQLite connection it checks both database headers and rejects WAL, SHM or journal sidecars. It checks the enrolled legacy device/inode and matching authority, applies the existing held-startup idle checks, and refuses unresolved reference jobs or unacknowledged outbox rows against the two exact supported reference table schemas. Missing, partial or unsupported reference schema fails closed. The returned metadata is valid only while the context remains open, with stable trusted directories and cooperative writers. Once it exits its locks are released; a subsequent start requires fresh independent fencing.
+
+This does not prove result delivery or archive custody, absence of untracked files or direct engine work, host reboot behavior, backup durability, or SQLite/filesystem resistance to untrusted path replacement. The caller still needs a real bounded Docker integration, live drain and ingress controls, reviewed backup/census protocol, crash recovery, exact host and volume identity, and cleanup. No production activation is included.
