@@ -55,8 +55,9 @@ class MountRestoreE2E(unittest.TestCase):
     def test_backup_remount_restore(self):
         image_compat = os.environ.get('LEDGETOP_IMAGE_COMPAT_E2E') == '1'
         old_image = 'sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004'
-        candidate_image = 'sha256:4d4d6b7c4af869a611a7a55e911ceb9cd1cb4610b4374c942dc5ad60d21a2254'
+        candidate_image = 'sha256:4c5bd4bd43c75510b1c1ab2e58d601aa880a028f1b16f6d24053850adfe4d3d1'
         ident = 'codex-viewer-e2e-' + uuid.uuid4().hex
+        print('synthetic owner label: ' + ident, flush=True)
         volume = ident + '-backup'
         scratch_volume = ident + '-scratch'
         repo = Path(__file__).resolve().parents[1]
@@ -83,7 +84,7 @@ class MountRestoreE2E(unittest.TestCase):
             options = ['--user', uid] if uid else []
             return docker('run', '--rm', '-i', '--name', name, '--label', 'ledgetop.codex.owner=' + ident,
                           '--network', 'none', '--memory', '256m', *options,
-                          '--cpus', '1', '-v', str(repo) + ':/work:ro', *mounts,
+                          '--cpus', '0.5', '--pids-limit', '64', '-v', str(repo) + ':/work:ro', *mounts,
                           '-w', '/work' if image == 'python:3.12-slim' else '/app', image, 'python', '-B', '-c',
                           'import signal,sys; signal.alarm(120); exec(sys.stdin.read())', code=code)
 
@@ -144,23 +145,89 @@ directory,filename=rows[0]; assert Path(directory).name==directory and Path(file
 assert (root/'viewer-tasks'/directory/filename).read_bytes()==b'synthetic-image'
 '''
 
+        def capture_script():
+            # The test injects synthetic terminal rows; no ODM processing occurs.
+            return r"""
+from pathlib import Path
+import hashlib,io,json,os,signal,sqlite3,subprocess,sys,threading,time,urllib.request,zipfile
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path('/scratch/__IDENT__/candidate');leases=Path('/scratch/__IDENT__/leases')
+task1='12345678-1234-4234-8234-123456789abc';task2='22345678-1234-4234-8234-123456789abc'
+q=Queue(root,node_ids=('cluster','main'),viewer_enabled=True);t=TaskStore(q,root/'viewer-tasks')
+t.initialize(task2,name='synthetic partial',options=[],outputs=[],environment='production')
+t.upload(task2,'photo.jpg',io.BytesIO(b'synthetic-image-2'),17,'production')
+with q._db() as db:
+ for index,task in enumerate((task1,task2),1):
+  job='33333333-3333-4333-8333-33333333333'+str(index)
+  engine='44444444-4444-4444-8444-44444444444'+str(index)
+  db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES(?,?, 'production','odm-viewer-v1','succeeded','cluster')",(job,'synthetic-'+str(index)))
+  db.execute("UPDATE viewer_tasks SET stage='succeeded',phase='complete',job_id=?,node_id='cluster',engine_uuid=?,claim_token=? WHERE uuid=?",(job,engine,'synthetic-claim',task))
+q.close()
+buf=io.BytesIO()
+with zipfile.ZipFile(buf,'w') as z:z.writestr('synthetic.txt',b'owned synthetic output')
+archive=buf.getvalue();counts=[]
+class Engine(BaseHTTPRequestHandler):
+ def log_message(self,*_):pass
+ def do_GET(self):
+  counts.append(self.path);self.send_response(200);self.send_header('Content-Type','application/zip');self.send_header('Content-Length',str(len(archive)));self.end_headers()
+  self.wfile.write(archive if '44444444-4444-4444-8444-444444444441' in self.path else archive[:7]);self.wfile.flush()
+engine=ThreadingHTTPServer(('127.0.0.1',19991),Engine);thread=threading.Thread(target=engine.serve_forever,daemon=True);thread.start()
+env=os.environ.copy();env.update(PROCESSING_API_TOKEN='a'*32,PROCESSING_PROTOTYPE_STATE_DIR=str(root),PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_VIEWER_ENABLED='1',PROCESSING_VIEWER_TOKEN='b'*32,LOCAL_NODE_URL='http://127.0.0.1:19991',MAIN_NODE_URL='http://127.0.0.1:19992',PROCESSING_BIND_HOST='127.0.0.1',PROCESSING_PORT='18080',PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE='1',PROCESSING_VIEWER_ARCHIVE_FREE_FLOOR='1',PROCESSING_AUTHORITY_LEASE_DIR=str(leases))
+server=subprocess.Popen([sys.executable,'-m','processing.app'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+open_url=urllib.request.build_opener(urllib.request.ProxyHandler({}));base='http://127.0.0.1:18080';deadline=time.monotonic()+25
+try:
+ while True:
+  if server.poll() is not None:raise AssertionError('candidate exited')
+  try:
+   values=[]
+   for task in (task1,task2):
+    with open_url.open(base+'/task/'+task+'/info?token='+('b'*32),timeout=1) as response:values.append(json.load(response))
+   if values[0].get('ledgetopArchive',{}).get('state')=='recorded' and values[1].get('ledgetopArchive',{}).get('state')=='inspection':break
+  except (OSError,urllib.error.URLError):pass
+  if time.monotonic()>=deadline:raise AssertionError('capture did not reach expected states')
+  time.sleep(.1)
+ assert values[1]['ledgetopArchive']['reason']=='partial_requires_inspection'
+ with open_url.open(base+'/task/'+task1+'/download/all.zip?token='+('b'*32),timeout=3) as response:assert response.read()==archive
+finally:
+ server.send_signal(signal.SIGTERM)
+ try:code=server.wait(timeout=8)
+ except subprocess.TimeoutExpired:server.kill();server.wait(timeout=3);raise AssertionError('candidate did not stop')
+ engine.shutdown();engine.server_close();thread.join(5)
+ if code!=0:raise AssertionError('candidate shutdown failed')
+db=sqlite3.connect('file:'+str(root/'jobs.sqlite3')+'?mode=ro',uri=True)
+rows=db.execute('SELECT t.uuid,t.directory,t.archive_path,t.archive_state,f.name,f.path FROM viewer_tasks t JOIN viewer_files f ON f.uuid=t.uuid ORDER BY t.uuid').fetchall();db.close()
+assert len(rows)==2
+for task,directory,path,state,name,input_file in rows:
+ assert name=='photo.jpg' and Path(input_file).name==input_file
+ d=root/'viewer-tasks'/directory
+ assert (d/input_file).read_bytes()==(b'synthetic-image' if task==task1 else b'synthetic-image-2')
+ if task==task1:
+  assert Path(path).read_bytes()==archive and (d/'all.zip.receipt').exists()
+ else:
+  assert path is None and state=='inspection' and (d/'all.zip.partial').exists()
+assert len(counts)==2
+print('synthetic candidate enabled capture and inspection verified',flush=True)
+""".replace('__IDENT__',ident)
+
         scratch = f'type=volume,src={scratch_volume},dst=/scratch'
         try:
             volume_create(volume)
-            volume_create(scratch_volume, '--opt', 'type=tmpfs', '--opt', 'device=tmpfs')
+            volume_create(scratch_volume, '--opt', 'type=tmpfs', '--opt', 'device=tmpfs', '--opt', 'o=size=128m')
             # Keep the task-owned tmpfs mounted between short test containers.
             # The bounded keeper is always reconciled by the finally block.
             keeper = ident + '-keeper'
             container_names.append(keeper)
             docker('run', '-d', '--name', keeper, '--label', 'ledgetop.codex.owner=' + ident,
-                   '--network', 'none', '--memory', '128m', '--cpus', '0.25',
+                   '--network', 'none', '--memory', '128m', '--cpus', '0.25', '--pids-limit', '32',
                    '--mount', scratch, 'python:3.12-slim', 'python', '-c',
                    'import time; time.sleep(120)')
             if image_compat:
                 for image, revision in ((old_image, '693cb7eca32295da959a4f42399f317577ef8a8a'),
-                                        (candidate_image, 'd90e81a01efec5ccf004eb3ade48e7480a273398')):
+                                        (candidate_image, '1cdedc87b4f0b4fbe7631853c02d39883a2ff532')):
                     observed = json.loads(docker('image', 'inspect', image).stdout)[0]
-                    if observed.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != revision:
+                    if observed.get('Id') != image or observed.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != revision:
                         raise RuntimeError('exact image revision required')
                 run('--mount', scratch, '--mount', f'type=volume,src={volume},dst=/backups', code=f'''\
 from pathlib import Path
@@ -231,6 +298,17 @@ for field in ('objects','rowCounts','tableDigest','viewerTaskProjection','author
 assert before['database']['rowCounts']['viewer_tasks']==1
 assert before['database']['rowCounts']['viewer_files']==1
 ''')
+            if image_compat:
+                run('--mount', scratch, image=candidate_image, uid='10001:10001', code=capture_script())
+                # Existing updater still rejects nonempty candidate state; do not
+                # reinterpret restoring the old independent copy as rollback.
+                run('--mount', scratch, uid='10001:10001', code=f"""
+from pathlib import Path
+from ops.update_reference_coordinator import volume_census
+try:volume_census(Path('/scratch/{ident}/candidate'),uid=10001,offline=True)
+except AssertionError:pass
+else:raise AssertionError('nonempty candidate census unexpectedly accepted')
+""")
             run('--mount', scratch,
                 '--mount', f'type=volume,src={volume},dst=/backup,readonly,volume-subpath=snapshot',
                 uid='10001:10001' if image_compat else None, code=f'''\
