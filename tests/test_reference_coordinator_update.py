@@ -355,7 +355,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.fail_after_start()
         with self.queue._db() as db:db.execute("INSERT INTO owned_maintenance_schedules VALUES('new','main','a','b','{}','{}')")
         before=len(self.transport.calls)
-        with self.assertRaises(AssertionError):self.updater.rollback(self.state)
+        with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
         self.assertEqual(len(self.transport.calls),before)
         self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
 
@@ -416,6 +416,131 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         proof=json.loads(output.getvalue())
         self.assertEqual(proof['fullCensusSha256'],module.digest(module.volume_census(self.volume,uid=os.geteuid(),offline=True)))
         self.assertEqual((destination/'jobs.sqlite3').read_bytes(),(self.volume/'jobs.sqlite3').read_bytes())
+
+    def test_retained_pilot_journals_are_backed_up_and_bound(self):
+        journals=self.volume/'pilot-journals'/('lt-aa5-'+'0'*32)
+        journals.mkdir(parents=True,mode=0o700)
+        (journals/'main.json').write_bytes(b'{"plan":"synthetic"}\n')
+        (journals/'main.json.cancel-intent').write_bytes(b'{"cancel":"synthetic"}\n')
+        baseline=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        destination=self.root/'journal-backup';destination.mkdir(mode=0o700)
+        code=module.backup_script().replace("Path('/source')",'Path('+repr(str(self.volume))+')').replace("Path('/backup')",'Path('+repr(str(destination))+')')
+        code=code.replace('10001',str(os.geteuid())).replace('uid=10001','uid='+str(os.geteuid()))
+        captured=io.StringIO()
+        with redirect_stdout(captured):exec(compile(code,'<synthetic-journal-backup>','exec'),{})
+        self.assertEqual((destination/'pilot-journals'/journals.name/'main.json').read_bytes(),(journals/'main.json').read_bytes())
+        self.assertEqual(json.loads(captured.getvalue())['fullCensusSha256'],module.digest(baseline))
+        (journals/'main.json').write_bytes(b'{"changed":true}\n')
+        with self.assertRaises(module.Stopped):module.compatible(module.volume_census(self.volume,uid=os.geteuid(),offline=True),baseline)
+
+    def test_retained_journals_reject_symlink_and_unreviewed_tree(self):
+        journals=self.volume/'pilot-journals';journals.mkdir(mode=0o700)
+        (journals/'link').symlink_to(self.root)
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+        code="from ops.update_reference_coordinator import volume_census; import os,sys; volume_census(sys.argv[1],uid=os.geteuid())"
+        result=subprocess.run([sys.executable,'-O','-c',code,str(self.volume)],capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0);self.assertIn('state symlink refused',result.stderr)
+        (journals/'link').unlink();(self.volume/'other').mkdir()
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_configured_predecessor_is_exact_and_checkpoint_bound(self):
+        predecessor=('a'*64,'sha256:'+'b'*64,'c'*40)
+        updated=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,predecessor=predecessor)
+        with self.assertRaises(module.Stopped):updated.validate(self.state)
+        state=copy.deepcopy(self.state)
+        state['old']['containerId'],state['old']['image'],state['oldSourceCommit']=predecessor
+        updated.validate(state)
+        for candidate in [('a'*63,predecessor[1],predecessor[2]),(predecessor[0],'latest',predecessor[2]),(predecessor[0],predecessor[1],'bad')]:
+            with self.assertRaises(module.Stopped):module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,predecessor=candidate)
+        state['old']['containerId']='d'*64
+        with self.assertRaises(module.Stopped):updated.validate(state)
+
+    def test_existing_owned_schedule_history_is_preserved_and_compared(self):
+        with self.queue._db() as db:
+            db.execute(next(row[3] for row in module.owned_schema() if row[0]=='table'))
+            db.execute("INSERT INTO owned_maintenance_schedules VALUES(?,?,?,?,?,?)",('synthetic-request','main',module.AUTHORITY,'a'*64,'{}','{}'))
+        baseline=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        self.assertEqual(baseline['tables']['owned_maintenance_schedules']['count'],1)
+        destination=self.root/'owned-history-backup';destination.mkdir(mode=0o700)
+        code=module.backup_script().replace("Path('/source')",'Path('+repr(str(self.volume))+')').replace("Path('/backup')",'Path('+repr(str(destination))+')')
+        code=code.replace('10001',str(os.geteuid())).replace('uid=10001','uid='+str(os.geteuid()))
+        captured=io.StringIO()
+        with redirect_stdout(captured):exec(compile(code,'<synthetic-owned-backup>','exec'),{})
+        self.assertEqual(json.loads(captured.getvalue())['fullCensusSha256'],module.digest(baseline))
+        with self.queue._db() as db:db.execute("UPDATE owned_maintenance_schedules SET receipt_json=?",('{"changed":true}',))
+        with self.assertRaises(module.Stopped):module.compatible(module.volume_census(self.volume,uid=os.geteuid(),offline=True),baseline)
+
+    def test_authority_lease_binding_and_candidate_mount(self):
+        lease=self.root/'lease';lease.mkdir(mode=0o711);lease.chmod(0o711)
+        (lease/(module.AUTHORITY+'.lease')).write_bytes(b'');(lease/(module.AUTHORITY+'.lease')).chmod(0o600)
+        actual=module.lease_binding(str(lease),uid=os.geteuid())
+        with patch.object(module,'lease_binding',return_value=actual):
+            updater=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,lease_dir=str(lease))
+            state=copy.deepcopy(self.state);state['leaseBinding']=actual;updater.validate(state)
+            args=updater.create_args(state)
+            self.assertIn('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease',args)
+            self.assertIn('type=bind,src='+str(lease)+',dst=/run/ledgetop-authority-lease',args)
+            with patch.object(module,'lease_binding',return_value=dict(actual,inode=actual['inode']+1)):
+                with self.assertRaises(module.Stopped):updater.validate(state)
+        link=self.root/'lease-link';link.symlink_to(lease,target_is_directory=True)
+        with self.assertRaises(module.Stopped):module.lease_binding(str(link),uid=os.geteuid())
+        old=actual['lockInode'];replacement=lease/'replacement';replacement.write_bytes(b'');replacement.chmod(0o600);replacement.replace(lease/(module.AUTHORITY+'.lease'))
+        self.assertNotEqual(module.lease_binding(str(lease),uid=os.geteuid())['lockInode'],old)
+        inspect_binding=module.lease_binding
+        with patch.object(module,'lease_binding',side_effect=lambda path:inspect_binding(path,uid=os.geteuid())):
+            with self.assertRaises(module.Stopped):updater.validate(state)
+
+    def test_candidate_checks_lease_bind_and_environment(self):
+        lease=self.root/'lease';lease.mkdir(mode=0o711);lease.chmod(0o711)
+        (lease/(module.AUTHORITY+'.lease')).write_bytes(b'');(lease/(module.AUTHORITY+'.lease')).chmod(0o600)
+        binding=module.lease_binding(str(lease),uid=os.geteuid())
+        item=self.transport.container(NEW_ID,TARGET,module.NAME,False)
+        item['Config']['Labels'][module.LABEL]=self.state['operation']
+        item['Config']['Env'].append('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease')
+        item['Mounts'].append({'Type':'bind','Source':str(lease),'Destination':'/run/ledgetop-authority-lease','RW':True})
+        self.transport.containers[NEW_ID]=item
+        state=copy.deepcopy(self.state);state['newContainerId']=NEW_ID;state['leaseBinding']=binding
+        updater=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,lease_dir=str(lease))
+        with patch.object(module,'lease_binding',return_value=binding),patch.object(updater,'save'):
+            self.assertEqual(updater.candidate(state)['Id'],NEW_ID)
+            item['Mounts'][-1]['RW']=False
+            with self.assertRaises(module.Stopped):updater.candidate(state)
+            item['Mounts'][-1]['RW']=True;item['Config']['Env'][-1]='PROCESSING_AUTHORITY_LEASE_DIR=/wrong'
+            with self.assertRaises(module.Stopped):updater.candidate(state)
+            item['Config']['Env'][-1]='PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease'
+            item['Config']['Env'].append('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease')
+            with self.assertRaises(module.Stopped):updater.candidate(state)
+
+    def test_new_lease_marker_is_forward_only_not_rollback_compatible(self):
+        baseline=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), required INTEGER NOT NULL CHECK(required=1))')
+            db.execute('INSERT INTO coordinator_authority_lease VALUES(1,1)')
+        candidate=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        module.compatible(candidate,baseline,allow_lease_addition=True)
+        with self.assertRaises(module.Stopped):module.compatible(candidate,baseline)
+
+    def test_full_synthetic_activation_preserves_lease_binding(self):
+        lease=self.root/'lease';lease.mkdir(mode=0o711);lease.chmod(0o711)
+        (lease/(module.AUTHORITY+'.lease')).write_bytes(b'');(lease/(module.AUTHORITY+'.lease')).chmod(0o600)
+        binding=module.lease_binding(str(lease),uid=os.geteuid())
+        self.updater.lease_dir=str(lease);self.state['leaseBinding']=binding
+        original=self.transport.docker
+        def docker(*args,**kwargs):
+            value=original(*args,**kwargs)
+            if args[0]=='create':
+                item=self.transport.containers[NEW_ID]
+                item['Config']['Env'].append('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease')
+                item['Mounts'].append({'Type':'bind','Source':str(lease),'Destination':'/run/ledgetop-authority-lease','RW':True})
+            if args[0]=='start' and args[-1]==NEW_ID:
+                with self.queue._db() as db:
+                    db.execute('CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), required INTEGER NOT NULL CHECK(required=1))')
+                    db.execute('INSERT INTO coordinator_authority_lease VALUES(1,1)')
+            return value
+        with patch.object(module,'lease_binding',return_value=binding),patch.object(self.transport,'docker',side_effect=docker):
+            self.assertEqual(self.activate()['phase'],'completed')
+            self.assertEqual(self.transport.inspected(module.NAME)['Id'],NEW_ID)
+            self.assertEqual({self.queue.get_node(node)['state'] for node in ('cluster','main')},{'active'})
 
     def test_actual_authenticated_owned_get_requires_exact_new_missing_receipt_body(self):
         self.probe.stop()

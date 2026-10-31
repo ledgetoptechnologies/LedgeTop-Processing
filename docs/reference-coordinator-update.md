@@ -3,20 +3,19 @@
 `ops/update_reference_coordinator.py` is a separate source executor for updating
 the existing reference coordinator. It does not reuse the native predecessor
 selection or change the historical installer/frozen operation artifacts. Import
-does nothing. The activation CLI is enabled after independent source review,
-the frozen 894-case Linux run (890 passed, four Node skips covered on Windows),
-and the actual two-PC gate preflight recorded for source `890cd26` in
-`docs/evidence/coordinator-gate-preflight-20261028.json`. An explicit new prepared
-operation and every immutable binding/live fence are still required. These
-checks do not themselves install the replacement coordinator.
+does nothing. This revised executor is activation-disabled pending independent
+review and qualification. Historical evidence for source `890cd26` does not
+qualify this new predecessor, state census or lease transition. An explicit new
+prepared operation and every immutable binding/live fence are still required.
 
 ## Exact operation binding
 
-The reviewed predecessor is container
+The historical predecessor was container
 `7ebe34636518961ddb4398b545a6a73d0254a47a093b198cf5d2d8411345cd07`, image
 `sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9`,
-source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`. The executor revalidates
-these identities. The much older native container beginning `6300` is never
+source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`. This revision requires an
+explicit full predecessor identity, revalidated against current state and bound
+to the checkpoint. The much older native container beginning `6300` is never
 selected or modified. The sole authority and exact original state volume remain
 unchanged. A new schema-version-2 checkpoint explicitly records mode
 `reference-to-reference-v1`; historical schema-version-1 checkpoints are refused.

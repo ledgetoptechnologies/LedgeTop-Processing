@@ -1,5 +1,36 @@
 # Installing the next reference coordinator
 
+## Unreviewed current-predecessor adaptation
+
+The exact current predecessor is supplied explicitly by full container ID,
+image ID and source revision and is bound to the private checkpoint. Every
+prepare/activate/rollback invocation must supply the same values. The previously
+listed predecessor below is historical, not a current live pin. The current
+adaptation remains activation-disabled until independently reviewed and tested
+against the intended live gate and backup environment.
+
+The census retains and hashes the bounded `pilot-journals` tree and accepts
+existing owned-maintenance receipt history only with the exact reviewed table
+schema; its complete rows are hashed and compared across the backup. No receipt
+or journal is deleted. Unknown paths, symlinks, active jobs, altered history
+or exceeded bounds hold. The old predecessor must not already have a lease bind:
+this path is for the current unleased-to-leased transition, not a general
+lease-aware predecessor upgrade.
+
+The new candidate requires an existing canonical authority lease directory
+owned by numeric UID/GID 10001 and mode 0711, containing the authority's existing
+regular single-link 0600 lock file owned by the same UID/GID. The executor binds
+directory and file device/inode into the checkpoint and rechecks both before
+mutations; it never creates or replaces the lock. All authorized coordinators
+for this authority must use the same qualified filesystem and lock inode. An
+operator must establish and verify effective cross-process `flock` semantics and
+cooperative non-replacement throughout the window. The candidate's lease marker
+is accepted only for forward verification. If that new marker exists, the
+automatic old-binary rollback path holds and retains the candidate; it does not
+silently restart an older binary that ignores the lease. Backup captures file
+bytes, numeric ownership and modes; it is not a claim of xattr/ACL/timestamp
+equivalence.
+
 The owned scheduling API is not installed in the current sole coordinator.
 Current observed container `7ebe34636518961ddb4398b545a6a73d0254a47a093b198cf5d2d8411345cd07`
 uses image `sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9`

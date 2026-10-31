@@ -42,12 +42,31 @@ MODE = 'reference-to-reference-v1'
 # Explicit preparation, immutable argument binding and every live fence remain.
 # Follow-up census compatibility includes the existing TerminalService table;
 # its reference_* zero-row admission fence remains unchanged.
-ACTIVATION_REVIEWED = True
+# This predecessor/census revision is unreviewed; do not enable live mutation.
+ACTIVATION_REVIEWED = False
 class Stopped(ValueError):pass
 
 
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
+
+def lease_binding(directory, *, uid=10001):
+    """Bind the existing authority lock inode, never creating or replacing it."""
+    if type(directory) is not str or not directory.startswith('/') or ',' in directory or '\n' in directory:
+        raise Stopped('absolute_private_lease_directory_required')
+    path=Path(directory)
+    if path.resolve(strict=True)!=path or any(p.is_symlink() for p in (path,*path.parents)):
+        raise Stopped('absolute_private_lease_directory_required')
+    st=path.stat()
+    # The unprivileged host operator must traverse this non-writable directory
+    # to inspect the exact file; only UID10001 may change its contents.
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid!=uid or st.st_gid!=uid or stat.S_IMODE(st.st_mode)!=0o711:
+        raise Stopped('private_lease_directory_required')
+    lock=(path/(AUTHORITY+'.lease')).lstat()
+    if not stat.S_ISREG(lock.st_mode) or lock.st_uid!=uid or lock.st_gid!=uid or stat.S_IMODE(lock.st_mode)!=0o600 or lock.st_nlink!=1 or lock.st_dev!=st.st_dev:
+        raise Stopped('authority_lease_file_required')
+    return dict(path=str(path),device=st.st_dev,inode=st.st_ino,uid=st.st_uid,gid=st.st_gid,mode=stat.S_IMODE(st.st_mode),
+                lockDevice=lock.st_dev,lockInode=lock.st_ino)
 
 
 def cluster_http_json(route,token,deadline,limit=65536):
@@ -130,40 +149,58 @@ def volume_census(root, *, uid=10001, offline=False):
     from pathlib import Path
     root=Path(root)
     root_info=root.lstat()
-    assert stat.S_ISDIR(root_info.st_mode) and root_info.st_uid==uid and root_info.st_gid==uid
+    if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid!=uid or root_info.st_gid!=uid:raise AssertionError('state root invalid')
     def encode(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
     def sha(value):return hashlib.sha256(encode(value)).hexdigest()
     allowed={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','viewer_files','viewer_incarnations',
         'reference_jobs','reference_acceptances','reference_outbox','reference_claims','reference_worker_receipts',
         'reference_transfer_grants','reference_worker_failures','reference_terminal_acceptances','owned_maintenance_schedules',
-        'viewer_reservations','viewer_option_evidence'}
-    files=[]
-    for path in sorted(root.rglob('*')):
+        'viewer_reservations','viewer_option_evidence','coordinator_authority_lease'}
+    files=[]; pending=[root]; paths=[]
+    while pending:
+        directory=pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path=Path(entry.path);relative=path.relative_to(root)
+                if len(paths)>=4096 or len(relative.parts)>8 or len(relative.as_posix())>1024:raise AssertionError('state tree limit')
+                info=path.lstat()
+                if stat.S_ISLNK(info.st_mode):raise AssertionError('state symlink refused')
+                paths.append(path)
+                if stat.S_ISDIR(info.st_mode):pending.append(path)
+    total_bytes=0
+    for path in sorted(paths):
         relative=path.relative_to(root).as_posix();info=path.lstat()
-        assert info.st_uid==uid and info.st_gid==uid and not stat.S_ISLNK(info.st_mode)
-        # The reviewed baseline contains system metadata and empty native dirs.
-        assert relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool')
+        if info.st_uid!=uid or info.st_gid!=uid or stat.S_ISLNK(info.st_mode):raise AssertionError('state ownership or type invalid')
+        # Retained pilot plan and cancellation journals are part of state and
+        # must be copied and compared; all other unreviewed paths still hold.
+        if relative not in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool','pilot-journals') and not relative.startswith('pilot-journals/'):raise AssertionError('unreviewed state path')
+        if relative=='pilot-journals' and not stat.S_ISDIR(info.st_mode):raise AssertionError('journal root invalid')
         if stat.S_ISDIR(info.st_mode):files.append(dict(path=relative,kind='directory',mode=stat.S_IMODE(info.st_mode)))
         else:
-            assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=67108864
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>67108864:raise AssertionError('state file invalid')
+            total_bytes+=info.st_size
+            if total_bytes>268435456:raise AssertionError('state byte limit')
             fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
             try:
-                before=os.fstat(fd);assert (before.st_dev,before.st_ino)==(info.st_dev,info.st_ino)
+                before=os.fstat(fd)
+                if (before.st_dev,before.st_ino)!=(info.st_dev,info.st_ino):raise AssertionError('state identity changed')
                 h=hashlib.sha256();size=0
                 while True:
                     data=os.read(fd,1048576)
                     if not data:break
-                    size+=len(data);assert size<=info.st_size;h.update(data)
+                    size+=len(data)
+                    if size>info.st_size:raise AssertionError('state grew')
+                    h.update(data)
                 after=path.lstat()
-                assert size==info.st_size and (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+                if size!=info.st_size or (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)!=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns):raise AssertionError('state changed')
             finally:os.close(fd)
             files.append(dict(path=relative,kind='file',mode=stat.S_IMODE(info.st_mode),bytes=size,sha256=h.hexdigest()))
-    assert any(item['path']=='jobs.sqlite3' for item in files)
+    if not any(item['path']=='jobs.sqlite3' for item in files):raise AssertionError('state database missing')
     uri='file:'+str(root/'jobs.sqlite3')+'?mode=ro'+('&immutable=1' if offline else '')
     db=sqlite3.connect(uri,uri=True,timeout=3)
     try:
         db.execute('BEGIN')
-        assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+        if db.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise AssertionError('state database integrity')
         objects=[list(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
         names={row[1] for row in objects if row[0]=='table'}
         if names-allowed or not {'jobs','coordinator_identity','nodes','reference_jobs','viewer_tasks'}<=names:
@@ -185,22 +222,39 @@ def volume_census(root, *, uid=10001, offline=False):
                         or re.sub(r'\s+',' ',table[0][3]).strip()!=expected[name]
                         or indexes!=[['index','sqlite_autoindex_'+name+'_1',name,None]]
                         or len(entries)!=2):raise AssertionError('unreviewed Viewer schema')
+        if 'owned_maintenance_schedules' in names:
+            entries=[row for row in objects if row[2]=='owned_maintenance_schedules']
+            table=[row for row in entries if row[0]=='table'];indexes=[row for row in entries if row[0]=='index']
+            ddl=('CREATE TABLE owned_maintenance_schedules ( request_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,authority_id TEXT NOT NULL, '
+                 'request_sha256 TEXT NOT NULL,request_json TEXT NOT NULL,receipt_json TEXT NOT NULL)')
+            if (len(table)!=1 or not isinstance(table[0][3],str) or re.sub(r'\s+',' ',table[0][3]).strip()!=ddl or
+                    indexes!=[['index','sqlite_autoindex_owned_maintenance_schedules_1','owned_maintenance_schedules',None]] or len(entries)!=2):
+                raise AssertionError('unreviewed owned maintenance schema')
+        if 'coordinator_authority_lease' in names:
+            entries=[row for row in objects if row[2]=='coordinator_authority_lease']
+            ddl=('CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), '
+                 'required INTEGER NOT NULL CHECK(required=1))')
+            if (len(entries)!=1 or entries[0][:3]!=['table','coordinator_authority_lease','coordinator_authority_lease'] or
+                    not isinstance(entries[0][3],str) or re.sub(r'\s+',' ',entries[0][3]).strip()!=ddl or
+                    db.execute('SELECT singleton,required FROM coordinator_authority_lease').fetchall()!=[(1,1)]):
+                raise AssertionError('unreviewed authority lease marker')
         if any(row[0] in ('trigger','view') for row in objects):raise AssertionError('unreviewed database object')
         if not all(row[0]!='index' or row[1].startswith('sqlite_autoindex_') or row[1]=='viewer_engine_uuid' for row in objects):raise AssertionError('unreviewed database index')
         tables={}
         for name in sorted(names):
-            assert name in allowed
+            if name not in allowed:raise AssertionError('unreviewed database table')
             columns=[list(row) for row in db.execute('PRAGMA table_info("'+name+'")')]
             rows=[]
             for row in db.execute('SELECT * FROM "'+name+'"'):
+                if len(rows)>=100000:raise AssertionError('table census limit')
                 rows.append([{'blob':value.hex()} if isinstance(value,bytes) else value for value in row])
             rows.sort(key=encode)
             tables[name]=dict(count=len(rows),sha256=sha(rows),columns=columns)
         authority=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
         active=db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
-        assert active==0
+        if active!=0:raise AssertionError('active jobs remain')
         for name in names:
-            if (name.startswith(('reference_','viewer_')) or name=='owned_maintenance_schedules') and tables[name]['count']!=0:
+            if name.startswith(('reference_','viewer_')) and tables[name]['count']!=0:
                 raise AssertionError('nonempty guarded table')
         node_columns=[row[1] for row in db.execute('PRAGMA table_info(nodes)')]
         nodes={row[0]:dict(zip(node_columns,row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}
@@ -234,7 +288,7 @@ def normalized_schema(rows):
     return [[*row[:3],re.sub(r'\s+',' ',row[3]).strip() if row[3] is not None else None] for row in rows]
 
 
-def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False):
+def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False, allow_lease_addition=False):
     """Compare complete censuses; allow exact empty additions only explicitly.
 
     Viewer additions are permitted for candidate verification, not the offline
@@ -258,6 +312,17 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
                 or a['tables']['owned_maintenance_schedules']['count']!=0):raise Stopped('unreviewed_owned_schema_or_receipts')
         a['schema']=[row for row in a['schema'] if row[2]!='owned_maintenance_schedules']
         a['tables'].pop('owned_maintenance_schedules')
+    if allow_lease_addition and 'coordinator_authority_lease' not in b['tables'] and 'coordinator_authority_lease' in a['tables']:
+        marker=[row for row in a['schema'] if row[2]=='coordinator_authority_lease']
+        ddl=('CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), '
+             'required INTEGER NOT NULL CHECK(required=1))')
+        if (len(marker)!=1 or marker[0][:3]!=['table','coordinator_authority_lease','coordinator_authority_lease'] or
+                not isinstance(marker[0][3],str) or re.sub(r'\s+',' ',marker[0][3]).strip()!=ddl or
+                a['tables']['coordinator_authority_lease']['count']!=1 or
+                a['tables']['coordinator_authority_lease']['sha256']!=digest([[1,1]])):
+            raise Stopped('unreviewed_authority_lease_marker')
+        a['schema']=[row for row in a['schema'] if row[2]!='coordinator_authority_lease']
+        a['tables'].pop('coordinator_authority_lease')
     for value in (a,b):
         # SQLite page layout changes during our own maintenance; all logical
         # bytes remain bound separately, while the raw file hash is retained.
@@ -290,12 +355,15 @@ print(json.dumps(dict(root=dict(dev=rs.st_dev,ino=rs.st_ino,uid=rs.st_uid,gid=rs
 """
 
 
-def application_environment(transport, item):
+def application_environment(transport, item, *, lease=False):
     env=transport.environment()
     defaults=dict(value.split('=',1) for value in transport.image(item['Image'])['Config'].get('Env',[]))
-    observed=dict(value.split('=',1) for value in item['Config']['Env'])
+    entries=item['Config']['Env'];observed=dict(value.split('=',1) for value in entries)
+    if len(observed)!=len(entries):raise Stopped('duplicate_application_environment_key')
     application=dict(env,PROCESSING_REFERENCE_CONFIG=legacy.CONFIG_PATH)
-    if observed!=dict(defaults,**application):raise Stopped('reference_application_environment_changed')
+    expected=dict(defaults,**application)
+    if lease:expected['PROCESSING_AUTHORITY_LEASE_DIR']='/run/ledgetop-authority-lease'
+    if observed!=expected:raise Stopped('reference_application_environment_changed')
     return digest(application)
 
 
@@ -335,18 +403,26 @@ s=p.parent.stat();assert s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077
 os.mkdir(p,0o700);os.chown(p,10001,10001)
 fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 '''
-    transport.command(['sudo','-n','python3','-c',installer,str(destination)])
+    transport.command(['sudo','-n','python3','-I','-c',installer,str(destination)])
     info=destination.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=10001 or info.st_gid!=10001 or stat.S_IMODE(info.st_mode)!=0o700):
         raise Stopped('private_numeric_uid_backup_required')
     return json.loads(transport.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
         '--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script(),timeout=120))
+        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-I','-c',backup_script(),timeout=120))
 
 
 class ReferenceCoordinatorUpdate:
-    def __init__(self,root,*,gate_factory,transport=legacy,cluster_probe=None):
+    def __init__(self,root,*,gate_factory,transport=legacy,cluster_probe=None,predecessor=None,lease_dir=None):
+        if predecessor is None:predecessor=(OLD_ID,OLD_IMAGE,OLD_SOURCE)
+        if (not isinstance(predecessor,tuple) or len(predecessor)!=3 or
+                not isinstance(predecessor[0],str) or not re.fullmatch(r'[a-f0-9]{64}',predecessor[0]) or
+                not isinstance(predecessor[1],str) or not re.fullmatch(r'sha256:[a-f0-9]{64}',predecessor[1]) or
+                not isinstance(predecessor[2],str) or not re.fullmatch(r'[a-f0-9]{40}',predecessor[2])):
+            raise Stopped('exact_predecessor_identity_required')
+        self.old_id,self.old_image,self.old_source=predecessor
+        self.lease_dir=lease_dir
         self.root=Path(root).absolute();self.t=transport;self.gate_factory=gate_factory
         self.cluster_probe=cluster_probe or self.cluster_idle
         if self.root.resolve()!=self.root or any(path.is_symlink() for path in (self.root,*self.root.parents)):
@@ -364,12 +440,15 @@ class ReferenceCoordinatorUpdate:
         self.validate(state);return state
 
     def validate(self,state):
+        if ((self.lease_dir is None and 'leaseBinding' in state) or
+                (self.lease_dir is not None and state.get('leaseBinding')!=lease_binding(self.lease_dir))):
+            raise Stopped('lease_binding_changed')
         if (state.get('schemaVersion')!=2 or state.get('mode')!=MODE or state.get('authorityId')!=AUTHORITY
-                or state.get('old',{}).get('containerId')!=OLD_ID or state['old'].get('image')!=OLD_IMAGE
+                or state.get('old',{}).get('containerId')!=self.old_id or state['old'].get('image')!=self.old_image
                 or state.get('gateBinding')!=self.gate_factory.binding):raise Stopped('reference_update_checkpoint_binding_changed')
         if (type(state.get('image')) is not str or not re.fullmatch(r'sha256:[a-f0-9]{64}',state['image'])
                 or type(state.get('sourceCommit')) is not str or not re.fullmatch(r'[a-f0-9]{40}',state['sourceCommit'])
-                or state.get('oldSourceCommit')!=OLD_SOURCE or type(state.get('operation')) is not str
+                or state.get('oldSourceCommit')!=self.old_source or type(state.get('operation')) is not str
                 or not re.fullmatch(r'[a-f0-9]{32}',state['operation'])
                 or state.get('rollbackName')!=NAME+'-pre-reference-update-'+state['operation']
                 or state.get('failedName')!=NAME+'-failed-reference-update-'+state['operation']
@@ -385,8 +464,8 @@ class ReferenceCoordinatorUpdate:
             if self.t.docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():raise Stopped('offline_volume_has_owner')
             raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
                 '--cap-drop','ALL','--security-opt','no-new-privileges','--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-                '--entrypoint','python',state['image'],'-c',code)
-        else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
+                '--entrypoint','python',state['image'],'-I','-c',code)
+        else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-I','-c',code)
         result=json.loads(raw)
         if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=12:raise Stopped('reviewed_idle_history_required')
         return result
@@ -395,7 +474,7 @@ class ReferenceCoordinatorUpdate:
         raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
             '--cap-drop','ALL','--security-opt','no-new-privileges','--mount',
             'type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
-            '--entrypoint','python',state['image'],'-c',TLS_CENSUS)
+            '--entrypoint','python',state['image'],'-I','-c',TLS_CENSUS)
         return json.loads(raw)
 
     def cluster_idle(self,state):
@@ -427,10 +506,10 @@ class ReferenceCoordinatorUpdate:
 
     def original(self,state=None):
         item=self.t.inspected(NAME)
-        if (item['Id']!=OLD_ID or item['Image']!=OLD_IMAGE or not item['State']['Running']
+        if (item['Id']!=self.old_id or item['Image']!=self.old_image or not item['State']['Running']
                 or item['State'].get('Health',{}).get('Status')!='healthy'):raise Stopped('exact_current_reference_primary_required')
-        facts=self.t.facts(item,reference=True);self.t.sole_owner(OLD_ID)
-        if self.t.image(OLD_IMAGE)['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=OLD_SOURCE:
+        facts=self.t.facts(item,reference=True);self.t.sole_owner(self.old_id)
+        if self.t.image(self.old_image)['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=self.old_source:
             raise Stopped('predecessor_source_changed')
         if state and (facts!=state['old'] or application_environment(self.t,item)!=state['applicationEnvironmentSha256']):
             raise Stopped('prepared_reference_primary_changed')
@@ -441,7 +520,7 @@ class ReferenceCoordinatorUpdate:
 
     def prepare(self,target,source_commit,main_image):
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',target) or not re.fullmatch(r'[0-9a-f]{40}',source_commit):raise Stopped('immutable_candidate_required')
-        if target==OLD_IMAGE:raise Stopped('new_reference_image_required')
+        if target==self.old_image:raise Stopped('new_reference_image_required')
         if (self.root/'checkpoint.json').exists():raise Stopped('new_private_operation_required')
         old,original=self.original();application=application_environment(self.t,old)
         candidate=self.t.image(target)
@@ -457,10 +536,11 @@ class ReferenceCoordinatorUpdate:
                 or not re.fullmatch(r'sha256:[0-9a-f]{64}',main_image)):raise Stopped('verified_processing_images_required')
         operation=uuid.uuid4().hex
         state=dict(schemaVersion=2,mode=MODE,operation=operation,phase='preparing',image=target,sourceCommit=source_commit,
-            oldSourceCommit=OLD_SOURCE,old=original,authorityId=AUTHORITY,history=history,plans={},
+            oldSourceCommit=self.old_source,old=original,authorityId=AUTHORITY,history=history,plans={},
             applicationEnvironmentSha256=application,gateBinding=self.gate_factory.binding,
             engineImages=dict(main=main_image,cluster=cluster['Image']),clusterContainerId=cluster['Id'],
             rollbackName=NAME+'-pre-reference-update-'+operation,failedName=NAME+'-failed-reference-update-'+operation)
+        if self.lease_dir is not None:state['leaseBinding']=lease_binding(self.lease_dir)
         self.validate(state)
         self.cluster_probe(state)
         for name in (state['rollbackName'],state['failedName']):
@@ -490,8 +570,16 @@ class ReferenceCoordinatorUpdate:
         if (not re.fullmatch(r'[a-f0-9]{64}',item['Id']) or item['Image']!=state['image']
                 or item['Config'].get('Labels',{}).get(LABEL)!=state['operation']
                 or item['Name'] not in ('/'+NAME,'/'+state['failedName'])):raise Stopped('foreign_candidate_refused')
-        self.t.facts(item,reference=True)
-        if application_environment(self.t,item)!=state['applicationEnvironmentSha256']:raise Stopped('candidate_application_environment_changed')
+        if self.lease_dir is not None:
+            if state.get('leaseBinding')!=lease_binding(self.lease_dir):raise Stopped('lease_binding_changed')
+            mounts=item.get('Mounts') or []
+            leases=[m for m in mounts if m.get('Destination')=='/run/ledgetop-authority-lease']
+            if (len(leases)!=1 or leases[0].get('Type')!='bind' or leases[0].get('Source')!=self.lease_dir or leases[0].get('RW') is not True):
+                raise Stopped('candidate_lease_mount_changed')
+            original=dict(item,Mounts=[m for m in mounts if m.get('Destination')!='/run/ledgetop-authority-lease'])
+            self.t.facts(original,reference=True)
+        else:self.t.facts(item,reference=True)
+        if application_environment(self.t,item,lease=self.lease_dir is not None)!=state['applicationEnvironmentSha256']:raise Stopped('candidate_application_environment_changed')
         self.save(state,newContainerId=item['Id']);return item
 
     def plans(self,state,api):
@@ -519,14 +607,19 @@ class ReferenceCoordinatorUpdate:
             if observed['nodeRows'][identifier]!=expected:raise Stopped('unowned_node_row_transition')
 
     def create_args(self,state):
-        return ('create','--name',NAME,'--pull=never','--init','--restart','unless-stopped','--network','bridge',
+        args=('create','--name',NAME,'--pull=never','--init','--restart','unless-stopped','--network','bridge',
             '--read-only','--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
             '--pids-limit','64','--cpus','0.5','--memory','256m','--memory-swap','512m','--ipc','private','--shm-size','64m',
             '--log-driver','json-file','--workdir','/app','--env-file',str(legacy.NATIVE_ENV),'-e','PROCESSING_REFERENCE_CONFIG='+legacy.CONFIG_PATH,
             '--mount','type=volume,src='+VOLUME+',dst=/prototype-state',
             '--mount','type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
             '-p','127.0.0.1:18080:8080','-p','192.168.50.89:3005:8080','-p','192.168.50.89:18443:8443',
-            '--label',LABEL+'='+state['operation'],state['image'])
+            '--label',LABEL+'='+state['operation'])
+        if self.lease_dir is not None:
+            if state.get('leaseBinding')!=lease_binding(self.lease_dir):raise Stopped('lease_binding_changed')
+            args+=('-e','PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease',
+                   '--mount','type=bind,src='+self.lease_dir+',dst=/run/ledgetop-authority-lease')
+        return args+(state['image'],)
 
     def backup(self,state,gates):
         self.check(state,gates)
@@ -546,9 +639,9 @@ class ReferenceCoordinatorUpdate:
             self.check(state,gates)
             if not state.get('reopeningStarted'):
                 self.activity(state,api)
-                observed=self.census(state,container=state.get('newContainerId') or OLD_ID)
+                observed=self.census(state,container=state.get('newContainerId') or self.old_id)
                 self.node_census(state,observed)
-                compatible(observed,state['drained'],allow_owned=True,allow_viewer_additions=True)
+                compatible(observed,state['drained'],allow_owned=True,allow_viewer_additions=True,allow_lease_addition=self.lease_dir is not None)
             current=api.json('GET','/v1/prototype/nodes/'+identifier)['node']
             if current['planId']!=plan['planId'] or current['targetImage']!=state['engineImages'][identifier]:raise Stopped('cannot_reopen_peer_plan')
             intent=plan.get('cancelIntent')
@@ -598,12 +691,12 @@ class ReferenceCoordinatorUpdate:
                 drained=self.census(state);self.node_census(state,drained)
                 compatible(drained,state['baseline'],ignore_nodes=True)
                 self.save(state,'stop_old_pending',drained=drained)
-                self.mutation(state,gates,'stop','--time','-1',OLD_ID,timeout=60)
-                if self.t.inspected(OLD_ID)['State']['Running']:raise Stopped('old_not_confirmed_stopped')
+                self.mutation(state,gates,'stop','--time','-1',self.old_id,timeout=60)
+                if self.t.inspected(self.old_id)['State']['Running']:raise Stopped('old_not_confirmed_stopped')
                 compatible(self.census(state,offline=True),drained)
                 self.save(state,'backup_pending');backed=self.backup(state,gates)
                 self.save(state,'rename_old_pending',backup=backed)
-                self.mutation(state,gates,'rename',OLD_ID,state['rollbackName'])
+                self.mutation(state,gates,'rename',self.old_id,state['rollbackName'])
                 self.save(state,'create_pending')
                 identifier=self.mutation(state,gates,*self.create_args(state)).strip()
                 if not re.fullmatch(r'[a-f0-9]{64}',identifier):raise Stopped('create_response_unknown')
@@ -614,7 +707,7 @@ class ReferenceCoordinatorUpdate:
                 self.save(state,'started',replacementStarted=True)
                 self.t.health(api,container_id=identifier);self.t.sole_owner(identifier)
                 self.check(state,gates);self.activity(state,api);self.plans(state,api)
-                compatible(self.census(state,container=identifier),drained,allow_owned=True,allow_viewer_additions=True)
+                compatible(self.census(state,container=identifier),drained,allow_owned=True,allow_viewer_additions=True,allow_lease_addition=self.lease_dir is not None)
                 verified=self.t.verify_reference();verified.update(owned_api_probe(operator))
                 self.save(state,'verified',verification=verified)
                 self.reopen(state,gates,api,operator)
@@ -641,9 +734,9 @@ class ReferenceCoordinatorUpdate:
 
     def finish_rollback(self,state,gates):
         self.check(state,gates);self.original(state)
-        _env,api,operator=self.t.local_clients();self.t.health(api,container_id=OLD_ID)
-        self.t.sole_owner(OLD_ID);self.activity(state,api)
-        compatible(self.census(state,container=OLD_ID),state['drained'],allow_owned=True)
+        _env,api,operator=self.t.local_clients();self.t.health(api,container_id=self.old_id)
+        self.t.sole_owner(self.old_id);self.activity(state,api)
+        compatible(self.census(state,container=self.old_id),state['drained'],allow_owned=True)
         self.t.verify_reference()
         state.pop('newContainerId',None)
         self.reopen(state,gates,api,operator)
@@ -656,7 +749,7 @@ class ReferenceCoordinatorUpdate:
         if state.get('reopeningStarted') or state.get('pendingPlan'):raise Stopped('reopen_or_schedule_uncertainty_prevents_rollback')
         with self.gate_factory() as gates:
             self.check(state,gates);item=self.candidate(state)
-            old=self.t.inspected(OLD_ID)
+            old=self.t.inspected(self.old_id)
             if old['State']['Running']:
                 if state['phase']!='rollback_start_old_pending' or old['Name']!='/'+NAME:
                     raise Stopped('unexpected_running_predecessor')
@@ -673,16 +766,16 @@ class ReferenceCoordinatorUpdate:
             except Exception:
                 if item is not None:self.retain(state,gates,item)
                 raise Stopped('offline_rollback_refused') from None
-            old=self.t.inspected(OLD_ID)
-            if old['Image']!=OLD_IMAGE or old['Name'] not in ('/'+NAME,'/'+state['rollbackName']):raise Stopped('exact_old_reference_rollback_only')
+            old=self.t.inspected(self.old_id)
+            if old['Image']!=self.old_image or old['Name'] not in ('/'+NAME,'/'+state['rollbackName']):raise Stopped('exact_old_reference_rollback_only')
             self.t.facts(old,reference=True)
             if application_environment(self.t,old)!=state['applicationEnvironmentSha256']:raise Stopped('rollback_application_environment_changed')
             if item is not None and item['Name']=='/'+NAME:
                 self.save(state,'rollback_rename_candidate_pending');self.mutation(state,gates,'rename',item['Id'],state['failedName'])
             if old['Name']!='/'+NAME:
-                self.save(state,'rollback_rename_old_pending');self.mutation(state,gates,'rename',OLD_ID,NAME)
+                self.save(state,'rollback_rename_old_pending');self.mutation(state,gates,'rename',self.old_id,NAME)
             if not old['State']['Running']:
-                self.save(state,'rollback_start_old_pending');self.mutation(state,gates,'start',OLD_ID)
+                self.save(state,'rollback_start_old_pending');self.mutation(state,gates,'start',self.old_id)
             self.finish_rollback(state,gates)
         return state
 
@@ -727,10 +820,18 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=('prepare','activate','rollback'))
     parser.add_argument('--image',required=True);parser.add_argument('--source-commit',required=True)
+    parser.add_argument('--predecessor-id',required=True);parser.add_argument('--predecessor-image',required=True)
+    parser.add_argument('--predecessor-source',required=True)
+    parser.add_argument('--lease-dir',required=True,help='existing private host authority lease directory')
     parser.add_argument('--receipt-dir',required=True);parser.add_argument('--verified-main-image',required=True)
     parser.add_argument('--gate-config',required=True,help='private reviewed live dual-host gate bridge configuration')
     args=parser.parse_args(argv)
     try:
+        if (not re.fullmatch(r'[a-f0-9]{64}',args.predecessor_id) or
+                not re.fullmatch(r'sha256:[a-f0-9]{64}',args.predecessor_image) or
+                not re.fullmatch(r'[a-f0-9]{40}',args.predecessor_source)):
+            raise Stopped('exact_predecessor_identity_required')
+        lease_binding(args.lease_dir)
         if os.name!='posix':raise Stopped('linux_reference_update_required')
         import pwd
         if (os.geteuid()!=1000 or pwd.getpwuid(os.geteuid()).pw_name!='bkoltz'
@@ -745,7 +846,8 @@ def main(argv=None):
                 root.mkdir(mode=0o700)
             state=None if args.action=='prepare' else json.loads(legacy.private_file(root/'checkpoint.json').read_text())
             factory=GateFactory(json.loads(legacy.private_file(args.gate_config).read_text()),operation_id=state['operation'] if state else None)
-            updater=ReferenceCoordinatorUpdate(root,gate_factory=factory)
+            updater=ReferenceCoordinatorUpdate(root,gate_factory=factory,
+                predecessor=(args.predecessor_id,args.predecessor_image,args.predecessor_source),lease_dir=args.lease_dir)
             if args.action=='prepare':state=updater.prepare(args.image,args.source_commit,args.verified_main_image)
             else:
                 if not ACTIVATION_REVIEWED:raise Stopped('source_review_required_before_activation')

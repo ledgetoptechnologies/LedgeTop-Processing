@@ -1,13 +1,18 @@
 """Controller tests use real local children/pipes, never SSH or a Docker daemon."""
 import json
+import hashlib
+import io
+import os
 from pathlib import Path
 import shlex
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 
 from ops import run_coordinator_update_bridge as controller
+from ops.make_cutover_manifest import manifest_from_archive
 from ops.coordinator_gate_bridge import BridgeError, helper_digest
 from processing.node_gate import GateError
 
@@ -22,15 +27,46 @@ def configuration():
 
 
 def specification(**changes):
-    values = dict(action='activate', source_commit='b' * 40, image='sha256:' + 'c' * 64,
+    values = dict(action='activate', source_commit='b' * 40, bundle_commit='f' * 40,bundle_manifest_sha256='a'*64, image='sha256:' + 'c' * 64,
         main_image='sha256:' + 'd' * 64, operation_id='e' * 32,
         receipt_dir=controller.BASE + '/test-update/receipt',
-        gate_config=controller.BASE + '/test-update/bridge.json')
+        gate_config=controller.BASE + '/test-update/bridge.json',predecessor_id='1'*64,
+        predecessor_image='sha256:'+'2'*64,predecessor_source='3'*40,lease_dir=controller.BASE+'/test-update/lease')
     values.update(changes)
     return controller.RunSpec(**values)
 
 
 class ControllerTests(unittest.TestCase):
+    def test_manifest_builder_pins_content_and_rejects_links(self):
+        def archive(entries):
+            out=io.BytesIO()
+            with tarfile.open(fileobj=out,mode='w') as t:
+                for name,data,kind in entries:
+                    item=tarfile.TarInfo(name);item.type=kind;item.size=len(data) if kind==tarfile.REGTYPE else 0
+                    if kind==tarfile.SYMTYPE:item.linkname='elsewhere'
+                    t.addfile(item,io.BytesIO(data) if kind==tarfile.REGTYPE else None)
+            return out.getvalue()
+        result=json.loads(manifest_from_archive(archive([('ops/a.py',b'hello',tarfile.REGTYPE)])))
+        self.assertEqual(result,{'ops/a.py':hashlib.sha256(b'hello').hexdigest()})
+        with self.assertRaises(ValueError):manifest_from_archive(archive([('ops/a',b'',tarfile.SYMTYPE)]))
+        with self.assertRaises(ValueError):manifest_from_archive(archive([('ops/../bad',b'x',tarfile.REGTYPE)]))
+    @unittest.skipUnless(os.name=='posix','Linux source verification')
+    def test_bootstrap_verifies_manifest_before_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'ops').mkdir();(root/'processing').mkdir()
+            (root/'ops'/'__init__.py').write_text('')
+            (root/'ops'/'coordinator_gate_bridge.py').write_text("print('IMPORTED')\ndef helper_digest(): return 'a'*64\nclass BridgeBinding:\n def __init__(self,**kwargs): pass\nclass MainEngineProbe:\n def __init__(self,**kwargs): pass\ndef serve_main(*args,**kwargs): print('READY')\n")
+            files={p.relative_to(root).as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'ops').rglob('*') if p.is_file()}
+            manifest=json.dumps(files,sort_keys=True,separators=(',',':')).encode();(root/'cutover-source-manifest.json').write_bytes(manifest)
+            payload=dict(source=str(root),bundleManifestSha256=hashlib.sha256(manifest).hexdigest(),hostname='test',role='main',helperSha256='a'*64,operation='b'*32,sessionNonce='c'*64,timeoutSeconds=2,expectedMainImage='sha256:'+'d'*64,binding=dict(engineId='x',nodeId='main',authorityId='y',coordinatorOrigin='http://127.0.0.1:18080',generation=1,helperSha256='a'*64))
+            program=controller.BOOTSTRAP.replace("if os.geteuid()!=1000 or pwd.getpwuid(os.geteuid()).pw_name!='bkoltz':raise RuntimeError('account mismatch')","if False:raise RuntimeError('account mismatch')").replace("if socket.gethostname().split('.')[0].lower()!=p['hostname']:raise RuntimeError('host mismatch')","if False:raise RuntimeError('host mismatch')")
+            def run():return subprocess.run([sys.executable,'-I','-B','-c',program,json.dumps(payload)],capture_output=True,text=True,timeout=10)
+            good=run();self.assertEqual(good.returncode,0,good.stderr);self.assertIn('READY',good.stdout)
+            (root/'ops'/'coordinator_gate_bridge.py').write_text("print('TAMPERED')\n")
+            bad=run();self.assertNotEqual(bad.returncode,0);self.assertNotIn('TAMPERED',bad.stdout)
+            (root/'ops'/'coordinator_gate_bridge.py').write_text("print('IMPORTED')\ndef helper_digest(): return 'a'*64\nclass BridgeBinding:\n def __init__(self,**kwargs): pass\nclass MainEngineProbe:\n def __init__(self,**kwargs): pass\ndef serve_main(*args,**kwargs): print('READY')\n")
+            (root/'processing'/'extra.py').write_text("print('EXTRA')\n")
+            extra=run();self.assertNotEqual(extra.returncode,0);self.assertNotIn('IMPORTED',extra.stdout)
     def test_remote_commands_are_one_quoted_static_program_and_closed_json(self):
         spec = specification(); config = configuration()
         for node in ('main', 'cluster'):
@@ -41,12 +77,17 @@ class ControllerTests(unittest.TestCase):
             self.assertIn('ClearAllForwardings=yes', argv)
             self.assertIn('ControlPath=none', argv)
             program = shlex.split(argv[-1])
-            self.assertEqual(program[:4], ['python3', '-B', '-c', controller.BOOTSTRAP])
-            payload = json.loads(program[4])
+            self.assertEqual(program[:5], ['python3', '-I', '-B', '-c', controller.BOOTSTRAP])
+            payload = json.loads(program[5])
             self.assertEqual(payload['source'], spec.source)
             self.assertEqual(payload['role'], node)
             self.assertEqual(payload['operation'], spec.operation_id)
             if node == 'main': self.assertEqual(payload['expectedMainImage'], spec.main_image)
+            else:
+                arguments=payload['arguments']
+                for flag,value in [('--predecessor-id',spec.predecessor_id),('--predecessor-image',spec.predecessor_image),
+                                   ('--predecessor-source',spec.predecessor_source),('--lease-dir',spec.lease_dir)]:
+                    self.assertEqual(arguments[arguments.index(flag)+1],value)
             self.assertNotIn('token', json.dumps(payload).lower())
 
     def test_rejects_unprepared_actions_tags_shell_text_and_other_remote_roots(self):
@@ -54,7 +95,9 @@ class ControllerTests(unittest.TestCase):
             dict(operation_id='e' * 32 + ';whoami'), dict(receipt_dir='/tmp/receipt'),
             dict(receipt_dir=controller.BASE + '/../receipt'),
             dict(gate_config=controller.BASE + '/$(whoami).json'),
-            dict(gate_config=controller.BASE + '/x//bridge.json')]
+            dict(gate_config=controller.BASE + '/x//bridge.json'),dict(bundle_commit='main'),dict(bundle_manifest_sha256='bad'),
+            dict(predecessor_id='latest'),dict(predecessor_image='latest'),dict(predecessor_source='main'),
+            dict(lease_dir='/tmp/lease')]
         for changes in invalid:
             with self.subTest(changes=changes), self.assertRaises(BridgeError):
                 specification(**changes)

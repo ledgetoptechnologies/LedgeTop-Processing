@@ -7,6 +7,7 @@ never authorization to retry a deployment or clear a durable node reservation.
 """
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -84,16 +85,28 @@ def validate_config(config):
 class RunSpec:
     action: str
     source_commit: str
+    bundle_commit: str
+    bundle_manifest_sha256: str
     image: str
     main_image: str
     operation_id: str
     receipt_dir: str
     gate_config: str
+    predecessor_id: str
+    predecessor_image: str
+    predecessor_source: str
+    lease_dir: str
 
     def __post_init__(self):
         if self.action not in ('activate', 'rollback'):
             raise BridgeError('prepared_update_action_required')
-        _commit(self.source_commit); _image(self.image); _image(self.main_image)
+        _commit(self.source_commit); _commit(self.bundle_commit); _image(self.image); _image(self.main_image)
+        if type(self.bundle_manifest_sha256) is not str or not re.fullmatch(r'[a-f0-9]{64}',self.bundle_manifest_sha256):
+            raise BridgeError('exact_bundle_manifest_required')
+        if type(self.predecessor_id) is not str or not re.fullmatch(r'[a-f0-9]{64}',self.predecessor_id):
+            raise BridgeError('exact_predecessor_container_required')
+        _image(self.predecessor_image); _commit(self.predecessor_source)
+        _private_remote_path(self.lease_dir)
         if type(self.operation_id) is not str or not re.fullmatch(r'[a-f0-9]{32}', self.operation_id):
             raise BridgeError('prepared_update_operation_required')
         _private_remote_path(self.receipt_dir)
@@ -101,21 +114,62 @@ class RunSpec:
 
     @property
     def source(self):
-        return BASE + '/reference-' + self.source_commit + '/source'
+        return BASE + '/reference-' + self.bundle_commit + '/source'
 
 
 # These programs are constant code. All variable inputs are one JSON argument,
 # POSIX-quoted with shlex.join; no code/string formatting of a shell program.
-BOOTSTRAP = '''import json,os,pathlib,pwd,socket,sys
+BOOTSTRAP = '''import hashlib,json,os,pathlib,pwd,re,socket,stat,sys
 p=json.loads(sys.argv[1]);root=pathlib.Path(p['source'])
-assert os.geteuid()==1000 and pwd.getpwuid(os.geteuid()).pw_name=='bkoltz'
-assert socket.gethostname().split('.')[0].lower()==p['hostname']
-assert root.is_absolute() and root.is_dir()
-assert not any(x.is_symlink() for x in (root,*root.parents))
+if os.geteuid()!=1000 or pwd.getpwuid(os.geteuid()).pw_name!='bkoltz':raise RuntimeError('account mismatch')
+if socket.gethostname().split('.')[0].lower()!=p['hostname']:raise RuntimeError('host mismatch')
+if not root.is_absolute() or not root.is_dir() or any(x.is_symlink() for x in (root,*root.parents)):raise RuntimeError('source root invalid')
+manifest=root/'cutover-source-manifest.json'
+fd=os.open(manifest,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+ st=os.fstat(fd)
+ if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>1048576:raise RuntimeError('manifest invalid')
+ data=os.read(fd,1048577)
+ if len(data)!=st.st_size or hashlib.sha256(data).hexdigest()!=p['bundleManifestSha256']:raise RuntimeError('manifest changed')
+finally:os.close(fd)
+def unique(items):
+ out={}
+ for k,v in items:
+  if k in out:raise RuntimeError('duplicate manifest path')
+  out[k]=v
+ return out
+expected=json.loads(data,object_pairs_hook=unique)
+if not isinstance(expected,dict) or not expected or len(expected)>4096:raise RuntimeError('manifest invalid')
+seen=set();pending=[root/'ops',root/'processing'];total=0;entries_seen=0
+while pending:
+ directory=pending.pop();ds=directory.lstat()
+ if not stat.S_ISDIR(ds.st_mode) or stat.S_ISLNK(ds.st_mode):raise RuntimeError('source directory invalid')
+ with os.scandir(directory) as entries:
+  for entry in entries:
+   entries_seen+=1
+   if entries_seen>8192:raise RuntimeError('source tree limit')
+   q=pathlib.Path(entry.path);relative=q.relative_to(root).as_posix();st=q.lstat()
+   if stat.S_ISLNK(st.st_mode):raise RuntimeError('source symlink refused')
+   if stat.S_ISDIR(st.st_mode):pending.append(q);continue
+   if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>4194304 or len(seen)>=4096 or relative not in expected:raise RuntimeError('source file invalid')
+   fd=os.open(q,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+   try:
+    a=os.fstat(fd);raw=b''
+    if (a.st_dev,a.st_ino)!=(st.st_dev,st.st_ino):raise RuntimeError('source identity changed')
+    while len(raw)<=4194304:
+     chunk=os.read(fd,65536)
+     if not chunk:break
+     raw+=chunk
+    z=os.fstat(fd)
+    if len(raw)!=st.st_size or (z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns)!=(a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns) or hashlib.sha256(raw).hexdigest()!=expected[relative]:raise RuntimeError('source changed')
+   finally:os.close(fd)
+   total+=len(raw)
+   if total>67108864:raise RuntimeError('source bound exceeded')
+   seen.add(relative)
+if seen!=set(expected):raise RuntimeError('source manifest incomplete')
 sys.path.insert(0,str(root));sys.dont_write_bytecode=True
 from ops import coordinator_gate_bridge as b
-assert pathlib.Path(b.__file__).resolve()==root/'ops/coordinator_gate_bridge.py'
-assert b.helper_digest()==p['helperSha256']
+if pathlib.Path(b.__file__).resolve()!=root/'ops/coordinator_gate_bridge.py' or b.helper_digest()!=p['helperSha256']:raise RuntimeError('gate helper changed')
 if p['role']=='main':
  r=p['binding'];binding=b.BridgeBinding(engine_id=r['engineId'],node_id=r['nodeId'],authority_id=r['authorityId'],coordinator_origin=r['coordinatorOrigin'],gate_generation=r['generation'],helper_sha256=r['helperSha256'])
  b.serve_main(sys.stdin.buffer,sys.stdout.buffer,binding=binding,operation_id=p['operation'],session_nonce=p['sessionNonce'],engine_probe=b.MainEngineProbe(expected_image=p['expectedMainImage']),timeout_seconds=p['timeoutSeconds'])
@@ -129,7 +183,7 @@ def ssh_argv(node, spec, config):
     if node not in HOSTS or type(spec) is not RunSpec:
         raise BridgeError('fixed_processing_ssh_target_required')
     bindings = validate_config(config)
-    payload = dict(source=spec.source, role=node, hostname='node' if node == 'main' else 'cluster',
+    payload = dict(source=spec.source, bundleManifestSha256=spec.bundle_manifest_sha256, role=node, hostname='node' if node == 'main' else 'cluster',
         helperSha256=helper_digest(), operation=spec.operation_id,
         sessionNonce=config['sessionNonce'], timeoutSeconds=config['timeoutSeconds'])
     if node == 'main':
@@ -138,8 +192,10 @@ def ssh_argv(node, spec, config):
     else:
         payload['arguments'] = [spec.action, '--image', spec.image, '--source-commit', spec.source_commit,
             '--receipt-dir', spec.receipt_dir, '--verified-main-image', spec.main_image,
-            '--gate-config', spec.gate_config]
-    command = shlex.join(['python3', '-B', '-c', BOOTSTRAP,
+            '--gate-config', spec.gate_config, '--predecessor-id',spec.predecessor_id,
+            '--predecessor-image',spec.predecessor_image,'--predecessor-source',spec.predecessor_source,
+            '--lease-dir',spec.lease_dir]
+    command = shlex.join(['python3', '-I', '-B', '-c', BOOTSTRAP,
         json.dumps(payload, sort_keys=True, separators=(',', ':'), allow_nan=False)])
     return [str(SSH), *OPTIONS, HOSTS[node], command]
 
@@ -201,8 +257,9 @@ def run(spec, config, evidence_dir, *, popen=subprocess.Popen, relay_factory=Roo
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('activate', 'rollback'))
-    for flag in ('source-commit', 'image', 'main-image', 'operation-id', 'receipt-dir',
-                 'gate-config', 'local-gate-config', 'evidence-dir'):
+    for flag in ('source-commit', 'bundle-commit', 'bundle-manifest-sha256', 'image', 'main-image', 'operation-id', 'receipt-dir',
+                 'gate-config', 'local-gate-config', 'evidence-dir', 'predecessor-id', 'predecessor-image',
+                 'predecessor-source', 'lease-dir'):
         parser.add_argument('--' + flag, required=True)
     args = parser.parse_args(argv)
     try:
@@ -212,8 +269,12 @@ def main(argv=None):
         if not config_path.is_absolute() or config_path.is_symlink() or config_path.stat().st_size > 16384:
             raise BridgeError('bounded_local_gate_configuration_required')
         config = json.loads(config_path.read_text(encoding='utf-8'))
-        spec = RunSpec(args.action, args.source_commit, args.image, args.main_image,
-            args.operation_id, args.receipt_dir, args.gate_config)
+        spec = RunSpec(args.action, args.source_commit, args.bundle_commit, args.bundle_manifest_sha256, args.image, args.main_image,
+            args.operation_id, args.receipt_dir, args.gate_config, args.predecessor_id,
+            args.predecessor_image,args.predecessor_source,args.lease_dir)
+        from ops.make_cutover_manifest import manifest_for_commit
+        if hashlib.sha256(manifest_for_commit(spec.bundle_commit)).hexdigest()!=spec.bundle_manifest_sha256:
+            raise BridgeError('bundle_manifest_commit_mismatch')
         return run(spec, config, args.evidence_dir)
     except Exception:
         print('Coordinator update bridge held. Inspect private SSH evidence and the existing checkpoint; do not replay.', file=sys.stderr)

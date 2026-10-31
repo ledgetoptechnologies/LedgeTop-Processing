@@ -24,6 +24,17 @@ shell program or shell invocation on Windows.
 Stage the exact reviewed source bundle on both PCs at
 `/home/bkoltz/.local/share/ledgetop-processing-reference/reference-<full-commit>/source`.
 Run the Windows controller from a byte-identical extraction of that bundle.
+This revised controller accepts a separate `--bundle-commit` and candidate-image
+`--source-commit`. Generate `cutover-source-manifest.json` from the exact bundle
+commit with `python -m ops.make_cutover_manifest <bundle-commit> <new-output>`;
+copy that file into the staged source root on each PC and supply its SHA-256 as
+`--bundle-manifest-sha256`. The controller recomputes the digest from the local
+Git commit; each remote bootstrap verifies every file under `ops` and
+`processing`, refusing unlisted files and symlinks before importing the bundle.
+Supply the exact `--predecessor-id`, `--predecessor-image`,
+`--predecessor-source` and existing `--lease-dir` on every invocation. These
+must match the previously prepared checkpoint. This revised path is not yet
+approved for live activation.
 The bridge hashes its own source and the imported NodeGate source. Windows Git
 line-ending conversion can change those hashes; a checkout that differs from
 the deployed bundle must not be used to authorize the bridge.
