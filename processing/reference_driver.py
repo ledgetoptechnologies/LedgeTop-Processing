@@ -207,6 +207,16 @@ class ReferenceDriver:
               created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
               claim_request TEXT UNIQUE NOT NULL, stage TEXT NOT NULL, data TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS readiness_tasks (uuid TEXT PRIMARY KEY)')
+            # Older drivers cached cancelled tasks as physically terminal. The
+            # status alone does not prove that their engine process stopped.
+            # Recheck that advisory cache once when adopting this policy.
+            db.execute('CREATE TABLE IF NOT EXISTS readiness_policy (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL)')
+            policy = db.execute('SELECT version FROM readiness_policy WHERE singleton=1').fetchone()
+            if policy is None:
+                db.execute('DELETE FROM readiness_tasks')
+                db.execute('INSERT INTO readiness_policy VALUES(1,1)')
+            elif policy[0] != 1:
+                raise ValueError('unknown engine readiness policy')
             if 'background_checked' not in {row['name'] for row in db.execute('PRAGMA table_info(driver_jobs)')}:
                 db.execute('ALTER TABLE driver_jobs ADD COLUMN background_checked REAL NOT NULL DEFAULT 0')
             db.execute('CREATE TABLE IF NOT EXISTS driver_binding (singleton INTEGER PRIMARY KEY,binding TEXT NOT NULL)')
@@ -502,7 +512,7 @@ class ReferenceDriver:
             task = self.worker.engine.read('/task/' + identifier + '/info')
             if (type(task) is not dict or task.get('uuid') != identifier or
                     type(task.get('status')) is not dict or type(task['status'].get('code')) is not int
-                    or task['status']['code'] not in (30, 40, 50)):
+                    or task['status']['code'] not in (30, 40)):
                 return False
             with self._db() as db:
                 db.execute('INSERT OR IGNORE INTO readiness_tasks VALUES(?)', (identifier,))
@@ -852,7 +862,12 @@ class ReferenceDriver:
                         or type(terminal.get('status')) is not dict):
                     raise DriverWait('engine_terminal_identity_unavailable')
                 code = terminal['status'].get('code')
-                if type(code) is int and code in (30, 50):
+                if type(code) is int and code == 50:
+                    # Cancellation status can precede actual process exit. Do
+                    # not attest terminal or release the shared execution gate
+                    # until physical termination has been reconciled.
+                    raise DriverHeld('engine_cancellation_unverified')
+                if type(code) is int and code == 30:
                     self._seal_failure(job_id, data, code)
                     return {'state': 'failure_delivering', 'jobId': job_id}
             try:

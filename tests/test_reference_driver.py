@@ -424,7 +424,7 @@ class ReferenceDriverTests(unittest.TestCase):
         self.advance(second, 'awaiting_acceptance')
 
     def test_terminal_viewer_ack_is_validated_and_retained_without_artifact_deletion(self):
-        self.transport.code = 50
+        self.transport.code = 30
         job = self.submit()
         self.advance(job, 'awaiting_failure_acceptance')
         failure = self.api.viewer.terminal.outcome(job['jobId'], 'staging')
@@ -439,6 +439,37 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(row['stage'], 'completed')
         self.assertEqual(json.loads(row['data'])['terminalAcceptance'], receipt)
         self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+
+    def test_cancelled_engine_holds_gate_and_retains_inputs_across_restart(self):
+        self.transport.code = 50
+        job = self.submit()
+        self.advance(job, 'executing')
+        before = self.worker._row(job['jobId'])
+        with NodeGate('engine') as gate:
+            reservation = gate.snapshot()['reservation']
+        for driver in (self.driver, self.make_driver()):
+            result = driver.step()
+            self.assertEqual(result, {'state': 'held', 'reason': 'engine_cancellation_unverified'})
+            self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+            self.assertEqual(self.worker._row(job['jobId'])['phase'], before['phase'])
+            with NodeGate('engine') as gate:
+                self.assertEqual(gate.snapshot()['reservation'], reservation)
+            with self.failures._transaction() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM completions').fetchone()[0], 0)
+            self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+
+    def test_legacy_cached_cancelled_task_is_rechecked_before_ready(self):
+        identifier = str(uuid.uuid4())
+        self.transport.tasks[identifier] = 50
+        with self.driver._db() as db:
+            db.execute('DROP TABLE readiness_policy')
+            db.execute('INSERT INTO readiness_tasks VALUES(?)', (identifier,))
+        restored = self.make_driver()
+        with restored._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM readiness_tasks').fetchone()[0], 0)
+        self.assertFalse(restored._ready())
+        with restored._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM readiness_tasks').fetchone()[0], 0)
 
     def test_background_success_acceptance_and_optional_cleanup_do_not_block_new_work(self):
         job = self.submit()
