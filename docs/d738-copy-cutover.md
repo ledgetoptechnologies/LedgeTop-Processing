@@ -115,6 +115,16 @@ ops/cutover_rehearsal.sh D738_IMAGE_ID RELEASE_IMAGE_ID D738_COMPOSE_FILE COMPOS
 ops/cutover_rehearsal.sh --cleanup MANIFEST
 ```
 
+For an isolated synthetic rehearsal of a candidate that creates the PR78 empty
+upload-intent table, set `CUTOVER_REHEARSAL_UPLOAD_INTENTS=1`. For one that
+also installs the optional inventory revision bundle, set
+`CUTOVER_REHEARSAL_INVENTORY=1`. Each value must be `0` or `1` and defaults to
+`0`. These switches select only the census comparison allowances: they do
+not configure or start the inventory feature. The inventory allowance requires
+the exact schema bundle and initial revision row; the intent allowance requires
+an exact empty table. They are not a substitute for an independently reviewed
+schema allowlist, a qualified migration, or old-binary and restore fencing.
+
 **Safety properties**
 
 - **Exact identities:** the images must be full local IDs (`sha256:…`), and the

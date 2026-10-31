@@ -31,6 +31,8 @@ set -euo pipefail
 umask 077
 export MSYS_NO_PATHCONV=1
 HERE=$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)
+# Optional comparison allowances only; this never enables a runtime feature.
+source "$HERE/cutover_census_flags.sh"
 # Host path for host tools: Windows paths under Git Bash/MSYS, unchanged elsewhere.
 w() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) DOCKER_LOCAL=npipe:////./pipe/docker_engine;; *) DOCKER_LOCAL=unix:///var/run/docker.sock;; esac
@@ -384,6 +386,7 @@ census "$NEW_VOL" > "$E/census-candidate-isolated.json"
 FIXED=(--allow-path .:mtime --allow-path jobs.sqlite3:bytes,content,mtime
        --allow-new-table viewer_reservations --allow-new-table viewer_option_evidence --allow-lease-marker
        --allow-viewer-task-default-column)
+FIXED+=("${CENSUS_FEATURE_FLAGS[@]}")
 if [ -n "$REVIEWED_ALLOWLIST" ]; then
   same "$E/census-$NEW_VOL.json" "$E/census-candidate-isolated.json" "${FIXED[@]}" \
     --schema-allowlist "$(w "$REVIEWED_ALLOWLIST")" || fail "gate failed against the reviewed allowlist"
