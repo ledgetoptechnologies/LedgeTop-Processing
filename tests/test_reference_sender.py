@@ -328,6 +328,7 @@ class API:
    with open(c['marker'],'x') as f:
     json.dump({'receipt':result.body,'delivery':json.loads(body)['delivery'],'status':result.status},f)
     f.flush();os.fsync(f.fileno())
+   print('COMMITTED',flush=True)
    time.sleep(20)
   return result
 tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(c['cert'],c['key'])
@@ -356,9 +357,9 @@ print(server.server_port,flush=True);server.serve_forever()
         thread=threading.Thread(target=lambda:outcome.append(sender.send_next()))
         try:
             thread.start()
-            deadline=time.monotonic()+5
-            while not marker.exists() and time.monotonic()<deadline:time.sleep(.01)
-            self.assertTrue(marker.exists(),'coordinator did not commit in time')
+            import select
+            self.assertTrue(select.select([server.stdout],[],[],5)[0],'coordinator did not commit in time')
+            self.assertEqual(server.stdout.readline().strip(),b'COMMITTED')
             evidence=json.loads(marker.read_text())
             self.assertEqual(evidence['status'],200)
             stop_server(server);server=None
@@ -376,8 +377,12 @@ print(server.server_port,flush=True);server.serve_forever()
             self.assertEqual(original_input.read_bytes(),b'synthetic-input')
             for output in results.values():self.assertEqual(output.read_bytes(),b'synthetic-result')
         finally:
-            if server is not None:stop_server(server)
-            thread.join(5)
+            try:
+                if server is not None:stop_server(server)
+            finally:
+                if thread.ident is not None:
+                    thread.join(5)
+                    self.assertFalse(thread.is_alive(),'sender thread did not stop')
         # Inspect coordinator state only after the restarted process has stopped.
         import sqlite3
         db=sqlite3.connect(str(coordinator_root/'jobs.sqlite3'))
