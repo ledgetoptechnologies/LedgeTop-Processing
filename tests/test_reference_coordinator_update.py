@@ -122,6 +122,38 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT archive_state FROM viewer_tasks WHERE uuid=?',('example',)).fetchone()[0], 'pending')
 
+    def test_nonempty_legacy_rows_migrate_without_loss_but_update_and_rollback_hold(self):
+        store=TaskStore(self.queue,self.volume/'viewer-tasks')
+        identifier='8b4b6fde-f0ab-4001-b36f-7f6e49307016'
+        store.initialize(identifier,'Synthetic retained task',[],None,'staging')
+        with self.queue._db() as db:
+            old_columns=[row[1] for row in db.execute('PRAGMA table_info(viewer_tasks)')]
+            before=dict(db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone())
+            backup=sqlite3.connect(str(self.root/'old-rows.sqlite3'))
+            try: db.backup(backup)
+            finally: backup.close()
+        # The real updater refuses the populated database before mutation.
+        with self.assertRaises(AssertionError):
+            module.volume_census(self.volume,uid=os.geteuid())
+        store.enable_archive_status()
+        with self.queue._db() as db:
+            after=dict(db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone())
+            self.assertEqual({key:after[key] for key in old_columns},before)
+            self.assertEqual(after['archive_state'],'pending')
+            db.execute("UPDATE viewer_tasks SET archive_state='inspection',archive_reason='partial_requires_inspection' WHERE uuid=?",(identifier,))
+        # The current census cannot qualify populated task directories; neither
+        # update nor rollback may restore the old snapshot over live state.
+        with self.assertRaises(AssertionError):
+            module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        with self.queue._db() as db:
+            retained=db.execute('SELECT archive_state,archive_reason FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
+            self.assertEqual(tuple(retained),('inspection','partial_requires_inspection'))
+        old=sqlite3.connect(str(self.root/'old-rows.sqlite3'))
+        try:
+            old.row_factory=sqlite3.Row
+            self.assertEqual(dict(old.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()),before)
+        finally:old.close()
+
     def test_viewer_extra_tables_partial_schema_holds(self):
         with self.queue._db() as db:db.execute('DROP TABLE viewer_option_evidence')
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
