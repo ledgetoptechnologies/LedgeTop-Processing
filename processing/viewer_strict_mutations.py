@@ -43,7 +43,8 @@ def initialize(engine,identifier,plan,pipeline_sha):
     parts.append(f'--{boundary}--\r\n'.encode())
     result=_post(engine,'/task/new/init',b''.join(parts),
                  {'Content-Type':'multipart/form-data; boundary='+boundary,'set-uuid':identifier})
-    if not isinstance(result,dict) or 'error' in result or result.get('uuid')!=identifier:
+    if (not isinstance(result,dict) or 'error' in result or ('success' in result and result['success'] is not True)
+            or result.get('uuid')!=identifier):
         raise SmokeError('initialization acknowledgment uncertain')
 
 

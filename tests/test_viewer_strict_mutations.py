@@ -45,6 +45,10 @@ class StrictMutationTests(unittest.TestCase):
         self.assertEqual(self.calls,[])
         self.answer={'uuid':'22222222-2222-4222-8222-222222222222'}
         with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,self.digest)
+        for value in (False,0,None,'true'):
+            with self.subTest(value=value):
+                self.answer={'uuid':ID,'success':value}
+                with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,self.digest)
 
     def test_missing_commit_success_and_lost_ack_hold(self):
         self.answer={}
