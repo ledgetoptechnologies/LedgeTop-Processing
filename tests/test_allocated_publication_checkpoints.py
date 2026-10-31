@@ -139,3 +139,33 @@ class PublicationDriverTests(unittest.TestCase):
         self.assertEqual(row['state'],'published')
         self.assertEqual(json.loads(row['identity'])['rootProof'],root_proof(self.f.scratch))
         self.assertEqual(self.f.driver.step()['state'],'processing_pending')
+
+
+@unittest.skipUnless(os.name=='posix','actual daemon configuration required')
+class PublicationCleanupGateTests(unittest.TestCase):
+    def write_config(self):
+        self.path.write_text(json.dumps(self.config));self.path.chmod(0o600)
+
+    @classmethod
+    def setUpClass(cls):
+        fixtures.InputBootstrapFactoryTests.setUpClass.__func__(cls)
+
+    def setUp(self):
+        fixtures.InputBootstrapFactoryTests.setUp(self)
+        self.config['inputCopyAccounting']={'schemaVersion':6,'fetchJournal':{'schemaVersion':1,
+            'policyId':'indexed-worker-fetch-three-retained-v1'},'allocatedReceiver':{'schemaVersion':2}}
+
+    def test_enabled_cleanup_rejected_by_all_entry_points_before_writes(self):
+        for flag in ('cleanupEnabled','engineCleanupEnabled'):
+            with self.subTest(flag=flag):
+                config=dict(self.config,**{flag:True})
+                self.path.write_text(json.dumps(config));self.path.chmod(0o600)
+                with self.assertRaises(ValueError):daemon.load_config(str(self.path))
+                with self.assertRaises(ValueError):bootstrap.bootstrap_input_copy_accounting(config)
+                with self.assertRaises(ValueError):daemon.build_worker(config)
+                self.assertFalse((Path(config['stateRoot'])/'scratch.sqlite').exists())
+
+    def test_legacy_profile_is_not_restricted_by_this_gate(self):
+        profile=dict(self.config['inputCopyAccounting'],schemaVersion=5,allocatedReceiver={'schemaVersion':1})
+        for flag in ('cleanupEnabled','engineCleanupEnabled'):
+            self.assertTrue(bootstrap.input_profile(dict(self.config,inputCopyAccounting=profile,**{flag:True})))

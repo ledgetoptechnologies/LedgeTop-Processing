@@ -56,6 +56,8 @@ def input_profile(config):
         if value['schemaVersion'] in (5,6):
             _require(type(value['allocatedReceiver']) is dict and value['allocatedReceiver']=={'schemaVersion':1 if value['schemaVersion']==5 else 2}
                      and type(value['allocatedReceiver']['schemaVersion']) is int)
+        if value['schemaVersion']==6:
+            _require(all(config.get(name,False) is False for name in ('cleanupEnabled','engineCleanupEnabled')))
         routing=config.get('executionRouting')
         _require(routing is None or type(routing) is dict and routing.get('treedar') is None)
     return True
