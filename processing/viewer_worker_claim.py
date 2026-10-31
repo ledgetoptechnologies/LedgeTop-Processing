@@ -12,12 +12,15 @@ import re
 import secrets
 import sqlite3
 import stat
+import threading
 from types import MappingProxyType
 import uuid
 
 from . import reference_protocol as p
 from .maintenance import Conflict
 from .viewer_tasks import PHOTO_SUFFIXES, VIEWER_PROFILE, canonical
+from .reference_binary import BinaryResponse
+from .direct_output_slot import _identity
 from pathlib import Path
 
 
@@ -31,8 +34,41 @@ FILES_DDL = '''CREATE TABLE viewer_worker_inventory (
  name TEXT NOT NULL CHECK(length(CAST(name AS BLOB))<=180),
  bytes INTEGER NOT NULL CHECK(typeof(bytes)='integer' AND bytes>0),
  sha256 TEXT NOT NULL CHECK(length(sha256)=64), is_photo INTEGER NOT NULL CHECK(is_photo IN (0,1)),
+ source_name TEXT NOT NULL, source_device INTEGER NOT NULL, source_inode INTEGER NOT NULL,
+ source_mtime INTEGER NOT NULL, source_ctime INTEGER NOT NULL, source_mount INTEGER NOT NULL,
  PRIMARY KEY(job_id,ordinal), UNIQUE(job_id,object_id))'''
 PAGE_SIZE=100
+MAX_INPUT_READERS=2
+
+
+class _InputStream:
+    def __init__(self,fd,directory_fd,name,expected,permit):
+        self.fd,self.directory_fd,self.name,self.expected,self.permit=fd,directory_fd,name,expected,permit
+        self.closed=False
+
+    def _check(self):
+        info=os.fstat(self.fd);named=os.stat(self.name,dir_fd=self.directory_fd,follow_symlinks=False)
+        identity=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or identity!=self.expected[:5]
+                or (named.st_dev,named.st_ino)!=(info.st_dev,info.st_ino) or _identity(self.fd)[2]!=self.expected[6]):
+            raise Conflict('Viewer source identity changed')
+
+    def chunks(self):
+        digest=hashlib.sha256();offset=0;size=self.expected[2]
+        while offset<size:
+            self._check();data=os.pread(self.fd,min(1024*1024,size-offset),offset)
+            if not data:raise Conflict('Viewer source truncated')
+            offset+=len(data);digest.update(data);self._check()
+            if offset==size and digest.hexdigest()!=self.expected[5]:raise Conflict('Viewer source hash changed')
+            yield data
+
+    def close(self):
+        if not self.closed:
+            self.closed=True
+            try:os.close(self.fd)
+            finally:
+                try:os.close(self.directory_fd)
+                finally:self.permit.release()
 
 
 class ViewerWorkerClaims:
@@ -42,6 +78,7 @@ class ViewerWorkerClaims:
             raise ValueError('positive routing limits required')
         self.queue,self.store=queue,viewer_store
         self.max_photos,self.max_bytes=local_max_photos,local_max_input_bytes
+        self._input_readers=threading.BoundedSemaphore(MAX_INPUT_READERS)
         if (type(node_environments) is not dict or set(node_environments)!=set(queue.node_ids)
                 or any(type(values) not in (tuple,list) or not values or len(set(values))!=len(values)
                        or not set(values)<={'production','staging'} for values in node_environments.values())):
@@ -78,7 +115,7 @@ class ViewerWorkerClaims:
                    or bool(row['is_photo'])!=(Path(row['name']).suffix.lower() in PHOTO_SUFFIXES)
                    for row in raw_files):raise ValueError()
         except (ValueError,TypeError):raise Conflict('Viewer input metadata invalid') from None
-        manifest=[]
+        manifest=[];source=[]
         for entry in sorted(item['files'],key=lambda value:value['name'].casefold()):
             path=entry['path']
             try: info=os.stat(path,follow_symlinks=False)
@@ -88,6 +125,14 @@ class ViewerWorkerClaims:
                     or not isinstance(entry['sha256'],str) or not re.fullmatch('[a-f0-9]{64}',entry['sha256'])):
                 raise Conflict('Viewer input metadata invalid')
             manifest.append(dict(name=entry['name'],bytes=entry['bytes'],sha256=entry['sha256'],isPhoto=entry['is_photo']))
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK)
+            try:
+                opened=os.fstat(fd)
+                if (opened.st_dev,opened.st_ino,opened.st_size,opened.st_mtime_ns,opened.st_ctime_ns)!=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns):
+                    raise Conflict('Viewer input identity changed')
+                mount=_identity(fd)[2]
+            finally:os.close(fd)
+            source.append((Path(path).name,info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns,mount))
         # This conservative route never sends a small job to main merely
         # because the small node is offline. Readiness is a separate gate.
         small=item['images_count']<=self.max_photos and item['input_bytes']<=self.max_bytes
@@ -98,7 +143,7 @@ class ViewerWorkerClaims:
             workerInstanceId=identity['worker_instance_id'],engineTaskId=engine_uuid,
             inputInventorySha256=p.digest(manifest),pipelineSha256=hashlib.sha256(settings).hexdigest(),
             imageCount=item['images_count'],inputBytes=item['input_bytes'],state='claimed_unenrolled')
-        return (value,manifest) if include_manifest else value
+        return (value,manifest,source) if include_manifest else value
 
     def claim(self,payload,identity):
         p._closed(payload,('jobId','claimRequestId','environment'),'Viewer worker claim')
@@ -145,48 +190,52 @@ class ViewerWorkerClaims:
             if not head or head['id']!=job['id'] or job['status']!='queued':raise Conflict('Viewer queue head changed')
             if task['stage']!='queued' or task['phase'] not in ('queued','waiting_node') or any(task[k] is not None for k in ('node_id','engine_uuid','claim_token')):
                 raise Conflict('Viewer task is not unclaimed')
-            engine_uuid=str(uuid.uuid4());value,manifest=self._binding(db,job,task,identity,engine_uuid,include_manifest=True)
+            engine_uuid=str(uuid.uuid4());value,manifest,source=self._binding(db,job,task,identity,engine_uuid,include_manifest=True)
             token=secrets.token_urlsafe(32);encoded=p.canonical_json(value).decode()
             db.execute('INSERT INTO viewer_worker_claims VALUES(?,?,?,?,?,?,?,?)',
                 (job['id'],payload['claimRequestId'],identity['node_id'],identity['worker_id'],identity['worker_instance_id'],job['environment'],encoded,token))
-            db.executemany('INSERT INTO viewer_worker_inventory VALUES(?,?,?,?,?,?,?)',(
+            db.executemany('INSERT INTO viewer_worker_inventory VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(
                 (job['id'],index,p.digest(dict(jobId=job['id'],generation=task['generation'],ordinal=index,entry=entry)),
-                 entry['name'],entry['bytes'],entry['sha256'],int(entry['isPhoto'])) for index,entry in enumerate(manifest)))
+                 entry['name'],entry['bytes'],entry['sha256'],int(entry['isPhoto']),*source[index]) for index,entry in enumerate(manifest)))
             db.execute("UPDATE jobs SET status='running',worker_id=?,node_id=?,claim_hash=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (identity['worker_id'],identity['node_id'],hashlib.sha256(token.encode()).hexdigest(),job['id']))
             db.execute("UPDATE viewer_tasks SET stage='running',phase='worker_claimed',node_id=?,engine_uuid=?,claim_token=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (identity['node_id'],engine_uuid,token,task['uuid']))
             return {**value,'claimRequestId':payload['claimRequestId'],'claimToken':token}
 
+    def _authorize_inventory(self,db,job_id,identity,claim_token):
+        if type(claim_token) is not str or not claim_token.isascii() or not 1<=len(claim_token)<=128:
+            raise Conflict('Viewer claim token required')
+        self._schema(db)
+        row=db.execute('SELECT * FROM viewer_worker_claims WHERE job_id=?',(job_id,)).fetchone()
+        job=db.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+        task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=? AND removed=0',(job_id,)).fetchall()
+        if (not row or not job or len(task)!=1 or
+            (row['node_id'],row['worker_id'],row['instance_id'])!=(identity['node_id'],identity['worker_id'],identity['worker_instance_id'])
+            or row['environment'] not in self.node_environments.get(identity['node_id'],())
+            or not hmac.compare_digest(row['token'],claim_token)
+            or job['claim_hash']!=hashlib.sha256(claim_token.encode()).hexdigest()
+            or job['status'] not in ('running','held') or (job['status']=='held' and job['held_reason']!='coordinator_restart')):
+            raise Conflict('Viewer inventory claim unavailable')
+        saved=json.loads(row['binding']);task=task[0]
+        if (p.canonical_json(saved).decode()!=row['binding'] or saved['state']!='claimed_unenrolled'
+            or (saved['authorityId'],saved['jobId'],saved['nodeId'],saved['workerId'],saved['workerInstanceId'],saved['environment'])!=
+               (self.queue.authority_id,job_id,row['node_id'],row['worker_id'],row['instance_id'],row['environment'])
+            or job['profile']!=VIEWER_PROFILE or job['environment']!=row['environment']
+            or task['uuid']!=saved['viewerTaskId'] or task['generation']!=saved['viewerGeneration']
+            or task['environment']!=row['environment'] or task['stage']!='running' or task['phase']!='worker_claimed'
+            or task['node_id']!=row['node_id'] or task['engine_uuid']!=saved['engineTaskId']
+            or task['claim_token']!=row['token'] or job['node_id']!=row['node_id'] or job['worker_id']!=row['worker_id']):
+            raise Conflict('Viewer inventory ownership changed')
+        p._hash(saved['inputInventorySha256'],'input inventory digest')
+        return saved,task
+
     def inventory_page(self,job_id,cursor,identity,claim_token):
         """Bounded metadata page; does not serve or verify any input bytes."""
         p._uuid(job_id,'job ID')
         if type(cursor) is not int or not 0<=cursor<=100000:raise ValueError('invalid inventory cursor')
-        if type(claim_token) is not str or not claim_token.isascii() or not 1<=len(claim_token)<=128:
-            raise Conflict('Viewer claim token required')
         with self.queue._db() as db:
-            db.execute('BEGIN');self._schema(db)
-            row=db.execute('SELECT * FROM viewer_worker_claims WHERE job_id=?',(job_id,)).fetchone()
-            job=db.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
-            task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=? AND removed=0',(job_id,)).fetchall()
-            if (not row or not job or len(task)!=1 or
-                (row['node_id'],row['worker_id'],row['instance_id'])!=(identity['node_id'],identity['worker_id'],identity['worker_instance_id'])
-                or row['environment'] not in self.node_environments.get(identity['node_id'],())
-                or not hmac.compare_digest(row['token'],claim_token)
-                or job['claim_hash']!=hashlib.sha256(claim_token.encode()).hexdigest()
-                or job['status'] not in ('running','held') or (job['status']=='held' and job['held_reason']!='coordinator_restart')):
-                raise Conflict('Viewer inventory claim unavailable')
-            saved=json.loads(row['binding']);task=task[0]
-            if (p.canonical_json(saved).decode()!=row['binding'] or saved['state']!='claimed_unenrolled'
-                or (saved['authorityId'],saved['jobId'],saved['nodeId'],saved['workerId'],saved['workerInstanceId'],saved['environment'])!=
-                   (self.queue.authority_id,job_id,row['node_id'],row['worker_id'],row['instance_id'],row['environment'])
-                or job['profile']!=VIEWER_PROFILE or job['environment']!=row['environment']
-                or task['uuid']!=saved['viewerTaskId'] or task['generation']!=saved['viewerGeneration']
-                or task['environment']!=row['environment'] or task['stage']!='running' or task['phase']!='worker_claimed'
-                or task['node_id']!=row['node_id'] or task['engine_uuid']!=saved['engineTaskId']
-                or task['claim_token']!=row['token'] or job['node_id']!=row['node_id'] or job['worker_id']!=row['worker_id']):
-                raise Conflict('Viewer inventory ownership changed')
-            p._hash(saved['inputInventorySha256'],'input inventory digest')
+            db.execute('BEGIN');saved,task=self._authorize_inventory(db,job_id,identity,claim_token)
             rows=db.execute('SELECT * FROM viewer_worker_inventory WHERE job_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?',
                             (job_id,cursor,PAGE_SIZE+1)).fetchall()
             entries=[]
@@ -203,3 +252,31 @@ class ViewerWorkerClaims:
             if not entries:raise Conflict('Viewer inventory cursor unavailable')
             return dict(jobId=job_id,viewerGeneration=task['generation'],inputInventorySha256=saved['inputInventorySha256'],
                         start=cursor,entries=entries,nextCursor=cursor+PAGE_SIZE if len(rows)>PAGE_SIZE else None)
+
+    def input_object(self,job_id,object_id,identity,claim_token):
+        """Open one bounded authenticated frozen source, retaining a reader permit."""
+        p._uuid(job_id,'job ID');p._hash(object_id,'object identity')
+        if not self._input_readers.acquire(blocking=False):raise Conflict('Viewer source read capacity unavailable')
+        fd=directory_fd=None
+        try:
+            with self.queue._db() as db:
+                db.execute('BEGIN');saved,task=self._authorize_inventory(db,job_id,identity,claim_token)
+                row=db.execute('SELECT * FROM viewer_worker_inventory WHERE job_id=? AND object_id=?',(job_id,object_id)).fetchone()
+                if not row:raise Conflict('Viewer source unavailable')
+                entry=dict(name=row['name'],bytes=row['bytes'],sha256=row['sha256'],isPhoto=bool(row['is_photo']))
+                if (row['is_photo'] not in (0,1) or object_id!=p.digest(dict(jobId=job_id,generation=task['generation'],ordinal=row['ordinal'],entry=entry))
+                        or Path(row['source_name']).name!=row['source_name']):raise Conflict('Viewer source identity invalid')
+                directory=self.store._directory(task)
+                directory_fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+                fd=os.open(row['source_name'],os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK,dir_fd=directory_fd)
+                expected=(row['source_device'],row['source_inode'],row['bytes'],row['source_mtime'],row['source_ctime'],row['sha256'],row['source_mount'])
+                stream=_InputStream(fd,directory_fd,row['source_name'],expected,self._input_readers)
+                stream._check()
+                result=BinaryResponse(stream,headers={'Content-Type':'application/octet-stream','Content-Length':str(row['bytes'])})
+                fd=directory_fd=None
+                return result
+        except BaseException:
+            if fd is not None:os.close(fd)
+            if directory_fd is not None:os.close(directory_fd)
+            self._input_readers.release()
+            raise

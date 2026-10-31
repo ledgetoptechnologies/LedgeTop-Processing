@@ -16,6 +16,7 @@ from urllib.error import HTTPError
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 from processing.config import Config
+from processing.maintenance import Conflict
 from processing.app import make_handler
 from processing.prototype import Queue
 from processing.reference_delivery import DeliveryReceiver
@@ -95,6 +96,15 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         except HTTPError as error:
             with error:return error.code,json.load(error)
 
+    def input_object(self,object_id,claim_token,*,token=TOKEN_A,job=None):
+        request=Request(self.origin+ROUTE+'/'+(job or self.job)+'/objects/'+object_id,
+            headers={'Authorization':'Bearer '+token,'X-Claim-Token':claim_token})
+        try:
+            with build_opener(ProxyHandler({}),HTTPSHandler(context=self.client)).open(request,timeout=3) as response:
+                return response.status,response.read()
+        except HTTPError as error:
+            with error:return error.code,error.read()
+
     def test_authenticated_claim_replay_after_restart_and_no_legacy_dispatch(self):
         status,claim=self.request();self.assertEqual(status,200)
         self.assertEqual(claim['state'],'claimed_unenrolled')
@@ -152,6 +162,32 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         status,claim=self.request();self.assertEqual(status,200)
         with self.queue._db() as db:db.execute('UPDATE viewer_worker_inventory SET bytes=bytes+1 WHERE job_id=?',(self.job,))
         self.assertEqual(self.inventory(0,claim['claimToken'])[0],409)
+
+    def test_claim_bound_source_stream_is_principal_and_object_scoped(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        page=self.inventory(0,claim['claimToken'])[1];object_id=page['entries'][0]['objectId']
+        self.assertEqual(self.input_object(object_id,claim['claimToken']),(200,b'synthetic'))
+        self.assertEqual(self.input_object(object_id,claim['claimToken'],token='z'*32)[0],401)
+        self.assertEqual(self.input_object(object_id,claim['claimToken'],token=TOKEN_B)[0],409)
+        self.assertEqual(self.input_object(object_id,'wrong')[0],409)
+        self.assertEqual(self.input_object('f'*64,claim['claimToken'])[0],409)
+
+    def test_source_mutation_after_claim_refuses_stream(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        object_id=self.inventory(0,claim['claimToken'])[1]['entries'][0]['objectId']
+        path=Path(self.store.task(TASK)['files'][0]['path']);path.write_bytes(b'different')
+        self.assertEqual(self.input_object(object_id,claim['claimToken'])[0],409)
+
+    def test_source_stream_permits_are_bounded_and_released(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        object_id=self.inventory(0,claim['claimToken'])[1]['entries'][0]['objectId']
+        identity=dict(node_id='cluster',worker_id='worker-a',worker_instance_id='instance-a')
+        one=self.claims.input_object(self.job,object_id,identity,claim['claimToken'])
+        two=self.claims.input_object(self.job,object_id,identity,claim['claimToken'])
+        try:
+            with self.assertRaises(Conflict):self.claims.input_object(self.job,object_id,identity,claim['claimToken'])
+        finally:one.stream.close();two.stream.close()
+        third=self.claims.input_object(self.job,object_id,identity,claim['claimToken']);third.stream.close()
 
     def test_partial_inventory_schema_blocks_restart(self):
         self.stop_server()
