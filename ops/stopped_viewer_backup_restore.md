@@ -39,10 +39,13 @@ Run it on a Docker host with `python:3.12-slim` available by setting
 
 With `LEDGETOP_IMAGE_COMPAT_E2E=1` also set, this test requires the exact local
 predecessor and candidate images pinned in the test. The predecessor builds a
-synthetic terminal Viewer task and photo; the candidate initializes its actual
-coordinator/Viewer handler on a separate copy; keyed database schema and row
-digests and the photo are compared; and the predecessor initializes against the
-independently restored backup. Backup and restore run as UID/GID 10001. No
-listening API, real processing, live state, writer-fence or daemon-restart
-recovery is tested; the synthetic task was marked terminal for the fixture.
+synthetic Viewer task; the predecessor's separate server process accepts a
+photo upload and is stopped. After a synthetic terminal state is assigned, the
+candidate serves task info over loopback on a separate copy; keyed database
+schema and row digests and the photo are compared; and a separate predecessor
+server process serves task info from the independently restored backup. The
+input photo has no download endpoint and is verified on disk only while each
+server is stopped. Processes run sequentially in network-none containers with
+no published host ports. Backup and restore run as UID/GID 10001. Real
+processing, live state, writer fencing and Docker-daemon restart are not tested.
 This image-specific result does not qualify later candidate revisions.

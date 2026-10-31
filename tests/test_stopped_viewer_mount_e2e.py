@@ -100,6 +100,50 @@ class MountRestoreE2E(unittest.TestCase):
             owned_volumes.append(name)
             uncertain = False
 
+        def server_script(state, *, upload=False):
+            # Each application runs in a separate process in a network-none
+            # container. Only loopback is reachable and no host port is published.
+            return f'''\
+from pathlib import Path
+import json, os, signal, sqlite3, subprocess, sys, time, urllib.error, urllib.request
+root=Path('/scratch/{ident}/{state}'); uid='12345678-1234-4234-8234-123456789abc'
+env=os.environ.copy(); env.update(PROCESSING_API_TOKEN='a'*32,PROCESSING_PROTOTYPE_STATE_DIR=str(root),
+ PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_VIEWER_ENABLED='1',
+ PROCESSING_VIEWER_TOKEN='b'*32,LOCAL_NODE_URL='http://127.0.0.1:19991',MAIN_NODE_URL='http://127.0.0.1:19992',
+ PROCESSING_BIND_HOST='127.0.0.1',PROCESSING_PORT='18080')
+server=subprocess.Popen([sys.executable,'-m','processing.app'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+base='http://127.0.0.1:18080'; opener=urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
+try:
+    end=time.monotonic()+8
+    while True:
+        if server.poll() is not None: raise AssertionError('coordinator process exited')
+        try:
+            with opener.open(base+'/healthz',timeout=.5) as response:
+                if response.status==200: break
+        except (OSError,urllib.error.URLError): pass
+        if time.monotonic()>=end: raise AssertionError('coordinator startup timeout')
+        time.sleep(.05)
+    if {upload!r}:
+        body=(b'--boundary123\\r\\nContent-Disposition: form-data; name="images"; filename="photo.jpg"\\r\\n'
+              b'Content-Type: image/jpeg\\r\\n\\r\\nsynthetic-image\\r\\n--boundary123--\\r\\n')
+        request=urllib.request.Request(base+'/task/new/upload/'+uid+'?token='+('b'*32),data=body,method='POST',
+            headers={{'Content-Type':'multipart/form-data; boundary=boundary123'}})
+        with opener.open(request,timeout=3) as response: assert json.load(response)=={{'success':True}}
+    with opener.open(base+'/task/'+uid+'/info?token='+('b'*32),timeout=3) as response: info=json.load(response)
+    assert info['name']=='synthetic task' and info['imagesCount']==1 and info['status']['code']==({10 if upload else 40})
+finally:
+    server.send_signal(signal.SIGTERM)
+    try: exit_code=server.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        server.kill();server.wait(timeout=3);raise AssertionError('coordinator failed graceful shutdown')
+    if exit_code!=0: raise AssertionError('coordinator exited unsuccessfully')
+db=sqlite3.connect('file:'+str(root/'jobs.sqlite3')+'?mode=ro',uri=True)
+rows=db.execute('SELECT t.directory,f.path FROM viewer_tasks t JOIN viewer_files f ON t.uuid=f.uuid WHERE t.uuid=?',(uid,)).fetchall()
+db.close(); assert len(rows)==1
+directory,filename=rows[0]; assert Path(directory).name==directory and Path(filename).name==filename
+assert (root/'viewer-tasks'/directory/filename).read_bytes()==b'synthetic-image'
+'''
+
         scratch = f'type=volume,src={scratch_volume},dst=/scratch'
         try:
             volume_create(volume)
@@ -130,7 +174,6 @@ Path('/backups').chmod(0o700)
 ''')
                 run('--mount', scratch, image=old_image, uid='10001:10001', code=f'''\
 from pathlib import Path
-import io
 from processing.prototype import Queue
 from processing.viewer_tasks import TaskStore
 p=Path('/scratch/{ident}'); root=p/'source'
@@ -138,11 +181,15 @@ q=Queue(root, node_ids=('cluster','main'), viewer_enabled=True)
 with q._db() as db: db.execute("UPDATE coordinator_identity SET authority_id='12345678-1234-1234-1234-123456789abc' WHERE singleton=1")
 t=TaskStore(q, root/'viewer-tasks'); uid='12345678-1234-4234-8234-123456789abc'
 t.initialize(uid,name='synthetic task',options=[],outputs=[],environment='production')
-t.upload(uid,'photo.jpg',io.BytesIO(b'synthetic-image'),15,environment='production')
-with q._db() as db: db.execute("UPDATE viewer_tasks SET stage='succeeded',phase='complete' WHERE uuid=?",(uid,))
-(root/'viewer-spool').mkdir(mode=0o700)
-assert t.task(uid)['images_count']==1
 q.close()
+''')
+                run('--mount', scratch, image=old_image, uid='10001:10001', code=server_script('source', upload=True))
+                run('--mount', scratch, image=old_image, uid='10001:10001', code=f'''\
+from pathlib import Path
+import sqlite3
+root=Path('/scratch/{ident}/source');db=sqlite3.connect(root/'jobs.sqlite3')
+db.execute("UPDATE viewer_tasks SET stage='succeeded',phase='complete' WHERE uuid=?",('12345678-1234-4234-8234-123456789abc',))
+db.commit();db.close()
 ''')
             else:
                 run('--mount', scratch, code=f'''\
@@ -169,19 +216,11 @@ with os.fdopen(fd,'w') as f:
             if image_compat:
                 run('--mount', scratch, image=candidate_image, uid='10001:10001', code=f'''\
 from pathlib import Path
-import os, shutil
-from processing.app import make_handler
-from processing.config import from_environment
+import shutil
 p=Path('/scratch/{ident}'); source=p/'source'; candidate=p/'candidate'
 shutil.copytree(source,candidate)
-os.environ.update(PROCESSING_API_TOKEN='a'*32,PROCESSING_PROTOTYPE_STATE_DIR=str(candidate),
- PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_VIEWER_ENABLED='1',
- PROCESSING_VIEWER_TOKEN='b'*32,LOCAL_NODE_URL='http://127.0.0.1:19991',MAIN_NODE_URL='http://127.0.0.1:19992')
-h=make_handler(from_environment()); task=h.viewer_service.store.task('12345678-1234-4234-8234-123456789abc')
-assert task['name']=='synthetic task' and task['stage']=='succeeded' and task['images_count']==1
-assert Path(task['files'][0]['path']).read_bytes()==b'synthetic-image'
-h.viewer_service.close(); h.prototype_queue.close()
 ''')
+                run('--mount', scratch, image=candidate_image, uid='10001:10001', code=server_script('candidate'))
                 run('--mount', scratch, uid='10001:10001', code=f'''\
 from pathlib import Path
 from ops.state_census import census
@@ -208,20 +247,7 @@ else: assert d.execute('SELECT * FROM viewer_tasks').fetchall()==[('synthetic','
 d.close()
 ''')
             if image_compat:
-                run('--mount', scratch, image=old_image, uid='10001:10001', code=f'''\
-from pathlib import Path
-import os
-from processing.app import make_handler
-from processing.config import from_environment
-root=Path('/scratch/{ident}/restore-parent/restored')
-os.environ.update(PROCESSING_API_TOKEN='a'*32,PROCESSING_PROTOTYPE_STATE_DIR=str(root),
- PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_VIEWER_ENABLED='1',
- PROCESSING_VIEWER_TOKEN='b'*32,LOCAL_NODE_URL='http://127.0.0.1:19991',MAIN_NODE_URL='http://127.0.0.1:19992')
-h=make_handler(from_environment()); task=h.viewer_service.store.task('12345678-1234-4234-8234-123456789abc')
-assert task['name']=='synthetic task' and task['stage']=='succeeded' and task['images_count']==1
-assert Path(task['files'][0]['path']).read_bytes()==b'synthetic-image'
-h.viewer_service.close(); h.prototype_queue.close()
-''')
+                run('--mount', scratch, image=old_image, uid='10001:10001', code=server_script('restore-parent/restored'))
         finally:
             primary_error = sys.exc_info()[1]
             # A timed-out Docker client can leave its container behind. Only
