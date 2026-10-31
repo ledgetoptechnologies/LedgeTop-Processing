@@ -14,7 +14,7 @@ import sqlite3
 import ssl
 import stat
 import threading
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -27,6 +27,9 @@ from ops.reference_worker_daemon import DaemonStateLock
 
 
 class EnrollmentHeld(RuntimeError):pass
+
+class EnrollmentTransportUnavailable(EnrollmentHeld):
+    """Narrow known connection failure, not TLS or HTTP authorization."""
 
 CONFIG_DDL='CREATE TABLE config (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL)'
 INTENT_DDL='CREATE TABLE intent (singleton INTEGER PRIMARY KEY CHECK(singleton=1), request TEXT NOT NULL, receipt TEXT NOT NULL, claim TEXT, binding TEXT, slot_phase TEXT NOT NULL, slot_identity TEXT)'
@@ -167,6 +170,13 @@ class ViewerNodeEnrollment:
             response=opener(query,timeout=min(10,watchdog.remaining()))
         except HTTPError as error:
             watchdog.close();error.close();raise EnrollmentHeld('claim_rejected_or_unavailable') from None
+        except URLError as error:
+            watchdog.close()
+            if isinstance(error.reason,(ConnectionRefusedError,ConnectionResetError,TimeoutError)):
+                raise EnrollmentTransportUnavailable('claim_transport_unavailable') from None
+            raise EnrollmentHeld('claim_unavailable') from None
+        except (ConnectionRefusedError,ConnectionResetError,TimeoutError):
+            watchdog.close();raise EnrollmentTransportUnavailable('claim_transport_unavailable') from None
         except Exception:
             watchdog.close();raise EnrollmentHeld('claim_unavailable') from None
         try:
@@ -194,7 +204,7 @@ class ViewerNodeEnrollment:
 
     def _validate_claim(self,claim,request):
         fields=('schemaVersion','authorityId','jobId','viewerTaskId','viewerGeneration','environment','nodeId',
-            'workerId','workerInstanceId','engineTaskId','inputInventorySha256','pipelineSha256','taskNameSha256','imageCount',
+            'workerId','workerInstanceId','engineTaskId','inputInventorySha256','pipelineSha256','taskNameSha256','imageCount','objectCount',
             'inputBytes','state','claimRequestId','claimToken')
         p._closed(claim,fields,'Viewer claim');c=self.config
         if (type(claim['schemaVersion']) is not int or claim['schemaVersion']!=1 or claim['state']!='claimed_unenrolled'
@@ -204,7 +214,8 @@ class ViewerNodeEnrollment:
             or any(ord(v)<33 or ord(v)>126 for v in claim['claimToken'])):
             raise EnrollmentHeld('claim_binding_mismatch')
         for field in ('jobId','viewerTaskId','engineTaskId'):p._uuid(claim[field],field)
-        for field in ('viewerGeneration','imageCount','inputBytes'):p._integer(claim[field],field)
+        for field in ('viewerGeneration','imageCount','objectCount','inputBytes'):p._integer(claim[field],field)
+        if not 1<=claim['imageCount']<=claim['objectCount']<=100000:raise EnrollmentHeld('claim_count_invalid')
         for field in ('inputInventorySha256','pipelineSha256','taskNameSha256'):p._hash(claim[field],field)
         return claim
 

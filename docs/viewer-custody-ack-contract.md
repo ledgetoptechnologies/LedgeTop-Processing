@@ -230,3 +230,13 @@ loopback-only synthetic engine guards, and cannot turn an ambiguous mutation
 or a partial capture into a retry. Restart before an input journal exists is
 held for inspection, including the crash window after enrollment. Retry delay
 is process-local and not a persistent scheduling policy.
+
+The disabled direct-worker claim now binds `objectCount` to the frozen input
+inventory, including auxiliary files; old claims without it fail closed. The
+synthetic supervisor checks its 64-object limit before fetching inventory pages,
+and verifies the final count and digest. The protocol ceiling remains 100,000;
+the local metadata DB limit remains 64 MiB. Retry applies only to explicitly
+classified connection-refused, connection-reset or timeout errors during
+idempotent post-capture delivery. TLS, HTTP authorization, integrity, unknown
+and ambiguous engine errors hold. DNS and filesystem calls have no guaranteed
+hard wall-clock deadline, and the retry schedule is not durable.

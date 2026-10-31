@@ -9,12 +9,26 @@ import time
 
 from .viewer_local_result import LocalResultHeld,capture,resume_capture_status,send_metadata,send_completion
 from .viewer_node_inputs import ViewerNodeInputs
-from .viewer_node_enrollment import ViewerNodeEnrollment
+from .viewer_node_enrollment import ViewerNodeEnrollment,EnrollmentTransportUnavailable
 from .viewer_service import NativeEngine
 from .viewer_synthetic_submission import submit
 
 
 class SupervisorHeld(RuntimeError):pass
+
+
+class TransientTransport(RuntimeError):
+    """Reserved for a verified transient transport classification."""
+
+
+def _deliver(worker):
+    # Only post-capture metadata/receipt operations are safe to retry; their
+    # immutable identities and durable journals perform the actual replay.
+    try:
+        send_metadata(worker,synthetic_fixture=True)
+        return send_completion(worker,synthetic_fixture=True)
+    except EnrollmentTransportUnavailable as error:
+        raise TransientTransport('delivery_transport_unavailable') from error
 
 
 def tick(worker,engine,job_id,request_id,environment,*,input_root,input_root_identity,
@@ -34,10 +48,11 @@ def tick(worker,engine,job_id,request_id,environment,*,input_root,input_root_ide
         else:
             if status['state']=='absent_no_dispatch':capture(worker,engine,synthetic_fixture=True)
             elif status['state']!='sealed_no_dispatch':raise SupervisorHeld('capture_state_unknown')
-            send_metadata(worker,synthetic_fixture=True)
-            return send_completion(worker,synthetic_fixture=True)
+            return _deliver(worker)
     inputs=ViewerNodeInputs(worker,job_id,request_id,environment,input_root=input_root,
         input_root_identity=input_root_identity,max_total=max_total,max_object=max_object)
+    count=inputs.claim.get('objectCount')
+    if type(count) is not int or not 1<=count<=max_objects:raise SupervisorHeld('synthetic_object_limit')
     inputs.fetch_plan();inventory=inputs.freeze_inventory()
     if inventory['count']>max_objects:raise SupervisorHeld('synthetic_object_limit')
     with inputs._db() as db:
@@ -46,8 +61,7 @@ def tick(worker,engine,job_id,request_id,environment,*,input_root,input_root_ide
     for (object_id,) in rows:inputs.transfer(object_id)
     submit(inputs,engine,synthetic_fixture=True)
     capture(worker,engine,synthetic_fixture=True)
-    send_metadata(worker,synthetic_fixture=True)
-    return send_completion(worker,synthetic_fixture=True)
+    return _deliver(worker)
 
 
 def run(worker,engine,job_id,request_id,environment,*,max_attempts=5,initial_delay=.1,max_delay=2,
@@ -60,6 +74,6 @@ def run(worker,engine,job_id,request_id,environment,*,max_attempts=5,initial_del
     delay=initial_delay
     for attempt in range(max_attempts):
         try:return tick(worker,engine,job_id,request_id,environment,synthetic_fixture=True,**kwargs)
-        except Exception:
+        except TransientTransport:
             if attempt+1==max_attempts:raise
             time.sleep(delay);delay=min(max_delay,delay*2)

@@ -147,6 +147,15 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         self.assertEqual(self.request(),(200,claim))
         self.assertEqual(self.queue.get(self.job)['status'],'held')
 
+    def test_legacy_claim_without_object_count_fails_closed(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(claim['objectCount'],1)
+        with self.queue._db() as db:
+            row=db.execute('SELECT binding FROM viewer_worker_claims WHERE job_id=?',(self.job,)).fetchone()
+            binding=json.loads(row['binding']);del binding['objectCount']
+            db.execute('UPDATE viewer_worker_claims SET binding=? WHERE job_id=?',(protocol.canonical_json(binding).decode(),self.job))
+        self.assertNotEqual(self.inventory(0,claim['claimToken'])[0],200)
+
     def test_inventory_requires_exact_principal_and_claim_token(self):
         status,claim=self.request();self.assertEqual(status,200)
         self.assertEqual(self.attest(claim)[0],200)

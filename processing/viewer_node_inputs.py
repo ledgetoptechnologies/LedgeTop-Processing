@@ -255,7 +255,7 @@ class ViewerNodeInputs:
             if count:digest.update(b',')
             digest.update(p.canonical_json(entry));count+=1;total+=item['bytes'];photos+=int(item['isPhoto'])
         digest.update(b']')
-        if (count!=manifest[2] or total!=manifest[3] or total!=self.claim['inputBytes'] or photos!=self.claim['imageCount']
+        if (count!=self.claim['objectCount'] or count!=manifest[2] or total!=manifest[3] or total!=self.claim['inputBytes'] or photos!=self.claim['imageCount']
                 or digest.hexdigest()!=self.claim['inputInventorySha256']):raise InputHeld('inventory_digest_mismatch')
 
     def freeze_inventory(self):
@@ -302,7 +302,7 @@ class ViewerNodeInputs:
                 with self._db() as db:db.executemany('INSERT INTO objects VALUES(?,?,?,?,?,?,?)',rows)
                 cursor=next_cursor
             digest.update(b']')
-            if (digest.hexdigest()!=self.claim['inputInventorySha256'] or total!=self.claim['inputBytes']
+            if (count!=self.claim['objectCount'] or digest.hexdigest()!=self.claim['inputInventorySha256'] or total!=self.claim['inputBytes']
                     or photos!=self.claim['imageCount']):raise InputHeld('inventory_digest_mismatch')
             with self._db() as db:
                 db.execute("UPDATE manifest SET phase='verified',count=?,total=? WHERE singleton=1 AND phase='fetching'",(count,total))

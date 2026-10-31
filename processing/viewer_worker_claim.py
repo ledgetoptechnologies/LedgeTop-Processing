@@ -159,7 +159,7 @@ class ViewerWorkerClaims:
             environment=task['environment'],nodeId=identity['node_id'],workerId=identity['worker_id'],
             workerInstanceId=identity['worker_instance_id'],engineTaskId=engine_uuid,
             inputInventorySha256=p.digest(manifest),pipelineSha256=hashlib.sha256(settings).hexdigest(),taskNameSha256=p.digest(item['name']),
-            imageCount=item['images_count'],inputBytes=item['input_bytes'],state='claimed_unenrolled')
+            imageCount=item['images_count'],objectCount=len(manifest),inputBytes=item['input_bytes'],state='claimed_unenrolled')
         return (value,manifest,source,settings.decode(),item['name']) if include_manifest else value
 
     def claim(self,payload,identity):
@@ -246,6 +246,8 @@ class ViewerWorkerClaims:
             or task['node_id']!=row['node_id'] or task['engine_uuid']!=saved['engineTaskId']
             or task['claim_token']!=row['token'] or job['node_id']!=row['node_id'] or job['worker_id']!=row['worker_id']):
             raise Conflict('Viewer inventory ownership changed')
+        if 'objectCount' not in saved:raise Conflict('Viewer claim object count unavailable')
+        p._integer(saved['objectCount'],'input object count')
         p._hash(saved['inputInventorySha256'],'input inventory digest');p._hash(saved['taskNameSha256'],'task name digest')
         if require_enrollment:
             receipt=db.execute('SELECT attestation,receipt FROM viewer_worker_enrollments WHERE job_id=?',(job_id,)).fetchone()

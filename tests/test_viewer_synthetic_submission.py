@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler,HTTPServer
 import io
 import json
 import signal
+import time
 import os
 from pathlib import Path
 import sqlite3
@@ -108,6 +109,7 @@ with DaemonStateLock(c['worker']) as owner:
  kwargs=dict(input_root=c['inputRoot'],input_root_identity=c['inputIdentity'],max_total=100000,max_object=100000,synthetic_fixture=True)
  if mode=='kill':
   with patch.object(supervisor,'send_completion',stop):supervisor.tick(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',**kwargs)
+ elif mode=='retry':print(json.dumps(supervisor.run(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',max_attempts=8,initial_delay=.1,max_delay=.5,**kwargs)))
  else:print(json.dumps(supervisor.tick(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',**kwargs)))
 '''
         args=[sys.executable,'-c',code,json.dumps(config)]
@@ -119,11 +121,17 @@ with DaemonStateLock(c['worker']) as owner:
         offline=subprocess.run(args+['resume'],capture_output=True,timeout=20)
         self.assertNotEqual(offline.returncode,0)
         self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])
-        fixture.server=create_reference_http_server(fixture.api,port=port,ssl_context=fixture.tls)
-        fixture.thread=threading.Thread(target=fixture.server.serve_forever,kwargs={'poll_interval':.05},daemon=True);fixture.thread.start()
-        resumed=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
-        self.assertEqual(resumed.returncode,0,resumed.stderr)
-        self.assertEqual(json.loads(resumed.stdout)['kind'],'viewer-completion-attestation-receipt')
+        retry=subprocess.Popen(args+['retry'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+        try:
+            time.sleep(.5)
+            self.assertIsNone(retry.poll(),'retry stopped during coordinator outage')
+            fixture.server=create_reference_http_server(fixture.api,port=port,ssl_context=fixture.tls)
+            fixture.thread=threading.Thread(target=fixture.server.serve_forever,kwargs={'poll_interval':.05},daemon=True);fixture.thread.start()
+            stdout,stderr=retry.communicate(timeout=20)
+        finally:
+            if retry.poll() is None:os.killpg(retry.pid,signal.SIGKILL);retry.communicate(timeout=5)
+        self.assertEqual(retry.returncode,0,stderr)
+        self.assertEqual(json.loads(stdout)['kind'],'viewer-completion-attestation-receipt')
         self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])
         self.assertEqual(fixture.queue.get(fixture.job)['status'],'running')
         self.assertEqual(len(list(root.glob('*.alloc'))),1)
