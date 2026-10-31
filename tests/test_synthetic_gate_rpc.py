@@ -58,6 +58,32 @@ class SyntheticGateRpcTests(unittest.TestCase):
   with self.server() as server:
    with self.assertRaises(FileExistsError):self.call(server)
   self.assertEqual(self.fixture.counts()['initialize'],0)
+ def test_listener_refuses_preexisting_fixture_database_without_touching_it(self):
+  import hashlib,os
+  from processing.synthetic_gate_rpc import SyntheticGateServer
+  root=Path(self.tmp.name)/'private';root.mkdir(mode=0o700)
+  sentinel=root/'synthetic-engine.sqlite';sentinel.write_bytes(b'untouched sentinel');sentinel.chmod(0o640)
+  before=(sentinel.stat().st_mode,sentinel.stat().st_ino,hashlib.sha256(sentinel.read_bytes()).digest())
+  server=SyntheticGateServer(root,'synthetic-engine',node='node',origin='http://127.0.0.1:18080',authority=self.authority,generation=1,receipt=self.receipt,job=self.job,token=self.token,enabled=True)
+  with self.assertRaises(FileExistsError):server.__enter__()
+  self.assertEqual((sentinel.stat().st_mode,sentinel.stat().st_ino,hashlib.sha256(sentinel.read_bytes()).digest()),before)
+ def test_concurrent_server_creation_does_not_share_fixture_database(self):
+  import threading
+  from concurrent.futures import ThreadPoolExecutor
+  from processing.synthetic_gate_rpc import SyntheticGateServer
+  root=Path(self.tmp.name)/'private';root.mkdir(mode=0o700);barrier=threading.Barrier(2);servers=[]
+  def create():
+   server=SyntheticGateServer(root,'synthetic-engine',node='node',origin='http://127.0.0.1:18080',authority=self.authority,generation=1,receipt=self.receipt,job=self.job,token=self.token,enabled=True)
+   barrier.wait(timeout=5)
+   try:server.__enter__();servers.append(server);return 'started'
+   except (FileExistsError,SyntheticRpcHeld):return 'held'
+  try:
+   with ThreadPoolExecutor(max_workers=2) as pool:
+    results=list(pool.map(lambda _:create(),range(2)))
+   self.assertEqual(sorted(results),['held','started']);self.assertEqual(len(servers),1)
+   self.assertTrue((root/'synthetic-engine.sqlite').is_file())
+  finally:
+   for server in servers:server.close()
  def test_missing_gate_or_untrusted_fixture_fails_closed(self):
   server=self.server();server.receipt='f'*32
   with self.assertRaises(SyntheticRpcHeld):
@@ -115,6 +141,9 @@ with SyntheticGateServer(sys.argv[1],'owned-synthetic',node='node',origin='http:
     probe=subprocess.run([sys.executable,'-c',code,str(root),json.dumps(job),'normal'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
     self.assertNotEqual(probe.returncode,0)
     current=sockpath.lstat();self.assertEqual((current.st_dev,current.st_ino),identity);sockpath.unlink()
+    # Preserve the task-owned engine DB under a verified new name; server never replaces it.
+    db=root/'synthetic-engine.sqlite';db_stat=db.lstat();preserved=root/'previous-synthetic-engine.sqlite'
+    self.assertFalse(preserved.exists());db.rename(preserved);self.assertEqual((preserved.stat().st_dev,preserved.stat().st_ino),(db_stat.st_dev,db_stat.st_ino))
     child=subprocess.Popen([sys.executable,'-c',code,str(root),json.dumps(job),'normal'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     self.assertTrue(select.select([child.stdout],[],[],5)[0]);self.assertEqual(child.stdout.readline().strip(),'ready')
     client=socket.socket(socket.AF_UNIX);client.settimeout(5);client.connect(str(sockpath));client.sendall(json.dumps(dict(token='b'*64,jobId=job['id'],operation='initialize')).encode()+b'\n')

@@ -93,7 +93,22 @@ class SyntheticGateServer:
   self._check_root()
   if self.path.exists() or self.path.is_symlink():raise SyntheticRpcHeld('socket_exists')
   try:
-   self.fixture=NativeNodeFixture(self.root/'synthetic-engine.sqlite',synthetic_enabled=True).start()
+   # The fixture class opens/chmods its path; only hand it the exact fresh file
+   # we created, never a pre-existing database. Retain it on all outcomes.
+   db_path=self.root/'synthetic-engine.sqlite'
+   fd=os.open(db_path,os.O_CREAT|os.O_EXCL|os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+   try:
+    initial=os.fstat(fd);os.fsync(fd)
+    dfd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:os.fsync(dfd)
+    finally:os.close(dfd)
+    self._check_root();named=db_path.lstat()
+    if not stat.S_ISREG(named.st_mode) or (named.st_dev,named.st_ino)!=(initial.st_dev,initial.st_ino):raise SyntheticRpcHeld('fixture_db_changed')
+    self.fixture=NativeNodeFixture(db_path,synthetic_enabled=True)
+    named=db_path.lstat()
+    if (named.st_dev,named.st_ino)!=(initial.st_dev,initial.st_ino):raise SyntheticRpcHeld('fixture_db_changed')
+    self.fixture.start()
+   finally:os.close(fd)
    self.rpc=SyntheticGateRpc(self.engine_id,self.fixture,**self.arguments).__enter__()
    self.listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);self.listener.bind(str(self.path))
    st=self.path.lstat();self.socket_identity=(st.st_dev,st.st_ino)
