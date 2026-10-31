@@ -11,8 +11,9 @@ import unittest
 class ViewerBridgeHarnessTests(unittest.TestCase):
     def test_uncertain_creation_records_identity_and_never_removes_by_name(self):self._failure('uncertain')
     def test_changed_container_identity_is_never_stopped_or_removed(self):self._failure('identity-mismatch')
+    def test_full_mode_records_uncertain_creation_without_cleanup(self):self._failure('uncertain','full')
 
-    def _failure(self,mode):
+    def _failure(self,mode,bridge_mode='reconcile'):
         script=Path(__file__).resolve().parents[1]/'ops'/'run_viewer_bridge_rehearsal.sh'
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);bin_dir=root/'bin';bin_dir.mkdir();log=root/'docker.log'
@@ -20,7 +21,7 @@ class ViewerBridgeHarnessTests(unittest.TestCase):
 shift 2
 case "$1" in
  rev-parse) case "$2" in HEAD) echo 1111111111111111111111111111111111111111;; *) echo baaaf2439d5a641ae59c3f550f77dc7512e3b84d;; esac;;
- status|merge-base|diff) exit 0;;
+ status|merge-base|diff|ls-files) exit 0;;
  archive) printf synthetic;;
  *) exit 1;;
 esac
@@ -44,13 +45,14 @@ exit 1
             try:subprocess.run([str(bin_dir/'tar')],check=True,timeout=2)
             except PermissionError:self.skipTest('temporary filesystem does not permit fixture execution')
             env={**os.environ,'PATH':str(bin_dir)+os.pathsep+os.environ['PATH'],'TMPDIR':str(root),
-                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode}
+                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode,'BRIDGE_MODE':bridge_mode}
             result=subprocess.run(['sh',str(script)],env=env,text=True,capture_output=True,timeout=10)
             self.assertNotEqual(result.returncode,0)
             if mode=='uncertain':self.assertIn('Server creation outcome uncertain',result.stderr)
             else:self.assertIn('Container identity unavailable or changed',result.stderr)
             evidence=list(root.glob('codex-viewer-bridge-*/run-identity.json'));self.assertEqual(len(evidence),1)
             identity=json.loads(evidence[0].read_text())
+            self.assertEqual(identity['bridgeMode'],bridge_mode)
             self.assertIn(identity['runId'],identity['serverName']);self.assertIn(identity['runId'],identity['clientName'])
             calls=log.read_text().splitlines()
             self.assertTrue(any(line.startswith('run ') for line in calls))
