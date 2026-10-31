@@ -95,6 +95,7 @@ class ActualViewerBrokerWorkerTests(unittest.TestCase):
             response.geturl = lambda: request.full_url
             return response
         fixture.broker._open = open_loopback
+        fixture.broker._custom_opener = True
         fixture.broker.enable_ranges = True
         # Advance via the actual durable coordinator/worker until the Viewer
         # can mint a grant bound to the worker-created reservation.
