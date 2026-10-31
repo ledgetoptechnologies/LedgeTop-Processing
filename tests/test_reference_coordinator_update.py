@@ -10,6 +10,8 @@ import shutil
 import socket
 import socketserver
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -75,6 +77,59 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.probe=patch.object(module,'owned_api_probe',return_value={'operatorLookupVerified':True})
         self.probe.start();self.addCleanup(self.probe.stop)
         self.state=self.updater.prepare(TARGET,SOURCE,MAIN)
+
+    def test_viewer_extra_tables_exact_empty_upgrade_and_copy(self):
+        with self.queue._db() as db:
+            db.execute('DROP TABLE viewer_option_evidence')
+            db.execute('DROP TABLE viewer_reservations')
+        before=module.volume_census(self.volume,uid=os.geteuid())
+        TaskStore(self.queue,self.volume/'viewer-tasks')
+        after=module.volume_census(self.volume,uid=os.geteuid())
+        module.compatible(after,before,allow_owned=True,allow_viewer_additions=True)
+        # Rollback compatibility must not silently permit a newer schema.
+        with self.assertRaises(module.Stopped):module.compatible(after,before,allow_owned=True)
+        nonempty=copy.deepcopy(after);nonempty['tables']['viewer_reservations']['count']=1
+        with self.assertRaises(module.Stopped):module.compatible(nonempty,before,allow_owned=True,allow_viewer_additions=True)
+        malformed=copy.deepcopy(after);malformed['schema']=[r for r in malformed['schema'] if r[1]!='sqlite_autoindex_viewer_reservations_1']
+        with self.assertRaises(module.Stopped):module.compatible(malformed,before,allow_owned=True,allow_viewer_additions=True)
+        copied=self.root/'viewer-schema-copy';shutil.copytree(self.volume,copied)
+        module.compatible(module.volume_census(copied,uid=os.geteuid(),offline=True),after)
+
+    def test_viewer_extra_tables_partial_schema_holds(self):
+        with self.queue._db() as db:db.execute('DROP TABLE viewer_option_evidence')
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_viewer_extra_tables_changed_schema_or_nonempty_hold(self):
+        with self.queue._db() as db:
+            db.execute('ALTER TABLE viewer_reservations ADD COLUMN unreviewed TEXT')
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_viewer_extra_tables_nonempty_reservation_holds(self):
+        with self.queue._db() as db:
+            db.execute("INSERT INTO viewer_reservations VALUES('synthetic','staging','synthetic','reserved')")
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_nonempty_viewer_reservation_holds_under_optimized_python(self):
+        with self.queue._db() as db:
+            db.execute("INSERT INTO viewer_reservations VALUES('synthetic','staging','synthetic','reserved')")
+        code="from ops.update_reference_coordinator import volume_census; import os,sys; volume_census(sys.argv[1],uid=os.geteuid())"
+        result=subprocess.run([sys.executable,'-O','-c',code,str(self.volume)],capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0);self.assertIn('nonempty guarded table',result.stderr)
+
+    def test_rollback_retains_candidate_when_new_empty_viewer_schema_was_added(self):
+        with self.queue._db() as db:
+            db.execute('DROP TABLE viewer_option_evidence')
+            db.execute('DROP TABLE viewer_reservations')
+        self.state['baseline']=module.volume_census(self.volume,uid=os.geteuid())
+        self.updater.save(self.state)
+        def candidate_start(action):
+            if action=='start':TaskStore(self.queue,self.volume/'viewer-tasks')
+        self.transport.hook=candidate_start;self.transport.loss='start'
+        with self.assertRaises(OSError):self.activate()
+        with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertTrue(self.state.get('downgradeRefused'))
 
     def make_transport(self):
         owner=self

@@ -47,6 +47,15 @@ history census. Preserve its frozen prior-operation artifacts.
    binary ignores it. If compatibility fails, retain/restart the exact new
    candidate and keep nodes fenced; never restore the backup over new work.
 
+The Viewer census accepts the reservation and option-evidence tables only as
+the exact reviewed pair with their exact autoindexes and no rows. Candidate
+verification may explicitly accept their empty addition to an older baseline;
+the offline rollback gate does not. If the candidate added these tables, an
+unqualified old-binary restart is refused and the exact candidate is retained.
+Nonempty Viewer tables or a partial or changed schema still hold the updater.
+The comparison tests use synthetic state; they do not establish production
+rollback or cross-host exclusion.
+
 The executor and its live cross-host gate transport still need implementation
 and runtime acceptance. The current main/cluster worker images are not
 coordinator rollback targets.
