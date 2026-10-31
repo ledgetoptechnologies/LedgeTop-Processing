@@ -32,6 +32,15 @@ class SupervisorPolicyTests(unittest.TestCase):
             claim=json.loads(claim);self.assertEqual(claim['imageCount'],1);self.assertEqual(claim['objectCount'],2)
         self.assertEqual(fixture.calls,[])
 
+    def test_archive_status_transient_is_retryable_but_partial_post_holds(self):
+        from processing.viewer_local_result import ArchiveStatusTransportUnavailable,LocalResultHeld
+        from processing.viewer_synthetic_supervisor import _deliver
+        with patch('processing.viewer_synthetic_supervisor.send_metadata'):
+            with patch('processing.viewer_synthetic_supervisor.send_completion',side_effect=ArchiveStatusTransportUnavailable('offline')):
+                with self.assertRaises(TransientTransport):_deliver(object())
+            with patch('processing.viewer_synthetic_supervisor.send_completion',side_effect=LocalResultHeld('archive_delivery_uncertain')):
+                with self.assertRaisesRegex(LocalResultHeld,'archive_delivery_uncertain'):_deliver(object())
+
     def test_only_explicit_transient_errors_retry(self):
         args=(object(),object(),'job','request','staging')
         with patch('processing.viewer_synthetic_supervisor.tick',side_effect=[TransientTransport('retry'),{'ok':True}]) as call:

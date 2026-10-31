@@ -109,6 +109,11 @@ with DaemonStateLock(c['worker']) as owner:
  kwargs=dict(input_root=c['inputRoot'],input_root_identity=c['inputIdentity'],max_total=100000,max_object=100000,synthetic_fixture=True)
  if mode=='kill':
   with patch.object(supervisor,'send_completion',stop):supervisor.tick(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',**kwargs)
+ elif mode=='archive-offline':
+  from processing.viewer_local_result import send_archive,ArchiveStatusTransportUnavailable
+  try:send_archive(worker,synthetic_fixture=True)
+  except ArchiveStatusTransportUnavailable:print('archive-status-transient')
+  else:raise AssertionError('offline lookup did not fail')
  elif mode=='retry':print(json.dumps(supervisor.run(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',max_attempts=8,initial_delay=.1,max_delay=.5,**kwargs)))
  else:print(json.dumps(supervisor.tick(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',**kwargs)))
 '''
@@ -118,6 +123,9 @@ with DaemonStateLock(c['worker']) as owner:
         self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])
         self.assertEqual(self.calls[0][2]['set-uuid'],fixture.store.task('22222222-2222-4222-8222-222222222222')['engine_uuid'])
         port=fixture.server.server_port;fixture.stop_server()
+        archive_offline=subprocess.run(args+['archive-offline'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(archive_offline.returncode,0,archive_offline.stderr)
+        self.assertEqual(archive_offline.stdout.strip(),'archive-status-transient')
         offline=subprocess.run(args+['resume'],capture_output=True,timeout=20)
         self.assertNotEqual(offline.returncode,0)
         self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])

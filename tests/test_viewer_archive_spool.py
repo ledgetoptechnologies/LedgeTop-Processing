@@ -86,6 +86,37 @@ class ViewerArchiveSpoolTests(unittest.TestCase):
                 self.spool.receive(claim['jobId'],self.identity(),claim['claimToken'],iter(()))
         self.assertEqual(len(list(self.root.glob('*.alloc'))),1)
 
+    def test_partial_tls_post_then_worker_restart_remains_held(self):
+        import json,signal
+        with DaemonStateLock(self.base.base.base.base.worker) as owner:
+            worker=self.base.worker(owner);claim,reader=self.source(worker)
+            try:
+                connection=http.client.HTTPSConnection('127.0.0.1',self.fixture.server.server_port,context=self.fixture.client,timeout=5)
+                connection.putrequest('POST','/ltds/worker/v1/viewer-claims/'+claim['jobId']+'/archive')
+                connection.putheader('Authorization','Bearer '+'a'*32);connection.putheader('X-Claim-Token',claim['claimToken'])
+                connection.putheader('Content-Type','application/octet-stream');connection.putheader('Content-Length',str(reader.length))
+                connection.endheaders();connection.send(reader.read(1));connection.close()
+            finally:reader.close()
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            with self.fixture.queue._db() as db:row=db.execute('SELECT state FROM viewer_worker_spool WHERE job_id=?',(claim['jobId'],)).fetchone()
+            if row and row['state']=='receiving':break
+            time.sleep(.05)
+        self.assertIsNotNone(row);self.assertEqual(row['state'],'receiving')
+        code='''import json,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_local_result import send_archive
+root,config=sys.argv[1:]
+with DaemonStateLock(root) as owner:send_archive(ViewerNodeEnrollment(owner,**json.loads(config)),synthetic_fixture=True)
+'''
+        child=subprocess.run([sys.executable,'-c',code,str(self.base.base.base.base.worker),json.dumps(self.base.base.base.base.config)],capture_output=True,text=True,timeout=15)
+        self.assertNotEqual(child.returncode,0);self.assertIn('coordinator_spool_requires_inspection',child.stderr)
+        with self.fixture.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_worker_spool WHERE job_id=?',(claim['jobId'],)).fetchone()['state'],'receiving')
+        self.assertEqual(len(list(self.root.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.base.base.base.output.glob('*.alloc'))),1)
+
     def test_actual_tls_streams_sealed_bytes_to_spool(self):
         with DaemonStateLock(self.base.base.base.base.worker) as owner:
             worker=self.base.worker(owner);claim,reader=self.source(worker)

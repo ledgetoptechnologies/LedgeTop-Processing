@@ -7,7 +7,7 @@ submission and output journals; ambiguous operations remain held there.
 from pathlib import Path
 import time
 
-from .viewer_local_result import LocalResultHeld,capture,resume_capture_status,send_metadata,send_completion
+from .viewer_local_result import LocalResultHeld,ArchiveStatusTransportUnavailable,capture,resume_capture_status,send_metadata,send_completion
 from .viewer_node_inputs import ViewerNodeInputs
 from .viewer_node_enrollment import ViewerNodeEnrollment,EnrollmentTransportUnavailable
 from .viewer_service import NativeEngine
@@ -27,7 +27,7 @@ def _deliver(worker):
     try:
         send_metadata(worker,synthetic_fixture=True)
         return send_completion(worker,synthetic_fixture=True)
-    except EnrollmentTransportUnavailable as error:
+    except (EnrollmentTransportUnavailable,ArchiveStatusTransportUnavailable) as error:
         raise TransientTransport('delivery_transport_unavailable') from error
 
 

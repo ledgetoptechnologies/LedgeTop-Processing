@@ -25,6 +25,9 @@ from .viewer_locked_upload import strict_response
 
 class LocalResultHeld(RuntimeError):pass
 
+class ArchiveStatusTransportUnavailable(LocalResultHeld):
+    """Known connection failure during an idempotent status GET."""
+
 
 def _local(worker,*,include_grant=False):
     if type(worker) is not ViewerNodeEnrollment:raise LocalResultHeld('enrollment_required')
@@ -267,6 +270,8 @@ def send_archive(worker,*,synthetic_fixture=False):
             try:
                 client.request('GET',path+'/archive-receipt',headers=headers)
                 status=strict_response(client.getresponse())
+            except (ConnectionRefusedError,ConnectionResetError,TimeoutError):
+                raise ArchiveStatusTransportUnavailable('archive_status_transport_unavailable') from None
             except Exception:raise LocalResultHeld('archive_status_unavailable') from None
             finally:client.close()
             if status=={'state':'held'}:raise LocalResultHeld('coordinator_spool_requires_inspection')

@@ -240,3 +240,11 @@ classified connection-refused, connection-reset or timeout errors during
 idempotent post-capture delivery. TLS, HTTP authorization, integrity, unknown
 and ambiguous engine errors hold. DNS and filesystem calls have no guaranteed
 hard wall-clock deadline, and the retry schedule is not durable.
+
+Known connection-refused, reset and timeout failures from the archive-receipt
+status GET are classified for bounded retry alongside idempotent metadata
+delivery. An interrupted archive POST remains uncertain and is not automatically
+retried; if the coordinator records a partial spool, later status holds it.
+TLS, authorization, response-integrity and unknown errors are not classified
+as transient. The status test includes a real coordinator outage and a partial
+TLS POST followed by a new worker process.
