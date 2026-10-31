@@ -30,7 +30,7 @@ class SyntheticSubmissionTests(unittest.TestCase):
         self.calls=[];self.drop=None;self.bad=None;self.pause=None;self.arrived=threading.Event();self.release=threading.Event();outer=self
         archive=io.BytesIO()
         with zipfile.ZipFile(archive,'w') as value:value.writestr('synthetic.txt','test result')
-        self.archive=archive.getvalue();self.engine_status=40;self.truncate_archive=False
+        self.archive=archive.getvalue();self.engine_status=40;self.truncate_archive=False;self.bad_info=False
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body=self.rfile.read(int(self.headers.get('Content-Length','0')))
@@ -48,6 +48,9 @@ class SyntheticSubmissionTests(unittest.TestCase):
                 identifier=self.path.split('/')[2]
                 data=(json.dumps({'uuid':identifier,'status':{'code':outer.engine_status}}).encode()
                       if self.path.endswith('/info') else outer.archive)
+                if outer.bad_info and self.path.endswith('/info'):
+                    self.connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(data)+10).encode()+b'\r\n\r\n'+data)
+                    self.close_connection=True;return
                 self.send_response(200);self.send_header('Content-Length',str(len(data)))
                 self.send_header('Content-Type','application/json' if self.path.endswith('/info') else 'application/zip')
                 self.end_headers()
@@ -178,6 +181,14 @@ class SyntheticSubmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(LocalResultHeld,'not_confirmed_complete'):
                 capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
 
+    def test_truncated_status_response_does_not_create_completion_observation(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+            self.bad_info=True
+            with self.assertRaisesRegex(LocalResultHeld,'status_unavailable'):
+                capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
+            self.assertEqual(list(Path(inputs.worker.config['outputRoot']).glob('*.viewer-completion-observation')),[])
+
     def failed_intent_sync(self,fail_at):
         real_persist=local_result._persist;real_fsync=os.fsync;counter=[0]
         def fail(fd):
@@ -185,6 +196,7 @@ class SyntheticSubmissionTests(unittest.TestCase):
             if counter[0]==fail_at:raise OSError('injected sync failure')
             return real_fsync(fd)
         def persist(*args):
+            if not args[2].endswith('.viewer-outbox'):return real_persist(*args)
             with patch.object(slot_capture.os,'fsync',fail):return real_persist(*args)
         with DaemonStateLock(self.base.base.worker) as owner:
             inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)

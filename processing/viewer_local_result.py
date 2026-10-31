@@ -26,7 +26,7 @@ from .viewer_locked_upload import strict_response
 class LocalResultHeld(RuntimeError):pass
 
 
-def _local(worker):
+def _local(worker,*,include_grant=False):
     if type(worker) is not ViewerNodeEnrollment:raise LocalResultHeld('enrollment_required')
     worker.owner.check();c=worker.config
     with worker._db() as db:
@@ -72,7 +72,8 @@ def _local(worker):
         after=path.lstat()
         if (after.st_dev,after.st_ino)!=(info.st_dev,info.st_ino):raise LocalResultHeld('input_journal_changed')
         worker.owner.check()
-        return claim,binding,digest,identity,submitted[1]
+        result=(claim,binding,digest,identity,submitted[1])
+        return (*result,grant) if include_grant else result
     finally:db.close()
 
 
@@ -84,14 +85,42 @@ def _gate(worker,claim,binding,gate):
     return reservation
 
 
+def _strict_engine_info(engine,identifier):
+    parsed=urlsplit(engine.origin)
+    kind=http.client.HTTPSConnection if parsed.scheme=='https' else http.client.HTTPConnection
+    connection=kind(parsed.hostname,parsed.port,timeout=30)
+    try:
+        connection.request('GET',engine.route('/task/'+identifier+'/info'))
+        return strict_response(connection.getresponse())
+    except Exception:raise LocalResultHeld('engine_status_unavailable') from None
+    finally:connection.close()
+
+
+def _observation(claim,digest,grant):
+    return dict(schemaVersion=1,kind='viewer-engine-completion-observation',bindingSha256=digest,
+        grantSha256=p.digest(grant),jobId=claim['jobId'],viewerTaskId=claim['viewerTaskId'],
+        viewerGeneration=claim['viewerGeneration'],engineTaskId=claim['engineTaskId'],environment=claim['environment'],engineStatus=40)
+
+
+def _check_observation(slot,digest,expected):
+    name='slot-'+digest+'.viewer-completion-observation';value,fd=_read_record(slot,name)
+    try:
+        _check_record(slot,fd,name,value)
+        if p.canonical_json(value)!=p.canonical_json(expected):raise LocalResultHeld('completion_observation_changed')
+        os.fsync(fd);_check_record(slot,fd,name,value);os.fsync(slot._root);_check_record(slot,fd,name,value)
+        return value
+    finally:os.close(fd)
+
+
 def register(worker):
     """Verify sealed bytes and persist/replay a local-only immutable intent."""
-    claim,binding,digest,identity,_=_local(worker);c=worker.config
+    claim,binding,digest,identity,_,grant=_local(worker,include_grant=True);c=worker.config
     with NodeGate(c['engineId']) as gate:
         reservation=_gate(worker,claim,binding,gate)
         with open_sealed_reader(c['outputRoot'],c['outputRootIdentity'],binding,max_budget=c['maxBudget']) as reader:
             slot=reader._slot;actual=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
             if actual!=identity:raise LocalResultHeld('output_identity_changed')
+            _check_observation(slot,digest,_observation(claim,digest,grant))
             record=dict(schemaVersion=1,kind='viewer-local-result-intent',bindingSha256=digest,
                 jobId=claim['jobId'],viewerTaskId=claim['viewerTaskId'],viewerGeneration=claim['viewerGeneration'],
                 engineTaskId=claim['engineTaskId'],environment=claim['environment'],archiveBytes=reader.length,
@@ -210,16 +239,46 @@ def send_archive(worker,*,synthetic_fixture=False):
             return expected
 
 
+def send_completion(worker,*,synthetic_fixture=False):
+    """Attest the durable status observation and existing spool receipt."""
+    if synthetic_fixture is not True:raise LocalResultHeld('synthetic_fixture_required')
+    spool_receipt=send_archive(worker,synthetic_fixture=True)
+    claim,binding,digest,identity,_,grant=_local(worker,include_grant=True);c=worker.config
+    with NodeGate(c['engineId']) as gate:
+        reservation=_gate(worker,claim,binding,gate)
+        with open_sealed_reader(c['outputRoot'],c['outputRootIdentity'],binding,max_budget=c['maxBudget']) as reader:
+            slot=reader._slot;actual=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
+            if actual!=identity:raise LocalResultHeld('output_identity_changed')
+            observation=_check_observation(slot,digest,_observation(claim,digest,grant))
+            payload=dict(observation=observation,spoolReceipt=spool_receipt)
+            receipt=worker._request(payload,job_id=claim['jobId'],claim_token=claim['claimToken'],kind='completion-attestation')
+            expected=dict(schemaVersion=1,kind='viewer-completion-attestation-receipt',jobId=claim['jobId'],
+                          observationSha256=p.digest(observation),spoolReceiptSha256=p.digest(spool_receipt))
+            if p.canonical_json(receipt)!=p.canonical_json(expected):raise LocalResultHeld('completion_receipt_changed')
+            name='slot-'+digest+'.viewer-completion-receipt'
+            try:_persist(slot._root,slot._root_identity,name,expected)
+            except FileExistsError:
+                old,fd=_read_record(slot,name)
+                try:
+                    _check_record(slot,fd,name,old)
+                    if p.canonical_json(old)!=p.canonical_json(expected):raise LocalResultHeld('completion_receipt_changed')
+                    os.fsync(fd);_check_record(slot,fd,name,old);os.fsync(slot._root);_check_record(slot,fd,name,old)
+                finally:os.close(fd)
+            reader._check()
+            if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+            return expected
+
+
 def capture(worker,engine,*,synthetic_fixture=False):
     """Capture a finished synthetic engine archive without coordinator access."""
-    claim,binding,_,identity,origin=_local(worker);c=worker.config
+    claim,binding,digest,identity,origin,grant=_local(worker,include_grant=True);c=worker.config
     parsed=urlsplit(origin)
     if (synthetic_fixture is not True or type(engine) is not NativeEngine or engine.origin!=origin
             or parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or parsed.port is None):
         raise LocalResultHeld('synthetic_engine_required')
     with NodeGate(c['engineId']) as gate:
         reservation=_gate(worker,claim,binding,gate)
-        info=engine.read('/task/'+claim['engineTaskId']+'/info')
+        info=_strict_engine_info(engine,claim['engineTaskId'])
         if (not isinstance(info,dict) or info.get('uuid')!=claim['engineTaskId'] or not isinstance(info.get('status'),dict)
                 or type(info['status'].get('code')) is not int or info['status']['code']!=40):
             raise LocalResultHeld('engine_not_confirmed_complete')
@@ -231,7 +290,10 @@ def capture(worker,engine,*,synthetic_fixture=False):
                 raise LocalResultHeld('engine_archive_length_invalid')
             capture=begin_capture(c['outputRoot'],c['outputRootIdentity'],binding,max_budget=c['maxBudget'],
                                   declared_length=int(lengths[0]),expected_slot_identity=identity)
-            try:capture.consume(response)
+            try:
+                _persist(capture._slot._root,capture._slot._root_identity,'slot-'+digest+'.viewer-completion-observation',
+                         _observation(claim,digest,grant))
+                capture.consume(response)
             finally:capture.close()
             if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
         finally:response.close()

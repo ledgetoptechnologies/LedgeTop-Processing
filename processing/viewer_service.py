@@ -122,7 +122,7 @@ class NativeEngine:
 
 
 class ViewerService:
-    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, viewer_spool=None):
+    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, viewer_spool=None, viewer_completion_projection=False):
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
@@ -134,6 +134,9 @@ class ViewerService:
             if type(viewer_spool) is not ViewerArchiveSpool or viewer_spool.claims.queue is not queue:
                 raise ValueError('Viewer spool authority mismatch')
         self.viewer_spool=viewer_spool
+        if type(viewer_completion_projection) is not bool or (viewer_completion_projection and viewer_spool is None):
+            raise ValueError('Viewer completion projection requires spool')
+        self.viewer_completion_projection=viewer_completion_projection
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -200,7 +203,14 @@ class ViewerService:
         return self.store.commit(identifier, environment, capability)
 
     def info(self, identifier):
-        return self.store.info(identifier)
+        info=self.store.info(identifier)
+        if self.viewer_completion_projection and info['status']['code']==20:
+            try:
+                task=self.store.task(identifier)
+                if task['phase']=='worker_claimed' and self.viewer_spool.completion_ready(task):
+                    return {**info,'status':{'code':40},'progress':100}
+            except Exception:pass # A missing or uncertain proof never becomes success.
+        return info
 
     def reserve(self, identifier, environment, capability):
         with self._lock:return self.store.reserve(identifier,environment,capability)
@@ -657,7 +667,7 @@ class ViewerService:
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
             with self.queue._db() as db:
-                if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_active_permit_hold')").fetchone():
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_completions','viewer_worker_active_permit_hold')").fetchone():
                     # This draft cannot dispatch or reconcile node enrollment.
                     # Never fall through to legacy direct engine mutations.
                     return

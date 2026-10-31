@@ -165,6 +165,13 @@ class ReferenceWorkerAPI:
                 if self.viewer_claims is None:return self._error(404,'not_found')
                 return Response(200,self.viewer_claims.result_metadata(metadata[1],protocol.decode_submission(body),identity,
                                                                       self._header(headers,'X-Claim-Token')))
+            completion=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/completion-attestation',path) if type(path) is str else None
+            if method=='POST' and completion:
+                if self.viewer_claims is None or self.viewer_spool is None:return self._error(404,'not_found')
+                token=self._header(headers,'X-Claim-Token');payload=protocol.decode_submission(body)
+                state=self.viewer_spool.lookup(completion[1],identity,token)
+                if state.get('state')!='sealed':raise Conflict('spool unavailable')
+                return Response(200,self.viewer_claims.completion_attestation(completion[1],payload,identity,token,state['receipt']))
             archive_status=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/archive-receipt',path) if type(path) is str else None
             if method=='GET' and archive_status:
                 if self.viewer_spool is None:return self._error(404,'not_found')
