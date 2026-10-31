@@ -540,6 +540,33 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (status,100 if status=='succeeded' else row['progress'],row['uuid']))
 
+    def settle_operator_resolution(self, task):
+        """Finish a hold the operator resolved before the Viewer row recorded it.
+
+        An operator hold of a running job, or a crash between the queue hold and
+        the Viewer update, leaves the row in an engine phase. Record the same
+        held outcome the normal hold path writes; no queue state or bytes change.
+        """
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=self._row(db,task['uuid'])
+            if (row['job_id']!=task['job_id'] or row['environment']!=task['environment']
+                    or row['phase'] not in ('processing','commit_pending','cancel_pending')):
+                raise Conflict('operator resolution identity changed')
+            job=db.execute('SELECT status,result,node_id,environment,profile FROM jobs WHERE id=?',(row['job_id'],)).fetchone()
+            try:
+                result=json.loads(job['result']) if job is not None and type(job['result']) is str else None
+            except ValueError:
+                result=None
+            if (job is None or job['status']!='failed' or job['profile']!=VIEWER_PROFILE
+                    or job['environment']!=row['environment'] or job['node_id']!=row['node_id']
+                    or type(result) is not dict or set(result)!={'environment','operatorAction','note','workerStopped'}
+                    or result['operatorAction']!='resolve' or result['workerStopped'] is not True
+                    or result['environment']!=row['environment']):
+                raise Conflict('terminal Viewer identity requires inspection')
+            db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='operator_resolved',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
+                (row['uuid'],))
+
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path'}

@@ -561,6 +561,72 @@ class ViewerServiceTests(unittest.TestCase):
                 with self.queue._db() as db:
                     db.execute('UPDATE jobs SET '+field+'=? WHERE id=?',(original,task['job_id']))
 
+    def assert_operator_resolution_settled(self, first, second):
+        task = self.task(first)
+        self.assertEqual((task['stage'], task['phase'], task['error']), ('held', 'held', 'operator_resolved'))
+        self.assertEqual(task['job']['status'], 'failed')
+        self.assertEqual(self.service.info(first)['status'], {'code': 30, 'errorMessage': 'operator_resolved'})
+        self.assertTrue(Path(task['directory']).is_dir())
+        self.assertEqual(len(task['files']), 1)
+        self.assertEqual(self.task(second)['job']['status'], 'running')
+        self.assertEqual([identifier for _, identifier in self.fleet.commits],
+                         [task['engine_uuid'], self.task(second)['engine_uuid']])
+
+    def test_operator_hold_and_resolve_of_running_job_releases_dispatch(self):
+        first = self.submit(); self.service.tick()
+        job_id = self.task(first)['job_id']
+        self.service.operator(job_id, 'hold', {'note': 'synthetic operator inspection'})
+        self.service.tick()
+        self.assertEqual(self.task(first)['phase'], 'processing')
+        self.finish(first, 30)  # the operator stopped the engine task
+        self.service.operator(job_id, 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
+        second = self.submit(environment='staging')
+        self.service.tick()
+        self.assert_operator_resolution_settled(first, second)
+        self.service.tick()
+        self.assertEqual(len(self.fleet.commits), 2)
+
+    def test_interrupted_hold_resolved_by_operator_recovers_after_restart(self):
+        first = self.submit(); self.service.tick()
+        self.finish(first, 50)
+        update = self.service.store.update
+        def crash(identifier, **fields):
+            if fields.get('phase') == 'held':
+                raise OSError('synthetic crash after queue hold')
+            return update(identifier, **fields)
+        self.service.store.update = crash
+        with self.assertRaises(OSError):
+            self.service.tick()
+        task = self.task(first)
+        self.assertEqual((task['phase'], task['job']['status']), ('processing', 'held'))
+        self.service.close(); self.queue.close(); self.make_queue_service()
+        self.service.operator(task['job_id'], 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
+        second = self.submit()
+        self.service.tick()
+        self.assert_operator_resolution_settled(first, second)
+
+    def test_operator_resolution_split_with_wrong_binding_still_blocks(self):
+        first = self.submit(); self.service.tick()
+        job_id = self.task(first)['job_id']
+        self.service.operator(job_id, 'hold', {'note': 'synthetic operator inspection'})
+        self.service.operator(job_id, 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
+        second = self.submit()
+        with self.queue._db() as db:
+            original = db.execute('SELECT result FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
+        for change in ({'workerStopped': False}, {'environment': 'staging'}, {'extra': 1}):
+            with self.subTest(change=change):
+                with self.queue._db() as db:
+                    db.execute('UPDATE jobs SET result=? WHERE id=?', (json.dumps({**json.loads(original), **change}), job_id))
+                with self.assertRaises(Conflict):
+                    self.service.tick()
+                self.assertEqual(self.task(first)['phase'], 'processing')
+                self.assertEqual(self.task(second)['job']['status'], 'queued')
+        with self.queue._db() as db:
+            db.execute('UPDATE jobs SET result=?,node_id=? WHERE id=?', (original, 'main', job_id))
+        with self.assertRaises(Conflict):
+            self.service.tick()
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+
     def test_restart_while_node_offline_retains_slot_then_returns_completed_result(self):
         first=self.submit();second=self.submit()
         self.service.tick();task=self.task(first);engine_uuid=task['engine_uuid']

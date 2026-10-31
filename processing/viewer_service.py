@@ -606,6 +606,11 @@ class ViewerService:
                     continue
                 expected = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                             'environment': task['environment'], 'cancelled': False}
+                if (job['status'] == 'failed' and isinstance(job['result'], dict)
+                        and job['result'].get('operatorAction') == 'resolve'):
+                    # The operator attested the worker stopped; finish the hold.
+                    self.store.settle_operator_resolution(task)
+                    continue
                 if (not task['engine_uuid'] or not task['node_id'] or not task['claim_token']
                         or job['result'] != expected):
                     raise Conflict('terminal Viewer identity requires inspection')
