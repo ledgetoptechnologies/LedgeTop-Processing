@@ -3,6 +3,7 @@ import json
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.parse import quote
 
 from ops.reference_worker_daemon import DaemonStateLock
@@ -10,6 +11,8 @@ from processing.config import Config
 from processing.viewer_http import ViewerFacade
 from processing.viewer_local_result import send_archive
 from processing.viewer_service import ViewerService
+from processing.direct_output_slot import OutputSlot
+from processing.viewer_archive_spool import ViewerArchiveSpool,SpoolHeld
 from tests.test_viewer_archive_spool import ViewerArchiveSpoolTests
 
 
@@ -93,3 +96,18 @@ class ViewerSpoolProviderTests(unittest.TestCase):
             with self.assertRaises(OSError):reader.read(8)
         finally:reader.close()
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
+    def test_open_failure_releases_capacity_even_if_close_fails(self):
+        task=self.fixture.store.task('22222222-2222-4222-8222-222222222222')
+        original=OutputSlot.close
+        def failed_close(slot):
+            original(slot)
+            raise OSError('injected close failure after descriptor close')
+        with patch.object(ViewerArchiveSpool,'_digest',side_effect=SpoolHeld('primary failure')):
+            with patch.object(OutputSlot,'close',failed_close):
+                with self.assertRaisesRegex(SpoolHeld,'primary failure'):
+                    self.base.spool.open_for_viewer(task)
+        self.assertTrue(self.base.spool._work.acquire(blocking=False))
+        self.assertTrue(self.base.spool._work.acquire(blocking=False))
+        try:self.assertFalse(self.base.spool._work.acquire(blocking=False))
+        finally:self.base.spool._work.release();self.base.spool._work.release()

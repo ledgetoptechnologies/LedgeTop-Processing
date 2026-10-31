@@ -125,8 +125,12 @@ class ViewerArchiveSpool:
             self._viewer_snapshot(task)
             return _ViewerReader(self,slot,dict(task),receipt),receipt['archiveBytes']
         except BaseException:
-            if slot is not None:slot.close()
-            self._work.release();raise
+            try:
+                if slot is not None:
+                    try:slot.close()
+                    except BaseException:pass  # Preserve the original failure.
+            finally:self._work.release()
+            raise
 
     @contextmanager
     def _admit(self):
