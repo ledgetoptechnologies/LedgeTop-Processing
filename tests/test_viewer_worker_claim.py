@@ -226,6 +226,22 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'configuration_required'):
             make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state')))
 
+    def test_enrollment_only_marker_blocks_legacy_claim_tick_and_startup(self):
+        with self.queue._db() as db:
+            db.execute('DROP TABLE viewer_worker_claims')
+            db.execute('DROP TABLE viewer_worker_inventory')
+        self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
+        class Bomb:
+            def __getattribute__(self,name):raise AssertionError('engine access forbidden')
+        service=ViewerService(self.queue,Config('x'*32,'','',1000,100000,viewer_enabled=True),store=self.store,
+                              engines={'cluster':Bomb(),'main':Bomb()},probe=lambda *a:self.fail('probe forbidden'))
+        service.tick()
+        self.assertEqual(self.store.task(TASK)['phase'],'queued')
+        self.assertEqual(self.queue.get(self.job)['status'],'queued')
+        self.stop_server();self.queue.close();self.queue=None
+        with self.assertRaisesRegex(RuntimeError,'configuration_required'):
+            make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state')))
+
     @unittest.skipUnless(os.environ.get('LEDGETOP_INVENTORY_10K')=='1','bounded synthetic 10k opt-in')
     def test_ten_thousand_metadata_entries_are_paged_and_digest_matches(self):
         directory=Path(self.store.task(TASK)['directory']);sha=hashlib.sha256(b'x').hexdigest()
