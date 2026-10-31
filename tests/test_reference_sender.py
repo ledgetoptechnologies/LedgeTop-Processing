@@ -2,6 +2,11 @@ import copy
 import io
 import json
 import os
+import shutil
+import socket
+import subprocess
+import threading
+import time
 from pathlib import Path
 import ssl
 import tempfile
@@ -14,6 +19,11 @@ from processing.reference_sender import (
     MAX_RECEIPT_BYTES, RESULTS_PATH, ReferenceSender, SenderError, decode_receipt,
 )
 from processing.worker_outbox import BINDING, WorkerOutbox
+from processing.prototype import Queue
+from processing.reference_store import ReferenceStore
+from processing.reference_delivery import DeliveryReceiver
+from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_http import create_reference_http_server
 
 
 class Response(io.BytesIO):
@@ -79,6 +89,147 @@ class ReferenceSenderTests(unittest.TestCase):
         self.assertIsNotNone(row["payload"])
         self.assertEqual(row["local_metadata"]["ownedPrefix"], "jobs/reservation-1")
         return row
+
+    @unittest.skipUnless(shutil.which('openssl'), 'openssl required for isolated TLS test')
+    def test_real_tls_deadline_and_ambiguous_post_replay(self):
+        cert, key = self.root / 'cert.pem', self.root / 'key.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+            '-subj', '/CN=synthetic-loopback', '-addext', 'subjectAltName=IP:127.0.0.1',
+            '-addext', 'basicConstraints=critical,CA:TRUE', '-keyout', str(key), '-out', str(cert)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cert, key)
+        client_context = ssl.create_default_context(cafile=str(cert))
+        delivered = []
+        for phase in ('handshake', 'header', 'body', 'normal'):
+            with self.subTest(phase=phase):
+                listener = socket.socket(); listener.bind(('127.0.0.1', 0)); listener.listen(1)
+                listener.settimeout(3); port = listener.getsockname()[1]; errors = []
+                def serve():
+                    try:
+                        raw, _ = listener.accept()
+                        if phase == 'handshake':
+                            time.sleep(.7); raw.close(); return
+                        with server_context.wrap_socket(raw, server_side=True) as conn:
+                            conn.settimeout(3); request = b''
+                            while b'\r\n\r\n' not in request:
+                                request += conn.recv(4096)
+                            headers, body = request.split(b'\r\n\r\n', 1)
+                            length = next(int(line.split(b':', 1)[1]) for line in headers.split(b'\r\n')
+                                          if line.lower().startswith(b'content-length:'))
+                            while len(body) < length: body += conn.recv(4096)
+                            delivery = json.loads(body)['delivery']; delivered.append(delivery)
+                            result = p.canonical_json(self.receipt(delivery))
+                            if phase == 'header':
+                                conn.sendall(b'HTTP/1.1 200 OK\r\nX-Slow: ')
+                                for _ in range(30): conn.sendall(b'x'); time.sleep(.04)
+                            else:
+                                conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '
+                                             + str(len(result)).encode() + b'\r\n\r\n' + result[:1])
+                                if phase == 'body':
+                                    for byte in result[1:]:
+                                        time.sleep(.04); conn.sendall(bytes([byte]))
+                                else:
+                                    conn.sendall(result[1:])
+                    except (OSError, ssl.SSLError): pass
+                    except Exception as exc: errors.append(type(exc).__name__)
+                    finally: listener.close()
+                thread = threading.Thread(target=serve); thread.start()
+                sender = ReferenceSender(self.outbox, 'https://127.0.0.1:' + str(port),
+                    bearer_token=self.bearer, claim_binding_provider=self.provider,
+                    ssl_context=client_context, timeout=1, total_timeout=.25)
+                start = time.monotonic()
+                try:
+                    result = sender.send_next()
+                    self.assertLess(time.monotonic() - start, 1.5)
+                    self.assertEqual(result['state'], 'acknowledged' if phase == 'normal' else 'retry_scheduled')
+                    self.assert_retained()
+                    if phase != 'normal': self.now = self.outbox.get(self.outbox_id)['next_at']
+                finally:
+                    listener.close(); thread.join(3)
+                self.assertFalse(thread.is_alive()); self.assertEqual(errors, [])
+        self.assertEqual(len(delivered), 3)
+        self.assertTrue(all(item == delivered[0] for item in delivered))
+        self.assertEqual(self.outbox.get(self.outbox_id)['state'], 'acknowledged')
+
+    @unittest.skipUnless(shutil.which('openssl'), 'openssl required for isolated TLS test')
+    def test_actual_coordinator_commit_lost_response_restart_replays_receipt(self):
+        cert, key = self.root / 'coordinator-cert.pem', self.root / 'coordinator-key.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+            '-subj', '/CN=synthetic-loopback', '-addext', 'subjectAltName=IP:127.0.0.1',
+            '-addext', 'basicConstraints=critical,CA:TRUE', '-keyout', str(key), '-out', str(cert)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); tls.load_cert_chain(cert, key)
+        client_tls = ssl.create_default_context(cafile=str(cert))
+        fixture = json.loads((Path(__file__).resolve().parents[1] /
+                              'contracts/reference-v1.contract.json').read_text())
+        queue = Queue(self.root / 'coordinator', reference_enabled=True)
+        store = ReferenceStore(queue)
+        raw = fixture['submission']
+        job = store.submit(p.validate_submission(raw, environment='staging',
+                           capability_fingerprint=raw['capabilityFingerprint']))[0]
+        identity = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')
+        claim = store.claim(job['jobId'], **identity, claim_request_id='claim-1')
+        store.reserve(job['jobId'], fixture['transferRequest'], node_id='cluster')
+        store.update_phase(job['jobId'], 'fetching'); store.update_phase(job['jobId'], 'processing')
+        manifest = copy.deepcopy(fixture['resultManifest'])
+        manifest.update(jobId=job['jobId'], pipelineDigest=job['pipelineDigest'])
+        manifest['objects'][0]['role'] = 'odm_archive'
+        manifest['resultManifestSha256'] = p.digest({k: v for k, v in manifest.items()
+                                                     if k != 'resultManifestSha256'})
+        worker_root = self.root / 'worker-integration'; worker_root.mkdir()
+        original_input = worker_root / 'input.bin'; original_input.write_bytes(b'synthetic-input')
+        output_dir = worker_root / 'jobs' / 'reservation-1'; output_dir.mkdir(parents=True)
+        results = {obj['id']: output_dir / (obj['id'] + '.bin') for obj in manifest['objects']}
+        for output in results.values(): output.write_bytes(b'synthetic-result')
+        path = worker_root / 'outbox.sqlite'
+        outbox = WorkerOutbox(path, clock=lambda: self.now, random_source=lambda: 0, retry_base_seconds=5)
+        outbox_id = outbox.persist_terminal(job_id=job['jobId'], generation=1, environment='staging',
+            input_manifest_sha256=job['manifestSha256'], pipeline_digest=job['pipelineDigest'],
+            result_manifest_sha256=manifest['resultManifestSha256'], result_manifest=manifest,
+            owned_prefix='jobs/reservation-1', local_objects={obj['id']:
+                'jobs/reservation-1/' + obj['id'] + '.bin' for obj in manifest['objects']})
+        api = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers={self.bearer: identity})
+        committed = threading.Event(); release = threading.Event(); calls = []
+        class StallFirstCommittedResponse:
+            def handle(_, method, route, headers, body, *, protected_transport=False):
+                response = api.handle(method, route, headers, body, protected_transport=protected_transport)
+                if route == RESULTS_PATH:
+                    calls.append((json.loads(body)['delivery'], copy.deepcopy(response.body), response.status))
+                    if len(calls) == 1:
+                        committed.set(); release.wait(4)
+                return response
+        server = create_reference_http_server(StallFirstCommittedResponse(), ssl_context=tls)
+        thread = threading.Thread(target=server.serve_forever); thread.start()
+        try:
+            origin = 'https://127.0.0.1:' + str(server.server_port)
+            provider = lambda _: {'claimRequestId': 'claim-1', 'claimToken': claim['claimToken']}
+            sender = ReferenceSender(outbox, origin, bearer_token=self.bearer,
+                                     claim_binding_provider=provider, ssl_context=client_tls,
+                                     timeout=2, total_timeout=1)
+            self.assertEqual(sender.send_next()['state'], 'retry_scheduled')
+            self.assertTrue(committed.is_set())
+            self.assertEqual(queue.get(job['jobId'])['status'], 'succeeded')
+            self.assertEqual(store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+            self.assertEqual(calls[0][2], 200)
+            self.assertEqual(outbox.get(outbox_id)['state'], 'pending')
+            self.now = outbox.get(outbox_id)['next_at']; release.set()
+            # Reopen durable worker state and construct a new sender, as after restart.
+            restarted = WorkerOutbox(path, clock=lambda: self.now, random_source=lambda: 0, retry_base_seconds=5)
+            sender = ReferenceSender(restarted, origin, bearer_token=self.bearer,
+                                     claim_binding_provider=provider, ssl_context=client_tls,
+                                     timeout=2, total_timeout=2)
+            self.assertEqual(sender.send_next()['state'], 'acknowledged')
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], calls[1])
+            self.assertEqual(restarted.get(outbox_id)['receipt'], calls[0][1])
+            self.assertEqual(store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+            self.assertEqual(original_input.read_bytes(), b'synthetic-input')
+            for output in results.values(): self.assertEqual(output.read_bytes(), b'synthetic-result')
+            self.assertIsNotNone(restarted.get(outbox_id)['payload'])
+        finally:
+            release.set(); server.shutdown(); server.server_close(); thread.join(5); queue.close()
+        self.assertFalse(thread.is_alive())
 
     def test_default_internal_sender_ignores_proxy_environment(self):
         with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:9",
@@ -182,6 +333,23 @@ class ReferenceSenderTests(unittest.TestCase):
         self.assertEqual(self.sender().send_next()["state"], "acknowledged")
         self.assertEqual(deliveries[0], json.loads(self.requests[0].data)["delivery"])
         self.assertEqual(self.outbox.get(self.outbox_id)["attempts"], 2)
+
+    def test_verified_receipt_is_not_lost_if_acknowledgement_outlives_deadline(self):
+        acknowledge = self.outbox.acknowledge
+        def delayed_ack(*args):
+            time.sleep(.08)
+            return acknowledge(*args)
+        sender = self.sender()
+        sender.total_timeout = .04
+        with patch.object(self.outbox, 'acknowledge', side_effect=delayed_ack):
+            self.assertEqual(sender.send_next()['state'], 'acknowledged')
+        self.assertEqual(self.assert_retained()['state'], 'acknowledged')
+
+    def test_invalid_total_deadline_is_rejected(self):
+        for value in (0, -1, 301, float('nan'), True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                ReferenceSender(self.outbox, 'https://coordinator.example', bearer_token=self.bearer,
+                    claim_binding_provider=self.provider, total_timeout=value)
 
     def test_expired_attempt_is_retained_until_reclaim_and_late_receipt_can_ack(self):
         def slow_failure(request, **kwargs):

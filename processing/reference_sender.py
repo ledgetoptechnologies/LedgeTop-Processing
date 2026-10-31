@@ -12,6 +12,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 
 from . import reference_protocol as protocol
 from .worker_outbox import BINDING, OutboxConflict
+from .reference_transfer import _TransferWatchdog, _DeadlineHTTPSHandler
 
 RESULTS_PATH = "/ltds/worker/v1/results"
 MAX_RECEIPT_BYTES = 4 * 1024 * 1024
@@ -61,7 +62,7 @@ def decode_receipt(body):
 
 class ReferenceSender:
     def __init__(self, outbox, origin, *, bearer_token, claim_binding_provider,
-                 ssl_context=None, opener=None, timeout=30, lease_seconds=60):
+                 ssl_context=None, opener=None, timeout=30, lease_seconds=60, total_timeout=30):
         if type(origin) is not str:
             raise ValueError("configured HTTPS coordinator origin required")
         parsed = urlsplit(origin)
@@ -81,6 +82,8 @@ class ReferenceSender:
             raise ValueError("coordinator TLS verification required")
         if type(timeout) not in (int, float) or not 0 < timeout <= 300:
             raise ValueError("invalid sender timeout")
+        if type(total_timeout) not in (int, float) or not 0 < total_timeout <= 300:
+            raise ValueError("invalid sender total timeout")
         if type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
             raise ValueError("invalid sender lease")
         if not callable(claim_binding_provider) or (opener is not None and not callable(opener)):
@@ -90,6 +93,9 @@ class ReferenceSender:
         self._bearer = _credential(bearer_token, maximum=4096)
         self._binding_provider = claim_binding_provider
         self._open = opener or build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=context)).open
+        self._default_open = self._open
+        self._custom_opener, self._ssl_context = opener is not None, context
+        self.total_timeout = total_timeout
         self.timeout, self.lease_seconds = timeout, lease_seconds
 
     def _send(self, delivery):
@@ -105,12 +111,28 @@ class ReferenceSender:
             "Authorization": "Bearer " + self._bearer,
             "Content-Type": "application/json", "Accept": "application/json",
             "Accept-Encoding": "identity"})
+        watchdog = _TransferWatchdog(self.total_timeout)
         try:
-            response = self._open(request, timeout=self.timeout)
+            receipt = self._receive(request, watchdog)
+        finally:
+            watchdog.close()
+        # A complete, verified receipt remains valid even if the deadline races
+        # with acknowledgement. An ambiguous POST is retried with the same ID.
+        self.outbox.acknowledge(delivery["outboxId"], receipt)
+
+    def _receive(self, request, watchdog):
+        try:
+            custom_opener = self._custom_opener or self._open is not self._default_open
+            opener = self._open if custom_opener else build_opener(
+                ProxyHandler({}), _NoRedirects(),
+                _DeadlineHTTPSHandler(watchdog, context=self._ssl_context)).open
+            response = opener(request, timeout=min(self.timeout, watchdog.remaining()))
         except HTTPError as error:
             error.close()
             raise SenderError("coordinator rejected delivery") from None
         try:
+            watchdog.response(response)
+            watchdog.remaining()
             if response.status != 200 or response.geturl() != self._url:
                 raise SenderError("unexpected coordinator response")
             content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -124,8 +146,10 @@ class ReferenceSender:
                     raise SenderError("invalid receipt length")
                 expected = int(expected)
             chunks, count = [], 0
+            read = response.read if custom_opener else getattr(response, "read1", response.read)
             while True:
-                chunk = response.read(min(READ_BYTES, MAX_RECEIPT_BYTES + 1 - count))
+                watchdog.remaining()
+                chunk = read(min(READ_BYTES, MAX_RECEIPT_BYTES + 1 - count))
                 if not chunk:
                     break
                 if type(chunk) is not bytes:
@@ -136,12 +160,9 @@ class ReferenceSender:
                 chunks.append(chunk)
             if expected is not None and count != expected:
                 raise SenderError("truncated receipt")
-            receipt = decode_receipt(b"".join(chunks))
+            return decode_receipt(b"".join(chunks))
         finally:
             response.close()
-        # This is the only acknowledgement boundary; status200 alone cannot
-        # mutate the row. The outbox verifies exact binding and object closure.
-        self.outbox.acknowledge(delivery["outboxId"], receipt)
 
     def send_next(self):
         """Attempt one due immutable completion, returning only secret-free state.
