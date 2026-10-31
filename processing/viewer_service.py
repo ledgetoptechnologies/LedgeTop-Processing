@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import stat
+import sys
 import threading
 import time
 from urllib.error import HTTPError
@@ -28,6 +30,10 @@ from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
+
+
+class ArchiveIdentityChanged(Exception):
+    """Capture candidate no longer denotes the discovered task incarnation."""
 
 
 class EngineUnavailable(OSError):
@@ -135,6 +141,141 @@ class ViewerService:
         self._unexpected_dispatch_failure = threading.Event()
         self._backoff = {}
         self._downloads = {}
+        self._archive_thread = None
+        self._archive_cursor = 0
+        self._archive_retry = {}
+        self._archive_status_persistence_failed = False
+
+    def _reserve_archive(self, output, size):
+        """Reserve output bytes; the free-space floor is a point-in-time check."""
+        if type(size) is not int or not 4 <= size <= self.config.viewer_max_archive_bytes:
+            raise Conflict('archive size unavailable for automatic capture')
+        space = os.fstatvfs(output.fileno())
+        if space.f_bavail * space.f_frsize < size + self.config.viewer_archive_free_floor:
+            raise Conflict('archive capacity unavailable')
+        os.posix_fallocate(output.fileno(), 0, size)
+
+    def _archive_once(self, identifier, expected_identity=None):
+        """Run file capture in a reaped child that inherits coordinator flocks."""
+        with self._lock:
+            lock = self._downloads.setdefault(identifier, threading.Lock())
+        with lock:
+            if self._stop.is_set():
+                return
+            task = self.store.task(identifier)
+            if expected_identity is not None and (task['generation'], task['job_id']) != expected_identity:
+                raise ArchiveIdentityChanged()
+            if not task['job'] or task['job']['status'] != 'succeeded' or task['archive_path']:
+                return
+            lease = getattr(self.queue, 'authority_lease', None)
+            if lease is None or lease._descriptor is None or self.queue._lock.closed:
+                raise RuntimeError('archive capture requires coordinator authority')
+            node = task['node_id']
+            if node not in ('cluster', 'main'):
+                raise Conflict('archive engine identity unavailable')
+            origin = self.config.local_node_url if node == 'cluster' else self.config.main_node_url
+            token = self.config.local_node_token if node == 'cluster' else self.config.main_node_token
+            fields = ('uuid', 'generation', 'job_id', 'node_id', 'engine_uuid', 'environment', 'directory', 'archive_path')
+            capture_task = {key: task[key] for key in fields}
+            capture_task['job'] = {'status': 'succeeded'}
+            payload = {'task': capture_task, 'origin': origin, 'token': token,
+                       'maxBytes': self.config.viewer_max_archive_bytes, 'freeFloor': self.config.viewer_archive_free_floor}
+            raw = json.dumps(payload, separators=(',', ':'), allow_nan=False).encode()
+            if len(raw) > 16384:
+                raise Conflict('archive capture metadata exceeds bound')
+            env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in os.environ}
+            process = subprocess.Popen([sys.executable, '-m', 'processing.viewer_archive_worker'],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=str(Path(__file__).resolve().parent.parent), env=env,
+                pass_fds=(self.queue._lock.fileno(), lease._descriptor), start_new_session=True)
+            try:
+                # Do not block shutdown if the child cannot read its input.
+                deadline = time.monotonic() + 6 * 60 * 60
+                os.set_blocking(process.stdin.fileno(), False)
+                remaining = memoryview(raw)
+                while remaining and not self._stop.is_set() and time.monotonic() < deadline:
+                    try:
+                        sent = os.write(process.stdin.fileno(), remaining)
+                        if sent <= 0: raise BrokenPipeError()
+                        remaining = remaining[sent:]
+                    except BlockingIOError:
+                        self._stop.wait(.1)
+                process.stdin.close()
+                while not remaining and process.poll() is None and not self._stop.wait(.25) and time.monotonic() < deadline:
+                    pass
+                if process.poll() is None:
+                    process.kill()
+                try:
+                    code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Keep the per-task lock until the killed child is reaped.
+                    # close() may report failure after its deadline; inherited
+                    # coordinator flocks also remain held by any live child.
+                    process.wait()
+                    raise RuntimeError('archive capture child not reaped in time') from None
+                if code == 2 and not self._stop.is_set():
+                    raise Conflict('partial_requires_inspection')
+                if code != 0 or self._stop.is_set():
+                    raise EngineUnavailable('archive capture incomplete')
+                path = Path(task['directory']) / 'all.zip'
+                receipt = self._archive_receipt(task, path.with_suffix('.zip.receipt'))
+                current = path.lstat()
+                if (path.is_symlink() or not stat.S_ISREG(current.st_mode) or current.st_size != receipt['bytes']
+                        or (os.name != 'nt' and current.st_uid != os.geteuid())):
+                    raise Conflict('captured archive identity changed')
+                # update() verifies the path still belongs to this current
+                # generation; no Viewer acknowledgement or deletion occurs.
+                self.store.update(identifier, archive_path=str(path))
+            finally:
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+                if process.poll() is None:
+                    process.kill()
+                    try: process.wait(timeout=5)
+                    except subprocess.TimeoutExpired: pass
+
+    def _archive_run(self):
+        while not self._stop.is_set():
+            try:
+                candidate = self.store.next_unarchived_success(self._archive_cursor)
+                if candidate is None:
+                    self._stop.wait(2)
+                    continue
+                self._archive_cursor, identifier = candidate
+                due, failures = self._archive_retry.get(identifier, (0, 0))
+                if time.monotonic() >= due:
+                    identity = None
+                    try:
+                        task = self.store.task(identifier)
+                        identity = (task['generation'], task['job_id'])
+                        self._archive_once(identifier, expected_identity=identity)
+                        self._archive_retry.pop(identifier, None)
+                    except ArchiveIdentityChanged:
+                        # The new incarnation has not been attempted; discover it anew.
+                        self._archive_retry.pop(identifier, None)
+                    except Exception as exc:
+                        if identity is None:
+                            # No trustworthy task identity can be associated with this failure.
+                            self._archive_status_persistence_failed = True
+                        else:
+                            inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
+                            try:
+                                recorded = self.store.set_archive_status(identifier, *identity,
+                                    'inspection' if inspection else 'pending',
+                                    'partial_requires_inspection' if inspection else 'capture_failed')
+                                if not recorded:
+                                    # The incarnation changed or was removed; do not
+                                    # apply its retry delay to the replacement.
+                                    self._archive_retry.pop(identifier, None)
+                                    continue
+                            except Exception:
+                                self._archive_status_persistence_failed = True
+                        failures += 1
+                        self._archive_retry[identifier] = (time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
+                self._stop.wait(.25)
+            except Exception:
+                self._archive_status_persistence_failed = True
+                self._stop.wait(2)
 
     def _catalog(self):
         return catalog([('local', self.config.local_node_url, self.config.local_node_token),
@@ -152,6 +293,7 @@ class ViewerService:
         jobs = self.queue.list()
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
                 'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'ledgetopArchiveHealth': self._archive_health(),
                 'ledgetopMaxInputBytes': self.store.max_input_bytes,
                 'ledgetopMaxUploadRequestBytes': MAX_UPLOAD_BYTES,
                 'ledgetopReservations': self.store.reservation_stats(),
@@ -195,8 +337,28 @@ class ViewerService:
     def commit(self, identifier, environment=None, capability=None):
         return self.store.commit(identifier, environment, capability)
 
+    def _archive_health(self):
+        if self._archive_status_persistence_failed:
+            return {'state': 'inspection', 'reason': 'status_persistence_failed'}
+        if getattr(self.config, 'viewer_archive_autocapture', False):
+            # No durable proof exists that a previous process persisted every
+            # failure; do not clear this warning merely because we restarted.
+            return {'state': 'inspection', 'reason': 'status_unverified_after_restart'}
+        return {'state': 'disabled', 'reason': None}
+
     def info(self, identifier):
-        return self.store.info(identifier)
+        info = self.store.info(identifier)
+        info['ledgetopArchiveHealth'] = self._archive_health()
+        if info['status']['code'] == 40:
+            task = self.store.task(identifier)
+            if task['archive_path']:
+                archive = {'state': 'recorded', 'reason': None}
+            elif not getattr(self.config, 'viewer_archive_autocapture', False):
+                archive = {'state': 'disabled', 'reason': None}
+            else:
+                archive = {'state': task.get('archive_state', 'pending'), 'reason': task.get('archive_reason')}
+            info['ledgetopArchive'] = archive
+        return info
 
     def reserve(self, identifier, environment, capability):
         with self._lock:return self.store.reserve(identifier,environment,capability)
@@ -342,7 +504,7 @@ class ViewerService:
             if stream is not None: stream.close()
             raise Conflict('archive file requires inspection') from None
 
-    def _restore_recorded_archive(self, task, path, receipt):
+    def _restore_recorded_archive(self, task, path, receipt, *, automatic=False):
         """Restore only bytes matching the existing task-bound receipt."""
         directory = Path(task['directory'])
         if path != directory / 'all.zip' or directory.resolve(strict=True) != directory:
@@ -373,6 +535,8 @@ class ViewerService:
             if created:
                 with os.fdopen(fd, 'wb') as output:
                     fd = None
+                    if automatic:
+                        self._reserve_archive(output, receipt['bytes'])
                     with self.engines[task['node_id']].download(task['engine_uuid']) as response:
                         if getattr(response, 'status', 200) != 200:
                             raise EngineUnavailable('archive_unavailable')
@@ -437,7 +601,7 @@ class ViewerService:
             if stream is not None: stream.close()
             # Failed or uncertain restores are retained for inspection.
 
-    def download(self, identifier):
+    def download(self, identifier, *, automatic=False):
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
@@ -468,7 +632,7 @@ class ViewerService:
                             # completed task. If local copies disappeared before
                             # archive_path was persisted, recover only that same
                             # content from the retained engine result.
-                            stream, size = self._restore_recorded_archive(task, path, receipt)
+                            stream, size = self._restore_recorded_archive(task, path, receipt, automatic=automatic)
                             self.store.update(identifier, archive_path=str(path))
                             return stream, size
                         current = path.lstat(); opened = os.fstat(stream.fileno())
@@ -521,11 +685,15 @@ class ViewerService:
                     declared = response.headers.get('Content-Length')
                     if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
                         raise Conflict('archive exceeds configured disk allowance')
+                    if automatic and (declared is None or not declared.isdigit() or int(declared) < 4):
+                        raise Conflict('archive size unavailable for automatic capture')
                     with partial.open('xb') as output:
                         os.chmod(partial, 0o600)
+                        if automatic:
+                            self._reserve_archive(output, int(declared))
                         while chunk := response.read(1024 ** 2):
                             total += len(chunk)
-                            if total > self.config.viewer_max_archive_bytes:
+                            if total > self.config.viewer_max_archive_bytes or (automatic and total > int(declared)):
                                 raise Conflict('archive exceeds configured disk allowance')
                             digest.update(chunk)
                             output.write(chunk)
@@ -750,6 +918,12 @@ class ViewerService:
     def start(self):
         if self._thread:
             raise RuntimeError('dispatcher already started')
+        if getattr(self.config, 'viewer_archive_autocapture', False):
+            if getattr(self.queue, 'authority_lease', None) is None:
+                raise RuntimeError('archive capture requires coordinator authority lease')
+            self.store.enable_archive_status()
+            self._archive_thread = threading.Thread(target=self._archive_run, name='viewer-archive-capture', daemon=True)
+            self._archive_thread.start()
         self._thread = threading.Thread(target=self._run, name='viewer-dispatch', daemon=True)
         self._thread.start()
 
@@ -767,3 +941,7 @@ class ViewerService:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=10)
+        if self._archive_thread:
+            self._archive_thread.join(timeout=10)
+            if self._archive_thread.is_alive():
+                raise RuntimeError('archive capture did not stop')

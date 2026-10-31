@@ -1,6 +1,7 @@
 """Strict startup configuration for the private routing prototype."""
 
 from dataclasses import dataclass, field
+import ipaddress
 import os
 import re
 from urllib.parse import urlsplit
@@ -30,6 +31,8 @@ class Config:
     viewer_staging_token: str = field(default='', repr=False)
     viewer_max_input_bytes: int = 20 * 1024 ** 3
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
+    viewer_archive_autocapture: bool = False
+    viewer_archive_free_floor: int = 20 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
     authority_lease_dir: str = ''
@@ -84,6 +87,18 @@ def from_environment() -> Config:
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
+    autocapture = os.environ.get('PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE', '0')
+    if autocapture not in ('0', '1'):
+        raise ValueError('PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE must be 0 or 1')
+    if autocapture == '1':
+        if viewer != '1' or not lease_dir or os.name != 'posix' or not hasattr(os, 'posix_fallocate'):
+            raise ValueError('Viewer archive autocapture requires POSIX Viewer and authority lease')
+        # No DNS lookup may outlive bounded child supervision.
+        try:
+            for name in ('LOCAL_NODE_URL', 'MAIN_NODE_URL'):
+                ipaddress.ip_address(urlsplit(os.environ.get(name, '')).hostname or '')
+        except ValueError:
+            raise ValueError('Viewer archive autocapture requires literal node IP addresses') from None
     if lease_dir and (not os.path.isabs(lease_dir) or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
         raise ValueError('PROCESSING_AUTHORITY_LEASE_DIR must be an absolute path used with persistent state')
     production_admission = os.environ.get('PROCESSING_VIEWER_PRODUCTION_ADMISSION', 'open')
@@ -131,6 +146,9 @@ def from_environment() -> Config:
                                             'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
         viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
                                               'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
+        viewer_archive_autocapture=autocapture == '1',
+        viewer_archive_free_floor=_positive_int(os.environ.get('PROCESSING_VIEWER_ARCHIVE_FREE_FLOOR', str(20 * 1024 ** 3)),
+                                                'PROCESSING_VIEWER_ARCHIVE_FREE_FLOOR', 10 ** 15),
         prototype_observer_token=observer,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],

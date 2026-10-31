@@ -509,6 +509,20 @@ class TaskStore:
             return [self._task(db, row) for row in db.execute(
                 'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
 
+    def next_unarchived_success(self, after_rowid=0):
+        """Round-robin cursor over durable, nonremoved successful tasks."""
+        with self._lock, self.queue._db() as db:
+            for boundary in (after_rowid, 0):
+                row = db.execute('''SELECT t.rowid,t.uuid FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id
+                    WHERE t.rowid>? AND t.removed=0 AND t.archive_path IS NULL
+                      AND t.stage='succeeded' AND t.phase='complete' AND j.status='succeeded'
+                    ORDER BY t.rowid LIMIT 1''', (boundary,)).fetchone()
+                if row is not None:
+                    return (row[0], row[1])
+                if boundary == 0:
+                    break
+            return None
+
     def task_for_job(self, job_id):
         """Load only the task selected for dispatch or active reconciliation."""
         with self._lock, self.queue._db() as db:
@@ -573,11 +587,45 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='operator_resolved',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (row['uuid'],))
 
+    def enable_archive_status(self):
+        # Both DDL statements and validation must commit as one transaction.
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            def validate():
+                rows = db.execute('PRAGMA table_info(viewer_tasks)').fetchall()
+                columns = [tuple(row) for row in rows if row[1] in ('archive_state', 'archive_reason')]
+                if not columns:
+                    return False
+                if len(columns) != 2:
+                    raise ValueError('partial archive status schema')
+                n = len(rows) - 2
+                if columns != [(n, 'archive_state', 'TEXT', 1, "'pending'", 0),
+                               (n + 1, 'archive_reason', 'TEXT', 0, None, 0)]:
+                    raise ValueError('unrecognized archive status schema')
+                return True
+            if not validate():
+                db.execute("ALTER TABLE viewer_tasks ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'pending'")
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_reason TEXT')
+                if not validate():
+                    raise ValueError('archive status schema not installed')
+
+    def set_archive_status(self, identifier, generation, job_id, state, reason):
+        if state not in ('pending', 'inspection') or reason not in ('capture_failed', 'partial_requires_inspection'):
+            raise ValueError('invalid archive status')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            return db.execute("UPDATE viewer_tasks SET archive_state=?,archive_reason=? WHERE uuid=? AND generation=? AND job_id=? AND removed=0 AND archive_path IS NULL",
+                              (state, reason, identifier, generation, job_id)).rowcount == 1
+
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
-                   'progress', 'output_lines', 'archive_path'}
+                   'progress', 'output_lines', 'archive_path', 'archive_state', 'archive_reason'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('unexpected broker update fields')
+        if 'archive_state' in fields and fields['archive_state'] not in ('pending', 'inspection'):
+            raise ValueError('invalid archive state')
+        if 'archive_reason' in fields and fields['archive_reason'] not in (None, 'capture_failed', 'partial_requires_inspection'):
+            raise ValueError('invalid archive reason')
         if 'stage' in fields and fields['stage'] not in STAGES:
             raise ValueError('invalid task stage')
         for field in ('phase', 'node_id'):
