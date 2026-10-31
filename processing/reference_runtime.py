@@ -271,6 +271,22 @@ class ReferenceRuntime:
                     # or feature startup can expose the configured authority.
                     RecoveryNodeBinding(**vars(physical))
                 recovery=dict(recovery)
+            # Validate every spool prerequisite before ReferenceStore or
+            # ViewerWorkerClaims can create any persistent schema markers.
+            spool_policy=None
+            if settings.viewer_archive_spool is not None:
+                if not VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED:
+                    raise RuntimeConfigurationError('Viewer archive spool schema is not qualified')
+                if (not config.viewer_worker_claim_enabled or viewer_service is None
+                        or viewer_service.queue is not queue or getattr(getattr(viewer_service,'store',None),'queue',None) is not queue):
+                    raise RuntimeConfigurationError('Viewer worker claims require shared Viewer authority')
+                environments=dict(config.viewer_worker_claim_env_policy)
+                if (set(environments)!=set(queue.node_ids) or any(type(values) not in (tuple,list) or not values
+                    or len(set(values))!=len(values) or not set(values)<={'production','staging'}
+                    for values in environments.values()) or type(config.local_max_photos) is not int
+                    or config.local_max_photos<1 or type(config.local_max_input_bytes) is not int or config.local_max_input_bytes<1):
+                    raise RuntimeConfigurationError('invalid Viewer claim policy')
+                spool_policy=_spool_policy(settings.viewer_archive_spool)
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
@@ -293,14 +309,11 @@ class ReferenceRuntime:
                     local_max_photos=config.local_max_photos,local_max_input_bytes=config.local_max_input_bytes,
                     node_environments=dict(config.viewer_worker_claim_env_policy))
             viewer_spool=None
-            if settings.viewer_archive_spool is not None:
-                if not VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED:
-                    raise RuntimeConfigurationError('Viewer archive spool schema is not qualified')
+            if spool_policy is not None:
                 if viewer_claims is None:raise RuntimeConfigurationError('Viewer worker claims required')
-                policy=_spool_policy(settings.viewer_archive_spool)
                 from .viewer_archive_spool import ViewerArchiveSpool
-                viewer_spool=ViewerArchiveSpool(viewer_claims,root=policy['root'],root_identity=policy['rootIdentity'],
-                                                max_archive_bytes=policy['maxArchiveBytes'],enabled=True)
+                viewer_spool=ViewerArchiveSpool(viewer_claims,root=spool_policy['root'],root_identity=spool_policy['rootIdentity'],
+                                                max_archive_bytes=spool_policy['maxArchiveBytes'],enabled=True)
             placeholder = p.digest({"runtime": "discovery_required"})
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,

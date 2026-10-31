@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import time
 import unittest
 import uuid
@@ -107,6 +108,32 @@ class ReferenceRuntimeTests(unittest.TestCase):
         with self.assertRaises(RuntimeConfigurationError):load_reference_settings(str(self.path),enabled)
         del self.value['viewerArchiveSpool'];self.write_config()
         with self.assertRaises(RuntimeConfigurationError):load_reference_settings(str(self.path),enabled)
+
+    def test_rejected_archive_runtime_leaves_schema_untouched(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True,viewer_enabled=True)
+        self.addCleanup(queue.close)
+        config=replace(self.config,viewer_worker_claim_enabled=True,
+                       viewer_worker_claim_env_policy=(('cluster',('production',)),('main',('production',))))
+        viewer=SimpleNamespace(queue=queue,store=SimpleNamespace(queue=queue))
+        settings=replace(self.settings(),viewer_archive_spool=dict(root=str(self.root/'missing'),rootIdentity=[1,2,3],maxArchiveBytes=1000))
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        with queue._db() as db:before=[tuple(row) for row in db.execute(query)]
+        with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,config,settings,viewer_service=viewer)
+        with queue._db() as db:self.assertEqual([tuple(row) for row in db.execute(query)],before)
+        with patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True):
+            with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,config,settings,viewer_service=viewer)
+            with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,config,settings,viewer_service=None)
+        with queue._db() as db:self.assertEqual([tuple(row) for row in db.execute(query)],before)
+        if os.name=='posix' and hasattr(os,'posix_fallocate'):
+            from processing.direct_output_slot import _identity
+            root=self.root/'valid-spool';root.mkdir(mode=0o700);fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+            try:identity=_identity(fd)
+            finally:os.close(fd)
+            valid=replace(settings,viewer_archive_spool=dict(root=str(root),rootIdentity=identity,maxArchiveBytes=1000))
+            invalid_policy=replace(config,viewer_worker_claim_env_policy=(('cluster',('production',)),))
+            with patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True):
+                with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,invalid_policy,valid,viewer_service=viewer)
+            with queue._db() as db:self.assertEqual([tuple(row) for row in db.execute(query)],before)
 
     def settings(self):
         return load_reference_settings(str(self.path), self.config)
