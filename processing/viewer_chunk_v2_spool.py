@@ -153,6 +153,34 @@ class SyntheticV2Spool:
     if state!='ready':raise SpoolHeld('v2_slot_sealed')
     return journal.write(index,offset,data)
    finally:slot.close()
+ def promote(self,job,identity,token,count):
+  """Promote a reverified v2 seal to a synthetic coordinator receipt only."""
+  if self.spool.synthetic_v2_viewer is not True:raise SpoolHeld('v2_viewer_disabled')
+  with self.spool._admit():
+   slot,journal,encoded,key,state=self._open(job,identity,token)
+   try:
+    if state!='sealed' or count!=journal.binding['chunkCount']:raise SpoolHeld('v2_slot_requires_inspection')
+    # Full archive verification and fsync occur outside the DB write barrier.
+    journal.finish(count);actual=self.spool._slot_identity(slot)
+    with self.spool.claims.queue._db() as db:
+     db.execute('BEGIN IMMEDIATE');binding,current,current_key=self._binding(db,job,identity,token);SyntheticChunkSpool._admit_operation(db,job);self._schema(db)
+     metadata=self.spool._metadata(db,job,identity,token);metadata_sha=p.digest(metadata)
+     row=db.execute('SELECT * FROM viewer_chunk_v2_slots WHERE job_id=?',(job,)).fetchone()
+     phase=db.execute('SELECT phase FROM viewer_chunk_v2_geometry WHERE job_id=?',(job,)).fetchone()
+     if (current!=encoded or current_key!=key or not row or row['state']!='sealed' or row['binding']!=encoded
+         or row['slot_key']!=key or row['slot_identity']!=actual or not phase or phase['phase']!='sealed'
+         or db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(job,)).fetchone()
+         or db.execute('SELECT 1 FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone()):raise SpoolHeld('v2_promotion_changed')
+     slot._check()
+     receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=job,metadataSha256=metadata_sha,
+                  archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key)
+     receipt_text=p.canonical_json(receipt).decode()
+     existing=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(job,)).fetchone()
+     if existing:
+      if (existing['metadata_sha'],existing['slot_key'],existing['state'],existing['slot_identity'],existing['receipt'])!=(metadata_sha,key,'sealed',actual,receipt_text):raise SpoolHeld('v2_promotion_changed')
+     else:db.execute("INSERT INTO viewer_worker_spool VALUES(?,?,?,'sealed',?,?)",(job,metadata_sha,key,actual,receipt_text))
+    return receipt
+   finally:slot.close()
  def finish(self,job,identity,token,count):
   with self.spool._admit():
    slot,journal,encoded,key,state=self._open(job,identity,token)

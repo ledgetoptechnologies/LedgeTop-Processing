@@ -4,14 +4,15 @@ from urllib.parse import urlsplit
 from .direct_output_slot import _identity
 from .direct_slot_capture import open_sealed_reader
 from .node_gate import NodeGate
-from .viewer_local_result import _local,_gate,_observation,_check_observation,send_metadata,LocalResultHeld
+from .viewer_local_result import _local,_gate,_observation,_check_observation,send_metadata,register,LocalResultHeld
 from .viewer_chunk_v2_geometry import geometry
 from .viewer_locked_upload import strict_response
 from . import reference_protocol as p
 
-def send(worker,*,synthetic_fixture=False,chunk_bytes=1024*1024):
- if synthetic_fixture is not True:raise LocalResultHeld('synthetic_fixture_required')
+def send(worker,*,synthetic_fixture=False,chunk_bytes=1024*1024,promote=False):
+ if synthetic_fixture is not True or type(promote) is not bool:raise LocalResultHeld('synthetic_fixture_required')
  send_metadata(worker,synthetic_fixture=True)
+ metadata_sha=p.digest(register(worker)) if promote else None
  claim,binding,digest,identity,_,grant=_local(worker,include_grant=True);c=worker.config;parsed=urlsplit(c['origin'])
  if parsed.scheme!='https' or parsed.hostname not in ('127.0.0.1','localhost') or parsed.port is None:raise LocalResultHeld('synthetic_coordinator_required')
  prefix='/ltds/worker/v1/viewer-claims/'+claim['jobId']+'/chunks-v2/'
@@ -51,4 +52,12 @@ def send(worker,*,synthetic_fixture=False,chunk_bytes=1024*1024):
    if any(seal.get(k)!=v or type(seal.get(k)) is not type(v) for k,v in expected.items()):raise LocalResultHeld('v2_seal_changed')
    reader._check()
    if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+   if promote:
+    key=p.digest(dict(kind='synthetic-v2-slot',binding=journal_binding))
+    expected_receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=claim['jobId'],metadataSha256=metadata_sha,archiveBytes=reader.length,archiveSha256=reader.sha256,slotKey=key)
+    receipt=call('promote',extra={'X-Chunk-Count':str(g['chunkCount'])})
+    if p.canonical_json(receipt)!=p.canonical_json(expected_receipt):raise LocalResultHeld('v2_receipt_changed')
+    reader._check()
+    if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+    return receipt
    return result

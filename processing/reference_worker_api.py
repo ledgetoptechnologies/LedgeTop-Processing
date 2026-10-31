@@ -147,10 +147,11 @@ class ReferenceWorkerAPI:
                 if length!=0 or not isinstance(size,str) or not re.fullmatch(r'[1-9][0-9]{0,6}',size):raise ValueError('invalid size')
                 SyntheticV2Geometry(spool.spool,synthetic_fixture=True).negotiate(job,identity,token,version=2,chunk_bytes=int(size))
                 return Response(200,spool.prepare(job,identity,token))
-            if operation=='finish':
+            if operation in ('finish','promote'):
                 count=self._header(headers,'X-Chunk-Count')
                 if length!=0 or not isinstance(count,str) or not re.fullmatch(r'[1-9][0-9]{0,3}',count):raise ValueError('invalid count')
-                return Response(200,spool.finish(job,identity,token,int(count)))
+                action=spool.finish if operation=='finish' else spool.promote
+                return Response(200,action(job,identity,token,int(count)))
             raw_index=self._header(headers,'X-Chunk-Index');offset=self._header(headers,'X-Chunk-Offset');sha=self._header(headers,'X-Chunk-SHA256')
             if not isinstance(raw_index,str) or not re.fullmatch(r'0|[1-9][0-9]{0,3}',raw_index) or not isinstance(offset,str) or not re.fullmatch(r'0|[1-9][0-9]{0,15}',offset):raise ValueError('invalid geometry')
             index=int(raw_index);offset=int(offset)

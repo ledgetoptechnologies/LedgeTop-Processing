@@ -48,8 +48,9 @@ class _ViewerReader:
 
 
 class ViewerArchiveSpool:
-    def __init__(self,claims,*,root,root_identity,max_archive_bytes,enabled=False):
-        if type(claims) is not ViewerWorkerClaims or enabled is not True:raise SpoolHeld('spool_disabled')
+    def __init__(self,claims,*,root,root_identity,max_archive_bytes,enabled=False,synthetic_v2_viewer=False):
+        if type(claims) is not ViewerWorkerClaims or enabled is not True or type(synthetic_v2_viewer) is not bool:raise SpoolHeld('spool_disabled')
+        self.synthetic_v2_viewer=synthetic_v2_viewer
         p._integer(max_archive_bytes,'spool limit')
         self.claims=claims;self.root=str(root);self.root_identity=json.loads(p.canonical_json(root_identity));self.max_bytes=max_archive_bytes
         self._work=threading.BoundedSemaphore(2)
@@ -90,6 +91,31 @@ class ViewerArchiveSpool:
             digest.update(data);offset+=len(data)
         slot._check();return digest.hexdigest()
 
+    def _slot_key_for_metadata(self,db,job,metadata,identity,token):
+        standard=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=job,metadataSha256=p.digest(metadata)))
+        has_table=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_slots'").fetchone()
+        row=db.execute('SELECT * FROM viewer_chunk_v2_slots WHERE job_id=?',(job,)).fetchone() if has_table else None
+        has_geometry=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_geometry'").fetchone()
+        geometry_row=db.execute('SELECT 1 FROM viewer_chunk_v2_geometry WHERE job_id=?',(job,)).fetchone() if has_geometry else None
+        if not row:
+            if geometry_row:raise SpoolHeld('v2_slot_missing')
+            return standard
+        if self.synthetic_v2_viewer is not True:raise SpoolHeld('v2_viewer_disabled')
+        from .viewer_chunk_v2_spool import SyntheticV2Spool
+        v2=SyntheticV2Spool(self,synthetic_fixture=True);v2._schema(db)
+        binding,encoded,key=v2._binding(db,job,identity,token)
+        phase=db.execute('SELECT phase FROM viewer_chunk_v2_geometry WHERE job_id=?',(job,)).fetchone()
+        status=db.execute('SELECT status FROM jobs WHERE id=?',(job,)).fetchone()
+        fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(job,)).fetchone()
+        if (not status or status['status']!='running' or (fence and fence['stop_requested'])
+                or db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone()
+                or db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(job,)).fetchone()
+                or not phase or phase['phase']!='sealed' or row['state']!='sealed' or row['binding']!=encoded
+                or row['slot_key']!=key or not row['slot_identity']
+                or db.execute('SELECT 1 FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone()):
+            raise SpoolHeld('v2_promotion_changed')
+        return key
+
     def _viewer_snapshot(self,task,db=None):
         """Revalidate against the caller's transaction when supplied."""
         if db is None:
@@ -107,7 +133,7 @@ class ViewerArchiveSpool:
         if (metadata['viewerTaskId']!=task['uuid'] or metadata['viewerGeneration']!=task['generation']
                 or metadata['environment']!=task['environment'] or metadata['engineTaskId']!=task['engine_uuid']):
             raise SpoolHeld('viewer_metadata_changed')
-        metadata_sha=p.digest(metadata);slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=task['job_id'],metadataSha256=metadata_sha))
+        metadata_sha=p.digest(metadata);slot_key=self._slot_key_for_metadata(db,task['job_id'],metadata,identity,claim['token'])
         row=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(task['job_id'],)).fetchone()
         receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=task['job_id'],metadataSha256=metadata_sha,
                      archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=slot_key)
@@ -120,6 +146,29 @@ class ViewerArchiveSpool:
         """Open only a fully verified promoted chunk slot or legacy spool."""
         with self.claims.queue._db() as db:
             db.execute('BEGIN');session=db.execute('SELECT * FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone()
+            has_v2=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_slots'").fetchone()
+            v2row=db.execute('SELECT * FROM viewer_chunk_v2_slots WHERE job_id=?',(job,)).fetchone() if has_v2 else None
+            if v2row:
+                if session or self.synthetic_v2_viewer is not True:raise SpoolHeld('v2_viewer_disabled')
+                claim=db.execute('SELECT * FROM viewer_worker_claims WHERE job_id=?',(job,)).fetchone()
+                if not claim:raise SpoolHeld('viewer_claim_unavailable')
+                identity=dict(node_id=claim['node_id'],worker_id=claim['worker_id'],worker_instance_id=claim['instance_id'])
+                from .viewer_chunk_v2_spool import SyntheticV2Spool
+                v2=SyntheticV2Spool(self,synthetic_fixture=True);v2._schema(db)
+                binding,encoded,v2key=v2._binding(db,job,identity,claim['token'])
+                phase=db.execute('SELECT phase FROM viewer_chunk_v2_geometry WHERE job_id=?',(job,)).fetchone()
+                if (not phase or phase['phase']!='sealed' or v2row['state']!='sealed' or v2row['binding']!=encoded
+                    or v2key!=key or v2row['slot_identity']!=recorded):raise SpoolHeld('v2_promotion_changed')
+        if v2row:
+            from .direct_output_slot import _open_slot
+            from .direct_slot_capture import _exists
+            from .viewer_chunk_v2_journal import SyntheticV2ChunkJournal
+            slot=_open_slot(self.root,self.root_identity,key,metadata['archiveBytes'],max_budget=self.max_bytes,allow_chunk_journal=True)
+            try:
+                if self._slot_identity(slot)!=recorded or not _exists(slot._root,slot._name+'.chunks-v2.header'):raise SpoolHeld('v2_slot_changed')
+                journal=SyntheticV2ChunkJournal(slot,binding,legacy_state='new',synthetic_fixture=True)
+                journal.finish(binding['chunkCount']);return slot
+            except BaseException:slot.close();raise
         if not session:
             return open_slot(self.root,self.root_identity,key,metadata['archiveBytes'],max_budget=self.max_bytes,create=False)
         if session['state']!='sealed' or session['slot_key']!=key or session['slot_identity']!=recorded or session['metadata_sha']!=p.digest(metadata):
@@ -252,7 +301,7 @@ class ViewerArchiveSpool:
             row=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(job_id,)).fetchone()
             if not row:return dict(state='missing')
             if row['state']!='sealed':return dict(state='held')
-            metadata_sha=p.digest(metadata);slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=job_id,metadataSha256=metadata_sha))
+            metadata_sha=p.digest(metadata);slot_key=self._slot_key_for_metadata(db,job_id,metadata,identity,token)
             if row['metadata_sha']!=metadata_sha or row['slot_key']!=slot_key:raise SpoolHeld('spool_binding_changed')
             recorded=row['slot_identity'];saved=row['receipt']
         slot=self._open_receipt_slot(job_id,metadata,slot_key,recorded)

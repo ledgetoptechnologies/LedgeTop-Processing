@@ -102,3 +102,97 @@ with DaemonStateLock(root) as owner:
    conn.send(payload);self.assertEqual(conn.getresponse().status,409)
   finally:conn.close()
   with self.f.fixture.queue._db() as db:self.assertEqual(db.execute("SELECT state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id='v2-0'",(self.job,)).fetchone()[0],'active')
+ def test_v2_promotion_and_actual_viewer_http_replay(self):
+  import threading
+  from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+  from processing.config import Config
+  from processing.viewer_service import ViewerService
+  from processing.viewer_http import ViewerFacade
+  self.f.spool.synthetic_v2_viewer=True
+  with DaemonStateLock(self.f.base.base.base.base.worker) as owner:
+   worker=self.f.base.worker(owner);receipt=send(worker,synthetic_fixture=True,chunk_bytes=16,promote=True)
+   self.assertEqual(receipt['kind'],'viewer-coordinator-archive-receipt')
+   self.assertEqual(send(worker,synthetic_fixture=True,chunk_bytes=16,promote=True),receipt)
+  self.assertEqual(self.f.spool.lookup(self.job,self.f.identity(),self.token)['receipt'],receipt)
+  service=ViewerService(self.f.fixture.queue,Config('legacy','http://127.0.0.1:1','http://127.0.0.1:2',1000,100000,viewer_enabled=True),store=self.f.fixture.store,engines={},viewer_spool=self.f.spool)
+  self.addCleanup(service.close);facade=ViewerFacade(service,'viewer-token','staging-token')
+  class Handler(BaseHTTPRequestHandler):
+   def do_GET(self):
+    if not facade.handle(self):self.send_error(404)
+   def log_message(self,*args):pass
+  server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.05});thread.start()
+  try:
+   conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+   try:
+    conn.request('GET','/task/22222222-2222-4222-8222-222222222222/download/all.zip?token=viewer-token');response=conn.getresponse()
+    self.assertEqual(response.status,200);self.assertEqual(response.read(),self.f.base.base.archive)
+   finally:conn.close()
+  finally:server.shutdown();server.server_close();thread.join(5);self.assertFalse(thread.is_alive())
+  self.assertEqual(self.f.fixture.queue.get(self.job)['status'],'running')
+  allocation=next(self.f.root.glob('*.alloc'))
+  with allocation.open('r+b') as stream:stream.write(b'X');stream.flush()
+  with self.assertRaises(Exception):self.f.spool.lookup(self.job,self.f.identity(),self.token)
+ def test_hold_during_v2_promotion_hash_blocks_receipt(self):
+  import threading
+  from concurrent.futures import ThreadPoolExecutor
+  from unittest.mock import patch
+  from processing.viewer_chunk_v2_journal import SyntheticV2ChunkJournal
+  from processing.viewer_archive_spool import SpoolHeld
+  self.f.spool.synthetic_v2_viewer=True
+  with DaemonStateLock(self.f.base.base.base.base.worker) as owner:send(self.f.base.worker(owner),synthetic_fixture=True,chunk_bytes=16)
+  entered=threading.Event();release=threading.Event();original=SyntheticV2ChunkJournal.finish
+  def paused(journal,count):
+   entered.set()
+   if not release.wait(5):raise RuntimeError('barrier timed out')
+   return original(journal,count)
+  count=(len(self.f.base.base.archive)+15)//16
+  with patch.object(SyntheticV2ChunkJournal,'finish',paused):
+   with ThreadPoolExecutor(max_workers=2) as pool:
+    future=pool.submit(self.api.viewer_v2_chunks.promote,self.job,self.f.identity(),self.token,count)
+    try:
+     self.assertTrue(entered.wait(5));hold=pool.submit(self.f.fixture.claims.mutation_hold,self.job,self.f.identity(),self.token)
+     self.assertEqual(hold.result(timeout=2)['state'],'held')
+    finally:release.set()
+    with self.assertRaises(Exception):future.result(timeout=5)
+  with self.f.fixture.queue._db() as db:self.assertIsNone(db.execute('SELECT 1 FROM viewer_worker_spool WHERE job_id=?',(self.job,)).fetchone())
+ def test_sender_kill_before_and_after_v2_promotion_replays_exact_receipt(self):
+  from pathlib import Path
+  self.f.spool.synthetic_v2_viewer=True;receipt_path=Path(self.f.fixture.root)/'synthetic-v2-receipt.json'
+  code='''import json,os,signal,sys
+from pathlib import Path
+from unittest.mock import patch
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+import processing.viewer_synthetic_v2_sender as sender
+root,config,mode,path=sys.argv[1:];original=sender.strict_response
+def observe(response):
+ value=original(response)
+ if mode=='before' and isinstance(value,dict) and value.get('state')=='sealed_no_receipt':os.kill(os.getpid(),signal.SIGKILL)
+ if mode=='after' and isinstance(value,dict) and value.get('kind')=='viewer-coordinator-archive-receipt':
+  fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+  try:os.write(fd,json.dumps(value,sort_keys=True).encode());os.fsync(fd)
+  finally:os.close(fd)
+  os.kill(os.getpid(),signal.SIGKILL)
+ return value
+with DaemonStateLock(root) as owner:
+ with patch.object(sender,'strict_response',observe):print(json.dumps(sender.send(ViewerNodeEnrollment(owner,**json.loads(config)),synthetic_fixture=True,chunk_bytes=16,promote=True)))
+'''
+  root=self.f.base.base.base.base.worker;config=self.f.base.base.base.base.config;args=[sys.executable,'-c',code,str(root),json.dumps(config)]
+  child=subprocess.run(args+['before',str(receipt_path)],capture_output=True,timeout=30);self.assertEqual(child.returncode,-signal.SIGKILL,child.stderr)
+  with self.f.fixture.queue._db() as db:self.assertIsNone(db.execute('SELECT 1 FROM viewer_worker_spool WHERE job_id=?',(self.job,)).fetchone())
+  child=subprocess.run(args+['after',str(receipt_path)],capture_output=True,timeout=30);self.assertEqual(child.returncode,-signal.SIGKILL,child.stderr)
+  expected=json.loads(receipt_path.read_text());child=subprocess.run(args+['replay',str(receipt_path)],capture_output=True,text=True,timeout=30)
+  self.assertEqual(child.returncode,0,child.stderr);self.assertEqual(json.loads(child.stdout),expected)
+  self.assertEqual(self.f.spool.lookup(self.job,self.f.identity(),self.token)['receipt'],expected)
+ def test_active_mutation_blocks_v2_promotion_and_reader(self):
+  self.f.spool.synthetic_v2_viewer=True
+  with DaemonStateLock(self.f.base.base.base.base.worker) as owner:send(self.f.base.worker(owner),synthetic_fixture=True,chunk_bytes=16)
+  count=(len(self.f.base.base.archive)+15)//16
+  with self.f.fixture.queue._db() as db:db.execute("INSERT INTO viewer_worker_permits VALUES(?,?,'upload','active')",(self.job,'v2-active'))
+  with self.assertRaises(Exception):self.api.viewer_v2_chunks.promote(self.job,self.f.identity(),self.token,count)
+  with self.f.fixture.queue._db() as db:
+   self.assertIsNone(db.execute('SELECT 1 FROM viewer_worker_spool WHERE job_id=?',(self.job,)).fetchone())
+   db.execute("UPDATE viewer_worker_permits SET state='finished' WHERE job_id=? AND operation_id='v2-active'",(self.job,))
+  self.api.viewer_v2_chunks.promote(self.job,self.f.identity(),self.token,count)
+  with self.f.fixture.queue._db() as db:db.execute("INSERT INTO viewer_worker_permits VALUES(?,?,'upload','active')",(self.job,'v2-later'))
+  with self.assertRaises(Exception):self.f.spool.lookup(self.job,self.f.identity(),self.token)

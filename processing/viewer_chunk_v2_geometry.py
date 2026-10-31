@@ -42,7 +42,7 @@ class SyntheticV2Geometry:
             saved,_=self.spool.claims._authorize_inventory(db,job,identity,token)
             metadata=self.spool._metadata(db,job,identity,token)
             SyntheticChunkSpool._admit_operation(db,job)
-            if db.execute('SELECT 1 FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone() or db.execute('SELECT 1 FROM viewer_worker_spool WHERE job_id=?',(job,)).fetchone():
+            if db.execute('SELECT 1 FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone():
                 raise SpoolHeld('v1_or_existing_spool_requires_inspection')
             item=geometry(metadata['archiveBytes'],chunk_bytes,version)
             binding=dict(kind='synthetic-v2-geometry-held',jobId=job,claimSha256=p.digest(saved),metadataSha256=p.digest(metadata),geometry=item)
@@ -56,5 +56,14 @@ class SyntheticV2Geometry:
                 if db.execute('SELECT 1 FROM viewer_chunk_v2_slots WHERE job_id=?',(job,)).fetchone():
                     raise SpoolHeld('v2_geometry_missing_for_slot')
             if old and old['binding']!=encoded:raise SpoolHeld('v2_geometry_changed')
+            standard=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(job,)).fetchone()
+            if standard:
+                if not old:raise SpoolHeld('v1_or_existing_spool_requires_inspection')
+                key=self.spool._slot_key_for_metadata(db,job,metadata,identity,token)
+                receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=job,metadataSha256=p.digest(metadata),archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key)
+                row=db.execute('SELECT slot_identity FROM viewer_chunk_v2_slots WHERE job_id=?',(job,)).fetchone()
+                if (not row or standard['state']!='sealed' or standard['slot_key']!=key or standard['metadata_sha']!=p.digest(metadata)
+                    or standard['slot_identity']!=row['slot_identity'] or standard['receipt']!=p.canonical_json(receipt).decode()):
+                    raise SpoolHeld('v2_promotion_changed')
             if not old:db.execute("INSERT INTO viewer_chunk_v2_geometry VALUES (?,?,'negotiated')",(job,encoded))
             return dict(state='held_no_transfer',binding=binding)
