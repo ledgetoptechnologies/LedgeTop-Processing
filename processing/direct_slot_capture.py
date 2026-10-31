@@ -147,7 +147,7 @@ class Capture:
             if self._slot is not None:self._slot.close();self._slot=None
 
 
-def begin_capture(root,root_identity,binding,*,max_budget,declared_length=None):
+def begin_capture(root,root_identity,binding,*,max_budget,declared_length=None,expected_slot_identity=None):
     """Durably bind a streaming attempt before allowing any capture writes."""
     digest=validate_binding(binding);budget=binding['outputBudgetBytes']
     if declared_length is not None and (type(declared_length) is not int or not 1<=declared_length<=budget):
@@ -155,6 +155,9 @@ def begin_capture(root,root_identity,binding,*,max_budget,declared_length=None):
     slot=_open_slot(root,root_identity,digest,budget,max_budget=max_budget,allow_capture=True)
     intent_name,seal_name=_names(digest)
     try:
+        if expected_slot_identity is not None:
+            actual=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
+            if expected_slot_identity!=actual:raise SlotHeld('capture_slot_identity_changed')
         if _exists(slot._root,intent_name) or _exists(slot._root,seal_name):
             raise SlotHeld('capture_requires_inspection')
         intent=dict(schemaVersion=1,binding=json.loads(p.canonical_json(binding)),

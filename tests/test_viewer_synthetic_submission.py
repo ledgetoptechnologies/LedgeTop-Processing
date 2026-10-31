@@ -1,4 +1,5 @@
 from http.server import BaseHTTPRequestHandler,HTTPServer
+import io
 import json
 import os
 import sqlite3
@@ -6,12 +7,15 @@ import subprocess
 import sys
 import threading
 import unittest
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 from ops.reference_worker_daemon import DaemonStateLock
 from processing.node_gate import NodeGate
 from processing.viewer_service import NativeEngine
 from processing.viewer_synthetic_submission import SubmissionHeld,submit
+from processing.viewer_local_result import capture,register,LocalResultHeld
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
 from tests.test_viewer_node_inputs import NodeInputsTests
 
 
@@ -20,6 +24,9 @@ class SyntheticSubmissionTests(unittest.TestCase):
         self.base=NodeInputsTests('test_tls_inventory_then_actual_verified_transfer_and_restart')
         self.base.setUp();self.addCleanup(self.base.doCleanups)
         self.calls=[];self.drop=None;self.bad=None;self.pause=None;self.arrived=threading.Event();self.release=threading.Event();outer=self
+        archive=io.BytesIO()
+        with zipfile.ZipFile(archive,'w') as value:value.writestr('synthetic.txt','test result')
+        self.archive=archive.getvalue();self.engine_status=40;self.truncate_archive=False
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body=self.rfile.read(int(self.headers.get('Content-Length','0')))
@@ -33,6 +40,16 @@ class SyntheticSubmissionTests(unittest.TestCase):
                 self.end_headers()
                 try:self.wfile.write(data)
                 except OSError:pass
+            def do_GET(self):
+                identifier=self.path.split('/')[2]
+                data=(json.dumps({'uuid':identifier,'status':{'code':outer.engine_status}}).encode()
+                      if self.path.endswith('/info') else outer.archive)
+                self.send_response(200);self.send_header('Content-Length',str(len(data)))
+                self.send_header('Content-Type','application/json' if self.path.endswith('/info') else 'application/zip')
+                self.end_headers()
+                if outer.truncate_archive and not self.path.endswith('/info'):
+                    self.wfile.write(data[:8]);self.close_connection=True;return
+                self.wfile.write(data)
             def log_message(self,*args):pass
         self.server=HTTPServer(('127.0.0.1',0),Handler)
         self.thread=threading.Thread(target=self.server.serve_forever,kwargs={'poll_interval':.05},daemon=True);self.thread.start()
@@ -137,6 +154,84 @@ class SyntheticSubmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(SubmissionHeld,'state_invalid'):
                 submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
         self.assertEqual([c[0] for c in self.calls],['init','upload','commit'])
+
+    def test_capture_and_replay_local_intent_while_coordinator_offline(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+            self.base.base.fixture.stop_server()
+            result=capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
+            self.assertEqual(result['archiveBytes'],len(self.archive))
+            self.assertEqual(result['kind'],'viewer-local-result-intent')
+        with DaemonStateLock(self.base.base.worker) as owner:
+            worker=ViewerNodeEnrollment(owner,**self.base.base.config)
+            self.assertEqual(register(worker),result)
+        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+
+    def test_nonterminal_engine_result_does_not_capture(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+            self.engine_status=20
+            with self.assertRaisesRegex(LocalResultHeld,'not_confirmed_complete'):
+                capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
+
+    def test_truncated_archive_holds_without_local_intent_or_cleanup(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+            self.truncate_archive=True
+            with self.assertRaises(Exception):capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
+            with self.assertRaises(Exception):register(inputs.worker)
+        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(self.archive[:2],b'PK')
+
+    def test_restart_registers_sealed_result_after_kill_before_outbox(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+        self.base.base.fixture.stop_server()
+        code='''import json,os,signal,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_service import NativeEngine
+import processing.viewer_local_result as result
+root,config,origin=sys.argv[1:]
+def kill(worker):os.kill(os.getpid(),signal.SIGKILL)
+result.register=kill
+with DaemonStateLock(root) as owner:
+ worker=ViewerNodeEnrollment(owner,**json.loads(config))
+ result.capture(worker,NativeEngine(origin),synthetic_fixture=True)
+'''
+        child=subprocess.run([sys.executable,'-c',code,str(self.base.base.worker),json.dumps(self.base.base.config),self.origin],
+                             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+        self.assertEqual(child.returncode,-9)
+        with DaemonStateLock(self.base.base.worker) as owner:
+            worker=ViewerNodeEnrollment(owner,**self.base.base.config)
+            result=register(worker);self.assertEqual(result['archiveBytes'],len(self.archive))
+            self.assertEqual(register(worker),result)
+
+    def test_kill_during_capture_holds_partial_without_deletion(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+        self.base.base.fixture.stop_server()
+        code='''import json,os,signal,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_service import NativeEngine
+from processing.direct_slot_capture import Capture
+from processing.viewer_local_result import capture
+root,config,origin=sys.argv[1:]
+original=Capture._write
+def write(self,data):original(self,data);os.kill(os.getpid(),signal.SIGKILL)
+Capture._write=write
+with DaemonStateLock(root) as owner:
+ worker=ViewerNodeEnrollment(owner,**json.loads(config))
+ capture(worker,NativeEngine(origin),synthetic_fixture=True)
+'''
+        child=subprocess.run([sys.executable,'-c',code,str(self.base.base.worker),json.dumps(self.base.base.config),self.origin],
+                             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+        self.assertEqual(child.returncode,-9)
+        with DaemonStateLock(self.base.base.worker) as owner:
+            worker=ViewerNodeEnrollment(owner,**self.base.base.config)
+            with self.assertRaises(Exception):register(worker)
+        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
 
     def kill_stage(self,stage):
         with DaemonStateLock(self.base.base.worker) as owner:self.prepare(owner)
