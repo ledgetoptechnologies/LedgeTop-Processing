@@ -16,7 +16,7 @@ BRIDGE_MODE=${BRIDGE_MODE:-full}
 case "$BRIDGE_MODE" in
     reconcile) printf 'reconcile mode is not qualified for the per-object input layout\n' >&2; exit 1;;
     full) SERVER_SCRIPT=viewer_full_bridge_server.py; CLIENT_SCRIPT=viewer_full_bridge_client.cjs; CLIENT_WAIT=75s;;
-    staged-full) SERVER_SCRIPT=viewer_staged_full_server.py; CLIENT_SCRIPT=viewer_staged_full_client.cjs; CLIENT_WAIT=90s; FULL_SERVER_SHA256=ca52721148601989d09f8515fb991de9d1f6a79afab0663fed600bc24e938d5f; FULL_CLIENT_SHA256=033dbd5876f3d6c102553a3636b5e0b0d23a41b24a90043b0b36fcf905648328; NODE_EXTRA_CA_CERTS=/exchange/synthetic-ca.pem; export NODE_EXTRA_CA_CERTS;;
+    staged-full) SERVER_SCRIPT=viewer_staged_full_server.py; CLIENT_SCRIPT=viewer_staged_full_client.cjs; CLIENT_WAIT=90s; FULL_SERVER_SHA256=ef7359295515b78d6372dd28216cfbee0a942a277fdb928b3af91d60e8463e22; FULL_CLIENT_SHA256=033dbd5876f3d6c102553a3636b5e0b0d23a41b24a90043b0b36fcf905648328; NODE_EXTRA_CA_CERTS=/exchange/synthetic-ca.pem; export NODE_EXTRA_CA_CERTS;;
     *) printf 'BRIDGE_MODE must be full or staged-full\n' >&2; exit 1;;
 esac
 RUN_ID=$(python3 -c 'import secrets; print(secrets.token_hex(12))')
