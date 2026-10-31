@@ -101,6 +101,11 @@ def register(worker):
                 try:
                     _check_record(slot,fd,name,existing)
                     if existing!=record:raise LocalResultHeld('result_intent_changed')
+                    # A previous creation may have failed after linking the
+                    # name but before either durable sync. Replay must not
+                    # treat mere existence as proof of persistence.
+                    os.fsync(fd);_check_record(slot,fd,name,existing)
+                    os.fsync(slot._root);_check_record(slot,fd,name,existing)
                 finally:os.close(fd)
             reader._check()
             if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')

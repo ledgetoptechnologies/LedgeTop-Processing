@@ -2,11 +2,13 @@ from http.server import BaseHTTPRequestHandler,HTTPServer
 import io
 import json
 import os
+from pathlib import Path
 import sqlite3
 import subprocess
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
@@ -16,6 +18,8 @@ from processing.viewer_service import NativeEngine
 from processing.viewer_synthetic_submission import SubmissionHeld,submit
 from processing.viewer_local_result import capture,register,LocalResultHeld
 from processing.viewer_node_enrollment import ViewerNodeEnrollment
+import processing.viewer_local_result as local_result
+import processing.direct_slot_capture as slot_capture
 from tests.test_viewer_node_inputs import NodeInputsTests
 
 
@@ -173,6 +177,36 @@ class SyntheticSubmissionTests(unittest.TestCase):
             self.engine_status=20
             with self.assertRaisesRegex(LocalResultHeld,'not_confirmed_complete'):
                 capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
+
+    def failed_intent_sync(self,fail_at):
+        real_persist=local_result._persist;real_fsync=os.fsync;counter=[0]
+        def fail(fd):
+            counter[0]+=1
+            if counter[0]==fail_at:raise OSError('injected sync failure')
+            return real_fsync(fd)
+        def persist(*args):
+            with patch.object(slot_capture.os,'fsync',fail):return real_persist(*args)
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+            with patch.object(local_result,'_persist',persist):
+                with self.assertRaises(OSError):capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
+            paths=list(Path(inputs.worker.config['outputRoot']).glob('*.viewer-outbox'))
+            self.assertEqual(len(paths),1)
+            file_stat=paths[0].stat();root_stat=paths[0].parent.stat();synced=[]
+            file_id=(file_stat.st_dev,file_stat.st_ino);root_id=(root_stat.st_dev,root_stat.st_ino)
+            def still_fails(fd):
+                info=os.fstat(fd)
+                if (info.st_dev,info.st_ino)==file_id:raise OSError('injected replay sync failure')
+                return real_fsync(fd)
+            with patch.object(local_result.os,'fsync',still_fails):
+                with self.assertRaises(OSError):register(inputs.worker)
+            def observe(fd):
+                info=os.fstat(fd);synced.append((info.st_dev,info.st_ino));return real_fsync(fd)
+            with patch.object(local_result.os,'fsync',observe):register(inputs.worker)
+            index=synced.index(file_id);self.assertIn(root_id,synced[index+1:])
+
+    def test_result_intent_file_sync_failure_requires_resync(self):self.failed_intent_sync(1)
+    def test_result_intent_directory_sync_failure_requires_resync(self):self.failed_intent_sync(2)
 
     def test_truncated_archive_holds_without_local_intent_or_cleanup(self):
         with DaemonStateLock(self.base.base.worker) as owner:
