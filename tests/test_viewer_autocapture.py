@@ -182,7 +182,44 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.service._archive_once(self.identifier)
         info = self.service.info(self.identifier)
         self.assertEqual(info['status']['code'], 40)
-        self.assertEqual(info['ledgetopArchive'], {'state': 'archived', 'reason': None})
+        self.assertEqual(info['ledgetopArchive'], {'state': 'recorded', 'reason': None})
+
+    def test_recorded_is_not_verified_custody_when_bytes_missing_or_corrupt(self):
+        self.fixture.config.viewer_archive_autocapture = True
+        self.service._archive_once(self.identifier)
+        path = Path(self.fixture.task(self.identifier)['archive_path'])
+        path.write_bytes(b'corrupt')
+        self.assertEqual(self.service.info(self.identifier)['ledgetopArchive']['state'], 'recorded')
+        path.unlink()
+        self.assertEqual(self.service.info(self.identifier)['ledgetopArchive']['state'], 'recorded')
+
+    def test_status_cas_rejects_old_generation_and_job(self):
+        store = self.service.store
+        store.enable_archive_status()
+        task = store.task(self.identifier)
+        self.assertFalse(store.set_archive_status(self.identifier, task['generation'] + 1, task['job_id'], 'inspection', 'partial_requires_inspection'))
+        self.assertFalse(store.set_archive_status(self.identifier, task['generation'], 'old-job', 'inspection', 'partial_requires_inspection'))
+        self.assertEqual(store.task(self.identifier)['archive_state'], 'pending')
+        store.remove(self.identifier)
+        self.service.initialize(self.identifier, 'Synthetic survey', fixtures.REQUEST_OPTIONS, None, 'production')
+        replacement = store.task(self.identifier)
+        self.assertEqual(replacement['generation'], task['generation'] + 1)
+        self.assertFalse(store.set_archive_status(self.identifier, task['generation'], task['job_id'], 'inspection', 'partial_requires_inspection'))
+        self.assertEqual(store.task(self.identifier)['archive_state'], 'pending')
+
+    def test_status_store_failure_is_visible_without_error_text(self):
+        self.fixture.config.viewer_archive_autocapture = True
+        self.fixture.config.viewer_archive_free_floor = 10**18
+        with patch.object(self.service.store, 'set_archive_status', side_effect=RuntimeError('secret-token-for-test')):
+            self.service.start()
+            deadline = time.monotonic() + 10
+            while self.service.info(self.identifier)['ledgetopArchiveHealth']['state'] != 'inspection':
+                if time.monotonic() >= deadline: self.fail('health signal not raised')
+                time.sleep(.05)
+            info = self.service.info(self.identifier)
+            self.assertEqual(info['ledgetopArchiveHealth'], {'state': 'inspection', 'reason': 'status_persistence_failed'})
+            self.assertNotIn('secret-token-for-test', str(info))
+            self.service.close()
 
     def test_shutdown_kills_and_reaps_blocked_capture_before_authority_release(self):
         self.release.clear()

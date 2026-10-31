@@ -120,11 +120,6 @@ class TaskStore:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
             if 'option_evidence_required' not in {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1))')
-            columns = {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}
-            if 'archive_state' not in columns:
-                db.execute("ALTER TABLE viewer_tasks ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'pending'")
-            if 'archive_reason' not in columns:
-                db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_reason TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_files (
                 uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
                 path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -591,6 +586,23 @@ class TaskStore:
                 raise Conflict('terminal Viewer identity requires inspection')
             db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='operator_resolved',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (row['uuid'],))
+
+    def enable_archive_status(self):
+        # Explicit opt-in only: this alters the coordinator database schema.
+        with self._lock, self.queue._db() as db:
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}
+            if 'archive_state' not in columns:
+                db.execute("ALTER TABLE viewer_tasks ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'pending'")
+            if 'archive_reason' not in columns:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_reason TEXT')
+
+    def set_archive_status(self, identifier, generation, job_id, state, reason):
+        if state not in ('pending', 'inspection') or reason not in ('capture_failed', 'partial_requires_inspection'):
+            raise ValueError('invalid archive status')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            return db.execute("UPDATE viewer_tasks SET archive_state=?,archive_reason=? WHERE uuid=? AND generation=? AND job_id=? AND removed=0 AND archive_path IS NULL",
+                              (state, reason, identifier, generation, job_id)).rowcount == 1
 
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',

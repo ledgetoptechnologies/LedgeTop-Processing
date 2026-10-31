@@ -139,6 +139,7 @@ class ViewerService:
         self._archive_thread = None
         self._archive_cursor = 0
         self._archive_retry = {}
+        self._archive_status_persistence_failed = False
 
     def _reserve_archive(self, output, size):
         """Reserve output bytes; the free-space floor is a point-in-time check."""
@@ -237,19 +238,22 @@ class ViewerService:
                 due, failures = self._archive_retry.get(identifier, (0, 0))
                 if time.monotonic() >= due:
                     try:
+                        identity = self.store.task(identifier)
                         self._archive_once(identifier)
                         self._archive_retry.pop(identifier, None)
                     except Exception as exc:
                         inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
                         try:
-                            self.store.update(identifier, archive_state='inspection' if inspection else 'pending',
-                                              archive_reason='partial_requires_inspection' if inspection else 'capture_failed')
+                            self.store.set_archive_status(identifier, identity['generation'], identity['job_id'],
+                                'inspection' if inspection else 'pending',
+                                'partial_requires_inspection' if inspection else 'capture_failed')
                         except Exception:
-                            pass
+                            self._archive_status_persistence_failed = True
                         failures += 1
                         self._archive_retry[identifier] = (time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
                 self._stop.wait(.25)
             except Exception:
+                self._archive_status_persistence_failed = True
                 self._stop.wait(2)
 
     def _catalog(self):
@@ -268,6 +272,7 @@ class ViewerService:
         jobs = self.queue.list()
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
                 'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'ledgetopArchiveHealth': self._archive_health(),
                 'ledgetopMaxInputBytes': self.store.max_input_bytes,
                 'ledgetopMaxUploadRequestBytes': MAX_UPLOAD_BYTES,
                 'ledgetopReservations': self.store.reservation_stats(),
@@ -311,16 +316,20 @@ class ViewerService:
     def commit(self, identifier, environment=None, capability=None):
         return self.store.commit(identifier, environment, capability)
 
+    def _archive_health(self):
+        return {'state': 'inspection', 'reason': 'status_persistence_failed'} if self._archive_status_persistence_failed else {'state': 'ok', 'reason': None}
+
     def info(self, identifier):
         info = self.store.info(identifier)
+        info['ledgetopArchiveHealth'] = self._archive_health()
         if info['status']['code'] == 40:
             task = self.store.task(identifier)
             if task['archive_path']:
-                archive = {'state': 'archived', 'reason': None}
+                archive = {'state': 'recorded', 'reason': None}
             elif not getattr(self.config, 'viewer_archive_autocapture', False):
                 archive = {'state': 'disabled', 'reason': None}
             else:
-                archive = {'state': task['archive_state'], 'reason': task['archive_reason']}
+                archive = {'state': task.get('archive_state', 'pending'), 'reason': task.get('archive_reason')}
             info['ledgetopArchive'] = archive
         return info
 
@@ -883,6 +892,7 @@ class ViewerService:
         if getattr(self.config, 'viewer_archive_autocapture', False):
             if getattr(self.queue, 'authority_lease', None) is None:
                 raise RuntimeError('archive capture requires coordinator authority lease')
+            self.store.enable_archive_status()
             self._archive_thread = threading.Thread(target=self._archive_run, name='viewer-archive-capture', daemon=True)
             self._archive_thread.start()
         self._thread = threading.Thread(target=self._run, name='viewer-dispatch', daemon=True)

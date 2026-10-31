@@ -95,6 +95,18 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         copied=self.root/'viewer-schema-copy';shutil.copytree(self.volume,copied)
         module.compatible(module.volume_census(copied,uid=os.geteuid(),offline=True),after)
 
+    def test_archive_status_opt_in_schema_fails_closed_for_upgrade_and_rollback(self):
+        before=module.volume_census(self.volume,uid=os.geteuid())
+        store=TaskStore(self.queue,self.volume/'viewer-tasks')
+        unchanged=module.volume_census(self.volume,uid=os.geteuid())
+        module.compatible(unchanged,before,allow_owned=True)
+        store.enable_archive_status()
+        after=module.volume_census(self.volume,uid=os.geteuid())
+        with self.assertRaises(module.Stopped):
+            module.compatible(after,before,allow_owned=True,allow_viewer_additions=True)
+        with self.assertRaises(module.Stopped):
+            module.compatible(after,before,allow_owned=True)
+
     def test_viewer_extra_tables_partial_schema_holds(self):
         with self.queue._db() as db:db.execute('DROP TABLE viewer_option_evidence')
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
