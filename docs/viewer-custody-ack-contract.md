@@ -339,3 +339,14 @@ fails before any new chunk is sent. Existing databases lack the revised exact
 schema and fail closed; no migration is included. Standard full-archive POST
 replay against a chunk-promoted spool remains unsupported and fails closed;
 standard authenticated receipt lookup and Viewer download remain available.
+
+A later isolated process-kill rehearsal terminated the synthetic coordinator
+immediately after its standard spool receipt transaction returned but before
+the TLS response. On restart, the existing Queue correctly held the job for
+`coordinator_restart`; authenticated spool lookup verified the exact receipt
+and bytes, while a new promotion attempt remained held. No automatic
+re-admission was claimed. Another subprocess test kills the sender after the
+chunk seal and before promotion, then verifies the resumed path. Node inputs,
+node result and coordinator spool remained present before fixture teardown.
+The tests do not establish power-loss durability, Viewer acceptance or a safe
+production reconciliation procedure.

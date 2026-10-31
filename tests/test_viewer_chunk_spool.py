@@ -35,6 +35,7 @@ original=sender.strict_response
 def observe(response):
  value=original(response)
  if mode=='kill' and isinstance(value,dict) and value.get('state')=='finished' and 'receipt' in value:os.kill(os.getpid(),signal.SIGKILL)
+ if mode=='kill-seal' and isinstance(value,dict) and value.get('kind')=='synthetic-chunk-seal':os.kill(os.getpid(),signal.SIGKILL)
  if mode=='kill-promotion' and isinstance(value,dict) and value.get('kind')=='viewer-coordinator-archive-receipt':os.kill(os.getpid(),signal.SIGKILL)
  return value
 with DaemonStateLock(root) as owner:
@@ -47,6 +48,11 @@ with DaemonStateLock(root) as owner:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_worker_chunk_permits WHERE state='finished'").fetchone()[0],1)
         wrong=subprocess.run(args+['wrong'],capture_output=True,text=True,timeout=20);self.assertNotEqual(wrong.returncode,0)
         with self.base.fixture.queue._db() as db:self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_worker_chunk_permits").fetchone()[0],1)
+        sealed=subprocess.run(args+['kill-seal'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(sealed.returncode,-signal.SIGKILL,sealed.stderr)
+        with self.base.fixture.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_worker_chunk_sessions WHERE job_id=?',(self.job,)).fetchone()['state'],'sealed')
+            self.assertEqual(db.execute('SELECT state FROM viewer_worker_spool WHERE job_id=?',(self.job,)).fetchone()['state'],'receiving')
         second=subprocess.run(args+['kill-promotion'],capture_output=True,text=True,timeout=20)
         self.assertEqual(second.returncode,-signal.SIGKILL,second.stderr)
         third=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
