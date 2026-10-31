@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import threading
 
 from . import reference_protocol as p
 
@@ -53,19 +54,20 @@ class OutputSlot:
         self._meta_identity = _identity(meta_fd)
         self._root_identity, self._file_identity = root_identity, file_identity
         self._name, self.budget, self._pid = name, budget, os.getpid()
+        self._operation_lock = threading.RLock()
+        self._held = False
 
     def _check(self):
         if self._fd is None or os.getpid() != self._pid: raise SlotHeld('slot_not_owned')
+        if self._held: raise SlotHeld('slot_write_requires_inspection')
         if _identity(self._root) != self._root_identity: raise SlotHeld('root_identity_changed')
         root_info = os.fstat(self._root)
         if root_info.st_uid != os.geteuid() or stat.S_IMODE(root_info.st_mode) != 0o700:
             raise SlotHeld('root_identity_changed')
-        try:
-            root_named = os.stat(self._root_path, follow_symlinks=False)
-            if (self._root_path.resolve()!=self._root_path or
-                    [root_named.st_dev,root_named.st_ino] != self._root_identity[:2]):
-                raise SlotHeld('root_identity_changed')
-        except OSError: raise SlotHeld('root_identity_changed') from None
+        # Reopen the name, rather than comparing only st_dev/st_ino: a bind
+        # mount of the same inode can have a different Linux mount identity.
+        named_root = _open_root(self._root_path, self._root_identity)
+        os.close(named_root)
         info = _file(self._fd, self._root_identity, size=self.budget)
         meta = _file(self._meta,self._root_identity)
         try:
@@ -81,19 +83,42 @@ class OutputSlot:
             raise SlotHeld('slot_path_changed')
 
     def write_at(self, offset, data):
+        if os.getpid() != self._pid: raise SlotHeld('slot_not_owned')
         if (type(offset) is not int or offset < 0 or type(data) is not bytes
                 or offset + len(data) > self.budget): raise SlotHeld('slot_write_out_of_bounds')
-        self._check(); written = os.pwrite(self._fd, data, offset); self._check()
-        if written != len(data): raise SlotHeld('slot_write_incomplete')
+        with self._operation_lock:
+            self._check()
+            try:
+                written = os.pwrite(self._fd, data, offset)
+                if written != len(data): raise SlotHeld('slot_write_incomplete')
+                self._check()
+            except OSError:
+                self._held = True
+                raise SlotHeld('slot_write_uncertain') from None
+            except BaseException:
+                self._held = True
+                raise
 
     def sync(self):
-        self._check(); os.fsync(self._fd); self._check()
+        if os.getpid() != self._pid: raise SlotHeld('slot_not_owned')
+        with self._operation_lock:
+            self._check()
+            try:
+                os.fsync(self._fd); self._check()
+            except OSError:
+                self._held = True
+                raise SlotHeld('slot_sync_uncertain') from None
+            except BaseException:
+                self._held = True
+                raise
 
     def close(self):
-        if self._fd is not None:
-            os.close(self._fd); self._fd = None
-            os.close(self._meta); self._meta = None
-            os.close(self._root); self._root = None
+        if os.getpid() != self._pid: raise SlotHeld('slot_not_owned')
+        with self._operation_lock:
+            if self._fd is not None:
+                os.close(self._fd); self._fd = None
+                os.close(self._meta); self._meta = None
+                os.close(self._root); self._root = None
 
 
 def _open_root(path, expected):
