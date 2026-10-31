@@ -112,6 +112,40 @@ def register(worker):
             return record
 
 
+def send_metadata(worker,*,synthetic_fixture=False):
+    """Attempt one idempotent metadata delivery; never deletes retained bytes.
+
+    The caller can retry this same operation after failure or process restart.
+    This is metadata registration only and is not Viewer/archive custody.
+    """
+    if synthetic_fixture is not True:raise LocalResultHeld('synthetic_fixture_required')
+    record=register(worker);claim,binding,digest,identity,_=_local(worker);c=worker.config
+    response=worker._request(record,job_id=claim['jobId'],claim_token=claim['claimToken'],kind='result-metadata')
+    expected=dict(schemaVersion=1,kind='viewer-result-metadata-receipt',jobId=claim['jobId'],payloadSha256=p.digest(record),
+                  archiveSha256=record['archiveSha256'],archiveBytes=record['archiveBytes'])
+    if p.canonical_json(response)!=p.canonical_json(expected):raise LocalResultHeld('metadata_receipt_changed')
+    if register(worker)!=record:raise LocalResultHeld('result_intent_changed')
+    with NodeGate(c['engineId']) as gate:
+        reservation=_gate(worker,claim,binding,gate)
+        with open_sealed_reader(c['outputRoot'],c['outputRootIdentity'],binding,max_budget=c['maxBudget']) as reader:
+            slot=reader._slot;actual=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
+            if actual!=identity or reader.sha256!=record['archiveSha256'] or reader.length!=record['archiveBytes']:
+                raise LocalResultHeld('result_intent_changed')
+            name='slot-'+digest+'.viewer-metadata-receipt'
+            try:_persist(slot._root,slot._root_identity,name,expected)
+            except FileExistsError:
+                existing,fd=_read_record(slot,name)
+                try:
+                    _check_record(slot,fd,name,existing)
+                    if existing!=expected:raise LocalResultHeld('metadata_receipt_changed')
+                    os.fsync(fd);_check_record(slot,fd,name,existing)
+                    os.fsync(slot._root);_check_record(slot,fd,name,existing)
+                finally:os.close(fd)
+            reader._check()
+            if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+    return expected
+
+
 def capture(worker,engine,*,synthetic_fixture=False):
     """Capture a finished synthetic engine archive without coordinator access."""
     claim,binding,_,identity,origin=_local(worker);c=worker.config

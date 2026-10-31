@@ -44,6 +44,7 @@ PLAN_DDL = '''CREATE TABLE viewer_worker_plans (job_id TEXT PRIMARY KEY, plan TE
 GRANT_DDL = '''CREATE TABLE viewer_worker_grants (job_id TEXT PRIMARY KEY, request TEXT NOT NULL, grant_value TEXT NOT NULL)'''
 FENCE_DDL = '''CREATE TABLE viewer_worker_fences (job_id TEXT PRIMARY KEY, stop_requested INTEGER NOT NULL CHECK(stop_requested IN (0,1)))'''
 PERMIT_DDL = '''CREATE TABLE viewer_worker_permits (job_id TEXT NOT NULL, operation_id TEXT NOT NULL, operation TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','finished')), PRIMARY KEY(job_id,operation_id))'''
+RESULT_DDL = '''CREATE TABLE viewer_worker_result_metadata (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL, receipt TEXT NOT NULL)'''
 TRIGGER_DDL = '''CREATE TRIGGER viewer_worker_active_permit_hold BEFORE UPDATE OF status ON jobs WHEN OLD.status='running' AND NEW.status!='running' AND EXISTS(SELECT 1 FROM viewer_worker_permits WHERE job_id=OLD.id AND state='active') BEGIN SELECT RAISE(ABORT,'viewer active permit requires drain'); END'''
 PAGE_SIZE=100
 MAX_INPUT_READERS=2
@@ -94,18 +95,18 @@ class ViewerWorkerClaims:
         self.node_environments=MappingProxyType({node:frozenset(values) for node,values in node_environments.items()})
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_active_permit_hold')").fetchall()
+            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_active_permit_hold')").fetchall()
             if not objects:
-                for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,TRIGGER_DDL):db.execute(sql)
+                for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,RESULT_DDL,TRIGGER_DDL):db.execute(sql)
             self._schema(db)
 
     @staticmethod
     def _schema(db):
-        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits') OR name='viewer_worker_active_permit_hold' ORDER BY type,name"
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata') OR name='viewer_worker_active_permit_hold' ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
             expected.execute('CREATE TABLE jobs (id TEXT,status TEXT)')
-            for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,TRIGGER_DDL):expected.execute(sql)
+            for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,RESULT_DDL,TRIGGER_DDL):expected.execute(sql)
             if [tuple(row) for row in db.execute(query)] != [tuple(row) for row in expected.execute(query)]:
                 raise Conflict('Viewer claim schema changed')
         finally:expected.close()
@@ -333,6 +334,44 @@ class ViewerWorkerClaims:
             active=db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(job_id,)).fetchone()
             if not active:db.execute("UPDATE jobs SET status='held',held_reason='worker_fence_hold' WHERE id=? AND status='running'",(job_id,))
             return dict(jobId=job_id,state='draining' if active else 'held')
+
+    def result_metadata(self,job_id,payload,identity,claim_token):
+        p._uuid(job_id,'job ID')
+        p._closed(payload,('schemaVersion','kind','bindingSha256','jobId','viewerTaskId','viewerGeneration',
+            'engineTaskId','environment','archiveBytes','archiveSha256','allocation'),'local result intent')
+        if type(payload['schemaVersion']) is not int or payload['schemaVersion']!=1 or payload['kind']!='viewer-local-result-intent':
+            raise Conflict('result metadata invalid')
+        p._hash(payload['bindingSha256'],'binding digest');p._hash(payload['archiveSha256'],'archive digest')
+        p._integer(payload['archiveBytes'],'archive size')
+        p._integer(payload['viewerGeneration'],'Viewer generation');p._environment(payload['environment'])
+        for field in ('jobId','viewerTaskId','engineTaskId'):p._uuid(payload[field],field)
+        if (type(payload['allocation']) is not list or len(payload['allocation'])!=3
+                or any(type(value) is not int or value<0 for value in payload['allocation'])):
+            raise Conflict('result allocation invalid')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');saved,_=self._authorize_inventory(db,job_id,identity,claim_token,allow_fence_hold=True)
+            enrollment=db.execute('SELECT attestation,receipt FROM viewer_worker_enrollments WHERE job_id=?',(job_id,)).fetchone()
+            grant=db.execute('SELECT grant_value FROM viewer_worker_grants WHERE job_id=?',(job_id,)).fetchone()
+            commit=db.execute("SELECT state,operation FROM viewer_worker_permits WHERE job_id=? AND operation_id='commit'",(job_id,)).fetchone()
+            if not enrollment or not grant or not commit or (commit['state'],commit['operation'])!=('finished','commit'):
+                raise Conflict('result metadata unavailable')
+            attestation=json.loads(enrollment['attestation']);binding=attestation['binding'];grant_value=json.loads(grant['grant_value'])
+            if (payload['bindingSha256']!=validate_binding(binding) or payload['jobId']!=job_id
+                or payload['viewerTaskId']!=saved['viewerTaskId'] or payload['viewerGeneration']!=saved['viewerGeneration']
+                or payload['engineTaskId']!=saved['engineTaskId'] or payload['environment']!=saved['environment']
+                or payload['allocation']!=attestation['slotIdentity']['allocation']
+                or payload['archiveBytes']>binding['outputBudgetBytes'] or grant_value['jobId']!=job_id
+                or grant_value['engineTaskId']!=saved['engineTaskId'] or grant_value['enrollmentReceipt']!=enrollment['receipt']):
+                raise Conflict('result metadata binding changed')
+            encoded=p.canonical_json(payload).decode();digest=p.digest(payload)
+            receipt=dict(schemaVersion=1,kind='viewer-result-metadata-receipt',jobId=job_id,payloadSha256=digest,
+                         archiveSha256=payload['archiveSha256'],archiveBytes=payload['archiveBytes'])
+            result=p.canonical_json(receipt).decode()
+            old=db.execute('SELECT payload,receipt FROM viewer_worker_result_metadata WHERE job_id=?',(job_id,)).fetchone()
+            if old:
+                if (old['payload'],old['receipt'])!=(encoded,result):raise Conflict('result metadata changed')
+            else:db.execute('INSERT INTO viewer_worker_result_metadata VALUES(?,?,?)',(job_id,encoded,result))
+            return receipt
 
     def enroll(self,job_id,payload,identity,claim_token):
         p._uuid(job_id,'job ID');p._closed(payload,('binding','slotIdentity'),'node enrollment')

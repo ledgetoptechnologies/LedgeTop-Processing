@@ -155,7 +155,7 @@ class ViewerNodeEnrollment:
         headers={'Authorization':'Bearer '+self._bearer,'Accept':'application/json','Content-Type':'application/json','Accept-Encoding':'identity'}
         if job_id is not None:
             p._uuid(job_id,'job ID')
-            if kind not in ('enrollment','execution-grant','mutation-permit','mutation-finish','mutation-hold'):raise EnrollmentHeld('request_kind_invalid')
+            if kind not in ('enrollment','execution-grant','mutation-permit','mutation-finish','mutation-hold','result-metadata'):raise EnrollmentHeld('request_kind_invalid')
             url+='/'+job_id+'/'+kind;headers['X-Claim-Token']=claim_token
         query=Request(url,data=p.canonical_json(request),method='POST',headers=headers)
         watchdog=_TransferWatchdog(30)
