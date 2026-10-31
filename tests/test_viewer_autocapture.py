@@ -213,13 +213,56 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         with patch.object(self.service.store, 'set_archive_status', side_effect=RuntimeError('secret-token-for-test')):
             self.service.start()
             deadline = time.monotonic() + 10
-            while self.service.info(self.identifier)['ledgetopArchiveHealth']['state'] != 'inspection':
+            while self.service.info(self.identifier)['ledgetopArchiveHealth']['reason'] != 'status_persistence_failed':
                 if time.monotonic() >= deadline: self.fail('health signal not raised')
                 time.sleep(.05)
             info = self.service.info(self.identifier)
             self.assertEqual(info['ledgetopArchiveHealth'], {'state': 'inspection', 'reason': 'status_persistence_failed'})
             self.assertNotIn('secret-token-for-test', str(info))
             self.service.close()
+
+    def test_discovery_capture_identity_race_does_not_touch_replacement(self):
+        self.fixture.config.viewer_archive_autocapture = True
+        self.service.store.enable_archive_status()
+        old = self.fixture.task(self.identifier)
+        original = self.service._archive_once
+        def reset_before_capture(identifier, expected_identity=None):
+            self.service.store.remove(identifier)
+            self.service.initialize(identifier, 'Synthetic survey', fixtures.REQUEST_OPTIONS, None, 'production')
+            try:
+                return original(identifier, expected_identity=expected_identity)
+            finally:
+                self.service._stop.set()
+        with patch.object(self.service, '_archive_once', side_effect=reset_before_capture):
+            self.service._archive_run()
+        new = self.fixture.task(self.identifier)
+        self.assertEqual(new['generation'], old['generation'] + 1)
+        self.assertEqual(new['archive_state'], 'pending')
+        self.assertIsNone(new['archive_reason'])
+        self.assertEqual(self.requests, 0)
+        self.assertNotIn(self.identifier, self.service._archive_retry)
+
+    def test_discovery_identity_read_failure_signals_health_without_stale_status_write(self):
+        self.fixture.config.viewer_archive_autocapture = True
+        self.service.store.enable_archive_status()
+        def fail_identity(_identifier):
+            self.service._stop.set()
+            raise RuntimeError('private detail')
+        with patch.object(self.service.store, 'task', side_effect=fail_identity), \
+             patch.object(self.service.store, 'set_archive_status') as persist:
+            self.service._archive_run()
+        persist.assert_not_called()
+        self.assertEqual(self.service._archive_health(), {'state': 'inspection', 'reason': 'status_persistence_failed'})
+        self.assertNotIn('private detail', str(self.service._archive_health()))
+
+    def test_restart_health_never_claims_failure_history_is_verified(self):
+        self.fixture.config.viewer_archive_autocapture = True
+        self.assertEqual(self.service.info(self.identifier)['ledgetopArchiveHealth'],
+                         {'state': 'inspection', 'reason': 'status_unverified_after_restart'})
+        self.service._archive_status_persistence_failed = True
+        restarted = ViewerService(self.queue, self.fixture.config, engines=self.fixture.engines, probe=self.fixture.probe)
+        self.assertEqual(restarted.info(self.identifier)['ledgetopArchiveHealth'],
+                         {'state': 'inspection', 'reason': 'status_unverified_after_restart'})
 
     def test_shutdown_kills_and_reaps_blocked_capture_before_authority_release(self):
         self.release.clear()

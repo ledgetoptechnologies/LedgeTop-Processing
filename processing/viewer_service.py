@@ -32,6 +32,10 @@ from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
 
 
+class ArchiveIdentityChanged(Exception):
+    """Capture candidate no longer denotes the discovered task incarnation."""
+
+
 class EngineUnavailable(OSError):
     pass
 
@@ -150,7 +154,7 @@ class ViewerService:
             raise Conflict('archive capacity unavailable')
         os.posix_fallocate(output.fileno(), 0, size)
 
-    def _archive_once(self, identifier):
+    def _archive_once(self, identifier, expected_identity=None):
         """Run file capture in a reaped child that inherits coordinator flocks."""
         with self._lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
@@ -158,6 +162,8 @@ class ViewerService:
             if self._stop.is_set():
                 return
             task = self.store.task(identifier)
+            if expected_identity is not None and (task['generation'], task['job_id']) != expected_identity:
+                raise ArchiveIdentityChanged()
             if not task['job'] or task['job']['status'] != 'succeeded' or task['archive_path']:
                 return
             lease = getattr(self.queue, 'authority_lease', None)
@@ -237,18 +243,32 @@ class ViewerService:
                 self._archive_cursor, identifier = candidate
                 due, failures = self._archive_retry.get(identifier, (0, 0))
                 if time.monotonic() >= due:
+                    identity = None
                     try:
-                        identity = self.store.task(identifier)
-                        self._archive_once(identifier)
+                        task = self.store.task(identifier)
+                        identity = (task['generation'], task['job_id'])
+                        self._archive_once(identifier, expected_identity=identity)
+                        self._archive_retry.pop(identifier, None)
+                    except ArchiveIdentityChanged:
+                        # The new incarnation has not been attempted; discover it anew.
                         self._archive_retry.pop(identifier, None)
                     except Exception as exc:
-                        inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
-                        try:
-                            self.store.set_archive_status(identifier, identity['generation'], identity['job_id'],
-                                'inspection' if inspection else 'pending',
-                                'partial_requires_inspection' if inspection else 'capture_failed')
-                        except Exception:
+                        if identity is None:
+                            # No trustworthy task identity can be associated with this failure.
                             self._archive_status_persistence_failed = True
+                        else:
+                            inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
+                            try:
+                                recorded = self.store.set_archive_status(identifier, *identity,
+                                    'inspection' if inspection else 'pending',
+                                    'partial_requires_inspection' if inspection else 'capture_failed')
+                                if not recorded:
+                                    # The incarnation changed or was removed; do not
+                                    # apply its retry delay to the replacement.
+                                    self._archive_retry.pop(identifier, None)
+                                    continue
+                            except Exception:
+                                self._archive_status_persistence_failed = True
                         failures += 1
                         self._archive_retry[identifier] = (time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
                 self._stop.wait(.25)
@@ -317,7 +337,13 @@ class ViewerService:
         return self.store.commit(identifier, environment, capability)
 
     def _archive_health(self):
-        return {'state': 'inspection', 'reason': 'status_persistence_failed'} if self._archive_status_persistence_failed else {'state': 'ok', 'reason': None}
+        if self._archive_status_persistence_failed:
+            return {'state': 'inspection', 'reason': 'status_persistence_failed'}
+        if getattr(self.config, 'viewer_archive_autocapture', False):
+            # No durable proof exists that a previous process persisted every
+            # failure; do not clear this warning merely because we restarted.
+            return {'state': 'inspection', 'reason': 'status_unverified_after_restart'}
+        return {'state': 'disabled', 'reason': None}
 
     def info(self, identifier):
         info = self.store.info(identifier)
