@@ -58,6 +58,50 @@ def _spool_policy(value):
     finally:os.close(fd)
 
 
+def _preflight_spool_settings(settings,config,queue,policy):
+    """Validate direct settings and existing spool state without schema writes."""
+    if settings.recovery_bindings is not None or settings.staged_ack_bearers is not None:
+        raise RuntimeConfigurationError('archive schema cannot combine optional policies')
+    listener=settings.listener
+    p._closed(listener,('host','port','certificate','privateKey','clientCA'),'TLS listener')
+    if (type(listener['host']) is not str or not listener['host'] or any(ord(c)<=32 for c in listener['host'])
+            or type(listener['port']) is not int or not 0<=listener['port']<=65535):
+        raise RuntimeConfigurationError('invalid TLS listener address')
+    for field in ('certificate','privateKey','clientCA'):_file(listener[field],private=field=='privateKey')
+    viewers=settings.viewer_bearers;workers=settings.workers;budget=settings.stream_budget
+    if type(viewers) is not dict or not viewers or type(workers) is not dict or set(workers)!=set(queue.node_ids):
+        raise RuntimeConfigurationError('credential coverage invalid')
+    credentials=[]
+    for token,env in viewers.items():
+        p._environment(env);credentials.append(token)
+    from .reference_result_proxy import _origin
+    for node,worker in workers.items():
+        p._closed(worker,('bearer','workerId','instanceId','resultOrigin','resultBearer'),'reference worker')
+        queue._known_node(node);queue.slug(worker['workerId']);p._slug(worker['instanceId'],'worker instance ID')
+        _origin(worker['resultOrigin']);credentials.extend((worker['bearer'],worker['resultBearer']))
+    legacy={secret for secret in (config.api_token,config.prototype_operator_token,config.prototype_observer_token,
+            config.viewer_token,config.viewer_staging_token,config.local_node_token,config.main_node_token) if secret}
+    if (any(type(token) is not str or not 32<=len(token)<=4096 or any(ord(c)<33 or ord(c)>126 for c in token)
+            for token in credentials) or len(set(credentials))!=len(credentials) or set(credentials)&legacy):
+        raise RuntimeConfigurationError('credential scope invalid')
+    p._closed(budget,('maxConcurrent','maxObjectBytes'),'stream budget')
+    if type(budget['maxConcurrent']) is not int or not 1<=budget['maxConcurrent']<=16:
+        raise RuntimeConfigurationError('stream budget invalid')
+    p._integer(budget['maxObjectBytes'],'stream object budget')
+    if 'reference-pipeline-v1' not in queue.allowed_profiles or 'main' not in queue.node_ids:
+        raise RuntimeConfigurationError('reference queue unavailable')
+    with queue._db() as db:
+        names={row['name'] for row in db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'viewer_worker_%'")}
+        if names:
+            from .viewer_worker_claim import ViewerWorkerClaims
+            ViewerWorkerClaims._schema(db)
+            old=db.execute('SELECT policy FROM viewer_worker_spool_config WHERE singleton=1').fetchone()
+            value=p.canonical_json(dict(root=policy['root'],rootIdentity=policy['rootIdentity'],maxArchiveBytes=policy['maxArchiveBytes'])).decode()
+            if old and old['policy']!=value:raise RuntimeConfigurationError('spool policy changed')
+            if not old and db.execute('SELECT 1 FROM viewer_worker_spool LIMIT 1').fetchone():
+                raise RuntimeConfigurationError('spool policy missing')
+
+
 def _file(path, *, private):
     if type(path) is not str or not path or not Path(path).is_absolute():
         raise RuntimeConfigurationError("reference files require explicit absolute paths")
@@ -287,6 +331,7 @@ class ReferenceRuntime:
                     or config.local_max_photos<1 or type(config.local_max_input_bytes) is not int or config.local_max_input_bytes<1):
                     raise RuntimeConfigurationError('invalid Viewer claim policy')
                 spool_policy=_spool_policy(settings.viewer_archive_spool)
+                _preflight_spool_settings(settings,config,queue,spool_policy)
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])

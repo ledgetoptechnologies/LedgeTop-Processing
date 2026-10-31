@@ -135,6 +135,60 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,invalid_policy,valid,viewer_service=viewer)
             with queue._db() as db:self.assertEqual([tuple(row) for row in db.execute(query)],before)
 
+    @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'Linux allocation required')
+    def test_archive_preflight_rejects_credential_overlap_without_schema_changes(self):
+        from processing.direct_output_slot import _identity
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True,viewer_enabled=True)
+        self.addCleanup(queue.close)
+        root=self.root/'valid-spool';root.mkdir(mode=0o700);fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+        try:identity=_identity(fd)
+        finally:os.close(fd)
+        settings=self.settings();overlap=settings.workers['cluster']['bearer']
+        settings=replace(settings,viewer_bearers={overlap:'staging'},
+                         viewer_archive_spool=dict(root=str(root),rootIdentity=identity,maxArchiveBytes=1000))
+        config=replace(self.config,viewer_worker_claim_enabled=True,
+                       viewer_worker_claim_env_policy=(('cluster',('production',)),('main',('production',))))
+        viewer=SimpleNamespace(queue=queue,store=SimpleNamespace(queue=queue))
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        with queue._db() as db:before=[tuple(row) for row in db.execute(query)]
+        from processing.reference_runtime import _preflight_spool_settings
+        with self.assertRaisesRegex(RuntimeConfigurationError,'credential scope invalid'):
+            _preflight_spool_settings(settings,config,queue,settings.viewer_archive_spool)
+        with patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True):
+            with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,config,settings,viewer_service=viewer)
+        with queue._db() as db:self.assertEqual([tuple(row) for row in db.execute(query)],before)
+
+    @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'Linux allocation required')
+    def test_archive_preflight_rejects_existing_policy_mismatch_without_schema_changes(self):
+        from processing.direct_output_slot import _identity
+        from processing.viewer_tasks import TaskStore
+        from processing.viewer_worker_claim import ViewerWorkerClaims
+        from processing import reference_protocol as protocol
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True,viewer_enabled=True)
+        self.addCleanup(queue.close)
+        store=TaskStore(queue,self.root/'viewer-tasks')
+        ViewerWorkerClaims(queue,store,local_max_photos=1000,local_max_input_bytes=100000,
+                           node_environments={'cluster':('production',),'main':('production',)})
+        root=self.root/'valid-spool';root.mkdir(mode=0o700);fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+        try:identity=_identity(fd)
+        finally:os.close(fd)
+        old=protocol.canonical_json(dict(root=str(root),rootIdentity=identity,maxArchiveBytes=999)).decode()
+        with queue._db() as db:db.execute('INSERT INTO viewer_worker_spool_config VALUES(1,?)',(old,))
+        settings=replace(self.settings(),viewer_archive_spool=dict(root=str(root),rootIdentity=identity,maxArchiveBytes=1000))
+        config=replace(self.config,viewer_worker_claim_enabled=True,
+                       viewer_worker_claim_env_policy=(('cluster',('production',)),('main',('production',))))
+        viewer=SimpleNamespace(queue=queue,store=store)
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+        with queue._db() as db:before=[tuple(row) for row in db.execute(query)]
+        from processing.reference_runtime import _preflight_spool_settings
+        with self.assertRaisesRegex(RuntimeConfigurationError,'spool policy changed'):
+            _preflight_spool_settings(settings,config,queue,settings.viewer_archive_spool)
+        with patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True):
+            with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,config,settings,viewer_service=viewer)
+        with queue._db() as db:
+            self.assertEqual([tuple(row) for row in db.execute(query)],before)
+            self.assertEqual(db.execute('SELECT policy FROM viewer_worker_spool_config').fetchone()[0],old)
+
     def settings(self):
         return load_reference_settings(str(self.path), self.config)
 
