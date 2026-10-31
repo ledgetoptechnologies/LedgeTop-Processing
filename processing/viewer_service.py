@@ -394,6 +394,22 @@ class ViewerService:
             opened = os.fstat(stream.fileno()); observed = temporary.lstat()
             if (opened.st_dev,opened.st_ino)!=(original.st_dev,original.st_ino) or (observed.st_dev,observed.st_ino)!=(original.st_dev,original.st_ino):
                 raise Conflict('archive restore identity changed')
+            # A recovered file can have been written by a process that died
+            # before fsync. Make its verified data durable before publication.
+            # On failure retain even a slot created by this invocation.
+            try:
+                sync_fd = os.open(temporary, os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+                                  | getattr(os, 'O_NONBLOCK', 0))
+                try:
+                    sync_identity = os.fstat(sync_fd)
+                    if (sync_identity.st_dev,sync_identity.st_ino)!=(opened.st_dev,opened.st_ino):
+                        raise OSError('archive restore identity changed')
+                    os.fsync(sync_fd)
+                finally:
+                    os.close(sync_fd)
+            except OSError:
+                created = False
+                raise Conflict('archive restore sync failed') from None
             try: os.link(temporary,path)
             except FileExistsError: raise Conflict('archive restore destination changed') from None
             linked = path.lstat()
