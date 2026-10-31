@@ -112,7 +112,7 @@ def main():
                     if plan['options']!=[{'name':'dsm','value':True}]:raise RuntimeError('Viewer plan mismatch')
                     inputs.freeze_inventory();object_id=synthetic.base.object_id(inputs);inputs.transfer(object_id)
                     with inputs._db() as db:row=db.execute('SELECT slot_key FROM objects WHERE object_id=?',(object_id,)).fetchone()
-                    if (synthetic.base.inputs/('slot-'+row[0]+'.alloc')).read_bytes()!=b'synthetic':raise RuntimeError('node input mismatch')
+                    if (synthetic.base.inputs/('object-'+object_id)/('slot-'+row[0]+'.alloc')).read_bytes()!=b'synthetic':raise RuntimeError('node input mismatch')
                     submit(inputs,NativeEngine(synthetic.origin),synthetic_fixture=True)
                     if [item[0] for item in synthetic.calls]!=['init','upload','commit']:raise RuntimeError('engine call sequence mismatch')
                     if b'"name": "dsm", "value": true' not in synthetic.calls[0][3] or b'\r\n\r\nsynthetic\r\n' not in synthetic.calls[1][3]:
