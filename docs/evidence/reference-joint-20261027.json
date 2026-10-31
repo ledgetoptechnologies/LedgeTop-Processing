@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-27",
+  "scope": "synthetic transport and process-restart acceptance; no geometry admission",
+  "processingBaseCommit": "ff2c014449404213b7f7756b8b6e71810f6584ee",
+  "viewerCommit": "e30504c10a51940efaf26f9460a7da1030a89034",
+  "sourceHashes": {
+    "ops/reference_joint_driver.py": "eeaf2af80f87c116dcc9b703962a1848cc1a8f7981695863891287b7945460d2",
+    "ops/reference_joint_fixture.py": "d4b262cece21151135f3d0aead7e56e1fb4a0d7ba592ee05508b903ea4a8d428",
+    "ops/reference_joint_probe.py": "ce0d7c4bb78691bfc56a60a562b9a53e8d8321ccec78bf306f00ce676fcaebab",
+    "ops/reference_joint_viewer.json": "049625acaa7703fb4a277ae477f0fa79508376cca93e00a08b859876e9c2c2e9",
+    "processing/reference_api.py": "162b19887b696081951ca497156b8dd064fc19167708ee58b84c3071dab01db3",
+    "processing/reference_store.py": "a97c3c011ea2c9e6a4340f8ba4683e65601ec989d89b0a5710641b7c6bd43ac8",
+    "processing/reference_worker_api.py": "f85cafe0d1afca86b2dcd1a1e86ef441c12a39eae06df1f38a2552cb286b93e7",
+    "processing/reference_terminal.py": "b77e48f30e6e33a81f7a18e952a37acfc294075691a516125b7fc7676195f746",
+    "processing/reference_engine_worker.py": "20ef02061f4c71c52963ed38b802077a91cdd0f7b413dddd5d589484269a6abc",
+    "processing/reference_results.py": "72413a1f94d7ee24bc184770a28154343bb4962fb66e42ef57ee4baf38ae2018",
+    "processing/reference_result_api.py": "b314bf88d715d644be300ec6c7c1d7e00fd7cfd4f8cdc559ada97a990f360a72",
+    "processing/reference_result_proxy.py": "4a198f496b973b7993c75cf1a826b96e99fd57155eeb3678ac1c72a511b0b18e"
+  },
+  "viewerHarnessSha256": "a3a81a630c724d1d9952b369fea9aadcf8ac71c01b3bcc0165a3e32e27c02a0e",
+  "transport": {
+    "actualTls": true,
+    "ephemeralTestCa": true,
+    "dockerInternalNetwork": true,
+    "publishedHostPorts": false,
+    "externalNetwork": false,
+    "sourceMountReadOnly": true
+  },
+  "success": {
+    "inputBytes": 3,
+    "archiveBytes": 22,
+    "viewerBrokerInputTransferred": true,
+    "workerResultStreamedThroughCoordinator": true,
+    "viewerDurableReceiptAcknowledged": true,
+    "workerArchiveCleaned": true,
+    "originalViewerArchiveRetainedBeforeFixtureRemoval": true,
+    "engineCalls": {
+      "initialize": 1,
+      "upload": 1,
+      "commit": 1,
+      "download": 1
+    }
+  },
+  "recovery": {
+    "coordinatorRestartedAfterWorkerOutboxBeforeDelivery": true,
+    "viewerExitedAfterLedgerCommitBeforeAck": true,
+    "viewerExitCode": 86,
+    "workerArchiveRetainedWhileUnacknowledged": true,
+    "cleanupCandidatesBeforeAck": 0,
+    "exactViewerOutboxReceiptsReplayed": 1,
+    "engineCallsAfterRecovery": {
+      "initialize": 1,
+      "upload": 1,
+      "commit": 1,
+      "download": 1
+    },
+    "workerArchiveCountAfterAckAndCleanup": 0,
+    "viewerArchiveCountAfterRecovery": 1,
+    "viewerArchiveBytesAfterRecovery": 22
+  },
+  "initialFailedAttempts": [
+    {
+      "lastDriverState": "awaiting_grant",
+      "reason": "Python microsecond expiry rejected by strict millisecond Viewer DTO",
+      "correction": "UTC millisecond wire format, server boundary regression test, fresh synthetic state"
+    },
+    {
+      "lastDriverState": "awaiting_grant",
+      "reason": "600-second expiry exceeded broker 300-second policy",
+      "correction": "240-second synthetic reservation; real capability negotiation still required"
+    }
+  ],
+  "fixtureResourcesRemovedAndAbsenceVerified": true,
+  "productionRuntimeModified": false,
+  "realEngineProcessingValidated": false,
+  "hardwarePowerLossValidated": false
+}

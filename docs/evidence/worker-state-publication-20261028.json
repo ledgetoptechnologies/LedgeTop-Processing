@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T19:09:04.757402+00:00",
+  "source": {
+    "sourceCommit": "2b0c4cd1c7717f815badfdf918dce8f397a0a2ac",
+    "archiveSha256": "91b9efa689c61be564ed9c9ac8643ee74a11b9de58f90ebd0cf6acbb08b668cd",
+    "archiveBytes": 3901440
+  },
+  "sourceFiles": 339,
+  "tests": {
+    "linux": {
+      "total": 1034,
+      "passed": 1030,
+      "skipped": 4,
+      "seconds": 120.743,
+      "resourceWarningsAsErrors": true
+    },
+    "windowsActualNode": {
+      "passed": 4,
+      "seconds": 0.46
+    },
+    "focusedFactoryDriverRuntimeNative": 90,
+    "independentFinalDirectoryTests": 9
+  },
+  "review": {
+    "initialFinding": "Root privacy drift during fsync could escape scratch-root admission.",
+    "resolution": "Final descriptor and visible root ownership/private-mode checks added; regression reproduces and refuses drift without changing permissions.",
+    "result": "Independent source review clear after fix."
+  },
+  "invariants": [
+    "Descriptor-relative no-follow creation and bottom-up ancestor fsync before factory admission.",
+    "State root published before lease registration; scratch root published under that lease before engine admission.",
+    "Lock file/root entry synced before registering ownership; failed sync retains files but grants no owner.",
+    "No permission repair, deletion, service activation or NAS operation."
+  ],
+  "runtimeChanged": false,
+  "installedVersion": "Runtime unchanged; source 2b0c4cd not activated.",
+  "fullGoalComplete": false
+}

@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T15:11:32.840003+00:00",
+  "sourceCommit": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+  "archiveSha256": "1c382c3e280bdfc36f41dc4849e57264ad9e32c6c3b8c4878b500434c2fd9d5f",
+  "archiveBytes": 3450880,
+  "sourceFileCount": 306,
+  "builtImage": {
+    "sourceCommit": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+    "imageId": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+    "tag": "ledgetop-processing-coordinator:cutover-671fd2a",
+    "os": "linux",
+    "architecture": "amd64",
+    "user": "10001:10001",
+    "workingDir": "/app",
+    "cmd": [
+      "python",
+      "-m",
+      "processing.app"
+    ],
+    "runtimeDeployment": false
+  },
+  "validation": {
+    "linux": {
+      "total": 897,
+      "passed": 893,
+      "skipped": 4,
+      "seconds": 111.15,
+      "exitCode": 0,
+      "logSha256": "dbbbfb62d7aaca3dc08f0d0d900171247e73a6677fa7542c771f5a114b7c4353"
+    },
+    "windows": {
+      "total": 87,
+      "passed": 44,
+      "skipped": 43,
+      "seconds": 5.216,
+      "exitCode": 0,
+      "nodeProbeTestsPassed": 4,
+      "logSha256": "d30408d05e1554c393e8dc3a0accac8a0610b81a4003d4ee302329f09b3457aa"
+    }
+  },
+  "cutover": {
+    "operation": "3dcb76ac036e41b8a8b841c1b85b4987",
+    "phase": "completed",
+    "sourceCommit": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+    "imageId": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+    "containerId": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+    "health": "healthy",
+    "restartCount": 0,
+    "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "history": {
+      "count": 12,
+      "sha256": "2ad24fe66eaab476299534c64ba89acbf236bd33d959489c1bcf4c7ecc6fcf9f",
+      "statusCounts": {
+        "failed": 2,
+        "succeeded": 10
+      }
+    },
+    "nodes": [
+      {
+        "id": "cluster",
+        "state": "active",
+        "revision": 6
+      },
+      {
+        "id": "main",
+        "state": "active",
+        "revision": 15
+      }
+    ],
+    "ownedApi": {
+      "operatorLookupVerified": true
+    },
+    "native": [
+      {
+        "role": "production",
+        "queue": 0,
+        "optionCount": 74,
+        "optionsSha256": "42b4cf37d0f2ab3fab28523e74be4f8daad2a32fa13845bd1a00f2489a1d5845"
+      },
+      {
+        "role": "staging",
+        "queue": 0,
+        "optionCount": 74,
+        "optionsSha256": "42b4cf37d0f2ab3fab28523e74be4f8daad2a32fa13845bd1a00f2489a1d5845"
+      }
+    ],
+    "verification": {
+      "nativeProductionCredentialsRejected": true,
+      "operatorLookupVerified": true,
+      "optionCount": 56,
+      "referenceEnvironment": "staging",
+      "tlsVerified": true,
+      "workerAuthoritiesVerified": true
+    },
+    "backup": {
+      "bytes": 163840,
+      "databaseHistory": {
+        "count": 12,
+        "sha256": "4e5f11ab7b5083fa26809acef9d261d4152d5d43f6c1a3116b8d7609eead301b"
+      },
+      "directories": 3,
+      "fullCensusSha256": "5ed0ad282679ef1177d79334dc7090acdbecc4d17a28f8c47ec9ba4aa81075d5",
+      "regularFiles": 2,
+      "sourceCensusSha256": "5ed0ad282679ef1177d79334dc7090acdbecc4d17a28f8c47ec9ba4aa81075d5",
+      "sourceRawFiles": [
+        {
+          "bytes": 0,
+          "kind": "file",
+          "mode": 420,
+          "path": "coordinator.lock",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 163840,
+          "kind": "file",
+          "mode": 384,
+          "path": "jobs.sqlite3",
+          "sha256": "fb1d4deacec138c2637e045aeeca4d465792e07640e696ea1bb828eafc08266e"
+        },
+        {
+          "kind": "directory",
+          "mode": 448,
+          "path": "viewer-spool"
+        },
+        {
+          "kind": "directory",
+          "mode": 448,
+          "path": "viewer-tasks"
+        }
+      ],
+      "sqliteQuickCheck": "ok",
+      "treeSha256": "2d033b7a766e004d13bca0383c47560ad4a3273644b5ec6063fab03d56287907"
+    },
+    "oldContainerRetainedStopped": true,
+    "olderPredecessorUntouchedStopped": true,
+    "legacyClusterStopped": true,
+    "clusterGateGeneration": 1,
+    "clusterGateReservation": null,
+    "databaseRestored": false
+  },
+  "controllerExitCode": 0,
+  "independentPreparedReviewPassed": true,
+  "independentPostCutoverReviewPassed": true,
+  "failedPreparationRetained": {
+    "sourceCommit": "de676f6d508d00d26aae59e17c40a50d6c2d6946",
+    "operationId": "fdf22f3f888e40d0b8109e353fd30a75",
+    "phase": "preparing",
+    "plansCreated": 0,
+    "reason": "Missing known empty TerminalService table in census; corrected fixture and validation without touching live state"
+  },
+  "mainProcessingContainerUpdated": false,
+  "unattendedUpdateLoopInstalled": false,
+  "nasChanged": false,
+  "realDatasetProcessed": false,
+  "remaining": [
+    "Accept actual owned main-node container update using qualified cached image",
+    "Implement/accept NAS source broker, retention receipts, JIT transfer and Viewer integration",
+    "Resolve/accept Viewer hierarchy and workspace UI findings with confirmed owner"
+  ]
+}

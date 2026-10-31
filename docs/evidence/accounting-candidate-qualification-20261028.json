@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T21:45:59.943359+00:00",
+  "status": "source-qualified-and-inactive-staging-verified",
+  "source": {
+    "sourceCommit": "dd4fa53823b9bab15fdb1564c4db341be1626c0c",
+    "archiveSha256": "a563ca4c1e38d1c4037ff847178dd160a0e7b6383407d82758888cbb65eaf134",
+    "archiveBytes": 5171200
+  },
+  "sourceFiles": 451,
+  "sourcePins": {
+    "processing/scratch_policy.py": "0d0a5cdcf7b96044eae9f1e1ac8885d7f242e2798a5a3c59af763627a5d0fa1a",
+    "processing/reference_parent_guard.py": "47796c7265371e841cf3f97b94d6533d9b6e728e1eabcb800218680d9cd47fac",
+    "processing/reference_worker_recovery.py": "0612924357e56f7f6f1eb9c77dbabad5eff6ef2fc0141544ca977da6253607a2",
+    "processing/reference_v2_candidate.py": "80bef5c770515ca66eb915bebddf88578547a0c59ad11770b8aba03b12d81644",
+    "contracts/reference-v2-candidate/contract.schema.json": "61467d589c36efae9b130fc179a454868ea1242a96918d8143ca949c79ed933c",
+    "contracts/reference-v2-candidate/inventory.json": "dc8545d5127f06b7e10bbe7dd6eb14e7524b90e942b8966843b485757353b1a6",
+    "tests/fixtures/scratch_policy_c60834c/legacy_scratch_policy.py": "770381c4115148cad3e31d58d282abe3c665ad8d185f716a5b4057202ac36e88"
+  },
+  "tests": {
+    "linux": {
+      "total": 1237,
+      "passed": 1232,
+      "skipped": 5,
+      "seconds": 199.759,
+      "exitCode": 0,
+      "resourceWarningsAsErrors": true,
+      "skips": "Four Node probes and one optional jsonschema oracle, all covered separately on Windows."
+    },
+    "windows": {
+      "total": 31,
+      "passed": 31,
+      "skipped": 0,
+      "seconds": 0.816,
+      "exitCode": 0,
+      "scope": "Four actual Node probes, three manifest checks and 24 candidate-layer tests including the existing jsonschema 4.26 oracle."
+    }
+  },
+  "downgradeFence": {
+    "sourceCommit": "f9fd4b99e5f2063963bd9618ebe8c86627e34331",
+    "ownerFocused": 89,
+    "independentFocused": 52,
+    "legacySourceCommit": "c60834cd156b7ec073ab381c0d9cde4ecee12bd3",
+    "legacyGitBlob": "85092a8db5395e7529effc63b0ef20a97509f03a",
+    "legacyRawSha256": "770381c4115148cad3e31d58d282abe3c665ad8d185f716a5b4057202ac36e88",
+    "guarantee": "First-charge atomic accounting marker makes archived old allocator refuse coherent charged state at cold startup without DB changes.",
+    "limits": "Not protection for an already-loaded old allocator or externally removed/corrupted markers. Owner migration and backend-image rollback remain distinct."
+  },
+  "candidateLayer": {
+    "contractCommit": "49b58f3",
+    "validatorCommit": "f477f601ee526465b712033ed8ae867f19741f71",
+    "schemaSha256": "61467d589c36efae9b130fc179a454868ea1242a96918d8143ca949c79ed933c",
+    "definitions": 60,
+    "goldenRecords": 58,
+    "appliedNegativeVectors": 25,
+    "deferredNegativeVectors": 32,
+    "namedMetadataDigestDomains": 9,
+    "scope": "Inactive lexical/used structural schema/named self-digests only, standard-library runtime; not authentication, archive/scientific/cross-record lifecycle acceptance.",
+    "v1Modified": false,
+    "wireAgreement": false,
+    "capabilityActivated": false
+  },
+  "cleanupFixtureCorrection": {
+    "failedIntermediateCommit": "f9fd4b99e5f2063963bd9618ebe8c86627e34331",
+    "failedRunTotal": 1213,
+    "failure": "Existing test mutated ledger.grace after startup; new live accounting validation correctly rejected immutable policy drift.",
+    "fixCommit": "dd4fa53823b9bab15fdb1564c4db341be1626c0c",
+    "runtimeGuardsWeakened": false,
+    "ownerAndIndependentFocusedTests": 50
+  },
+  "inactiveStages": [
+    {
+      "node": "cluster",
+      "sourceCommit": "dd4fa53823b9bab15fdb1564c4db341be1626c0c",
+      "archiveSha256": "a563ca4c1e38d1c4037ff847178dd160a0e7b6383407d82758888cbb65eaf134",
+      "verifiedFiles": 451,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/node-odx-gpu",
+          "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+          "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "running": true,
+          "startedAt": "2026-10-28T16:54:13.176495987Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/ledgetop-processing-prototype-c3fcb3a",
+          "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+          "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+          "running": true,
+          "startedAt": "2026-10-28T15:04:54.798609898Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/clusterodx",
+          "id": "e6d4da528e44c40f23816561187eea66f862dd36e870307d1cde12b57c39dc1a",
+          "image": "sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd",
+          "running": false,
+          "startedAt": "2026-10-28T00:22:55.543397097Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/cluster-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 21:41:19 UTC] ; stop_time=[Wed 2026-10-28 21:41:19 UTC] ; pid=410271 ; code=exited ; status=0 }"
+      }
+    },
+    {
+      "node": "main",
+      "sourceCommit": "dd4fa53823b9bab15fdb1564c4db341be1626c0c",
+      "archiveSha256": "a563ca4c1e38d1c4037ff847178dd160a0e7b6383407d82758888cbb65eaf134",
+      "verifiedFiles": 451,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/ledgetop-main-processing-nodeodx-1",
+          "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+          "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+          "running": true,
+          "startedAt": "2026-10-28T15:24:31.019864573Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/dcgm_exporter",
+          "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+          "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+          "running": true,
+          "startedAt": "2026-10-27T21:19:37.266076107Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/node_exporter",
+          "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+          "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+          "running": true,
+          "startedAt": "2026-10-26T22:58:44.651792853Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 21:40:48 UTC] ; stop_time=[Wed 2026-10-28 21:40:48 UTC] ; pid=456670 ; code=exited ; status=0 }"
+      }
+    }
+  ],
+  "hostPythonCompatibility": [
+    {
+      "node": "cluster",
+      "python": "3.14.4",
+      "compiledFiles": 231,
+      "imported": [
+        "processing.reference_worker_recovery",
+        "processing.reference_treedar_publication",
+        "processing.reference_runtime",
+        "processing.reference_v2_candidate"
+      ],
+      "constructedControllers": false,
+      "runtimeChanged": false
+    },
+    {
+      "node": "main",
+      "python": "3.10.12",
+      "compiledFiles": 231,
+      "imported": [
+        "processing.reference_worker_recovery",
+        "processing.reference_treedar_publication",
+        "processing.reference_runtime",
+        "processing.reference_v2_candidate"
+      ],
+      "constructedControllers": false,
+      "runtimeChanged": false
+    }
+  ],
+  "messaging": {
+    "automaticIncomingMessage": "57644f0b-3209-47e7-ab40-a6b266a25eb9",
+    "request": "97e01e8e-0b6b-450f-9497-ac93971e50de",
+    "scope": "Actual Claude Processing reply auto-notified this exact active Codex chat; handled and acknowledged. Idle/reboot/separate Claude Viewer routing unproved.",
+    "viewerSourceLocallyVerified": "b8c664698b9911737dbfe1bf20af48776c84f3d6",
+    "viewerWorktreeClean": true,
+    "viewerLocalOriginAhead": 10,
+    "viewerLocalOriginBehind": 29,
+    "viewerOwnerCurrentlyActiveVerified": false
+  },
+  "remaining": [
+    "Actual combined and standalone mode factories/driver preparation and lifecycle remain unwired.",
+    "64 prepared-parent and retained-history caps, typed control retirement/export and full owner/config migration remain deployment gates.",
+    "The 32 deferred v2 semantic/auth/archive/lifecycle vectors are unimplemented gates, not passing conformance tests.",
+    "Metadata-only reauthorization and sealed at-start source authority, immutable NAS custody/purge enforcement and real issuer endpoints remain unimplemented.",
+    "Final three-mode transport, producer/accepted-copy receipts, execution-vs-delivery settlement, ACK/cleanup and installed acceptance remain incomplete.",
+    "Viewer pairing waits for its protected release; separate Claude Viewer UI ownership/routing and browser/mobile/runtime acceptance remain unconfirmed.",
+    "Real-photo trial remains paused pending Beau selecting a smaller dataset. No 310-photo job was run."
+  ],
+  "runtimeActivated": false,
+  "packagePublished": false,
+  "githubActionsRun": false,
+  "nasMutated": false,
+  "userTreeDarDirectoryModified": false
+}

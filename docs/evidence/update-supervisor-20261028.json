@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Source-only durable host update supervisor with explicit local adapters",
+  "rootVerification": {
+    "command": "python -B -m unittest tests.test_maintenance tests.test_managed_update_finalization tests.test_update_supervisor",
+    "environment": "isolated cached Linux container, no network, read-only repository",
+    "passed": 42,
+    "skipped": 0,
+    "seconds": 5.382,
+    "exitCode": 0
+  },
+  "ownerFocusedVerification": {
+    "passed": 43,
+    "skipped": 0,
+    "seconds": 1.147,
+    "scope": "19 supervisor and 24 registry tests",
+    "provenance": "implementation agent report"
+  },
+  "review": "Independent stable-source review found no remaining blocking defects after cycle-generation and reentrant-lease corrections",
+  "runtimeChanged": false,
+  "qualificationAdapterInstalled": false,
+  "maintenanceAdapterInstalled": false,
+  "timerInstalled": false,
+  "nasAccessed": false,
+  "limitations": [
+    "Explicit production adapters and heavy-test execution admission are not implemented by this component",
+    "Owned scheduling API integration is separate in-progress work",
+    "No automatic runtime updates enabled"
+  ],
+  "sourceSha256": {
+    "processing/update_supervisor.py": "05294051bf80dec23ae7455293e63eb00775887370dd40f7b66f2f7a08316070",
+    "tests/test_update_supervisor.py": "843ffa5a3b8620e4fc2799a00dc66d70330347c4ec7c286853dd1aa3ddb85c36",
+    "docs/update-supervisor.md": "9f19433ecf8791f7a27ef50fd00a49d6ea96705fb38d2a1c056753a93a867f82"
+  }
+}

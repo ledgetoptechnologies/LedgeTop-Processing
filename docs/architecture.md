@@ -64,8 +64,8 @@ specified and tested.
 
 - `local` is eligible only when healthy, idle or within its configured slots,
   able to run the selected engine, below its verified photo/byte/RAM limits,
-  and able to reserve scratch space. The proposed 800-photo limit is only a
-  starting value to benchmark.
+  and able to reserve scratch space. The current 1,000-photo ceiling still needs
+  benchmarking. Small jobs wait for local while it is busy or unavailable.
 - `main` is selected for jobs above the local limit or requiring capabilities
   unavailable locally. If `main` is down, the job remains pending with a clear
   reason. It must not overflow to `local` merely to clear the queue.
@@ -78,7 +78,8 @@ ClusterODX already handles a NodeODX-compatible single address, node health,
 queue slots, and `maxImages`. We can use it behind an ODM adapter if its actual
 responses pass the current Viewer's probe and task contract. Its capacity-based
 routing alone does not prove the desired local-first rule; do not assume that
-an 800-photo ceiling makes all smaller jobs land on `local`.
+a photo ceiling alone makes all smaller jobs land on `local`. The native
+coordinator now applies explicit small-node-first policy at its atomic claim.
 
 ## Security and API boundary
 

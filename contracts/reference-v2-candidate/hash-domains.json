@@ -1,0 +1,97 @@
+{
+  "authenticity": "Self-digests/fixture strings are never MACs, signatures or issuer authorization.",
+  "canonicalMetadata": {
+    "arrayOrder": "preserved",
+    "encoding": "UTF8",
+    "keyOrder": "ASCII lexicographic",
+    "numbers": "finite nonnegative safe integer metadata only; booleans remain booleans; negative zero forbidden",
+    "unicode": "valid scalar values; no normalization; standard JSON escaping",
+    "whitespace": false
+  },
+  "newCandidateTechnicalChoice": {
+    "ParentCompletion.requestedProductsDigest": "Canonical array in original stage order of closed {stageId,engine,requestedProducts}; no ODM option values included. Still requires paired acceptance."
+  },
+  "opaqueAuthenticatedReferences": [
+    "Binding.pipelineDigest",
+    "Submission.capabilityFingerprint",
+    "Submission.contractFingerprint",
+    "OdmRequest.optionsFingerprint",
+    "OriginalReceiptIdentity.receiptSha256",
+    "OriginalReceiptIdentity.issuerPolicySha256",
+    "ControlBudgetPolicy.policySha256",
+    "authenticatedActorBindingSha256",
+    "originalTransferDigest",
+    "planSha256",
+    "stageDefinitionSha256",
+    "predecessorProofSha256"
+  ],
+  "physicalDigests": {
+    "domain": "Exactly byteSize bytes of that one physical file; ZIP hashes compressed container bytes. No decompression/canonicalization/directory digest.",
+    "fields": [
+      "InputObject.sha256",
+      "Artifact.sha256",
+      "CustodyObject.sha256",
+      "OriginalObject.sha256",
+      "ArchiveMemberReference.sha256",
+      "EptClosureEntry.sha256",
+      "AcceptedArtifact.sha256"
+    ]
+  },
+  "selfDigests": [
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "sha256",
+      "omission": "ONLY this own top-level field",
+      "type": "InputManifest"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "resultManifestSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "ResultManifest"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "completionSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "ParentCompletion"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "manifestSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "PointcloudZipManifest"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "manifestSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "OdmArchiveClosureManifest"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "intentSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "ImmutableMetadataIntent"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "receiptSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "AuthorizedResponse"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "receiptSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "DeniedResponse"
+    },
+    {
+      "domain": "complete canonical structured record, preserving every nested digest",
+      "field": "admissionSha256",
+      "omission": "ONLY this own top-level field",
+      "type": "SealedStageAdmission"
+    }
+  ],
+  "status": "UNAGREED_NO_NEW_PIPELINE_HASH_ALGORITHM"
+}

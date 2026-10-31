@@ -1,0 +1,55 @@
+{
+  "candidateVersion": 1,
+  "canonicalVectors": "canonical-vectors.json",
+  "hashDomains": "hash-domains.json",
+  "invalidIndex": "invalid/index.json",
+  "invariant": "No existing v1 schema, implementation, claim, receipt, config, capability or deployed runtime is modified.",
+  "nativeBundleSourcePin": "0b11c0b8958fbfcb170b42fe6e61a07d95b17a7140d905137f760e74d6ec8b34",
+  "schema": "contract.schema.json",
+  "semanticReviewQuestions": [
+    "Approve technical candidate constants/grammars and requestedProductsDigest domain?",
+    "Remove superseded compact reauthorization summary type or explicitly pair a non-authoritative view?",
+    "Pair ODM closure descriptor transport and exact EPT/mesh dependency semantics without mandatory standalone duplicates?",
+    "Confirm preupload worker ProductOutcome evidence and producer custody are distinct from NAS accepted-copy validation/custody?",
+    "Confirm fresh next-stage metadata admission versus immutable historical stage validation and separate current publication authority?",
+    "Pair exact trusted issuer/actor/custody/capacity evidence and finite deployment policy before any activation?"
+  ],
+  "semanticRules": "semantic-rules.json",
+  "sourcePins": {
+    "contract-proposal-v3.json": "23918d2263a91ca6c91501fd35bdf52fb60826c2ab6c33e06596b37688671be5",
+    "metadata-reauthorization-addendum-v1.json": "502491feee2f8e52df49e87ce51e0f26a2fa3c2e0b6ed9431b8423f794358242"
+  },
+  "status": [
+    "UNAGREED",
+    "NOTWIRECOMPATIBLE",
+    "NOTACTIVATED"
+  ],
+  "technicalCandidateChoices": {
+    "archiveMemberPathCharacters": 1024,
+    "metadataMaximumDepth": 32,
+    "odmClosureDescriptor": "ltds-odm-closure-v1-proposed sidecar supplied in fixture context; actual transport unresolved",
+    "producerRetainUntilSpelling": "accepted_copy_ack_or_authorized_release",
+    "requestedProductsDigest": "Canonical original stage-ordered {stageId,engine,requestedProducts} array; no options included.",
+    "supersededSummary": "SourceMetadataReauthorization kept as annotated definition for source coverage; excluded from accepted root message union."
+  },
+  "unimplementedGates": [
+    "paired schema/lexical/semantic validator acceptance and conformance",
+    "actual fixed issuer and actor authentication/endpoints/reconciliation APIs",
+    "actual immutable original LAS/LAZ custody and purge-pin enforcement/release policy",
+    "actual preupload producer custody/worker semantic evidence integration",
+    "actual accepted-copy ingestion/fsync/receipt/outbox factory",
+    "separate current publication/catalog authorization and cleanup ACK API",
+    "real engine/product/COG/CRS/pointcloud/mesh/bundle semantic qualification",
+    "finite deployed archive/raw/expansion/control/history/disk coexistence limits and ledger enforcement",
+    "durable all-heavy execution settlement vs pending delivery disk hold integration",
+    "migration/no-upgrade/capability negotiation/rollback"
+  ],
+  "validFixtures": [
+    "valid/odm_only.json",
+    "valid/treedar_only.json",
+    "valid/combined.json",
+    "valid/odm_optional_unavailable.json",
+    "valid/odm_pointcloud_only.json",
+    "valid/support-records.json"
+  ]
+}

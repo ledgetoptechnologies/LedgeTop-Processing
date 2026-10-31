@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T21:09:26.754244+00:00",
+  "status": "source-qualified-and-inactive-staging-verified",
+  "source": {
+    "sourceCommit": "2be08b5904e38e98a76b57bd22cc0c78e6338682",
+    "archiveSha256": "f5baffbcd762f2693606e5fce3690bf623af65bdd4ebb659151d62aeb9693f09",
+    "archiveBytes": 4392960
+  },
+  "sourceFiles": 364,
+  "sourcePins": {
+    "processing/reference_recovery.py": "181ddfbdbae10df10bd39a06d0772dfc3af3d682ca3c95a5e22813f109c62446",
+    "processing/reference_worker_recovery.py": "0612924357e56f7f6f1eb9c77dbabad5eff6ef2fc0141544ca977da6253607a2",
+    "processing/scratch_policy.py": "8046d573661a2125c351c61f988ae8a5e157caedcbed31195adfcc8de56b6617",
+    "processing/reference_pipeline.py": "5c11e7ba4ef8409f01e8b08fce800882918824f0c382dcc03b19908371f5d76e",
+    "processing/reference_parent_guard.py": "1ca38f893e9c1b1a3b5d456ca04243717ae92fc7581d421eb5b7f46d78e26f8b",
+    "processing/reference_odm_stage.py": "4ae7f91d4a69e342f370a7b2722ffebe75e83146dde72b8551e6ad9be9842677",
+    "processing/reference_treedar_stage.py": "8a5c5f04865f3e740a02f4be2acd383cd1bc4bba0ad97e30d2b1eb7d6d5cdd97",
+    "processing/reference_treedar_publication.py": "1f38fca772e417ec196114734935cbc70d18debfa565ff8600ad5eca9b68604a",
+    "processing/reference_http.py": "aeae7487f1e5a0a013acb1528ee14fa7af64b6ae2f4545cb2ee0014060cab70c",
+    "processing/reference_runtime.py": "94a63e78cb081a37a9ad048ac559f84189dd1036e90e4c7f4c86d11b2effdde6",
+    "processing/reference_control.py": "0289fa0983e1630cce795ded66b805aabfd92110a9e5e0771e3a449f28d62646"
+  },
+  "tests": {
+    "linux": {
+      "total": 1206,
+      "passed": 1202,
+      "skipped": 4,
+      "seconds": 198.248,
+      "exitCode": 0,
+      "resourceWarningsAsErrors": true,
+      "skipReason": "Four actual Node probes passed separately on Windows; cached Linux test image has no Node."
+    },
+    "windows": {
+      "total": 7,
+      "passed": 7,
+      "skipped": 0,
+      "seconds": 0.449,
+      "exitCode": 0,
+      "scope": "Four actual Node update probes and three manifest checks."
+    }
+  },
+  "independentReview": {
+    "recoveryCoordinatorRegressions": 65,
+    "publicationOwnerCombined": 47,
+    "publicationIndependentDeltaMethods": 6,
+    "runtimeConfiguration": 73,
+    "nativeAllocation": 28,
+    "workerAccountingInitialCombined": 183,
+    "finalWorkerAndLedger": 65,
+    "finalIndependentUnchangedCore": 63,
+    "finalIndependentChangedCases": 3,
+    "fixedFindings": [
+      "Same-thread and concurrent close cannot release coordinator authority during a transaction.",
+      "HEAD reader closes before HTTP success and uncertain close is not replayed.",
+      "Early publication preparation is retained and conservatively charged before a new numbered copy.",
+      "Recovery records and SQLite files/pages/sidecars have explicit bounded history.",
+      "Typed control charge and future-byte capacity hold commit together; replay does not infer ownership from aggregate allocation.",
+      "Parent control budget is additive; Native archive bytes retain the original allocation baseline.",
+      "Pre-stage restart can reconcile an existing charge without pretending an engine already started.",
+      "Normal engine admission checks actual published metadata files, identities, exact format and bounded current history, not a stored hash alone."
+    ]
+  },
+  "inactiveStages": [
+    {
+      "node": "cluster",
+      "sourceCommit": "2be08b5904e38e98a76b57bd22cc0c78e6338682",
+      "archiveSha256": "f5baffbcd762f2693606e5fce3690bf623af65bdd4ebb659151d62aeb9693f09",
+      "verifiedFiles": 364,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/node-odx-gpu",
+          "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+          "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "running": true,
+          "startedAt": "2026-10-28T16:54:13.176495987Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/ledgetop-processing-prototype-c3fcb3a",
+          "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+          "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+          "running": true,
+          "startedAt": "2026-10-28T15:04:54.798609898Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/clusterodx",
+          "id": "e6d4da528e44c40f23816561187eea66f862dd36e870307d1cde12b57c39dc1a",
+          "image": "sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd",
+          "running": false,
+          "startedAt": "2026-10-28T00:22:55.543397097Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/cluster-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 21:07:44 UTC] ; stop_time=[Wed 2026-10-28 21:07:44 UTC] ; pid=405287 ; code=exited ; status=0 }"
+      }
+    },
+    {
+      "node": "main",
+      "sourceCommit": "2be08b5904e38e98a76b57bd22cc0c78e6338682",
+      "archiveSha256": "f5baffbcd762f2693606e5fce3690bf623af65bdd4ebb659151d62aeb9693f09",
+      "verifiedFiles": 364,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/ledgetop-main-processing-nodeodx-1",
+          "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+          "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+          "running": true,
+          "startedAt": "2026-10-28T15:24:31.019864573Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/dcgm_exporter",
+          "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+          "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+          "running": true,
+          "startedAt": "2026-10-27T21:19:37.266076107Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/node_exporter",
+          "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+          "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+          "running": true,
+          "startedAt": "2026-10-26T22:58:44.651792853Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 21:07:13 UTC] ; stop_time=[Wed 2026-10-28 21:07:13 UTC] ; pid=452752 ; code=exited ; status=0 }"
+      }
+    }
+  ],
+  "hostPythonCompatibility": [
+    {
+      "node": "cluster",
+      "python": "3.14.4",
+      "compiledFiles": 227,
+      "imported": [
+        "processing.reference_worker_recovery",
+        "processing.reference_treedar_publication",
+        "processing.reference_runtime"
+      ],
+      "constructedControllers": false,
+      "runtimeChanged": false
+    },
+    {
+      "node": "main",
+      "python": "3.10.12",
+      "compiledFiles": 227,
+      "imported": [
+        "processing.reference_worker_recovery",
+        "processing.reference_treedar_publication",
+        "processing.reference_runtime"
+      ],
+      "constructedControllers": false,
+      "runtimeChanged": false
+    }
+  ],
+  "intermediateFailure": {
+    "sourceCommit": "73b04c3fcec32564ab1a4b627081679fa6444dbf",
+    "total": 1125,
+    "failed": 1,
+    "finding": "HEAD response could precede reader pin release; fixed before current full qualification.",
+    "retained": true
+  },
+  "remaining": [
+    "Production combined factory must prepare and retain the concrete recovery client before stage issue; no worker daemon is wired to it.",
+    "Current client covers main-node combined PipelineJournal, not standalone ODM-only or TreeDar-only recovery.",
+    "Global limit is 64 prepared parents as well as 64 retained attempts; no automatic record pruning or control-hold release exists.",
+    "Old ScratchLedger code ignores retained control holds; downgrade/rollback to it is forbidden pending a qualified fence and migration.",
+    "Outer-v2 candidate contract, three-mode final facade, trusted producer/accepted custody and Viewer ingestion remain unimplemented or unagreed.",
+    "Metadata-only source reauthorization after long ODM is not implemented; v1 provenance still depends on original payload-grant expiry and a short observation window.",
+    "NAS original custody/issuer/purge enforcement, full ACK/cleanup chain, runtime configuration migration and installed synthetic acceptance remain unfinished.",
+    "Real-photo trial remains paused until Beau selects a smaller dataset; no 310-photo task was run."
+  ],
+  "runtimeActivated": false,
+  "packagePublished": false,
+  "githubActionsRun": false,
+  "nasMutated": false,
+  "userTreeDarDirectoryModified": false
+}

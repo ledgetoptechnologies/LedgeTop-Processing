@@ -1,0 +1,355 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-28T05:24:21Z",
+  "purpose": "Independent read-only acceptance of the installed sole coordinator and optional reference TLS listener",
+  "installation": {
+    "operation": "2879e3a1f83a",
+    "phase": "completed",
+    "coreSourceCommit": "e2ccf489ab41160acff3f90e2b4bcd568f72cf24",
+    "historicalInstallerCommit": "e18544440d634078fefd24a321deb4a734fa8760",
+    "imageId": "sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9"
+  },
+  "independentObservations": {
+    "cluster": {
+      "host": "192.168.50.89",
+      "hostname": "cluster",
+      "currentPrimary": {
+        "name": "ledgetop-processing-prototype-c3fcb3a",
+        "containerId": "7ebe34636518961ddb4398b545a6a73d0254a47a093b198cf5d2d8411345cd07",
+        "imageId": "sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9",
+        "running": true,
+        "health": "healthy",
+        "user": "10001:10001",
+        "revisionLabel": "e2ccf489ab41160acff3f90e2b4bcd568f72cf24",
+        "operationLabel": "2879e3a1f83a",
+        "security": {
+          "Init": true,
+          "NetworkMode": "bridge",
+          "ReadonlyRootfs": true,
+          "Privileged": false,
+          "CapDrop": [
+            "ALL"
+          ],
+          "SecurityOpt": [
+            "no-new-privileges"
+          ],
+          "PidsLimit": 64,
+          "NanoCpus": 500000000,
+          "Memory": 268435456,
+          "MemorySwap": 536870912,
+          "IpcMode": "private",
+          "ShmSize": 67108864,
+          "RestartPolicy": {
+            "Name": "unless-stopped",
+            "MaximumRetryCount": 0
+          },
+          "PortBindings": {
+            "8080/tcp": [
+              {
+                "HostIp": "127.0.0.1",
+                "HostPort": "18080"
+              },
+              {
+                "HostIp": "192.168.50.89",
+                "HostPort": "3005"
+              }
+            ],
+            "8443/tcp": [
+              {
+                "HostIp": "192.168.50.89",
+                "HostPort": "18443"
+              }
+            ]
+          }
+        }
+      },
+      "nativeEnvironmentParity": true,
+      "originalRetained": {
+        "containerId": "6300e33a3b6f62036e535c86a76c492c326d3b4411c3ec637730b389232c5f21",
+        "name": "ledgetop-processing-prototype-c3fcb3a-pre-reference-e2ccf48",
+        "imageId": "sha256:40a4d54c3b7311384ba031cf05acb3e760237ada4d6d2434ab1392fabd5bc401",
+        "running": false
+      },
+      "state": {
+        "volume": "ledgetop-processing-prototype-c3fcb3a-state",
+        "runningOwnerCount": 1,
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "historyCount": 12,
+        "historySha256": "2ad24fe66eaab476299534c64ba89acbf236bd33d959489c1bcf4c7ecc6fcf9f",
+        "matchesPreparedHistory": true,
+        "statusCounts": {
+          "succeeded": 10,
+          "failed": 2
+        },
+        "activeCount": 0,
+        "volumeFacts": {
+          "counts": {
+            "viewer_tasks": 0,
+            "viewer_files": 0,
+            "viewer_incarnations": 0,
+            "reference_jobs": 0
+          },
+          "sqliteQuickCheck": "ok",
+          "fileTypes": {
+            "regular": 2,
+            "directory": 3,
+            "symlink": 0,
+            "other": 0
+          },
+          "regularBytes": 163840,
+          "ownerIDs": [
+            "10001:10001"
+          ]
+        }
+      },
+      "nodes": [
+        {
+          "id": "cluster",
+          "state": "active",
+          "revision": 2
+        },
+        {
+          "id": "main",
+          "state": "active",
+          "revision": 11
+        }
+      ],
+      "gate": {
+        "engineId": "b557939c-6ac3-4e73-8b14-31caf7390f23",
+        "nodeId": "cluster",
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "coordinatorOrigin": "http://127.0.0.1:18080",
+        "generation": 1
+      },
+      "gateReservationPresent": false,
+      "engine": {
+        "imageId": "sha256:4013b4977c267afa8d7bb3ba99a2fcdf55f710ec32f26061800c989f48f3a3c9",
+        "running": true
+      },
+      "legacyClusterODX": {
+        "name": "clusterodx",
+        "running": false,
+        "status": "exited"
+      },
+      "referenceTLS": {
+        "trustedCAFileSha256": "d35b9882b6f7244ecc09ff934ddb524a27fb2080ac4350087c5b96529a636318",
+        "hostnameAndChainVerified": true,
+        "minimumTLS": "TLSv1_2",
+        "environment": "staging",
+        "optionsCount": 56,
+        "fingerprintsConsistent": true,
+        "treedarAvailable": false,
+        "gaussianEnabled": false,
+        "workerAuthoritiesMatch": {
+          "clusterWorker": true,
+          "mainWorker": true
+        },
+        "roleResponses": {
+          "unauthenticatedViewer": 401,
+          "referenceViewerCannotUseWorkerAuthority": 401,
+          "legacyAPIRejectedByReference": 401,
+          "legacyViewerRejectedByReference": 401,
+          "clusterWorkerCannotUseViewer": 401,
+          "mainWorkerCannotUseViewer": 401,
+          "clusterResultReaderCannotUseViewer": 401,
+          "clusterResultReaderCannotUseWorkerAuthority": 401,
+          "mainResultReaderCannotUseViewer": 401,
+          "mainResultReaderCannotUseWorkerAuthority": 401
+        }
+      },
+      "nativeProvider": {
+        "origin": "http://192.168.50.89:3005",
+        "info": {
+          "version": "2.4.0",
+          "engine": "ledgetop-processing",
+          "engineVersion": "0.2.0",
+          "maxParallelTasks": 1,
+          "coordinator": true,
+          "taskQueueCount": 0
+        }
+      },
+      "installationCheckpoint": {
+        "operation": "2879e3a1f83a",
+        "phase": "completed",
+        "backup": {
+          "bytes": 69632,
+          "databaseHistory": {
+            "count": 12,
+            "sha256": "4e5f11ab7b5083fa26809acef9d261d4152d5d43f6c1a3116b8d7609eead301b"
+          },
+          "directories": 3,
+          "regularFiles": 2,
+          "sqliteQuickCheck": "ok",
+          "treeSha256": "78cf6777e75388af2be79ac80372a7c4cd0c11806b11ac82ea89d9ed0f4acbd9"
+        },
+        "realJobsSubmitted": false
+      },
+      "workerResultPortListening": false,
+      "mountCount": 2,
+      "referenceTLSMountReadOnly": true,
+      "stateVolumeReadWrite": true,
+      "healthcheckPreserved": true,
+      "referenceWorkerUnitPresent": false,
+      "engineActivity": [
+        {
+          "role": "local",
+          "engine": "odm",
+          "engineVersion": "3.6.2",
+          "taskQueueCount": 0,
+          "retainedTaskCount": 0
+        },
+        {
+          "role": "main",
+          "engine": "odx",
+          "engineVersion": "3.8.5",
+          "taskQueueCount": 0,
+          "retainedTaskCount": 0
+        }
+      ]
+    },
+    "main": {
+      "host": "192.168.50.88",
+      "hostname": "node",
+      "engine": {
+        "container": "ledgetop-main-processing-nodeodx-1",
+        "imageId": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776",
+        "running": true
+      },
+      "gate": {
+        "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+        "nodeId": "main",
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "coordinatorOrigin": "http://127.0.0.1:18080",
+        "generation": 1
+      },
+      "gateReservationPresent": false,
+      "coordinatorTunnel": {
+        "unit": "ledgetop-processing-tunnel.service",
+        "state": {
+          "MainPID": 306176,
+          "ActiveState": "active",
+          "SubState": "running"
+        },
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "healthStatus": "ok",
+        "authorityMatchesGate": true
+      },
+      "referencePortsListening": false,
+      "referenceWorkerUnitPresent": false
+    }
+  },
+  "scope": {
+    "installed": [
+      "Sole existing coordinator upgraded using original authority and state volume",
+      "Optional reference HTTPS listener at 192.168.50.89:18443",
+      "Staging-only reference Viewer credential with separate private worker roles"
+    ],
+    "unchanged": [
+      "Native Viewer provider at http://192.168.50.89:3005",
+      "Native credentials and container security/resource policy",
+      "Both physical engine images and idle generation-1 gates",
+      "Main user SSH tunnel to canonical loopback coordinator origin"
+    ],
+    "notActivated": [
+      "Reference worker intake or result daemons",
+      "NAS broker integration or NAS durability qualification",
+      "TreeDar availability",
+      "Gaussian splatting",
+      "Input-cache or engine-task cleanup",
+      "Real-photo or new processing jobs"
+    ],
+    "noTasksOrMutationsPerformedByIndependentAcceptance": true
+  },
+  "supplementaryRootReported": {
+    "provenance": "Reported directly by root; distinct from the independent observations above",
+    "externalTLS": {
+      "windows": {
+        "privateCATrustPassed": true,
+        "unauthenticatedStatus": 401,
+        "nativePort3005HealthStatus": 200
+      },
+      "main": {
+        "privateCATrustPassed": true,
+        "unauthenticatedStatus": 401,
+        "tunnelPort18080HealthStatus": 200
+      }
+    },
+    "sourceTests": {
+      "platform": "isolated Linux",
+      "passed": 583,
+      "skipped": 0,
+      "elapsedSeconds": 51.643
+    },
+    "finalSourceQualification": {
+      "recordedAt": "2026-10-28T05:35:46.1679035Z",
+      "platform": "isolated Linux",
+      "passed": 587,
+      "skipped": 0,
+      "elapsedSeconds": 52.099,
+      "migrationRegressions": 15,
+      "helperSha256": "cb467eb2bbd01ae755ed2f7f98a0be454ad586ed47f32c22777a1c30bc48c362",
+      "futureHelperStaged": true,
+      "liveRollbackExecuted": false,
+      "runtimeChangedBySafetyPatch": false
+    },
+    "actualViewerSdkProbe": {
+      "recordedAt": "2026-10-28T05:41:52.4638421Z",
+      "viewerCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+      "nodeVersion": "24.16.0",
+      "sourceHashes": {
+        "referenceProvider.js": "cde67f2506fb07e3faefd7d4efee7684198bbd68eb3d286d2562f2618e2705e3",
+        "referenceCaTransport.js": "3ea6ed955d40727d0c8d2bdc6d7f34fbb39c4802c130534da81c51465a3c9d19",
+        "referenceProtocol.js": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159"
+      },
+      "hashSemantics": "Exact Windows working-file bytes",
+      "probeScriptSha256": "b578d59a0a5cb6958a7e3c7b934d6d3655958be708bd92c0a8104b1776eab75f",
+      "actualInstalledCoordinator": true,
+      "privateCaTls": true,
+      "authenticatedDiscovery": true,
+      "invalidCredentialRejected": true,
+      "credentialEnvironmentBound": true,
+      "treeDarAvailable": false,
+      "gaussianEnabled": false,
+      "jobsSubmitted": 0,
+      "credentialsPrinted": false,
+      "providerConfigurationChanged": false
+    }
+  },
+  "privacy": {
+    "credentialsRecorded": false,
+    "rawJobRecordsRecorded": false,
+    "customerNamesOrPathsRecorded": false,
+    "privateKeysRecorded": false
+  },
+  "postInstallSourceOnlyRollbackHardening": {
+    "helperSourceSha256": "cb467eb2bbd01ae755ed2f7f98a0be454ad586ed47f32c22777a1c30bc48c362",
+    "testSourceSha256": "a71bb5426aedbea338c8a75db54562eb7f35171a1071228ce0f6b10fe150b620",
+    "focusedValidation": {
+      "platform": "isolated Linux UID 1000",
+      "passed": 15,
+      "elapsedSeconds": 0.508,
+      "network": "none",
+      "readOnlySourceBind": true,
+      "temporaryInjectedFiles": "container tmpfs",
+      "productionStateEnvironmentOrTLSMounted": false,
+      "testContainerRemoved": true
+    },
+    "coverage": [
+      "Changed or unverifiable completed-install history refuses before checkpoint or Docker mutation",
+      "Any reference row blocks downgrade, including after execution slot release",
+      "Immutable SQLite census after replacement stops detects admission during drain",
+      "Unsafe or unavailable offline census resumes only the exact owned current replacement",
+      "Lost create, schedule and cancel responses preserve exact ownership and uncertainty",
+      "Foreign containers and peer maintenance plans are never modified"
+    ],
+    "liveRollbackPerformed": false,
+    "installedPrimaryIdAndImageUnchanged": true,
+    "historicalFrozenInstallationHelperOverwrittenByThisReview": false,
+    "publicationScope": "Future source-only helper; the completed installation and its historical installer commit above remain separate"
+  },
+  "hashSemantics": {
+    "historySha256": "Canonical selected public job fields, compared with prepared checkpoint; raw rows excluded",
+    "backupDatabaseHistorySha256": "Canonical original SQL job rows from verified offline backup; raw rows excluded",
+    "backupTreeSha256": "Canonical offline file/directory inventory with modes, sizes and content hashes; file names excluded from this receipt"
+  }
+}

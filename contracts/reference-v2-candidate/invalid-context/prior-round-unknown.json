@@ -1,0 +1,8 @@
+{
+  "authoritativeResolution": null,
+  "base": "valid/combined.json",
+  "originalOperationId": "metadata-operation-1",
+  "originalRound": 1,
+  "priorState": "outcome_unknown",
+  "status": "SYNTHETIC_NEGATIVE_CONTEXT"
+}

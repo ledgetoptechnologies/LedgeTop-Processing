@@ -4,6 +4,8 @@ Only the standard library runs on the host. Docker receives no credentials.
 Receipts contain claim secrets: keep the approved scratch directory private.
 Requires a node-aware coordinator returning the exact claimed nodeId; no legacy
 claim fallback may bypass maintenance admission.
+The fixture stays bounded by default. main-unrestricted removes container CPU,
+RAM, PID and OMP/BLAS thread caps on main; synthetic inputs and timeout remain.
 """
 
 import argparse
@@ -35,6 +37,7 @@ if str(REPO_ROOT) not in sys.path:
 from processing.node_gate import GateError, NodeGate
 
 DOCKER_ENDPOINT = None
+RESOURCE_POLICIES = ('bounded-fixture', 'main-unrestricted')
 
 
 class WorkerError(Exception):
@@ -268,14 +271,22 @@ def durable_artifacts(output, paths):
                 os.close(descriptor)
 
 
-def execute(image, output, container, timeout):
+def validate_resource_policy(policy, node_id):
+    if policy not in RESOURCE_POLICIES or (policy == 'main-unrestricted' and node_id != 'main'):
+        raise WorkerError('main-unrestricted resource policy requires node main')
+    return policy
+
+
+def execute(image, output, container, timeout, *, resource_policy='bounded-fixture', node_id='cluster'):
+    validate_resource_policy(resource_policy, node_id)
     helper = ROOT / 'scripts' / 'prototype_synthetic.py'
     fixture = ROOT / 'tests' / 'synthetic_forest.py'
-    command = ['create', '--name', container, '--network', 'none', '--cpus', '2',
-               '--memory', '2g', '--pids-limit', '128', '--cap-drop', 'ALL',
+    limits = (['--cpus', '2', '--memory', '2g', '--pids-limit', '128',
+               '--env', 'OMP_NUM_THREADS=2', '--env', 'OPENBLAS_NUM_THREADS=2']
+              if resource_policy == 'bounded-fixture' else [])
+    command = ['create', '--name', container, '--network', 'none', *limits, '--cap-drop', 'ALL',
                '--security-opt', 'no-new-privileges', '--read-only',
                '--tmpfs', '/tmp:rw,nosuid,nodev,size=512m',
-               '--env', 'OMP_NUM_THREADS=2', '--env', 'OPENBLAS_NUM_THREADS=2',
                '--mount', mount(output, '/runs'),
                '--mount', mount(helper, '/worker/prototype_synthetic.py', True),
                '--mount', mount(fixture, '/worker/synthetic_forest.py', True),
@@ -438,6 +449,7 @@ def run(args):
     global DOCKER_ENDPOINT
     base = origin(args.coordinator, args.verified_origin)
     node_id = getattr(args, 'node_id', 'cluster')
+    resource_policy = validate_resource_policy(getattr(args, 'resource_policy', 'bounded-fixture'), node_id)
     delivery_wait = getattr(args, 'delivery_wait_seconds', 0)
     if type(delivery_wait) is not int or not -1 <= delivery_wait <= 86400:
         raise WorkerError('invalid delivery wait bound')
@@ -487,7 +499,8 @@ def run(args):
             gate.reserve(node_id, base, authority_id, generation, receipt_path.stem)
             receipt = {'coordinator': base, 'state': 'claim_pending', 'workerId': args.worker_id,
                        'nodeId': node_id, 'authorityId': authority_id, 'engineId': engine_id,
-                       'nodeGeneration': generation, 'reservationId': receipt_path.stem}
+                       'nodeGeneration': generation, 'reservationId': receipt_path.stem,
+                       'resourcePolicy': resource_policy}
             save(receipt_path, receipt)
             response = post(base, token, '/v1/prototype/claim',
                             {'workerId': args.worker_id, 'nodeId': node_id})
@@ -520,7 +533,8 @@ def run(args):
             output = environment / job['id']
             output.mkdir(mode=0o777)
             output.chmod(0o777)
-            status, result = execute(args.image, output, receipt['container'], args.timeout)
+            status, result = execute(args.image, output, receipt['container'], args.timeout,
+                                     resource_policy=resource_policy, node_id=node_id)
             result.update(environment=job['environment'], jobId=job['id'], image_id=args.image,
                           nodeId=node_id)
             if len(json.dumps(result, allow_nan=False).encode()) > 4096:
@@ -588,6 +602,8 @@ def main():
     parser.add_argument('--scratch', required=True, help='Existing approved private scratch root')
     parser.add_argument('--worker-id', required=True)
     parser.add_argument('--node-id', default='cluster', help='Exact coordinator node identity')
+    parser.add_argument('--resource-policy', choices=RESOURCE_POLICIES, default='bounded-fixture',
+                        help='Synthetic fixture limits; main-unrestricted omits CPU/RAM/PID/thread caps on main only')
     parser.add_argument('--docker-engine-id', required=True, help='Exact local Docker Engine ID')
     parser.add_argument('--node-generation', required=True, type=int, help='Provisioned node ownership generation')
     parser.add_argument('--timeout', type=int, choices=range(180, 301), default=240)

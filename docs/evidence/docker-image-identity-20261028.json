@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Image-store identity ABI correction discovered by actual main-host staging",
+  "fullLinuxRegression": {
+    "command": "python -B -m unittest discover -s tests",
+    "total": 820,
+    "passed": 818,
+    "skipped": 2,
+    "seconds": 86.538,
+    "exitCode": 0,
+    "skipReason": "Cached Python/TreeDar test image lacks Node.js; two probe tests passed separately on existing host Node",
+    "warnings": [
+      "One intentional multithreaded fork-ownership test DeprecationWarning"
+    ]
+  },
+  "jointManifestStorePipeline": {
+    "command": "python -B -m unittest tests.test_update_pipeline",
+    "passed": 6,
+    "skipped": 0,
+    "seconds": 3.458,
+    "exitCode": 0
+  },
+  "probeScriptSha256": "fe3779fe21b0a21d0028dfca7dca3bf510b491213a5515f2dedcce48de0dea39",
+  "probeUnchangedFromSeparatelyTested56dbb30": true,
+  "actualMainObservation": {
+    "host": "192.168.50.88",
+    "sourceStageCommit": "56dbb30786a469090a45105364526ea348574a32",
+    "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+    "pullAttemptTerminalExitCode": 1,
+    "registryState": "held",
+    "cachedImageInspectReturnCode": 0,
+    "manifestDigest": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "configDigest": "sha256:2dca9adae8525b8a112e125504e0e5e467c32a353299037ad6be04c8c63f4c26",
+    "actualLocalImageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "actualDescriptor": {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+      "size": 3733
+    },
+    "daemonReportedImageSize": 5667385948,
+    "candidateStarted": false,
+    "pullRepeated": false,
+    "installedContainerUnchanged": true,
+    "installedContainerId": "78be3d38659e2b698c7611b6b60fad46e7632ef96aa21898a7c2edafece093c1",
+    "installedImageId": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776"
+  },
+  "correction": [
+    "Discovery v2 records exact selected manifest descriptor and does not guess a runtime ID",
+    "Classic ID requires config identity; manifest ID requires exact selected descriptor plus platform/repository/engine proof",
+    "Requests, receipts, pins, Docker create, completion and adopted current image use verified localImageId",
+    "Legacy v1 alias is never runtime proof; held pull recovers only by immutable inspection with unchanged pull identity"
+  ],
+  "review": "Independent final identity-contract and joint-pipeline review found no blocking findings",
+  "primarySources": [
+    "https://github.com/moby/moby/blob/master/daemon/containerd/image_inspect.go",
+    "https://docs.docker.com/engine/storage/containerd/"
+  ],
+  "automaticUpdatesEnabled": false,
+  "nasCommandsExecuted": false,
+  "remaining": [
+    "Corrected source must be staged and cached main candidate reconciled by inspection before qualification",
+    "No actual Node candidate startup or processing/GPU qualification accepted yet",
+    "Installed coordinator upgrade and NAS/Viewer durable handoff remain incomplete"
+  ],
+  "sourceSha256": {
+    "processing/update_registry.py": "9485921d8e111bcb03169283d598f273dce8e30262acde787076f32ef0577892",
+    "processing/update_supervisor.py": "9d9148c7174ee59003c41ef9b27fa5ec4f0444dd4b809351ebf307d3eeeb1464",
+    "processing/update_qualifier.py": "7fb753694653ba050621db26d905cde1dbb727c019dd051936253ed0cd0d41d8",
+    "ops/update_maintenance_adapter.py": "4fcabc8422619429ca2e9366584ad4294e54adedcfc4f1525905875c2a8aa3bb",
+    "tests/test_update_registry.py": "a695fecdc8e78f1f277c2952ed89b6cbb064874e3fbf48f07704f6e0763dd9ab",
+    "tests/test_update_supervisor.py": "0a0faf493321948eeec600f6a4bdeafa77638f9951e9225932a6d37c5ba7980d",
+    "tests/test_update_qualifier.py": "3d8409a43d171d01439ee84e7d4d890f36dd4474a08220a93f34329311e2414f",
+    "tests/test_update_maintenance_adapter.py": "55e95ffe7fdcaee1051344653aa63a7cac03e2283c84157f55e12273d1ab32cb",
+    "tests/test_update_pipeline.py": "6af6ea757dbc5c54e1fa8fdd6956d26ab427e5d29d619ebc7f12bacdf6cbfa1f",
+    "docs/update-registry.md": "839c2b8844db2455f0f95a90f151a4c90067b9025251d871bc4f2b517acb8455",
+    "docs/update-supervisor.md": "c40f6242123b06109e3c5818ef3fa0e127a9906a9dde14b3138718d92e78fe3d",
+    "docs/update-qualifier.md": "669beeb735d34d3b079b5e84e3e8747bbd30ce62b3127541db1016a6ee04a2c2",
+    "docs/update-maintenance-adapter.md": "25c0fa8bd502b8e314b914e74538b075ddc808d7af4105b1cf27f927342628cb"
+  }
+}

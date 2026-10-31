@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-28T06:38:54.406397+00:00",
+  "purpose": "Source qualification of ledger-bound owned result-reader crash recovery",
+  "baseCommit": "ad7479554618251390d326d79579377f71908d85",
+  "sourceHashScope": "Exact working-tree bytes mounted read-only; Git may normalize line endings",
+  "sourceHashes": {
+    "processing/reference_readers.py": "680f356e6b851e1576ef5db506d507180f9ba1361895db52c9eb3d732ed52353",
+    "processing/reference_results.py": "46f346d03a307c195ed669544ec5119b1e8dd27696e64de95477dc7a644d68b2",
+    "ops/reference_worker_daemon.py": "9351bf28d3cc6137466d271cde79c056508feb0a9a545e85631a8e42fd663614",
+    "tests/test_reference_readers.py": "cb844d6ddb847f54e60459cd959db71d6890914ee78060422ed12202a9a399c8",
+    "tests/test_reference_results_readers.py": "d23b45926356b2c5b5cabcc63d1fb8cdeb9cdd8ab31ab8ebf6e696d45ad24a86",
+    "tests/test_reference_worker_daemon_routing.py": "bb54c7ad5429c0855b28ae6427c65c6a837ae30a183c9f5f9c62d23aa4639dd7"
+  },
+  "tests": {
+    "fullLinux": {
+      "count": 663,
+      "passed": 663,
+      "skipped": 0,
+      "seconds": 55.941,
+      "network": "none",
+      "sourceMount": "read-only",
+      "temporaryFixtures": "container tmpfs; removed on exit",
+      "imageId": "sha256:83028785a336b420f42fd4c6a2219f289437e6406255b555aa7b5c70dcdf24fb"
+    },
+    "coveredFaults": [
+      "Actual subprocess result-open and abrupt os._exit; restart retires only registered owned prior-epoch read pins",
+      "Live flock exclusion and direct-factory ownership contention",
+      "Fork while parent mutex is held refuses before inherited mutex acquisition",
+      "Unknown attachment, close, pin-commit and release-commit outcomes retain ownership until process death",
+      "Recorded successful owned close remains valid after descriptor-number reuse",
+      "First-bootstrap crash recovery only with empty ownership domain; missing binding with existing ownership fails unchanged",
+      "Legacy anonymous, foreign/unregistered, worker and downstream pins remain held",
+      "Lease replacement/symlink/hardlink and exact identity binding refusal",
+      "Durable active-pin census prevents unlock over inconsistent ownership state",
+      "HTTP HEAD/abort/drain and failed-handler-join lease retention",
+      "Accepted/grace-complete cleanup admission succeeds only after known-owned stale pin retirement"
+    ]
+  },
+  "review": {
+    "independentSource": "No blocking findings in core ownership or consumer/lifetime integration; final approval contingent on full suite, now passed",
+    "scratchPolicyChanged": false,
+    "engineBootstrapSourceChanged": false,
+    "priorActualBootstrapEvidence": "reference-routing-20261028.json"
+  },
+  "runtime": {
+    "newSourceDeployed": false,
+    "installedCoreCommit": "e2ccf489ab41160acff3f90e2b4bcd568f72cf24",
+    "workerServicesActivated": false,
+    "nasIssuerInstalled": false,
+    "treeDarCapability": false,
+    "gaussianCapability": false,
+    "customerDataTouched": false
+  },
+  "remaining": [
+    "NAS authenticated broker/provenance issuer and source-retention enforcement; account/management connection pending",
+    "Upgrade coordinator private execution advice before routed intake; install/qualify worker/result services",
+    "Production Viewer ingestion and selected smaller real-data trial",
+    "Combined sequential ODM-to-TreeDar stage contract",
+    "TreeDar historical-adapter/journal migration and automatic container update detection/scheduling",
+    "Claude-owned Viewer UI/hierarchy findings remain open; no new frontend commits verified"
+  ]
+}

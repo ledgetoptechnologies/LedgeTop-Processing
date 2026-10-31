@@ -1,0 +1,1246 @@
+{
+  "artifacts": [
+    {
+      "byteSize": 7881,
+      "bytesBase64": "UEsDBBQAAAAAAAAAIQBBcR91LQAAAC0AAAAYAAAAYXJ0aWZhY3RzL2FyZWFfdHlwZXMuY3N2c3ludGhldGljOmFyZWFfdHlwZXMuY3N2OmFyZWFfdHlwZXNfdGVtcGxhdGUKUEsDBBQAAAAAAAAAIQCtsnGkJQAAACUAAAATAAAAYXJ0aWZhY3RzL2FyZWFzLnBuZ3N5bnRoZXRpYzphcmVhcy5wbmc6YXJlYV9tYXBfcHJldmlldwpQSwMEFAAAAAAAAAAhAJ0S8X8gAAAAIAAAABMAAABhcnRpZmFjdHMvYXJlYXMudGlmc3ludGhldGljOmFyZWFzLnRpZjphcmVhX2xhYmVscwpQSwMEFAAAAAAAAAAhAIAQYHsgAAAAIAAAABEAAABhcnRpZmFjdHMvY2htLnRpZnN5bnRoZXRpYzpjaG0udGlmOmNhbm9weV9oZWlnaHQKUEsDBBQAAAAAAAAAIQADpz3iLwAAAC8AAAAVAAAAYXJ0aWZhY3RzL2NobV9yYXcudGlmc3ludGhldGljOmNobV9yYXcudGlmOmNhbm9weV9oZWlnaHRfdW5maWx0ZXJlZApQSwMEFAAAAAAAAAAhAMob3AY6AAAAOgAAACcAAABhcnRpZmFjdHMvY2xhc3NpZnkvY2xhc3NpZnlfcmVwb3J0Lmpzb25zeW50aGV0aWM6Y2xhc3NpZnkvY2xhc3NpZnlfcmVwb3J0Lmpzb246Y2xhc3NpZmllcl9yZXBvcnQKUEsDBBQAAAAAAAAAIQAMjdSQRQAAAEUAAAAtAAAAYXJ0aWZhY3RzL2NsYXNzaWZ5L2ZpbmFsX3Rlc3RfcHJlZGljdGlvbnMuY3N2c3ludGhldGljOmNsYXNzaWZ5L2ZpbmFsX3Rlc3RfcHJlZGljdGlvbnMuY3N2OmZpbmFsX3Rlc3RfcHJlZGljdGlvbnMKUEsDBBQAAAAAAAAAIQCo8DRQOQAAADkAAAAiAAAAYXJ0aWZhY3RzL2NsYXNzaWZ5L3ByZWRpY3Rpb25zLmNzdnN5bnRoZXRpYzpjbGFzc2lmeS9wcmVkaWN0aW9ucy5jc3Y6dHJlZV90eXBlX3ByZWRpY3Rpb25zClBLAwQUAAAAAAAAACEAMr5UHCIAAAAiAAAAFAAAAGFydGlmYWN0cy9jcm93bnMudGlmc3ludGhldGljOmNyb3ducy50aWY6Y3Jvd25fbGFiZWxzClBLAwQUAAAAAAAAACEAjHSFdR8AAAAfAAAAEQAAAGFydGlmYWN0cy9kdG0udGlmc3ludGhldGljOmR0bS50aWY6Z3JvdW5kX21vZGVsClBLAwQUAAAAAAAAACEAMS3SgRwAAAAcAAAAFAAAAGFydGlmYWN0cy9sYWJlbHMuY3N2c3ludGhldGljOmxhYmVscy5jc3Y6bGFiZWxzClBLAwQUAAAAAAAAACEACTix1ygAAAAoAAAAFwAAAGFydGlmYWN0cy9tYW5pZmVzdC5qc29uc3ludGhldGljOm1hbmlmZXN0Lmpzb246ZW5naW5lX21hbmlmZXN0ClBLAwQUAAAAAAAAACEAVdBkvjAAAAAwAAAAFwAAAGFydGlmYWN0cy9vcnRob19yZ2IudGlmc3ludGhldGljOm9ydGhvX3JnYi50aWY6b3J0aG9waG90b19wb2ludF9jb2xvdXIKUEsDBBQAAAAAAAAAIQBOtFxXIQAAACEAAAARAAAAYXJ0aWZhY3RzL3FjLmpzb25zeW50aGV0aWM6cWMuanNvbjpxdWFsaXR5X3JlcG9ydApQSwMEFAAAAAAAAAAhAOWGA0AdAAAAHQAAABUAAABhcnRpZmFjdHMvcmVwb3J0Lmh0bWxzeW50aGV0aWM6cmVwb3J0Lmh0bWw6cmVwb3J0ClBLAwQUAAAAAAAAACEAABsPEyMAAAAjAAAAFgAAAGFydGlmYWN0cy9zdW1tYXJ5Lmpzb25zeW50aGV0aWM6c3VtbWFyeS5qc29uOnJ1bl9zdW1tYXJ5ClBLAwQUAAAAAAAAACEAvN3DDiQAAAAkAAAAGAAAAGFydGlmYWN0cy90cmVlX2FyZWFzLmNzdnN5bnRoZXRpYzp0cmVlX2FyZWFzLmNzdjp0cmVlX2FyZWFzClBLAwQUAAAAAAAAACEAGI497ioAAAAqAAAAGwAAAGFydGlmYWN0cy90cmVlX2ZlYXR1cmVzLmNzdnN5bnRoZXRpYzp0cmVlX2ZlYXR1cmVzLmNzdjp0cmVlX2ZlYXR1cmVzClBLAwQUAAAAAAAAACEATanFSCgAAAAoAAAAFgAAAGFydGlmYWN0cy90cmVlX2lkcy5jc3ZzeW50aGV0aWM6dHJlZV9pZHMuY3N2Omxhc3RpbmdfdHJlZV9pZHMKUEsDBBQAAAAAAAAAIQB3KlG8IgAAACIAAAAaAAAAYXJ0aWZhY3RzL3RyZWVfbWFwLmdlb2pzb25zeW50aGV0aWM6dHJlZV9tYXAuZ2VvanNvbjpjcm93bnMKUEsDBBQAAAAAAAAAIQDONQIkHwAAAB8AAAAWAAAAYXJ0aWZhY3RzL3RyZWVfbWFwLnBuZ3N5bnRoZXRpYzp0cmVlX21hcC5wbmc6cHJldmlldwpQSwMEFAAAAAAAAAAhAAxrX8UfAAAAHwAAABMAAABhcnRpZmFjdHMvdHJlZXMuY3N2c3ludGhldGljOnRyZWVzLmNzdjp0cmVlX3RhYmxlClBLAwQUAAAAAAAAACEAP2hB0UIQAABCEAAAEwAAAHRyZWVkYXItYnVuZGxlLmpzb257ImJpbmRpbmciOnsiZW52aXJvbm1lbnQiOiJzdGFnaW5nIiwiZ2VuZXJhdGlvbiI6MSwiaW5wdXRNYW5pZmVzdFNoYTI1NiI6IjMzMzkyNzM1ZjRiMzlkYTRkNDcyMjRjODlmNGNkMDFhNzZjMWFhOGI0NWJjODU0YTgwMGE4NjE0MjNiZjc0ZTAiLCJqb2JJZCI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMiIsInBpcGVsaW5lRGlnZXN0IjoiZTBlZmZlNGZjZWQxYWQxNDQwMDIyM2FlMGVkMDQyMTcyZGE2YzE1OGM0MzQ1ZjFiNmM2ZjdkNGU3ZDdlYTA2MCIsInNvdXJjZUxpZGFyIjp7ImJ5dGVTaXplIjozNSwib2JqZWN0SWQiOiJsaWRhci0xIiwicHJvdmVuYW5jZVJlY2VpcHRJZCI6ImFjcXVpc2l0aW9uLTEiLCJzaGEyNTYiOiJkMzZmMWVhNGMzNWVkZTJhZGJjMmVkMTEwMGY5Nzc2M2ZjMGViZmZiODNiMjY2ODUyYTI2OTI5YTAyZjU3ZTk0In19LCJlbmdpbmVWZXJzaW9uIjoiMC4wLjEiLCJmaWxlcyI6W3siYnl0ZVNpemUiOjQ1LCJmb3JtYXQiOiJjc3YiLCJuYXRpdmVQYXRoIjoiYXJlYV90eXBlcy5jc3YiLCJyb2xlIjoiYXJlYV90eXBlc190ZW1wbGF0ZSIsInNoYTI1NiI6IjQ2ODEzOTMxYWM3NDllZDY2MjRlOTc2OGQzMjJjYzZjZGZmMzExMWY3OTJmZGYxNzUzOTQ0NTMyNmI0M2RmNjAifSx7ImJ5dGVTaXplIjozNywiZm9ybWF0IjoicG5nIiwibmF0aXZlUGF0aCI6ImFyZWFzLnBuZyIsInJvbGUiOiJhcmVhX21hcF9wcmV2aWV3Iiwic2hhMjU2IjoiM2ZmZjRhZTM5MTc2NDQ2NTgzZjU1NmFhNGQyNDljMjRkZTRkMjJkNDdhMzNlYzk0ODllOWQ1OTg5NWIxYWZjNiJ9LHsiYnl0ZVNpemUiOjMyLCJmb3JtYXQiOiJjb2ciLCJuYXRpdmVQYXRoIjoiYXJlYXMudGlmIiwicm9sZSI6ImFyZWFfbGFiZWxzIiwic2hhMjU2IjoiY2JmNzQ4NzM0YzA0NmQ3MTgxOWYxNGI5ZmI0ZmEzYzdlZTA3MDI4ZWU0YzEyNWVjOGE0YzJmOThlYjUwNDg3MCJ9LHsiYnl0ZVNpemUiOjMyLCJmb3JtYXQiOiJjb2ciLCJuYXRpdmVQYXRoIjoiY2htLnRpZiIsInJvbGUiOiJjYW5vcHlfaGVpZ2h0Iiwic2hhMjU2IjoiYTliY2RjM2NmZmQxMjZkZmNlODQ5M2ZlMjUwMTg0NTc0NDYwZjExZGRkYzhkMGQyYjVkNjFmNmRhZjk3ZGIyOSJ9LHsiYnl0ZVNpemUiOjQ3LCJmb3JtYXQiOiJjb2ciLCJuYXRpdmVQYXRoIjoiY2htX3Jhdy50aWYiLCJyb2xlIjoiY2Fub3B5X2hlaWdodF91bmZpbHRlcmVkIiwic2hhMjU2IjoiNGUxMGYxYWViMjM1NWUzZTMyMzMzYzNiODY2OGE4ZmE5Yzk1N2Y1ODA2NThiYjQ4NTYzMjE1MDU0NjRlZGIzOCJ9LHsiYnl0ZVNpemUiOjU4LCJmb3JtYXQiOiJqc29uIiwibmF0aXZlUGF0aCI6ImNsYXNzaWZ5L2NsYXNzaWZ5X3JlcG9ydC5qc29uIiwicm9sZSI6ImNsYXNzaWZpZXJfcmVwb3J0Iiwic2hhMjU2IjoiOTdiODYxYWE3YjU5NDQwOGE5OWYxN2Y5M2E4ZDBlZThiMGU0NTNjZjk0MzM4YzY1MmE5MjUwZTE3MDBiZGY1MCJ9LHsiYnl0ZVNpemUiOjY5LCJmb3JtYXQiOiJjc3YiLCJuYXRpdmVQYXRoIjoiY2xhc3NpZnkvZmluYWxfdGVzdF9wcmVkaWN0aW9ucy5jc3YiLCJyb2xlIjoiZmluYWxfdGVzdF9wcmVkaWN0aW9ucyIsInNoYTI1NiI6IjYwYzNjZjExOGExNzA5YTljN2NlY2FmODUyNGU2Mjc0MGFmYWIyNWUyNTgwOWFmMjg1MWY1NjlkOTdiMzUxMjIifSx7ImJ5dGVTaXplIjo1NywiZm9ybWF0IjoiY3N2IiwibmF0aXZlUGF0aCI6ImNsYXNzaWZ5L3ByZWRpY3Rpb25zLmNzdiIsInJvbGUiOiJ0cmVlX3R5cGVfcHJlZGljdGlvbnMiLCJzaGEyNTYiOiI3YWM3Y2YyNmUwYzgwODM0MTVhNGRlZjA4MjQ5MjdmYjZlMGY2Y2E0MDk4ZWViMzFmMWFmNWIxMTUxODk3Y2IzIn0seyJieXRlU2l6ZSI6MzQsImZvcm1hdCI6ImNvZyIsIm5hdGl2ZVBhdGgiOiJjcm93bnMudGlmIiwicm9sZSI6ImNyb3duX2xhYmVscyIsInNoYTI1NiI6IjI5ZDc0YmQxNjE2MjNmYjk3YzE2OTM2MDZmNjA1NTkwNzQ0ZDAwNjIyMmRhZGYzYWZjNGUyNDBlN2M1NDhlZjAifSx7ImJ5dGVTaXplIjozMSwiZm9ybWF0IjoiY29nIiwibmF0aXZlUGF0aCI6ImR0bS50aWYiLCJyb2xlIjoiZ3JvdW5kX21vZGVsIiwic2hhMjU2IjoiNTY1ZDY1MTE4NjkyNDU4MTgwY2Y3ZTk1ZTdiYTM1MTBkZTRhZDg3YTdkNDg5ZDAzYzc0NzI2YzM4MjIzMjk2OSJ9LHsiYnl0ZVNpemUiOjI4LCJmb3JtYXQiOiJjc3YiLCJuYXRpdmVQYXRoIjoibGFiZWxzLmNzdiIsInJvbGUiOiJsYWJlbHMiLCJzaGEyNTYiOiI0MWJkMzg3NWU0MjIzYWNmZGM4ZjE4MTg5YjZmZjdkYmJmODMzNmUyNWM5NWMwMmZiNzFmOTI3NGUzOTI2YjA0In0seyJieXRlU2l6ZSI6NDAsImZvcm1hdCI6Impzb24iLCJuYXRpdmVQYXRoIjoibWFuaWZlc3QuanNvbiIsInJvbGUiOiJlbmdpbmVfbWFuaWZlc3QiLCJzaGEyNTYiOiI2ZjhjYmI1Zjk4MGFjMDE0YjU1YzJmY2E4YTY1YWEzN2JlZTE2YzM1N2UwNDcwMTMzNjAzZTE1OTFhMmQ1NWMyIn0seyJieXRlU2l6ZSI6NDgsImZvcm1hdCI6ImNvZyIsIm5hdGl2ZVBhdGgiOiJvcnRob19yZ2IudGlmIiwicm9sZSI6Im9ydGhvcGhvdG9fcG9pbnRfY29sb3VyIiwic2hhMjU2IjoiNjNlNzhhMWZjZWZiZDY3ZTQ2MmFhMTYwOTQwZWIwMTkwNGY5YjRjZjJkZDlhMWRiZDg2YTFkNjA1MWQ5YzNkYyJ9LHsiYnl0ZVNpemUiOjMzLCJmb3JtYXQiOiJqc29uIiwibmF0aXZlUGF0aCI6InFjLmpzb24iLCJyb2xlIjoicXVhbGl0eV9yZXBvcnQiLCJzaGEyNTYiOiI1NzgzMGY5MWNlOTFkMmVlMDljZDgzY2E2NTk2NGUxMTU1YzQwOWI4OTBmYjc1ZGRiMzZkNjk4OTYyZDg5ZmFhIn0seyJieXRlU2l6ZSI6MjksImZvcm1hdCI6Imh0bWwiLCJuYXRpdmVQYXRoIjoicmVwb3J0Lmh0bWwiLCJyb2xlIjoicmVwb3J0Iiwic2hhMjU2IjoiZGMyNGViMTRiNDE2NjNkNTE4NDAwMjEyZDg2MmVhOTU5NjNiZTlkMWYwMGI1ZmZlN2NlMGYxZGJiNWZkNTRkNSJ9LHsiYnl0ZVNpemUiOjM1LCJmb3JtYXQiOiJqc29uIiwibmF0aXZlUGF0aCI6InN1bW1hcnkuanNvbiIsInJvbGUiOiJydW5fc3VtbWFyeSIsInNoYTI1NiI6IjAzMzM1ODVmNDQzMmJmYWQ2M2JlYzRiN2JmNTA5NmVlMDUxYTM0ZGU1MWI1N2JjYWVlNGEzN2FmOGRiODNmNGUifSx7ImJ5dGVTaXplIjozNiwiZm9ybWF0IjoiY3N2IiwibmF0aXZlUGF0aCI6InRyZWVfYXJlYXMuY3N2Iiwicm9sZSI6InRyZWVfYXJlYXMiLCJzaGEyNTYiOiJkOTBmNDI0OTZlMjM0NzJhM2FkZGQzNDE1YjQ5NjIxODExZWE4ZGJmOTQwZWExMzVhYWUyMjA5YTk4YmEwOTE0In0seyJieXRlU2l6ZSI6NDIsImZvcm1hdCI6ImNzdiIsIm5hdGl2ZVBhdGgiOiJ0cmVlX2ZlYXR1cmVzLmNzdiIsInJvbGUiOiJ0cmVlX2ZlYXR1cmVzIiwic2hhMjU2IjoiZjkzYTJlZjc2MmVhZmYxNzI2OWZjYTdiZDM1ZDQwNzhlOWM5YTk4NjMzZjhiM2VhM2E5ODUwMTRkMzJlYWE1MCJ9LHsiYnl0ZVNpemUiOjQwLCJmb3JtYXQiOiJjc3YiLCJuYXRpdmVQYXRoIjoidHJlZV9pZHMuY3N2Iiwicm9sZSI6Imxhc3RpbmdfdHJlZV9pZHMiLCJzaGEyNTYiOiJiMzUxYzJlMWEyYjA4NTZhNTg4ZTgyNjc1ZmFhNWUxMWQxYTFiYTY1NjRkODE2OWEwYTQ2Njk0MjUxYjg0OTQzIn0seyJieXRlU2l6ZSI6MzQsImZvcm1hdCI6Imdlb2pzb24iLCJuYXRpdmVQYXRoIjoidHJlZV9tYXAuZ2VvanNvbiIsInJvbGUiOiJjcm93bnMiLCJzaGEyNTYiOiI4MzIyYTA5YTZlOWViOTliYWMxY2MyMDk4NTA0NjcyMTI0MzE2OGM2YTQ0Mzk0NTNhZGQ5OGUxNTM5MzYzNTYxIn0seyJieXRlU2l6ZSI6MzEsImZvcm1hdCI6InBuZyIsIm5hdGl2ZVBhdGgiOiJ0cmVlX21hcC5wbmciLCJyb2xlIjoicHJldmlldyIsInNoYTI1NiI6ImQyMGVjNTIyNzE0MDQwNzg4YzE2MmQ3NzdiZGRiMjA5MTlkNWFkY2RkZmQ0M2FkYTRjODg5NWYyZGNiNDY3YTQifSx7ImJ5dGVTaXplIjozMSwiZm9ybWF0IjoiY3N2IiwibmF0aXZlUGF0aCI6InRyZWVzLmNzdiIsInJvbGUiOiJ0cmVlX3RhYmxlIiwic2hhMjU2IjoiYTdjMGY2MmM4YWU1ZDNjODE3Njk3NzA2NzNiMDdmMjU5ZWFmZTdjMjE2MzVjN2ZhNDhkMTUwMjk5MzA5MWUxYiJ9XSwiZm9ybWF0IjoibHRkcy10cmVlZGFyLWJ1bmRsZS12MSIsIm1hbmlmZXN0U2hhMjU2IjoiYzU2ZDg0NzM1ODNlNTg1NDQ5ZmQxNGIxYmRjYjE2YmM2ZTEyMmQ4YWIxNTg5OGY0ZWFjNjFhZmE1ZjJjMDc4NyIsInJhd0J5dGVzIjo4NjksInNjaGVtYVZlcnNpb24iOjF9UEsBAhQDFAAAAAAAAAAhAEFxH3UtAAAALQAAABgAAAAAAAAAAAAAAICBAAAAAGFydGlmYWN0cy9hcmVhX3R5cGVzLmNzdlBLAQIUAxQAAAAAAAAAIQCtsnGkJQAAACUAAAATAAAAAAAAAAAAAACAgWMAAABhcnRpZmFjdHMvYXJlYXMucG5nUEsBAhQDFAAAAAAAAAAhAJ0S8X8gAAAAIAAAABMAAAAAAAAAAAAAAICBuQAAAGFydGlmYWN0cy9hcmVhcy50aWZQSwECFAMUAAAAAAAAACEAgBBgeyAAAAAgAAAAEQAAAAAAAAAAAAAAgIEKAQAAYXJ0aWZhY3RzL2NobS50aWZQSwECFAMUAAAAAAAAACEAA6c94i8AAAAvAAAAFQAAAAAAAAAAAAAAgIFZAQAAYXJ0aWZhY3RzL2NobV9yYXcudGlmUEsBAhQDFAAAAAAAAAAhAMob3AY6AAAAOgAAACcAAAAAAAAAAAAAAICBuwEAAGFydGlmYWN0cy9jbGFzc2lmeS9jbGFzc2lmeV9yZXBvcnQuanNvblBLAQIUAxQAAAAAAAAAIQAMjdSQRQAAAEUAAAAtAAAAAAAAAAAAAACAgToCAABhcnRpZmFjdHMvY2xhc3NpZnkvZmluYWxfdGVzdF9wcmVkaWN0aW9ucy5jc3ZQSwECFAMUAAAAAAAAACEAqPA0UDkAAAA5AAAAIgAAAAAAAAAAAAAAgIHKAgAAYXJ0aWZhY3RzL2NsYXNzaWZ5L3ByZWRpY3Rpb25zLmNzdlBLAQIUAxQAAAAAAAAAIQAyvlQcIgAAACIAAAAUAAAAAAAAAAAAAACAgUMDAABhcnRpZmFjdHMvY3Jvd25zLnRpZlBLAQIUAxQAAAAAAAAAIQCMdIV1HwAAAB8AAAARAAAAAAAAAAAAAACAgZcDAABhcnRpZmFjdHMvZHRtLnRpZlBLAQIUAxQAAAAAAAAAIQAxLdKBHAAAABwAAAAUAAAAAAAAAAAAAACAgeUDAABhcnRpZmFjdHMvbGFiZWxzLmNzdlBLAQIUAxQAAAAAAAAAIQAJOLHXKAAAACgAAAAXAAAAAAAAAAAAAACAgTMEAABhcnRpZmFjdHMvbWFuaWZlc3QuanNvblBLAQIUAxQAAAAAAAAAIQBV0GS+MAAAADAAAAAXAAAAAAAAAAAAAACAgZAEAABhcnRpZmFjdHMvb3J0aG9fcmdiLnRpZlBLAQIUAxQAAAAAAAAAIQBOtFxXIQAAACEAAAARAAAAAAAAAAAAAACAgfUEAABhcnRpZmFjdHMvcWMuanNvblBLAQIUAxQAAAAAAAAAIQDlhgNAHQAAAB0AAAAVAAAAAAAAAAAAAACAgUUFAABhcnRpZmFjdHMvcmVwb3J0Lmh0bWxQSwECFAMUAAAAAAAAACEAABsPEyMAAAAjAAAAFgAAAAAAAAAAAAAAgIGVBQAAYXJ0aWZhY3RzL3N1bW1hcnkuanNvblBLAQIUAxQAAAAAAAAAIQC83cMOJAAAACQAAAAYAAAAAAAAAAAAAACAgewFAABhcnRpZmFjdHMvdHJlZV9hcmVhcy5jc3ZQSwECFAMUAAAAAAAAACEAGI497ioAAAAqAAAAGwAAAAAAAAAAAAAAgIFGBgAAYXJ0aWZhY3RzL3RyZWVfZmVhdHVyZXMuY3N2UEsBAhQDFAAAAAAAAAAhAE2pxUgoAAAAKAAAABYAAAAAAAAAAAAAAICBqQYAAGFydGlmYWN0cy90cmVlX2lkcy5jc3ZQSwECFAMUAAAAAAAAACEAdypRvCIAAAAiAAAAGgAAAAAAAAAAAAAAgIEFBwAAYXJ0aWZhY3RzL3RyZWVfbWFwLmdlb2pzb25QSwECFAMUAAAAAAAAACEAzjUCJB8AAAAfAAAAFgAAAAAAAAAAAAAAgIFfBwAAYXJ0aWZhY3RzL3RyZWVfbWFwLnBuZ1BLAQIUAxQAAAAAAAAAIQAMa1/FHwAAAB8AAAATAAAAAAAAAAAAAACAgbIHAABhcnRpZmFjdHMvdHJlZXMuY3N2UEsBAhQDFAAAAAAAAAAhAD9oQdFCEAAAQhAAABMAAAAAAAAAAAAAAICBAggAAHRyZWVkYXItYnVuZGxlLmpzb25QSwUGAAAAABcAFwA+BgAAdRgAAAAA",
+      "id": "treedar-file",
+      "semanticScope": "Synthetic bytes; ZIP transport/member/hash consistency only, not genuine processing or geospatial quality.",
+      "sha256": "3aa9e3adf38c462d4fb7162e008ab44bf6b9a4f32edb6311806880b681d09f5d"
+    }
+  ],
+  "closureDescriptors": [
+    {
+      "artifactId": "treedar-file",
+      "descriptor": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060",
+          "sourceLidar": {
+            "byteSize": 35,
+            "objectId": "lidar-1",
+            "provenanceReceiptId": "acquisition-1",
+            "sha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94"
+          }
+        },
+        "engineVersion": "0.0.1",
+        "files": [
+          {
+            "byteSize": 45,
+            "format": "csv",
+            "nativePath": "area_types.csv",
+            "role": "area_types_template",
+            "sha256": "46813931ac749ed6624e9768d322cc6cdff3111f792fdf17539445326b43df60"
+          },
+          {
+            "byteSize": 37,
+            "format": "png",
+            "nativePath": "areas.png",
+            "role": "area_map_preview",
+            "sha256": "3fff4ae39176446583f556aa4d249c24de4d22d47a33ec9489e9d59895b1afc6"
+          },
+          {
+            "byteSize": 32,
+            "format": "cog",
+            "nativePath": "areas.tif",
+            "role": "area_labels",
+            "sha256": "cbf748734c046d71819f14b9fb4fa3c7ee07028ee4c125ec8a4c2f98eb504870"
+          },
+          {
+            "byteSize": 32,
+            "format": "cog",
+            "nativePath": "chm.tif",
+            "role": "canopy_height",
+            "sha256": "a9bcdc3cffd126dfce8493fe250184574460f11dddc8d0d2b5d61f6daf97db29"
+          },
+          {
+            "byteSize": 47,
+            "format": "cog",
+            "nativePath": "chm_raw.tif",
+            "role": "canopy_height_unfiltered",
+            "sha256": "4e10f1aeb2355e3e32333c3b8668a8fa9c957f580658bb4856321505464edb38"
+          },
+          {
+            "byteSize": 58,
+            "format": "json",
+            "nativePath": "classify/classify_report.json",
+            "role": "classifier_report",
+            "sha256": "97b861aa7b594408a99f17f93a8d0ee8b0e453cf94338c652a9250e1700bdf50"
+          },
+          {
+            "byteSize": 69,
+            "format": "csv",
+            "nativePath": "classify/final_test_predictions.csv",
+            "role": "final_test_predictions",
+            "sha256": "60c3cf118a1709a9c7cecaf8524e62740afab25e25809af2851f569d97b35122"
+          },
+          {
+            "byteSize": 57,
+            "format": "csv",
+            "nativePath": "classify/predictions.csv",
+            "role": "tree_type_predictions",
+            "sha256": "7ac7cf26e0c8083415a4def0824927fb6e0f6ca4098eeb31f1af5b1151897cb3"
+          },
+          {
+            "byteSize": 34,
+            "format": "cog",
+            "nativePath": "crowns.tif",
+            "role": "crown_labels",
+            "sha256": "29d74bd161623fb97c1693606f605590744d006222dadf3afc4e240e7c548ef0"
+          },
+          {
+            "byteSize": 31,
+            "format": "cog",
+            "nativePath": "dtm.tif",
+            "role": "ground_model",
+            "sha256": "565d65118692458180cf7e95e7ba3510de4ad87a7d489d03c74726c382232969"
+          },
+          {
+            "byteSize": 28,
+            "format": "csv",
+            "nativePath": "labels.csv",
+            "role": "labels",
+            "sha256": "41bd3875e4223acfdc8f18189b6ff7dbbf8336e25c95c02fb71f9274e3926b04"
+          },
+          {
+            "byteSize": 40,
+            "format": "json",
+            "nativePath": "manifest.json",
+            "role": "engine_manifest",
+            "sha256": "6f8cbb5f980ac014b55c2fca8a65aa37bee16c357e0470133603e1591a2d55c2"
+          },
+          {
+            "byteSize": 48,
+            "format": "cog",
+            "nativePath": "ortho_rgb.tif",
+            "role": "orthophoto_point_colour",
+            "sha256": "63e78a1fcefbd67e462aa160940eb01904f9b4cf2dd9a1dbd86a1d6051d9c3dc"
+          },
+          {
+            "byteSize": 33,
+            "format": "json",
+            "nativePath": "qc.json",
+            "role": "quality_report",
+            "sha256": "57830f91ce91d2ee09cd83ca65964e1155c409b890fb75ddb36d698962d89faa"
+          },
+          {
+            "byteSize": 29,
+            "format": "html",
+            "nativePath": "report.html",
+            "role": "report",
+            "sha256": "dc24eb14b41663d518400212d862ea95963be9d1f00b5ffe7ce0f1dbb5fd54d5"
+          },
+          {
+            "byteSize": 35,
+            "format": "json",
+            "nativePath": "summary.json",
+            "role": "run_summary",
+            "sha256": "0333585f4432bfad63bec4b7bf5096ee051a34de51b57bcaee4a37af8db83f4e"
+          },
+          {
+            "byteSize": 36,
+            "format": "csv",
+            "nativePath": "tree_areas.csv",
+            "role": "tree_areas",
+            "sha256": "d90f42496e23472a3addd3415b49621811ea8dbf940ea135aae2209a98ba0914"
+          },
+          {
+            "byteSize": 42,
+            "format": "csv",
+            "nativePath": "tree_features.csv",
+            "role": "tree_features",
+            "sha256": "f93a2ef762eaff17269fca7bd35d4078e9c9a98633f8b3ea3a985014d32eaa50"
+          },
+          {
+            "byteSize": 40,
+            "format": "csv",
+            "nativePath": "tree_ids.csv",
+            "role": "lasting_tree_ids",
+            "sha256": "b351c2e1a2b0856a588e82675faa5e11d1a1ba6564d8169a0a46694251b84943"
+          },
+          {
+            "byteSize": 34,
+            "format": "geojson",
+            "nativePath": "tree_map.geojson",
+            "role": "crowns",
+            "sha256": "8322a09a6e9eb99bac1cc20985046721243168c6a4439453add98e1539363561"
+          },
+          {
+            "byteSize": 31,
+            "format": "png",
+            "nativePath": "tree_map.png",
+            "role": "preview",
+            "sha256": "d20ec522714040788c162d777bddb20919d5adcddfd43ada4c8895f2dcb467a4"
+          },
+          {
+            "byteSize": 31,
+            "format": "csv",
+            "nativePath": "trees.csv",
+            "role": "tree_table",
+            "sha256": "a7c0f62c8ae5d3c81769770673b07f259eafe7c21635c7fa48d1502993091e1b"
+          }
+        ],
+        "format": "ltds-treedar-bundle-v1",
+        "manifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+        "rawBytes": 869,
+        "schemaVersion": 1
+      }
+    }
+  ],
+  "documents": [
+    {
+      "type": "Submission",
+      "value": {
+        "capabilityFingerprint": "9728ebd31d7b6a7656ba5bd9601246a8d99e80a8f268983237d498dd67cb8eb0",
+        "contractFingerprint": "f4b261d235224bac3de60641ae1db801362ce1a8878ef067640aa67596153d18",
+        "inputManifest": {
+          "id": "inputs-treedar_only",
+          "inputCounts": {
+            "images": 0,
+            "lidarObjects": 1,
+            "points": 10
+          },
+          "objectCount": 1,
+          "objects": [
+            {
+              "byteSize": 35,
+              "id": "lidar-1",
+              "kind": "lidar",
+              "mediaType": "application/vnd.las",
+              "name": "original-1.las",
+              "sha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94"
+            }
+          ],
+          "revision": 1,
+          "sha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "totalBytes": 35
+        },
+        "pipeline": {
+          "gaussian_splat": {
+            "requested": false
+          },
+          "mode": "treedar_only",
+          "odm": {
+            "options": {},
+            "optionsFingerprint": "1d469f9048c880a6a240f932f11ba28cb5b274d866b46e4f4f2b353ee15c385e",
+            "requested": false,
+            "requestedProducts": []
+          },
+          "treedar": {
+            "bundleContract": "ltds-treedar-bundle-v1",
+            "inputObjectIds": [
+              "lidar-1"
+            ],
+            "provenanceReceiptId": "acquisition-1",
+            "requested": true,
+            "requestedProducts": [
+              "native_bundle"
+            ]
+          }
+        },
+        "protocol": "ltds-reference-outer-v2-proposed",
+        "schemaVersion": 2,
+        "submissionId": "00000000-0000-4000-8000-000000000002"
+      }
+    },
+    {
+      "type": "ProducerCustodyReceipt",
+      "value": {
+        "byteSize": 7881,
+        "issuerId": "fixture-worker-custody-issuer",
+        "objectId": "treedar-file",
+        "physicalObjectId": "producer-object-treedar",
+        "receiptId": "producer-treedar",
+        "receiptType": "producer_result_custody",
+        "reservationId": "parent-reservation",
+        "retainUntil": "accepted_copy_ack_or_authorized_release",
+        "retainedAt": "2026-10-28T12:00:00.000Z",
+        "schemaVersion": 2,
+        "sha256": "3aa9e3adf38c462d4fb7162e008ab44bf6b9a4f32edb6311806880b681d09f5d",
+        "stage": {
+          "binding": {
+            "environment": "staging",
+            "generation": 1,
+            "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+            "jobId": "00000000-0000-4000-8000-000000000002",
+            "parentClaimId": "original-parent-claim-treedar_only",
+            "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+          },
+          "continuationId": "continuation-treedar",
+          "engine": "treedar",
+          "reservationId": "parent-reservation",
+          "reservationReceiptId": "reservation-proof",
+          "stageId": "stage-treedar",
+          "stageOrdinal": 1,
+          "workerId": "worker-main",
+          "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+        },
+        "verificationReceiptId": "worker-custody-check-treedar"
+      }
+    },
+    {
+      "type": "ResultManifest",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "engineVersions": {
+          "treedar": "0.0.1"
+        },
+        "objects": [
+          {
+            "artifactManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+            "byteSize": 7881,
+            "format": "zip",
+            "id": "treedar-file",
+            "physicalKind": "file",
+            "physicalReceiptId": "producer-treedar",
+            "productKeys": [
+              "native_bundle"
+            ],
+            "role": "treedar_bundle",
+            "sha256": "3aa9e3adf38c462d4fb7162e008ab44bf6b9a4f32edb6311806880b681d09f5d",
+            "sourceObjectIds": [
+              "lidar-1"
+            ],
+            "stage": {
+              "binding": {
+                "environment": "staging",
+                "generation": 1,
+                "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+                "jobId": "00000000-0000-4000-8000-000000000002",
+                "parentClaimId": "original-parent-claim-treedar_only",
+                "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+              },
+              "continuationId": "continuation-treedar",
+              "engine": "treedar",
+              "reservationId": "parent-reservation",
+              "reservationReceiptId": "reservation-proof",
+              "stageId": "stage-treedar",
+              "stageOrdinal": 1,
+              "workerId": "worker-main",
+              "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+            }
+          }
+        ],
+        "products": [
+          {
+            "engine": "treedar",
+            "evidenceReceiptId": "worker-outcome-treedar",
+            "product": "native_bundle",
+            "required": true,
+            "state": "available",
+            "targets": [
+              {
+                "artifactByteSize": 7881,
+                "artifactId": "treedar-file",
+                "artifactSha256": "3aa9e3adf38c462d4fb7162e008ab44bf6b9a4f32edb6311806880b681d09f5d",
+                "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                "memberRefs": [
+                  {
+                    "byteSize": 45,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-0",
+                    "relativePath": "artifacts/area_types.csv",
+                    "sha256": "46813931ac749ed6624e9768d322cc6cdff3111f792fdf17539445326b43df60"
+                  },
+                  {
+                    "byteSize": 37,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-1",
+                    "relativePath": "artifacts/areas.png",
+                    "sha256": "3fff4ae39176446583f556aa4d249c24de4d22d47a33ec9489e9d59895b1afc6"
+                  },
+                  {
+                    "byteSize": 32,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-2",
+                    "relativePath": "artifacts/areas.tif",
+                    "sha256": "cbf748734c046d71819f14b9fb4fa3c7ee07028ee4c125ec8a4c2f98eb504870"
+                  },
+                  {
+                    "byteSize": 32,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-3",
+                    "relativePath": "artifacts/chm.tif",
+                    "sha256": "a9bcdc3cffd126dfce8493fe250184574460f11dddc8d0d2b5d61f6daf97db29"
+                  },
+                  {
+                    "byteSize": 47,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-4",
+                    "relativePath": "artifacts/chm_raw.tif",
+                    "sha256": "4e10f1aeb2355e3e32333c3b8668a8fa9c957f580658bb4856321505464edb38"
+                  },
+                  {
+                    "byteSize": 58,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-5",
+                    "relativePath": "artifacts/classify/classify_report.json",
+                    "sha256": "97b861aa7b594408a99f17f93a8d0ee8b0e453cf94338c652a9250e1700bdf50"
+                  },
+                  {
+                    "byteSize": 69,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-6",
+                    "relativePath": "artifacts/classify/final_test_predictions.csv",
+                    "sha256": "60c3cf118a1709a9c7cecaf8524e62740afab25e25809af2851f569d97b35122"
+                  },
+                  {
+                    "byteSize": 57,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-7",
+                    "relativePath": "artifacts/classify/predictions.csv",
+                    "sha256": "7ac7cf26e0c8083415a4def0824927fb6e0f6ca4098eeb31f1af5b1151897cb3"
+                  },
+                  {
+                    "byteSize": 34,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-8",
+                    "relativePath": "artifacts/crowns.tif",
+                    "sha256": "29d74bd161623fb97c1693606f605590744d006222dadf3afc4e240e7c548ef0"
+                  },
+                  {
+                    "byteSize": 31,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-9",
+                    "relativePath": "artifacts/dtm.tif",
+                    "sha256": "565d65118692458180cf7e95e7ba3510de4ad87a7d489d03c74726c382232969"
+                  },
+                  {
+                    "byteSize": 28,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-10",
+                    "relativePath": "artifacts/labels.csv",
+                    "sha256": "41bd3875e4223acfdc8f18189b6ff7dbbf8336e25c95c02fb71f9274e3926b04"
+                  },
+                  {
+                    "byteSize": 40,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-11",
+                    "relativePath": "artifacts/manifest.json",
+                    "sha256": "6f8cbb5f980ac014b55c2fca8a65aa37bee16c357e0470133603e1591a2d55c2"
+                  },
+                  {
+                    "byteSize": 48,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-12",
+                    "relativePath": "artifacts/ortho_rgb.tif",
+                    "sha256": "63e78a1fcefbd67e462aa160940eb01904f9b4cf2dd9a1dbd86a1d6051d9c3dc"
+                  },
+                  {
+                    "byteSize": 33,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-13",
+                    "relativePath": "artifacts/qc.json",
+                    "sha256": "57830f91ce91d2ee09cd83ca65964e1155c409b890fb75ddb36d698962d89faa"
+                  },
+                  {
+                    "byteSize": 29,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-14",
+                    "relativePath": "artifacts/report.html",
+                    "sha256": "dc24eb14b41663d518400212d862ea95963be9d1f00b5ffe7ce0f1dbb5fd54d5"
+                  },
+                  {
+                    "byteSize": 35,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-15",
+                    "relativePath": "artifacts/summary.json",
+                    "sha256": "0333585f4432bfad63bec4b7bf5096ee051a34de51b57bcaee4a37af8db83f4e"
+                  },
+                  {
+                    "byteSize": 36,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-16",
+                    "relativePath": "artifacts/tree_areas.csv",
+                    "sha256": "d90f42496e23472a3addd3415b49621811ea8dbf940ea135aae2209a98ba0914"
+                  },
+                  {
+                    "byteSize": 42,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-17",
+                    "relativePath": "artifacts/tree_features.csv",
+                    "sha256": "f93a2ef762eaff17269fca7bd35d4078e9c9a98633f8b3ea3a985014d32eaa50"
+                  },
+                  {
+                    "byteSize": 40,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-18",
+                    "relativePath": "artifacts/tree_ids.csv",
+                    "sha256": "b351c2e1a2b0856a588e82675faa5e11d1a1ba6564d8169a0a46694251b84943"
+                  },
+                  {
+                    "byteSize": 34,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-19",
+                    "relativePath": "artifacts/tree_map.geojson",
+                    "sha256": "8322a09a6e9eb99bac1cc20985046721243168c6a4439453add98e1539363561"
+                  },
+                  {
+                    "byteSize": 31,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-20",
+                    "relativePath": "artifacts/tree_map.png",
+                    "sha256": "d20ec522714040788c162d777bddb20919d5adcddfd43ada4c8895f2dcb467a4"
+                  },
+                  {
+                    "byteSize": 31,
+                    "closureId": "native-bundle-closure",
+                    "closureManifestSha256": "c56d8473583e585449fd14b1bdcb16bc6e122d8ab15898f4eac61afa5f2c0787",
+                    "memberId": "native-21",
+                    "relativePath": "artifacts/trees.csv",
+                    "sha256": "a7c0f62c8ae5d3c81769770673b07f259eafe7c21635c7fa48d1502993091e1b"
+                  }
+                ],
+                "validationReceiptId": "worker-product-validation-treedar"
+              }
+            ]
+          }
+        ],
+        "resultManifestSha256": "2330016c1451d64fd673990d3c1fe381a2d5e57b2003981b5e16575ee1e0e696",
+        "resultSetId": "results-treedar",
+        "schemaVersion": 2,
+        "stage": {
+          "binding": {
+            "environment": "staging",
+            "generation": 1,
+            "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+            "jobId": "00000000-0000-4000-8000-000000000002",
+            "parentClaimId": "original-parent-claim-treedar_only",
+            "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+          },
+          "continuationId": "continuation-treedar",
+          "engine": "treedar",
+          "reservationId": "parent-reservation",
+          "reservationReceiptId": "reservation-proof",
+          "stageId": "stage-treedar",
+          "stageOrdinal": 1,
+          "workerId": "worker-main",
+          "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+        }
+      }
+    },
+    {
+      "type": "PartialAcceptance",
+      "value": {
+        "acceptedArtifacts": [
+          {
+            "byteSize": 7881,
+            "id": "treedar-file",
+            "physicalReceiptId": "nas-copy-treedar",
+            "producerCustodyReceiptId": "producer-treedar",
+            "reservationId": "parent-reservation",
+            "sha256": "3aa9e3adf38c462d4fb7162e008ab44bf6b9a4f32edb6311806880b681d09f5d",
+            "stageId": "stage-treedar",
+            "validationReceiptId": "nas-ingestion-validation-treedar",
+            "workerId": "worker-main"
+          }
+        ],
+        "acceptedAt": "2026-10-28T12:00:00.000Z",
+        "ackOperationId": "acceptance-ack-treedar",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "receiptId": "acceptance-treedar",
+        "receiptType": "partial_result_acceptance",
+        "resultManifestSha256": "2330016c1451d64fd673990d3c1fe381a2d5e57b2003981b5e16575ee1e0e696",
+        "resultSetId": "results-treedar",
+        "schemaVersion": 2,
+        "storageReceiptId": "nas-storage-treedar",
+        "validationVersion": "candidate-fixture-only"
+      }
+    },
+    {
+      "type": "OriginalLidarCustodyProof",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "issuerId": "synthetic-nas-source-issuer",
+        "objects": [
+          {
+            "acquisitionReceiptId": "acquisition-1",
+            "byteSize": 35,
+            "controlledObjectId": "nas-original-lidar",
+            "genuineLasLaz": true,
+            "mediaType": "application/vnd.las",
+            "objectId": "lidar-1",
+            "photogrammetryDerived": false,
+            "physicalReceiptId": "nas-original-physical",
+            "sha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94"
+          }
+        ],
+        "receiptId": "original-custody",
+        "receiptType": "original_lidar_custody",
+        "retainedAt": "2026-10-28T10:00:00.000Z",
+        "retentionGuarantee": "until_explicit_release_ack",
+        "schemaVersion": 2,
+        "storageReceiptId": "original-storage",
+        "validationVersion": "synthetic-expectation-not-authority"
+      }
+    },
+    {
+      "type": "ImmutableMetadataIntent",
+      "value": {
+        "controlBudgetLedgerId": "control-ledger",
+        "controlChargeId": "control-charge-1",
+        "intentSha256": "3d08a878dbe4467d56df0e41ddb22e65e9dfe050e1a61a57dbc61eb624e04066",
+        "issuerPolicySha256": "589309e0563f3e40f0835932b8aec42e33f333349bae15b507e275eb20048ef7",
+        "operationId": "metadata-operation-1",
+        "originalAcquisition": {
+          "issuerId": "synthetic-acquisition-issuer",
+          "issuerPolicySha256": "c52e213f02a297af4c2801de662c97542a3db97ae798ca1e6ee26ae4baa80655",
+          "receiptId": "acquisition-1",
+          "receiptSha256": "2a09ee1245ad3480677e6fffb4623629d4a088876e14d59e80e9ee3458e28882"
+        },
+        "originalCustody": {
+          "issuerId": "synthetic-nas-source-issuer",
+          "issuerPolicySha256": "2bd11b046d09396073ef2b324d903b3394b58521d2c091703e99a316563c36d1",
+          "receiptId": "original-custody",
+          "receiptSha256": "288951a0a65be13d104088bdbb9621c45f42c1f172e76d98376ede1722acf8e0"
+        },
+        "originalObjects": [
+          {
+            "acquisitionReceiptId": "acquisition-1",
+            "byteSize": 35,
+            "controlledObjectId": "nas-original-lidar",
+            "custodyPhysicalReceiptId": "nas-original-physical",
+            "mediaType": "application/vnd.las",
+            "objectId": "lidar-1",
+            "sha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94"
+          }
+        ],
+        "originalTransferDigest": "9576abc9ca105ac7d0a05290a990336caebcfaaa344629a671c775b410c55ebc",
+        "parentBinding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "payloadBudgetLedgerId": "unchanged-payload-ledger",
+        "payloadBudgetLedgerRevision": 7,
+        "planSha256": "66ae9deb8d4409d9d45bbc3ef71a57aef0ee84286716bd46d305cbf19d8b79cc",
+        "predecessorProofSha256": null,
+        "protocol": "ltds-original-metadata-reauthorization-v1-proposed",
+        "purpose": "next_stage_admission",
+        "receiptType": "immutable_metadata_intent",
+        "requestedAt": "2026-10-28T12:00:00.000Z",
+        "round": 1,
+        "schemaVersion": 1,
+        "stage": {
+          "binding": {
+            "environment": "staging",
+            "generation": 1,
+            "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+            "jobId": "00000000-0000-4000-8000-000000000002",
+            "parentClaimId": "original-parent-claim-treedar_only",
+            "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+          },
+          "continuationId": "continuation-treedar",
+          "engine": "treedar",
+          "reservationId": "parent-reservation",
+          "reservationReceiptId": "reservation-proof",
+          "stageId": "stage-treedar",
+          "stageOrdinal": 1,
+          "workerId": "worker-main",
+          "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+        },
+        "stageDefinitionSha256": "63fb7c286ef6a6538cc81decb98a29a28885def82de76cf1788bf3cebeef8474"
+      }
+    },
+    {
+      "type": "AuthorizedResponse",
+      "value": {
+        "authenticatedActorBindingSha256": "36a4c7b88462c5e08066e89ef11c34b79d63b36d004c66d38a12dec86e70894c",
+        "checkedAt": "2026-10-28T12:00:00.000Z",
+        "controlChargeId": "control-charge-1",
+        "custodyRevision": 3,
+        "decision": "authorized",
+        "intentSha256": "3d08a878dbe4467d56df0e41ddb22e65e9dfe050e1a61a57dbc61eb624e04066",
+        "issuerPolicySha256": "589309e0563f3e40f0835932b8aec42e33f333349bae15b507e275eb20048ef7",
+        "metadataExpiresAt": "2026-10-28T12:05:00.000Z",
+        "operationId": "metadata-operation-1",
+        "originalAcquisition": {
+          "issuerId": "synthetic-acquisition-issuer",
+          "issuerPolicySha256": "c52e213f02a297af4c2801de662c97542a3db97ae798ca1e6ee26ae4baa80655",
+          "receiptId": "acquisition-1",
+          "receiptSha256": "2a09ee1245ad3480677e6fffb4623629d4a088876e14d59e80e9ee3458e28882"
+        },
+        "originalCustody": {
+          "issuerId": "synthetic-nas-source-issuer",
+          "issuerPolicySha256": "2bd11b046d09396073ef2b324d903b3394b58521d2c091703e99a316563c36d1",
+          "receiptId": "original-custody",
+          "receiptSha256": "288951a0a65be13d104088bdbb9621c45f42c1f172e76d98376ede1722acf8e0"
+        },
+        "originalObjects": [
+          {
+            "acquisitionReceiptId": "acquisition-1",
+            "byteSize": 35,
+            "controlledObjectId": "nas-original-lidar",
+            "custodyPhysicalReceiptId": "nas-original-physical",
+            "mediaType": "application/vnd.las",
+            "objectId": "lidar-1",
+            "sha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94"
+          }
+        ],
+        "originalTransferDigest": "9576abc9ca105ac7d0a05290a990336caebcfaaa344629a671c775b410c55ebc",
+        "parentBinding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "payloadBudgetLedgerId": "unchanged-payload-ledger",
+        "payloadBudgetLedgerRevision": 7,
+        "planSha256": "66ae9deb8d4409d9d45bbc3ef71a57aef0ee84286716bd46d305cbf19d8b79cc",
+        "predecessorProofSha256": null,
+        "protocol": "ltds-original-metadata-reauthorization-v1-proposed",
+        "purpose": "next_stage_admission",
+        "receiptId": "metadata-response-1",
+        "receiptSha256": "bb75f82b0117183d92b63661f3e7c0a7ae51b46886bada282b5e79710c3f972a",
+        "receiptType": "metadata_authorization_receipt",
+        "revocationRevision": 2,
+        "round": 1,
+        "schemaVersion": 1,
+        "stageDefinitionSha256": "63fb7c286ef6a6538cc81decb98a29a28885def82de76cf1788bf3cebeef8474"
+      }
+    },
+    {
+      "type": "SealedStageAdmission",
+      "value": {
+        "admissionSha256": "468ff96a502ad5c34bc4b0781fe996c9c053f09c9f6b3b49b24523982fd8d709",
+        "admittedAt": "2026-10-28T12:00:01.000Z",
+        "authenticatedActorBindingSha256": "36a4c7b88462c5e08066e89ef11c34b79d63b36d004c66d38a12dec86e70894c",
+        "custodyRevision": 3,
+        "intentSha256": "3d08a878dbe4467d56df0e41ddb22e65e9dfe050e1a61a57dbc61eb624e04066",
+        "metadataAuthorizationReceiptId": "metadata-response-1",
+        "metadataAuthorizationReceiptSha256": "bb75f82b0117183d92b63661f3e7c0a7ae51b46886bada282b5e79710c3f972a",
+        "originalAcquisition": {
+          "issuerId": "synthetic-acquisition-issuer",
+          "issuerPolicySha256": "c52e213f02a297af4c2801de662c97542a3db97ae798ca1e6ee26ae4baa80655",
+          "receiptId": "acquisition-1",
+          "receiptSha256": "2a09ee1245ad3480677e6fffb4623629d4a088876e14d59e80e9ee3458e28882"
+        },
+        "originalCustody": {
+          "issuerId": "synthetic-nas-source-issuer",
+          "issuerPolicySha256": "2bd11b046d09396073ef2b324d903b3394b58521d2c091703e99a316563c36d1",
+          "receiptId": "original-custody",
+          "receiptSha256": "288951a0a65be13d104088bdbb9621c45f42c1f172e76d98376ede1722acf8e0"
+        },
+        "planSha256": "66ae9deb8d4409d9d45bbc3ef71a57aef0ee84286716bd46d305cbf19d8b79cc",
+        "receiptId": "sealed-admission",
+        "receiptType": "sealed_stage_metadata_admission",
+        "revocationRevision": 2,
+        "schemaVersion": 1,
+        "stage": {
+          "binding": {
+            "environment": "staging",
+            "generation": 1,
+            "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+            "jobId": "00000000-0000-4000-8000-000000000002",
+            "parentClaimId": "original-parent-claim-treedar_only",
+            "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+          },
+          "continuationId": "continuation-treedar",
+          "engine": "treedar",
+          "reservationId": "parent-reservation",
+          "reservationReceiptId": "reservation-proof",
+          "stageId": "stage-treedar",
+          "stageOrdinal": 1,
+          "workerId": "worker-main",
+          "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+        },
+        "stageDefinitionSha256": "63fb7c286ef6a6538cc81decb98a29a28885def82de76cf1788bf3cebeef8474"
+      }
+    },
+    {
+      "type": "ExecutionSettledReceipt",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "coordinatorSettlementOperationId": "execution-settlement-operation",
+        "diskBudgetReceiptId": "synthetic-current-disk-budget",
+        "producerCustodyReceiptIds": [
+          "producer-treedar"
+        ],
+        "receiptId": "execution-settled",
+        "receiptType": "execution_settled",
+        "requestedStageIds": [
+          "stage-treedar"
+        ],
+        "retainedDiskReservationIds": [
+          "parent-reservation",
+          "delivery-disk-hold"
+        ],
+        "schemaVersion": 2,
+        "settledAt": "2026-10-28T13:00:00.000Z",
+        "settledStages": [
+          {
+            "engineExecutionId": "synthetic-execution-treedar",
+            "engineStopReceiptId": "synthetic-stop-treedar",
+            "resultCustodyReceiptIds": [
+              "producer-treedar"
+            ],
+            "settledAt": "2026-10-28T12:00:00.000Z",
+            "stage": {
+              "binding": {
+                "environment": "staging",
+                "generation": 1,
+                "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+                "jobId": "00000000-0000-4000-8000-000000000002",
+                "parentClaimId": "original-parent-claim-treedar_only",
+                "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+              },
+              "continuationId": "continuation-treedar",
+              "engine": "treedar",
+              "reservationId": "parent-reservation",
+              "reservationReceiptId": "reservation-proof",
+              "stageId": "stage-treedar",
+              "stageOrdinal": 1,
+              "workerId": "worker-main",
+              "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+            },
+            "terminalState": "succeeded"
+          }
+        ]
+      }
+    },
+    {
+      "type": "HeavyCapacityReleaseReceipt",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "executionSettledReceiptId": "execution-settled",
+        "operationId": "heavy-release-operation",
+        "receiptId": "heavy-release",
+        "receiptType": "heavy_capacity_release",
+        "releasedAt": "2026-10-28T13:00:01.000Z",
+        "releasedCpuGpuSlotIds": [
+          "global-heavy-slot"
+        ],
+        "remainingDiskHoldIds": [
+          "parent-reservation",
+          "delivery-disk-hold"
+        ],
+        "schemaVersion": 2
+      }
+    },
+    {
+      "type": "ParentCompletion",
+      "value": {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "completionSha256": "54525509d313b1c08dd1e08d4b83b039d3a882b185140f52ac074f5df9e60f10",
+        "mode": "treedar_only",
+        "publicationReceiptIds": [
+          "synthetic-catalog-treedar"
+        ],
+        "requestedProductsDigest": "864539101cd49a35fe32b0c88a246f12809665f6269ec83d1904a811a140c213",
+        "schemaVersion": 2,
+        "stageResults": [
+          {
+            "acceptanceReceiptIds": [
+              "acceptance-treedar"
+            ],
+            "requiredArtifactIds": [
+              "treedar-file"
+            ],
+            "resultManifestSha256": "2330016c1451d64fd673990d3c1fe381a2d5e57b2003981b5e16575ee1e0e696",
+            "resultSetId": "results-treedar",
+            "stage": {
+              "binding": {
+                "environment": "staging",
+                "generation": 1,
+                "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+                "jobId": "00000000-0000-4000-8000-000000000002",
+                "parentClaimId": "original-parent-claim-treedar_only",
+                "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+              },
+              "continuationId": "continuation-treedar",
+              "engine": "treedar",
+              "reservationId": "parent-reservation",
+              "reservationReceiptId": "reservation-proof",
+              "stageId": "stage-treedar",
+              "stageOrdinal": 1,
+              "workerId": "worker-main",
+              "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+            }
+          }
+        ],
+        "terminalReceiptId": "synthetic-parent-delivery-terminal"
+      }
+    },
+    {
+      "type": "CleanupAck",
+      "value": {
+        "acceptanceReceiptIds": [
+          "acceptance-treedar"
+        ],
+        "acknowledgedAt": "2026-10-28T14:00:00.000Z",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "cleanupOperationId": "cleanup-operation-treedar",
+        "physicalReceiptIds": [
+          "producer-treedar"
+        ],
+        "producerObjectIds": [
+          "treedar-file"
+        ],
+        "receiptId": "cleanup-ack-treedar",
+        "receiptType": "producer_cleanup_ack",
+        "resultManifestSha256": "2330016c1451d64fd673990d3c1fe381a2d5e57b2003981b5e16575ee1e0e696",
+        "schemaVersion": 2,
+        "terminalReceiptId": "synthetic-parent-delivery-terminal"
+      }
+    }
+  ],
+  "expectedContext": {
+    "admittedStages": [
+      {
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "continuationId": "continuation-treedar",
+        "engine": "treedar",
+        "reservationId": "parent-reservation",
+        "reservationReceiptId": "reservation-proof",
+        "stageId": "stage-treedar",
+        "stageOrdinal": 1,
+        "workerId": "worker-main",
+        "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+      }
+    ],
+    "archiveLimits": {
+      "maxArchiveBytes": 1048576,
+      "maxControlProofBytes": 65536,
+      "maxExpandedBytes": 1048576,
+      "maxExpandedMembers": 64,
+      "maxManifestBytes": 65536,
+      "maxRawBytes": 1048576,
+      "maxRetainedCopyBytes": 8388608,
+      "maxValidationDiskBytes": 8388608
+    },
+    "authenticationEvidence": null,
+    "authorityPolicy": {
+      "atStart": "Fresh metadata and current parent/revocation check required before next heavy engine.",
+      "historicalValidation": "Sealed at-start admission remains evidence after metadata TTL; source receipt and bundle identity unchanged.",
+      "outage": "Retain all disk/custody/outbox holds; release heavy capacity only after ALL requested execution settled.",
+      "publication": "Separate CURRENT publication/catalog authority required; historical source authorization is insufficient."
+    },
+    "expectedActorBindingSha256": "36a4c7b88462c5e08066e89ef11c34b79d63b36d004c66d38a12dec86e70894c",
+    "limitsScope": "Explicit invented finite TEST CONTEXT values, not approved deployment policy.",
+    "nasAcceptedValidationReceiptIds": [
+      "nas-ingestion-validation-treedar"
+    ],
+    "originalBinding": {
+      "environment": "staging",
+      "generation": 1,
+      "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+      "jobId": "00000000-0000-4000-8000-000000000002",
+      "parentClaimId": "original-parent-claim-treedar_only",
+      "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+    },
+    "originalSubmission": {
+      "capabilityFingerprint": "9728ebd31d7b6a7656ba5bd9601246a8d99e80a8f268983237d498dd67cb8eb0",
+      "contractFingerprint": "f4b261d235224bac3de60641ae1db801362ce1a8878ef067640aa67596153d18",
+      "inputManifest": {
+        "id": "inputs-treedar_only",
+        "inputCounts": {
+          "images": 0,
+          "lidarObjects": 1,
+          "points": 10
+        },
+        "objectCount": 1,
+        "objects": [
+          {
+            "byteSize": 35,
+            "id": "lidar-1",
+            "kind": "lidar",
+            "mediaType": "application/vnd.las",
+            "name": "original-1.las",
+            "sha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94"
+          }
+        ],
+        "revision": 1,
+        "sha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+        "totalBytes": 35
+      },
+      "pipeline": {
+        "gaussian_splat": {
+          "requested": false
+        },
+        "mode": "treedar_only",
+        "odm": {
+          "options": {},
+          "optionsFingerprint": "1d469f9048c880a6a240f932f11ba28cb5b274d866b46e4f4f2b353ee15c385e",
+          "requested": false,
+          "requestedProducts": []
+        },
+        "treedar": {
+          "bundleContract": "ltds-treedar-bundle-v1",
+          "inputObjectIds": [
+            "lidar-1"
+          ],
+          "provenanceReceiptId": "acquisition-1",
+          "requested": true,
+          "requestedProducts": [
+            "native_bundle"
+          ]
+        }
+      },
+      "protocol": "ltds-reference-outer-v2-proposed",
+      "schemaVersion": 2,
+      "submissionId": "00000000-0000-4000-8000-000000000002"
+    },
+    "payload": {
+      "consumedBytes": 35,
+      "cumulativeByteBudget": 105,
+      "ledgerId": "unchanged-payload-ledger",
+      "originalPayloadExpiresAt": "2026-10-28T11:00:00.000Z",
+      "revision": 7
+    },
+    "pipelineDigestOwnership": "Opaque server-provided fixed digest, not computed from options.",
+    "planDigestScope": "Canonical fixture plan/stage metadata is supplied for consistency checks only; production plan digests remain authenticated original references, not a new public client derivation.",
+    "syntheticApprovedPlan": {
+      "binding": {
+        "environment": "staging",
+        "generation": 1,
+        "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+        "jobId": "00000000-0000-4000-8000-000000000002",
+        "parentClaimId": "original-parent-claim-treedar_only",
+        "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+      },
+      "mode": "treedar_only",
+      "schemaVersion": 1,
+      "stages": [
+        {
+          "inputObjects": [
+            {
+              "byteSize": 35,
+              "id": "lidar-1",
+              "kind": "lidar",
+              "mediaType": "application/vnd.las",
+              "name": "original-1.las",
+              "sha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94"
+            }
+          ],
+          "requestedProducts": [
+            "native_bundle"
+          ],
+          "stage": {
+            "binding": {
+              "environment": "staging",
+              "generation": 1,
+              "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+              "jobId": "00000000-0000-4000-8000-000000000002",
+              "parentClaimId": "original-parent-claim-treedar_only",
+              "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+            },
+            "continuationId": "continuation-treedar",
+            "engine": "treedar",
+            "reservationId": "parent-reservation",
+            "reservationReceiptId": "reservation-proof",
+            "stageId": "stage-treedar",
+            "stageOrdinal": 1,
+            "workerId": "worker-main",
+            "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+          }
+        }
+      ]
+    },
+    "treeDarLimits": {
+      "maxArchiveBytes": 1048576,
+      "maxControlProofBytes": 65536,
+      "maxFiles": 64,
+      "maxManifestBytes": 65536,
+      "maxRawBytes": 1048576,
+      "maxValidationDiskBytes": 8388608
+    },
+    "trustModel": "IDs/digests represent expected externally authenticated facts ONLY. Absent real trusted endpoints/receipts these records authorize nothing.",
+    "workerValidationReceiptIds": [
+      "worker-outcome-treedar",
+      "worker-product-validation-treedar"
+    ]
+  },
+  "fixtureVersion": 1,
+  "mode": "treedar_only",
+  "originalAcquisitionRecord": {
+    "byteSize": 35,
+    "environment": "staging",
+    "generation": 1,
+    "jobId": "00000000-0000-4000-8000-000000000002",
+    "objectId": "lidar-1",
+    "objectSha256": "d36f1ea4c35ede2adbc2ed1100f97763fc0ebffb83b266852a26929a02f57e94",
+    "receiptId": "acquisition-1",
+    "schemaVersion": 1,
+    "sourceKind": "lidar",
+    "verticalDatum": "navd88",
+    "verticalUnits": "metre"
+  },
+  "originalPayloads": [
+    {
+      "bytesBase64": "U1lOVEhFVElDLU5PVC1TRU5TT1I6b3JpZ2luYWwtMS5sYXM=",
+      "objectId": "lidar-1"
+    }
+  ],
+  "outageSnapshot": {
+    "diskHoldsRetained": true,
+    "executionSettledReceipt": {
+      "binding": {
+        "environment": "staging",
+        "generation": 1,
+        "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+        "jobId": "00000000-0000-4000-8000-000000000002",
+        "parentClaimId": "original-parent-claim-treedar_only",
+        "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+      },
+      "coordinatorSettlementOperationId": "execution-settlement-operation",
+      "diskBudgetReceiptId": "synthetic-current-disk-budget",
+      "producerCustodyReceiptIds": [
+        "producer-treedar"
+      ],
+      "receiptId": "execution-settled",
+      "receiptType": "execution_settled",
+      "requestedStageIds": [
+        "stage-treedar"
+      ],
+      "retainedDiskReservationIds": [
+        "parent-reservation",
+        "delivery-disk-hold"
+      ],
+      "schemaVersion": 2,
+      "settledAt": "2026-10-28T13:00:00.000Z",
+      "settledStages": [
+        {
+          "engineExecutionId": "synthetic-execution-treedar",
+          "engineStopReceiptId": "synthetic-stop-treedar",
+          "resultCustodyReceiptIds": [
+            "producer-treedar"
+          ],
+          "settledAt": "2026-10-28T12:00:00.000Z",
+          "stage": {
+            "binding": {
+              "environment": "staging",
+              "generation": 1,
+              "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+              "jobId": "00000000-0000-4000-8000-000000000002",
+              "parentClaimId": "original-parent-claim-treedar_only",
+              "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+            },
+            "continuationId": "continuation-treedar",
+            "engine": "treedar",
+            "reservationId": "parent-reservation",
+            "reservationReceiptId": "reservation-proof",
+            "stageId": "stage-treedar",
+            "stageOrdinal": 1,
+            "workerId": "worker-main",
+            "workerImageDigest": "7cbb269c4a8841180e889463ccf9bfc2bc95c67dccb53cc31880791f2f9a3a10"
+          },
+          "terminalState": "succeeded"
+        }
+      ]
+    },
+    "heavyCapacityReleaseReceipt": {
+      "binding": {
+        "environment": "staging",
+        "generation": 1,
+        "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+        "jobId": "00000000-0000-4000-8000-000000000002",
+        "parentClaimId": "original-parent-claim-treedar_only",
+        "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+      },
+      "executionSettledReceiptId": "execution-settled",
+      "operationId": "heavy-release-operation",
+      "receiptId": "heavy-release",
+      "receiptType": "heavy_capacity_release",
+      "releasedAt": "2026-10-28T13:00:01.000Z",
+      "releasedCpuGpuSlotIds": [
+        "global-heavy-slot"
+      ],
+      "remainingDiskHoldIds": [
+        "parent-reservation",
+        "delivery-disk-hold"
+      ],
+      "schemaVersion": 2
+    },
+    "originalSourceCustodyRetained": true,
+    "outboxRetained": true,
+    "parentDeliveryState": "pending",
+    "viewerAccepted": false
+  },
+  "scope": "Golden structural/hash/lifecycle relationships only; no acquisition, engine execution, custody, issuer authentication, semantic processing, NAS acceptance or publication actually occurred.",
+  "status": "SYNTHETIC_EXPECTED_CONTEXT_NOT_AUTHORITY",
+  "timingScope": "Documents are separate lifecycle snapshots, not evidence of one instantaneous state; fixture trust is modeled, never real."
+}

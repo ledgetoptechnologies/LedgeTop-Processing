@@ -38,6 +38,31 @@ class NodeGateTests(unittest.TestCase):
         return {'id': '12345678-1234-1234-1234-123456789abd',
                 'workerId': 'worker-one', 'nodeId': 'cluster', 'authorityId': AUTHORITY}
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX creation modes')
+    def test_new_lock_stays_private_with_group_writable_host_umask(self):
+        other = Path(self.temp.name) / 'permissive-umask'
+        previous = os.umask(0o002)
+        try:
+            with patch('processing.node_gate.canonical_gate_path', return_value=other):
+                with NodeGate(ENGINE) as gate:
+                    gate.provision('cluster', ORIGIN, AUTHORITY)
+                    self.assertEqual((other / 'gate.lock').stat().st_mode & 0o777, 0o600)
+        finally:
+            os.umask(previous)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX existing inode modes')
+    def test_existing_lock_mode_inode_and_state_are_not_silently_rewritten(self):
+        lock = self.root / 'gate.lock'
+        lock.chmod(0o664)
+        before = lock.stat()
+        state = (self.root / 'gate.json').read_bytes()
+        with NodeGate(ENGINE) as gate:
+            self.assertEqual(gate.snapshot()['generation'], 1)
+        after = lock.stat()
+        self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
+        self.assertEqual(after.st_mode & 0o777, 0o664)
+        self.assertEqual((self.root / 'gate.json').read_bytes(), state)
+
     def test_explicit_provisioning_required_and_cannot_overwrite(self):
         with NodeGate(ENGINE) as gate:
             with self.assertRaises(GateError):

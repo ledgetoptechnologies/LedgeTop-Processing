@@ -1,0 +1,92 @@
+{
+  "status": "DRAFT; revised schema convergence, pending final Viewer fixture agreement; pure validators only",
+  "prefix": "/ltds/v1",
+  "submission": {
+    "schemaVersion": 1,
+    "submissionId": "00000000-0000-4000-8000-000000000003",
+    "manifest": {
+      "id": "manifest-synthetic-1",
+      "revision": 1,
+      "sha256": "7cb1fc239c9e2d1b26ca0a4fe3b77da7433ee73293def55174634a5c58e5c268",
+      "totalBytes": 9007199254740991,
+      "objects": [
+        {
+          "id": "image-1",
+          "name": "photo.jpg",
+          "byteSize": 9007199254740991,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "kind": "image",
+          "mediaType": "image/jpeg"
+        }
+      ],
+      "objectCount": 1,
+      "inputCounts": {
+        "images": 1,
+        "lidarObjects": 0,
+        "points": 0
+      }
+    },
+    "pipeline": {
+      "odm": {
+        "requested": true,
+        "options": {},
+        "optionsFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "treedar": {
+        "requested": false,
+        "inputObjectIds": [],
+        "provenanceReceiptId": null
+      },
+      "gaussian_splat": {
+        "requested": false
+      }
+    },
+    "capabilityFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "canonicalManifest": "{\"id\":\"manifest-synthetic-1\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":1,\"objects\":[{\"byteSize\":9007199254740991,\"id\":\"image-1\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"photo.jpg\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}],\"revision\":1,\"totalBytes\":9007199254740991}",
+  "manifestSha256": "7cb1fc239c9e2d1b26ca0a4fe3b77da7433ee73293def55174634a5c58e5c268",
+  "requestDigest": "a8e2ccf4b3eda5c8b0e4c6be5766cb3c9de3fc82c2ad0f44127fcf25e9c5251d",
+  "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+  "resultManifest": {
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "resultManifestSha256": "71cc7815ecd7cf7eaa79b15861394f1f541136bc2c41df422326c201869ea09f",
+    "engineVersions": {
+      "odm": "draft-fixture"
+    },
+    "objects": [
+      {
+        "id": "result-1",
+        "role": "orthophoto",
+        "byteSize": 42,
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      {
+        "id": "result-2",
+        "role": "pointcloud",
+        "byteSize": 43,
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ],
+    "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+    "schemaVersion": 1
+  },
+  "acceptance": {
+    "schemaVersion": 1,
+    "receiptId": "receipt-1",
+    "storageReceiptId": "storage-1",
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "inputManifestSha256": "7cb1fc239c9e2d1b26ca0a4fe3b77da7433ee73293def55174634a5c58e5c268",
+    "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+    "resultManifestSha256": "71cc7815ecd7cf7eaa79b15861394f1f541136bc2c41df422326c201869ea09f",
+    "acceptedObjectIds": [
+      "result-1"
+    ],
+    "acceptedAt": "2026-10-27T22:00:00Z",
+    "validationVersion": "ltds-reference-v1"
+  },
+  "receiptTombstoneDigest": "5b21d116a31e225a095c213f27fe1786f3fc1f530eb877557472bf3e78d1cc93"
+}

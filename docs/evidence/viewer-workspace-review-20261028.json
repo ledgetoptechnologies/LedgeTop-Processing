@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T17:27:27.290049+00:00",
+  "scope": "reserved-Claude-Viewer-workspace-redesign-source-review",
+  "repository": "C:/Projects/Ledge Top Operations/viewer-workspace-redesign",
+  "status": "three-reproduced-source-finding-categories-closed-at-7e5e1acc",
+  "baseline": {
+    "schemaVersion": 1,
+    "sourceCommit": "a67e3a7270de0a26427b4b35cef1823022095cb1",
+    "sourceSha256LF": "a5c5bbe3730c38b31ac996163c1ff4376568c1eaaa704cc212e1b168512092db",
+    "equivalentSourceSha256CRLF": "21d7c4276866b2a8877fb5ffe8905801d5cfb6a2987b572c9a9de91648bc0e72",
+    "status": "three-finding-categories-open-on-frozen-a67",
+    "findings": [
+      {
+        "id": "late-shares-authorization",
+        "location": "apps/viewer/workspace-projects.js:990 load",
+        "observed": "share request401 clears authorization but final load calls render once and writes Platform ready",
+        "fix": "Validate captured session after final shareResults await before further state writes or render; add regression."
+      },
+      {
+        "id": "initial-core-session-change",
+        "location": "apps/viewer/workspace-projects.js:990 load",
+        "observed": "Delayed original-session projects overwrite replacement-session projects before post-hierarchy return",
+        "fix": "Validate captured session immediately after first Promise.allSettled and before first state mutation; add regression."
+      },
+      {
+        "id": "incomplete-source-error-coverage",
+        "location": "apps/viewer/workspace-projects.js:990 load",
+        "observed": "Both hierarchy503 and shares503 keep loadErrors empty and Platform ready; retained grouping silently stale",
+        "fix": "Report hierarchy/share failures through visible retryable load errors while retaining appropriate last data; add targeted regressions."
+      }
+    ],
+    "fixedSourceAssessments": {
+      "filterReachability": "actual projectRows() retains both ready rows under active alpha search, hides beta row/customer rather than omitting; clearing search can reach retained rows",
+      "hiddenCSS": "specific hidden selectors override grid display for project rows/customer/subgroups/no-match note",
+      "coreSourceFailures": "prior tested expanded source failures/readiness correction retained",
+      "hierarchy401": "existing targeted test covers hierarchy401 and drops hierarchy answer after session changed"
+    },
+    "tests": {
+      "frozenA67LoadErrors": {
+        "total": 9,
+        "passed": 9,
+        "failed": 0,
+        "skipped": 0,
+        "durationMs": 322.8776
+      },
+      "syntheticReproducer": "four expected defect observations plus actual HTML/static CSS assertions pass on frozen committed a67"
+    },
+    "limitations": [
+      "No browser rendering/computed-style or production runtime asserted.",
+      "Owner began editing source and tests during initial read. A transient working-copy run gave4test failures from temporary hierarchy fixture expectations; that is not an a67 result or a completed-fix finding.",
+      "The committed a67 snapshot was obtained through git show without editing owner files. Current dirty owner fix is pending immutable commit/review."
+    ],
+    "artifacts": {
+      "a67-frozen-load-tests.log": "10042337d2bd2d42952a351e4297285642df703ec7bad5f7544a4356df1629bc",
+      "receipt.json": "fbb7fee02caa0fb327e1231289e792435d84f370eb226ba45971489c32dfa937",
+      "reproduce.mjs": "635a690354a91c6b6b0c748e71fbbe4eed69f02b989e61e598600c4c44a2b98b"
+    }
+  },
+  "fixed": {
+    "schemaVersion": 1,
+    "observedAt": "2026-10-28T17:25:50.717599+00:00",
+    "sourceCommit": "7e5e1accd116b1bfebc05855fa0d2f22af7d75de",
+    "sourceSha256LF": "a57a540fdf4faacf1fa19ffe7840c965537ab53c0d36a877ffc319276dba7da3",
+    "worktreeAtReview": "clean 7e5e1accd116b1bfebc05855fa0d2f22af7d75de",
+    "status": "three-prior-source-finding-categories-closed-on-frozen-7e5",
+    "findings": [
+      {
+        "id": "late-shares-authorization",
+        "status": "fixed",
+        "evidence": "shares401 clears authorization and calls access once; render0, no final health write."
+      },
+      {
+        "id": "initial-core-session-change",
+        "status": "fixed",
+        "evidence": "replacement-session project remains; old project not copied and render0."
+      },
+      {
+        "id": "incomplete-source-error-coverage",
+        "status": "fixed",
+        "evidence": "hierarchy503 keeps grouping and reports customer grouping; shares503 reports share links and retains known links; hierarchy404 remains compatibility absence."
+      }
+    ],
+    "preservedAssessments": {
+      "filterReachability": "Actual projectRows HTML keeps two ready rows during search; nonmatching project/customer hidden rather than omitted.",
+      "hiddenCSS": "Static specific hidden selectors still override display:grid; stylesheet unchanged from a67.",
+      "hierarchySession": "Pinned owner regression covers hierarchy401 and changed-session hierarchy response."
+    },
+    "tests": {
+      "pinnedNode24LoadErrors": {
+        "total": 13,
+        "passed": 13,
+        "failed": 0,
+        "skipped": 0,
+        "durationMs": 701.9757
+      },
+      "actualFunctionReproducer": "All fixed-mode assertions passed for four cases plus filter/hidden HTML/static CSS assertions."
+    },
+    "diffReview": "Only workspace-projects.js and workspace-load-errors.test.mjs changed from a67 to7e5; session equality checks precede first post-core mutation and final post-shares mutation; retained-data failures are visibly labelled. No new actionable delta regression found.",
+    "limitations": [
+      "Source-function and static CSS evidence only; no actual browser computed style or rendered visual acceptance.",
+      "No merge, publication, installed Viewer runtime or client acceptance is proved.",
+      "This is bounded verification of the three reproduced a67 findings, not a whole application authorization audit."
+    ],
+    "artifacts": {
+      "fixed-receipt.json": "7e48abd0387e94b7b0e308252c4372a2de862575a2388e586249b1e472b5089c",
+      "pinned-load-tests.log": "26a7bece0a64719c3aeeef405d3088c48740a6a0b383d91fda3e0f614953ac78",
+      "reproduce.mjs": "635a690354a91c6b6b0c748e71fbbe4eed69f02b989e61e598600c4c44a2b98b",
+      "snapshot-manifest.json": "d43bffb70a89ae5fa79ce764fe9dd4c8be311c5be5daa50434ca53e7e7cc9572"
+    }
+  },
+  "fixedReproducer": {
+    "schemaVersion": 1,
+    "observedAt": "2026-10-28T17:24:12.325Z",
+    "repository": "C:/Projects/Ledge Top Operations/viewer-workspace-redesign",
+    "sourceRoot": "C:/Users/fstor/.codex/artifacts/processing-cluster-maintenance-20261028/viewer-7e5-review/snapshot-7e5",
+    "sourceCommit": "7e5e1accd116b1bfebc05855fa0d2f22af7d75de",
+    "head": "7e5e1accd116b1bfebc05855fa0d2f22af7d75de",
+    "worktreeStatus": "",
+    "sourceSha256": "a57a540fdf4faacf1fa19ffe7840c965537ab53c0d36a877ffc319276dba7da3",
+    "mode": "expect-fixed",
+    "cases": {
+      "shares401": {
+        "authorizationCleared": true,
+        "accessCalls": 1,
+        "renderCount": 0,
+        "finalHealth": null,
+        "renderedAfterAuthorizationCleared": false,
+        "loadErrorLabels": []
+      },
+      "replacedCoreSession": {
+        "replacementSessionRetained": true,
+        "projectIds": [
+          "new-session-project"
+        ],
+        "oldSessionOverwroteReplacementState": false,
+        "renderCount": 0
+      },
+      "hierarchy503": {
+        "retainedGrouping": true,
+        "loadErrorLabels": [
+          "customer grouping"
+        ],
+        "finalHealth": "Platform ready",
+        "renderCount": 1,
+        "failureReported": true
+      },
+      "shares503": {
+        "loadErrorLabels": [
+          "share links"
+        ],
+        "finalHealth": "Platform ready",
+        "renderCount": 1,
+        "failureReported": true
+      },
+      "filterAndHidden": {
+        "rowCountWhileSearchAndStatusActive": 2,
+        "nonmatchingRowRetainedHidden": true,
+        "nonmatchingCustomerRetainedHidden": true,
+        "cssHiddenOverridesGrid": true,
+        "scope": "Actual projectRows HTML and static CSS selector; browser behavior is not asserted here."
+      }
+    },
+    "effects": "Synthetic fetches only; no network/browser, repository edits, credentials or runtime changes."
+  },
+  "limitations": [
+    "No browser acceptance performed by this review.",
+    "No merge, publication, deployment or TrueNAS changes performed.",
+    "The protected Viewer release and this unpublished workspace redesign are separate work.",
+    "Full customer/project/subcategory/task workflow and visual acceptance remain required."
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T19:09:04.757402+00:00",
+  "sourceCommit": "b8c664698b9911737dbfe1bf20af48776c84f3d6",
+  "baseline": "7e5e1accd116b1bfebc05855fa0d2f22af7d75de",
+  "sourceCanonicalSha256": "21d8812aa8ebdfff1afd9d170fb2c23ccba5cf581471cb3d56b7502732e207eb",
+  "actualFunctionReceiptSha256": "355e9364e162639fbc6541b1f0e3a4002f10d35f018811da9375cdc4e4600c21",
+  "independentFocusedTests": 60,
+  "scopedResult": "No blocking regression found in reviewed source delta; actual-function reproductions also passed.",
+  "covered": [
+    "Selected project is reachable despite retained list search/status filter.",
+    "Overview/Runs routing and task tab bar; old routes/auth continuity.",
+    "Runs retry hidden for archived task/project, missing project or missing permission.",
+    "Customer/optional subgroup/Unassigned hierarchy display."
+  ],
+  "remaining": [
+    "Customer/subgroup creation and editing controls; current grouping is display-only.",
+    "Subgroup breadcrumbs; search tasks/runs; unified Processing navigation.",
+    "Inline task preview remains a documented deviation.",
+    "Independent browser/mobile/color alignment acceptance and production deployment."
+  ],
+  "viewerOwnerNotified": true,
+  "sourceEditsMade": false,
+  "browserAcceptance": false,
+  "productionRuntimeChanged": false,
+  "fullGoalComplete": false
+}

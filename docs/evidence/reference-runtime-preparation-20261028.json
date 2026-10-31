@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "sourceCommit": "e2ccf489ab41160acff3f90e2b4bcd568f72cf24",
+  "scope": "private runtime preparation; this receipt does not assert cutover or worker intake",
+  "linuxSuite": {"tests": 572, "passed": true, "skipped": 0, "seconds": 51.607},
+  "sourceStaging": {
+    "bothHosts": true,
+    "versionDirectory": "reference-e2ccf48/source",
+    "archiveSha256": "29f842022e52e959f21edc8bdffa1afb7beadf73b602ae2df58fc2c85d50e47c",
+    "archiveBytes": 737280,
+    "fileCount": 58,
+    "allFileHashesVerified": true,
+    "clusterReceiptSha256": "a209bd8f22ad51c466e5cde57732c75428396db5ee648b97822cb95da7a1acd3",
+    "mainReceiptSha256": "f9dc0c40ba074ef238b86e8de5ab1391b31456e47173c21ded95b3616ea7fd0c"
+  },
+  "offlineImage": {
+    "imageId": "sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9",
+    "tag": "ledgetop-processing:reference-e2ccf48",
+    "baseCached": true,
+    "pull": false,
+    "buildNetwork": "none",
+    "revisionLabelVerified": true,
+    "runtimeUid": 10001,
+    "actualImportsPassed": true,
+    "actualPrivateSettingsValidated": true,
+    "actualServerCertificateKeyLoaded": true,
+    "actualPrivateCaClientContextLoaded": true,
+    "queueOpenedDuringValidation": false,
+    "buildReceiptSha256": "f806c1dfcb744ba3e857203816310ea6b815a4840e489dfe1507307e9a6cb3f4"
+  },
+  "tls": {
+    "caCertificateSha256": "d35b9882b6f7244ecc09ff934ddb524a27fb2080ac4350087c5b96529a636318",
+    "coordinatorCertificateSha256": "13f855d1578cc5830f5e1345cbec7a3555ef9fd7a9d07df0cdc0dbddedfe4f82",
+    "clusterWorkerCertificateSha256": "e0a86413068da8bd55fced6b14611528adb9fd2871a9efbf257fe416b86053f0",
+    "mainWorkerCertificateSha256": "857bd161e3588a79d43c35bc160b21b11e52ed3a095a8c9ead20efb4ddee735c",
+    "leafExpiryDateUtc": "2027-01-26",
+    "mainChainIpAndKeyPairVerified": true,
+    "caPrivateKeyTransferred": false,
+    "systemTrustChanged": false,
+    "coordinatorPrivateFilesUid": 10001,
+    "workerPrivateFilesUid": 1000,
+    "privateDirectoryMode": "0700",
+    "privateFileMode": "0600"
+  },
+  "configuration": {
+    "newDisjointRoleCredentials": 5,
+    "referenceViewerEnvironments": ["staging"],
+    "nativeCredentialsChanged": false,
+    "brokerConfigured": false,
+    "workerIntakeConfigured": false
+  },
+  "readOnlyPreflight": {
+    "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "historicJobs": 12,
+    "succeeded": 10,
+    "historicalFailed": 2,
+    "queuedRunningHeld": 0,
+    "nativeViewerTasks": 0,
+    "bothEngineQueuesEmpty": true,
+    "bothPhysicalGatesIdleGeneration": 1,
+    "bothMaintenanceNodesActive": true,
+    "stateDatabaseBytes": 69632,
+    "stateLinksOrUnexpectedTypes": false
+  },
+  "rejectedBuild": {
+    "imageId": "sha256:cf231c60c30415a05f3305f578233f678980caeb3d37bd2defd1caa0404f3002",
+    "reason": "Private staged source modes survived plain root-owned COPY; runtime UID could not import package.",
+    "runtimeActivated": false,
+    "fix": "Dockerfile COPY --chown=10001:10001; corrected image passed actual UID imports and settings/TLS validation."
+  },
+  "livePrepare": {
+    "phase": "prepared",
+    "operation": "2879e3a1f83a",
+    "helperSnapshotSha256": "12adeb28c310f8a4240cf226b4d89109fc943fa20c107cea1744fdf7372a8548",
+    "receiptRelativePath": "reference-e2ccf48/coordinator-install-20261028-v2/checkpoint.json",
+    "nativeEnvironmentAndHistoryVerified": true,
+    "maintenanceChanged": false,
+    "coordinatorChanged": false,
+    "firstAttempt": "Refused before checkpoint or maintenance because the helper assumed the unsupported native facade /task/list route. Replaced with authenticated /info and read-only SQLite aggregate; the new frozen prepare snapshot passed. Original empty receipt directory retained."
+  },
+  "runtimeActivatedAtThisCheckpoint": false,
+  "nasManagementAccessVerified": false,
+  "realDatasetRun": false
+}

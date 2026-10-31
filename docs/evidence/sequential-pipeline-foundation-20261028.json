@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T17:49:06.534744+00:00",
+  "status": "source-qualified-and-inactive-staging-accepted",
+  "source": {
+    "sourceCommit": "99ff5a2f042339064c760c13f58e378ffba3bcae",
+    "archiveSha256": "40739790f662769e874b78a70d8cc9e7fb22e128d03d90eb13b9651d9c4e5ee4",
+    "archiveBytes": 3758080
+  },
+  "sourceFiles": 327,
+  "reviewedSourceHashes": {
+    "processing/reference_pipeline.py": "525d866825de2d09db46058c6bdd8b87bde491a74ffe330bc65d37ae8855775a",
+    "tests/test_reference_pipeline.py": "225fc521587f2615932f96ebea5c635a492e6cd8b11fbac57223dd18ee23f910",
+    "tests/emit_reference_pipeline_result.py": "c1319edbc9e08e5aa4e46d994b3526136b619a4cd1173bc41347ea7ee0f1899a",
+    "tests/reference_pipeline_wire_probe.cjs": "fc2713d2704c6907bfbffdf19925f4ec20b6a05d67612ab5e99c474d64bf27f7",
+    "docs/reference-pipeline-stages.md": "861e35f65875ca832a3389d0ff0756c913422bdbd5ad8273759a0c5bb3cb4df7"
+  },
+  "tests": {
+    "linux": {
+      "total": 991,
+      "passed": 987,
+      "skipped": 4,
+      "seconds": 122.531,
+      "exitCode": 0,
+      "resourceWarningsAsErrors": true,
+      "skipReason": "Actual Node probe tests need Node absent from cached Linux test image."
+    },
+    "windowsActualNode": {
+      "total": 4,
+      "passed": 4,
+      "skipped": 0,
+      "seconds": 4.73,
+      "exitCode": 0
+    }
+  },
+  "crossLanguage": {
+    "viewerReferenceCommit": "867dd3f26c16203b5fdceec3af1671846ffa208c",
+    "viewerProtocolCanonicalSha256": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159",
+    "actualProbe": {
+      "status": "accepted",
+      "sourceSha256": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159",
+      "engineVersions": {
+        "odm": "3.8.5",
+        "treedar": "0.0.1"
+      },
+      "objectCount": 2,
+      "resultManifestSha256": "93ddf00e445ea3460fac4c736d4cba01382e760a3795153becb63c0c9324bccd",
+      "negativeCasesRejected": [
+        "missingArchive",
+        "duplicateArchive",
+        "zeroArchive",
+        "unsupportedRole",
+        "missingTreeDarVersion"
+      ],
+      "scope": "Actual Python synthetic stage closure and pinned Viewer validator only; no processing/runtime acceptance."
+    }
+  },
+  "independentStagingReadback": [
+    {
+      "node": "cluster",
+      "sourceCommit": "99ff5a2f042339064c760c13f58e378ffba3bcae",
+      "archiveSha256": "40739790f662769e874b78a70d8cc9e7fb22e128d03d90eb13b9651d9c4e5ee4",
+      "verifiedFiles": 327,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/node-odx-gpu",
+          "id": "7f4723957ad215a52b5f69cdbdc32b323b914e48d62783914974f67b97d28611",
+          "image": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+          "running": true,
+          "startedAt": "2026-10-28T16:54:13.176495987Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/ledgetop-processing-prototype-c3fcb3a",
+          "id": "450217abc4942e6152d5462be7d2f99a356ccf2a5b393800772070fd5fd88278",
+          "image": "sha256:649f53f2b5dc32cd9eb229c42b6bbd7b479249fba5a8d65c48d8afc4f157b249",
+          "running": true,
+          "startedAt": "2026-10-28T15:04:54.798609898Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/clusterodx",
+          "id": "e6d4da528e44c40f23816561187eea66f862dd36e870307d1cde12b57c39dc1a",
+          "image": "sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd",
+          "running": false,
+          "startedAt": "2026-10-28T00:22:55.543397097Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/cluster-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 17:47:19 UTC] ; stop_time=[Wed 2026-10-28 17:47:19 UTC] ; pid=377078 ; code=exited ; status=0 }"
+      }
+    },
+    {
+      "node": "main",
+      "sourceCommit": "99ff5a2f042339064c760c13f58e378ffba3bcae",
+      "archiveSha256": "40739790f662769e874b78a70d8cc9e7fb22e128d03d90eb13b9651d9c4e5ee4",
+      "verifiedFiles": 327,
+      "runtimeChanged": false,
+      "containers": [
+        {
+          "name": "/ledgetop-main-processing-nodeodx-1",
+          "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+          "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+          "running": true,
+          "startedAt": "2026-10-28T15:24:31.019864573Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/dcgm_exporter",
+          "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+          "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+          "running": true,
+          "startedAt": "2026-10-27T21:19:37.266076107Z",
+          "restartCount": 0
+        },
+        {
+          "name": "/node_exporter",
+          "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+          "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+          "running": true,
+          "startedAt": "2026-10-26T22:58:44.651792853Z",
+          "restartCount": 0
+        }
+      ],
+      "updater": {
+        "timer": "active",
+        "lastExit": "0",
+        "execStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json ; ignore_errors=no ; start_time=[Wed 2026-10-28 17:46:48 UTC] ; stop_time=[Wed 2026-10-28 17:46:48 UTC] ; pid=429357 ; code=exited ; status=0 }"
+      }
+    }
+  ],
+  "review": {
+    "status": "clear-after-two-corrections",
+    "directoryPublication": "Existing private root required before any journal files; root+parent fsynced before constructor returns. Factory must durably provision ancestors and retain StateOwner lease.",
+    "wireCompatibility": "Stage-local seven roles; one positive ODM archive only in ODM stage; zero bytes only for reports; actual Viewer paired validator and five exact-path negatives passed."
+  },
+  "historicalFailedQualification": {
+    "sourceCommit": "be7ace6fa7629bb0a6aebfb0a42a7b77b107cced",
+    "linux": {
+      "total": 989,
+      "passed": 985,
+      "skipped": 4,
+      "seconds": 121.481,
+      "exitCode": 0
+    },
+    "actualNodeResult": {
+      "status": "rejected",
+      "category": "BINDING_MISMATCH",
+      "path": "odm_archive"
+    },
+    "meaning": "Python-only green did not establish Viewer interoperability; original archive/report retained, not promoted."
+  },
+  "diagnosticCorrection": "Initial independent staging readback shadowed the expected-container variable with a file hash; corrected read-only helper verified exact container metadata unchanged on both hosts.",
+  "limitations": [
+    "Foundation is not integrated into real intermediate ODM/TreeDar adapters or driver/router. Combined jobs remain rejected and unadvertised.",
+    "No real reconstruction, LiDAR acquisition/geometry, GPU kernel, NAS durability or Viewer ingestion is proved here.",
+    "No queue completion, result outbox, ACK, gate release or cleanup is performed by the new journal.",
+    "Existing runtime and updater source020c15c/codebindingfe01 are unchanged; new source99ff5a2 is inactive.",
+    "NAS broker/provenance issuer/source-retention enforcement, full worker activation/acceptance/cleanup and selected small real dataset remain pending."
+  ],
+  "artifactHashes": {
+    "cluster-independent-readback-difference.json": "714558907a5e8354c1535f9097bf46649e70459298efa3b800a0f9dea6f92d3a",
+    "cluster-source-stage-intent.json": "3f4bd78eaf7099bb78721165ec1b045c85a075e70fc9f873ce3d8a6e5d465c46",
+    "cluster-source-stage-result.json": "776d89f4e4bf11c1e8e58128f953018d1bc5d4cfadf0c731ec1b81478531a6f9",
+    "cluster-source-staged.json": "566e2edc108481794bf02957a9c62953879e4c95ee5534b35e43edb2443f7ea8",
+    "independent-readback.json": "243f8e089dacd56b30f83bffdd31d155b94fade108009339a865c27f3f1d97b1",
+    "linux-tests.log": "6cf796d3c7e3f9969770f992a3b3d5665df3ed93dbb8a2dcd2cabbb8c05f9600",
+    "main-source-stage-intent.json": "d71fcdcad16a675c48b839769193d2257a1a0ff283904c83f54f24130e2d4585",
+    "main-source-stage-result.json": "776d89f4e4bf11c1e8e58128f953018d1bc5d4cfadf0c731ec1b81478531a6f9",
+    "main-source-staged.json": "566e2edc108481794bf02957a9c62953879e4c95ee5534b35e43edb2443f7ea8",
+    "referenceProtocol.cjs": "17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159",
+    "stage_helpers.py": "9b137fc5788e5b3b3c37ae1af3dd7d278c6b9ba7ab9cebd551ad07de86e4ea6e",
+    "synthetic-combined-fixture.json": "9b2db143907a17d8f15a60402925a66f8ad931b9200e8d68fc2f0df6ecf88ff4",
+    "verify_staged.py": "9102bb7aafe41435a6e3538e886ca6355eee9b2a6aa1d76b1114c72594340c2d",
+    "viewer-wire-probe.json": "cd5396b2429b9dd709a8fd83b79313ca13917cbd6abba21f1ba49f0c18fc7f20",
+    "windows-node-tests.log": "3b42dd2fc341022bab0f933c23199bf6681485cec060645efc1c0de5c2e177b4"
+  }
+}

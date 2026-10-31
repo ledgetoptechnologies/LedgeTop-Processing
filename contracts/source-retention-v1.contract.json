@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "binding": {
+    "job_id": "source-job-1",
+    "generation": 1,
+    "environment": "staging",
+    "input_manifest": {
+      "id": "manifest-synthetic-1",
+      "revision": 1,
+      "sha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+      "totalBytes": 6,
+      "objects": [
+        {
+          "id": "image-a",
+          "name": "photo.jpg",
+          "byteSize": 3,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "kind": "image",
+          "mediaType": "image/jpeg"
+        },
+        {
+          "id": "Image-B",
+          "name": "other.jpg",
+          "byteSize": 3,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "kind": "image",
+          "mediaType": "image/jpeg"
+        }
+      ],
+      "objectCount": 2,
+      "inputCounts": {
+        "images": 2,
+        "lidarObjects": 0,
+        "points": 0
+      }
+    },
+    "pipeline_digest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e"
+  },
+  "receipt": {
+    "schemaVersion": 1,
+    "receiptType": "source_retention",
+    "receiptId": "source-receipt-1",
+    "storageReceiptId": "source-storage-1",
+    "jobId": "source-job-1",
+    "generation": 1,
+    "environment": "staging",
+    "inputManifestSha256": "658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7",
+    "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e",
+    "retainedObjectIds": [
+      "Image-B",
+      "image-a"
+    ],
+    "retainedAt": "2026-10-27T12:00:00.000Z",
+    "validationVersion": "ltds-source-retention-v1",
+    "retentionGuarantee": "until_release_ack_v1"
+  },
+  "canonicalReceipt": "{\"environment\":\"staging\",\"generation\":1,\"inputManifestSha256\":\"658f1ac34bab6d6d17650243f1eb762f5692ada15335e54a3fee15dd68ee6df7\",\"jobId\":\"source-job-1\",\"pipelineDigest\":\"16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e\",\"receiptId\":\"source-receipt-1\",\"receiptType\":\"source_retention\",\"retainedAt\":\"2026-10-27T12:00:00.000Z\",\"retainedObjectIds\":[\"Image-B\",\"image-a\"],\"retentionGuarantee\":\"until_release_ack_v1\",\"schemaVersion\":1,\"storageReceiptId\":\"source-storage-1\",\"validationVersion\":\"ltds-source-retention-v1\"}",
+  "receiptSha256": "a1e7a9c44515e48a317716914634bf3cab264a030ba21f614e7f21cbd76636f5"
+}

@@ -124,6 +124,61 @@ class DispatcherTests(unittest.TestCase):
                 launch.assert_not_called()
         self.assertFalse(list(self.state.glob('dispatch-*.json')))
 
+    def test_ineligible_priority_head_exits_cleanly_without_launch_or_record(self):
+        staging = self.submit('staging-awaiting-role')
+        production = self.submit('production-awaiting-role', 'production')
+        with patch.object(dispatcher, 'node_state',
+                          return_value=dispatcher.NodeState('active', ['odx-photo-smoke-v1'])):
+            code, report, launch = self.invoke()
+        self.assertEqual(code, 0)
+        self.assertEqual(report, {'completed': 0, 'completedJobIds': [], 'reason': 'node_ineligible'})
+        launch.assert_not_called()
+        self.assertFalse(list(self.state.glob('dispatch-*.json')))
+        for job in (staging, production):
+            self.assertEqual(self.request('/v1/prototype/jobs/' + job['id'])['job']['status'], 'queued')
+
+    def test_allowed_role_launches_and_absent_metadata_remains_compatible(self):
+        self.submit('eligible-role')
+        with patch.object(dispatcher, 'node_state',
+                          return_value=dispatcher.NodeState('active', [dispatcher.PROFILE])):
+            _, report, launch = self.invoke(max_jobs=1)
+        self.assertEqual(report['completed'], 1)
+        launch.assert_called_once()
+
+    def test_node_metadata_preserves_and_validates_allowed_profiles(self):
+        for profiles in ([], [dispatcher.PROFILE], None, 'all', [None], ['../bad']):
+            with self.subTest(profiles=profiles), \
+                    patch.object(dispatcher.http.client, 'HTTPConnection') as connection:
+                response = connection.return_value.getresponse.return_value
+                response.status = 200
+                response.read.return_value = json.dumps({'node': {
+                    'id': 'cluster', 'state': 'active', 'allowedProfiles': profiles}}).encode()
+                if isinstance(profiles, list) and all(isinstance(p, str) and dispatcher.SLUG.fullmatch(p)
+                                                       for p in profiles):
+                    snapshot = dispatcher.node_state(self.base, TOKEN, 'cluster')
+                    self.assertEqual(snapshot, 'active')
+                    self.assertEqual(snapshot.allowed_profiles, profiles)
+                else:
+                    with self.assertRaises(dispatcher.DispatchError):
+                        dispatcher.node_state(self.base, TOKEN, 'cluster')
+
+    def test_unrestricted_policy_rejects_cluster_before_any_launch(self):
+        for node_id in ('cluster', 'nodecluster'):
+            with self.subTest(node_id=node_id), self.assertRaisesRegex(dispatcher.DispatchError, 'requires node main'):
+                self.invoke(node_id=node_id, resource_policy='main-unrestricted')
+        self.assertFalse(list(self.state.glob('dispatch-*.json')))
+
+    def test_main_policy_is_passed_to_child_and_recorded(self):
+        self.submit('main-unrestricted-fixture')
+        _, report, _ = self.invoke(node_id='main', resource_policy='main-unrestricted', max_jobs=1)
+        self.assertEqual(report['completed'], 1)
+        record = json.loads(next(self.state.glob('dispatch-*.json')).read_text())
+        self.assertEqual(record['resourcePolicy'], 'main-unrestricted')
+        with patch.object(dispatcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            dispatcher.launch(self.args(node_id='main', resource_policy='main-unrestricted'), self.base, self.scratch)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index('--resource-policy') + 1], 'main-unrestricted')
+
     def test_node_drain_between_jobs_stops_before_second_child(self):
         first = self.submit('before-drain')
         self.submit('after-drain')

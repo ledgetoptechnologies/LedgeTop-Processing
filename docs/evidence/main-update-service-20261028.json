@@ -1,0 +1,300 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T16:44:35.559781+00:00",
+  "scope": "main-node-container-update-service",
+  "status": "installed-enabled-no-change-accepted",
+  "source": {
+    "sourceCommit": "020c15c79577aff83af388fe476451ceca545518",
+    "archiveSha256": "7db3e9cf38f2847ec0991ce3e4954bdf33cc0d98723e4a58722dd363db0a015b",
+    "archiveBytes": 3624960
+  },
+  "sourceFiles": 319,
+  "configId": "696c73a001d44bb5532aec0b7da99932659f93dc4e35300f69285cb37cadf338",
+  "codeBindingSha256": "fe01afff0ccdec36be9c663843f4b7613523f13e2b21b7e5e6764c86a73a84da",
+  "tests": {
+    "linux": {
+      "total": 965,
+      "passed": 961,
+      "skipped": 4,
+      "seconds": 121.703,
+      "exitCode": 0,
+      "notes": "Four actual Node probe tests require Node absent in this Linux image; three existing fork-in-multithreaded-process deprecation warnings."
+    },
+    "windows": {
+      "total": 68,
+      "passed": 29,
+      "skipped": 39,
+      "seconds": 3.728,
+      "exitCode": 0,
+      "notes": "Includes all four actual Node probes; skipped tests are Linux-only."
+    }
+  },
+  "preparation": {
+    "status": "prepared-not-installed",
+    "sourceCommit": "020c15c79577aff83af388fe476451ceca545518",
+    "codeBindingSha256": "fe01afff0ccdec36be9c663843f4b7613523f13e2b21b7e5e6764c86a73a84da",
+    "configId": "696c73a001d44bb5532aec0b7da99932659f93dc4e35300f69285cb37cadf338",
+    "configPath": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json",
+    "units": {
+      "ledgetop-processing-image-updates.service": "d7e10ea0a4ab3ad672b087324ff6b16c047a991bef38ad37f1db6e02cd24c402",
+      "ledgetop-processing-image-updates.timer": "5fecf386eea83eafa9be5200092bf8a1503d2c5daf656e034c873c00ddf9bb33"
+    },
+    "currentImage": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "unitVerificationExit": 0
+  },
+  "bootstrap": {
+    "configId": "696c73a001d44bb5532aec0b7da99932659f93dc4e35300f69285cb37cadf338",
+    "legacyJournals": 1,
+    "serviceId": "main-image-updates-v1",
+    "status": "bootstrapped"
+  },
+  "preInstallStatus": {
+    "configId": "696c73a001d44bb5532aec0b7da99932659f93dc4e35300f69285cb37cadf338",
+    "host": {
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+      "imageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+      "nodeId": "main"
+    },
+    "pending": null,
+    "serviceId": "main-image-updates-v1",
+    "status": "observed"
+  },
+  "firstTick": {
+    "nextDiscoveryAt": 1793227209.8256361,
+    "operationId": null,
+    "serviceId": "main-image-updates-v1",
+    "state": null,
+    "status": "no_change",
+    "transitions": 1
+  },
+  "secondTick": {
+    "nextDiscoveryAt": 1793227209.8256361,
+    "operationId": null,
+    "serviceId": "main-image-updates-v1",
+    "state": null,
+    "status": "not_due",
+    "transitions": 0
+  },
+  "installation": {
+    "status": "installed-enabled",
+    "sourceCommit": "020c15c79577aff83af388fe476451ceca545518",
+    "configId": "696c73a001d44bb5532aec0b7da99932659f93dc4e35300f69285cb37cadf338",
+    "codeBindingSha256": "fe01afff0ccdec36be9c663843f4b7613523f13e2b21b7e5e6764c86a73a84da",
+    "units": {
+      "ledgetop-processing-image-updates.service": "d7e10ea0a4ab3ad672b087324ff6b16c047a991bef38ad37f1db6e02cd24c402",
+      "ledgetop-processing-image-updates.timer": "5fecf386eea83eafa9be5200092bf8a1503d2c5daf656e034c873c00ddf9bb33"
+    },
+    "loaded": {
+      ".service": {
+        "FragmentPath": "/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.service",
+        "DropInPaths": "",
+        "WorkingDirectory": "/home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/source",
+        "ExecStart": "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -B -m ops.update_service tick --config /home/bkoltz/.local/share/ledgetop-processing-reference/reference-020c15c79577aff83af388fe476451ceca545518/main-update-service.json ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+        "CPUQuotaPerSecUSec": "infinity",
+        "MemoryMax": "infinity",
+        "TasksMax": "308842"
+      },
+      ".timer": {
+        "FragmentPath": "/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.timer",
+        "DropInPaths": ""
+      }
+    },
+    "properties": {
+      ".service": "Result=success\nExecMainStartTimestamp=Wed 2026-10-28 16:44:00 UTC\nExecMainExitTimestamp=n/a\nExecMainStatus=0\nLoadState=loaded\nActiveState=activating\nSubState=start\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.service",
+      ".timer": "NextElapseUSecMonotonic=infinity\nLastTriggerUSec=Wed 2026-10-28 16:44:00 UTC\nResult=success\nLoadState=loaded\nActiveState=active\nSubState=running\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.timer"
+    }
+  },
+  "verification": {
+    "configId": "696c73a001d44bb5532aec0b7da99932659f93dc4e35300f69285cb37cadf338",
+    "codeBindingSha256": "fe01afff0ccdec36be9c663843f4b7613523f13e2b21b7e5e6764c86a73a84da",
+    "containers": [
+      {
+        "name": "/ledgetop-main-processing-nodeodx-1",
+        "id": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+        "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+        "running": true,
+        "startedAt": "2026-10-28T15:24:31.019864573Z",
+        "restartCount": 0,
+        "limits": {
+          "Memory": 0,
+          "MemorySwap": 0,
+          "NanoCpus": 0,
+          "CpuQuota": 0,
+          "CpusetCpus": "",
+          "PidsLimit": null
+        },
+        "devices": [
+          {
+            "Driver": "nvidia",
+            "Count": -1,
+            "DeviceIDs": null,
+            "Capabilities": [
+              [
+                "gpu"
+              ]
+            ],
+            "Options": null
+          }
+        ]
+      },
+      {
+        "name": "/dcgm_exporter",
+        "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+        "image": "sha256:613ab03c11d442fd960ff515f547e9921537454a712d08160bc8f677f89f1c35",
+        "running": true,
+        "startedAt": "2026-10-27T21:19:37.266076107Z",
+        "restartCount": 0,
+        "limits": {
+          "Memory": 0,
+          "MemorySwap": 0,
+          "NanoCpus": 0,
+          "CpuQuota": 0,
+          "CpusetCpus": "",
+          "PidsLimit": null
+        },
+        "devices": null
+      },
+      {
+        "name": "/node_exporter",
+        "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+        "image": "sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0",
+        "running": true,
+        "startedAt": "2026-10-26T22:58:44.651792853Z",
+        "restartCount": 0,
+        "limits": {
+          "Memory": 0,
+          "MemorySwap": 0,
+          "NanoCpus": 0,
+          "CpuQuota": 0,
+          "CpusetCpus": "",
+          "PidsLimit": null
+        },
+        "devices": null
+      }
+    ],
+    "books": {
+      "capacity.sqlite": {
+        "sha256": "124042d4ad114ed212d7a0d4c9fa136952f6c652b0fb9a6b33c29b531e13490c",
+        "bytes": 12288
+      },
+      "registry.sqlite": {
+        "sha256": "445ce11e9503d9c20ceff6301080db02e54d578efe3efe3e465d7191451a50c3",
+        "bytes": 24576
+      }
+    },
+    "gate": {
+      "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+      "nodeId": "main",
+      "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+      "generation": 1,
+      "reservation": null
+    },
+    "nodes": [
+      {
+        "id": "cluster",
+        "state": "active",
+        "revision": 6
+      },
+      {
+        "id": "main",
+        "state": "active",
+        "revision": 18
+      }
+    ],
+    "jobs": {
+      "count": 12,
+      "statuses": {
+        "succeeded": 10,
+        "failed": 2
+      }
+    },
+    "discovery": {
+      "id": 1,
+      "highwater": 1793205840.8315496,
+      "next_due": 1793227209.8256361,
+      "state": "idle",
+      "last_started": 1793205604.4291868,
+      "last_finished": 1793205609.8256361,
+      "attempt": 1
+    },
+    "properties": {
+      ".service": "Result=success\nExecMainStartTimestamp=Wed 2026-10-28 16:44:00 UTC\nExecMainExitTimestamp=Wed 2026-10-28 16:44:00 UTC\nExecMainStatus=0\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.service",
+      ".timer": "NextElapseUSecMonotonic=1d 17h 46min 53.055227s\nLastTriggerUSec=Wed 2026-10-28 16:44:00 UTC\nResult=success\nLoadState=loaded\nActiveState=active\nSubState=waiting\nFragmentPath=/home/bkoltz/.config/systemd/user/ledgetop-processing-image-updates.timer"
+    },
+    "serviceJournal": "Starting LedgeTop Processing image update supervision...\n{\"nextDiscoveryAt\":1793227209.8256361,\"operationId\":null,\"serviceId\":\"main-image-updates-v1\",\"state\":null,\"status\":\"not_due\",\"transitions\":0}\nFinished LedgeTop Processing image update supervision.\nStarting LedgeTop Processing image update supervision...\n{\"nextDiscoveryAt\":1793227209.8256361,\"operationId\":null,\"serviceId\":\"main-image-updates-v1\",\"state\":null,\"status\":\"not_due\",\"transitions\":0}\nFinished LedgeTop Processing image update supervision."
+  },
+  "legacyBeforeBootstrap": {
+    "capacity.sqlite": {
+      "sha256": "124042d4ad114ed212d7a0d4c9fa136952f6c652b0fb9a6b33c29b531e13490c",
+      "bytes": 12288,
+      "mode": "0o600",
+      "uid": 1000
+    },
+    "registry.sqlite": {
+      "sha256": "445ce11e9503d9c20ceff6301080db02e54d578efe3efe3e465d7191451a50c3",
+      "bytes": 24576,
+      "mode": "0o600",
+      "uid": 1000
+    }
+  },
+  "legacyAfterChecks": {
+    "capacity.sqlite": {
+      "sha256": "124042d4ad114ed212d7a0d4c9fa136952f6c652b0fb9a6b33c29b531e13490c",
+      "bytes": 12288,
+      "mode": "0o600",
+      "uid": 1000
+    },
+    "registry.sqlite": {
+      "sha256": "445ce11e9503d9c20ceff6301080db02e54d578efe3efe3e465d7191451a50c3",
+      "bytes": 24576,
+      "mode": "0o600",
+      "uid": 1000
+    }
+  },
+  "limitations": [
+    "No new image was available: actual installed no-change/throttle/timer acceptance; prior owned update remains separate evidence.",
+    "Cluster updater is not installed; current cluster NodeODM remains managed manually.",
+    "No TrueNAS modification or real dataset processing occurred.",
+    "NAS-backed submissions and complete Viewer delivery/purge acceptance remain incomplete.",
+    "Gaussian splats remain disabled; startup qualification is not a real GPU processing trial."
+  ],
+  "artifactHashes": {
+    "bootstrap-intent.json": "0534c85ce65fcfb6d128bb9272dbd03c9fb7f98fedf7bf62c5bee3d9754fb4f3",
+    "bootstrap-result.json": "bd69ab714a1022c8d14d767da5db9ba3a226e8e969540bc9209dce5d005763b5",
+    "bootstrap-stdout.json": "09013fdc8ea4b0f7533879f03704d681e183a81503424641b22f0f4e0c550072",
+    "cluster-source-stage-intent.json": "b7390423e9042687ea44528c4721942775e0def2bd086ad0a0e9e485d26904df",
+    "cluster-source-stage-result.json": "9f804c3db2b149cc3b8e72dca65b899b99ef63386cb361b316befc16ab139012",
+    "cluster-source-staged.json": "9d88c6a66a0b54b16bd31787b553dd0ac490830e75757d5a2dccae37b1849cff",
+    "control_service.py": "e68e25d61ff7d1cf43190815e40e633cd48dc070667397a43b8a10c13a9f5d8d",
+    "install-intent.json": "60df594756411180c178dbb0fd388a56061377f3046978866e51c64999b22a37",
+    "install-result.json": "c579012e50f9fdcb780e1d2b21860c5be717c7bad2e5afac79e2eb6bdb8fb225",
+    "install-stdout.json": "589c8da3b0233a8e08109271cf9e04428a7c6e9e8327dbede2e4ab1911797e18",
+    "install_main.py": "23c94d34de0bc3785a7592e58fe7b8ced8fd44d26cc32c03a07a5a7e6ff6b39a",
+    "legacy-after-checks.json": "d85f174b95413727a79756896255faf4d3e938bb1e0f49a71f589f865cdcfc5d",
+    "legacy-before-bootstrap.json": "d85f174b95413727a79756896255faf4d3e938bb1e0f49a71f589f865cdcfc5d",
+    "linux-tests.log": "003cdd0102c6315af96ca89ff2efd0c80895e32533a7b571f251a7619c3a8b73",
+    "main-source-stage-intent.json": "9933bacf318d78af315a239335eb42cfd35a306fa58cfd22e4fa5962c88e37d7",
+    "main-source-stage-result.json": "9f804c3db2b149cc3b8e72dca65b899b99ef63386cb361b316befc16ab139012",
+    "main-source-staged.json": "9d88c6a66a0b54b16bd31787b553dd0ac490830e75757d5a2dccae37b1849cff",
+    "prepare-intent.json": "1d3e14a2252ee9374e847f4b5e5d880172bd19b24f38ed630c2be330d02d1f4b",
+    "prepare-result.json": "4bd5eb24747a7af1c61b2172ddbcc8a0b29fccc79b3d383b1a1a68a1cb3fadc1",
+    "prepare-stdout.json": "123d0b2fc0e620528679e46cefb7272b8864b1af0d093bb421491d65e510e755",
+    "prepare_main.py": "8caf73beec472e157c8f9ee1276ef091bc986f966a0dc9656aa71c84f2aca6ed",
+    "stage_helpers.py": "365961517530042bb45ea81e197fc5f2578368c4d5e038c6037dd2ad4ff8919c",
+    "status-intent.json": "a1738acc05a1b95fe2fad4dfea91a4736bf2bdc63953e44cd403a474c063f382",
+    "status-result.json": "918349a938da05d4ba37ca087795970cca186c1d9283f1b7ae5e96952b39a77e",
+    "status-stdout.json": "7e4df022578e27ffbc561234f9afcc168109038d2f2eb165dbccd29156dd777f",
+    "tick-first-intent.json": "28dcdc99601031aaab0f1ba7e2df441d5deabfa3d5a48a5d035061761af2e26b",
+    "tick-first-result.json": "4f6868807f434d5e29d1aad8bb61645d5fbeac446b3df881bcfc1649dc2558c5",
+    "tick-first-stdout.json": "3d4cf9c7efbb7653c2f7cf91b3d0e51489e85fc9dbab116fcff8ccdd2c4e1426",
+    "tick-second-intent.json": "03f5eac71d524bbcf7ba3801eabfb282d2a9d793265fb7fca3b1e301420552cc",
+    "tick-second-result.json": "8523e2f5f3dea189918ca854d66cd03f4de82603813788a4b6c54cba6ac7b0ed",
+    "tick-second-stdout.json": "e2698ed7954d8b6f33d86506a7e1851a870e63f1a665e422240c108389b24d07",
+    "verify-intent.json": "64c1564db862d4d6d4dffea6abae2253bbcca9e41a3cbb17dddd2fe8e2bdee1c",
+    "verify-result.json": "3fbe5cf8bdfeafd98c3eefaccb809822ec04de12e81639a524b36b652faadc5a",
+    "verify-stdout.json": "671892d6df8898663ed73b255ceaf0c0d1f35b978dac79df199d24ef42614f48",
+    "verify_main.py": "37d0408325df572c5ab7180b8b8b862c64cce33dcf0ed8ebe68f06c9567ed146",
+    "windows-tests.log": "614cfabb49d1231abae6ed74b393673457c91b5d41ac66fff7410774ff9bb23c"
+  }
+}

@@ -116,8 +116,8 @@ health may change before an eventual real submission.
    undersized local node.
 3. The selected engine works on a temporary copy. The result returns to TrueNAS
    and is checked there before temporary copies are eligible for deletion.
-4. NodeODX/ODM is the first coordinated engine. OpenSPLAT and TreeDar follow
-   through separate adapters and explicit input/output contracts.
+4. NodeODX/ODM and TreeDar use separate adapters and explicit input/output
+   contracts. Gaussian splats are deferred future work.
 
 ## Repository layout and TreeDar development
 
@@ -148,9 +148,10 @@ See [TreeDar's README](engines/treedar/README.md),
 run folders stay in their current private locations; the migration moves code
 and documentation only.
 
-The proposed photo threshold of 800 is a **starting configuration value**, not
-a guarantee that the cluster PC can safely process 800 photos. Benchmarks and
-free disk/RAM checks must set the actual admission limit.
+The configured cluster threshold is 1,000 photos. This is an admission ceiling;
+benchmarks and free disk/RAM checks may require a lower limit. TreeDar is assigned
+to main only, with one global running or held job across both processing families.
+See [node roles and rollout status](docs/node-roles.md) for current limitations.
 
 ## Sources
 

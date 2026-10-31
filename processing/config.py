@@ -5,6 +5,8 @@ import os
 import re
 from urllib.parse import urlsplit
 
+ADMISSION_DRAIN_QUALIFIED = False
+
 
 @dataclass(frozen=True)
 class Config:
@@ -22,6 +24,16 @@ class Config:
     prototype_observer_token: str = ""
     local_node_token: str = field(default="", repr=False)
     main_node_token: str = field(default="", repr=False)
+    treedar_node_ids: tuple[str, ...] | None = None
+    viewer_enabled: bool = False
+    viewer_token: str = field(default='', repr=False)
+    viewer_staging_token: str = field(default='', repr=False)
+    viewer_max_input_bytes: int = 20 * 1024 ** 3
+    viewer_max_archive_bytes: int = 100 * 1024 ** 3
+    reference_config_path: str = field(default='', repr=False)
+    admission_drain_enabled: bool = False
+    authority_lease_dir: str = ''
+    viewer_production_held: bool = False
 
 
 def _node_origin(value: str) -> str:
@@ -61,11 +73,42 @@ def from_environment() -> Config:
     if (not 1 <= len(node_ids) <= 8 or 'cluster' not in node_ids or len(set(node_ids)) != len(node_ids)
             or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):
         raise ValueError("PROCESSING_PROTOTYPE_NODE_IDS must list 1 to 8 unique ASCII node IDs")
+    treedar_node_ids = tuple(os.environ.get("PROCESSING_TREEDAR_NODE_IDS", ",".join(node_ids)).split(","))
+    if (not treedar_node_ids or len(set(treedar_node_ids)) != len(treedar_node_ids)
+            or any(node not in node_ids for node in treedar_node_ids)):
+        raise ValueError("PROCESSING_TREEDAR_NODE_IDS must list unique configured node IDs")
     photo_smoke = os.environ.get("PROCESSING_PHOTO_SMOKE_ENABLED", "0")
     if photo_smoke not in ("0", "1"):
         raise ValueError("PROCESSING_PHOTO_SMOKE_ENABLED must be 0 or 1")
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
+    viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
+    if lease_dir and (not os.path.isabs(lease_dir) or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
+        raise ValueError('PROCESSING_AUTHORITY_LEASE_DIR must be an absolute path used with persistent state')
+    production_admission = os.environ.get('PROCESSING_VIEWER_PRODUCTION_ADMISSION', 'open')
+    if production_admission not in ('open', 'held'):
+        raise ValueError('PROCESSING_VIEWER_PRODUCTION_ADMISSION must be open or held')
+    admission = os.environ.get('PROCESSING_ADMISSION_DRAIN_ENABLED', '0')
+    if admission not in ('0', '1') or (admission == '1' and (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not operator)):
+        raise ValueError('admission drain requires persistent state and operator credential')
+    if admission == '1' and ADMISSION_DRAIN_QUALIFIED is not True:
+        raise ValueError('admission drain is not qualified for startup')
+    if viewer not in ('0', '1'):
+        raise ValueError('PROCESSING_VIEWER_ENABLED must be 0 or 1')
+    viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
+    viewer_staging = os.environ.get('PROCESSING_VIEWER_STAGING_TOKEN', '')
+    if viewer == '1':
+        if (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or 'main' not in node_ids
+                or not os.environ.get('LOCAL_NODE_URL') or not os.environ.get('MAIN_NODE_URL')):
+            raise ValueError('Viewer requires persistent state and both configured nodes')
+        credentials = (token, operator, observer)
+        for value in (viewer_token, viewer_staging):
+            if value and (len(value) < 32 or value in credentials
+                          or any(ord(c) < 33 or ord(c) > 126 for c in value)):
+                raise ValueError('Viewer credentials must be separate printable secrets')
+        if not viewer_token or (viewer_staging and viewer_staging == viewer_token):
+            raise ValueError('separate Viewer production credential required')
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
@@ -73,7 +116,7 @@ def from_environment() -> Config:
         api_token=token,
         local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
         main_node_url=_node_origin(os.environ.get("MAIN_NODE_URL", "")),
-        local_max_photos=_positive_int(os.environ.get("LOCAL_MAX_PHOTOS", "800"), "LOCAL_MAX_PHOTOS", 1_000_000),
+        local_max_photos=_positive_int(os.environ.get("LOCAL_MAX_PHOTOS", "1000"), "LOCAL_MAX_PHOTOS", 1_000_000),
         local_max_input_bytes=_positive_int(os.environ.get("LOCAL_MAX_INPUT_BYTES", "21474836480"), "LOCAL_MAX_INPUT_BYTES", 10**15),
         bind_host=os.environ.get("PROCESSING_BIND_HOST", "127.0.0.1"),
         port=_positive_int(os.environ.get("PROCESSING_PORT", "8080"), "PROCESSING_PORT", 65535),
@@ -81,7 +124,18 @@ def from_environment() -> Config:
         prototype_operator_token=operator,
         photo_smoke_enabled=photo_smoke == "1",
         prototype_node_ids=node_ids,
+        treedar_node_ids=treedar_node_ids,
+        viewer_enabled=viewer == '1', viewer_token=viewer_token,
+        viewer_staging_token=viewer_staging,
+        viewer_max_input_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_INPUT_BYTES', str(20 * 1024 ** 3)),
+                                            'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
+        viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
+                                              'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
         prototype_observer_token=observer,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
+        reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
+        admission_drain_enabled=admission == '1',
+        authority_lease_dir=lease_dir,
+        viewer_production_held=production_admission == 'held',
     )

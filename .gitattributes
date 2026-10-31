@@ -1,0 +1,3 @@
+# Shared wire fixture hashes identify exact bytes across Windows and Linux.
+contracts/reference-v1.contract.json text eol=lf
+contracts/source-retention-v1.contract.json text eol=lf

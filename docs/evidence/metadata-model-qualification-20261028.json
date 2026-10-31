@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T21:58:04.760211+00:00",
+  "sourceCommit": "ab2826e108dc8974882043eafd486a7adb30cd65",
+  "status": "inactive-non-authorizing-model-only",
+  "pins": {
+    "processing/reference_metadata_journal.py": "0d1c6689434209721ad7cd55092c24abfef3c7a37a3405c750720dde1e86218f",
+    "tests/test_reference_metadata_journal.py": "29874e4154ab51315ddb47e28e336863175a7e641b418edbd9953dff81ed96e2",
+    "docs/reference-metadata-journal.md": "cbe90b1fe8eb512b891433c9a099b3106cd25166aa7697ff9bb4dfbc776491f2"
+  },
+  "rootFinalWindows": {
+    "passed": 20,
+    "seconds": 0.425,
+    "resourceWarningsAsErrors": true
+  },
+  "independentReview": {
+    "windowsPassed": 20,
+    "windowsSeconds": 0.422,
+    "linuxPassed": 20,
+    "linuxSeconds": 0.412,
+    "network": "none",
+    "rootFilesystem": "read-only",
+    "scope": "Reviewed test bytes differed only by removal of one trailing blank line; final committed tests rerun by root."
+  },
+  "guarantees": [
+    "Exact original-context and response binding checks.",
+    "Bounded serialized transitions and recomputed counters.",
+    "Matching positive or denial stays unverified and grants no execution authority."
+  ],
+  "notImplemented": [
+    "Durable owner store, authenticated persistence and rollback resistance.",
+    "Issuer endpoints, actor verification and replay/lookup agreement.",
+    "Actual source custody/purge enforcement and original claim/budget mapping.",
+    "Typed metadata disk charge and runtime admission/next-round authorization."
+  ],
+  "runtimeActivated": false,
+  "remoteStagePerformed": false,
+  "nasMutated": false
+}

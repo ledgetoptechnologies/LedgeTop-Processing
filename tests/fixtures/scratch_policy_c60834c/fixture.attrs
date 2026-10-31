@@ -1,0 +1,8 @@
+{
+  "byteSize": 25324,
+  "gitBlob": "85092a8db5395e7529effc63b0ef20a97509f03a",
+  "preserveExactBytes": true,
+  "sha256": "770381c4115148cad3e31d58d282abe3c665ad8d185f716a5b4057202ac36e88",
+  "sourceCommit": "c60834cd156b7ec073ab381c0d9cde4ecee12bd3",
+  "sourcePath": "processing/scratch_policy.py"
+}

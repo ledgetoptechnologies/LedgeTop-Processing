@@ -1,0 +1,522 @@
+{
+  "proposalVersion": 3,
+  "status": [
+    "UNAGREED",
+    "NOTWIRECOMPATIBLE",
+    "NOTACTIVATED"
+  ],
+  "scope": "Review-only outer-v2 candidate; no validators, adapters, factories, migrations, runtime flags, provider calls or implementation authority. Independent of current Viewer PR251 acceptance.",
+  "candidateProtocol": "ltds-reference-outer-v2-proposed",
+  "compatibility": {
+    "wireVersion": 2,
+    "v1ChangedInPlace": false,
+    "rejectDowngradeAndUnknownVersion": true,
+    "migration": "UNRESOLVED: negotiate explicit v2 capability plus paired contract fingerprint; never send v2 fields or treedar_bundle to v1 validators. Existing v1 ODM-only jobs and receipts remain v1, not rewritten.",
+    "capabilityActivation": "All three modes remain unadvertised under this proposed v2 until both owners accept contracts, real adapters, ingestion, retention, authentication, restart and cleanup evidence. Existing installed v1 capabilities are unaffected.",
+    "gaussian_splat": {
+      "available": false,
+      "enabled": false,
+      "requested": false
+    },
+    "inputManifestCompatibility": "Verified referenceProtocol.js:32-35,63-79,97-115: no pipeline field in InputManifest. Submission holds manifest and pipeline separately. Proposal explicitly retains that closed input shape; owner must reject any other producer schema with embedded pipeline until separately negotiated, never silently strip/rewrite fields."
+  },
+  "encoding": {
+    "objectPolicy": "Every fieldset below is closed: all listed fields required, no additional keys; nullable fields explicitly marked. Arrays bounded by separately agreed positive limits; unique identities and ASCII ordering where specified.",
+    "jsonPolicy": "Bound raw bytes before decode; reject duplicate and escaped duplicate keys, malformed UTF-8, trailing data, excessive depth, floating/exponent encodings for integer fields, unsafe arithmetic, negative zero and unsafe keys.",
+    "identifier": "Inherited object/receipt/reservation/stage/operation slug: ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$. New v2 parent jobId and submissionId use lowercase canonical UUID as Processing _uuid and pipeline parent do: exactly 8-4-4-4-12 lowercase hex groups, parsed UUID string must equal supplied string, no extra UUID-version restriction for parent job. Existing v1 Node fixtures permit slug job IDs; do not rewrite or auto-upgrade them.",
+    "byteSize": "Physical artifacts, original sources and custody/accepted copies in new paired candidate have positive safe-integer byteSize<=9007199254740991. EPT closure entry size may be zero only if a semantic validator explicitly permits it; total artifact/raw bytes remains positive. Existing v1 Node zero allowances are not rewritten. Empty physical ZIP is never proof a requested product exists.",
+    "time": "Canonical UTC millisecond timestamp; issuer checks against trusted clock; time alone is not custody or cleanup authority.",
+    "sha256Syntax": "64 lowercase hexadecimal characters. The digest domain is field-specific below; a hash string alone supplies no authentication.",
+    "physicalByteDigest": "Artifact.sha256, InputObject.sha256, CustodyObject.sha256, OriginalObjectBinding.sha256, AcceptedArtifact.sha256 and EptClosureEntry.sha256 hash exactly byteSize bytes of one physical file, unchanged and without omission, canonicalization, decompression or directory serialization. ZIP hashes cover exact compressed ZIP bytes; accepted copies must reproduce them.",
+    "structuredRecordDigest": "Reuse existing Node canonicalBytes22-34 and shared reference fixture: UTF8, ASCII lexicographic object-key order, no whitespace, arrays preserve order, JSON string escapes, finite nonnegative safe integer metadata only, no negative zero. InputManifest.sha256 omits ONLY top-level sha256; ResultManifest.resultManifestSha256 omits ONLY that own field. Proposed ParentCompletion.completionSha256 and PointcloudZipManifest.manifestSha256 follow same explicit single-own-field rule. Child file sha256 fields are NEVER omitted. Python canonical_json sorts keys/compact separators/ensure_ascii=False/allow_nan=False; cross-language stable metadata avoids float serialization. Any truly new digest domain must be explicitly paired; no generic recursive omission.",
+    "pipelineDigestDomain": "Existing server-owned opaque SHA256 pipeline/request digest, carried and compared exactly. General dynamic ODM option serialization is NOT a cross-language digest input (Python canonical_json85-92; shared fixture requestDigest). This proposal adds no client algorithm for deriving it.",
+    "inheritedLimits": {
+      "metadataBytes": 4194304,
+      "objects": 10000,
+      "maximumSafeInteger": 9007199254740991,
+      "slugMaximumCharacters": 128,
+      "engineVersionMaximumCharacters": 128,
+      "basenameMaximumCharacters": 255,
+      "transferBudgetRule": "originalTotalBytes <= cumulativeByteBudget <= min(3*originalTotalBytes,9007199254740991); no reset on reauthorization/restart",
+      "source": "Node referenceProtocol6,14-22,39-46,58-79,132-134; Python reference_protocol18-20,40-57,85-104,153-184; shared reference-v1.contract.json"
+    },
+    "newLimits": "New metadata records inherit 4194304-byte whole-message cap and10000 array member ceiling; nested arrays must also fit whole-message cap and safe byte arithmetic. TreeDar bundle keeps existing separate six explicit positive configured limits, maxFiles<=64,maxManifestBytes<=1048576. EPT/ODM expanded member count/raw bytes/control proof/disk-copy limits are new per-admission positive policy values, not permission to default unlimited; exact deployment values remain unagreed, no validator implemented.",
+    "originalBasenameRules": "New paired candidate uses intersection of existing Node/Python safety: ASCII printable basename1..255 retaining a nonempty extension; reject slash,backslash,colon,<,>,quote,pipe,question mark,asterisk,leading dot or leading space,trailing dot or space,and Windows CON/PRN/AUX/NUL/COM1..9/LPT1..9 stem. Unique original object IDs; case-insensitive original basename uniqueness. Preserve original ID/hash/bytes/name, reject incompatible new submission rather than rename/rekey old job."
+  },
+  "fieldsets": {
+    "Binding": {
+      "jobId": "lowercase canonical UUID: str(UUID(value))==value, Processing reference_protocol40-47; pinned52b7 reference_pipeline parent282,314 and reference_store326. Existing v1 result validator237 uses slug and fixtures remain unchanged.",
+      "generation": "positive integer",
+      "environment": "staging|production, from credential identity",
+      "inputManifestSha256": "sha256 original immutable input manifest",
+      "pipelineDigest": "sha256 server-approved requested pipeline and requested products",
+      "parentClaimId": "opaque original durable parent claim; never substituted on restart"
+    },
+    "StageBinding": {
+      "binding": "Binding",
+      "stageId": "opaque stable ID persisted before dispatch",
+      "stageOrdinal": "positive integer",
+      "engine": "odm|treedar",
+      "workerId": "exact authenticated admitted worker identity, slug^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ (max64 fixed physical worker in pinned52b7 reference_pipeline64-65); do not impose64 globally on other object/receipt slugs",
+      "workerImageDigest": "sha256 immutable admitted worker image",
+      "reservationId": "opaque durable physical reservation ID",
+      "reservationReceiptId": "opaque issuer-verified physical reservation receipt",
+      "continuationId": "opaque stable durable continuation ID"
+    },
+    "Submission": {
+      "schemaVersion": "literal 2",
+      "protocol": "literal ltds-reference-outer-v2-proposed pending naming agreement",
+      "submissionId": "lowercase canonical UUID. New v2 candidate requires intersection with existing Node submission UUID variant/version predicate^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$; no automatic v1 migration",
+      "inputManifest": "InputManifest with exact compatible existing v1 input-closure fieldset; no pipeline field inside. Reuse is data-shape compatibility only, never automatic translation or upgrading of existing v1 jobs/receipts.",
+      "pipeline": "Pipeline",
+      "capabilityFingerprint": "sha256 exact negotiated discovery",
+      "contractFingerprint": "sha256 paired accepted v2 contract, unavailable in this proposal"
+    },
+    "Pipeline": {
+      "mode": "odm_only|treedar_only|combined",
+      "odm": "OdmRequest",
+      "treedar": "TreeDarRequest",
+      "gaussian_splat": "closed object {requested:false}"
+    },
+    "OdmRequest": {
+      "requested": "boolean matching mode",
+      "options": "existing bounded JSON options, validated by admitted ODM adapter; no client-derived authoritative digest",
+      "optionsFingerprint": "sha256 exact admitted engine option vocabulary",
+      "requestedProducts": "unique ASCII-sorted ProductRequest array; empty only when ODM not requested"
+    },
+    "ProductRequest": {
+      "product": "orthophoto|pointcloud|mesh|dsm|dtm|report",
+      "required": "boolean frozen before dispatch; omission is explicit not-requested, not fabricated success"
+    },
+    "TreeDarRequest": {
+      "requested": "boolean matching mode",
+      "inputObjectIds": "unique ASCII-sorted original manifest LiDAR IDs; empty when disabled",
+      "provenanceReceiptId": "issuer-verified original-source acquisition receipt ID or null when disabled",
+      "bundleContract": "ltds-treedar-bundle-v1 or null when disabled",
+      "requestedProducts": "literal [native_bundle] when requested, otherwise []"
+    },
+    "OriginalLidarCustodyProof": {
+      "schemaVersion": "literal 2",
+      "receiptType": "original_lidar_custody",
+      "receiptId": "opaque globally role-distinct ID",
+      "storageReceiptId": "opaque distinct physical custody receipt",
+      "binding": "Binding",
+      "issuerId": "authenticated authorized NAS custody issuer",
+      "objects": "unique ASCII-sorted CustodyObject array, exact original LiDAR subset",
+      "retentionGuarantee": "until_explicit_release_ack; policy and enforceability UNRESOLVED",
+      "retainedAt": "canonical time",
+      "validationVersion": "explicit agreed issuer proof version"
+    },
+    "CustodyObject": {
+      "objectId": "original input manifest object ID",
+      "controlledObjectId": "opaque issuer-managed immutable NAS object; never client/worker claimed path",
+      "byteSize": "positive exact original bytes",
+      "sha256": "sha256 exact original bytes",
+      "mediaType": "application/vnd.las|application/vnd.laz",
+      "acquisitionReceiptId": "issuer-authenticated genuine acquisition evidence",
+      "physicalReceiptId": "issuer-verified retained original bytes and purge-path protection",
+      "genuineLasLaz": "literal true after trusted admission; declaration alone insufficient",
+      "photogrammetryDerived": "literal false after trusted admission"
+    },
+    "SourceMetadataReauthorization": {
+      "schemaVersion": "literal 2",
+      "receiptType": "original_source_reauthorization",
+      "receiptId": "opaque durable distinct receipt ID",
+      "stage": "StageBinding for next stage",
+      "originalCustodyReceiptId": "unchanged verified custody receipt",
+      "originalObjects": "unique ASCII-sorted OriginalObjectBinding array, exact custody/input subset",
+      "checkedAt": "fresh canonical time",
+      "metadataExpiresAt": "bounded issuer policy time; not a payload lease reset",
+      "metadataOperationId": "stable persisted control-plane identity",
+      "payloadBudgetLedgerId": "unchanged cumulative original transfer accounting ledger"
+    },
+    "Artifact": {
+      "id": "stable unique opaque result object ID",
+      "stage": "StageBinding",
+      "role": "odm_archive|treedar_bundle|orthophoto|pointcloud|mesh|dem|report",
+      "format": "zip|geotiff|glb|pdf, exact role/format pairing below. Multi-file EPT uses role pointcloud and format zip, not a fake physical directory digest.",
+      "byteSize": "positive exact byte length of one stored physical file; for ZIP this is compressed container bytes, not expanded raw bytes",
+      "sha256": "SHA256 exact physical file bytes; ZIP byte stream unchanged, no omission/canonicalization",
+      "artifactManifestSha256": "sha256 of designated canonical validated closure manifest for ZIP (TreeDar bundle manifest, proposed EPT closure manifest, or agreed ODM closure descriptor); null for plain geotiff/glb/pdf. Distinct from physical ZIP sha256 and resultManifestSha256. ODM manifest embedding/location remains a paired transport choice.",
+      "physicalReceiptId": "PRODUCER custody receipt ID obtained from trusted issuer and independently verified via the fixed authenticated admitted-worker endpoint for exact job/stage/worker/reservation/physical file ID/hash/bytes. Available before immutable ResultManifest construction. NOT an already-ingested NAS accepted-copy receipt and never trusted merely because worker declares the string.",
+      "sourceObjectIds": "unique ASCII-sorted original input IDs establishing derivation",
+      "productKeys": "unique ASCII-sorted requested product identities; no invented product satisfaction",
+      "physicalKind": "literal file; directory/object-store prefix is not an Artifact"
+    },
+    "ResultManifest": {
+      "schemaVersion": "literal 2",
+      "binding": "Binding",
+      "stage": "StageBinding for this stage; must match binding and all objects",
+      "resultSetId": "stable immutable per-stage result set identity",
+      "engineVersions": "closed single-key map exactly matching stage.engine with admitted engine version; original requested engine set remains in pipeline, not fabricated in an intermediate manifest",
+      "objects": "ASCII-sorted Artifact array; exact ID/hash/size closure",
+      "products": "ProductOutcome array for every original requested product of this exact stage.engine; no claims for not-yet-run stages",
+      "resultManifestSha256": "sha256 canonical closed result manifest"
+    },
+    "OriginalObjectBinding": {
+      "objectId": "original input object ID",
+      "byteSize": "positive exact original bytes",
+      "sha256": "exact original bytes digest",
+      "controlledObjectId": "same issuer-controlled immutable object identity",
+      "physicalReceiptId": "same original custody physical receipt"
+    },
+    "ParentCompletion": {
+      "schemaVersion": "literal 2",
+      "binding": "Binding",
+      "mode": "original odm_only|treedar_only|combined",
+      "stageResults": "ordered StageResultReference array, exactly original requested stages; no same-manifest union across different stage results",
+      "requestedProductsDigest": "sha256 original immutable requested products",
+      "publicationReceiptIds": "exact authenticated durable product publication receipts",
+      "terminalReceiptId": "authenticated original parent completion receipt after all required stages/products",
+      "completionSha256": "sha256 canonical closed completion descriptor"
+    },
+    "StageResultReference": {
+      "stage": "exact original StageBinding",
+      "resultSetId": "exact immutable per-stage result set",
+      "resultManifestSha256": "exact stage manifest digest",
+      "requiredArtifactIds": "exact stage required closure",
+      "acceptanceReceiptIds": "exact immutable partial receipts whose same-stage membership satisfies required closure"
+    },
+    "ProductOutcome": {
+      "engine": "odm|treedar",
+      "product": "orthophoto|pointcloud|mesh|dsm|dtm|report|native_bundle",
+      "state": "available|not_produced|failed",
+      "required": "original immutable request value; not worker-controlled",
+      "evidenceReceiptId": "authenticated validation receipt ID for state, nullable only when not_produced",
+      "targets": "ProductTarget array; available has exact validated target(s), unavailable has[]. A product may reference member/closure of ONE accepted ODM archive; no duplicate physical product artifact required."
+    },
+    "PartialAcceptance": {
+      "schemaVersion": "literal 2",
+      "receiptType": "partial_result_acceptance",
+      "receiptId": "stable globally role-distinct acceptance ID",
+      "storageReceiptId": "stable distinct durable ingestion storage receipt",
+      "binding": "Binding",
+      "resultSetId": "exact immutable result set",
+      "resultManifestSha256": "exact closed result manifest digest",
+      "acceptedArtifacts": "ASCII-sorted AcceptedArtifact array, exact nonempty subset",
+      "acceptedAt": "canonical durable commit time",
+      "validationVersion": "negotiated outer-v2 acceptance version",
+      "ackOperationId": "stable durable outbox identity"
+    },
+    "AcceptedArtifact": {
+      "id": "exact result object ID",
+      "sha256": "exact result bytes hash",
+      "byteSize": "exact physical bytes",
+      "stageId": "original persisted stage ID",
+      "workerId": "original authenticated worker",
+      "reservationId": "original physical reservation",
+      "physicalReceiptId": "NAS/managed accepted-copy physical receipt assigned AFTER ingestion and durable byte barriers by authorized ingestion issuer; bound to exact accepted file hash/size and producer custody receipt; distinct from preupload producer receipt",
+      "validationReceiptId": "semantic/archive validation receipt for exact object",
+      "producerCustodyReceiptId": "exact authenticated original Artifact.physicalReceiptId, retained as immutable linkage, not replaced by NAS receipt"
+    },
+    "StageContinuation": {
+      "schemaVersion": "literal 2",
+      "binding": "Binding",
+      "continuationId": "stable pre-dispatch identity",
+      "previousStageId": "exact ODM stage ID or null for initial stage",
+      "nextStage": "StageBinding",
+      "previousResultManifestSha256": "exact immutable intermediate digest or null for initial stage",
+      "originalCustodyReceiptId": "original source custody proof or null for ODM-only",
+      "reauthorizationReceiptId": "fresh metadata-only source reauthorization receipt or null before acquisition",
+      "payloadBudgetLedgerId": "unchanged cumulative budget accounting",
+      "state": "prepared|dispatched|outcome_unknown|result_observed|accepted|held",
+      "operationId": "unchanged stable operation identity across retries/restart"
+    },
+    "CleanupAck": {
+      "schemaVersion": "literal 2",
+      "receiptType": "producer_cleanup_ack",
+      "receiptId": "globally role-distinct stable cleanup ACK identity",
+      "binding": "Binding",
+      "resultManifestSha256": "exact accepted result manifest digest",
+      "acceptanceReceiptIds": "exact durable contributing partial receipts",
+      "producerObjectIds": "exact accepted/pin-free producer-source subset",
+      "physicalReceiptIds": "exact producer identities eligible for removal",
+      "terminalReceiptId": "authenticated original parent terminal confirmation; not intermediate ODM completion",
+      "cleanupOperationId": "preexisting stable cleanup intent; unknown outcome never gets a new key",
+      "acknowledgedAt": "canonical time"
+    },
+    "InputManifest": {
+      "id": "opaque immutable manifest ID",
+      "revision": "positive safe integer in new paired v2 candidate as Python validator156; v1 Node allows zero, existing jobs remain unchanged",
+      "sha256": "structured self-digest of only this InputManifest excluding this one sha256 field",
+      "totalBytes": "positive safe integer sum of exact physical original source bytes",
+      "objectCount": "positive safe integer <=10000 exact original source count",
+      "inputCounts": "InputCounts",
+      "objects": "bounded InputObject array with stable original identities and exact original order; IDs and safe original basenames unique case-insensitively where v1 requires"
+    },
+    "InputCounts": {
+      "images": "nonnegative safe integer exact image count",
+      "lidarObjects": "nonnegative safe integer exact LiDAR count",
+      "points": "nonnegative safe integer admitted source point count; zero when no LiDAR"
+    },
+    "InputObject": {
+      "id": "stable original opaque source object ID",
+      "name": "existing v1 safe ASCII basename with original extension, not a path/URL",
+      "byteSize": "positive safe integer in new paired v2 candidate (Python176); Node v1 zero permissiveness remains documented and unchanged, not silently reinterpreted",
+      "sha256": "SHA256 exact original file bytes",
+      "kind": "image|lidar|auxiliary",
+      "mediaType": "kind-specific existing v1 enum; image/jpeg,image/png,image/tiff for image; application/vnd.las,application/vnd.laz for lidar; application/octet-stream,application/json,text/plain,text/csv for auxiliary"
+    },
+    "PointcloudZipManifest": {
+      "schemaVersion": "literal1 proposed only",
+      "format": "ltds-ept-bundle-v1-proposed",
+      "stage": "exact StageBinding",
+      "inputManifestSha256": "original immutable input closure digest, equal stage.binding",
+      "files": "ASCII-sorted unique EptClosureEntry array, exact full EPT closure",
+      "rawBytes": "positive safe integer sum of expanded entry file byte sizes",
+      "manifestSha256": "structured self-digest of this closed manifest excluding only manifestSha256"
+    },
+    "EptClosureEntry": {
+      "relativePath": "normalized archive-relative path, no absolute/traversal/link/special entries, duplicate or case collision",
+      "byteSize": "nonnegative safe integer exact expanded entry bytes under positive total raw budget",
+      "sha256": "SHA256 exact expanded entry file bytes"
+    },
+    "ProducerCustodyReceipt": {
+      "schemaVersion": "literal2",
+      "receiptType": "producer_result_custody",
+      "receiptId": "stable slug, globally role-distinct",
+      "stage": "exact StageBinding",
+      "issuerId": "configured trusted producer-custody issuer",
+      "objectId": "exact Artifact.id",
+      "byteSize": "exact positive physical file bytes",
+      "sha256": "exact physical file hash",
+      "physicalObjectId": "opaque immutable producer-controlled object, no caller path",
+      "reservationId": "exact held producer disk reservation",
+      "retainedAt": "canonical UTC milliseconds",
+      "retainUntil": "explicit accepted-copy ACK or authorized hold/release policy, no guessed TTL",
+      "verificationReceiptId": "evidence from fixed authenticated admitted-worker endpoint; no arbitrary URL selected by client/worker"
+    },
+    "ProductTarget": {
+      "artifactId": "exact physical Artifact.id within this same stage result manifest",
+      "artifactSha256": "exact physical container/file hash",
+      "artifactByteSize": "exact physical container/file bytes",
+      "closureManifestSha256": "exact canonical validator-produced closure descriptor digest, null only for plain-file target",
+      "memberRefs": "ASCII-sorted ArchiveMemberReference array for ZIP member/closure product,[]for plain-file target",
+      "validationReceiptId": "authenticated semantic validator receipt for this requested product over exact artifact/member closure"
+    },
+    "ArchiveMemberReference": {
+      "memberId": "stable slug within exact archive closure descriptor",
+      "relativePath": "exact normalized archive-relative path; no absolute, traversal, duplicate/case collision or link/special entry",
+      "byteSize": "positive safe integer exact expanded member bytes unless explicitly justified zero metadata member",
+      "sha256": "SHA256 exact expanded member bytes",
+      "closureManifestSha256": "same exact archive closure descriptor digest as target",
+      "closureId": "stable slug grouping dependent members for one product, e.g.EPT graph or textured mesh dependencies"
+    },
+    "ExecutionSettledReceipt": {
+      "schemaVersion": "literal2",
+      "receiptType": "execution_settled",
+      "receiptId": "stable coordinator-issued slug, distinct from Viewer acceptance/terminal delivery receipt",
+      "binding": "original Binding",
+      "requestedStageIds": "exact ordered ALL requested heavy stage IDs",
+      "settledStages": "SettledStage array, exactly requestedStageIds with authoritative actually-stopped/settled evidence",
+      "producerCustodyReceiptIds": "verified durable result/source custody receipts needed while delivery pending",
+      "retainedDiskReservationIds": "exact disk/scratch reservations held for retained bytes/outboxes, not released by CPU settlement",
+      "diskBudgetReceiptId": "authoritative safe current copy/remaining budget accounting",
+      "coordinatorSettlementOperationId": "stable preexisting operation ID across unknown outcomes/restart",
+      "settledAt": "durable coordinator settlement time"
+    },
+    "SettledStage": {
+      "stage": "exact StageBinding",
+      "engineExecutionId": "exact authenticated engine task/process ID",
+      "terminalState": "succeeded|failed|cancelled only after actual execution stop",
+      "engineStopReceiptId": "authoritative worker/coordinator confirmation actual heavy engine stopped; requested cancel is insufficient",
+      "resultCustodyReceiptIds": "durable result byte custody or explicit no-output disposition under failure policy",
+      "settledAt": "canonical time"
+    },
+    "HeavyCapacityReleaseReceipt": {
+      "schemaVersion": "literal2",
+      "receiptType": "heavy_capacity_release",
+      "receiptId": "stable authoritative coordinator capacity receipt",
+      "binding": "original Binding",
+      "executionSettledReceiptId": "exact verified ExecutionSettledReceipt",
+      "releasedCpuGpuSlotIds": "exact owned heavy CPU/GPU/global admission slots, not disk reservations",
+      "remainingDiskHoldIds": "exact retained producer/input disk, custody and delivery outbox holds",
+      "operationId": "stable capacity release intent, reconcile unknown outcome without new key",
+      "releasedAt": "durable time"
+    }
+  },
+  "roleRules": {
+    "odm_archive": "Exactly one positive-byte physical ZIP when ODM requested/completed; zero when unrequested. Actual archive content and semantic requested-product closure must validate. ProductOutcome targets may reference member/closure entries of this single ZIP using exact member IDs/paths/hash/bytes/closure descriptor; do not require standalone duplicates. Report-only/pointcloud-only cannot pass on empty ZIP or invented product metadata.",
+    "treedar_bundle": "Exactly one positive-byte ZIP per accepted TreeDar stage, explicit format ltds-treedar-bundle-v1 internally. Dedicated typed outer role; never relabel whole bundle tree_inventory, canopy_height as dem or orthophoto_point_colour as photogrammetry orthophoto.",
+    "orthophoto": "geotiff, ODM orthophoto only, bound to requested product and validation receipt",
+    "pointcloud": "A requested ODM pointcloud may be a validated member/dependency closure inside the single ODM archive. Only if a real agreed consumer requires separate EPT delivery, optionally create one physical ZIP role pointcloud/formatzip with exact compressed hash/bytes and separate inner closure manifest/raw budgets. Account original ODM ZIP+native outputs+new EPT ZIP+validation expansion+accepted copy coexistence. No obligatory duplication, no directory hash, no original-LiDAR custody claim.",
+    "mesh": "glb closure, exact validation required",
+    "dem": "geotiff with requested dsm/dtm productKey; no canopy relabel",
+    "report": "pdf ODM report, positive bytes",
+    "tree_inventory": "Not an outer-v2 bundle fallback. Existing v1 vocabulary is preserved in v1; this proposed v2 role set does not include it."
+  },
+  "modes": {
+    "odm_only": {
+      "requestedEngines": [
+        "odm"
+      ],
+      "stages": [
+        "odm"
+      ],
+      "sourceLidarRequired": false,
+      "treeDarBundleCount": 0,
+      "odmArchiveCountOnSuccess": 1,
+      "completion": "All required requested ODM products validated, durably accepted and published; explicitly unavailable optional outputs do not fabricate availability."
+    },
+    "treedar_only": {
+      "requestedEngines": [
+        "treedar"
+      ],
+      "stages": [
+        "treedar"
+      ],
+      "sourceLidarRequired": true,
+      "treeDarBundleCountOnSuccess": 1,
+      "odmArchiveCount": 0,
+      "completion": "Issuer-verified original genuine LiDAR plus accepted native bundle closure; no ODM, orthophoto or mesh requirement."
+    },
+    "combined": {
+      "requestedEngines": [
+        "odm",
+        "treedar"
+      ],
+      "stages": [
+        "odm",
+        "treedar"
+      ],
+      "sourceLidarRequired": true,
+      "treeDarBundleCountOnSuccess": 1,
+      "odmArchiveCountOnSuccess": 1,
+      "completion": "Both requested stages and required products accepted/published under original parent. ODM intermediate is nonterminal. TreeDar reads original genuine source, never ODM photogrammetry cloud. Sequential ordering is a candidate matching current orchestration reference, subject to owner acceptance."
+    }
+  },
+  "treeDarNativeBundle": {
+    "contract": "ltds-treedar-bundle-v1",
+    "engineVersion": "0.0.1",
+    "manifestPath": "treedar-bundle.json",
+    "nativeArtifactPrefix": "artifacts/",
+    "nativeVocabularySource": "Exact 22-entry nativeVocabulary copied into evidence.json from four unintegrated draft files; 12 required paths also pinned there.",
+    "nativeManifestRetention": "manifest.json remains original engine_manifest artifact; it is not rewritten as outer or bundle manifest.",
+    "validation": "Match existing draft closed fields, exact nativePath/role/format, ASCII ordering, byte sum, per-artifact SHA256, safe ZIP extraction, limits and descriptor identity; native body integrity is not proof of real COG/CRS/tree quality or genuine acquisition.",
+    "budgetDimensions": [
+      "maxArchiveBytes",
+      "maxRawBytes",
+      "maxFiles",
+      "maxManifestBytes",
+      "maxControlProofBytes",
+      "maxValidationDiskBytes"
+    ],
+    "coexistence": "Producer native RAW files, new ZIP, input ZIP copy, validator expansion, metadata/control proofs and retained accepted copy may coexist. Account each physical copy on its actual filesystem/reservation; metadata size or compressed ZIP size cannot stand in for total scratch.",
+    "digestSeparation": "Outer Artifact.sha256/byteSize cover exact physical ZIP; internal bundle manifestSha256 canonicalizes only the structured bundle manifest excluding its own digest; each native file.sha256 hashes unchanged expanded native bytes. rawBytes and expansion reservation are distinct from ZIP byteSize."
+  },
+  "custodyAndRetention": {
+    "trust": "Fetch/verify proof through authenticated authorized issuer and exact job/manifest binding; matching receiptId, worker-supplied genuine flag or client path is insufficient. Resolve opaque controlledObjectId only inside issuer-owned storage boundary; no worker path grants.",
+    "originalVsDerived": "Original LAS/LAZ custody is a separate retained object and purge-path guarantee. Current retainedManifest selects valid EPT closure instead of original LAS/LAZ when EPT exists; EPT acceptance does not prove original LAS retained. Do not silently delete originals or claim all originals preserved.",
+    "postOdmReauthorization": "After long ODM, obtain fresh metadata-only issuer reauthorization for exact original objects before next stage, using persisted metadata operation identity. Reconfirm original custody/hash/physical reservation and revocation state. Do not renew original payload grant blindly, reset byte budget, reread payload to manufacture freshness, create a replacement parent claim, or reuse expired authority.",
+    "absenceOrExpiry": "Hold original parent and continuation with explicit source-unavailable/reauthorization-denied evidence. No fallback to ODM-derived LAS, no inferred permission from historical receipt.",
+    "release": "Original custody release is a distinct issuer-mediated explicit ACK after no remaining consumer/pins/holds and agreed policy; producer result cleanup ACK is not original-input release authorization. Duration, actual issuer and enforcement across all purge paths remain owner decisions.",
+    "immutableInputBinding": "Actual referenceProtocol.js v1 InputManifest is independent of Pipeline: exact seven fields id/revision/sha256/totalBytes/objectCount/inputCounts/objects; source objects have six fields id/name/byteSize/sha256/kind/mediaType. Genuine acquisition/custody is separately issuer verified, never implied by kind/mediaType/hash or supplied manifest. Compatible v2 submissions may bind that exact original closure plus separate authoritative pipelineDigest, but existing v1 job identities/digests/receipts are not translated."
+  },
+  "durableLifecycle": [
+    "Persist original binding/requested stages/products, trusted workers, physical disk reservations, stable operations and continuation before dispatch. Distinguish heavy execution admission from disk custody holds.",
+    "Before immutable stage result manifest, verify exact PRODUCER file custody receipt via fixed authenticated admitted-worker issuer endpoint; no self-declared receipt trust and no prerequisite NAS accepted-copy receipt.",
+    "Upload exact file/member closure to owned quarantine; validate actual archive bytes and semantic requested-product members under held leases and simultaneous-copy budgets. ZIP transport integrity alone is insufficient.",
+    "After ingestion, durably fsync accepted managed bytes/directories and commit immutable partial acceptance with newly issued NAS physical-copy receipt plus exact producer-receipt linkage and ACK outbox.",
+    "Derive same-stage same-manifest partial membership from exact ID/hash/bytes/member closure and receipts; parent references individual stage results explicitly, never unions unrelated manifests or synthesizes terminal completion.",
+    "When ALL requested heavy executions actually stopped/settled and durable source/result custody plus disk budgets are safe, commit ExecutionSettledReceipt and release owned heavy CPU/GPU/global slot through exact durable capacity receipt. Viewer delivery outage continues disk/custody/outbox holds, not heavy slot indefinitely. ODM-only intermediate in combined is insufficient.",
+    "Publish only validated accepted requested products via stable authorized catalog transaction. Replay exact durable acceptance outbox identity; unknown upload/accept/publish/cleanup outcomes require authoritative reconciliation or proven same-key idempotent replay, no new operation keys.",
+    "On combined restart recover exact original parent claim, stage, worker, reservation, continuation and immutable manifests. Fresh metadata-only original-source reauthorization before TreeDar never resets payload budget/TTL or substitutes photogrammetry-derived cloud. No blind redispatch.",
+    "Parent delivery completes only all requested stages/required products accepted and published. Execution settlement/capacity release is independently durable; neither implies parent delivery success, deletion authority or acceptance.",
+    "After exact terminal/acceptance ACK and pin checks, persist exact eligible producer cleanup intent and ACK; reconcile unknown result. Disk reservations release only after actual retained-byte custody transitions/deletions accounted. Original custody release distinct; never delete unaccepted bytes, managed accepted copies or unknown/replaced paths."
+  ],
+  "pairedReviewQuestions": [
+    {
+      "question": "Accept concrete proposed ltds-reference-outer-v2-proposed and typed treedar_bundle with exact inherited UUID/slug/limits/canonical metadata rules, documented v1 differences and no automatic old-job translation?",
+      "owners": [
+        "Processing",
+        "Viewer"
+      ],
+      "id": "version-and-role"
+    },
+    {
+      "question": "Confirm actual packager preserves22 native entries/12 required and all copy budgets; qualify real report-only,pointcloud-only and zero-tree semantics. Empty ZIP transport or zero output is never product acceptance.",
+      "owners": [
+        "Processing",
+        "Viewer"
+      ],
+      "id": "native-and-semantic"
+    },
+    {
+      "question": "Confirm fixed authenticated worker custody endpoint verifies preupload exact producer file receipts; accepted NAS copy receipt issued only after durable ingestion. Neither receipt is trusted by declared string alone.",
+      "owners": [
+        "Processing",
+        "Viewer"
+      ],
+      "id": "producer-versus-NAS"
+    },
+    {
+      "question": "Pair exact coordinator execution-settled and capacity-release receipt wiring: ALL requested heavy executions stopped plus durable custody/budgets can release heavy/global slot while Viewer-outage disk/outbox holds remain; combined ODM intermediate alone cannot do so.",
+      "owners": [
+        "Processing",
+        "Viewer"
+      ],
+      "id": "execution-versus-delivery"
+    },
+    {
+      "question": "Accept exact archive member/closure targets inside one ODM ZIP without mandatory standalone duplicate products, optional EPT ZIP only actual consumer requires and fully accounted coexistence?",
+      "owners": [
+        "Processing",
+        "Viewer"
+      ],
+      "id": "member-closure"
+    },
+    {
+      "question": "Agree actual original LAS/LAZ issuer/control/retention and metadata-only reauthorization authority. JSON spelling and typed proposed roles are engineering paired decisions; NAS owner decides actual storage/custody/retention authority, not wire spelling.",
+      "owners": [
+        "NAS owner",
+        "Processing",
+        "Viewer"
+      ],
+      "id": "original-source-policy"
+    },
+    {
+      "question": "Select real ingestion transport/factory and authoritative exact-identity lookup/replay, partial receipts, capacity/custody transitions and v1/v2 activation/rollback together. Proposal activates nothing.",
+      "owners": [
+        "Processing",
+        "Viewer"
+      ],
+      "id": "transport-and-recovery"
+    }
+  ],
+  "unresolvedOwnerChoices": [
+    "Actual original LAS/LAZ storage custody issuer, retention/purge enforcement and release authority",
+    "Actual metadata-only original-source reauthorization authorization/transport",
+    "Real fixed worker-custody endpoint and issuer-verification integration",
+    "Real ingestion transport/factory, publish/ACK/reconcile APIs",
+    "New EPT/ODM expanded closure byte/count/disk policy values; inherited JSON limits already exact",
+    "Paired v2 fieldset acceptance, v1 migration/no-upgrade activation and rollback",
+    "Semantic product validators and real engine qualification",
+    "Durable execution settlement/heavy capacity release vs disk hold integration"
+  ],
+  "supersedesProposalSHA256": "10f62ee51d9606469c673ec3b42eac1ef0d8ce73ea45b3319f5f57245486b60d",
+  "executionVersusDelivery": {
+    "execution": "ExecutionSettled is separate from Viewer delivery/publication parentcompleted. Release sole heavy CPU/GPU/global slot after ALL originally requested heavy stages actually stopped/settled, required custody durable and budgets safe, using durable authoritative coordinator receipt.",
+    "outage": "Viewer/network outage retains producer/accepted disk copies, durable delivery outbox, original source custody and applicable DISK capacity reservations/holds. It does not retain sole heavy/global CPU slot forever after full execution settlement.",
+    "intermediate": "Combined ODM intermediate alone is not full-parent ExecutionSettled. It may settle its engine-local task but parent heavy/global admission transitions only under agreed bound continuation/capacity policy; no release that admits overlapping heavy stages unintentionally.",
+    "completion": "ParentCompleted remains requested-product-aware Viewer acceptance/publication completion; ExecutionSettled must not fabricate delivery success or authorize source deletion.",
+    "unknown": "Missing actual stop/custody/budget evidence holds capacity release. Lookup exact coordinator/worker state; no time-only release or new operation keys."
+  },
+  "semanticAcceptanceCases": [
+    {
+      "case": "report-only ODM",
+      "required": "Actual nonempty report member in actual ODM ZIP, safe archive validation plus agreed report syntax/semantic validation and exact member hash/bytes/closure binding. Empty synthetic ZIP transport fixture is not product success."
+    },
+    {
+      "case": "pointcloud-only ODM",
+      "required": "Actual usable pointcloud dependency closure inside ODM ZIP, validated metadata/CRS/coordinate/required-data semantics per agreed adapter; optional separate EPT ZIP only consumer-required. No universal orthophoto or duplicate mandatory artifact."
+    },
+    {
+      "case": "TreeDar zero detected trees",
+      "required": "May be valid if actual engine ran, all12 required native outputs exist and nonempty required physical artifacts are consistent with zero inventory rows/features and semantic evidence. Zero trees is not zero outputs or empty bundle; do not fabricate detections or reject a genuine zero-result solely on count."
+    },
+    {
+      "case": "combined intermediate",
+      "required": "Actual ODM result and stopped ODM execution are intermediate evidence; original parent stays nonterminal for delivery and not fullyExecutionSettled until TreeDar requested heavy execution also settles."
+    }
+  ]
+}

@@ -3,9 +3,99 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ops.node_ingress import GateError, Ingress, configuration, save
+
+
+class IngressConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.image = 'sha256:' + 'a' * 64
+        self.config = {'proxyName': 'owned-proxy', 'backendName': 'owned-node',
+                       'proxyImage': self.image, 'listenPort': 13005, 'backendPort': 13004}
+
+    def ingress(self, **changes):
+        self.config.update(changes)
+        (self.root / 'gateway.json').write_text(json.dumps(self.config))
+        return Ingress(self.root)
+
+    def test_restricted_config_allows_exact_peers_and_loopback_then_denies_all(self):
+        text = configuration(13005, 13004, False,
+                             ['192.168.50.89', '172.17.0.0/16', '2001:db8::1', '2001:db8:1::/64'])
+        for address in ('127.0.0.1', '::1', '192.168.50.89', '172.17.0.0/16',
+                        '2001:db8::1', '2001:db8:1::/64'):
+            self.assertIn('allow ' + address + ';', text)
+        self.assertIn('deny all;', text)
+        self.assertLess(text.index('allow 192.168.50.89;'), text.index('deny all;'))
+        self.assertNotIn('real_ip_header', text)
+        self.assertNotIn('X-Forwarded-For', text)
+        self.assertNotIn('192.168.50.88', text)
+
+    def test_empty_list_preserves_unrestricted_legacy_config(self):
+        text = configuration(13005, 13004, False)
+        self.assertNotIn('allow ', text)
+        self.assertNotIn('deny all;', text)
+
+    def test_canonical_loopback_is_not_duplicated_and_closed_gate_stays_closed(self):
+        text = configuration(13005, 13004, True, ['127.0.0.1', '::1'])
+        self.assertEqual(text.count('allow 127.0.0.1;'), 1)
+        self.assertEqual(text.count('allow ::1;'), 1)
+        self.assertIn('return 503;', text)
+        self.assertNotIn('proxy_pass', text)
+
+    def test_invalid_clients_cannot_inject_or_broaden_nginx_config(self):
+        invalid = (None, '192.168.50.89', {'ip': '192.168.50.89'}, [True], [''],
+                   ['example.com'], ['192.168.50.89; allow all'], ['192.168.50.89\nallow all;'],
+                   [' 192.168.50.89'], ['192.168.050.089'], ['192.168.50.89/24'],
+                   ['2001:0db8::1'], ['fe80::1%eth0'], ['unix:'],
+                   ['192.168.50.89', '192.168.50.89'], ['127.0.0.1'] * 65)
+        for clients in invalid:
+            with self.subTest(clients=clients), self.assertRaises(GateError):
+                configuration(13005, 13004, False, clients)
+
+    def test_private_config_validates_allowlist_engine_and_credential(self):
+        gate = self.ingress(allowedClients=['192.168.50.89'], backendEngine='odm',
+                            backendToken='synthetic-private-token&?=')
+        self.assertEqual(gate.config['backendEngine'], 'odm')
+        public = configuration(13005, 13004, False, gate.config['allowedClients'])
+        self.assertNotIn('synthetic-private-token', public)
+        for key, value in (('backendEngine', 'ODM'), ('backendEngine', 'arbitrary'),
+                           ('backendToken', None), ('backendToken', True),
+                           ('backendToken', 'has space'), ('backendToken', 'line\nbreak'),
+                           ('backendToken', 'x' * 4097), ('allowedClients', ['hostname.invalid'])):
+            with self.subTest(key=key, value_type=type(value).__name__), self.assertRaises(GateError):
+                self.ingress(**{key: value})
+            self.config.update(allowedClients=['192.168.50.89'], backendEngine='odm',
+                               backendToken='synthetic-private-token&?=')
+
+    def test_private_health_token_is_urlencoded_not_rendered_into_public_config(self):
+        gate = self.ingress(backendToken='synthetic&?=token')
+        response = MagicMock(status=200)
+        response.read.return_value = b'{"engine":"odx"}'
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+        gate.opener = opener
+        self.assertEqual(gate.http(13004), (200, {'engine': 'odx'}))
+        opener.open.assert_called_once_with(
+            'http://127.0.0.1:13004/info?token=synthetic%26%3F%3Dtoken', timeout=3)
+
+    def test_odm_backend_requires_explicit_engine_identity(self):
+        gate = self.ingress()
+        item = {'Image': self.image, 'State': {'Running': True}, 'NetworkSettings': {
+            'Ports': {'3000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '13004'}]}}}
+        with patch.object(gate, 'docker', return_value=json.dumps([item])), \
+                patch.object(gate, 'http', return_value=(200, {'engine': 'odm'})):
+            with self.assertRaises(GateError):
+                gate.backend(self.image)
+            gate.config['backendEngine'] = 'odm'
+            self.assertEqual(gate.backend(self.image)['engine'], 'odm')
+        with patch.object(gate, 'docker', return_value=json.dumps([item])), \
+                patch.object(gate, 'http', return_value=(200, {'engine': 'odx'})):
+            with self.assertRaises(GateError):
+                gate.backend(self.image)
 
 
 @unittest.skipIf(os.name == 'nt', 'Linux host ingress uses POSIX durable files')

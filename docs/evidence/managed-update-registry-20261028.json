@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-28",
+  "scope": "Source-only managed update finalization and immutable registry staging",
+  "tests": {
+    "runner": "isolated cached Linux container",
+    "command": "python -B -m unittest discover -s tests",
+    "passed": 726,
+    "skipped": 0,
+    "seconds": 65.123,
+    "exitCode": 0
+  },
+  "review": {
+    "managedFinalization": "Independent reviewer found no blocking defects",
+    "registry": "Independent reviewer cleared bounded subprocess deadline fix; 24 Linux-focused tests reported"
+  },
+  "runtimeChanged": false,
+  "nasAccessed": false,
+  "imagesPulledOrPublished": false,
+  "automationInstalled": false,
+  "limits": [
+    "No approved live update channels selected",
+    "No isolated engine qualification or unattended supervisor installed",
+    "Compressed bytes and post-pull size do not enforce hard extraction quota",
+    "Registry selected-child digest is verified; top-level index digest is not proved"
+  ],
+  "sourceSha256": {
+    "processing/container_update.py": "ede299824365769cc7c2299e2f7724692af68ceb4c2969e76c287c6aad77e6ad",
+    "ops/node_maintenance.py": "2a3e83a0a7128a5b119007e72b6c65006310e86ad34ff489472e94cde1dcd98e",
+    "processing/update_registry.py": "d767adfcb213bb68dc10942fa96709c41b34902c2ef36732166b2da987d87891",
+    "tests/test_container_update.py": "a7760ea433a324d983cdb1d22500a675d56867d25ed5fc6c34b42f3342e7051a",
+    "tests/test_managed_maintenance.py": "7b215ef549fe3c555a214eedd8fdea8fee8efd1a729f10a37154c615feb0f4b0",
+    "tests/test_managed_update_finalization.py": "38297fe521722277783554df47353d58e71f3df130188f5d681e420577515af3",
+    "tests/test_update_registry.py": "202bad518e6ba468454048d089b242ec5f0d27ce48dd2185c6995cb887b62473"
+  }
+}

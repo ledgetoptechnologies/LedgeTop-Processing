@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-10-28T15:36:44.419973+00:00",
+  "scope": "Actual idle main-PC container update through the owned maintenance pipeline",
+  "sourceCommit": "671fd2a6bde40088bdfad91ccf67eab45ee3d8d7",
+  "runnerSha256": "b240f9f134c52436c49a05aa075c15ea02daa856e2cd4645ab0358e67df56122",
+  "operationId": "1157e072aa07f7d1292cc0dae9abf9fd36550522b1137c8d0e70cd5b98a76e42",
+  "plan": {
+    "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "candidateId": "285f57eeb73b331a354f00a068308f47acdda3e0606d33cd8efbc38ce02398da",
+    "configDigest": "sha256:2dca9adae8525b8a112e125504e0e5e467c32a353299037ad6be04c8c63f4c26",
+    "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+    "hostGeneration": 0,
+    "localImageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "manifestDigest": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "nodeId": "main",
+    "operationId": "1157e072aa07f7d1292cc0dae9abf9fd36550522b1137c8d0e70cd5b98a76e42",
+    "planId": "9e18c244-0f67-492f-81e8-338dade52c51",
+    "planSha256": "23dc557aa099726cc5e65111f1010b8ffa93c28b7a0ba107d8608a0bd44ff984",
+    "previousImageId": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776",
+    "qualificationSha256": "2a975d45239dc9e7c0f115ba1d1bb30d2f9eb0f2116f6910794619ed030c5c77",
+    "requestSha256": "b268ade203d55b3ee351fc80a21c11b954f01af701da537832b7b36ab5288a8f",
+    "schemaVersion": 1,
+    "supervisorPolicySha256": "efd68e858cead211e3328baa81aae43e8f47f426afb718d9f2518e10837f7675",
+    "targetImageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde"
+  },
+  "completion": {
+    "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "candidateId": "285f57eeb73b331a354f00a068308f47acdda3e0606d33cd8efbc38ce02398da",
+    "completionSha256": "c6531792e76af2c3b08d49c5cb913fadbb4b06a705e6c008ce131ddc1cc11317",
+    "configDigest": "sha256:2dca9adae8525b8a112e125504e0e5e467c32a353299037ad6be04c8c63f4c26",
+    "coordinatorFinished": true,
+    "engineId": "45bc889d-d645-442b-8fb9-d78b77b14fe9",
+    "healthy": true,
+    "hostGeneration": 0,
+    "hostPinDurable": true,
+    "imageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "ingressOpen": true,
+    "localImageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "manifestDigest": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "nodeId": "main",
+    "operationId": "1157e072aa07f7d1292cc0dae9abf9fd36550522b1137c8d0e70cd5b98a76e42",
+    "planId": "9e18c244-0f67-492f-81e8-338dade52c51",
+    "planSha256": "23dc557aa099726cc5e65111f1010b8ffa93c28b7a0ba107d8608a0bd44ff984",
+    "previousImageId": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776",
+    "qualificationSha256": "2a975d45239dc9e7c0f115ba1d1bb30d2f9eb0f2116f6910794619ed030c5c77",
+    "requestSha256": "01d8883df9bacdcb81e0eddb9da9633cd65a0421417ef8b4345393cd85c08181",
+    "schemaVersion": 1,
+    "supervisorPolicySha256": "efd68e858cead211e3328baa81aae43e8f47f426afb718d9f2518e10837f7675",
+    "targetImageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde"
+  },
+  "postUpdateHost": {
+    "containerId": "a817f90f25de309569b07fad98a4ee36907c1e374c702bf2cf2c96d3e6086e69",
+    "name": "/ledgetop-main-processing-nodeodx-1",
+    "imageId": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "startedAt": "2026-10-28T15:24:31.019864573Z",
+    "running": true,
+    "restartCount": 0,
+    "resources": {
+      "NanoCpus": 0,
+      "CpuPeriod": 0,
+      "CpuQuota": 0,
+      "CpusetCpus": "",
+      "Memory": 0,
+      "MemorySwap": 0,
+      "PidsLimit": null,
+      "Ulimits": null,
+      "DeviceRequests": [
+        {
+          "Driver": "nvidia",
+          "Count": -1,
+          "DeviceIDs": null,
+          "Capabilities": [
+            [
+              "gpu"
+            ]
+          ],
+          "Options": null
+        }
+      ]
+    },
+    "mounts": [
+      {
+        "source": "/dockerfiles/nodeodm/data",
+        "destination": "/var/www/data",
+        "writable": true
+      }
+    ],
+    "api": {
+      "version": "2.4.0",
+      "engine": "odx",
+      "engineVersion": "3.8.5",
+      "taskQueueCount": 0,
+      "maxImages": null
+    },
+    "optionCount": 80,
+    "tasks": 0,
+    "supervisorCurrent": {
+      "id": 1,
+      "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+      "generation": 1
+    },
+    "gateGeneration": 1,
+    "gateReservation": null,
+    "gpuVisibility": {
+      "commandExit": 0,
+      "devices": [
+        "NVIDIA GeForce RTX 5060 Ti, 16311 MiB",
+        "NVIDIA GeForce RTX 3060, 12288 MiB"
+      ],
+      "processingKernelsTested": false
+    },
+    "otherRunningServices": [
+      {
+        "name": "/dcgm_exporter",
+        "id": "263fc96b765a5da6f706ce384c7190d63e181c12b69aeae353cd4729d3c7bf4b",
+        "startedAt": "2026-10-27T21:19:37.266076107Z",
+        "running": true,
+        "restartCount": 0
+      },
+      {
+        "name": "/ledgetop-main-processing-ingress-1",
+        "id": "7147630118a3b25c6e84317314d02ff957ff8e5b7cc523036b5fe67e16a60ac0",
+        "startedAt": "2026-10-27T17:50:42.977898402Z",
+        "running": true,
+        "restartCount": 0
+      },
+      {
+        "name": "/arm",
+        "id": "0feb2bbdb1b62e21b2ea3d5988a2bebef6b7ba9a39fe24370cddc5f607f14b12",
+        "startedAt": "2026-10-26T22:58:44.674234655Z",
+        "running": true,
+        "restartCount": 0
+      },
+      {
+        "name": "/node_exporter",
+        "id": "091d1defa0c804211e4f7f83ece1868c76e8c5c106757708b331ebf0ecdd9752",
+        "startedAt": "2026-10-26T22:58:44.651792853Z",
+        "running": true,
+        "restartCount": 0
+      }
+    ]
+  },
+  "coordinatorNode": {
+    "id": "main",
+    "state": "active",
+    "revision": 18,
+    "planId": "9e18c244-0f67-492f-81e8-338dade52c51",
+    "drainAt": "2026-10-28T15:24:14.911673Z",
+    "notBefore": "2026-10-28T15:24:14.911673Z",
+    "afterJobId": null,
+    "targetImage": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+    "result": {
+      "composePinUpdateRequired": false,
+      "healthy": true,
+      "image": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+      "ingress": "open",
+      "persistentComposePin": "sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde",
+      "previousImage": "sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f4251776"
+    },
+    "allowedProfiles": [
+      "odm-viewer-v1",
+      "reference-pipeline-v1",
+      "treedar-synthetic-v1"
+    ]
+  },
+  "restartInspectionPassed": true,
+  "completedReconciliationSameReceipt": true,
+  "independentReadOnlyAcceptancePassed": true,
+  "ownedScheduleIntents": 1,
+  "managedRunIntents": 1,
+  "oldImageRetained": true,
+  "oldContainerRemovedByCompose": true,
+  "historicalJobsPreserved": {
+    "count": 12,
+    "statusCounts": {
+      "succeeded": 10,
+      "failed": 2
+    },
+    "sha256": "2ad24fe66eaab476299534c64ba89acbf236bd33d959489c1bcf4c7ecc6fcf9f"
+  },
+  "newRegistryPulls": 0,
+  "newQualificationRuns": 0,
+  "realTasksSubmitted": 0,
+  "reconstructionQualified": false,
+  "gpuKernelsQualified": false,
+  "unattendedServiceInstalled": false,
+  "nasConfigurationOrProcessingStorageChanged": false,
+  "remaining": [
+    "Install and accept general recurring update supervision with explicit policy and capacity handling",
+    "Implement/accept NAS source broker and durable retention/JIT transfer integration",
+    "Resolve/accept Viewer hierarchy and workspace UI findings"
+  ]
+}

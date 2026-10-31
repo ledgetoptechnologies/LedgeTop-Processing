@@ -5,7 +5,9 @@ without preempting running work. It never creates jobs or runs photo profiles.
 Private durable state must survive host restarts. An unresolved dispatch record
 requires operator inspection; this command never discards or retries it.
 
-The existing worker bounds Docker execution. Deliberately no parent subprocess
+The worker retains its synthetic timeout, with resource caps enabled by default.
+An explicit main-unrestricted policy is passed to the worker on main only.
+Deliberately no parent subprocess
 timeout kills that worker mid-container. If the host/child hangs, stop and inspect
 the recorded worker receipt/container manually before resolving state.
 
@@ -32,10 +34,20 @@ WORKER = ROOT / 'engines/treedar/scripts/prototype_worker.py'
 PROFILE = 'treedar-synthetic-v1'
 SLUG = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
 HEX = re.compile(r'[0-9a-f]{64}\Z')
+RESOURCE_POLICIES = ('bounded-fixture', 'main-unrestricted')
 
 
 class DispatchError(Exception):
     """Only sanitized failure categories may reach the terminal."""
+
+
+class NodeState(str):
+    """Maintenance state with optional coordinator profile eligibility."""
+
+    def __new__(cls, state, allowed_profiles=None):
+        instance = super().__new__(cls, state)
+        instance.allowed_profiles = allowed_profiles
+        return instance
 
 
 def origin(value, verified=None):
@@ -187,7 +199,12 @@ def node_state(base, token, node_id):
         if (not isinstance(node, dict) or node.get('id') != node_id
                 or node.get('state') not in ('active', 'scheduled', 'draining', 'updating', 'held', 'failed')):
             raise ValueError()
-        return node['state']
+        allowed_profiles = node.get('allowedProfiles')
+        if 'allowedProfiles' in node and (not isinstance(allowed_profiles, list)
+                or any(not isinstance(profile, str) or not SLUG.fullmatch(profile)
+                       for profile in allowed_profiles)):
+            raise ValueError()
+        return NodeState(node['state'], allowed_profiles)
     except Exception:
         raise DispatchError('node maintenance API unavailable or invalid; legacy 404 cannot dispatch') from None
     finally:
@@ -248,7 +265,8 @@ def launch(args, base, scratch):
                '--scratch', str(scratch), '--worker-id', args.worker_id,
                '--timeout', str(args.timeout), '--node-id', getattr(args, 'node_id', 'cluster'),
                '--docker-engine-id', args.docker_engine_id,
-               '--node-generation', str(args.node_generation)]
+               '--node-generation', str(args.node_generation),
+               '--resource-policy', getattr(args, 'resource_policy', 'bounded-fixture')]
     if args.verified_origin:
         command.extend(['--verified-origin', args.verified_origin])
     environment = {key: value for key, value in os.environ.items()
@@ -324,6 +342,9 @@ def no_claim_maintenance(args, base, token, expected, before, after, jobs):
 def run(args):
     base = origin(args.coordinator, args.verified_origin)
     node_id = getattr(args, 'node_id', 'cluster')
+    resource_policy = getattr(args, 'resource_policy', 'bounded-fixture')
+    if resource_policy not in RESOURCE_POLICIES or (resource_policy == 'main-unrestricted' and node_id != 'main'):
+        raise DispatchError('main-unrestricted resource policy requires node main')
     if (not re.fullmatch('sha256:[0-9a-f]{64}', args.image)
             or not SLUG.fullmatch(args.worker_id) or type(args.max_jobs) is not int
             or not isinstance(node_id, str) or not SLUG.fullmatch(node_id)
@@ -360,6 +381,9 @@ def run(args):
                 return 0
             jobs = queue(base, token)
             expected, reason = select_head(jobs)
+            allowed_profiles = getattr(state_now, 'allowed_profiles', None)
+            if expected and allowed_profiles is not None and expected['profile'] not in allowed_profiles:
+                reason = 'node_ineligible'
             if reason:
                 print(json.dumps({'completed': len(completed), 'completedJobIds': completed,
                                   'reason': reason}))
@@ -370,6 +394,7 @@ def run(args):
                       'nodeId': node_id,
                       'dockerEngineId': args.docker_engine_id, 'nodeGeneration': args.node_generation,
                       'workerId': args.worker_id, 'image': args.image, 'scratch': str(scratch),
+                      'resourcePolicy': resource_policy,
                       'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat()}
             save(dispatch_path, record)
             try:
@@ -404,6 +429,8 @@ def main():
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--verified-origin')
     parser.add_argument('--node-id', default='cluster', help='Node identity; maintenance API required')
+    parser.add_argument('--resource-policy', choices=RESOURCE_POLICIES, default='bounded-fixture',
+                        help='Synthetic fixture limits; main-unrestricted omits CPU/RAM/PID/thread caps on main only')
     parser.add_argument('--docker-engine-id', required=True, help='Pinned local Docker Engine identity')
     parser.add_argument('--node-generation', required=True, type=int, help='Provisioned node ownership generation')
     parser.add_argument('--max-jobs', type=int, choices=range(1, 11), default=2)
