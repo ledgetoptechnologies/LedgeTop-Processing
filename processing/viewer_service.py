@@ -346,41 +346,51 @@ class ViewerService:
         directory = Path(task['directory'])
         if path != directory / 'all.zip' or directory.resolve(strict=True) != directory:
             raise Conflict('retained archive path requires inspection')
-        # A crash may have left a previous restore in progress. Its bytes and
-        # ownership are not proven by its name, so preserve it for inspection
-        # and refuse to create another potentially large copy on each retry.
-        # The coordinator's single-authority fence and per-task lock serialize
-        # restores; this check is not a replacement for that fence.
-        with os.scandir(directory) as entries:
-            if any(re.fullmatch(r'\.all\.zip\.restore-[a-f0-9]{32}', entry.name)
-                   for entry in entries):
-                raise Conflict('previous archive restore requires inspection')
-        temporary = directory / ('.all.zip.restore-' + uuid.uuid4().hex)
+        # A single deterministic recovery slot prevents repeated crashes from
+        # creating an unbounded number of archives. The per-task lock and the
+        # single-coordinator fence remain necessary for safe serialization.
+        temporary = directory / '.all.zip.restore-pending'
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
-        fd = os.open(temporary, flags, 0o600)
-        original = os.fstat(fd); stream = None
+        stream = None
         try:
-            with os.fdopen(fd, 'wb') as output:
-                fd = None
-                with self.engines[task['node_id']].download(task['engine_uuid']) as response:
-                    if getattr(response, 'status', 200) != 200:
-                        raise EngineUnavailable('archive_unavailable')
-                    media = response.headers.get('Content-Type', '').split(';')[0].lower()
-                    if media and media not in ('application/zip','application/octet-stream','application/x-zip-compressed'):
-                        raise EngineUnavailable('archive_not_ready')
-                    declared = response.headers.get('Content-Length')
-                    if declared is not None and (not declared.isdigit() or int(declared) != receipt['bytes']):
-                        raise Conflict('archive response differs from retained receipt')
-                    total = 0
-                    while chunk := response.read(1024 ** 2):
-                        total += len(chunk)
-                        if total > receipt['bytes']:
-                            raise Conflict('archive response differs from retained receipt')
-                        output.write(chunk)
-                    if total != receipt['bytes']:
-                        raise EngineUnavailable('archive_transfer_incomplete')
-                output.flush(); os.fsync(output.fileno())
+            fd = os.open(temporary, flags, 0o600)
+        except FileExistsError:
+            # Existing data is not ours to delete. Reuse only a complete file
+            # matching the task-bound receipt; an incomplete/unknown file is
+            # retained for inspection rather than overwritten or redownloaded.
+            fd = None
             stream = self._verify_archive(temporary, receipt)
+            original = os.fstat(stream.fileno())
+            if original.st_nlink != 1:
+                stream.close()
+                raise Conflict('previous archive restore requires inspection')
+            created = False
+        else:
+            original = os.fstat(fd)
+            created = True
+        try:
+            if created:
+                with os.fdopen(fd, 'wb') as output:
+                    fd = None
+                    with self.engines[task['node_id']].download(task['engine_uuid']) as response:
+                        if getattr(response, 'status', 200) != 200:
+                            raise EngineUnavailable('archive_unavailable')
+                        media = response.headers.get('Content-Type', '').split(';')[0].lower()
+                        if media and media not in ('application/zip','application/octet-stream','application/x-zip-compressed'):
+                            raise EngineUnavailable('archive_not_ready')
+                        declared = response.headers.get('Content-Length')
+                        if declared is not None and (not declared.isdigit() or int(declared) != receipt['bytes']):
+                            raise Conflict('archive response differs from retained receipt')
+                        total = 0
+                        while chunk := response.read(1024 ** 2):
+                            total += len(chunk)
+                            if total > receipt['bytes']:
+                                raise Conflict('archive response differs from retained receipt')
+                            output.write(chunk)
+                        if total != receipt['bytes']:
+                            raise EngineUnavailable('archive_transfer_incomplete')
+                    output.flush(); os.fsync(output.fileno())
+                stream = self._verify_archive(temporary, receipt)
             opened = os.fstat(stream.fileno()); observed = temporary.lstat()
             if (opened.st_dev,opened.st_ino)!=(original.st_dev,original.st_ino) or (observed.st_dev,observed.st_ino)!=(original.st_dev,original.st_ino):
                 raise Conflict('archive restore identity changed')
@@ -408,10 +418,11 @@ class ViewerService:
         finally:
             if fd is not None: os.close(fd)
             if stream is not None: stream.close()
-            try:
-                current=temporary.lstat()
-                if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino): temporary.unlink()
-            except FileNotFoundError: pass
+            if created:
+                try:
+                    current=temporary.lstat()
+                    if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino): temporary.unlink()
+                except FileNotFoundError: pass
 
     def download(self, identifier):
         task = self.store.task(identifier)
