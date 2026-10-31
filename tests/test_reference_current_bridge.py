@@ -1,7 +1,7 @@
 import hashlib,json,os,select,ssl,subprocess,sys,threading,time,unittest
 from contextlib import contextmanager
 from pathlib import Path
-from tests.test_reference_joint_flow import ReferenceJointFlowTests, WORKER, VIEWER, READER, PINS as OLD_PINS
+from tests.test_reference_joint_flow import ReferenceJointFlowTests as _JointFlow, WORKER, VIEWER, READER, PINS as OLD_PINS
 from tests.test_reference_sender import spawn_fixture_sender
 from ops.native_node_fixture import ARCHIVE
 
@@ -17,7 +17,12 @@ PINS={
 'referenceWireJson.js':'c63143addd3d9185cad70a310e711066114328f68c28c78af18581e2fb386ca0'}
 
 @unittest.skipUnless(os.name=='posix' and os.environ.get('VIEWER_STAGED_ROOT'),'pinned staged Viewer required')
-class CurrentBridgeTests(ReferenceJointFlowTests):
+class CurrentBridgeTests(_JointFlow):
+    def setUp(self):
+        if self._testMethodName!='test_crashed_coordinator_then_current_viewer_read_no_acceptance':
+            raise unittest.SkipTest('inherited acceptance/cleanup fixture disabled here')
+        super().setUp()
+
     @classmethod
     def setUpClass(cls):
         cls.cert=Path(os.environ['SYNTHETIC_TLS_ROOT'])/'cert.pem'
@@ -124,6 +129,16 @@ print('READY',flush=True);server.serve_forever()
                     sender_thread.join(8);self.assertFalse(sender_thread.is_alive())
 
 
+del _JointFlow
+
+class FixtureInvocationTests(unittest.TestCase):
+    def test_inherited_acceptance_test_refuses_direct_invocation(self):
+        case=CurrentBridgeTests('test_real_node_broker_provider_acceptance_and_python_worker_cleanup_order')
+        result=unittest.TestResult();case.run(result)
+        self.assertEqual(result.testsRun,1);self.assertEqual(len(result.skipped),1)
+        self.assertFalse(result.errors or result.failures)
+
+
 def load_tests(loader, tests, pattern):
-    # Parent fixture also contains ACK/cleanup tests; never discover them here.
-    return unittest.TestSuite([CurrentBridgeTests('test_crashed_coordinator_then_current_viewer_read_no_acceptance')])
+    return unittest.TestSuite([CurrentBridgeTests('test_crashed_coordinator_then_current_viewer_read_no_acceptance'),
+                               FixtureInvocationTests('test_inherited_acceptance_test_refuses_direct_invocation')])
