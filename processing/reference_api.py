@@ -125,6 +125,15 @@ class ReferenceAPI:
                 return Response(200, job) if job else self._error(404, 'not_found')
             if method == "POST" and path == protocol.PREFIX + "/jobs":
                 payload = protocol.decode_submission(body)
+                # A previously committed exact submission remains recoverable
+                # after options/capabilities change. Authentication has already
+                # established the trusted environment, and this read-only
+                # lookup cannot create work or replay a different request.
+                if type(payload) is dict and 'submissionId' in payload:
+                    replay = self.store.find_submission_replay(payload['submissionId'],
+                        request_digest=protocol.digest(payload), environment=environment)
+                    if replay is not None:
+                        return Response(200, replay)
                 validated = protocol.validate_submission(payload, environment=environment,
                     capability_fingerprint=self.capability_fingerprint,
                     options_fingerprint=self.options_fingerprint,
