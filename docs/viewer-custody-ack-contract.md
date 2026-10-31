@@ -289,3 +289,10 @@ blocks direct-write bypass. A hold prevents new permits, while an already
 admitted operation may finish. This is still not a TLS route, remotely
 authenticated network boundary or continuously revocable lease. The new
 permit table changes the exact disabled schema; old databases are not migrated.
+
+A finished synthetic chunk permit is replayed only after the exact bound slot,
+intent, receipt and on-disk chunk hash are verified again under the slot lock.
+A wrong process-local nonce does not consume the valid nonce. Coordinator hold
+prevents new admissions but does not wait for an already-active chunk permit;
+that admitted operation may finish after hold, and no continuous revocation or
+engine-drain guarantee is implied.

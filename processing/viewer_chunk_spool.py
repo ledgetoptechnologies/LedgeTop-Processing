@@ -102,12 +102,15 @@ class SyntheticChunkSpool:
             if not session or not row or session['state']!='ready' or row['state']!='receiving' or offset+length>metadata['archiveBytes']:
                 raise SpoolHeld('chunk_state_changed')
             prior=db.execute('SELECT specification,state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id=?',(job,operation_id)).fetchone()
-            if prior:
-                if (prior['specification'],prior['state'])!=(spec,'finished'):raise SpoolHeld('chunk_permit_requires_inspection')
-                return dict(state='finished')
-            if db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():
+            if prior and (prior['specification'],prior['state'])!=(spec,'finished'):raise SpoolHeld('chunk_permit_requires_inspection')
+            if not prior and db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():
                 raise SpoolHeld('chunk_permit_requires_inspection')
-            db.execute("INSERT INTO viewer_worker_chunk_permits VALUES(?,?,?,'active')",(job,operation_id,spec))
+            if not prior:db.execute("INSERT INTO viewer_worker_chunk_permits VALUES(?,?,?,'active')",(job,operation_id,spec))
+        if prior:
+            _,_,_,slot,journal=self._open(job,identity,token)
+            try:journal.verify_chunk(index,offset,length,sha256)
+            finally:slot.close()
+            return dict(state='finished')
         nonce=secrets.token_hex(16)
         with self._permit_lock:self._active[(job,operation_id)]=nonce
         return dict(state='active',permit=nonce)
@@ -117,9 +120,10 @@ class SyntheticChunkSpool:
         from .viewer_chunk_journal import MAX_CHUNK
         if type(data) is not bytes or not 1<=len(data)<=MAX_CHUNK or os.getpid()!=self._pid:raise SpoolHeld('chunk_spec_invalid')
         with self._permit_lock:
-            expected_nonce=self._active.pop((job,operation_id),None)
-        if not expected_nonce or not isinstance(permit_nonce,str) or not secrets.compare_digest(expected_nonce,permit_nonce):
-            raise SpoolHeld('chunk_permit_requires_inspection')
+            expected_nonce=self._active.get((job,operation_id))
+            if not expected_nonce or not isinstance(permit_nonce,str) or not secrets.compare_digest(expected_nonce,permit_nonce):
+                raise SpoolHeld('chunk_permit_requires_inspection')
+            del self._active[(job,operation_id)]
         spec=p.canonical_json(dict(index=index,offset=offset,length=len(data),sha256=hashlib.sha256(data).hexdigest())).decode()
         with self.spool._admit():
             metadata,sha,key,slot,journal=self._open(job,identity,token)

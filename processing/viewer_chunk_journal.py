@@ -58,6 +58,21 @@ class SyntheticChunkJournal:
         base=self.prefix+str(index).zfill(4)
         return base+'.intent',base+'.receipt'
 
+    def verify_chunk(self,index,offset,length,sha256):
+        """Revalidate exact committed chunk bytes while holding the slot lock."""
+        with self.slot._operation_lock:
+            if type(offset) is not int or offset<0 or type(length) is not int or not 1<=length<=MAX_CHUNK or offset+length>self.binding['archiveBytes']:
+                raise ChunkHeld('chunk_spec_invalid')
+            p._hash(sha256,'chunk sha256')
+            self._verify(self.header,self.expected)
+            intent_name,receipt_name=self._names(index)
+            intent=dict(schemaVersion=1,bindingSha256=self.digest,index=index,offset=offset,length=length,sha256=sha256)
+            receipt=dict(schemaVersion=1,intentSha256=p.digest(intent))
+            self._verify(intent_name,intent);self._verify(receipt_name,receipt)
+            self.slot._check();data=os.pread(self.slot._fd,length,offset);self.slot._check()
+            if len(data)!=length or hashlib.sha256(data).hexdigest()!=sha256:raise ChunkHeld('chunk_content_changed')
+            return receipt
+
     def write(self,index,offset,data):
         with self.slot._operation_lock:return self._write(index,offset,data)
 

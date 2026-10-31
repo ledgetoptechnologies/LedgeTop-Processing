@@ -72,6 +72,27 @@ class ChunkSpoolTests(unittest.TestCase):
         with self.assertRaises(SpoolHeld):self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-1',1,8,1,hashlib.sha256(b'x').hexdigest())
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
 
+    def test_finished_permit_replay_rechecks_receipt_and_slot_bytes(self):
+        self.chunk.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
+        permit=self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest)
+        with self.assertRaises(SpoolHeld):
+            self.chunk.write_admitted(self.job,self.identity,self.token,'chunk-0','wrong',0,0,data)
+        self.chunk.write_admitted(self.job,self.identity,self.token,'chunk-0',permit['permit'],0,0,data)
+        self.assertEqual(self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest),{'state':'finished'})
+        allocation=next(self.base.root.glob('*.alloc'))
+        with allocation.open('r+b') as stream:stream.write(b'X');stream.flush()
+        with self.assertRaises(Exception):self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest)
+
+    def test_finished_permit_replay_rejects_missing_receipt(self):
+        self.chunk.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
+        permit=self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest)
+        self.chunk.write_admitted(self.job,self.identity,self.token,'chunk-0',permit['permit'],0,0,data)
+        receipt=next(self.base.root.glob('*.chunks-v1.*.receipt'));receipt.unlink()
+        with self.assertRaises(Exception):self.chunk.admit_chunk(self.job,self.identity,self.token,'chunk-0',0,0,len(data),digest)
+        self.assertFalse(receipt.exists())
+
     def test_interrupted_admission_does_not_auto_resume(self):
         self.chunk.begin(self.job,self.identity,self.token)
         data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
