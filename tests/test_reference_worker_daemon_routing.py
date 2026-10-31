@@ -109,6 +109,7 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         self.assertFalse(settings['engineCleanupEnabled'])
         self.assertEqual(settings['allowedEnvironments'],['production','staging'])
         driver,_=self.build(settings,provision=True)
+        self.assertFalse(driver.broker.enable_ranges)
         self.assertIsNone(driver.execution_router)
         self.assertIsNone(driver.provenance_client)
         self.assertIs(self.listeners[-1].results.worker,driver.worker)
@@ -116,6 +117,21 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             self.assertFalse((self.state/name).exists())
         self.assertEqual(self.docker_calls,[])
         self.assertFalse(any(self.backend.counts().values()))
+
+    def test_explicit_range_policy_reaches_actual_worker_broker(self):
+        self.config['brokerRangeMaxBytes']=8 * 1024 * 1024
+        settings=self.load()
+        driver,_=self.build(settings,provision=True)
+        self.assertTrue(driver.broker.enable_ranges)
+        self.assertEqual(driver.broker.max_response_bytes,8 * 1024 * 1024)
+        self.assertEqual(self.docker_calls,[])
+
+    def test_invalid_range_policy_is_rejected(self):
+        for value in (None,True,False,0,-1,16 * 1024 * 1024 + 1,1.5,'1024'):
+            with self.subTest(value=value):
+                self.config['brokerRangeMaxBytes']=value
+                with self.assertRaises(ValueError):
+                    self.load()
 
     def test_cluster_odm_only_opt_in_uses_router_without_treedar_or_issuer(self):
         self.config['nodeId']='cluster';self.config['workerId']='worker-cluster'

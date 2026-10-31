@@ -182,6 +182,15 @@ It must reserve scratch before exposing a transfer request, fetch only through
 the scoped broker grant, and pass verified reservation-owned input paths to the
 engine controller. No submitted path or engine origin is trusted.
 
+After a successful `fetching` step, the worker service continues without the
+normal polling delay. It yields for 10 ms after at most 16 consecutive fetch
+steps, checks for shutdown between steps, and retains the existing retry, idle,
+and other-state polling. Each driver step still performs its background pass
+and persists one input before proceeding. This removes a fixed per-object wait;
+it does not establish a transfer-time bound or qualify a 10,000-object job.
+Grant lifetime, broker request limits, source I/O and metadata serialization
+remain independent constraints.
+
 The private API supports claim, reservation, transfer/processing phase, grant,
 result receipt and Viewer-acceptance relay operations. Public submission lookup
 by immutable submission UUID recovers a lost response without creating another
@@ -397,6 +406,16 @@ does not establish processing acceptance. Claude's workspace changes have source
 review, while browser/mobile and installed acceptance remain open. Combined
 sequential ODM-to-TreeDar final delivery and the selected smaller real-data trial
 are still pending; TreeDar/Gaussian capabilities remain disabled.
+
+For a worker paired with a broker known to support v1 byte ranges, the private
+worker configuration may opt in using `brokerRangeMaxBytes`, an integer between
+1 and 16 MiB inclusive. It limits each requested range; set it no higher than
+the actual broker's response ceiling. Omit the key to retain legacy single-response
+behavior. This setting does not discover or advertise broker capabilities and
+must not be enabled without validating the paired broker. Ranges still share the
+v1 grant's expiry and request/byte budgets; partial objects restart from zero.
+It does not remove the existing grant and request-count limitations or qualify
+large datasets. No deployment is implied by this setting.
 
 ## Coordinated ownership
 
