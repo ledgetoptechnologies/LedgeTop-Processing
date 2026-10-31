@@ -10,6 +10,16 @@ This was one explicitly supervised operation; no recurring service is installed.
 `ops.node_maintenance.run`. It is a Linux library, with no installed detector,
 supervisor loop, timer, image pull, qualifier, or deployment entry point.
 
+Before a managed replacement, the Compose adapter requires `/var/www/data`
+to be an existing read-write bind mount or named Docker volume and requires the
+resolved replacement to use that same mount. It rejects overlay-only data and
+overlapping mounts. This check prevents the replacement from intentionally
+dropping the current mount; it does not migrate existing overlay data, make a
+backup, verify its contents, exclude other writers, or establish that a volume
+survives host loss. Migrate and independently verify existing data before
+enabling updates, and maintain exclusive control over the host and Compose
+configuration during the check and replacement.
+
 ## Composition
 
 Construct it with an existing private managed maintenance root, a dedicated

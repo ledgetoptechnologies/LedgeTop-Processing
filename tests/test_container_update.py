@@ -269,9 +269,10 @@ class ComposeBoundaryTests(unittest.TestCase):
             node_origin='http://127.0.0.1:12345', docker_engine_id='expected-engine', node_port=3000)
         self.adapter = ComposeNode(self.args, Path(self.temp.name))
         self.item = {'Id': 'exact-container', 'Image': OLD, 'State': {'Running': True},
+            'Mounts': [{'Type': 'volume', 'Name': 'fixture-data', 'Source':'/var/lib/docker/volumes/fixture-data/_data', 'Destination': '/var/www/data', 'RW': True}],
             'Config': {'Labels': {'com.docker.compose.project': 'test-project', 'com.docker.compose.service': 'node'}},
             'NetworkSettings': {'Ports': {'3000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '12345'}]}}}
-        self.service = {'image': NEW}
+        self.service = {'image': NEW, 'volumes': [{'type': 'volume', 'source': 'fixture-data', 'target': '/var/www/data'}]}
         self.commands = []
 
     def tearDown(self):
@@ -287,10 +288,12 @@ class ComposeBoundaryTests(unittest.TestCase):
             return 'exact-container\n'
         if command[1:3] == ['image', 'inspect']:
             return NEW + '\n'
+        if command[1:3] == ['volume', 'inspect']:
+            return json.dumps([{'Name':'fixture-data','Mountpoint':'/var/lib/docker/volumes/fixture-data/_data'}])
         if command[1] == 'inspect':
             return json.dumps([self.item])
         if 'config' in command:
-            return json.dumps({'services': {'node': self.service}})
+            return json.dumps({'services': {'node': self.service}, 'volumes': {'fixture-data': {'name': 'fixture-data'}, 'other': {'name': 'other'}}})
         return ''
 
     def test_exact_loopback_port_and_compose_ownership_required(self):
@@ -391,11 +394,47 @@ class ComposeBoundaryTests(unittest.TestCase):
 
     def test_existing_cluster_resources_are_preserved_and_none_added_for_main(self):
         with patch.dict(os.environ,{'DOCKER_HOST':''}),patch.object(self.adapter,'docker',side_effect=self.docker):
-            for service in ({'image':NEW},{'image':NEW,'mem_limit':'4g','cpus':2,'pids_limit':128}):
+            for service in ({'image':NEW,'volumes':[{'type':'volume','source':'fixture-data','target':'/var/www/data'}]}, {'image':NEW,'volumes':[{'type':'volume','source':'fixture-data','target':'/var/www/data'}],'mem_limit':'4g','cpus':2,'pids_limit':128}):
                 self.service=service
                 self.adapter.replace(NEW)
                 resolved=json.loads((Path(self.temp.name)/'resolved-compose.json').read_text())
                 self.assertEqual(resolved['services']['node'],service)
+
+    def test_replacement_refuses_overlay_mismatched_or_nested_data_mount(self):
+        with patch.dict(os.environ, {'DOCKER_HOST': ''}), patch.object(self.adapter, 'docker', side_effect=self.docker):
+            valid_item = self.item['Mounts'][:]
+            valid_volumes = self.service['volumes'][:]
+            cases = [([], valid_volumes), (valid_item, []),
+                     (valid_item, [{**valid_volumes[0], 'source': 'other'}]),
+                     ([{**valid_item[0], 'RW': False}], valid_volumes),
+                     (valid_item, [{**valid_volumes[0], 'read_only': True}]),
+                     (valid_item, valid_volumes + [{'type':'volume','source':'other','target':'/var/www/data/sub'}])]
+            for old, new in cases:
+                with self.subTest(old=old, new=new):
+                    self.item['Mounts'] = old; self.service['volumes'] = new
+                    with self.assertRaises(PreflightError): self.adapter.replace(NEW)
+            self.assertFalse(any('up' in c for c in self.commands))
+
+    def test_named_volume_resolves_actual_name_and_bind_must_match(self):
+        guard = self.adapter.require_persistent_data
+        volume = {'Mounts':[{'Type':'volume','Name':'project_actual','Destination':'/var/www/data','RW':True}]}
+        service = {'volumes':[{'type':'volume','source':'logical','target':'/var/www/data'}]}
+        guard(volume,service,{'logical':{'name':'project_actual'}})
+        with self.assertRaises(UpdateError): guard(volume,service,{'logical':{'name':'different'}})
+        with self.assertRaises(UpdateError): guard(volume,service,{})
+        with self.assertRaises(UpdateError): guard(volume,{**service,'tmpfs':['/var/www/data:rw']},{'logical':{'name':'project_actual'}})
+        with self.assertRaises(UpdateError): guard(volume,{**service,'volumes_from':['other']},{'logical':{'name':'project_actual'}})
+        with self.assertRaises(UpdateError): guard(volume,{'volumes':[{**service['volumes'][0],'volume':{'subpath':'other'}}]},{'logical':{'name':'project_actual'}})
+        with self.assertRaises(UpdateError): guard({'Mounts':[{**volume['Mounts'][0],'SubPath':'other'}]},service,{'logical':{'name':'project_actual'}})
+        bind = {'Mounts':[{'Type':'bind','Source':'/srv/node/data','Destination':'/var/www/data','RW':True}]}
+        guard(bind,{'volumes':[{'type':'bind','source':'/srv/node/data','target':'/var/www/data'}]}, {})
+        with self.assertRaises(UpdateError): guard(bind,{'volumes':[{'type':'bind','source':'/srv/other','target':'/var/www/data'}]}, {})
+
+    def test_volume_subdirectory_source_fails_before_replacement(self):
+        self.item['Mounts'][0]['Source'] += '/other'
+        with patch.dict(os.environ, {'DOCKER_HOST': ''}), patch.object(self.adapter, 'docker', side_effect=self.docker):
+            with self.assertRaises(PreflightError): self.adapter.replace(NEW)
+        self.assertFalse(any('up' in c for c in self.commands))
 
     def test_docker_timeout_is_uncertain_not_safe_rollback_signal(self):
         with patch('processing.container_update.subprocess.run', side_effect=subprocess.TimeoutExpired('docker', 1)):

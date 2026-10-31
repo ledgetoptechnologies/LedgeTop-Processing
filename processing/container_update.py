@@ -208,6 +208,15 @@ class ComposeNode:
         if (service.get('post_start') or service.get('pre_stop') or service.get('scale', 1) != 1
                 or deployment.get('replicas', 1) != 1 or deployment.get('mode', 'replicated') != 'replicated'):
             raise UpdateError('service hooks/scaling are not supported by maintenance adapter')
+        current = self.inspect()
+        self.require_persistent_data(current, service, configuration.get('volumes', {}))
+        mount = next(m for m in current['Mounts'] if m['Destination'] == '/var/www/data')
+        if mount['Type'] == 'volume':
+            volume = json.loads(self.docker(['docker', 'volume', 'inspect', mount['Name']]))
+            if (not isinstance(volume, list) or len(volume) != 1 or not isinstance(volume[0], dict)
+                    or volume[0].get('Name') != mount['Name'] or not isinstance(volume[0].get('Mountpoint'), str)
+                    or not volume[0]['Mountpoint'] or volume[0]['Mountpoint'] != mount.get('Source')):
+                raise UpdateError('engine volume root identity unavailable')
         # Execute the exact resolved configuration we validated. Source edits
         # between validation and 'up' must not introduce a new hook or mount.
         resolved = self.root / 'resolved-compose.json'
@@ -218,6 +227,52 @@ class ComposeNode:
         return ['docker', 'compose', '-p', self.args.project, '-f', str(resolved),
                 'up', '-d', '--no-deps', '--no-build',
                 '--pull', 'never', '--force-recreate', self.args.service]
+
+    @staticmethod
+    def require_persistent_data(item, service, volumes):
+        """Refuse replacement unless existing and resolved storage agree.
+
+        This is a point-in-time guard, not a migration or a writer fence.
+        """
+        target = '/var/www/data'
+        observed = item.get('Mounts')
+        proposed = service.get('volumes')
+        if (not isinstance(observed, list) or not isinstance(proposed, list)
+                or any(not isinstance(m, dict) or not isinstance(m.get('Destination'), str) for m in observed)
+                or any(not isinstance(m, dict) or not isinstance(m.get('target'), str) for m in proposed)):
+            raise UpdateError('persistent engine data mount required')
+        def relevant(path):
+            return isinstance(path, str) and (path == target or path.startswith(target + '/') or target.startswith(path.rstrip('/') + '/'))
+        tmpfs = service.get('tmpfs') or []
+        if isinstance(tmpfs, str):
+            tmpfs = [tmpfs]
+        if (service.get('volumes_from') or not isinstance(tmpfs, list)
+                or any(not isinstance(p, str) or relevant(p.split(':', 1)[0]) for p in tmpfs)):
+            raise UpdateError('unsupported engine data mount source')
+        current = [m for m in observed if isinstance(m, dict) and relevant(m.get('Destination'))]
+        future = [m for m in proposed if isinstance(m, dict) and relevant(m.get('target'))]
+        if len(current) != 1 or len(future) != 1:
+            raise UpdateError('ambiguous engine data mount')
+        old, new = current[0], future[0]
+        kind = old.get('Type')
+        source = old.get('Name') if kind == 'volume' else old.get('Source')
+        replacement_source = new.get('source')
+        if kind == 'volume':
+            options = new.get('volume', {})
+            old_options = old.get('VolumeOptions') or {}
+            if (not isinstance(options, dict) or 'subpath' in options
+                    or old.get('SubPath') or not isinstance(old_options, dict) or old_options.get('Subpath')):
+                raise UpdateError('volume subpath is not supported')
+            if (not isinstance(replacement_source, str) or not isinstance(volumes, dict)
+                    or not isinstance(volumes.get(replacement_source), dict)):
+                raise UpdateError('resolved named volume identity unavailable')
+            replacement_source = volumes[replacement_source].get('name')
+        if (old.get('Destination') != target or old.get('RW') is not True
+                or kind not in ('bind', 'volume') or not isinstance(source, str) or not source
+                or new.get('type') != kind or new.get('target') != target
+                or replacement_source != source or new.get('read_only', False) is not False
+                or (kind == 'bind' and not source.startswith('/'))):
+            raise UpdateError('existing and replacement engine data mounts differ')
 
     def replace(self, image):
         try:
