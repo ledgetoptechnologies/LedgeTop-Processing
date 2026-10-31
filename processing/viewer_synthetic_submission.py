@@ -56,9 +56,18 @@ def submit(inputs,engine,*,synthetic_fixture=False):
                         (after,index,new_object,before,index,expected_object)).rowcount
                     if changed!=1:raise SubmissionHeld('submission_state_changed')
 
+            def mutation(operation,operation_id,action):
+                payload=dict(operationId=operation_id,operation=operation)
+                expected=dict(jobId=grant['jobId'],**payload,state='active')
+                permit=inputs.worker._request(payload,job_id=grant['jobId'],claim_token=inputs.claim['claimToken'],kind='mutation-permit')
+                if permit!=expected:raise SubmissionHeld('mutation_permit_changed')
+                action()
+                finished=inputs.worker._request(payload,job_id=grant['jobId'],claim_token=inputs.claim['claimToken'],kind='mutation-finish')
+                if finished!={**expected,'state':'finished'}:raise SubmissionHeld('mutation_finish_changed')
+
             if phase=='ready':
                 transition('ready','init_pending',0)
-                try:initialize(engine,grant['engineTaskId'],plan,grant['pipelineSha256'],grant['taskName'],grant['taskNameSha256'])
+                try:mutation('init','init',lambda:initialize(engine,grant['engineTaskId'],plan,grant['pipelineSha256'],grant['taskName'],grant['taskNameSha256']))
                 except Exception:raise SubmissionHeld('initialization_uncertain') from None
                 transition('init_pending','initialized',0);phase='initialized'
             while ordinal<len(rows):
@@ -73,7 +82,7 @@ def submit(inputs,engine,*,synthetic_fixture=False):
                         raise SubmissionHeld('input_identity_changed')
                     previous_object=None if phase=='initialized' else p.decode_submission(rows[ordinal-1][0])['objectId']
                     transition(phase,'upload_pending',ordinal,previous_object,entry['objectId'])
-                    try:upload_locked(engine,grant['engineTaskId'],{k:entry[k] for k in ('name','bytes','sha256')},slot,identity)
+                    try:mutation('upload','upload-'+str(ordinal),lambda:upload_locked(engine,grant['engineTaskId'],{k:entry[k] for k in ('name','bytes','sha256')},slot,identity))
                     except Exception:raise SubmissionHeld('upload_uncertain') from None
                     with inputs._db() as db:
                         changed=db.execute("UPDATE synthetic_submission SET phase='uploaded',ordinal=? WHERE singleton=1 AND phase='upload_pending' AND ordinal=? AND object_id=?",
@@ -82,7 +91,7 @@ def submit(inputs,engine,*,synthetic_fixture=False):
                     ordinal+=1;phase='uploaded'
                 finally:slot.close()
             transition(phase,'commit_pending',ordinal,p.decode_submission(rows[-1][0])['objectId'],None)
-            try:commit(engine,grant['engineTaskId'])
+            try:mutation('commit','commit',lambda:commit(engine,grant['engineTaskId']))
             except Exception:raise SubmissionHeld('commit_uncertain') from None
             transition('commit_pending','committed',ordinal)
             return {'state':'synthetic_submitted','engineTaskId':grant['engineTaskId']}

@@ -137,23 +137,27 @@ class Queue(Maintenance):
             except BaseException:
                 self._lock.close()
                 raise
-        with self._db() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS jobs (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-                request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
-                profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,
-                claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            if 'node_id' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
-                db.execute('ALTER TABLE jobs ADD COLUMN node_id TEXT')
-            if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
-                db.execute('ALTER TABLE jobs ADD COLUMN held_reason TEXT')
-            db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
-            db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
-            self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
-            db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
-            db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
-            self._init_maintenance(db)
+        try:
+            with self._db() as db:
+                db.execute("""CREATE TABLE IF NOT EXISTS jobs (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+                    request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
+                    profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,
+                    claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                if 'node_id' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                    db.execute('ALTER TABLE jobs ADD COLUMN node_id TEXT')
+                if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                    db.execute('ALTER TABLE jobs ADD COLUMN held_reason TEXT')
+                db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
+                db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
+                self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
+                db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
+                db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
+                self._init_maintenance(db)
+        except BaseException:
+            self._lock.close()
+            raise
 
     def close(self):
         if os.getpid() != self._creator_pid:
@@ -287,7 +291,7 @@ class Queue(Maintenance):
             if not row:
                 return None
             if row['profile']=='odm-viewer-v1' and db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants')").fetchone():
+                    "SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_active_permit_hold')").fetchone():
                 # Once enrolled mode has ever created its durable marker,
                 # generic claims cannot bypass the authenticated worker path.
                 return None

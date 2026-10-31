@@ -1,10 +1,12 @@
 from http.server import BaseHTTPRequestHandler,HTTPServer
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from ops.reference_worker_daemon import DaemonStateLock
 from processing.node_gate import NodeGate
@@ -85,6 +87,46 @@ class SyntheticSubmissionTests(unittest.TestCase):
         with DaemonStateLock(self.base.base.worker):
             with self.assertRaisesRegex(ValueError,'already owned'):
                 with DaemonStateLock(self.base.base.worker):pass
+        self.assertEqual(self.calls,[])
+
+    def test_hold_drains_inflight_and_blocks_next_mutation(self):
+        self.pause='upload'
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future=pool.submit(submit,inputs,NativeEngine(self.origin),synthetic_fixture=True)
+                try:
+                    self.assertTrue(self.arrived.wait(8))
+                    hold=inputs.worker._request({},job_id=inputs.claim['jobId'],claim_token=inputs.claim['claimToken'],kind='mutation-hold')
+                    self.assertEqual(hold['state'],'draining')
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        with self.base.base.fixture.queue._db() as db:
+                            db.execute("UPDATE jobs SET status='held' WHERE id=?",(inputs.claim['jobId'],))
+                    self.release.set()
+                    with self.assertRaises(SubmissionHeld):future.result(timeout=8)
+                finally:self.release.set()
+            self.assertEqual(self.base.base.fixture.queue.get(inputs.claim['jobId'])['status'],'held')
+        self.assertEqual([c[0] for c in self.calls],['init','upload'])
+
+    def test_coordinator_restart_with_active_permit_fails_closed(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);inputs.request_execution_grant()
+            payload=dict(operationId='init',operation='init')
+            permit=inputs.worker._request(payload,job_id=inputs.claim['jobId'],claim_token=inputs.claim['claimToken'],kind='mutation-permit')
+            self.assertEqual(permit['state'],'active')
+        fixture=self.base.base.fixture;fixture.stop_server();fixture.queue.close();fixture.queue=None
+        with self.assertRaises(sqlite3.IntegrityError):fixture.start_queue()
+        with self.assertRaises(sqlite3.IntegrityError):fixture.start_queue()
+
+    def test_hold_without_active_permit_blocks_new_permits(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);inputs.request_execution_grant()
+            result=inputs.worker._request({},job_id=inputs.claim['jobId'],claim_token=inputs.claim['claimToken'],kind='mutation-hold')
+            self.assertEqual(result['state'],'held')
+            from processing.viewer_node_enrollment import EnrollmentHeld
+            with self.assertRaises(EnrollmentHeld):
+                inputs.worker._request(dict(operationId='init',operation='init'),job_id=inputs.claim['jobId'],
+                                       claim_token=inputs.claim['claimToken'],kind='mutation-permit')
         self.assertEqual(self.calls,[])
 
     def test_corrupt_journal_state_does_not_claim_success(self):

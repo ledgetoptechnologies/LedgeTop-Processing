@@ -42,6 +42,9 @@ ENROLL_DDL = '''CREATE TABLE viewer_worker_enrollments (
  job_id TEXT PRIMARY KEY, attestation TEXT NOT NULL, receipt TEXT NOT NULL)'''
 PLAN_DDL = '''CREATE TABLE viewer_worker_plans (job_id TEXT PRIMARY KEY, plan TEXT NOT NULL, task_name TEXT NOT NULL)'''
 GRANT_DDL = '''CREATE TABLE viewer_worker_grants (job_id TEXT PRIMARY KEY, request TEXT NOT NULL, grant_value TEXT NOT NULL)'''
+FENCE_DDL = '''CREATE TABLE viewer_worker_fences (job_id TEXT PRIMARY KEY, stop_requested INTEGER NOT NULL CHECK(stop_requested IN (0,1)))'''
+PERMIT_DDL = '''CREATE TABLE viewer_worker_permits (job_id TEXT NOT NULL, operation_id TEXT NOT NULL, operation TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','finished')), PRIMARY KEY(job_id,operation_id))'''
+TRIGGER_DDL = '''CREATE TRIGGER viewer_worker_active_permit_hold BEFORE UPDATE OF status ON jobs WHEN OLD.status='running' AND NEW.status!='running' AND EXISTS(SELECT 1 FROM viewer_worker_permits WHERE job_id=OLD.id AND state='active') BEGIN SELECT RAISE(ABORT,'viewer active permit requires drain'); END'''
 PAGE_SIZE=100
 MAX_INPUT_READERS=2
 
@@ -91,16 +94,18 @@ class ViewerWorkerClaims:
         self.node_environments=MappingProxyType({node:frozenset(values) for node,values in node_environments.items()})
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants')").fetchall()
-            if not objects:db.execute(DDL);db.execute(FILES_DDL);db.execute(ENROLL_DDL);db.execute(PLAN_DDL);db.execute(GRANT_DDL)
+            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_active_permit_hold')").fetchall()
+            if not objects:
+                for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,TRIGGER_DDL):db.execute(sql)
             self._schema(db)
 
     @staticmethod
     def _schema(db):
-        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants') ORDER BY type,name"
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits') OR name='viewer_worker_active_permit_hold' ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
-            expected.execute(DDL);expected.execute(FILES_DDL);expected.execute(ENROLL_DDL);expected.execute(PLAN_DDL);expected.execute(GRANT_DDL)
+            expected.execute('CREATE TABLE jobs (id TEXT,status TEXT)')
+            for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,TRIGGER_DDL):expected.execute(sql)
             if [tuple(row) for row in db.execute(query)] != [tuple(row) for row in expected.execute(query)]:
                 raise Conflict('Viewer claim schema changed')
         finally:expected.close()
@@ -212,7 +217,7 @@ class ViewerWorkerClaims:
                 (identity['node_id'],engine_uuid,token,task['uuid']))
             return {**value,'claimRequestId':payload['claimRequestId'],'claimToken':token}
 
-    def _authorize_inventory(self,db,job_id,identity,claim_token,*,require_enrollment=True):
+    def _authorize_inventory(self,db,job_id,identity,claim_token,*,require_enrollment=True,allow_fence_hold=False):
         if type(claim_token) is not str or not claim_token.isascii() or not 1<=len(claim_token)<=128:
             raise Conflict('Viewer claim token required')
         self._schema(db)
@@ -224,7 +229,8 @@ class ViewerWorkerClaims:
             or row['environment'] not in self.node_environments.get(identity['node_id'],())
             or not hmac.compare_digest(row['token'],claim_token)
             or job['claim_hash']!=hashlib.sha256(claim_token.encode()).hexdigest()
-            or job['status'] not in ('running','held') or (job['status']=='held' and job['held_reason']!='coordinator_restart')):
+            or job['status'] not in ('running','held') or (job['status']=='held' and job['held_reason']!='coordinator_restart'
+                and not (allow_fence_hold and job['held_reason']=='worker_fence_hold'))):
             raise Conflict('Viewer inventory claim unavailable')
         saved=json.loads(row['binding']);task=task[0]
         if (p.canonical_json(saved).decode()!=row['binding'] or saved['state']!='claimed_unenrolled'
@@ -290,6 +296,43 @@ class ViewerWorkerClaims:
                 if (old['request'],old['grant_value'])!=(request,encoded):raise Conflict('execution grant changed')
             else:db.execute('INSERT INTO viewer_worker_grants VALUES(?,?,?)',(job_id,request,encoded))
             return grant
+
+    def mutation_permit(self,job_id,payload,identity,claim_token):
+        p._closed(payload,('operationId','operation'),'mutation permit');p._slug(payload['operationId'],'operation ID')
+        if payload['operation'] not in ('init','upload','commit'):raise Conflict('mutation invalid')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');self._authorize_inventory(db,job_id,identity,claim_token)
+            job=db.execute('SELECT status FROM jobs WHERE id=?',(job_id,)).fetchone()
+            grant=db.execute('SELECT 1 FROM viewer_worker_grants WHERE job_id=?',(job_id,)).fetchone()
+            fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(job_id,)).fetchone()
+            if not grant or not job or job['status']!='running' or (fence and fence['stop_requested']):raise Conflict('mutation admission closed')
+            existing=db.execute('SELECT operation,state FROM viewer_worker_permits WHERE job_id=? AND operation_id=?',(job_id,payload['operationId'])).fetchone()
+            if existing:
+                if (existing['operation'],existing['state'])!=(payload['operation'],'active'):raise Conflict('mutation permit changed')
+            else:
+                if db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(job_id,)).fetchone():raise Conflict('mutation already active')
+                db.execute('INSERT INTO viewer_worker_permits VALUES(?,?,?,?)',(job_id,payload['operationId'],payload['operation'],'active'))
+            return dict(jobId=job_id,operationId=payload['operationId'],operation=payload['operation'],state='active')
+
+    def mutation_finish(self,job_id,payload,identity,claim_token):
+        p._closed(payload,('operationId','operation'),'mutation finish');p._slug(payload['operationId'],'operation ID')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');self._authorize_inventory(db,job_id,identity,claim_token,allow_fence_hold=True)
+            row=db.execute('SELECT operation,state FROM viewer_worker_permits WHERE job_id=? AND operation_id=?',(job_id,payload['operationId'])).fetchone()
+            if not row or row['operation']!=payload['operation'] or row['state'] not in ('active','finished'):raise Conflict('mutation permit changed')
+            db.execute("UPDATE viewer_worker_permits SET state='finished' WHERE job_id=? AND operation_id=?",(job_id,payload['operationId']))
+            fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(job_id,)).fetchone()
+            if fence and fence['stop_requested']:
+                db.execute("UPDATE jobs SET status='held',held_reason='worker_fence_hold' WHERE id=? AND status='running'",(job_id,))
+            return dict(jobId=job_id,operationId=payload['operationId'],operation=payload['operation'],state='finished')
+
+    def mutation_hold(self,job_id,identity,claim_token):
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');self._authorize_inventory(db,job_id,identity,claim_token,allow_fence_hold=True)
+            db.execute('INSERT INTO viewer_worker_fences VALUES(?,1) ON CONFLICT(job_id) DO UPDATE SET stop_requested=1',(job_id,))
+            active=db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(job_id,)).fetchone()
+            if not active:db.execute("UPDATE jobs SET status='held',held_reason='worker_fence_hold' WHERE id=? AND status='running'",(job_id,))
+            return dict(jobId=job_id,state='draining' if active else 'held')
 
     def enroll(self,job_id,payload,identity,claim_token):
         p._uuid(job_id,'job ID');p._closed(payload,('binding','slotIdentity'),'node enrollment')

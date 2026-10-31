@@ -258,6 +258,9 @@ class ViewerWorkerClaimTests(unittest.TestCase):
 
     def test_enrollment_only_marker_blocks_legacy_claim_tick_and_startup(self):
         with self.queue._db() as db:
+            db.execute('DROP TRIGGER viewer_worker_active_permit_hold')
+            db.execute('DROP TABLE viewer_worker_fences')
+            db.execute('DROP TABLE viewer_worker_permits')
             db.execute('DROP TABLE viewer_worker_claims')
             db.execute('DROP TABLE viewer_worker_inventory')
             db.execute('DROP TABLE viewer_worker_plans')
@@ -276,6 +279,9 @@ class ViewerWorkerClaimTests(unittest.TestCase):
 
     def test_plan_only_marker_blocks_legacy_claim_tick_and_startup(self):
         with self.queue._db() as db:
+            db.execute('DROP TRIGGER viewer_worker_active_permit_hold')
+            db.execute('DROP TABLE viewer_worker_fences')
+            db.execute('DROP TABLE viewer_worker_permits')
             for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_grants'):
                 db.execute('DROP TABLE '+table)
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
@@ -290,6 +296,9 @@ class ViewerWorkerClaimTests(unittest.TestCase):
 
     def test_grant_only_marker_blocks_legacy_claim_tick_and_startup(self):
         with self.queue._db() as db:
+            db.execute('DROP TRIGGER viewer_worker_active_permit_hold')
+            db.execute('DROP TABLE viewer_worker_fences')
+            db.execute('DROP TABLE viewer_worker_permits')
             for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans'):
                 db.execute('DROP TABLE '+table)
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))

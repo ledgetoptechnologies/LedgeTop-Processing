@@ -141,6 +141,15 @@ class ReferenceWorkerAPI:
                 if self.viewer_claims is None:return self._error(404,'not_found')
                 return Response(200,self.viewer_claims.execution_grant(grant[1],protocol.decode_submission(body),identity,
                                                                       self._header(headers,'X-Claim-Token')))
+            fence=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/(mutation-permit|mutation-finish|mutation-hold)',path) if type(path) is str else None
+            if method=='POST' and fence:
+                if self.viewer_claims is None:return self._error(404,'not_found')
+                payload=protocol.decode_submission(body);token=self._header(headers,'X-Claim-Token')
+                if fence[2]=='mutation-hold':
+                    protocol._closed(payload,(), 'mutation hold')
+                    return Response(200,self.viewer_claims.mutation_hold(fence[1],identity,token))
+                operation=self.viewer_claims.mutation_permit if fence[2]=='mutation-permit' else self.viewer_claims.mutation_finish
+                return Response(200,operation(fence[1],payload,identity,token))
             plan=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/plan',path) if type(path) is str else None
             if method=='GET' and plan:
                 if self.viewer_claims is None:return self._error(404,'not_found')
