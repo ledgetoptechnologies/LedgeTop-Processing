@@ -20,7 +20,13 @@ NodeODM's existing download adapter does not supply a trusted predeclared
 SHA-256; Content-Length, when present, is still a source assertion. This hash
 detects a mismatch between the bytes handed to this primitive and the bytes
 reread locally; it does not establish that the source provided the correct or
-complete result. The caller must provide the actual response stream, enforce
+complete result. In particular, without a trusted length or digest, a clean
+premature EOF that leaves any structurally valid ZIP can be sealed even if the
+intended archive contained more products or different bytes. The ZIP parser
+primarily checks its central directory and does not validate all compressed
+entry data. A user-facing status must therefore describe this as a locally
+sealed stream, never as a verified complete source result or verified archive.
+The caller must provide the actual response stream, enforce
 network/total deadlines and attest that EOF came from the intended task under
 an independently verified engine identity. An actual Viewer custody receipt
 must come from a separate, authenticated ingestion and validation protocol.
@@ -29,7 +35,12 @@ After a crash, an intent without a valid seal is held without retry or deletion.
 A partial or malformed intent/seal is also held. `verify_sealed` accepts only
 the same full binding and inode, rereads and rehashes the exact used bytes,
 rechecks ZIP structure, and syncs the file, records and directory before
-returning the same seal. It never treats file existence alone as completion.
+returning the same seal. It then closes the slot and releases its flock; the
+returned dictionary is a point-in-time observation, not a retained lock or
+pin. Bytes can change after it returns. Any future consumer must hold the same
+exclusive slot lock while it revalidates and streams or transfers bytes, then
+independently verify the bytes and custody before issuing an acknowledgement.
+There is no such locked handoff in this draft. It never treats file existence alone as completion.
 The original unjournaled slot opener refuses files carrying either journal
 marker. External noncooperating access to raw files remains outside this guard.
 
