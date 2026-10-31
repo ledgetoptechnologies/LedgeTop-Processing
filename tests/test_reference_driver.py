@@ -24,7 +24,7 @@ from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
-from processing.reference_transfer import BrokerClient, TransferResponseUnavailable
+from processing.reference_transfer import BrokerClient, TransferError, TransferResponseUnavailable
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.viewer_service import NativeEngine
 from processing.worker_outbox import WorkerOutbox
@@ -263,6 +263,66 @@ class ReferenceDriverTests(unittest.TestCase):
         self.advance(job, 'awaiting_acceptance')
         self.assertEqual(self.store.get(job['jobId'], private=True)['claimToken'], token)
         self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+
+    def test_broker_timeout_retries_with_durable_attempt_budget(self):
+        job=self.submit();self.advance(job,'fetching')
+        with patch.object(self.broker,'download_object',side_effect=TransferResponseUnavailable('deadline')) as transfer:
+            result=self.driver.step()
+        self.assertEqual(result,{'state':'retry_wait','reason':'broker_response_unavailable'})
+        self.assertEqual(transfer.call_count,1)
+        self.driver=self.make_driver()
+        self.advance(job,'processing_pending')
+        with self.driver._db() as db:
+            data=json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?',(job['jobId'],)).fetchone()[0])
+        self.assertEqual(next(iter(data['fetchAttempts'].values())),2)
+
+    def test_integrity_failure_is_durably_held_across_restart(self):
+        job=self.submit();self.advance(job,'fetching')
+        with patch.object(self.broker,'download_object',side_effect=TransferError('integrity')) as transfer:
+            self.assertEqual(self.driver.step()['state'],'held')
+            self.assertEqual(self.driver.step()['state'],'held')
+            self.assertEqual(transfer.call_count,1)
+        self.driver=self.make_driver()
+        with patch.object(self.broker,'download_object') as transfer:
+            self.assertEqual(self.driver.step()['state'],'held');transfer.assert_not_called()
+        with self.driver._db() as db:
+            self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?',(job['jobId'],)).fetchone()[0],'fetch_held')
+
+    def test_malformed_saved_grant_is_held_without_replay(self):
+        job=self.submit();self.advance(job,'fetching')
+        with self.driver._db() as db:
+            row=db.execute('SELECT data FROM driver_jobs WHERE job=?',(job['jobId'],)).fetchone()
+            data=json.loads(row['data']);data['grant'].pop('nonce')
+            db.execute('UPDATE driver_jobs SET data=? WHERE job=?',(json.dumps(data),job['jobId']))
+        with patch.object(self.broker,'download_object') as transfer:
+            self.assertEqual(self.driver.step()['state'],'held');transfer.assert_not_called()
+        self.driver=self.make_driver()
+        with patch.object(self.broker,'download_object') as transfer:
+            self.assertEqual(self.driver.step()['state'],'held');transfer.assert_not_called()
+
+    def test_malformed_new_grant_is_held_before_fetch(self):
+        job=self.submit();self.advance(job,'awaiting_grant');self.supply_grants()
+        original=self.driver._request
+        def malformed(method,route,*args,**kwargs):
+            status,value=original(method,route,*args,**kwargs)
+            if route.endswith('/transfer-grant') and status==200:
+                value=dict(value);value.pop('nonce')
+            return status,value
+        with patch.object(self.driver,'_request',side_effect=malformed), \
+                patch.object(self.broker,'download_object') as transfer:
+            self.assertEqual(self.driver.step()['state'],'held');transfer.assert_not_called()
+        self.driver=self.make_driver()
+        with patch.object(self.broker,'download_object') as transfer:
+            self.assertEqual(self.driver.step()['state'],'held');transfer.assert_not_called()
+
+    def test_invalid_grant_is_durably_held_without_transfer(self):
+        job=self.submit();self.advance(job,'fetching')
+        with patch('processing.reference_driver.validate_grant',side_effect=TransferError('expired')), \
+                patch.object(self.broker,'download_object') as transfer:
+            self.assertEqual(self.driver.step()['state'],'held');transfer.assert_not_called()
+        self.driver=self.make_driver()
+        with patch.object(self.broker,'download_object') as transfer:
+            self.assertEqual(self.driver.step()['state'],'held');transfer.assert_not_called()
 
     def test_uncertain_initialize_is_held_and_never_replayed_after_restart(self):
         job = self.submit()
