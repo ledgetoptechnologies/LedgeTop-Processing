@@ -941,6 +941,49 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(length,len(expected));self.assertEqual(path.read_bytes(),expected)
         self.assertEqual(self.engines['cluster'].download_calls,2);self.assertEqual(len(self.fleet.commits),1)
 
+    def test_missing_unrecorded_archive_with_receipt_recovers_after_restart(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier)
+        with stream:expected=stream.read()
+        path=Path(self.task(identifier)['archive_path'])
+        self.service.store.update(identifier,archive_path=None);path.unlink()
+        self.service.close();self.queue.close();self.make_queue_service()
+        stream,length=self.service.download(identifier)
+        with stream:self.assertEqual(stream.read(),expected)
+        self.assertEqual(length,len(expected));self.assertEqual(path.read_bytes(),expected)
+        self.assertEqual(self.task(identifier)['archive_path'],str(path))
+        self.assertEqual(self.engines['cluster'].download_calls,2);self.assertEqual(len(self.fleet.commits),1)
+
+    def test_missing_unrecorded_archive_with_receipt_rejects_different_bytes(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        path=Path(self.task(identifier)['archive_path'])
+        self.service.store.update(identifier,archive_path=None);path.unlink()
+        changed=bytearray(self.engines['cluster'].archive);changed[10]^=1
+        self.engines['cluster'].archive=bytes(changed)
+        with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertFalse(path.exists());self.assertIsNone(self.task(identifier)['archive_path'])
+
+    def test_missing_unrecorded_archive_offline_or_competing_file_is_retained(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        task=self.task(identifier);path=Path(task['archive_path'])
+        receipt=path.with_suffix('.zip.receipt');receipt_before=receipt.read_bytes()
+        self.service.store.update(identifier,archive_path=None);path.unlink()
+        with patch.object(self.engines['cluster'],'download',side_effect=EngineUnavailable('offline')):
+            with self.assertRaises(EngineUnavailable):self.service.download(identifier)
+        self.assertFalse(path.exists());self.assertEqual(receipt.read_bytes(),receipt_before)
+        self.assertEqual(self.task(identifier)['job']['status'],'succeeded')
+        self.assertTrue(Path(task['files'][0]['path']).is_file())
+        original=os.link
+        def compete(source,destination):
+            Path(destination).write_bytes(b'foreign')
+            return original(source,destination)
+        with patch('processing.viewer_service.os.link',side_effect=compete):
+            with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertEqual(path.read_bytes(),b'foreign');self.assertEqual(receipt.read_bytes(),receipt_before)
+        self.assertIsNone(self.task(identifier)['archive_path'])
+
     def test_missing_recorded_archive_rejects_mismatched_node_and_missing_receipt(self):
         identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
         stream,_=self.service.download(identifier);stream.close()

@@ -419,7 +419,13 @@ class ViewerService:
                             stream = self._verify_archive(partial, receipt)
                             os.link(partial, path)
                         else:
-                            raise Conflict('archive receipt has no file')
+                            # The receipt already binds the exact bytes to this
+                            # completed task. If local copies disappeared before
+                            # archive_path was persisted, recover only that same
+                            # content from the retained engine result.
+                            stream, size = self._restore_recorded_archive(task, path, receipt)
+                            self.store.update(identifier, archive_path=str(path))
+                            return stream, size
                         current = path.lstat(); opened = os.fstat(stream.fileno())
                         if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
                             raise Conflict('archive identity changed during publication')
