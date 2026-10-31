@@ -588,13 +588,26 @@ class TaskStore:
                 (row['uuid'],))
 
     def enable_archive_status(self):
-        # Explicit opt-in only: this alters the coordinator database schema.
+        # Both DDL statements and validation must commit as one transaction.
         with self._lock, self.queue._db() as db:
-            columns = {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}
-            if 'archive_state' not in columns:
+            db.execute('BEGIN IMMEDIATE')
+            def validate():
+                rows = db.execute('PRAGMA table_info(viewer_tasks)').fetchall()
+                columns = [tuple(row) for row in rows if row[1] in ('archive_state', 'archive_reason')]
+                if not columns:
+                    return False
+                if len(columns) != 2:
+                    raise ValueError('partial archive status schema')
+                n = len(rows) - 2
+                if columns != [(n, 'archive_state', 'TEXT', 1, "'pending'", 0),
+                               (n + 1, 'archive_reason', 'TEXT', 0, None, 0)]:
+                    raise ValueError('unrecognized archive status schema')
+                return True
+            if not validate():
                 db.execute("ALTER TABLE viewer_tasks ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'pending'")
-            if 'archive_reason' not in columns:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_reason TEXT')
+                if not validate():
+                    raise ValueError('archive status schema not installed')
 
     def set_archive_status(self, identifier, generation, job_id, state, reason):
         if state not in ('pending', 'inspection') or reason not in ('capture_failed', 'partial_requires_inspection'):

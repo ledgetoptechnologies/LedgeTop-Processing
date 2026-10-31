@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
+import tempfile
 import sys
 import threading
 import time
@@ -38,6 +40,70 @@ class ViewerAutoCaptureConfigTests(unittest.TestCase):
             enabled['LOCAL_NODE_URL'] = 'http://127.0.0.1:3001'
             with patch.dict(os.environ, enabled, clear=True):
                 self.assertTrue(from_environment().viewer_archive_autocapture)
+
+
+@unittest.skipUnless(os.name == 'posix', 'process kill semantics require POSIX')
+class ArchiveSchemaAtomicityTests(unittest.TestCase):
+    def test_real_method_transaction_survives_kill_and_ddl_failure(self):
+        script = r"""
+import contextlib, os, signal, sqlite3, sys, threading
+from processing.viewer_tasks import TaskStore
+path, stage = sys.argv[1:]
+class Queue:
+    @contextlib.contextmanager
+    def _db(self):
+        db = sqlite3.connect(path)
+        def trace(sql):
+            if (stage == 'first' and 'ADD COLUMN archive_state' in sql) or (stage == 'second' and 'ADD COLUMN archive_reason' in sql) or (stage == 'commit' and sql == 'COMMIT'):
+                os.kill(os.getpid(), signal.SIGKILL)
+        if stage == 'error':
+            def authorizer(action, a, b, c, d):
+                if action == sqlite3.SQLITE_ALTER_TABLE and seen[0]: return sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_ALTER_TABLE: seen[0] = True
+                return sqlite3.SQLITE_OK
+            seen=[False]; db.set_authorizer(authorizer)
+        db.set_trace_callback(trace)
+        try:
+            with db: yield db
+        finally: db.close()
+store=object.__new__(TaskStore); store._lock=threading.RLock(); store.queue=Queue()
+store.enable_archive_status()
+"""
+        for stage in ('first', 'second', 'commit', 'error', 'success'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+                dbpath = str(Path(root) / 'tasks.sqlite3')
+                with sqlite3.connect(dbpath) as db:
+                    db.execute('CREATE TABLE viewer_tasks (uuid TEXT PRIMARY KEY)')
+                    db.execute("INSERT INTO viewer_tasks VALUES ('synthetic')")
+                run = subprocess.run([sys.executable, '-c', script, dbpath, stage],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                with sqlite3.connect(dbpath) as db:
+                    cols=[row[1] for row in db.execute('PRAGMA table_info(viewer_tasks)')]
+                    self.assertEqual(db.execute('SELECT uuid FROM viewer_tasks').fetchone()[0], 'synthetic')
+                self.assertEqual(cols, ['uuid', 'archive_state', 'archive_reason'] if stage == 'success' else ['uuid'])
+                self.assertEqual(run.returncode == 0, stage == 'success')
+
+    def test_partial_and_unrecognized_schema_are_refused_without_mutation(self):
+        # Exercise the real TaskStore method against owned synthetic SQLite.
+        from contextlib import contextmanager
+        from processing.viewer_tasks import TaskStore
+        class Queue:
+            def __init__(self, path): self.path=path
+            @contextmanager
+            def _db(self):
+                db=sqlite3.connect(self.path)
+                try:
+                    with db: yield db
+                finally: db.close()
+        for fragment in ("archive_state TEXT NOT NULL DEFAULT 'pending'",
+                         "archive_state TEXT, archive_reason TEXT"):
+            with self.subTest(fragment=fragment), tempfile.TemporaryDirectory() as root:
+                path=str(Path(root)/'tasks.sqlite3')
+                with sqlite3.connect(path) as db: db.execute('CREATE TABLE viewer_tasks (uuid TEXT, '+fragment+')')
+                store=object.__new__(TaskStore); store._lock=threading.RLock(); store.queue=Queue(path)
+                with sqlite3.connect(path) as db: before=db.execute('SELECT sql FROM sqlite_master').fetchall()
+                with self.assertRaises(ValueError): store.enable_archive_status()
+                with sqlite3.connect(path) as db: self.assertEqual(db.execute('SELECT sql FROM sqlite_master').fetchall(),before)
 
 
 @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'posix_fallocate'), 'POSIX flock and allocation required')
