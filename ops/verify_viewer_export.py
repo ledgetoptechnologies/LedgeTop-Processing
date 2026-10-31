@@ -44,7 +44,11 @@ def _inventory(archives):
 
 def check(root,archives,*,extract=False):
     root=Path(root);info=root.lstat()
-    if not stat.S_ISDIR(info.st_mode) or root.is_symlink() or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:raise InvalidExport('export root invalid')
+    parent=root.parent.lstat()
+    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid!=os.geteuid() or stat.S_IMODE(parent.st_mode)!=0o700
+            or not stat.S_ISDIR(info.st_mode) or root.is_symlink() or info.st_uid!=os.geteuid()
+            or stat.S_IMODE(info.st_mode)!=(0o700 if extract else 0o755)):
+        raise InvalidExport('export root or private parent invalid')
     expected=_inventory(archives)
     if extract:
         if any(root.iterdir()):raise InvalidExport('export root not empty')
@@ -68,6 +72,9 @@ def check(root,archives,*,extract=False):
                                 if not chunk:break
                                 target.write(chunk)
                     finally:os.close(fd)
+        # Container sees this bind root directly; the private 0700 parent still
+        # prevents other host users from traversing the source checkout.
+        os.chmod(root,0o755)
     found=set()
     for current,dirs,files in os.walk(root,followlinks=False):
         for item in dirs+files:

@@ -16,6 +16,10 @@ class ViewerExportTests(unittest.TestCase):
  def test_extract_verify_and_current_owner(self):
   check(self.export,self.archives,extract=True);check(self.export,self.archives)
   self.assertEqual((self.export/'apps/viewer/file').stat().st_uid,os.geteuid())
+  self.assertEqual(stat.S_IMODE(self.export.stat().st_mode),0o755)
+  self.root.chmod(0o755)
+  with self.assertRaises(InvalidExport):check(self.export,self.archives)
+  self.root.chmod(0o700)
  def test_modified_bytes_mode_unexpected_missing_and_symlink_fail(self):
   check(self.export,self.archives,extract=True);path=self.export/'apps/viewer/file'
   path.write_bytes(b'evil')
