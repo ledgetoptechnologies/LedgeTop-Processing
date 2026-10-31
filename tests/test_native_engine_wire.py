@@ -6,14 +6,30 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import uuid
 import zipfile
 
 from processing.synthetic_engine import SyntheticEngine, handler_for
 from processing.viewer_service import NativeEngine
+from processing.odx_smoke_worker import SmokeError
 
 
 class NativeEngineWireTests(unittest.TestCase):
+    def test_contradictory_init_and_mutation_acknowledgements_hold(self):
+        engine=NativeEngine('http://127.0.0.1:3001')
+        identifier=str(uuid.uuid4())
+        task=dict(name='synthetic',options=[],outputs=None,engine_uuid=identifier)
+        for value in (False,0,None,'true'):
+            with self.subTest(value=value),patch.object(engine.client,'json',return_value={'uuid':identifier,'success':value}):
+                with self.assertRaises(SmokeError):engine.initialize(task)
+                with self.assertRaises(SmokeError):engine.action('commit',identifier)
+        with patch.object(engine.client,'json',return_value={'uuid':identifier,'error':'rejected'}):
+            with self.assertRaises(SmokeError):engine.initialize(task)
+        for ack in ({'uuid':identifier},{'uuid':identifier,'success':True}):
+            with patch.object(engine.client,'json',return_value=ack):
+                engine.initialize(task);engine.action('commit',identifier)
+
     def test_real_http_init_upload_commit_cancel_and_archive(self):
         token = 'synthetic-engine-credential-' + 'x' * 32
         backend = SyntheticEngine(1000, 3600)
