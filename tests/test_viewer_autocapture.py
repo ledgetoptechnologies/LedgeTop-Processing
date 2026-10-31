@@ -242,6 +242,33 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.assertEqual(restarted.info(self.identifier)['ledgetopArchive'], info['ledgetopArchive'])
         self.assertTrue(Path(self.fixture.task(self.identifier)['directory'], 'all.zip.partial').exists())
 
+    def test_interrupted_restore_is_retained_and_reported_for_inspection(self):
+        # Simulate a child that published a receipt but whose result vanished
+        # before the parent recorded archive_path. Only synthetic files change.
+        self.service._archive_once(self.identifier)
+        task=self.fixture.task(self.identifier);directory=Path(task['directory'])
+        archive=directory/'all.zip';receipt=directory/'all.zip.receipt'
+        archive.unlink()
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET archive_path=NULL WHERE uuid=?',(self.identifier,))
+        pending=directory/'.all.zip.restore-pending';pending.write_bytes(b'owned incomplete synthetic restore')
+        before=pending.read_bytes();receipt_before=receipt.read_bytes();requests_before=self.requests
+        with self.assertRaisesRegex(Conflict,'partial_requires_inspection'):
+            self.service._archive_once(self.identifier)
+        self.assertEqual(pending.read_bytes(),before);self.assertEqual(receipt.read_bytes(),receipt_before)
+        self.assertEqual(self.requests,requests_before)
+        # Exercise the real background status writer and a separate worker child.
+        self.fixture.config.viewer_archive_autocapture=True;self.service.start()
+        deadline=time.monotonic()+10
+        while self.service.info(self.identifier).get('ledgetopArchive',{}).get('state')!='inspection':
+            if time.monotonic()>=deadline:self.fail('restore inspection not persisted')
+            time.sleep(.05)
+        self.assertEqual(self.service.info(self.identifier)['ledgetopArchive'],
+                         {'state':'inspection','reason':'partial_requires_inspection'})
+        self.assertEqual(pending.read_bytes(),before);self.assertEqual(receipt.read_bytes(),receipt_before)
+        self.assertEqual(self.requests,requests_before)
+        self.assertTrue(self.fixture.engine_for(self.identifier).tasks)
+
     def test_capture_status_distinguishes_processing_and_custody(self):
         self.fixture.config.viewer_archive_autocapture = True
         self.assertEqual(self.service.info(self.identifier)['ledgetopArchive']['state'], 'pending')

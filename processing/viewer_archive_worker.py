@@ -49,7 +49,8 @@ def main():
         try:
             directory = Path(task['directory'])
             if any(p.exists() or p.is_symlink() for p in
-                   (directory / 'all.zip.partial', directory / '.all.zip.restore')):
+                   (directory / 'all.zip.partial', directory / '.all.zip.restore',
+                    directory / '.all.zip.restore-pending')):
                 return 2
         except BaseException:
             pass
