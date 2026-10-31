@@ -88,6 +88,30 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaises(SlotHeld):self.verify(altered)
         self.assertTrue(path.exists())
 
+    def test_verification_does_not_hold_a_lock_after_return(self):
+        self.allocate(self.binding);capture=self.begin()
+        try:sealed=capture.consume(io.BytesIO(self.data))
+        finally:capture.close()
+        self.assertEqual(self.verify(),sealed)
+        # Once verify returns, it no longer owns the slot or pins its bytes.
+        path=self.root/('slot-'+validate_binding(self.binding)+'.alloc')
+        with path.open('r+b') as stream:stream.write(b'changed')
+        with self.assertRaises(SlotHeld):self.verify()
+
+    def test_valid_shorter_archive_can_seal_without_trusted_length(self):
+        full=io.BytesIO();short=io.BytesIO()
+        with zipfile.ZipFile(full,'w') as archive:
+            archive.writestr('first.txt',b'one');archive.writestr('second.txt',b'two')
+        with zipfile.ZipFile(short,'w') as archive:archive.writestr('first.txt',b'one')
+        self.assertLess(len(short.getvalue()),len(full.getvalue()))
+        self.allocate(self.binding);capture=self.begin()
+        try:sealed=capture.consume(io.BytesIO(short.getvalue()))
+        finally:capture.close()
+        # Both archives are structurally valid. EOF and local hash alone do
+        # not establish the intended remote archive's completeness.
+        self.assertEqual(sealed['bytes'],len(short.getvalue()))
+        self.assertEqual(self.verify(),sealed)
+
     def test_interrupted_seal_record_is_held_and_retained(self):
         self.allocate(self.binding);capture=self.begin()
         original=capture_module.os.write
