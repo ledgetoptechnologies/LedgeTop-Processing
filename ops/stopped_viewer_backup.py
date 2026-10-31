@@ -124,7 +124,7 @@ def _require_known_quiescent_state(source):
 
 
 def backup(source, destination, lease_directory, authority_id, key, *, stopped_writers_confirmed=False,
-           independent_destination_confirmed=False):
+           independent_destination_confirmed=False, expected_source_inventory=None):
     """Create a new owned destination and compare source/copy/source censuses.
 
     Returns keyed census documents. Never prints task names, rows or tokens.
@@ -163,6 +163,13 @@ def backup(source, destination, lease_directory, authority_id, key, *, stopped_w
                 or db.get('active', {}).get('jobs') != 0 or db.get('active', {}).get('viewerTasks') != 0):
             raise BackupRefused('source_not_quiescent')
         _require_known_quiescent_state(source)
+        if expected_source_inventory is not None:
+            try:
+                matches = state_census.compare(expected_source_inventory, before, key)['identical']
+            except (KeyError, TypeError, ValueError, AttributeError, SystemExit) as error:
+                raise BackupRefused('expected_inventory_invalid') from error
+            if not matches:
+                raise BackupRefused('expected_inventory_mismatch')
         destination.mkdir(mode=0o700)
         parent_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -227,13 +234,18 @@ def main(argv=None):
                         help='Operator has stopped and excluded all writers, including legacy instances')
     parser.add_argument('--independent-destination-confirmed', action='store_true', required=True,
                         help='Operator provisioned an independent destination, not an alias of source')
+    parser.add_argument('--emit-inventory', action='store_true',
+                        help='Emit the keyed verified inventory for separate trusted retention')
     args = parser.parse_args(argv)
     try:
         key = bytes.fromhex(sys.stdin.readline().strip())
-        backup(args.source, args.destination, args.lease_directory, args.authority_id, key,
-               stopped_writers_confirmed=args.stopped_writers_confirmed,
-               independent_destination_confirmed=args.independent_destination_confirmed)
-        print(json.dumps({'status': 'verified', 'scope': 'stopped read-only source; writer exclusion required'}))
+        result = backup(args.source, args.destination, args.lease_directory, args.authority_id, key,
+                        stopped_writers_confirmed=args.stopped_writers_confirmed,
+                        independent_destination_confirmed=args.independent_destination_confirmed)
+        response = {'status': 'verified', 'scope': 'stopped read-only source; writer exclusion required'}
+        if args.emit_inventory:
+            response['inventory'] = result['snapshot']
+        print(json.dumps(response))
         return 0
     except (OSError, ValueError, sqlite3.Error, BackupRefused) as error:
         print(json.dumps({'status': 'refused', 'reason': type(error).__name__}), file=sys.stderr)

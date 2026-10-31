@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from ops import stopped_viewer_backup as backup
+from ops import stopped_viewer_restore as restore
 
 AUTHORITY = '12345678-1234-1234-1234-123456789abc'
 KEY = bytes(range(32))
@@ -129,6 +130,67 @@ class BackupTest(unittest.TestCase):
                 self.run_backup()
         self.assertTrue(changed)
         self.assertEqual((self.source / 'viewer-tasks/synthetic-task/photo.bin').read_bytes(), b'changed')
+
+    def test_restore_nonempty_and_lost_ack_fails_closed(self):
+        inventory = self.run_backup()['snapshot']
+        destination = self.out / 'restored'
+        kwargs = dict(stopped_writers_confirmed=True, independent_destination_confirmed=True,
+                      original_inventory_trusted=True)
+        with mock.patch.object(backup.os, 'statvfs') as mounted, \
+             mock.patch.object(backup, '_require_isolated_mounts'):
+            mounted.return_value.f_flag = os.ST_RDONLY
+            restore.restore(self.destination, destination, self.leases, AUTHORITY, KEY, inventory, **kwargs)
+            with self.assertRaisesRegex(backup.BackupRefused, 'new_path'):
+                restore.restore(self.destination, destination, self.leases, AUTHORITY, KEY, inventory, **kwargs)
+        self.assertEqual((destination / 'jobs.sqlite3').read_bytes(), (self.source / 'jobs.sqlite3').read_bytes())
+        self.assertEqual((destination / 'viewer-tasks/synthetic-task/photo.bin').read_bytes(),
+                         (self.source / 'viewer-tasks/synthetic-task/photo.bin').read_bytes())
+
+    def test_restore_refuses_changed_backup_and_untrusted_inventory(self):
+        inventory = self.run_backup()['snapshot']
+        destination = self.out / 'restored'
+        kwargs = dict(stopped_writers_confirmed=True, independent_destination_confirmed=True)
+        with self.assertRaisesRegex(backup.BackupRefused, 'trusted_original'):
+            restore.restore(self.destination, destination, self.leases, AUTHORITY, KEY, inventory, **kwargs)
+        (self.destination / 'viewer-tasks/synthetic-task/photo.bin').write_bytes(b'tampered')
+        with mock.patch.object(backup.os, 'statvfs') as mounted, \
+             mock.patch.object(backup, '_require_isolated_mounts'):
+            mounted.return_value.f_flag = os.ST_RDONLY
+            with self.assertRaisesRegex(backup.BackupRefused, 'inventory_mismatch'):
+                restore.restore(self.destination, destination, self.leases, AUTHORITY, KEY, inventory,
+                                original_inventory_trusted=True, **kwargs)
+        self.assertFalse(destination.exists())
+
+    def test_inventory_reader_rejects_links_and_public_permissions(self):
+        import json
+        path = self.base / 'inventory.json'
+        path.write_text(json.dumps({'inventory': {'schemaVersion': 1}}))
+        path.chmod(0o644)
+        with self.assertRaisesRegex(backup.BackupRefused, 'inventory_file_invalid'):
+            restore.read_inventory(path)
+        path.chmod(0o600)
+        self.assertEqual(restore.read_inventory(path), {'schemaVersion': 1})
+        link = self.base / 'inventory-link'
+        link.symlink_to(path)
+        with self.assertRaises(OSError):
+            restore.read_inventory(link)
+
+    def test_interrupted_restore_keeps_partial_and_never_overwrites(self):
+        inventory = self.run_backup()['snapshot']
+        destination = self.out / 'restored'
+        kwargs = dict(stopped_writers_confirmed=True, independent_destination_confirmed=True,
+                      original_inventory_trusted=True)
+        with mock.patch.object(backup.os, 'statvfs') as mounted, \
+             mock.patch.object(backup, '_require_isolated_mounts'):
+            mounted.return_value.f_flag = os.ST_RDONLY
+            with mock.patch.object(backup, '_copy_file', side_effect=OSError('simulated interruption')):
+                with self.assertRaises(OSError):
+                    restore.restore(self.destination, destination, self.leases, AUTHORITY, KEY, inventory, **kwargs)
+            self.assertTrue(destination.exists())
+            with self.assertRaisesRegex(backup.BackupRefused, 'new_path'):
+                restore.restore(self.destination, destination, self.leases, AUTHORITY, KEY, inventory, **kwargs)
+        self.assertEqual((self.destination / 'viewer-tasks/synthetic-task/photo.bin').read_bytes(),
+                         (self.source / 'viewer-tasks/synthetic-task/photo.bin').read_bytes())
 
 
 class RealMountTopologyTest(unittest.TestCase):
