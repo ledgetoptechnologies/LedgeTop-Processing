@@ -63,3 +63,19 @@ class OperationFenceTests(unittest.TestCase):
         with self.fence() as fence:
             self.lock.unlink();self.lock.touch()
             with self.assertRaisesRegex(OperationFenceHeld,'operation_lock_lost_or_replaced'):fence.check()
+
+    def test_handoff_marker_appearing_during_acquisition_refuses(self):
+        from processing import authority_lease
+        marker=self.leases/(self.authority+'.handoff-intent');original=authority_lease._require_no_handoff_markers;calls=[]
+        def race(*paths):
+            calls.append(True)
+            if len(calls)==2:marker.write_bytes(b'synthetic-uncertain')
+            return original(*paths)
+        with patch('processing.authority_lease._require_no_handoff_markers',side_effect=race):
+            with self.assertRaisesRegex(OperationFenceHeld,'unresolved_handoff_requires_reconciliation'):
+                with self.fence():pass
+        self.assertTrue(marker.exists())
+        for path in (self.lease,self.lock):
+            fd=os.open(path,os.O_RDONLY)
+            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            finally:os.close(fd)

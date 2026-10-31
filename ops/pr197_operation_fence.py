@@ -24,14 +24,20 @@ class OperationFence:
 
     def __enter__(self):
         from ops.pr197_stopped_census import _mount
+        from processing.authority_lease import _require_no_handoff_markers, LeaseUnavailable
         if self.pid!=os.getpid() or self.fds:raise OperationFenceHeld('fence_owner_changed')
         _mount(self.root)
         if not self.leases.is_absolute() or self.leases.resolve()!=self.leases:
             raise OperationFenceHeld('canonical_lease_directory_required')
         try:
+            markers=(self.leases/(self.authority+'.handoff-intent'),self.leases/(self.authority+'.handoff-intent.ack'))
+            try:_require_no_handoff_markers(*markers)
+            except LeaseUnavailable:raise OperationFenceHeld('unresolved_handoff_requires_reconciliation') from None
             for path in (self.leases/(self.authority+'.lease'),self.root/'coordinator.lock'):
                 fd=_lock(path);self.fds.append(fd)
                 item=os.fstat(fd);self.facts.append((path,item.st_dev,item.st_ino))
+            try:_require_no_handoff_markers(*markers)
+            except LeaseUnavailable:raise OperationFenceHeld('unresolved_handoff_requires_reconciliation') from None
             self.check();return self
         except BaseException:
             self.close();raise

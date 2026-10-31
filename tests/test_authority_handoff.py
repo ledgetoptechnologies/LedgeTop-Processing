@@ -12,8 +12,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from ops.authority_handoff import offer,HandoffHeld,DockerProcessAttestor
-from ops.pr197_operation_fence import OperationFence
+from ops.authority_handoff import offer,pending_status,HandoffHeld,DockerProcessAttestor
+from ops.pr197_operation_fence import OperationFence,OperationFenceHeld
 from processing.authority_lease import acquire_transferred,AuthorityLease,LeaseUnavailable
 
 
@@ -48,6 +48,9 @@ class AuthorityTransferTests(unittest.TestCase):
             thread.join(7);self.assertFalse(thread.is_alive());self.assertEqual(errors,[])
             self.assertEqual(result[0]['state'],'handoff_outcome_unknown')
             self.assertTrue(self.intent.exists());self.assertTrue(Path(str(self.intent)+'.ack').exists())
+            status=pending_status(self.leases,self.authority,self.attestor)
+            self.assertEqual((status['state'],status['ack'],status['lease']),('held','present','held'))
+            self.assertFalse(status['startAuthorized']);self.assertFalse(status['cleanupAuthorized'])
             fence.check();lease.close()
 
     def test_lost_ack_holds_original_fence_and_never_retries(self):
@@ -79,7 +82,53 @@ class AuthorityTransferTests(unittest.TestCase):
         # startup on the newer binary even though the flock is available.
         with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
             AuthorityLease(self.leases,self.authority)
+        with self.assertRaisesRegex(OperationFenceHeld,'unresolved_handoff_requires_reconciliation'):
+            with OperationFence(self.state,self.leases,self.authority,enabled=True):pass
         self.assertTrue(self.intent.exists())
+        with patch.object(self.attestor,'inspect',side_effect=HandoffHeld('synthetic offline')):
+            status=pending_status(self.leases,self.authority,self.attestor)
+        self.assertEqual((status['state'],status['ack'],status['lease'],status['candidate']),('held','absent','free','unverified'))
+        self.assertFalse(status['retryAuthorized'])
+
+    def test_pending_status_rejects_tampered_ack(self):
+        left,right=socket.socketpair();self.addCleanup(left.close);self.addCleanup(right.close)
+        with OperationFence(self.state,self.leases,self.authority,enabled=True) as fence:
+            errors=[]
+            def send():
+                try:offer(left,fence,self.attestor,self.intent,operation_id=self.operation,expected_uid=os.geteuid())
+                except Exception as exc:errors.append(type(exc).__name__)
+            thread=threading.Thread(target=send);thread.start()
+            _,ancillary,_,_=right.recvmsg(4100,socket.CMSG_SPACE(array.array('i').itemsize))
+            for _level,_kind,data in ancillary:
+                fds=array.array('i');fds.frombytes(data[:len(data)-len(data)%fds.itemsize])
+                for fd in fds:os.close(fd)
+            right.close();thread.join(7);self.assertFalse(thread.is_alive());self.assertEqual(errors,['HandoffHeld'])
+            ack=Path(str(self.intent)+'.ack');ack.write_bytes(b'not-a-valid-ack');ack.chmod(0o600)
+            with self.assertRaisesRegex(HandoffHeld,'pending_ack_invalid'):
+                pending_status(self.leases,self.authority,self.attestor)
+
+    def test_pending_status_rejects_ack_create_remove_or_replacement_during_probe(self):
+        import json
+        info=(self.leases/(self.authority+'.lease')).stat()
+        value=dict(version=1,operationId=self.operation,authorityId=self.authority,pid=os.getpid(),startTime=123,
+            containerId=self.attestor.container,imageId=self.attestor.image,leaseDevice=info.st_dev,leaseInode=info.st_ino)
+        raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
+        ack=Path(str(self.intent)+'.ack');payload=hashlib.sha256(raw).hexdigest().encode()+b'\n'
+        for change in ('create','remove','replace'):
+            with self.subTest(change=change):
+                self.intent.write_bytes(raw);self.intent.chmod(0o600)
+                if change!='create':ack.write_bytes(payload);ack.chmod(0o600)
+                def mutate(_pid):
+                    if change=='create':ack.write_bytes(payload);ack.chmod(0o600)
+                    elif change=='remove':ack.unlink()
+                    else:
+                        replacement=self.root/'replacement';replacement.write_bytes(payload);replacement.chmod(0o600)
+                        os.replace(replacement,ack)
+                    return 123
+                with patch.object(self.attestor,'inspect',side_effect=mutate):
+                    with self.assertRaisesRegex(HandoffHeld,'handoff_ack_changed'):
+                        pending_status(self.leases,self.authority,self.attestor)
+                self.intent.unlink();ack.unlink(missing_ok=True)
 
     def test_marker_created_after_first_check_refuses_and_closes_lease(self):
         real=fcntl.flock;triggered=[]
@@ -144,6 +193,92 @@ class AuthorityTransferTests(unittest.TestCase):
         self.assertTrue(os.WIFSIGNALED(status));self.assertTrue(self.intent.exists())
         with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
             AuthorityLease(self.leases,self.authority)
+        with self.assertRaisesRegex(OperationFenceHeld,'unresolved_handoff_requires_reconciliation'):
+            with OperationFence(self.state,self.leases,self.authority,enabled=True):pass
+
+    @unittest.skipUnless(hasattr(os,'fork'),'separate-process fixture required')
+    def test_supervisor_death_after_go_preserves_candidate_lock_and_blocks_restart(self):
+        left,right=socket.socketpair();ready_r,ready_w=os.pipe();release_r,release_w=os.pipe()
+        candidate=os.fork()
+        if candidate==0:
+            signal.alarm(15);left.close();os.close(ready_r);os.close(release_w)
+            try:
+                lease=acquire_transferred(right,self.leases,self.state,supervisor_uid=os.geteuid(),operation_id=self.operation,
+                    container_id=self.attestor.container,image_id=self.attestor.image,experimental=True)
+                os.write(ready_w,b'1');os.read(release_r,1);lease.close();os._exit(0)
+            except BaseException:os._exit(2)
+        supervisor=os.fork()
+        if supervisor==0:
+            signal.alarm(15);right.close();os.close(ready_r);os.close(ready_w);os.close(release_r);os.close(release_w)
+            try:
+                with OperationFence(self.state,self.leases,self.authority,enabled=True) as fence, \
+                     patch.object(self.attestor,'inspect',return_value=123):
+                    offer(left,fence,self.attestor,self.intent,operation_id=self.operation,expected_uid=os.geteuid())
+                    os.kill(os.getpid(),signal.SIGKILL)
+            finally:os._exit(3)
+        left.close();right.close();os.close(ready_w);os.close(release_r)
+        supervisor_reaped=False;candidate_reaped=False
+        try:
+            _,status=os.waitpid(supervisor,0);supervisor_reaped=True;self.assertTrue(os.WIFSIGNALED(status))
+            self.assertEqual(os.read(ready_r,1),b'1')
+            probe=os.open(self.leases/(self.authority+'.lease'),os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError):fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            finally:os.close(probe)
+            with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
+                AuthorityLease(self.leases,self.authority)
+            with self.assertRaisesRegex(OperationFenceHeld,'unresolved_handoff_requires_reconciliation'):
+                with OperationFence(self.state,self.leases,self.authority,enabled=True):pass
+            self.assertTrue(Path(str(self.intent)+'.ack').exists())
+            os.write(release_w,b'1');_,status=os.waitpid(candidate,0);candidate_reaped=True
+            self.assertEqual(os.waitstatus_to_exitcode(status),0)
+        finally:
+            os.close(ready_r);os.close(release_w)
+            for pid,reaped in ((supervisor,supervisor_reaped),(candidate,candidate_reaped)):
+                if not reaped:
+                    try:os.kill(pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                    os.waitpid(pid,0)
+
+    @unittest.skipUnless(hasattr(os,'fork'),'separate-process fixture required')
+    def test_supervisor_death_before_go_leaves_durable_hold(self):
+        from ops import authority_handoff
+        left,right=socket.socketpair();candidate=os.fork()
+        if candidate==0:
+            signal.alarm(15);left.close()
+            try:
+                acquire_transferred(right,self.leases,self.state,supervisor_uid=os.geteuid(),operation_id=self.operation,
+                    container_id=self.attestor.container,image_id=self.attestor.image,experimental=True)
+            except LeaseUnavailable:os._exit(0)
+            except BaseException:os._exit(2)
+            os._exit(3)
+        supervisor=os.fork()
+        if supervisor==0:
+            signal.alarm(15);right.close();original=authority_handoff._write_once
+            def die(path,payload):
+                original(path,payload)
+                if str(path).endswith('.ack'):os.kill(os.getpid(),signal.SIGKILL)
+            try:
+                with OperationFence(self.state,self.leases,self.authority,enabled=True) as fence, \
+                     patch.object(self.attestor,'inspect',return_value=123), \
+                     patch.object(authority_handoff,'_write_once',side_effect=die):
+                    offer(left,fence,self.attestor,self.intent,operation_id=self.operation,expected_uid=os.geteuid())
+            finally:os._exit(4)
+        left.close();right.close();reaped=set()
+        try:
+            _,status=os.waitpid(supervisor,0);reaped.add(supervisor);self.assertTrue(os.WIFSIGNALED(status))
+            _,status=os.waitpid(candidate,0);reaped.add(candidate);self.assertEqual(os.waitstatus_to_exitcode(status),0)
+            self.assertTrue(self.intent.exists());self.assertTrue(Path(str(self.intent)+'.ack').exists())
+            with self.assertRaisesRegex(LeaseUnavailable,'authority_handoff_requires_reconciliation'):
+                AuthorityLease(self.leases,self.authority)
+            with self.assertRaisesRegex(OperationFenceHeld,'unresolved_handoff_requires_reconciliation'):
+                with OperationFence(self.state,self.leases,self.authority,enabled=True):pass
+        finally:
+            for pid in (supervisor,candidate):
+                if pid not in reaped:
+                    try:os.kill(pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                    os.waitpid(pid,0)
 
     def test_host_attestor_rejects_container_pid_and_cgroup_mismatches(self):
         from types import SimpleNamespace
