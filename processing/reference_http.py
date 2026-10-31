@@ -28,7 +28,7 @@ def _protected(connection):
     return _loopback(connection.getsockname()[0]) and _loopback(connection.getpeername()[0])
 
 
-def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=None, request_timeout=10):
+def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=None, request_timeout=10, max_connections=None):
     """Create a listener; caller must explicitly call serve_forever().
 
     Plaintext LAN/wildcard binding is forbidden. TLS is supplied by a real
@@ -38,6 +38,8 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             or type(request_timeout) not in (int, float) or not math.isfinite(request_timeout)
             or not 0 < request_timeout <= 60):
         raise ValueError("invalid reference listener configuration")
+    if max_connections is not None and (type(max_connections) is not int or not 1 <= max_connections <= 256):
+        raise ValueError("invalid connection limit")
     if ssl_context is not None and not isinstance(ssl_context, ssl.SSLContext):
         raise ValueError("TLS requires a server SSLContext")
     if ssl_context is not None and ssl_context.protocol == ssl.PROTOCOL_TLS_CLIENT:
@@ -257,6 +259,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         do_PATCH = _dispatch
         do_OPTIONS = _dispatch
 
+    connection_slots = threading.BoundedSemaphore(max_connections) if max_connections is not None else None
     class Server(ThreadingHTTPServer):
         address_family = family
         daemon_threads = True
@@ -265,13 +268,40 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         def get_request(self):
             connection, address = self.socket.accept()
             connection.settimeout(request_timeout)
-            if ssl_context is not None:
+            if ssl_context is not None and connection_slots is None:
                 try:
                     connection = ssl_context.wrap_socket(connection, server_side=True)
                 except Exception:
                     connection.close()
                     raise
             return connection, address
+
+        def process_request(self, request, client_address):
+            if connection_slots is None:
+                return super().process_request(request, client_address)
+            if not connection_slots.acquire(blocking=False):
+                self.shutdown_request(request)
+                return
+            try:
+                super().process_request(request, client_address)
+            except BaseException:
+                connection_slots.release()
+                self.shutdown_request(request)
+                raise
+
+        def process_request_thread(self, request, client_address):
+            if connection_slots is None:
+                return super().process_request_thread(request, client_address)
+            try:
+                if ssl_context is not None:
+                    try:
+                        request = ssl_context.wrap_socket(request, server_side=True)
+                    except Exception:
+                        self.shutdown_request(request)
+                        return
+                super().process_request_thread(request, client_address)
+            finally:
+                connection_slots.release()
 
         def handle_error(self, request, client_address):
             # No request or exception logs: headers may contain bearer tokens.

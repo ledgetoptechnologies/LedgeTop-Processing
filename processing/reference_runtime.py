@@ -31,6 +31,7 @@ STAGED_ACK_SCHEMA_QUALIFIED = False
 VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED = False
 VIEWER_RUNTIME_PROJECTION_QUALIFIED = False
 SYNTHETIC_CHUNK_TLS_QUALIFIED = False
+REFERENCE_CONNECTION_LIMIT_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -334,7 +335,7 @@ class _DynamicAPI:
 
 
 class ReferenceRuntime:
-    def __init__(self, queue, config, settings, *, discover=None, server_factory=None, viewer_service=None, synthetic_chunk_tls=False):
+    def __init__(self, queue, config, settings, *, discover=None, server_factory=None, viewer_service=None, synthetic_chunk_tls=False, max_connections=None):
         """Construct services around the existing authority; never create a Queue."""
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
@@ -342,6 +343,9 @@ class ReferenceRuntime:
         self._projection_owner=None;self._projection_binding=None;self._closed=False
         self._lifecycle_lock=threading.RLock()
         try:
+            if max_connections is not None and (not REFERENCE_CONNECTION_LIMIT_QUALIFIED or type(max_connections) is not int or not 1 <= max_connections <= 256):
+                raise RuntimeConfigurationError('reference connection limit not qualified')
+            self._max_connections=max_connections
             if type(synthetic_chunk_tls) is not bool or (synthetic_chunk_tls and (not SYNTHETIC_CHUNK_TLS_QUALIFIED or settings.viewer_archive_spool is None)):
                 raise RuntimeConfigurationError('synthetic chunk TLS is not qualified')
             projection=settings.viewer_projection_environments
@@ -466,7 +470,9 @@ class ReferenceRuntime:
         listener = self.settings.listener
         server=None;thread=None;started=False
         try:
-            server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
+            kwargs={"ssl_context":self._server_context}
+            if self._max_connections is not None:kwargs["max_connections"]=self._max_connections
+            server = self._server_factory(self.api, listener["host"], listener["port"], **kwargs)
             # Join active requests before releasing the shared queue's authority lock.
             server.daemon_threads, server.block_on_close = False, True
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1},

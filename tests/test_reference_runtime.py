@@ -482,6 +482,21 @@ class ReferenceRuntimeTests(unittest.TestCase):
         changed["nodes"][0]["engineVersion"] = "synthetic-2"
         self.assertNotEqual(first[0], discovered_policy(changed, self.config)[0])
 
+    def test_connection_limit_requires_qualification_and_wires_to_server(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
+        self.addCleanup(queue.close)
+        with self.assertRaises(RuntimeConfigurationError):
+            self.runtime(queue,max_connections=2)
+        server=FakeServer();calls=[]
+        def factory(*args,**kwargs):calls.append(kwargs);return server
+        with patch('processing.reference_runtime.REFERENCE_CONNECTION_LIMIT_QUALIFIED',True):
+            for invalid in (0,257,True):
+                with self.assertRaises(RuntimeConfigurationError):self.runtime(queue,max_connections=invalid)
+            runtime=self.runtime(queue,server_factory=factory,max_connections=2)
+        runtime.start();runtime.close()
+        self.assertEqual(calls[0]['max_connections'],2)
+        self.assertEqual(server.events[-1],'closed')
+
     def test_listener_only_starts_explicitly_and_stops_before_queue_release(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
         self.addCleanup(queue.close)
