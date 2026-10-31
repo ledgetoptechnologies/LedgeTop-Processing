@@ -69,7 +69,8 @@ class NativeEngine:
             fields['outputs'] = json.dumps(task['outputs'])
         result = self.client.json('POST', self.route('/task/new/init'), fields=fields,
                                   headers={'set-uuid': task['engine_uuid']})
-        if not isinstance(result, dict) or result.get('uuid') != task['engine_uuid']:
+        if (not isinstance(result, dict) or result.get('uuid') != task['engine_uuid']
+                or 'error' in result or ('success' in result and result['success'] is not True)):
             raise SmokeError('engine initialization identity uncertain')
 
     def upload(self, identifier, item):
@@ -96,7 +97,7 @@ class NativeEngine:
             raw = self.client.request('POST', self.route(route), body=urlencode({'uuid': identifier}).encode(),
                                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
             result = json.loads(raw)
-        if (not isinstance(result, dict) or 'error' in result or result.get('success') is False
+        if (not isinstance(result, dict) or 'error' in result or ('success' in result and result['success'] is not True)
                 or ('uuid' in result and result['uuid'] != identifier)):
             raise SmokeError('engine mutation acknowledgment uncertain')
         return result

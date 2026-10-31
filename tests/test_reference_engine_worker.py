@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import tempfile
 import unittest
@@ -153,6 +154,41 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
         with self.assertRaises(WorkerHeld):
             self.worker.poll(self.job['jobId'])
         self.assertEqual(self.engine.calls, ['initialize'])
+
+    def test_negative_init_ack_keeps_real_owner_intent_and_never_uploads(self):
+        from processing.viewer_service import NativeEngine
+        from processing.odx_smoke_worker import SmokeError
+        engine=NativeEngine('http://127.0.0.1:3001');self.engine=engine
+        self.worker=self.make_worker()
+        with patch.object(engine.client,'json',return_value={'uuid':self.job['jobId'],'success':False}) as send, \
+             patch.object(engine,'upload') as upload:
+            with self.assertRaises(SmokeError):self.start()
+            self.assertEqual(self.worker._row(self.job['jobId'])['phase'],'initialize_pending')
+            self.worker=self.make_worker()
+            self.assertEqual(self.start(),'initialize_pending')
+            self.assertEqual(send.call_count,1);upload.assert_not_called()
+        with NodeGate('physical-engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['id'],self.job['jobId'])
+
+    @unittest.skipUnless(hasattr(os,'fork'),'process death fixture requires fork')
+    def test_owner_process_death_after_init_side_effect_holds_without_replay(self):
+        marker=self.root/'synthetic-init-side-effect'
+        pid=os.fork()
+        if pid==0:
+            signal.alarm(15)
+            def die(_task):
+                marker.write_bytes(b'created');os._exit(73)
+            self.engine.initialize=die
+            try:self.start()
+            finally:os._exit(74)
+        _,status=os.waitpid(pid,0)
+        self.assertEqual(os.waitstatus_to_exitcode(status),73)
+        self.assertEqual(marker.read_bytes(),b'created')
+        self.worker=self.make_worker()
+        self.assertEqual(self.start(),'initialize_pending')
+        self.assertEqual(self.engine.calls,[])
+        with NodeGate('physical-engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['id'],self.job['jobId'])
 
     def test_uncertain_commit_is_read_only_reconciled_without_rerun(self):
         self.engine.fail = 'commit'
