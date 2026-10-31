@@ -509,6 +509,20 @@ class TaskStore:
             return [self._task(db, row) for row in db.execute(
                 'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
 
+    def next_unarchived_success(self, after_rowid=0):
+        """Round-robin cursor over durable, nonremoved successful tasks."""
+        with self._lock, self.queue._db() as db:
+            for boundary in (after_rowid, 0):
+                row = db.execute('''SELECT t.rowid,t.uuid FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id
+                    WHERE t.rowid>? AND t.removed=0 AND t.archive_path IS NULL
+                      AND t.stage='succeeded' AND t.phase='complete' AND j.status='succeeded'
+                    ORDER BY t.rowid LIMIT 1''', (boundary,)).fetchone()
+                if row is not None:
+                    return (row[0], row[1])
+                if boundary == 0:
+                    break
+            return None
+
     def task_for_job(self, job_id):
         """Load only the task selected for dispatch or active reconciliation."""
         with self._lock, self.queue._db() as db:
