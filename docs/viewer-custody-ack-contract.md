@@ -129,3 +129,12 @@ credential preflight succeeds. Runtime qualification flags remain false. Tests
 patch a guard only inside isolated fixtures; the combined assembled TLS runtime,
 staging-only Viewer clients and process-kill/lost-response replay have not yet
 been validated. This is not a production activation or a custody guarantee.
+
+An isolated staging fixture has exercised the actual staged Viewer commitment
+and acknowledgement clients against the assembled TLS coordinator, using a
+synthetic in-memory Viewer outbox. The client discards a successful POST response
+after coordinator commit, marks delivery uncertain, and resolves it through the
+existing authenticated lookup. This is a simulated lost response, not a
+process-kill test, and the in-memory outbox provides no durable Viewer custody.
+The runtime fixture patches qualification flags only for the test. It does not
+wire the spool into ViewerService or enable completion projection in deployment.

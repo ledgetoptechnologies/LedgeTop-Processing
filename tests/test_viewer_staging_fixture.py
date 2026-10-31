@@ -3,6 +3,9 @@ import base64
 import io
 import http.client
 import json
+import os
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -19,7 +22,13 @@ TASK=claim_tests.TASK
 CAP=base64.urlsafe_b64encode(b'b'*32).decode().rstrip('=')
 
 def staging_coordinator(fixture):
-    empty_coordinator(fixture)
+    cert=os.environ.get('SYNTHETIC_TEST_CERT');key=os.environ.get('SYNTHETIC_TEST_KEY')
+    if cert and key:
+        def install_cert(args,**kwargs):
+            shutil.copyfile(key,args[args.index('-keyout')+1]);shutil.copyfile(cert,args[args.index('-out')+1]);os.chmod(args[args.index('-keyout')+1],0o600)
+            return subprocess.CompletedProcess(args,0)
+        with patch('tests.viewer_full_bridge_server.subprocess.run',side_effect=install_cert):empty_coordinator(fixture)
+    else:empty_coordinator(fixture)
     fixture.store.reserve(TASK,'staging',CAP)
     fixture.store.initialize(TASK,'synthetic',[],[],'staging',CAP)
     fixture.store.upload(TASK,'photo.jpg',io.BytesIO(b'synthetic'),9,'staging',CAP)
@@ -91,8 +100,18 @@ class StagingFixtureTests(unittest.TestCase):
         value=dict(commitment,attemptId=str(uuid.uuid4()),modelId=str(uuid.uuid4()),modelVersionId=str(uuid.uuid4()),stagingCommitId=str(uuid.uuid4()))
         raw=protocol.canonical_json(value)
         self.assertEqual(call('POST',path,body=protocol.canonical_json(dict(value,generation=value['generation']+1)))[0],409)
-        self.assertTrue(call('POST',path,body=raw)[1]['created'])
-        self.assertFalse(call('POST',path,body=raw)[1]['created'])
-        self.assertEqual(call('GET',path+'/generations/'+str(value['generation']))[1]['assertion'],value)
+        viewer_source=os.environ.get('VIEWER_SOURCE')
+        if viewer_source:
+            env=dict(os.environ,NODE_EXTRA_CA_CERTS=str(fixture.fixture.cert),NODE_NO_WARNINGS='1',
+                SYNTHETIC_BRIDGE_CONFIG=json.dumps(dict(origin='https://127.0.0.1:'+str(runtime._server.server_port),
+                    authority=fixture.fixture.queue.authority_id,bearer=bearer,capability=CAP,task=TASK)))
+            result=subprocess.run(['node',str(__import__('pathlib').Path(__file__).with_name('viewer_staged_clients_synthetic.cjs'))],
+                                  env=env,capture_output=True,text=True,timeout=30,check=True)
+            self.assertEqual(json.loads(result.stdout)['replay'],'lookup')
+            with fixture.fixture.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0],1)
+        else:
+            self.assertTrue(call('POST',path,body=raw)[1]['created'])
+            self.assertFalse(call('POST',path,body=raw)[1]['created'])
+            self.assertEqual(call('GET',path+'/generations/'+str(value['generation']))[1]['assertion'],value)
         self.assertEqual(fixture.fixture.queue.get(fixture.fixture.job)['status'],'running')
         self.assertEqual(len(list(fixture.base.root.glob('*.alloc'))),1)
