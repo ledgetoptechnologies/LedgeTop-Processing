@@ -1,15 +1,26 @@
 # Reference worker image
 
-`Dockerfile.reference-worker` packages the optional reference worker separately
-from the coordinator. Building the image does not provision or start a worker.
+`Dockerfile.reference-worker` packages the optional **ODM-only** reference worker
+separately from the coordinator. Its entrypoint rejects TreeDar routing before
+opening worker state; this image has no Docker CLI. Building the image does not
+provision or start a worker.
 Run it with `--config` pointing at a pre-existing owner-private configuration.
 Without a valid configuration and physical gate, the daemon fails closed.
 
 The default image user is unprivileged. A real deployment must use the same OS
 identity and **same underlying canonical NodeGate directory** as every other
 cooperating writer for that engine; a fresh gate inside the container does not
-provide mutual exclusion. Mount a previously provisioned gate location and set
-`XDG_STATE_HOME` consistently with the host. Independently provision persistent,
+provide mutual exclusion. On the current Linux nodes the host gate is owned by
+`bkoltz` UID/GID `1000:1000`. For that specific layout, use `--user 1000:1000`,
+set `XDG_STATE_HOME=/node-state`, and bind the host's existing
+`/home/bkoltz/.local/state/LedgeTop-Processing/node-gates` directory read-write
+to `/node-state/LedgeTop-Processing/node-gates`. Verify the host's real gate
+binding and UID before use; if its state home differs, mount the actual directory.
+Do not bind an empty replacement or use the image's default UID for that gate.
+An isolated synthetic lock check on the main host verified that a container run
+as `1000:1000` with this mapping observes a host-held gate lock. This does not
+validate the live gate's binding, other writers, or deployment.
+Independently provision persistent,
 owner-private worker state and scratch mounts, a verified coordinator/broker CA,
 worker server certificate and key, and distinct scoped credentials. Configure
 the network so the fixed loopback `engineOrigin` actually reaches the intended
@@ -19,3 +30,5 @@ Image packaging does not verify those identities, protect against direct engine
 clients, establish a NAS broker or Viewer acceptance, or enable TreeDar. Do not
 start a second worker against an active engine until the ownership, maintenance,
 retention and recovery procedures have been qualified for the target host.
+The draft reference v2 protocol is not wired or supported by this image; its
+candidate contract resources are intentionally not included.
