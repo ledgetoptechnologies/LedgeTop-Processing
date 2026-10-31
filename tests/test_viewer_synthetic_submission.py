@@ -69,6 +69,67 @@ class SyntheticSubmissionTests(unittest.TestCase):
     def prepare(self,owner):
         inputs=self.base.make(owner);inputs.freeze_inventory();inputs.transfer(self.base.object_id(inputs));return inputs
 
+    def test_supervisor_never_replays_ambiguous_engine_init(self):
+        from processing.viewer_synthetic_supervisor import tick
+        from processing.viewer_synthetic_submission import SubmissionHeld
+        self.drop='init'
+        with DaemonStateLock(self.base.base.worker) as owner:
+            worker=self.base.base.make(owner)
+            kwargs=dict(input_root=self.base.inputs,input_root_identity=self.base.input_id,
+                        max_total=100000,max_object=100000,synthetic_fixture=True)
+            with self.assertRaises(Exception):tick(worker,NativeEngine(self.origin),self.base.base.fixture.job,'enroll-1','production',**kwargs)
+            with self.assertRaises(SubmissionHeld):tick(worker,NativeEngine(self.origin),self.base.base.fixture.job,'enroll-1','production',**kwargs)
+        self.assertEqual([item[0] for item in self.calls],['init'])
+        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.base.output.glob('*.alloc'))),1)
+
+    def test_supervisor_restart_offline_then_reconnect(self):
+        from processing.direct_output_slot import _identity
+        from processing.viewer_archive_spool import ViewerArchiveSpool
+        from processing.reference_http import create_reference_http_server
+        fixture=self.base.base.fixture
+        root=fixture.root/'supervisor-spool';root.mkdir(mode=0o700);fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+        try:root_id=_identity(fd)
+        finally:os.close(fd)
+        spool=ViewerArchiveSpool(fixture.claims,root=root,root_identity=root_id,max_archive_bytes=65536,enabled=True)
+        fixture.api.viewer_spool=spool
+        config=dict(worker=str(self.base.base.worker),workerConfig=self.base.base.config,origin=self.origin,
+                    job=fixture.job,inputRoot=str(self.base.inputs),inputIdentity=self.base.input_id)
+        code='''import json,os,signal,sys
+from unittest.mock import patch
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_service import NativeEngine
+import processing.viewer_synthetic_supervisor as supervisor
+c=json.loads(sys.argv[1]);mode=sys.argv[2]
+def stop(*args,**kwargs):os.kill(os.getpid(),signal.SIGKILL)
+with DaemonStateLock(c['worker']) as owner:
+ worker=ViewerNodeEnrollment(owner,**c['workerConfig'])
+ kwargs=dict(input_root=c['inputRoot'],input_root_identity=c['inputIdentity'],max_total=100000,max_object=100000,synthetic_fixture=True)
+ if mode=='kill':
+  with patch.object(supervisor,'send_completion',stop):supervisor.tick(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',**kwargs)
+ else:print(json.dumps(supervisor.tick(worker,NativeEngine(c['origin']),c['job'],'enroll-1','production',**kwargs)))
+'''
+        args=[sys.executable,'-c',code,json.dumps(config)]
+        killed=subprocess.run(args+['kill'],capture_output=True,timeout=20)
+        self.assertEqual(killed.returncode,-signal.SIGKILL,killed.stderr)
+        self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])
+        self.assertEqual(self.calls[0][2]['set-uuid'],fixture.store.task('22222222-2222-4222-8222-222222222222')['engine_uuid'])
+        port=fixture.server.server_port;fixture.stop_server()
+        offline=subprocess.run(args+['resume'],capture_output=True,timeout=20)
+        self.assertNotEqual(offline.returncode,0)
+        self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])
+        fixture.server=create_reference_http_server(fixture.api,port=port,ssl_context=fixture.tls)
+        fixture.thread=threading.Thread(target=fixture.server.serve_forever,kwargs={'poll_interval':.05},daemon=True);fixture.thread.start()
+        resumed=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(resumed.returncode,0,resumed.stderr)
+        self.assertEqual(json.loads(resumed.stdout)['kind'],'viewer-completion-attestation-receipt')
+        self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])
+        self.assertEqual(fixture.queue.get(fixture.job)['status'],'running')
+        self.assertEqual(len(list(root.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.base.output.glob('*.alloc'))),1)
+
     def test_missing_capture_guard_is_not_migrated_or_recreated(self):
         import sqlite3
         with DaemonStateLock(self.base.base.worker) as owner:

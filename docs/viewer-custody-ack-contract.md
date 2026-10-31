@@ -219,3 +219,14 @@ This assumes cooperative ownership, trusted filesystem and no rollback to an
 older valid database snapshot; it cannot detect privileged tampering or power
 loss beyond the filesystem durability guarantees. No runtime worker loop or
 automatic dispatch is enabled by this API.
+
+A disabled, synthetic-only supervisor draft drives the existing enrollment,
+input, submission, local capture and delivery journals with bounded retries.
+A subprocess test kills the supervisor after capture, restarts with the
+coordinator offline, then reconnects and delivers; the synthetic engine sees
+one init, upload and commit for the same UUID, and input/result/spool copies
+remain until fixture teardown. It has no production daemon entry point, uses
+loopback-only synthetic engine guards, and cannot turn an ambiguous mutation
+or a partial capture into a retry. Restart before an input journal exists is
+held for inspection, including the crash window after enrollment. Retry delay
+is process-local and not a persistent scheduling policy.
