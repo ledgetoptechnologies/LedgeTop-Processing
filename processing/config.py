@@ -119,6 +119,9 @@ def from_environment() -> Config:
         spool_floor = 0
     else:
         spool_floor = _positive_int(spool_floor_text, 'PROCESSING_VIEWER_SPOOL_MIN_FREE_BYTES', 10 ** 15)
+    spool_inode_floor = (_positive_int(os.environ.get('PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES', '1024'),
+                                       'PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES', 10 ** 12)
+                         if spool_floor else 1024)
     return Config(
         api_token=token,
         local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
@@ -146,5 +149,5 @@ def from_environment() -> Config:
         authority_lease_dir=lease_dir,
         viewer_production_held=production_admission == 'held',
         viewer_spool_min_free_bytes=spool_floor,
-        viewer_spool_min_free_inodes=_positive_int(os.environ.get('PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES', '1024'), 'PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES', 10**12),
+        viewer_spool_min_free_inodes=spool_inode_floor,
     )

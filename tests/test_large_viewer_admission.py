@@ -1,9 +1,21 @@
 """Large-accounting regressions use invented rows, not large file transfers."""
-import io,tempfile,unittest,uuid
+import io,os,tempfile,unittest,uuid
 from pathlib import Path
+from unittest.mock import patch
+from processing.config import from_environment
 from processing.policy import plan
 from processing.prototype import Queue
 from processing.viewer_tasks import InputLimitExceeded,TaskStore,VIEWER_PROFILE
+
+class SpoolConfigurationTests(unittest.TestCase):
+ def test_inode_floor_is_validated_only_when_spool_guard_is_enabled(self):
+  env={'PROCESSING_API_TOKEN':'x'*32,'PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES':'invalid'}
+  with patch.dict(os.environ,env,clear=True):
+   self.assertEqual(from_environment().viewer_spool_min_free_inodes,1024)
+  with patch.dict(os.environ,{**env,'PROCESSING_VIEWER_SPOOL_MIN_FREE_BYTES':'1'},clear=True):
+   with self.assertRaises(ValueError):from_environment()
+  with patch.dict(os.environ,{**env,'PROCESSING_VIEWER_SPOOL_MIN_FREE_BYTES':'1','PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES':'500'},clear=True):
+   self.assertEqual(from_environment().viewer_spool_min_free_inodes,500)
 
 class LargeAdmissionTests(unittest.TestCase):
  def setUp(self):
