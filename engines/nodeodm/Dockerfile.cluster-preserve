@@ -1,0 +1,6 @@
+# Derived from the exact locally verified cluster-node image. No moving tags.
+FROM opendronemap/nodeodm@sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6
+USER root
+COPY ops/nodeodm_startup_patch.js /tmp/ledgetop-nodeodm-startup-patch.js
+RUN node /tmp/ledgetop-nodeodm-startup-patch.js && rm /tmp/ledgetop-nodeodm-startup-patch.js
+USER odm
