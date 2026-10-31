@@ -114,6 +114,8 @@ def main():
             def handle_request(self):
                 if not facade.handle(self):self.send_error(404)
             do_GET=handle_request;do_POST=handle_request
+            def log_request(self,code='-',size='-'):
+                print('synthetic-provider',self.command,self.path,code,flush=True)
             def log_message(self,*_args):pass
         provider=ThreadingHTTPServer(('127.0.0.1',0),Provider)
         provider_thread=threading.Thread(target=provider.serve_forever,kwargs={'poll_interval':.05});provider_thread.start()
