@@ -23,15 +23,27 @@ class ChunkCrashTests(unittest.TestCase):
     def test_coordinator_kill_after_promotion_commit_leaves_receipt_and_restart_hold(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);ready=root/'ready.json'
-            code='''import hashlib,json,os,signal,sys
+            code='''import hashlib,http.client,json,os,signal,sys
 from pathlib import Path
 from tests.test_viewer_chunk_spool import ChunkSpoolTests
 root=Path(sys.argv[1]);test=ChunkSpoolTests('test_exact_coordinator_chunk_replay_and_final_receipt');test.setUp()
-f=test.base.fixture;test.chunk.begin(test.job,test.identity,test.token);test.chunk.write(test.job,test.identity,test.token,0,0,test.archive);test.chunk.finish(test.job,test.identity,test.token,1)
-f.api.viewer_chunks=test.chunk
+f=test.base.fixture;f.api.viewer_chunks=test.chunk
+conn=http.client.HTTPSConnection('127.0.0.1',f.server.server_port,context=f.client,timeout=5)
+try:
+ headers={'Authorization':'Bearer '+'a'*32,'X-Claim-Token':test.token,'X-Chunk-Size':str(len(test.archive)),'Content-Type':'application/octet-stream'}
+ conn.request('POST','/ltds/worker/v1/viewer-claims/'+test.job+'/chunks/begin',b'',headers)
+ response=conn.getresponse();assert response.status==200;assert json.loads(response.read())=={'state':'ready'}
+finally:conn.close()
+test.chunk.write(test.job,test.identity,test.token,0,0,test.archive);test.chunk.finish(test.job,test.identity,test.token,1)
 original=test.chunk.promote
 def kill_after_commit(*args,**kwargs):
  value=original(*args,**kwargs)
+ fd=os.open(root/'committed-receipt.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+ try:os.write(fd,json.dumps(value,sort_keys=True).encode());os.fsync(fd)
+ finally:os.close(fd)
+ directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
+ try:os.fsync(directory)
+ finally:os.close(directory)
  os.kill(os.getpid(),signal.SIGKILL)
  return value
 test.chunk.promote=kill_after_commit
@@ -56,6 +68,7 @@ while True:time.sleep(1)
                         conn.getresponse().read()
                 finally:conn.close()
                 self.assertEqual(child.wait(timeout=5),-signal.SIGKILL)
+                expected_receipt=json.loads((root/'committed-receipt.json').read_text())
                 state=Path(info['root'])/'state'
                 queue=Queue(state,node_ids=('cluster','main'),viewer_enabled=True,reference_enabled=True)
                 try:
@@ -65,11 +78,14 @@ while True:time.sleep(1)
                     identity=dict(node_id='cluster',worker_id='worker-a',worker_instance_id='instance-a')
                     job=queue.get(info['job']);self.assertEqual(job['status'],'held');self.assertEqual(job['heldReason'],'coordinator_restart')
                     receipt=spool.lookup(info['job'],identity,info['token'])['receipt']
+                    self.assertEqual(receipt,expected_receipt)
                     self.assertEqual((receipt['archiveSha256'],receipt['archiveBytes']),(info['sha'],info['length']))
                     with self.assertRaises(SpoolHeld):SyntheticChunkSpool(spool,synthetic_fixture=True).promote(info['job'],identity,info['token'],1)
                     with queue._db() as db:
                         self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_spool WHERE job_id=?',(info['job'],)).fetchone()[0],1)
                         self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_chunk_sessions WHERE job_id=?',(info['job'],)).fetchone()[0],1)
+                        geometry=db.execute('SELECT chunk_bytes,chunk_count FROM viewer_worker_chunk_sessions WHERE job_id=?',(info['job'],)).fetchone()
+                        self.assertEqual((geometry['chunk_bytes'],geometry['chunk_count']),(info['length'],1))
                     self.assertEqual(len(list(Path(info['spool']).glob('*.alloc'))),1)
                     self.assertEqual(len(list(Path(info['nodeOutput']).glob('*.alloc'))),1)
                     self.assertEqual(len(list(Path(info['nodeInputs']).glob('*.alloc'))),1)
