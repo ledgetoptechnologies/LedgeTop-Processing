@@ -68,11 +68,30 @@ def path_id(key, relative):
     return _keyed(key, b'path\0' + relative.encode('utf-8', 'surrogateescape')).hexdigest()
 
 
-def _content(key, path):
+def _content(key, path, expected):
     digest = _keyed(key, b'content\0')
-    with open(path, 'rb') as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b''):
+    # Bind the content digest to the object discovered by the walk. A stopped
+    # volume is a prerequisite; this check detects changes, it is not a lock.
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
+    try:
+        def identity(info):
+            fields = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                      info.st_nlink, info.st_size, info.st_mtime_ns)
+            # Windows may report different ctime through a handle and path.
+            return fields if os.name == 'nt' else fields + (info.st_ctime_ns,)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or identity(before) != identity(expected):
+            raise OSError('census file changed')
+        total = 0
+        while chunk := os.read(fd, 1 << 20):
+            total += len(chunk)
+            if total > before.st_size:
+                raise OSError('census file changed')
             digest.update(chunk)
+        if total != before.st_size or identity(os.fstat(fd)) != identity(before) or identity(path.lstat()) != identity(before):
+            raise OSError('census file changed')
+    finally:
+        os.close(fd)
     return digest.hexdigest()
 
 
@@ -82,7 +101,7 @@ def _entry(key, path, info):
     if stat.S_ISDIR(info.st_mode):
         entry['kind'] = 'directory'
     elif stat.S_ISREG(info.st_mode):
-        entry.update(kind='file', bytes=info.st_size, links=info.st_nlink, content=_content(key, path))
+        entry.update(kind='file', bytes=info.st_size, links=info.st_nlink, content=_content(key, path, info))
     elif stat.S_ISLNK(info.st_mode):
         entry['kind'] = 'symlink'
     else:

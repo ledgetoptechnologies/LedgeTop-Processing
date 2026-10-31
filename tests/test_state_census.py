@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from ops import state_census
 
@@ -76,6 +77,33 @@ class CensusFixture(unittest.TestCase):
 
 
 class CensusTest(CensusFixture):
+    def test_changed_file_during_hash_is_rejected(self):
+        target = self.root / 'viewer-tasks' / 'task-1' / 'DJI_0001.JPG'
+        real_read = os.read
+        changed = False
+        def mutate(fd, size):
+            nonlocal changed
+            data = real_read(fd, size)
+            if data and not changed:
+                changed = True
+                with target.open('ab') as stream:
+                    stream.write(b'changed')
+            return data
+        info = target.lstat()
+        with mock.patch('ops.state_census.os.read', side_effect=mutate):
+            with self.assertRaises(OSError):
+                state_census._content(KEY, target, info)
+        self.assertTrue(changed)
+
+    @unittest.skipUnless(hasattr(os, 'O_NOFOLLOW'), 'requires no-follow open')
+    def test_replaced_file_symlink_is_never_followed(self):
+        target = self.root / 'viewer-tasks' / 'task-1' / 'DJI_0001.JPG'
+        info = target.lstat()
+        target.unlink()
+        target.symlink_to(self.root / 'jobs.sqlite3')
+        with self.assertRaises(OSError):
+            state_census._content(KEY, target, info)
+
     def test_reports_state_and_is_stable_and_read_only(self):
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         status, first = self.census()
