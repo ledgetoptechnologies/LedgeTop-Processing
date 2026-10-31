@@ -248,3 +248,14 @@ retried; if the coordinator records a partial spool, later status holds it.
 TLS, authorization, response-integrity and unknown errors are not classified
 as transient. The status test includes a real coordinator outage and a partial
 TLS POST followed by a new worker process.
+
+An unwired synthetic chunk-journal experiment uses an already allocated,
+exclusively locked slot, a versioned binding header, immutable chunk intents,
+fsync-before-receipt and a full rehash before sealing. Interrupted chunks with
+no receipt hold rather than overwrite. Legacy `receiving` is rejected when the
+caller identifies it. The experiment has no authenticated network route,
+coordinator schema or trusted proof that a caller-provided `new` designation
+is true; it must not be connected to live work. It assumes a trusted directory
+and no deletion or rollback of previously durable journal records. It does not
+provide recovery of an in-flight incomplete chunk, power-loss certification or
+independent storage custody.
