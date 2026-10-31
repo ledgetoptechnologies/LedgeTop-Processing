@@ -27,7 +27,7 @@ async function main(){
     config.stagedCommitmentProviders={[provider.id]:{origin:`https://127.0.0.1:${bridge.ackPort}`,principalId:'viewer-stage',authorityId:bridge.authority,environment:'staging',credentialRef:'synthetic'}};
     const deps={processing,repository,storage,config,providerCredentials:credentials,signal:new AbortController().signal};
     const submit=processing.claimJob('fixture');assert.equal(submit.job_type,'submit');await processSubmit(submit,deps);
-    assert.equal(processing.getAttempt(attempt.id).status,'queued_upstream');
+    {const observed=processing.getAttempt(attempt.id);if(observed.status!=='queued_upstream')console.error(JSON.stringify({phase:observed.status,errorCode:observed.errorCode,submissionPhase:observed.submissionPhase}));assert.equal(observed.status,'queued_upstream');}
     const reservation=processing.getAttemptReservation(attempt.id);assert.ok(reservation);
     const capability=sealed.openAttemptCapability(provider.id,attempt.id,bridge.task,reservation);
     const adapter=new NodeOdmProvider({endpoint:provider.endpoint,token:bridge.token,providerType:'nodeodm',attemptCapability:capability,transferTimeoutMs:5000});
