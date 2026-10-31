@@ -270,6 +270,120 @@ print(json.dumps(sender.send_next()),flush=True)
             release.set(); server.shutdown(); server.server_close(); thread.join(5); queue.close()
         self.assertFalse(thread.is_alive())
 
+    @unittest.skipUnless(os.name=='posix' and shutil.which('openssl'), 'POSIX SIGKILL and openssl required')
+    def test_coordinator_sigkill_after_receipt_commit_replays_once(self):
+        cert, key = self.root / 'coordinator-cert.pem', self.root / 'coordinator-key.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+            '-subj', '/CN=synthetic-loopback', '-addext', 'subjectAltName=IP:127.0.0.1',
+            '-addext', 'basicConstraints=critical,CA:TRUE', '-keyout', str(key), '-out', str(cert)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); tls.load_cert_chain(cert, key)
+        client_tls = ssl.create_default_context(cafile=str(cert))
+        fixture = json.loads((Path(__file__).resolve().parents[1] /
+                              'contracts/reference-v1.contract.json').read_text())
+        queue = Queue(self.root / 'coordinator', reference_enabled=True)
+        store = ReferenceStore(queue)
+        raw = fixture['submission']
+        job = store.submit(p.validate_submission(raw, environment='staging',
+                           capability_fingerprint=raw['capabilityFingerprint']))[0]
+        identity = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')
+        claim = store.claim(job['jobId'], **identity, claim_request_id='claim-1')
+        store.reserve(job['jobId'], fixture['transferRequest'], node_id='cluster')
+        store.update_phase(job['jobId'], 'fetching'); store.update_phase(job['jobId'], 'processing')
+        manifest = copy.deepcopy(fixture['resultManifest'])
+        manifest.update(jobId=job['jobId'], pipelineDigest=job['pipelineDigest'])
+        manifest['objects'][0]['role'] = 'odm_archive'
+        manifest['resultManifestSha256'] = p.digest({k: v for k, v in manifest.items()
+                                                     if k != 'resultManifestSha256'})
+        worker_root = self.root / 'worker-integration'; worker_root.mkdir()
+        original_input = worker_root / 'input.bin'; original_input.write_bytes(b'synthetic-input')
+        output_dir = worker_root / 'jobs' / 'reservation-1'; output_dir.mkdir(parents=True)
+        results = {obj['id']: output_dir / (obj['id'] + '.bin') for obj in manifest['objects']}
+        for output in results.values(): output.write_bytes(b'synthetic-result')
+        path = worker_root / 'outbox.sqlite'
+        outbox = WorkerOutbox(path, clock=lambda: self.now, random_source=lambda: 0, retry_base_seconds=5)
+        outbox_id = outbox.persist_terminal(job_id=job['jobId'], generation=1, environment='staging',
+            input_manifest_sha256=job['manifestSha256'], pipeline_digest=job['pipelineDigest'],
+            result_manifest_sha256=manifest['resultManifestSha256'], result_manifest=manifest,
+            owned_prefix='jobs/reservation-1', local_objects={obj['id']:
+                'jobs/reservation-1/' + obj['id'] + '.bin' for obj in manifest['objects']})
+        coordinator_root=self.root/'coordinator'
+        queue.close()
+        marker=self.root/'committed.json'
+        code=r"""
+import json,os,ssl,sys,time
+from processing.prototype import Queue
+from processing.reference_store import ReferenceStore
+from processing.reference_delivery import DeliveryReceiver
+from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_http import create_reference_http_server
+from processing.reference_sender import RESULTS_PATH
+c=json.load(sys.stdin)
+queue=Queue(c['root'],reference_enabled=True);store=ReferenceStore(queue)
+api=ReferenceWorkerAPI(store,DeliveryReceiver(store),bearer_workers={c['bearer']:{'node_id':'cluster','worker_id':'worker','worker_instance_id':'instance'}})
+class API:
+ def handle(self,method,route,headers,body,*,protected_transport=False):
+  result=api.handle(method,route,headers,body,protected_transport=protected_transport)
+  if route==RESULTS_PATH and c['stall']:
+   with open(c['marker'],'x') as f:
+    json.dump({'receipt':result.body,'delivery':json.loads(body)['delivery'],'status':result.status},f)
+    f.flush();os.fsync(f.fileno())
+   time.sleep(20)
+  return result
+tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(c['cert'],c['key'])
+server=create_reference_http_server(API(),ssl_context=tls)
+print(server.server_port,flush=True);server.serve_forever()
+"""
+        def start_server(stall):
+            proc=spawn_fixture_sender(code,dict(root=str(coordinator_root),bearer=self.bearer,
+                cert=str(cert),key=str(key),marker=str(marker),stall=stall))
+            try:
+                import select
+                if not select.select([proc.stdout],[],[],5)[0]:raise RuntimeError('server start timeout')
+                port=int(proc.stdout.readline())
+                return proc,'https://127.0.0.1:'+str(port)
+            except BaseException:
+                if proc.poll() is None:proc.kill()
+                proc.wait(timeout=3);proc.stdout.close();proc.stderr.close();raise
+        def stop_server(proc):
+            if proc.poll() is None:proc.kill()
+            proc.wait(timeout=3);proc.stdout.close();proc.stderr.close()
+        server,origin=start_server(True)
+        outcome=[]
+        provider=lambda _: {'claimRequestId':'claim-1','claimToken':claim['claimToken']}
+        sender=ReferenceSender(outbox,origin,bearer_token=self.bearer,claim_binding_provider=provider,
+                               ssl_context=client_tls,timeout=5,total_timeout=5,lease_seconds=10)
+        thread=threading.Thread(target=lambda:outcome.append(sender.send_next()))
+        try:
+            thread.start()
+            deadline=time.monotonic()+5
+            while not marker.exists() and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue(marker.exists(),'coordinator did not commit in time')
+            evidence=json.loads(marker.read_text())
+            self.assertEqual(evidence['status'],200)
+            stop_server(server);server=None
+            thread.join(5);self.assertFalse(thread.is_alive())
+            self.assertEqual(outcome[0]['state'],'retry_scheduled')
+            self.now=outbox.get(outbox_id)['next_at']
+            server,origin=start_server(False)
+            restarted=WorkerOutbox(path,clock=lambda:self.now,random_source=lambda:0,retry_base_seconds=5)
+            sender=ReferenceSender(restarted,origin,bearer_token=self.bearer,claim_binding_provider=provider,
+                                   ssl_context=client_tls,timeout=2,total_timeout=2)
+            self.assertEqual(sender.send_next()['state'],'acknowledged')
+            self.assertEqual(restarted.get(outbox_id)['receipt'],evidence['receipt'])
+            self.assertEqual(evidence['delivery']['outboxId'],outbox_id)
+            self.assertEqual(evidence['delivery']['payload'],restarted.get(outbox_id)['payload'])
+            self.assertEqual(original_input.read_bytes(),b'synthetic-input')
+            for output in results.values():self.assertEqual(output.read_bytes(),b'synthetic-result')
+        finally:
+            if server is not None:stop_server(server)
+            thread.join(5)
+        # Inspect coordinator state only after the restarted process has stopped.
+        import sqlite3
+        db=sqlite3.connect(str(coordinator_root/'jobs.sqlite3'))
+        try:self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_worker_receipts').fetchone()[0],1)
+        finally:db.close()
+
     def test_sender_spawn_write_failure_reaps_owned_child(self):
         class BadInput:
             closed=False
