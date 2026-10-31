@@ -122,5 +122,16 @@ class StoppedCensusTests(unittest.TestCase):
             signal.alarm(0);signal.signal(signal.SIGALRM,previous)
         self.assertTrue(lock.exists())
 
+    def test_borrowed_fence_requires_exact_database_authority(self):
+        from ops.pr197_operation_fence import OperationFence
+        leases=self.root.parent/(self.root.name+'-leases');leases.mkdir(mode=0o700)
+        self.addCleanup(leases.rmdir)
+        wrong='12345678-1234-1234-1234-123456789abc'
+        path=leases/(wrong+'.lease');path.touch(mode=0o600);self.addCleanup(path.unlink)
+        with patch('ops.pr197_stopped_census._mount'):
+            with OperationFence(self.root,leases,wrong,enabled=True) as fence:
+                with self.assertRaisesRegex(CensusHeld,'operation_authority_mismatch'):
+                    stopped_census(self.root,bytes(range(32)),operation_fence=fence)
+
 
 if __name__=='__main__':unittest.main()

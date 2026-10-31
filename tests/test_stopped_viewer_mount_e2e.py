@@ -282,13 +282,18 @@ from pathlib import Path
 import json, os
 from ops.stopped_viewer_backup import backup
 from ops.pr197_stopped_census import stopped_census
+from ops.pr197_operation_fence import OperationFence
 p=Path('/scratch/{ident}'); Path('/backups').chmod(0o700)
 if {image_compat!r}:
- doc=stopped_census(Path('/source'),bytes(range(32)))
- assert not doc['cutoverAuthorized'] and not doc['writerFenceQualified']
- assert doc['census']['database']['rowCounts']['owned_maintenance_schedules']==16
- (p/'strict-source.json').write_text(json.dumps(doc))
-r=backup(Path('/source'),Path('/backups/snapshot'),p/'leases','12345678-1234-1234-1234-123456789abc',bytes(range(32)),stopped_writers_confirmed=True,independent_destination_confirmed=True)
+ with OperationFence(Path('/source'),p/'leases','12345678-1234-1234-1234-123456789abc',enabled=True) as fence:
+  doc=stopped_census(Path('/source'),bytes(range(32)),operation_fence=fence)
+  assert not doc['cutoverAuthorized'] and not doc['writerFenceQualified']
+  assert doc['census']['database']['rowCounts']['owned_maintenance_schedules']==16
+  (p/'strict-source.json').write_text(json.dumps(doc))
+  r=backup(Path('/source'),Path('/backups/snapshot'),p/'leases','12345678-1234-1234-1234-123456789abc',bytes(range(32)),stopped_writers_confirmed=True,independent_destination_confirmed=True,operation_fence=fence)
+  fence.check()
+else:
+ r=backup(Path('/source'),Path('/backups/snapshot'),p/'leases','12345678-1234-1234-1234-123456789abc',bytes(range(32)),stopped_writers_confirmed=True,independent_destination_confirmed=True)
 fd=os.open(p/'inventory.json',os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
 with os.fdopen(fd,'w') as f:
     json.dump({{'inventory':r['snapshot']}},f); f.flush(); os.fsync(f.fileno())

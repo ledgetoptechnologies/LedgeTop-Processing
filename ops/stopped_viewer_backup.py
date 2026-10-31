@@ -124,7 +124,7 @@ def _require_known_quiescent_state(source):
 
 
 def backup(source, destination, lease_directory, authority_id, key, *, stopped_writers_confirmed=False,
-           independent_destination_confirmed=False, expected_source_inventory=None):
+           independent_destination_confirmed=False, expected_source_inventory=None, operation_fence=None):
     """Create a new owned destination and compare source/copy/source censuses.
 
     Returns keyed census documents. Never prints task names, rows or tokens.
@@ -152,10 +152,19 @@ def backup(source, destination, lease_directory, authority_id, key, *, stopped_w
         raise BackupRefused('source_mount_not_readonly')
     _require_isolated_mounts(source, destination.parent)
     # Open existing files only; don't create/truncate the authority lease.
-    authority_fd = _lock(leases / (authority_id + '.lease'))
+    if operation_fence is not None:
+        from ops.pr197_operation_fence import OperationFence
+        if (type(operation_fence) is not OperationFence or operation_fence.root!=source
+                or operation_fence.leases!=leases or operation_fence.authority!=authority_id):
+            raise BackupRefused('operation_fence_binding_changed')
+        operation_fence.check()
+        authority_fd=os.dup(operation_fence.fds[0])
+    else:
+        authority_fd = _lock(leases / (authority_id + '.lease'))
     queue_fd = None
     try:
-        queue_fd = _lock(source / 'coordinator.lock')
+        queue_fd = os.dup(operation_fence.fds[1]) if operation_fence is not None else _lock(source / 'coordinator.lock')
+        if operation_fence is not None:operation_fence.check()
         before = state_census.census(source, key)
         db = before.get('database') or {}
         if (any(before['tree']['rejected'].values()) or db.get('quickCheck') != 'ok'
@@ -217,6 +226,7 @@ def backup(source, destination, lease_directory, authority_id, key, *, stopped_w
             held, current = os.fstat(fd), path.lstat()
             if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
                 raise BackupRefused('lock_identity_changed')
+        if operation_fence is not None:operation_fence.check()
         return {'source': before, 'snapshot': copied}
     finally:
         if queue_fd is not None:

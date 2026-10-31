@@ -53,7 +53,7 @@ def _mount(root):
     except (OSError,ValueError):raise CensusHeld('mountinfo_unavailable') from None
 
 
-def stopped_census(root,key,*,limits=None):
+def stopped_census(root,key,*,limits=None,operation_fence=None):
     """Read-only keyed census. Never grants writer, cutover, or rollback authority."""
     root=Path(root)
     if type(key) is not bytes or len(key)!=32:raise CensusHeld('census_key_required')
@@ -70,15 +70,23 @@ def stopped_census(root,key,*,limits=None):
         # The predecessor's own flock is held throughout this read. It stops
         # cooperating coordinators on this exact inode, not privileged or
         # uncooperative writers, and is released when this function returns.
-        lock=os.open('coordinator.lock',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+        if operation_fence is not None:
+            from ops.pr197_operation_fence import OperationFence
+            if type(operation_fence) is not OperationFence or operation_fence.root!=root:
+                raise CensusHeld('operation_fence_binding_changed')
+            operation_fence.check()
+            lock=os.dup(operation_fence.fds[1])
+        else:
+            lock=os.open('coordinator.lock',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
         lock_info=os.fstat(lock)
         named_lock=os.stat('coordinator.lock',dir_fd=directory,follow_symlinks=False)
         if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink!=1 or
             (lock_info.st_dev,lock_info.st_ino)!=(named_lock.st_dev,named_lock.st_ino) or
             _identity(lock)[2]!=identity[2]):
             raise CensusHeld('coordinator_lock_identity_required')
-        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except OSError:raise CensusHeld('coordinator_lock_busy_or_unavailable') from None
+        if operation_fence is None:
+            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except OSError:raise CensusHeld('coordinator_lock_busy_or_unavailable') from None
         named_lock=os.stat('coordinator.lock',dir_fd=directory,follow_symlinks=False)
         if (lock_info.st_dev,lock_info.st_ino)!=(named_lock.st_dev,named_lock.st_ino):
             raise CensusHeld('coordinator_lock_changed')
@@ -101,6 +109,8 @@ def stopped_census(root,key,*,limits=None):
         if (document['database']['quickCheck']!='ok' or document['database']['sidecars'] or
             any(document['tree']['rejected'].values()) or snapshot(db_path.lstat())!=snapshot(info)):
             raise CensusHeld('unstable_or_unsupported_state')
+        if operation_fence is not None and document['database']['authorityId']!=operation_fence.authority:
+            raise CensusHeld('operation_authority_mismatch')
         named=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         try:
             if _identity(named)!=identity or _identity(directory)!=identity:raise CensusHeld('mount_identity_changed')
@@ -109,6 +119,7 @@ def stopped_census(root,key,*,limits=None):
                 raise CensusHeld('coordinator_lock_changed')
         finally:os.close(named)
         # Schema equality cannot establish which executable wrote the state.
+        if operation_fence is not None:operation_fence.check()
         return {'schemaProfileRevision':PREDECESSOR_REVISION,'schemaProfileImage':PREDECESSOR_IMAGE,'schemaSha256':schema,
                 'limits':limits,'writerFenceQualified':False,'cutoverAuthorized':False,'rollbackAuthorized':False,'census':document}
     except CensusHeld:raise
