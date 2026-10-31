@@ -82,8 +82,10 @@ def main():
             return ViewerNodeInputs(obj.base.make(owner),obj.base.fixture.job,'enroll-1','staging',input_root=obj.inputs,input_root_identity=obj.input_id,max_total=100000,max_object=100000)
         with patch.object(ViewerWorkerClaimTests,'setUp',empty_coordinator),patch.object(enrollment_tests.NodeEnrollmentTests,'setUp',stage_enrollment),patch.object(input_tests.NodeInputsTests,'make',stage_inputs),patch.object(zipfile.ZipFile,'writestr',write):synthetic.setUp()
         fixture=synthetic.base.base.fixture
+        discovery_requests=[]
         class Discovery(BaseHTTPRequestHandler):
             def do_GET(self):
+                discovery_requests.append(self.path)
                 value=([{'name':'dsm','type':'bool','value':False}] if self.path=='/options' else
                        {'version':'2.2.3','engine':'odm','engineVersion':'synthetic'})
                 raw=json.dumps(value).encode();self.send_response(200);self.send_header('Content-Type','application/json')
@@ -177,6 +179,8 @@ def main():
                       coordinatorJobStatus=fixture.queue.get(fixture.job)['status'])
         if retained!={'nodeInputCopies':1,'nodeResultCopies':1,'coordinatorSpoolCopies':1,'coordinatorJobStatus':'running'}:
             raise AssertionError('synthetic retention changed')
+        if discovery_requests.count('/options')<1:raise AssertionError('synthetic option discovery not observed')
+        retained['optionDiscoveryRequests']=discovery_requests.count('/options')
         with fixture.queue._db() as db:
             ack=db.execute('SELECT COUNT(*) FROM viewer_staged_acks WHERE task_id=? AND environment=?',(TASK,'staging')).fetchone()[0]
         if ack!=1:raise AssertionError('staged acknowledgment count mismatch')
