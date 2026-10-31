@@ -15,11 +15,17 @@ not a gate or proof of a reservation. It cannot make the live system safe.
 1. The coordinator claims the global slot and durably records the Viewer UUID,
    generation, job ID, environment, selected node, a fresh engine UUID and a
    sealed digest of the exact ordered input names, byte counts and file hashes.
-   The direct path does not currently persist that manifest digest. No engine
+   It also binds the processing options and requested outputs in their stored
+   order, using `viewer_tasks.canonical` JSON spelling; the proposed
+   `direct_pipeline_digest` computes that identity but does not prove it was
+   executed. The direct path does not currently persist either digest. No engine
    init, upload or commit is sent until the following steps succeed.
 2. An authenticated, node-bound service verifies the current coordinator
    authority and the node's exact engine identity and obtains the same physical
-   NodeGate used by all job types and maintenance. It must retain the durable
+   NodeGate used by all job types and maintenance. The proposed binding records
+   the gate's normalized coordinator origin and its exact 32-lowercase-hex
+   reservation receipt ID, alongside node, authority and generation. Comparing
+   those strings is not a live NodeGate or authority verification. It must retain the durable
    reservation after crashes. Existing direct dispatch and direct engine ingress
    bypass this gate; those paths must be fenced before this can be enabled.
 3. The service reserves a **real, bounded output allocation** on the persistent
