@@ -4,12 +4,13 @@ from processing.prototype import Queue, _require_idle_state
 from processing.viewer_tasks import TaskStore
 from tests.test_state_census import _run
 
-FLAGS = Path(__file__).resolve().parents[1] / 'ops' / 'cutover_census_flags.sh'
+SCRIPT = Path(__file__).resolve().parents[1] / 'ops' / 'cutover_rehearsal.sh'
 
 class InventoryRehearsalTests(unittest.TestCase):
  def flags(self, intents='0', inventory='0'):
   env=os.environ.copy();env['CUTOVER_REHEARSAL_UPLOAD_INTENTS']=intents;env['CUTOVER_REHEARSAL_INVENTORY']=inventory
-  p=subprocess.run(['bash','-c','set -e; source "$1"; printf "%s\\n" "${CENSUS_FEATURE_FLAGS[@]}"','--',str(FLAGS)],env=env,capture_output=True,text=True)
+  block=SCRIPT.read_text().split('# BEGIN optional census allowances;',1)[1].split('# END optional census allowances',1)[0].split('\n',1)[1]
+  p=subprocess.run(['bash','-c','set -e; '+block+'\nprintf "%s\\n" "${CENSUS_FEATURE_FLAGS[@]}"'],env=env,capture_output=True,text=True)
   return p.returncode,[line for line in p.stdout.splitlines() if line]
  def test_opt_in_selection_and_invalid_values(self):
   self.assertEqual(self.flags(),(0,[]))

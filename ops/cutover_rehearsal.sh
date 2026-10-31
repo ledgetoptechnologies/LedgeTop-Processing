@@ -31,8 +31,19 @@ set -euo pipefail
 umask 077
 export MSYS_NO_PATHCONV=1
 HERE=$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)
-# Optional comparison allowances only; this never enables a runtime feature.
-source "$HERE/cutover_census_flags.sh"
+# BEGIN optional census allowances; never enables a runtime feature.
+CENSUS_FEATURE_FLAGS=()
+case "${CUTOVER_REHEARSAL_UPLOAD_INTENTS:-0}" in
+  0) ;;
+  1) CENSUS_FEATURE_FLAGS+=(--allow-empty-upload-intents) ;;
+  *) echo 'invalid CUTOVER_REHEARSAL_UPLOAD_INTENTS (expected 0 or 1)' >&2; exit 2 ;;
+esac
+case "${CUTOVER_REHEARSAL_INVENTORY:-0}" in
+  0) ;;
+  1) CENSUS_FEATURE_FLAGS+=(--allow-inventory-revision) ;;
+  *) echo 'invalid CUTOVER_REHEARSAL_INVENTORY (expected 0 or 1)' >&2; exit 2 ;;
+esac
+# END optional census allowances
 # Host path for host tools: Windows paths under Git Bash/MSYS, unchanged elsewhere.
 w() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) DOCKER_LOCAL=npipe:////./pipe/docker_engine;; *) DOCKER_LOCAL=unix:///var/run/docker.sock;; esac
