@@ -332,7 +332,7 @@ class ReferenceRuntime:
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
-        self._projection_owner=None;self._projection_binding=None
+        self._projection_owner=None;self._projection_binding=None;self._closed=False
         try:
             projection=settings.viewer_projection_environments
             if projection is not None:
@@ -428,12 +428,9 @@ class ReferenceRuntime:
                 staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers,spool=viewer_spool)
             self.api = _DynamicAPI(self.control, config, settings, discover, staged)
             if projection is not None:
-                # One publication point; no user data or queue state is changed.
-                with viewer_service._lock:
-                    if viewer_service._runtime_projection is not None:raise RuntimeConfigurationError('Viewer projection already bound')
-                    self._projection_binding=(viewer_spool,projection)
-                    viewer_service._runtime_projection=self._projection_binding
-                    self._projection_owner=viewer_service
+                # Keep pending until the listener has successfully started.
+                self._projection_binding=(viewer_spool,projection)
+                self._projection_owner=viewer_service
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
 
@@ -447,24 +444,34 @@ class ReferenceRuntime:
             self._streams.release()
 
     def start(self):
+        if self._closed:raise RuntimeConfigurationError("reference listener is closed")
         if self._server is not None:
             return
         listener = self.settings.listener
-        server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
-        # Join active requests before releasing the shared queue's authority lock.
-        server.daemon_threads, server.block_on_close = False, True
-        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1},
-                                  name="processing-reference-tls", daemon=True)
-        self._server, self._thread = server, thread
+        server=None;thread=None;started=False
         try:
-            thread.start()
+            server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
+            # Join active requests before releasing the shared queue's authority lock.
+            server.daemon_threads, server.block_on_close = False, True
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1},
+                                      name="processing-reference-tls", daemon=True)
+            thread.start();started=True
+            if self._projection_owner is not None:
+                with self._projection_owner._lock:
+                    if self._projection_owner._runtime_projection is not None:
+                        raise RuntimeConfigurationError('Viewer projection already bound')
+                    self._projection_owner._runtime_projection=self._projection_binding
+            self._server, self._thread = server, thread
         except Exception:
-            self._server, self._thread = None, None
-            server.server_close()
+            if server is not None:
+                if started:server.shutdown()
+                server.server_close()
+                if started:thread.join()
             self.close()
             raise RuntimeConfigurationError("reference listener start failed") from None
 
     def close(self):
+        self._closed=True
         if self._server is not None:
             server, thread = self._server, self._thread
             self._server, self._thread = None, None
