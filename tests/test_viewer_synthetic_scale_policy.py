@@ -107,3 +107,12 @@ class SyntheticScalePolicyTests(unittest.TestCase):
    for fs in (SimpleNamespace(f_frsize=4096,f_favail=1,f_bavail=1000000),SimpleNamespace(f_frsize=4096,f_favail=100000,f_bavail=1)):
     with patch('processing.viewer_synthetic_supervisor.os.fstatvfs',return_value=fs):
      with self.assertRaisesRegex(SupervisorHeld,'capacity_low'):_synthetic_scale_preflight(inputs,10000,policy)
+ def test_scale_policy_is_bound_to_input_journal_across_owner_restart(self):
+  from processing.viewer_node_inputs import ViewerNodeInputs,InputHeld
+  fixture=SyntheticSubmissionTests('test_exact_submission_once_and_replay_without_cleanup');self.addCleanup(fixture.doCleanups);fixture.setUp()
+  policy=dict(version=1,maxObjects=10000,maxInputBytes=64*1024*1024)
+  def create(owner,selected):
+   return ViewerNodeInputs(fixture.base.base.make(owner),fixture.base.base.fixture.job,'enroll-1','production',input_root=fixture.base.inputs,input_root_identity=fixture.base.input_id,max_total=100000,max_object=100000,synthetic_scale_policy=selected)
+  with DaemonStateLock(fixture.base.base.worker) as owner:create(owner,policy)
+  with DaemonStateLock(fixture.base.base.worker) as owner:
+   with self.assertRaisesRegex(InputHeld,'input_policy_changed'):create(owner,dict(policy,maxObjects=9999))
