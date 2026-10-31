@@ -23,6 +23,11 @@ then rechecks gate and slot while both are held. Interrupted gate reservation
 or binding can be reconciled only with the exact same journal and claim. An
 uncommitted, partial or conflicting slot is retained and held. No automatic
 release or cleanup exists. The sole success label is `enrolled_no_dispatch`.
+The journal persists a slot-creation intent before creating a file, then commits
+the exact root, allocation and metadata inode/mount identities. After an
+interrupted creation intent it may reopen an already complete matching pair,
+but never creates a missing slot. After an identity commit, missing or replaced
+files hold; the worker does not create a replacement reservation.
 On a coordinator-restart hold, the coordinator draft may replay its original
 claim; this prototype may reserve local resources, but that replay and the
 enrollment result never authorize an engine start or override a held job.
@@ -33,7 +38,12 @@ state root, configuration, stable ancestors and gate file. The gate's
 `engineId` is configured and stored, not independently attested against Docker.
 Old coordinators, direct NodeODM clients, privileged or same-UID writers,
 unrecorded state copies and different gate paths can bypass or race it. The
-claim's input digest is only upload-time inventory metadata, not a current-byte
+gate's coordinator origin and the HTTPS origin are distinct configured strings.
+Both are persisted in the same local policy and the returned authority ID is
+compared with the gate, but the network relationship between those origins is
+not independently attested. Trusted provisioning must establish it; equal
+authority strings alone do not prove the endpoints are the same coordinator.
+The claim's input digest is only upload-time inventory metadata, not a current-byte
 verification. Allocation is the local filesystem's fallocate/st_blocks report,
 not proof of physical backing, thin storage, quota or power-loss safety. Mount
 IDs can change across reboot and intentionally hold until reviewed. The private

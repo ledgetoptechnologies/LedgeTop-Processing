@@ -137,6 +137,22 @@ class NodeEnrollmentTests(unittest.TestCase):
             with self.assertRaisesRegex(EnrollmentHeld,'binding_disappeared'):self.enroll(worker)
         with NodeGate('fixture-engine') as gate:self.assertIsNone(gate.snapshot()['reservation']['job'])
 
+    def test_committed_slot_deleted_never_recreated(self):
+        with DaemonStateLock(self.worker) as owner:
+            worker=self.make(owner);self.enroll(worker)
+            for path in self.output.iterdir():path.unlink()  # only this test's synthetic slot
+            with self.assertRaises(SlotHeld):self.enroll(worker)
+            self.assertEqual(list(self.output.iterdir()),[])
+        with NodeGate('fixture-engine') as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
+
+    def test_committed_slot_replaced_with_valid_fresh_pair_is_rejected(self):
+        from processing.direct_output_slot import open_slot
+        with DaemonStateLock(self.worker) as owner:
+            worker=self.make(owner);result=self.enroll(worker)
+            for path in self.output.iterdir():path.rename(path.with_name(path.name+'.retained'))
+            slot=open_slot(self.output,self.output_id,result['bindingSha256'],65536,max_budget=65536,create=True);slot.close()
+            with self.assertRaisesRegex(EnrollmentHeld,'slot_identity_changed'):self.enroll(worker)
+
     def _kill_boundary(self,phase):
         ready=self.root/('child-'+phase)
         code='''import json,sys,time
@@ -148,6 +164,18 @@ root,config,job,ready,phase=sys.argv[1:];config=json.loads(config)
 def pause():Path(ready).write_text('ready');time.sleep(30)
 with DaemonStateLock(root) as owner:
  worker=module.ViewerNodeEnrollment(owner,**config)
+ if phase=='slot-committed':
+  from contextlib import contextmanager
+  actual=worker._db
+  @contextmanager
+  def intercept(*args,**kwargs):
+   phase_now=None
+   with actual(*args,**kwargs) as db:
+    yield db
+    row=db.execute('SELECT slot_phase FROM intent WHERE singleton=1').fetchone()
+    if row:phase_now=row[0]
+   if phase_now=='committed':pause()
+  worker._db=intercept
  if phase=='journal':
   from contextlib import contextmanager
   actual=worker._db
@@ -173,9 +201,10 @@ with DaemonStateLock(root) as owner:
   def intercept(self,*args):
    result=actual(self,*args);pause();return result
   NodeGate.bind=intercept
- if phase=='slot':
+ if phase in ('slot','slot-intent'):
   actual=module.open_slot
   def intercept(*args,**kwargs):
+   if phase=='slot-intent':pause()
    result=actual(*args,**kwargs);pause();return result
   module.open_slot=intercept
  worker.enroll(job,'enroll-1','production')
@@ -191,14 +220,21 @@ with DaemonStateLock(root) as owner:
         finally:
             if child.poll() is None:child.kill();child.wait(timeout=5)
         with DaemonStateLock(self.worker) as owner:
-            worker=self.make(owner);result=self.enroll(worker)
-            self.assertEqual(result['state'],'enrolled_no_dispatch');self.assertEqual(self.enroll(worker),result)
+            worker=self.make(owner)
+            if phase=='slot-intent':
+                with self.assertRaises(SlotHeld):self.enroll(worker)
+                self.assertEqual(list(self.output.iterdir()),[])
+            else:
+                result=self.enroll(worker)
+                self.assertEqual(result['state'],'enrolled_no_dispatch');self.assertEqual(self.enroll(worker),result)
         with NodeGate('fixture-engine') as gate:
             self.assertEqual(gate.snapshot()['reservation']['job']['id'],self.fixture.job)
-        self.assertEqual(len(list(self.output.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.output.glob('*.alloc'))),0 if phase=='slot-intent' else 1)
 
     def test_kill_after_claim_before_local_record(self):self._kill_boundary('claim')
     def test_kill_during_local_claim_commit(self):self._kill_boundary('journal')
     def test_kill_after_gate_reserve_before_bind(self):self._kill_boundary('gate-reserve')
     def test_kill_after_gate_bind_before_allocation(self):self._kill_boundary('gate')
+    def test_kill_after_slot_intent_before_creation_holds(self):self._kill_boundary('slot-intent')
     def test_kill_after_allocation_before_return(self):self._kill_boundary('slot')
+    def test_kill_after_committed_slot_marker_revalidates(self):self._kill_boundary('slot-committed')

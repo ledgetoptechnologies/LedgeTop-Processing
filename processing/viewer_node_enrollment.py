@@ -29,7 +29,7 @@ from ops.reference_worker_daemon import DaemonStateLock
 class EnrollmentHeld(RuntimeError):pass
 
 CONFIG_DDL='CREATE TABLE config (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL)'
-INTENT_DDL='CREATE TABLE intent (singleton INTEGER PRIMARY KEY CHECK(singleton=1), request TEXT NOT NULL, receipt TEXT NOT NULL, claim TEXT, binding TEXT)'
+INTENT_DDL='CREATE TABLE intent (singleton INTEGER PRIMARY KEY CHECK(singleton=1), request TEXT NOT NULL, receipt TEXT NOT NULL, claim TEXT, binding TEXT, slot_phase TEXT NOT NULL, slot_identity TEXT)'
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -226,7 +226,7 @@ class ViewerNodeEnrollment:
         with self._db() as db:
             row=db.execute('SELECT request,receipt,claim,binding FROM intent WHERE singleton=1').fetchone()
             if row is None:
-                receipt=secrets.token_hex(16);db.execute('INSERT INTO intent VALUES(1,?,?,NULL,NULL)',(p.canonical_json(request).decode(),receipt))
+                receipt=secrets.token_hex(16);db.execute('INSERT INTO intent VALUES(1,?,?,NULL,NULL,?,NULL)',(p.canonical_json(request).decode(),receipt,'not_started'))
             else:
                 if row[0]!=p.canonical_json(request).decode():raise EnrollmentHeld('enrollment_intent_changed')
                 receipt=row[1]
@@ -260,14 +260,37 @@ class ViewerNodeEnrollment:
                 saved=db.execute('SELECT binding FROM intent WHERE singleton=1').fetchone()[0]
                 if saved is not None and saved!=text:raise EnrollmentHeld('enrollment_binding_changed')
                 db.execute('UPDATE intent SET binding=? WHERE singleton=1',(text,))
-            path=Path(c['outputRoot'])/('slot-'+digest+'.alloc')
-            exists=os.path.lexists(path)
+            # Commit intent before touching the allocation. After an
+            # interrupted attempt, a missing file is ambiguous and never
+            # authorizes creation of a replacement.
+            with self._db() as db:
+                slot_row=db.execute('SELECT slot_phase,slot_identity FROM intent WHERE singleton=1').fetchone()
+                phase,recorded=slot_row
+                if phase=='not_started':
+                    if recorded is not None:raise EnrollmentHeld('slot_journal_invalid')
+                    db.execute("UPDATE intent SET slot_phase='creating' WHERE singleton=1")
+                    create=True
+                elif phase=='creating':
+                    if recorded is not None:raise EnrollmentHeld('slot_journal_invalid')
+                    create=False
+                elif phase=='committed':
+                    if not isinstance(recorded,str):raise EnrollmentHeld('slot_journal_invalid')
+                    create=False
+                else:raise EnrollmentHeld('slot_journal_invalid')
             slot=open_slot(c['outputRoot'],c['outputRootIdentity'],digest,c['outputBudget'],
-                           max_budget=c['maxBudget'],create=not exists)
+                           max_budget=c['maxBudget'],create=create)
             try:
                 state=self._check_gate(gate)
                 if state['reservation']['receiptId']!=receipt or state['reservation']['job']!=expected_job:
                     raise EnrollmentHeld('gate_binding_changed')
                 slot._check()
+                actual=p.canonical_json(dict(root=_identity(slot._root),allocation=_identity(slot._fd),
+                                             metadata=_identity(slot._meta))).decode()
+                with self._db() as db:
+                    current=db.execute('SELECT slot_phase,slot_identity FROM intent WHERE singleton=1').fetchone()
+                    if current==('creating',None):
+                        db.execute("UPDATE intent SET slot_phase='committed',slot_identity=? WHERE singleton=1",(actual,))
+                    elif current!=('committed',actual):raise EnrollmentHeld('slot_identity_changed')
+                slot._check();self._check_gate(gate)
                 return dict(state='enrolled_no_dispatch',bindingSha256=digest)
             finally:slot.close()
