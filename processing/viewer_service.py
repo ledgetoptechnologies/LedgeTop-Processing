@@ -242,36 +242,46 @@ class ViewerService:
                     self._stop.wait(2)
                     continue
                 self._archive_cursor, identifier = candidate
-                due, failures = self._archive_retry.get(identifier, (0, 0))
-                if time.monotonic() >= due:
-                    identity = None
-                    try:
-                        task = self.store.task(identifier)
-                        identity = (task['generation'], task['job_id'])
-                        self._archive_once(identifier, expected_identity=identity)
+                identity = None
+                due, failures = 0, 0
+                try:
+                    task = self.store.task(identifier)
+                    identity = (task['generation'], task['job_id'])
+                    prior = self._archive_retry.get(identifier)
+                    if prior is None or prior[0] != identity:
+                        # A public UUID can be reused. Old-incarnation backoff
+                        # must never postpone a different job's result capture.
                         self._archive_retry.pop(identifier, None)
-                    except ArchiveIdentityChanged:
-                        # The new incarnation has not been attempted; discover it anew.
-                        self._archive_retry.pop(identifier, None)
-                    except Exception as exc:
-                        if identity is None:
-                            # No trustworthy task identity can be associated with this failure.
+                        due, failures = 0, 0
+                    else:
+                        _, due, failures = prior
+                    if time.monotonic() < due:
+                        self._stop.wait(.25)
+                        continue
+                    self._archive_once(identifier, expected_identity=identity)
+                    self._archive_retry.pop(identifier, None)
+                except ArchiveIdentityChanged:
+                    # The new incarnation has not been attempted; discover it anew.
+                    self._archive_retry.pop(identifier, None)
+                except Exception as exc:
+                    if identity is None:
+                        # No trustworthy task identity can be associated with this failure.
+                        self._archive_status_persistence_failed = True
+                    else:
+                        inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
+                        try:
+                            recorded = self.store.set_archive_status(identifier, *identity,
+                                'inspection' if inspection else 'pending',
+                                'partial_requires_inspection' if inspection else 'capture_failed')
+                            if not recorded:
+                                # The incarnation changed or was removed; do not
+                                # apply its retry delay to the replacement.
+                                self._archive_retry.pop(identifier, None)
+                                continue
+                        except Exception:
                             self._archive_status_persistence_failed = True
-                        else:
-                            inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
-                            try:
-                                recorded = self.store.set_archive_status(identifier, *identity,
-                                    'inspection' if inspection else 'pending',
-                                    'partial_requires_inspection' if inspection else 'capture_failed')
-                                if not recorded:
-                                    # The incarnation changed or was removed; do not
-                                    # apply its retry delay to the replacement.
-                                    self._archive_retry.pop(identifier, None)
-                                    continue
-                            except Exception:
-                                self._archive_status_persistence_failed = True
                         failures += 1
-                        self._archive_retry[identifier] = (time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
+                        self._archive_retry[identifier] = (identity, time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
                 self._stop.wait(.25)
             except Exception:
                 self._archive_status_persistence_failed = True

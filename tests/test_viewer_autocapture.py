@@ -219,6 +219,55 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.assertEqual(partial.read_bytes(), before)
         self.assertIsNone(self.fixture.task(self.identifier)['archive_path'])
 
+    def test_same_incarnation_retains_backoff_then_retries(self):
+        self.engine_http_status=503;self.fixture.config.viewer_archive_autocapture=True
+        self.service.start();deadline=time.monotonic()+10
+        while self.identifier not in self.service._archive_retry:
+            if time.monotonic()>=deadline:self.fail('failure was not recorded')
+            time.sleep(.02)
+        task=self.fixture.task(self.identifier)
+        identity,due,_=self.service._archive_retry[self.identifier]
+        self.assertEqual(identity,(task['generation'],task['job_id']))
+        self.engine_http_status=200
+        self.assertGreater(due,time.monotonic());self.assertEqual(self.requests,1)
+        while self.fixture.task(self.identifier)['archive_path'] is None:
+            if time.monotonic()>=deadline:self.fail('retry did not complete')
+            time.sleep(.05)
+        self.assertEqual(self.requests,2);self.assertEqual(len(self.fixture.fleet.commits),1)
+
+    def test_new_incarnation_does_not_inherit_old_capture_backoff(self):
+        # The first generation fails against a real loopback HTTP endpoint.
+        self.engine_http_status=503;self.fixture.config.viewer_archive_autocapture=True
+        old=self.fixture.task(self.identifier);old_dir=Path(old['directory']);old_input=Path(old['files'][0]['path']);old_bytes=old_input.read_bytes()
+        self.service.start();deadline=time.monotonic()+10
+        while self.identifier not in self.service._archive_retry:
+            if time.monotonic()>=deadline:self.fail('old capture failure was not recorded')
+            time.sleep(.02)
+        identity,due,failures=self.service._archive_retry[self.identifier]
+        self.assertEqual(identity,(old['generation'],old['job_id']))
+        self.assertEqual(self.requests,1)
+        # Widen the observed retry deadline for a deterministic check; the old
+        # failure itself and the replacement capture use real worker processes.
+        self.service._archive_retry[self.identifier]=(identity,time.monotonic()+60,failures)
+        self.service.remove(self.identifier)
+        self.service.initialize(self.identifier,'Synthetic survey',fixtures.REQUEST_OPTIONS,None,'production')
+        self.fixture.upload(self.identifier);self.service.commit(self.identifier)
+        self.engine_http_status=200;deadline=time.monotonic()+10
+        while True:
+            current=self.fixture.task(self.identifier);node=current['node_id'];engine_id=current['engine_uuid']
+            if node is not None and engine_id in self.fixture.engines[node].tasks:break
+            if time.monotonic()>=deadline:self.fail('replacement did not dispatch')
+            time.sleep(.02)
+        self.fixture.finish(self.identifier)
+        while self.fixture.task(self.identifier)['archive_path'] is None:
+            if time.monotonic()>=deadline:self.fail('replacement inherited old backoff')
+            time.sleep(.05)
+        new=self.fixture.task(self.identifier)
+        self.assertEqual(new['generation'],old['generation']+1);self.assertNotEqual(new['job_id'],old['job_id'])
+        self.assertEqual(Path(new['archive_path']).read_bytes(),self.engine_response)
+        self.assertTrue((old_dir/'all.zip.intent').exists());self.assertEqual(old_input.read_bytes(),old_bytes)
+        self.assertEqual(self.requests,2);self.assertEqual(len(self.fixture.fleet.commits),2)
+
     def test_background_discovers_completed_task_without_viewer_download(self):
         self.fixture.config.viewer_archive_autocapture = True
         self.service.start()
