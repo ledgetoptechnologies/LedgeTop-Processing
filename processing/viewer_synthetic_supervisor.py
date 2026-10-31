@@ -31,6 +31,25 @@ def _deliver(worker):
         raise TransientTransport('delivery_transport_unavailable') from error
 
 
+def _object_ids(inputs, expected_count, *, page_size=100):
+    """Traverse a verified inventory in bounded, ordinal-keyset pages."""
+    if type(expected_count) is not int or expected_count < 1 or type(page_size) is not int or not 1 <= page_size <= 100:
+        raise SupervisorHeld('inventory_changed')
+    with inputs._db() as db:
+        count=db.execute('SELECT COUNT(*) FROM objects').fetchone()[0]
+    if count!=expected_count:raise SupervisorHeld('inventory_changed')
+    cursor=0
+    while cursor<expected_count:
+        with inputs._db() as db:
+            page=db.execute('SELECT ordinal,object_id FROM objects WHERE ordinal>=? ORDER BY ordinal LIMIT ?',
+                            (cursor,page_size)).fetchall()
+        if not page:raise SupervisorHeld('inventory_changed')
+        for ordinal,object_id in page:
+            if ordinal!=cursor or cursor>=expected_count:raise SupervisorHeld('inventory_changed')
+            cursor+=1
+            yield object_id
+
+
 def tick(worker,engine,job_id,request_id,environment,*,input_root,input_root_identity,
          max_total,max_object,synthetic_fixture=False,max_objects=64):
     """One bounded turn; no deletion, remote custody claim or live execution."""
@@ -55,10 +74,7 @@ def tick(worker,engine,job_id,request_id,environment,*,input_root,input_root_ide
     if type(count) is not int or not 1<=count<=max_objects:raise SupervisorHeld('synthetic_object_limit')
     inputs.fetch_plan();inventory=inputs.freeze_inventory()
     if inventory['count']>max_objects:raise SupervisorHeld('synthetic_object_limit')
-    with inputs._db() as db:
-        rows=db.execute('SELECT object_id FROM objects ORDER BY ordinal').fetchall()
-    if len(rows)!=inventory['count']:raise SupervisorHeld('inventory_changed')
-    for (object_id,) in rows:inputs.transfer(object_id)
+    for object_id in _object_ids(inputs,inventory['count']):inputs.transfer(object_id)
     submit(inputs,engine,synthetic_fixture=True)
     capture(worker,engine,synthetic_fixture=True)
     return _deliver(worker)

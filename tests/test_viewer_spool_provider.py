@@ -60,7 +60,7 @@ class ViewerSpoolProviderTests(unittest.TestCase):
         self.assertEqual(headers['X-LedgeTop-Archive-SHA256'],self.base.base.record['archiveSha256'])
         self.assertEqual(self.fixture.queue.get(self.fixture.job)['status'],'running')
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
-        self.assertEqual(len(list(self.base.base.base.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.base.base.base.inputs.rglob('*.alloc'))),1)
 
     def test_wrong_credentials_environment_and_generation_are_rejected(self):
         path='/task/22222222-2222-4222-8222-222222222222/download/all.zip'

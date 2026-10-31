@@ -97,7 +97,7 @@ with DaemonStateLock(root) as owner:
         with self.fixture.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_result_metadata').fetchone()[0],1)
         self.assertEqual(self.fixture.queue.get(self.fixture.job)['status'],'running')
-        self.assertEqual(len(list(self.base.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.base.inputs.rglob('*.alloc'))),1)
 
     def test_metadata_can_be_registered_for_a_held_job_without_completion(self):
         with DaemonStateLock(self.base.base.base.worker) as owner:

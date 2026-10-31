@@ -46,8 +46,7 @@ class LockedUploadTests(unittest.TestCase):
             entry=json.loads(row[0]);item={key:entry[key] for key in ('name','bytes','sha256')}
             if wrong_hash:item['sha256']='0'*64
             with inputs._gate():
-                slot=open_slot(inputs.policy['inputRoot'],inputs.policy['inputRootIdentity'],row[1],entry['bytes'],
-                               max_budget=inputs.policy['maxObject'],create=False)
+                slot=inputs._input_slot(object_id,row[1],entry['bytes'],create=False,recorded=row[2])
                 try:
                     engine=NativeEngine('http://127.0.0.1:'+str(self.server.server_port))
                     identity=json.loads(row[2])

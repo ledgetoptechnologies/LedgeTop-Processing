@@ -46,7 +46,7 @@ class NodeInputsTests(unittest.TestCase):
             self.assertEqual(inputs.transfer(object_id)['state'],'input_verified_no_dispatch')
             with inputs._db() as db:row=db.execute('SELECT slot_key,phase FROM objects WHERE object_id=?',(object_id,)).fetchone()
             self.assertEqual(row[1],'verified')
-            self.assertEqual((self.inputs/('slot-'+row[0]+'.alloc')).read_bytes(),b'synthetic')
+            self.assertEqual((self.inputs/('object-'+object_id)/('slot-'+row[0]+'.alloc')).read_bytes(),b'synthetic')
         with DaemonStateLock(self.base.worker) as owner:
             inputs=self.make(owner)
             self.assertEqual(inputs.fetch_plan(),dict(options=[],outputs=[]))
@@ -54,7 +54,7 @@ class NodeInputsTests(unittest.TestCase):
             self.assertEqual(inputs.freeze_inventory()['count'],1)
             self.assertEqual(inputs.transfer(object_id)['state'],'input_verified_no_dispatch')
         self.assertEqual(self.base.fixture.store.task('22222222-2222-4222-8222-222222222222')['phase'],'worker_claimed')
-        self.assertEqual(len(list(self.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.inputs.rglob('*.alloc'))),1)
 
     def test_changed_source_is_held_without_dispatch_or_cleanup(self):
         with DaemonStateLock(self.base.worker) as owner:
@@ -64,7 +64,7 @@ class NodeInputsTests(unittest.TestCase):
             with self.assertRaises(InputHeld):inputs.transfer(object_id)
             with self.assertRaisesRegex(InputHeld,'requires_inspection'):inputs.transfer(object_id)
         self.assertEqual(source.read_bytes(),b'different')
-        self.assertEqual(len(list(self.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.inputs.rglob('*.alloc'))),1)
 
     def test_disconnected_stream_leaves_partial_and_holds_retry(self):
         def broken(stream):
@@ -75,7 +75,7 @@ class NodeInputsTests(unittest.TestCase):
             with patch.object(_InputStream,'chunks',broken):
                 with self.assertRaises(InputHeld):inputs.transfer(object_id)
             with self.assertRaisesRegex(InputHeld,'requires_inspection'):inputs.transfer(object_id)
-        self.assertEqual(len(list(self.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.inputs.rglob('*.alloc'))),1)
 
     def test_missing_output_reservation_blocks_inventory(self):
         with DaemonStateLock(self.base.worker) as owner:
@@ -122,7 +122,7 @@ class NodeInputsTests(unittest.TestCase):
         with DaemonStateLock(self.base.worker) as owner:
             inputs=self.make(owner);inputs.freeze_inventory();object_id=self.object_id(inputs);inputs.transfer(object_id)
             with inputs._db() as db:key=db.execute('SELECT slot_key FROM objects WHERE object_id=?',(object_id,)).fetchone()[0]
-            (self.inputs/('slot-'+key+'.alloc')).write_bytes(b'different')
+            (self.inputs/('object-'+object_id)/('slot-'+key+'.alloc')).write_bytes(b'different')
             with self.assertRaises(InputHeld):inputs.request_execution_grant()
         with self.base.fixture.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_grants').fetchone()[0],0)
@@ -268,4 +268,13 @@ with DaemonStateLock(worker_root) as owner:
         with DaemonStateLock(self.base.worker) as owner:
             inputs=self.make(owner);inputs.freeze_inventory();object_id=self.object_id(inputs)
             with self.assertRaisesRegex(InputHeld,'requires_inspection'):inputs.transfer(object_id)
-        self.assertEqual(len(list(self.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.inputs.rglob('*.alloc'))),1)
+    def test_legacy_flat_layout_policy_is_held(self):
+     import json
+     with DaemonStateLock(self.base.worker) as owner:
+      inputs=self.make(owner)
+      with inputs._db() as db:
+       value=json.loads(db.execute('SELECT value FROM policy').fetchone()[0]);value.pop('inputLayout')
+       from processing import reference_protocol as p
+       db.execute('UPDATE policy SET value=?',(p.canonical_json(value).decode(),))
+      with self.assertRaises(InputHeld):self.make(owner)

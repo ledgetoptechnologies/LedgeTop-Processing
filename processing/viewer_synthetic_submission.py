@@ -74,8 +74,7 @@ def submit(inputs,engine,*,synthetic_fixture=False):
                 entry=p.decode_submission(rows[ordinal][0]);key=rows[ordinal][2];recorded=rows[ordinal][3]
                 expected_key=p.digest(dict(purpose='viewer-input-slot-v1',bindingSha256=inputs.binding_sha,objectId=entry['objectId']))
                 if key!=expected_key or not isinstance(recorded,str):raise SubmissionHeld('input_identity_changed')
-                slot=open_slot(inputs.policy['inputRoot'],inputs.policy['inputRootIdentity'],key,entry['bytes'],
-                               max_budget=inputs.policy['maxObject'],create=False)
+                slot=inputs._input_slot(entry['objectId'],key,entry['bytes'],create=False,recorded=recorded)
                 try:
                     identity=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
                     if p.canonical_json(identity).decode()!=recorded or inputs._hash_slot(slot,entry['bytes'])!=entry['sha256']:

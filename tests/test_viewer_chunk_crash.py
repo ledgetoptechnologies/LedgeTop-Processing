@@ -88,7 +88,7 @@ while True:time.sleep(1)
                         self.assertEqual((geometry['chunk_bytes'],geometry['chunk_count']),(info['length'],1))
                     self.assertEqual(len(list(Path(info['spool']).glob('*.alloc'))),1)
                     self.assertEqual(len(list(Path(info['nodeOutput']).glob('*.alloc'))),1)
-                    self.assertEqual(len(list(Path(info['nodeInputs']).glob('*.alloc'))),1)
+                    self.assertEqual(len(list(Path(info['nodeInputs']).rglob('*.alloc'))),1)
                 finally:queue.close()
             finally:
                 if child.poll() is None:os.killpg(child.pid,signal.SIGKILL);child.wait(timeout=5)

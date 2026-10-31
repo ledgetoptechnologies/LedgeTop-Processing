@@ -81,7 +81,7 @@ class SyntheticSubmissionTests(unittest.TestCase):
             with self.assertRaises(Exception):tick(worker,NativeEngine(self.origin),self.base.base.fixture.job,'enroll-1','production',**kwargs)
             with self.assertRaises(SubmissionHeld):tick(worker,NativeEngine(self.origin),self.base.base.fixture.job,'enroll-1','production',**kwargs)
         self.assertEqual([item[0] for item in self.calls],['init'])
-        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.inputs.rglob('*.alloc'))),1)
         self.assertEqual(len(list(self.base.base.output.glob('*.alloc'))),1)
 
     def test_supervisor_restart_offline_then_reconnect(self):
@@ -143,7 +143,7 @@ with DaemonStateLock(c['worker']) as owner:
         self.assertEqual([item[0] for item in self.calls],['init','upload','commit'])
         self.assertEqual(fixture.queue.get(fixture.job)['status'],'running')
         self.assertEqual(len(list(root.glob('*.alloc'))),1)
-        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.inputs.rglob('*.alloc'))),1)
         self.assertEqual(len(list(self.base.base.output.glob('*.alloc'))),1)
 
     def test_missing_capture_guard_is_not_migrated_or_recreated(self):
@@ -213,7 +213,7 @@ with DaemonStateLock(root) as owner:
             self.assertEqual(self.calls[0][2]['set-uuid'],inputs.claim['engineTaskId'])
             self.assertIn(b'\r\n\r\nsynthetic\r\n',self.calls[0][3])
             self.assertIn(b'\r\n\r\nsynthetic\r\n',self.calls[1][3])
-        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.inputs.rglob('*.alloc'))),1)
 
     def lost_ack(self,stage):
         self.drop=stage
@@ -309,7 +309,7 @@ with DaemonStateLock(root) as owner:
         with DaemonStateLock(self.base.base.worker) as owner:
             worker=ViewerNodeEnrollment(owner,**self.base.base.config)
             self.assertEqual(register(worker),result)
-        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.inputs.rglob('*.alloc'))),1)
 
     def test_nonterminal_engine_result_does_not_capture(self):
         with DaemonStateLock(self.base.base.worker) as owner:
@@ -363,7 +363,7 @@ with DaemonStateLock(root) as owner:
             self.truncate_archive=True
             with self.assertRaises(Exception):capture(inputs.worker,NativeEngine(self.origin),synthetic_fixture=True)
             with self.assertRaises(Exception):register(inputs.worker)
-        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.inputs.rglob('*.alloc'))),1)
         self.assertEqual(self.archive[:2],b'PK')
 
     def test_restart_registers_sealed_result_after_kill_before_outbox(self):
@@ -414,7 +414,7 @@ with DaemonStateLock(root) as owner:
         with DaemonStateLock(self.base.base.worker) as owner:
             worker=ViewerNodeEnrollment(owner,**self.base.base.config)
             with self.assertRaises(Exception):register(worker)
-        self.assertEqual(len(list(self.base.inputs.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.inputs.rglob('*.alloc'))),1)
 
     def kill_stage(self,stage):
         with DaemonStateLock(self.base.base.worker) as owner:self.prepare(owner)

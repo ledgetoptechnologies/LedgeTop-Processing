@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from . import reference_protocol as p
-from .direct_output_slot import _identity, open_slot
+from .direct_output_slot import _identity, _open_root, open_slot
 from .direct_outbox_contract import direct_pipeline_digest
 from .node_gate import NodeGate
 from .reference_transfer import _DeadlineHTTPSHandler, _TransferWatchdog
@@ -49,7 +49,7 @@ class ViewerNodeInputs:
         self.binding_sha=p.digest(self.binding)
         self.policy=json.loads(p.canonical_json(dict(jobId=job_id,requestId=request_id,environment=environment,
             bindingSha256=self.binding_sha,claimSha256=p.digest(self.claim),inputRoot=str(input_root),
-            inputRootIdentity=input_root_identity,maxTotal=max_total,maxObject=max_object)))
+            inputRootIdentity=input_root_identity,inputLayout="per-object-v1",maxTotal=max_total,maxObject=max_object)))
         self.path=enrollment.owner.root/'viewer-inputs.sqlite'
         fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
         try:
@@ -213,8 +213,7 @@ class ViewerNodeInputs:
                     entry=p.decode_submission(encoded)
                     expected_key=p.digest(dict(purpose='viewer-input-slot-v1',bindingSha256=self.binding_sha,objectId=entry['objectId']))
                     if phase!='verified' or key!=expected_key or not isinstance(recorded,str):raise InputHeld('input_not_verified')
-                    slot=open_slot(self.policy['inputRoot'],self.policy['inputRootIdentity'],key,entry['bytes'],
-                                   max_budget=self.policy['maxObject'],create=False)
+                    slot=self._input_slot(entry['objectId'],key,entry['bytes'],create=False,recorded=recorded)
                     try:
                         actual=p.canonical_json(dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))).decode()
                         if actual!=recorded or self._hash_slot(slot,entry['bytes'])!=entry['sha256']:
@@ -310,6 +309,26 @@ class ViewerNodeInputs:
             self._verified_session=True
             return dict(state='inventory_verified_no_dispatch',count=count,total=total)
 
+    def _input_slot(self,object_id,slot_key,budget,*,create,recorded=None):
+        """Open a task-owned per-object directory; uncertain creation stays held."""
+        p._hash(object_id,'object identity')
+        parent=_open_root(self.policy['inputRoot'],self.policy['inputRootIdentity'])
+        try:
+            name='object-'+object_id
+            if create:
+                try:os.mkdir(name,0o700,dir_fd=parent);os.fsync(parent)
+                except OSError:raise InputHeld('input_directory_requires_inspection') from None
+                fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=parent)
+                try:child_identity=_identity(fd)
+                finally:os.close(fd)
+            else:
+                if not isinstance(recorded,str):raise InputHeld('input_slot_identity_changed')
+                try:child_identity=json.loads(recorded)['root']
+                except (ValueError,TypeError,KeyError):raise InputHeld('input_slot_identity_changed') from None
+            path=str(Path(self.policy['inputRoot'])/name)
+            return open_slot(path,child_identity,slot_key,budget,max_budget=self.policy['maxObject'],create=create)
+        finally:os.close(parent)
+
     def transfer(self,object_id):
         """Verify one source into its own allocated inode; uncertain writes hold."""
         if os.getpid()!=self._pid:raise InputHeld('input_process_changed')
@@ -331,8 +350,7 @@ class ViewerNodeInputs:
                 elif row[3]=='verified':create=False
                 else:raise InputHeld('input_requires_inspection')
                 recorded=row[5]
-            slot=open_slot(self.policy['inputRoot'],self.policy['inputRootIdentity'],slot_key,entry['bytes'],
-                           max_budget=self.policy['maxObject'],create=create)
+            slot=self._input_slot(object_id,slot_key,entry['bytes'],create=create,recorded=recorded)
             try:
                 actual=p.canonical_json(dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))).decode()
                 if not create:
