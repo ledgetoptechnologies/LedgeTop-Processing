@@ -70,15 +70,41 @@ def _synthetic_scale_preflight(inputs,limit,policy):
     # hard 64 MiB limit, and per-object fallocate remains the authority.
     journal_estimate=4*1024*1024+4096*count
     if journal_estimate>64*1024*1024:raise SupervisorHeld('synthetic_scale_journal_limit')
+    # The input slots and journal can reside on different filesystems.  Hold
+    # verified descriptors for both observations; this is not a reservation.
+    owner=inputs.worker.owner
+    owner.check(owner.root)
     fd=_open_root(inputs.policy['inputRoot'],inputs.policy['inputRootIdentity'])
-    try:fs=os.fstatvfs(fd)
-    finally:os.close(fd)
-    block=fs.f_frsize
-    if type(block) is not int or not 1<=block<=1024*1024 or fs.f_favail<=0:
-        raise SupervisorHeld('synthetic_scale_capacity_unknown')
-    required=size+count*8*block+journal_estimate
-    if fs.f_bavail*block<required or fs.f_favail<count*4+128:raise SupervisorHeld('synthetic_scale_capacity_low')
-    return dict(count=count,inputBytes=size,journalEstimateBytes=journal_estimate,freeBytesObserved=fs.f_bavail*block)
+    journal_fd=None
+    try:
+        journal_fd=os.open(owner.root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        journal_stat=os.fstat(journal_fd)
+        if (journal_stat.st_dev,journal_stat.st_ino)!=owner._root_identity:
+            raise SupervisorHeld('synthetic_scale_journal_root_changed')
+        owner.check(owner.root)
+        input_fs=os.fstatvfs(fd);journal_fs=os.fstatvfs(journal_fd)
+        same_fs=os.fstat(fd).st_dev==journal_stat.st_dev
+        for fs in (input_fs,journal_fs):
+            if type(fs.f_frsize) is not int or not 1<=fs.f_frsize<=1024*1024 or fs.f_favail<=0:
+                raise SupervisorHeld('synthetic_scale_capacity_unknown')
+        input_required=size+count*8*input_fs.f_frsize
+        journal_required=journal_estimate+128*journal_fs.f_frsize
+        input_inodes=count*4+128
+        journal_inodes=128
+        if same_fs:
+            if (min(input_fs.f_bavail*input_fs.f_frsize,journal_fs.f_bavail*journal_fs.f_frsize)<input_required+journal_required
+                    or min(input_fs.f_favail,journal_fs.f_favail)<input_inodes+journal_inodes):
+                raise SupervisorHeld('synthetic_scale_capacity_low')
+        elif (input_fs.f_bavail*input_fs.f_frsize<input_required or input_fs.f_favail<input_inodes
+                or journal_fs.f_bavail*journal_fs.f_frsize<journal_required or journal_fs.f_favail<journal_inodes):
+            raise SupervisorHeld('synthetic_scale_capacity_low')
+        owner.check(owner.root)
+        return dict(count=count,inputBytes=size,journalEstimateBytes=journal_estimate,
+                    freeBytesObserved=input_fs.f_bavail*input_fs.f_frsize,
+                    journalFreeBytesObserved=journal_fs.f_bavail*journal_fs.f_frsize)
+    finally:
+        if journal_fd is not None:os.close(journal_fd)
+        os.close(fd)
 
 
 def tick(worker,engine,job_id,request_id,environment,*,input_root,input_root_identity,

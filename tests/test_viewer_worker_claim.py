@@ -147,6 +147,22 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         self.assertEqual(self.request(),(200,claim))
         self.assertEqual(self.queue.get(self.job)['status'],'held')
 
+    def test_routing_rejects_wrong_worker_for_small_and_large_jobs(self):
+        # Small threshold keeps the real admission path inexpensive to test.
+        self.claims.max_photos=1
+        large='33333333-3333-4333-8333-333333333333'
+        self.store.initialize(large,name='synthetic-large',options=[],outputs=[],environment='production')
+        for name in ('a.jpg','b.jpg'):
+            self.store.upload(large,name,io.BytesIO(b'x'),1,environment='production')
+        self.store.commit(large,environment='production')
+        large_job=self.store.task(large)['job_id']
+        self.assertEqual(self.request(token=TOKEN_MAIN)[0],409)
+        with self.queue._db() as db:db.execute("UPDATE jobs SET status='cancelled' WHERE id=?",(self.job,))
+        self.assertEqual(self.request(job=large_job,token=TOKEN_A)[0],409)
+        status,large_claim=self.request(job=large_job,token=TOKEN_MAIN)
+        self.assertEqual(status,200,large_claim)
+        self.assertEqual((large_claim['nodeId'],large_claim['imageCount']),('main',2))
+
     def test_legacy_claim_without_object_count_fails_closed(self):
         status,claim=self.request();self.assertEqual(status,200)
         self.assertEqual(claim['objectCount'],1)
