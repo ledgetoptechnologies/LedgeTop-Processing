@@ -45,6 +45,7 @@ class ReferenceWorkerAPI:
                 raise ValueError('bound viewer spool required')
         self.viewer_spool=viewer_spool
         self.viewer_chunks=None  # Explicit synthetic fixture injection only.
+        self.viewer_v2_chunks=None  # Explicit synthetic fixture injection only.
         self.viewer_restart_census=None  # Explicit synthetic fixture injection only.
         self.recovery = None
         if recovery_bindings is not None:
@@ -126,6 +127,50 @@ class ReferenceWorkerAPI:
         except Exception:
             if permit and permit.get('state')=='active':
                 self.viewer_chunks.abandon_admission(match[1],match[2],permit.get('permit'))
+            return self._error(409,'chunk_requires_inspection')
+
+    def handle_chunk_v2(self,path,headers,length,chunks,*,tls_transport=False):
+        """Disabled synthetic v2 ingress: authenticate and journal before body."""
+        if tls_transport is not True:return self._error(503,'tls_required')
+        identity=self._authenticate(headers)
+        if identity is None:return self._error(401,'unauthorized')
+        match=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/chunks-v2/([A-Za-z0-9_-]{1,128})',path)
+        if not match or self.viewer_v2_chunks is None:return self._error(404,'not_found')
+        if self._header(headers,'Content-Type')!='application/octet-stream':return self._error(415,'invalid_content_type')
+        if self._header(headers,'X-Chunk-Version')!='2':return self._error(409,'chunk_version_unavailable')
+        token=self._header(headers,'X-Claim-Token');permit=None;index=None
+        try:
+            operation=match[2];job=match[1];spool=self.viewer_v2_chunks
+            if operation=='begin':
+                from .viewer_chunk_v2_geometry import SyntheticV2Geometry
+                size=self._header(headers,'X-Chunk-Size')
+                if length!=0 or not isinstance(size,str) or not re.fullmatch(r'[1-9][0-9]{0,6}',size):raise ValueError('invalid size')
+                SyntheticV2Geometry(spool.spool,synthetic_fixture=True).negotiate(job,identity,token,version=2,chunk_bytes=int(size))
+                return Response(200,spool.prepare(job,identity,token))
+            if operation=='finish':
+                count=self._header(headers,'X-Chunk-Count')
+                if length!=0 or not isinstance(count,str) or not re.fullmatch(r'[1-9][0-9]{0,3}',count):raise ValueError('invalid count')
+                return Response(200,spool.finish(job,identity,token,int(count)))
+            raw_index=self._header(headers,'X-Chunk-Index');offset=self._header(headers,'X-Chunk-Offset');sha=self._header(headers,'X-Chunk-SHA256')
+            if not isinstance(raw_index,str) or not re.fullmatch(r'0|[1-9][0-9]{0,3}',raw_index) or not isinstance(offset,str) or not re.fullmatch(r'0|[1-9][0-9]{0,15}',offset):raise ValueError('invalid geometry')
+            index=int(raw_index);offset=int(offset)
+            if operation=='status-'+str(index):
+                saved=self._header(headers,'X-Chunk-Length')
+                if length!=0 or not isinstance(saved,str) or not re.fullmatch(r'[1-9][0-9]{0,6}',saved):raise ValueError('invalid length')
+                return Response(200,spool.status(job,identity,token,index,offset,int(saved),sha))
+            if operation!='part-'+str(index):raise ValueError('invalid operation')
+            permit=spool.admit(job,identity,token,index,offset,length,sha)
+            if permit['state']=='finished':return Response(200,{'state':'finished'})
+            pieces=[];total=0
+            for part in chunks:
+                total+=len(part)
+                if total>length:raise ValueError('chunk overflow')
+                pieces.append(part)
+            if total!=length:raise ValueError('truncated chunk')
+            receipt=spool.write_admitted(job,identity,token,index,offset,b''.join(pieces),permit['permit'])
+            return Response(200,{'state':'finished','receipt':receipt})
+        except Exception:
+            if permit and permit.get('state')=='active':self.viewer_v2_chunks.abandon(match[1],index,permit.get('permit'))
             return self._error(409,'chunk_requires_inspection')
 
     @staticmethod

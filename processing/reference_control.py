@@ -21,6 +21,9 @@ class ReferenceControlAPI:
     def handle_chunk(self,*args,**kwargs):
         return self.worker.handle_chunk(*args,**kwargs)
 
+    def handle_chunk_v2(self,*args,**kwargs):
+        return self.worker.handle_chunk_v2(*args,**kwargs)
+
     def handle_archive(self,path,headers,length,chunks,*,protected_transport=False):
         return self.worker.handle_archive(path,headers,length,chunks,protected_transport=protected_transport)
 
