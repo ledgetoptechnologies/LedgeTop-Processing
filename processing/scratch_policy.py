@@ -153,10 +153,13 @@ class ScratchLedger:
 
     def __init__(self, path, storage_root, capacity_probe=None, clock=None,
                  safety_floor_bytes=1024**3, cleanup_grace_seconds=3600, input_copy_accounting=False,
-                 release_authority=None, auxiliary_budget=None, allocated_receiver=False):
+                 release_authority=None, auxiliary_budget=None, allocated_receiver=False, allocated_receiver_version=1):
         if type(allocated_receiver) is not bool or (allocated_receiver and not input_copy_accounting):
             raise ValueError('allocated receiver requires explicit input accounting')
         self.allocated_receiver = allocated_receiver
+        if type(allocated_receiver_version) is not int or allocated_receiver_version not in (1,2) or (allocated_receiver_version!=1 and not allocated_receiver):
+            raise ValueError('explicit allocated receiver version required')
+        self.allocated_receiver_version = allocated_receiver_version
         if type(input_copy_accounting) is not bool:
             raise ValueError("explicit input copy accounting profile required")
         if release_authority is not None and (not isinstance(release_authority, InputReleaseAuthority)
@@ -280,13 +283,13 @@ class ScratchLedger:
         count=db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0]
         if config is None:raise PolicyConflict('accounting configuration missing')
         shapes={_json(self._config(control=control,inputs=inputs,receiver=receiver)):(control,inputs,receiver)
-                for control in (False,True) for inputs in (False,True) for receiver in (False,True)
+                for control in (False,True) for inputs in (False,True) for receiver in (0,1,2)
                 if not receiver or inputs}
         if config[0] not in shapes:raise PolicyConflict('unknown accounting version or ledger policy')
         control,inputs,receiver=shapes[config[0]]
         marker=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='allocated_input_receipts'").fetchone()
         if receiver:
-            if not self.allocated_receiver or marker is None or marker[0] != ALLOCATED_RECEIVER_SCHEMA:
+            if not self.allocated_receiver or receiver!=self.allocated_receiver_version or marker is None or marker[0] != ALLOCATED_RECEIVER_SCHEMA:
                 raise PolicyConflict('allocated input receiver profile or schema differs')
         elif marker is not None:
             raise PolicyConflict('allocated receiver schema lacks its version marker')
@@ -325,7 +328,7 @@ class ScratchLedger:
         if inputs:
             config["inputCopyAccountingVersion"] = INPUT_COPY_ACCOUNTING_VERSION
         if receiver:
-            config['allocatedReceiverVersion'] = ALLOCATED_RECEIVER_VERSION
+            config['allocatedReceiverVersion'] = receiver
         return config
 
     def _latch(self, db, *, control=False, inputs=False, receiver=False):
@@ -335,7 +338,7 @@ class ScratchLedger:
         current = json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
         config = self._config(control=control or "accountingVersion" in current,
                               inputs=inputs or "inputCopyAccountingVersion" in current,
-                              receiver=receiver or 'allocatedReceiverVersion' in current)
+                              receiver=(self.allocated_receiver_version if receiver else current.get('allocatedReceiverVersion',0)))
         db.execute("UPDATE metadata SET value=? WHERE key='config'", (_json(config),))
 
     def _reservation(self, db, reservation_id):
@@ -807,8 +810,13 @@ class ScratchLedger:
         _id(object_id)
         if type(attempt) is not str or not attempt or len(attempt.encode()) > 4096:
             raise PolicyConflict('bounded exact indexed attempt required')
-        if type(identity) is not dict or set(identity) != {'jobId','generation','environment','manifestSha256','path','sha256','byteSize'}:
+        fields={'jobId','generation','environment','manifestSha256','path','sha256','byteSize'}
+        if self.allocated_receiver_version==2:fields=fields|{'rootProof'}
+        if type(identity) is not dict or set(identity) != fields:
             raise PolicyConflict('closed input identity required')
+        if self.allocated_receiver_version==2:
+            from .reference_allocated_receiver import validate_root_proof
+            validate_root_proof(identity['rootProof'],self.root)
         _id(identity['jobId']); _integer(identity['generation'], 'generation', 1)
         _sha(identity['manifestSha256']); _sha(identity['sha256']); _integer(identity['byteSize'], 'input size')
         if identity['environment'] not in ('production', 'staging'):
@@ -855,13 +863,24 @@ class ScratchLedger:
             if not 0 <= delta <= row['remaining']:
                 raise PolicyConflict('allocation outside reservation')
             result=db.execute("UPDATE allocated_input_receipts SET state='published' "
-                "WHERE reservation=? AND object=? AND intent=? AND state='allocated' AND dev=? AND ino=? "
+                "WHERE reservation=? AND object=? AND intent=? AND state=? AND dev=? AND ino=? "
                 "AND mount=? AND dirdev=? AND dirino=? AND dirmount=?",
-                (reservation_id,object_id,attempt,dev,ino,mount,dirdev,dirino,dirmount))
+                (reservation_id,object_id,attempt,'unlinked' if self.allocated_receiver_version==2 else 'allocated',dev,ino,mount,dirdev,dirino,dirmount))
             if row['state']!='receiving' or result.rowcount!=1:
                 raise PolicyConflict('allocated input inode changed')
             db.execute("UPDATE reservations SET state='reserved',allocated=?,remaining=remaining-? WHERE id=?",
                        (allocated_bytes,delta,reservation_id))
+
+    def checkpoint_allocated_publication(self,reservation_id,object_id,attempt,before,after):
+        """Persist a v2 no-replay checkpoint; it never authorizes recovery."""
+        if self.allocated_receiver_version!=2 or (before,after) not in (('allocated','publishing'),('publishing','linked'),('linked','unlinked')):
+            raise PolicyConflict('invalid allocated publication checkpoint')
+        with self._transaction() as db:
+            if self._reservation(db,reservation_id)['state']!='receiving':
+                raise PolicyConflict('allocated input is not held')
+            changed=db.execute('UPDATE allocated_input_receipts SET state=? WHERE reservation=? AND object=? AND intent=? AND state=?',
+                (after,reservation_id,object_id,attempt,before))
+            if changed.rowcount!=1:raise PolicyConflict('allocated publication checkpoint changed')
 
     def _check_input_aliases(self, db, reservation_id, normalized):
         """Portable case/Unicode identity via the indexed path_key, plus single-link

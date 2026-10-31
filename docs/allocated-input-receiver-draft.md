@@ -33,10 +33,21 @@ publication and allocation accounting precede normal driver confirmation.
 Failures and crashes preserve uncertain input data and hold the job. In
 particular, death after publication but before indexed progress is committed
 requires manual reconciliation; this draft does not automatically replay or
-adopt the file. File and parent mount identities are recorded, but the scratch
-root identity and every ancestor are not durably bound for future adoption.
+adopt the file. The original profile records file and parent mount identities.
 Existing legacy ledgers with reservations are not migrated. Only a fresh ledger
 can latch this format.
+
+An additional default-off experimental fresh profile uses provisional accounting
+schema 6 and receiver marker 2; these identifiers are not reserved across
+branches and require coordination before integration. It persists bounded
+scratch-root and ancestor identity observations, and durable `publishing`,
+`linked`, and `unlinked` checkpoints around publication. Identity mismatch or
+an interrupted receipt holds the job. These observations do not establish
+exclusive control of old writers or authorize adoption; no automatic recovery
+is enabled. Schema 5 and receiver marker 1 retain their existing semantics.
+Indexed maintenance still expects a different completion receipt and census;
+cleanup and engine cleanup remain disabled for this experimental profile. The
+checkpoints have not been qualified for physical power loss or deployment.
 
 This design assumes trusted private ancestors, cooperating same-user processes,
 and truthful filesystem allocation semantics. Fallocate is not proof of
