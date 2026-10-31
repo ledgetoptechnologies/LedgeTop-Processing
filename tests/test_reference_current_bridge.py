@@ -18,23 +18,26 @@ PINS={
 
 @unittest.skipUnless(os.name=='posix' and os.environ.get('VIEWER_STAGED_ROOT'),'pinned staged Viewer required')
 class CurrentBridgeTests(_JointFlow):
+    @classmethod
+    def setUpClass(cls):
+        # The inherited class hook reads Viewer exports. Never run it here:
+        # direct unittest invocation calls class hooks before per-test setup.
+        pass
+
     def setUp(self):
         if self._testMethodName!='test_crashed_coordinator_then_current_viewer_read_no_acceptance':
             raise unittest.SkipTest('inherited acceptance/cleanup fixture disabled here')
-        super().setUp()
-
-    @classmethod
-    def setUpClass(cls):
-        cls.cert=Path(os.environ['SYNTHETIC_TLS_ROOT'])/'cert.pem'
-        cls.key=Path(os.environ['SYNTHETIC_TLS_ROOT'])/'key.pem'
-        cls.viewer_root=Path(os.environ['VIEWER_REFERENCE_ROOT'])/'apps/viewer'
+        self.cert=Path(os.environ['SYNTHETIC_TLS_ROOT'])/'cert.pem'
+        self.key=Path(os.environ['SYNTHETIC_TLS_ROOT'])/'key.pem'
+        self.viewer_root=Path(os.environ['VIEWER_REFERENCE_ROOT'])/'apps/viewer'
         for name,digest in OLD_PINS.items():
-            if hashlib.sha256((cls.viewer_root/name).read_bytes()).hexdigest()!=digest:
+            if hashlib.sha256((self.viewer_root/name).read_bytes()).hexdigest()!=digest:
                 raise ValueError('old_broker_source_mismatch')
-        cls.staged=Path(os.environ['VIEWER_STAGED_ROOT'])
+        self.staged=Path(os.environ['VIEWER_STAGED_ROOT'])
         for name,digest in PINS.items():
-            if hashlib.sha256((cls.staged/'server'/name).read_bytes()).hexdigest()!=digest:
+            if hashlib.sha256((self.staged/'server'/name).read_bytes()).hexdigest()!=digest:
                 raise ValueError('staged_viewer_source_mismatch')
+        super().setUp()
 
     def test_crashed_coordinator_then_current_viewer_read_no_acceptance(self):
         self.drop_result_ack=True
@@ -138,7 +141,18 @@ class FixtureInvocationTests(unittest.TestCase):
         self.assertEqual(result.testsRun,1);self.assertEqual(len(result.skipped),1)
         self.assertFalse(result.errors or result.failures)
 
+    @unittest.skipUnless(os.name=='posix','Linux test runner required')
+    def test_unittest_subprocess_skips_before_any_export_access(self):
+        env=dict(os.environ,VIEWER_STAGED_ROOT='/nonexistent-staged-fixture',
+                 VIEWER_REFERENCE_ROOT='/nonexistent-old-fixture',SYNTHETIC_TLS_ROOT='/nonexistent-tls-fixture')
+        case='tests.test_reference_current_bridge.CurrentBridgeTests.test_real_node_broker_provider_acceptance_and_python_worker_cleanup_order'
+        result=subprocess.run([sys.executable,'-m','unittest','-v',case],env=env,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr.decode())
+        self.assertIn(b'skipped',result.stderr)
+        self.assertNotIn(b'FileNotFoundError',result.stderr)
+
 
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite([CurrentBridgeTests('test_crashed_coordinator_then_current_viewer_read_no_acceptance'),
-                               FixtureInvocationTests('test_inherited_acceptance_test_refuses_direct_invocation')])
+                               FixtureInvocationTests('test_inherited_acceptance_test_refuses_direct_invocation'),
+                               FixtureInvocationTests('test_unittest_subprocess_skips_before_any_export_access')])
