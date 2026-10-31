@@ -119,6 +119,7 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.release = threading.Event()
         self.release.set()
         self.include_length = True
+        self.prefix_bytes = 0
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -130,9 +131,12 @@ class ViewerAutoCaptureTests(unittest.TestCase):
                 if owner.include_length:
                     self.send_header('Content-Length', str(len(owner.engine_response)))
                 self.end_headers()
+                prefix = owner.prefix_bytes
+                if prefix:
+                    self.wfile.write(owner.engine_response[:prefix]); self.wfile.flush()
                 owner.ready.set()
                 if owner.release.wait(15):
-                    try: self.wfile.write(owner.engine_response)
+                    try: self.wfile.write(owner.engine_response[prefix:])
                     except OSError: pass
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -378,6 +382,83 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         else:
             self.service._archive_once(self.identifier)
             self.assertEqual(Path(self.fixture.task(self.identifier)['archive_path']).read_bytes(), self.engine_response)
+
+    def test_killed_capture_child_restart_retains_partial_and_reports_inspection(self):
+        import hashlib,io,select,signal,zipfile
+        data=io.BytesIO()
+        with zipfile.ZipFile(data,'w',compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr('synthetic.bin',b'x'*(2*1024*1024))
+        self.engine_response=data.getvalue();self.prefix_bytes=1024*1024;self.release.clear()
+        task=self.fixture.task(self.identifier);input_path=Path(task['files'][0]['path']);input_before=input_path.read_bytes()
+        directory=Path(task['directory']);partial=directory/'all.zip.partial';intent=directory/'all.zip.intent'
+        authority=self.queue.authority_id;self.queue.close();self.lease.close()
+        code=r"""
+import subprocess,sys
+from types import SimpleNamespace
+from processing.authority_lease import AuthorityLease
+from processing.prototype import Queue
+from processing.viewer_service import ViewerService
+import processing.viewer_service as module
+root,lease_dir,authority,identifier,origin=sys.argv[1:]
+q=Queue(root,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+q.authority_lease=AuthorityLease(lease_dir,authority)
+c=SimpleNamespace(prototype_state_dir=root,viewer_max_input_bytes=20*1024**3,viewer_max_archive_bytes=4*1024**2,viewer_archive_free_floor=1,local_node_url=origin,local_node_token='synthetic',main_node_url=origin,main_node_token='synthetic')
+original=subprocess.Popen
+def tracked(*args,**kwargs):
+ p=original(*args,**kwargs);print(p.pid,flush=True);return p
+module.subprocess.Popen=tracked
+try:ViewerService(q,c)._archive_once(identifier)
+except Exception:pass
+finally:q.authority_lease.close();q.close()
+"""
+        parent=subprocess.Popen([sys.executable,'-c',code,str(self.root/'state'),str(self.lease_dir),authority,self.identifier,self.fixture.config.local_node_url],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+        child_pid=None
+        try:
+            self.assertTrue(select.select([parent.stdout],[],[],10)[0]);child_pid=int(parent.stdout.readline().strip())
+            self.assertTrue(self.ready.wait(10));deadline=time.monotonic()+10
+            while time.monotonic()<deadline:
+                if partial.exists() and partial.read_bytes()[:4]==b'PK\x03\x04':break
+                time.sleep(.05)
+            self.assertEqual(partial.read_bytes()[:4],b'PK\x03\x04')
+            # Verify this is the exact direct child before signalling it.
+            status=Path('/proc',str(child_pid),'status').read_text()
+            self.assertIn('PPid:\t'+str(parent.pid)+'\n',status)
+            os.kill(child_pid,signal.SIGKILL);parent.wait(timeout=10);child_pid=None
+            before=partial.read_bytes();inode=partial.stat().st_ino;intent_before=intent.read_bytes()
+            self.assertFalse((directory/'all.zip.receipt').exists())
+            self.assertEqual(len(before),len(self.engine_response));self.assertEqual(before[:1024*1024],self.engine_response[:1024*1024])
+            self.release.set()
+            self.queue=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            self.lease=authority_lease.AuthorityLease(self.lease_dir,authority);self.queue.authority_lease=self.lease
+            self.fixture.config.viewer_archive_autocapture=True
+            self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+            self.service.start();deadline=time.monotonic()+10
+            while self.service.info(self.identifier).get('ledgetopArchive',{}).get('state')!='inspection':
+                if time.monotonic()>=deadline:self.fail('inspection status not persisted')
+                time.sleep(.05)
+            self.assertEqual(self.service.info(self.identifier)['ledgetopArchive'],{'state':'inspection','reason':'partial_requires_inspection'})
+            with self.assertRaises(Conflict):self.service.download(self.identifier)
+            self.assertEqual((hashlib.sha256(partial.read_bytes()).digest(),partial.stat().st_ino,intent.read_bytes()),(hashlib.sha256(before).digest(),inode,intent_before))
+            self.assertEqual(input_path.read_bytes(),input_before);self.assertFalse((directory/'all.zip.receipt').exists())
+            self.assertEqual(self.requests,1);self.assertEqual(len(self.fixture.fleet.commits),1)
+            self.assertEqual(self.service.store.task(self.identifier)['job']['status'],'succeeded')
+        finally:
+            self.release.set()
+            # Parent is ours; identify only its exact capture-module children
+            # even if failure happened before the PID was read from stdout.
+            if parent.poll() is None:
+                try:
+                    children=Path('/proc',str(parent.pid),'task',str(parent.pid),'children').read_text().split()
+                    for child in children:
+                        proc=Path('/proc',child)
+                        command=proc.joinpath('cmdline').read_bytes().split(b'\0')
+                        status=proc.joinpath('status').read_text()
+                        if (b'processing.viewer_archive_worker' in command
+                                and 'PPid:\t'+str(parent.pid)+'\n' in status):
+                            os.kill(int(child),signal.SIGKILL)
+                except (FileNotFoundError,ProcessLookupError):pass
+                parent.kill()
+            parent.wait(timeout=10);parent.stdout.close()
 
     def test_parent_death_leaves_coordinator_flocks_held_until_capture_child_exits(self):
         # A slow fixture keeps the actual capture child alive while its parent
