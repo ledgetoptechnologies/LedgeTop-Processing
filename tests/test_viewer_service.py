@@ -627,6 +627,45 @@ class ViewerServiceTests(unittest.TestCase):
             self.service.tick()
         self.assertEqual(self.task(second)['job']['status'], 'queued')
 
+    def test_operator_resolution_requires_complete_unchanged_identity(self):
+        first = self.submit(); self.service.tick()
+        task = self.task(first); job_id = task['job_id']
+        self.service.operator(job_id, 'hold', {'note': 'synthetic operator inspection'})
+        self.service.operator(job_id, 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
+        second = self.submit()
+        def blocked():
+            with self.assertRaises(Conflict):
+                self.service.tick()
+            current = self.task(first)
+            self.assertEqual((current['stage'], current['phase']), (task['stage'], 'processing'))
+            self.assertEqual(self.task(second)['job']['status'], 'queued')
+        for field in ('engine_uuid', 'node_id', 'claim_token'):
+            for missing in (None, ''):
+                with self.subTest(field=field, missing=missing):
+                    with self.queue._db() as db:
+                        db.execute('UPDATE viewer_tasks SET ' + field + '=? WHERE uuid=?', (missing, first))
+                        if field == 'node_id':  # an equal missing binding on both sides
+                            db.execute('UPDATE jobs SET node_id=? WHERE id=?', (missing, job_id))
+                    blocked()
+                    with self.queue._db() as db:
+                        db.execute('UPDATE viewer_tasks SET ' + field + '=? WHERE uuid=?', (task[field], first))
+                        db.execute('UPDATE jobs SET node_id=? WHERE id=?', (task['node_id'], job_id))
+        with self.subTest('claim not bound to the job'):
+            with self.queue._db() as db:
+                db.execute("UPDATE viewer_tasks SET claim_token='other-claim' WHERE uuid=?", (first,))
+            blocked()
+            with self.queue._db() as db:
+                db.execute('UPDATE viewer_tasks SET claim_token=? WHERE uuid=?', (task['claim_token'], first))
+        for field, changed in (('engine_uuid', str(uuid.uuid4())), ('node_id', 'main'),
+                               ('claim_token', 'stale-claim'), ('job_id', 'stale-job')):
+            with self.subTest(stale=field):
+                with self.assertRaises(Conflict):
+                    self.service.store.settle_operator_resolution({**self.task(first), field: changed})
+                self.assertEqual(self.task(first)['phase'], 'processing')
+        self.finish(first, 30)  # the operator stopped the engine task
+        self.service.tick()
+        self.assert_operator_resolution_settled(first, second)
+
     def test_restart_while_node_offline_retains_slot_then_returns_completed_result(self):
         first=self.submit();second=self.submit()
         self.service.tick();task=self.task(first);engine_uuid=task['engine_uuid']

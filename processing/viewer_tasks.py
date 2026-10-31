@@ -550,10 +550,14 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row=self._row(db,task['uuid'])
-            if (row['job_id']!=task['job_id'] or row['environment']!=task['environment']
+            identity=('job_id','engine_uuid','node_id','claim_token','environment')
+            if (any(type(row[k]) is not str or not row[k] or row[k]!=task[k] for k in identity)
                     or row['phase'] not in ('processing','commit_pending','cancel_pending')):
                 raise Conflict('operator resolution identity changed')
-            job=db.execute('SELECT status,result,node_id,environment,profile FROM jobs WHERE id=?',(row['job_id'],)).fetchone()
+            job=db.execute('SELECT status,result,node_id,environment,profile,claim_hash FROM jobs WHERE id=?',(row['job_id'],)).fetchone()
+            if (job is None or not job['claim_hash'] or not hmac.compare_digest(
+                    job['claim_hash'],hashlib.sha256(row['claim_token'].encode()).hexdigest())):
+                raise Conflict('terminal Viewer identity requires inspection')
             try:
                 result=json.loads(job['result']) if job is not None and type(job['result']) is str else None
             except ValueError:
