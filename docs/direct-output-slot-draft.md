@@ -12,7 +12,9 @@ an identity-named regular file, physically requests its full logical budget via
 `posix_fallocate`, checks file size and reported allocated blocks, syncs it,
 and persists and syncs an exact binding/root/inode/budget metadata record. The
 slot retains a nonblocking exclusive OS flock. `write_at` writes bounded bytes
-to that very inode, with identity checks before and after; `sync` requests a
+to that very inode, with identity checks before and after; operations on the
+same slot object are serialized. A short or failed write and a failed sync
+hold that object for inspection; `sync` requests a
 file sync. Closing releases the lock and does not remove the slot. Existing
 names are never overwritten or unlinked. A missing or incomplete metadata
 record, changed file/root/mount, changed budget, missing allocation or lock
@@ -34,6 +36,14 @@ Mount IDs may change after reboot and will fail closed until separately
 reconciled. A fully written but unacknowledged metadata record is usable only
 after revalidation and fresh sync; partial metadata and preallocated orphans
 remain for explicit inspection, not automatic retry or cleanup.
+
+Named root validation reopens the root and compares device, inode and mount ID;
+it remains a point-in-time observation, not a fence against a malicious mount
+or ancestor replacement between checks. There is no content-write journal: a
+write failure or process death can leave partially changed bytes. The in-memory
+hold does not survive reopening; reopening proves allocation and identity only,
+never that a prior write completed. An integrating capture writer must maintain
+its own durable write-intent and content-completion protocol before reuse.
 
 Before integration, an independently reviewed capture writer must consume this
 same inode without truncating it or replacing its path, validate the actual

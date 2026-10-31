@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -164,3 +165,50 @@ module.open_slot(root,json.loads(identity),digest,65536,max_budget=65536,create=
             with self.assertRaisesRegex(slots.SlotHeld,'root_identity_changed'):slot.write_at(0,b'x')
         finally:
             slot.close();self.root.rmdir();os.rename(moved,self.root)
+
+    def test_named_root_same_inode_changed_mount_id_is_rejected(self):
+        slot=self.open(create=True);actual=slots._identity
+        def identity(fd):
+            value=actual(fd)
+            if fd != slot._root and __import__('stat').S_ISDIR(os.fstat(fd).st_mode):
+                value[2]+=1
+            return value
+        try:
+            with patch.object(slots,'_identity',side_effect=identity):
+                with self.assertRaisesRegex(slots.SlotHeld,'root_identity_changed'):slot.write_at(0,b'x')
+        finally:slot.close()
+
+    def test_partial_write_holds_current_object(self):
+        slot=self.open(create=True);actual=slots.os.pwrite
+        def partial(fd,data,offset):return actual(fd,data[:1],offset)
+        try:
+            with patch.object(slots.os,'pwrite',side_effect=partial):
+                with self.assertRaisesRegex(slots.SlotHeld,'slot_write_incomplete'):slot.write_at(0,b'abc')
+            with self.assertRaisesRegex(slots.SlotHeld,'requires_inspection'):slot.write_at(2,b'x')
+            with self.assertRaisesRegex(slots.SlotHeld,'requires_inspection'):slot.sync()
+        finally:slot.close()
+        # There is no content journal; reopening proves allocation, not that
+        # the earlier write completed or that any bytes are usable.
+        reopened=self.open();reopened.close()
+
+    def test_same_object_concurrent_writes_are_serialized(self):
+        slot=self.open(create=True);original=slots.os.pwrite;count=0;maximum=0;guard=threading.Lock();errors=[]
+        def slow(fd,data,offset):
+            nonlocal count,maximum
+            with guard:count+=1;maximum=max(maximum,count)
+            try:time.sleep(.05);return original(fd,data,offset)
+            finally:
+                with guard:count-=1
+        def run(offset):
+            try:slot.write_at(offset,b'a')
+            except BaseException as error:errors.append(type(error).__name__)
+        threads=[threading.Thread(target=run,args=(offset,),daemon=True) for offset in (0,1)]
+        try:
+            with patch.object(slots.os,'pwrite',side_effect=slow):
+                for thread in threads:thread.start()
+                for thread in threads:thread.join(5)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(errors,[]);self.assertEqual(maximum,1)
+        finally:
+            for thread in threads:thread.join(5)
+            if all(not thread.is_alive() for thread in threads):slot.close()
