@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from ops import state_census
 
@@ -76,6 +77,79 @@ class CensusFixture(unittest.TestCase):
 
 
 class CensusTest(CensusFixture):
+    def test_queued_directory_replaced_before_scan_is_rejected(self):
+        original_entry = state_census._entry
+        target = self.root / 'viewer-tasks'
+        moved = self.base / 'original-viewer-tasks'
+        replaced = False
+        def replace(key, path, info):
+            nonlocal replaced
+            result = original_entry(key, path, info)
+            if path == target and not replaced:
+                replaced = True
+                target.rename(moved)
+                target.mkdir()
+            return result
+        with mock.patch('ops.state_census._entry', side_effect=replace):
+            summary, _ = state_census.tree(self.root, KEY)
+        self.assertTrue(replaced)
+        self.assertGreater(summary['rejected']['unreadable'], 0)
+        self.assertEqual((moved / 'task-1' / 'DJI_0001.JPG').read_bytes(), b'synthetic photo bytes')
+
+    def test_add_or_remove_after_directory_scan_is_rejected(self):
+        original_entry = state_census._entry
+        for change in ('add', 'remove'):
+            with self.subTest(change=change):
+                extra = self.root / 'after-scan'
+                if change == 'remove':
+                    extra.write_bytes(b'synthetic')
+                changed = False
+                def modify(key, path, info):
+                    nonlocal changed
+                    result = original_entry(key, path, info)
+                    if not changed and path.name == 'DJI_0001.JPG':
+                        changed = True
+                        if change == 'add': extra.write_bytes(b'synthetic')
+                        else: extra.unlink()
+                    return result
+                with mock.patch('ops.state_census._entry', side_effect=modify):
+                    summary, _ = state_census.tree(self.root, KEY)
+                self.assertTrue(changed)
+                self.assertGreater(summary['rejected']['unreadable'], 0)
+                if extra.exists(): extra.unlink()
+
+    def test_entry_limit_fails_closed(self):
+        with mock.patch('ops.state_census.MAX_TREE_ENTRIES', 2):
+            summary, _ = state_census.tree(self.root, KEY)
+        self.assertGreater(summary['rejected']['unreadable'], 0)
+
+    def test_changed_file_during_hash_is_rejected(self):
+        target = self.root / 'viewer-tasks' / 'task-1' / 'DJI_0001.JPG'
+        real_read = os.read
+        changed = False
+        def mutate(fd, size):
+            nonlocal changed
+            data = real_read(fd, size)
+            if data and not changed:
+                changed = True
+                with target.open('ab') as stream:
+                    stream.write(b'changed')
+            return data
+        info = target.lstat()
+        with mock.patch('ops.state_census.os.read', side_effect=mutate):
+            with self.assertRaises(OSError):
+                state_census._content(KEY, target, info)
+        self.assertTrue(changed)
+
+    @unittest.skipUnless(hasattr(os, 'O_NOFOLLOW'), 'requires no-follow open')
+    def test_replaced_file_symlink_is_never_followed(self):
+        target = self.root / 'viewer-tasks' / 'task-1' / 'DJI_0001.JPG'
+        info = target.lstat()
+        target.unlink()
+        target.symlink_to(self.root / 'jobs.sqlite3')
+        with self.assertRaises(OSError):
+            state_census._content(KEY, target, info)
+
     def test_reports_state_and_is_stable_and_read_only(self):
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         status, first = self.census()
