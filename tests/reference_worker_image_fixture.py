@@ -1,5 +1,9 @@
 import copy, hashlib, importlib.util, json, os, pathlib, signal, socket, ssl, subprocess, tempfile, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import nullcontext
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from processing.reference_result_proxy import ResultProxy
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore
 from processing.reference_control import ReferenceControlAPI
@@ -31,6 +35,8 @@ class Broker(BaseHTTPRequestHandler):
 broker=ThreadingHTTPServer(('127.0.0.1',0),Broker);broker.socket=tls.wrap_socket(broker.socket,server_side=True);threading.Thread(target=broker.serve_forever,daemon=True).start()
 port=socket.socket();port.bind(('127.0.0.1',0));worker_port=port.getsockname()[1];port.close()
 origin='https://127.0.0.1:'+str(coordinator.server_port)
+client_tls=ssl.create_default_context(cafile=str(cert))
+api.viewer.result_proxy=ResultProxy({'cluster':'https://127.0.0.1:'+str(worker_port)},worker_bearers={'cluster':'SYNTHETIC-READER-'+'r'*36},admit_read=lambda _binding:nullcontext(),ssl_context=client_tls)
 with NodeGate('synthetic-engine') as gate:gate.provision('cluster','http://127.0.0.1:18080',queue.authority_id)
 config=dict(schemaVersion=1,stateRoot=str(root/'state'),scratchRoot=str(root/'scratch'),nodeId='cluster',workerId='worker',workerInstanceId='instance',authorityId=queue.authority_id,engineId='synthetic-engine',gateGeneration=1,gateCoordinatorOrigin='http://127.0.0.1:18080',coordinatorOrigin=origin,brokerOrigin='https://127.0.0.1:'+str(broker.server_port),engineOrigin=engine.origin,engineToken='',workerBearer=worker_token,resultReadBearer='SYNTHETIC-READER-'+'r'*36,caFile=str(cert),serverCertFile=str(cert),serverKeyFile=str(key),listenHost='127.0.0.1',listenPort=worker_port,outputBudget=1048576,safetyFloor=1024,transferTtl=240,cleanupGrace=3600,pollSeconds=.2,engineVersion='synthetic-transport-only',shareResults=True)
 configpath=root/'worker.json';configpath.write_text(json.dumps(config));configpath.chmod(0o600)
@@ -65,7 +71,29 @@ try:
    assert manifest is not None and len(manifest['objects'])==1
    assert manifest['objects'][0]['sha256']==digest and manifest['objects'][0]['byteSize']==len(native.ARCHIVE)
    assert restarted
-   print(json.dumps({'result':'PASS','phase':state['phase'],'engineCounts':counts,'worker_restart':True,'retainedInputSha256':hashlib.sha256(b'abc').hexdigest(),'retainedArchiveSha256':digest}));break
+   path=origin+'/ltds/v1/jobs/'+job['jobId']
+   def viewer_request(suffix,payload=None,token=viewer_token):
+    headers={'Authorization':'Bearer '+token}; body=None
+    if payload is not None:
+     headers['Content-Type']='application/json';body=json.dumps(payload).encode()
+    with urlopen(Request(path+suffix,data=body,headers=headers),context=client_tls,timeout=10) as response:return response.read()
+   retrieved_manifest=json.loads(viewer_request('/results'))
+   assert retrieved_manifest==manifest
+   received=viewer_request('/results/'+manifest['objects'][0]['id'])
+   assert received==native.ARCHIVE and hashlib.sha256(received).hexdigest()==digest
+   try:viewer_request('/results/'+manifest['objects'][0]['id'],token='invalid')
+   except HTTPError as e:assert e.code==401;e.close()
+   else:raise AssertionError('unauthenticated read succeeded')
+   receipt=dict(schemaVersion=1,receiptId='synthetic-viewer-receipt',storageReceiptId='synthetic-viewer-storage',jobId=job['jobId'],generation=1,environment='staging',inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],resultManifestSha256=manifest['resultManifestSha256'],acceptedObjectIds=[manifest['objects'][0]['id']],acceptedAt='2026-10-27T22:00:00Z',validationVersion='ltds-reference-v1')
+   time.sleep(2)
+   assert archives[0].read_bytes()==native.ARCHIVE and inputs[0].read_bytes()==b'abc'
+   assert store.acceptance_receipts(job['jobId'])['receipts']==[]
+   accepted=json.loads(viewer_request('/acceptance',receipt))
+   assert accepted['created'] and accepted['fullyAccepted']
+   replay=json.loads(viewer_request('/acceptance',receipt))
+   assert not replay['created'] and replay['fullyAccepted']
+   assert store.acceptance_receipts(job['jobId'])['receipts']==[receipt]
+   print(json.dumps({'result':'PASS','phase':state['phase'],'engineCounts':counts,'worker_restart':True,'retainedInputSha256':hashlib.sha256(b'abc').hexdigest(),'retainedArchiveSha256':digest,'viewerReceipt':receipt}));break
   time.sleep(.2)
  else:raise RuntimeError('timed out in phase '+str(store.get(job['jobId'],private=True)['phase']))
 finally:
