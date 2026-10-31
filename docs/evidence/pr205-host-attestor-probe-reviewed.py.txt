@@ -1,0 +1,85 @@
+import json,os,pathlib,select,socket,stat,subprocess,sys,tempfile,uuid
+
+# Injected from the exact committed Git blob by the caller; no secrets.
+import base64
+namespace={'__name__':'synthetic_attestor'}
+exec(base64.b64decode('SOURCE_B64'),namespace)
+Attestor=namespace['DockerProcessAttestor'];Held=namespace['HandoffHeld'];peer=namespace['_peer']
+image='sha256:b655ce507f3ea3924bae9bdb93a6a8ecfa9e55941ab0f9f34f540dc101796a0c'
+label='fd-attestor-'+uuid.uuid4().hex;name='codex-'+label
+root=pathlib.Path(tempfile.mkdtemp(prefix='codex-fd-attestor-',dir='/tmp'));os.chmod(root,0o711)
+config=root/'docker-config';config.mkdir(mode=0o700)
+path=root/'gate.sock';listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);listener.bind(str(path));os.chmod(path,0o666);listener.listen(2);listener.settimeout(8)
+bad=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);bad.connect(str(path));wrong,_=listener.accept()
+container=None;verified=False;uncertain=True
+print('owned_name='+name,flush=True)
+def record(filename,value):
+ target=root/filename
+ fd=os.open(target,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+ try:
+  raw=json.dumps(value,sort_keys=True).encode();written=os.write(fd,raw)
+  if written!=len(raw):raise RuntimeError('recovery record incomplete')
+  os.fsync(fd)
+ finally:os.close(fd)
+ dfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try:os.fsync(dfd)
+ finally:os.close(dfd)
+record('recovery.json',{'name':name,'label':label,'image':image})
+def docker(*args):
+ return subprocess.run(['docker','--host','unix:///run/docker.sock',*args],capture_output=True,text=True,timeout=12,check=True).stdout.strip()
+try:
+ daemon_id=docker('info','--format','{{.ID}}')
+ if not daemon_id:raise RuntimeError('daemon identity unavailable')
+ code="import socket;s=socket.socket(socket.AF_UNIX);s.settimeout(8);s.connect('/ipc/gate.sock');assert s.recv(2)==b'ok';s.close()"
+ try:
+  container=docker('run','-d','--name',name,'--label','codex.task='+label,'--network','none','--read-only',
+    '--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','128m',
+    '--cpus','0.25','--pids-limit','32','--mount','type=bind,src='+str(root)+',dst=/ipc',
+    '--entrypoint','python',image,'-c',code)
+ except Exception:
+  uncertain=True;raise
+ if len(container)!=64 or any(c not in '0123456789abcdef' for c in container):uncertain=True;raise RuntimeError('invalid container id')
+ print('owned_id='+container,flush=True)
+ record('container-id.json',{'id':container})
+ details=json.loads(docker('inspect',container))[0]
+ if (details['Id']!=container or details['Image']!=image or details['Config']['Labels'].get('codex.task')!=label
+     or details['HostConfig']['NetworkMode']!='none' or details['HostConfig']['Privileged']):
+  uncertain=True;raise RuntimeError('identity mismatch')
+ verified=True
+ actual,_=listener.accept()
+ with actual:
+  attestor=Attestor(container,image,config)
+  wrong_pid,_,_=peer(wrong)
+  try:attestor.inspect(wrong_pid);raise RuntimeError('wrong peer unexpectedly accepted')
+  except Held:print('wrong_peer=rejected',flush=True)
+  pid,uid,_=peer(actual);expected=details['State']['Pid']
+  if pid!=expected or uid!=10001:raise RuntimeError('peer mapping differs')
+  pidfd=os.pidfd_open(pid,0)
+  try:
+   first=attestor.inspect(pid);second=attestor.inspect(pid)
+   if first!=second or select.select([pidfd],[],[],0)[0]:raise RuntimeError('candidate changed')
+   print('actual_peer=accepted pid_matches=true uid_matches=true starttime_stable=true pidfd_alive=true',flush=True)
+   actual.sendall(b'ok')
+   if not select.select([pidfd],[],[],5)[0]:raise RuntimeError('candidate exit unobserved')
+   print('pidfd_exit_observed=true',flush=True)
+  finally:os.close(pidfd)
+finally:
+ wrong.close();bad.close();listener.close()
+ if container and verified:
+  try:
+   details=json.loads(docker('inspect',container))[0]
+   if details['Id']!=container or details['Config']['Labels'].get('codex.task')!=label:raise RuntimeError('cleanup identity changed')
+   if details['State']['Running']:docker('stop','-t','2',container)
+   details=json.loads(docker('inspect',container))[0]
+   if details['Id']!=container or details['Config']['Labels'].get('codex.task')!=label or details['State']['Running']:raise RuntimeError('cleanup uncertain')
+   docker('rm',container)
+   if docker('info','--format','{{.ID}}')!=daemon_id:raise RuntimeError('daemon identity changed')
+   remaining=docker('ps','-a','--no-trunc','--format','{{.ID}}').splitlines()
+   if any(len(item)!=64 or any(c not in '0123456789abcdef' for c in item) for item in remaining) or container in remaining:
+    raise RuntimeError('container removal unverified')
+   uncertain=False;print('owned_container=removed',flush=True)
+  except Exception:
+   uncertain=True;print('owned_container=retained outcome=uncertain',flush=True)
+ if not uncertain:
+  path.unlink();(root/'container-id.json').unlink();(root/'recovery.json').unlink();config.rmdir();root.rmdir();print('owned_directory=removed',flush=True)
+ else:print('owned_directory_retained='+str(root),flush=True)

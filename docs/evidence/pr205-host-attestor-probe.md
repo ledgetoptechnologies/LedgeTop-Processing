@@ -5,6 +5,12 @@ probe, preserved for review. It is deliberately not a packaged command or an
 activation procedure. Before executing it in another environment, independently
 review its Docker endpoint, isolation, ownership, resource and cleanup rules.
 It starts and removes a synthetic container and creates a temporary socket.
+The separate `pr205-host-attestor-probe-reviewed.py.txt` is a later, unrun
+revision: it records the intended container identity before creation, treats
+creation and inspection as uncertain until verified removal, and preserves its
+socket directory and recovery metadata when the Docker outcome is unknown.
+Local mocked tests cover create-timeout and inspection-failure retention; this
+revised source was **not** run on the remote host.
 
 On 2026-10-31, the source from Git commit
 `e929c6424db5f5ab3b465d61bc6e0ac5c29805d5` at
