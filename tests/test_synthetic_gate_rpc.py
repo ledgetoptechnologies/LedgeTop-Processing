@@ -65,3 +65,62 @@ class SyntheticGateRpcTests(unittest.TestCase):
   with self.assertRaises(SyntheticRpcHeld):
    SyntheticGateRpc('synthetic-engine',object(),node='node',origin='http://127.0.0.1:18080',authority=self.authority,generation=1,receipt=self.receipt,job=self.job,token=self.token,enabled=True)
   self.assertEqual(self.fixture.counts()['initialize'],0)
+
+@unittest.skipUnless(hasattr(socket,'SO_PEERCRED'),'Linux peer credentials required')
+class SyntheticGateProcessTests(unittest.TestCase):
+ def test_peer_credential_rejects_different_uid(self):
+  import os,struct
+  from unittest.mock import Mock
+  from processing.synthetic_gate_rpc import SyntheticGateServer
+  connection=Mock();server=object.__new__(SyntheticGateServer)
+  connection.getsockopt.return_value=struct.pack('3i',123,os.geteuid()+1,0)
+  self.assertFalse(server._same_uid(connection))
+  connection.getsockopt.return_value=struct.pack('3i',123,os.geteuid(),0)
+  self.assertTrue(server._same_uid(connection))
+ def test_process_kill_leaves_intent_and_stale_socket_held(self):
+  import os,select,signal,subprocess,sys,time
+  from processing.node_gate import canonical_gate_path
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp);os.chmod(root,0o700);state=root/'state';state.mkdir(mode=0o700)
+   authority='11111111-1111-4111-8111-111111111111';receipt='a'*32;job=dict(id='22222222-2222-4222-8222-222222222222',workerId='worker',nodeId='node',authorityId=authority)
+   with patch.dict(os.environ,{'XDG_STATE_HOME':str(state)}):
+    gate_path=canonical_gate_path('owned-synthetic')
+    with NodeGate('owned-synthetic') as gate:
+     gate.provision('node','http://127.0.0.1:18080',authority);gate.reserve('node','http://127.0.0.1:18080',authority,1,receipt);gate.bind(receipt,job)
+   code="""import json,os,sys,threading,time
+from processing.synthetic_gate_rpc import SyntheticGateServer
+import processing.synthetic_gate_rpc as module
+job=json.loads(sys.argv[2])
+if sys.argv[3]=='block':
+ def block(*args):time.sleep(30)
+ module.initialize=block
+with SyntheticGateServer(sys.argv[1],'owned-synthetic',node='node',origin='http://127.0.0.1:18080',authority=job['authorityId'],generation=1,receipt='a'*32,job=job,token='b'*64,enabled=True) as server:
+ print('ready',flush=True);server.serve(threading.Event())
+"""
+   env=dict(os.environ,XDG_STATE_HOME=str(state));child=None;sockpath=root/'synthetic-gate.sock';client=None
+   try:
+    child=subprocess.Popen([sys.executable,'-c',code,str(root),json.dumps(job),'block'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    self.assertTrue(select.select([child.stdout],[],[],5)[0]);self.assertEqual(child.stdout.readline().strip(),'ready')
+    info=sockpath.lstat();identity=(info.st_dev,info.st_ino)
+    denied=socket.socket(socket.AF_UNIX);denied.settimeout(5);denied.connect(str(sockpath))
+    denied.sendall(json.dumps(dict(token='c'*64,jobId=job['id'],operation='initialize')).encode()+b'\n')
+    self.assertIn(b'held',denied.recv(1024));denied.close()
+    self.assertFalse((gate_path/('synthetic-rpc-init-'+job['id']+'.intent')).exists())
+    client=socket.socket(socket.AF_UNIX);client.settimeout(5);client.connect(str(sockpath))
+    client.sendall(json.dumps(dict(token='b'*64,jobId=job['id'],operation='initialize')).encode()+b'\n')
+    marker=gate_path/('synthetic-rpc-init-'+job['id']+'.intent');deadline=time.monotonic()+5
+    while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+    self.assertTrue(marker.exists());child.kill();child.wait(timeout=5);child.stdout.close();child.stderr.close();child=None;client.close();client=None
+    # Stale socket is held, never silently replaced.
+    probe=subprocess.run([sys.executable,'-c',code,str(root),json.dumps(job),'normal'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
+    self.assertNotEqual(probe.returncode,0)
+    current=sockpath.lstat();self.assertEqual((current.st_dev,current.st_ino),identity);sockpath.unlink()
+    child=subprocess.Popen([sys.executable,'-c',code,str(root),json.dumps(job),'normal'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    self.assertTrue(select.select([child.stdout],[],[],5)[0]);self.assertEqual(child.stdout.readline().strip(),'ready')
+    client=socket.socket(socket.AF_UNIX);client.settimeout(5);client.connect(str(sockpath));client.sendall(json.dumps(dict(token='b'*64,jobId=job['id'],operation='initialize')).encode()+b'\n')
+    self.assertIn(b'held',client.recv(1024));self.assertTrue(marker.exists())
+   finally:
+    if client is not None:client.close()
+    if child is not None:
+     if child.poll() is None:child.kill()
+     child.wait(timeout=5);child.stdout.close();child.stderr.close()

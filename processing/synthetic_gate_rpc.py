@@ -3,7 +3,7 @@
 Only the process-owned NativeNodeFixture is callable.  This is not a network
 fence, a coordinator permit, a live engine integration, or durable success.
 """
-import hmac, json, os, re, socket, threading
+import hmac, json, os, re, socket, stat, struct, threading
 from pathlib import Path
 from .node_gate import NodeGate
 from .direct_outbox_contract import direct_pipeline_digest
@@ -44,14 +44,22 @@ class SyntheticGateRpc:
     if not chunk:break
     raw+=chunk
    if not raw.endswith(b'\n') or raw.count(b'\n')!=1:raise SyntheticRpcHeld('invalid_request')
-   try:req=json.loads(raw)
+   def pairs(values):
+    result={}
+    for key,value in values:
+     if key in result:raise ValueError('duplicate')
+     result[key]=value
+    return result
+   try:req=json.loads(raw,object_pairs_hook=pairs,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('constant')))
    except (ValueError,UnicodeError):raise SyntheticRpcHeld('invalid_request') from None
    if (type(req) is not dict or set(req)!={'token','jobId','operation'} or type(req['token']) is not str
        or not hmac.compare_digest(req['token'],self.token) or req['jobId']!=self.job['id'] or req['operation']!='initialize'):
     raise SyntheticRpcHeld('unauthorized')
    self._check()
    # Exclusive marker remains on any ambiguity or success: never replay a mutation.
-   root=Path(self.gate.root);fd=os.open(root/'synthetic-rpc-init.intent',os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+   root=Path(self.gate.root)
+   if (root/'synthetic-rpc-init.intent').exists() or (root/'synthetic-rpc-init.intent').is_symlink():raise SyntheticRpcHeld('legacy_intent_requires_inspection')
+   fd=os.open(root/('synthetic-rpc-init-'+self.job['id']+'.intent'),os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
    try:os.write(fd,b'initialize\n');os.fsync(fd)
    finally:os.close(fd)
    dfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
@@ -61,3 +69,61 @@ class SyntheticGateRpc:
    initialize(NativeEngine(self.fixture.origin),self.job['id'],plan,direct_pipeline_digest([],None),name,digest(name))
    conn.sendall(b'{"state":"initialized_no_dispatch"}\n')
   finally:self.lock.release()
+
+class SyntheticGateServer:
+ """Single-threaded fixture-only AF_UNIX listener with same-UID peer check.
+
+ Caller must provision the gate and an isolated private root first. A stale
+ socket is never unlinked automatically. No arbitrary engine endpoint is used.
+ """
+ def __init__(self,root,engine_id,*,node,origin,authority,generation,receipt,job,token,enabled=False):
+  if enabled is not True or not hasattr(socket,'SO_PEERCRED'):raise SyntheticRpcHeld('synthetic_unix_required')
+  self.root=Path(root)
+  if not self.root.is_absolute() or self.root.resolve()!=self.root:raise SyntheticRpcHeld('private_root_required')
+  st=self.root.stat()
+  if st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=0o700 or not stat.S_ISDIR(st.st_mode):raise SyntheticRpcHeld('private_root_required')
+  self.root_identity=(st.st_dev,st.st_ino);self.path=self.root/'synthetic-gate.sock';self.engine_id=engine_id
+  self.arguments=dict(node=node,origin=origin,authority=authority,generation=generation,receipt=receipt,job=job,token=token,enabled=True)
+  self.fixture=None;self.rpc=None;self.listener=None;self.socket_identity=None
+ def _check_root(self):
+  st=self.root.lstat()
+  if not stat.S_ISDIR(st.st_mode) or (st.st_dev,st.st_ino)!=self.root_identity or st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=0o700:
+   raise SyntheticRpcHeld('private_root_changed')
+ def __enter__(self):
+  self._check_root()
+  if self.path.exists() or self.path.is_symlink():raise SyntheticRpcHeld('socket_exists')
+  try:
+   self.fixture=NativeNodeFixture(self.root/'synthetic-engine.sqlite',synthetic_enabled=True).start()
+   self.rpc=SyntheticGateRpc(self.engine_id,self.fixture,**self.arguments).__enter__()
+   self.listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);self.listener.bind(str(self.path))
+   st=self.path.lstat();self.socket_identity=(st.st_dev,st.st_ino)
+   os.chmod(self.path,0o600);self.listener.listen(1);self.listener.settimeout(.2);self._check_root()
+   return self
+  except BaseException:
+   self.close();raise
+ def _same_uid(self,connection):
+  _,uid,_=struct.unpack('3i',connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,struct.calcsize('3i')))
+  return uid==os.geteuid()
+ def serve(self,stop):
+  if self.listener is None or self.rpc is None:raise SyntheticRpcHeld('not_started')
+  while not stop.is_set():
+   try:connection,_=self.listener.accept()
+   except socket.timeout:continue
+   with connection:
+    try:
+     if not self._same_uid(connection):continue
+     self.rpc.serve_one(connection)
+    except Exception:
+     try:connection.sendall(b'{"state":"held"}\n')
+     except OSError:pass
+ def close(self):
+  if self.listener is not None:self.listener.close();self.listener=None
+  if self.socket_identity is not None:
+   try:
+    self._check_root();st=self.path.lstat()
+    if stat.S_ISSOCK(st.st_mode) and (st.st_dev,st.st_ino)==self.socket_identity:self.path.unlink()
+   except (OSError,SyntheticRpcHeld):pass
+   self.socket_identity=None
+  if self.rpc is not None:self.rpc.__exit__(None,None,None);self.rpc=None
+  if self.fixture is not None:self.fixture.close();self.fixture=None
+ def __exit__(self,*_):self.close()
