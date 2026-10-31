@@ -126,6 +126,9 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         store=TaskStore(self.queue,self.volume/'viewer-tasks')
         identifier='8b4b6fde-f0ab-4001-b36f-7f6e49307016'
         store.initialize(identifier,'Synthetic retained task',[],None,'staging')
+        task_dir=Path(store.task(identifier)['directory'])
+        synthetic_file=task_dir/'synthetic-input.bin'
+        synthetic_file.write_bytes(b'synthetic task input retained')
         with self.queue._db() as db:
             old_columns=[row[1] for row in db.execute('PRAGMA table_info(viewer_tasks)')]
             before=dict(db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone())
@@ -145,6 +148,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         # update nor rollback may restore the old snapshot over live state.
         with self.assertRaises(AssertionError):
             module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        self.assertEqual(synthetic_file.read_bytes(),b'synthetic task input retained')
         with self.queue._db() as db:
             retained=db.execute('SELECT archive_state,archive_reason FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
             self.assertEqual(tuple(retained),('inspection','partial_requires_inspection'))
