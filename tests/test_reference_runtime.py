@@ -445,6 +445,49 @@ class ReferenceRuntimeTests(unittest.TestCase):
             threading.Event().wait(0.01)
         self.fail('coordinator lifecycle condition not reached')
 
+    def test_real_completion_in_flight_blocks_clean_shutdown_and_queue_release(self):
+        handler=self.supervised_handler();queue=handler.prototype_queue
+        job,_=queue.submit(dict(requestId='shutdown-test',environment='staging',profile='treedar-synthetic-v1'))
+        claim=queue.claim(dict(workerId='synthetic-worker',nodeId='main',profiles=['treedar-synthetic-v1']))
+        self.assertEqual(claim['id'],job['id'])
+        entered,release=threading.Event(),threading.Event();original=queue.complete
+        def blocked(identifier,payload):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('test deadline')
+            return original(identifier,payload)
+        queue.complete=blocked
+        class ReferenceServer:
+            def __init__(self):self.stop=threading.Event()
+            def serve_forever(self,**kwargs):self.stop.wait(8)
+            def shutdown(self):self.stop.set()
+            def server_close(self):pass
+        handler.reference_listener._server_factory=lambda *_a,**_k:ReferenceServer()
+        native=ThreadingHTTPServer(('127.0.0.1',0),handler);service=CoordinatorService(native,handler)
+        stop=threading.Event();exits=[];runner=threading.Thread(target=lambda:exits.append(service.run(stop)));runner.start()
+        results=[]
+        def complete():
+            conn=http.client.HTTPConnection(*native.server_address,timeout=6)
+            try:
+                body=json.dumps(dict(claimToken=claim['claimToken'],status='succeeded',result={})).encode()
+                conn.request('POST','/v1/prototype/jobs/'+job['id']+'/complete',body,headers={'Content-Type':'application/json','Authorization':'Bearer '+self.config.api_token})
+                response=conn.getresponse();results.append((response.status,json.loads(response.read())))
+            finally:conn.close()
+        client=threading.Thread(target=complete)
+        try:
+            self.wait_for(service.healthy);client.start();self.assertTrue(entered.wait(3))
+            stop.set();self.wait_for(lambda:service.health()['state']=='draining')
+            self.assertTrue(runner.is_alive())
+            with self.assertRaises(RuntimeError):Queue(self.config.prototype_state_dir,node_ids=('cluster','main'))
+            release.set();client.join(5);runner.join(5)
+            self.assertFalse(client.is_alive());self.assertFalse(runner.is_alive())
+            self.assertEqual(results[0][0],200);self.assertEqual(exits,[0])
+            reopened=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'))
+            try:self.assertEqual(reopened.get(job['id'])['status'],'succeeded')
+            finally:reopened.close()
+        finally:
+            release.set();stop.set();runner.join(7)
+            if client.ident is not None:client.join(7)
+
     def test_coordinator_shutdown_joins_native_and_reference_handlers_before_queue_unlock(self):
         handler = self.supervised_handler()
         native_entered, native_release = threading.Event(), threading.Event()
