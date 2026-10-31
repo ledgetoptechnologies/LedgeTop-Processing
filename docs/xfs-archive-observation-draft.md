@@ -8,9 +8,8 @@ the reported project accounting/enforcement and hard quota. It does not prove
 exclusive writers, current or future physical capacity, or reservation of
 space. The mount and project can change immediately after a successful snapshot.
 The public observation entry point is disabled. The current draft uses the
-Linux x86-64 `quotactl_fd` ABI and reads mount IDs directly; it has not yet
-been exercised against the real disposable XFS mount and needs independent
-review before use.
+Linux x86-64 `quotactl_fd` ABI and reads mount IDs directly; it needs
+independent review before use.
 
 On 2026-10-31 a disposable 512 MiB loop-backed XFS filesystem on the cluster
 host was mounted with project quotas. Its project 42001 had a 64 MiB hard
@@ -22,6 +21,10 @@ removed and verified absent. This was an isolated observation, not a production
 archive volume qualification. A trailing CRLF command after the probes made
 the test shell exit nonzero; its cleanup completed and was separately verified.
 
-The mock tests exercise parsing and mismatch holds. A positive end-to-end test
-of this exact source against a newly provisioned disposable XFS mount remains
-necessary before relying on its output for any purpose.
+The mock tests exercise parsing and mismatch holds. On 2026-10-31 the internal
+function in commit `babdbc7` also observed a newly provisioned disposable XFS
+project with a 64 MiB limit, and rejected a different project ID and limit.
+The public function remained disabled. Cleanup reported success and independent
+inspection confirmed the temporary directory and loop association absent. A
+trailing CRLF command made the test shell exit nonzero after its probes; this
+does not qualify the observer for production or prove writer exclusion.
