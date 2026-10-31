@@ -177,7 +177,7 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, inventory_enabled=False):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
@@ -186,6 +186,9 @@ class ViewerFacade:
         # Cutover hold: production may read but never mutate until reopened by
         # restarting without the hold. Staging is unaffected.
         self.production_held = production_held
+        if type(inventory_enabled) is not bool:
+            raise ValueError('inventory enable must be a boolean')
+        self.inventory_enabled = inventory_enabled
         if temp_dir is not None:
             directory = Path(temp_dir)
             if (directory.is_symlink() or not directory.is_dir()
@@ -224,7 +227,8 @@ class ViewerFacade:
             query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
             environment = self._environment(query)
             output_route = re.fullmatch(r'/task/([^/]+)/output', path)
-            allowed_query = {'token', 'line'} if output_route else {'token'}
+            inventory_route = re.fullmatch(r'/task/[^/]+/ledgetop/input-inventory', path)
+            allowed_query = {'token', 'line'} if output_route else ({'token', 'cursor'} if inventory_route else {'token'})
             if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
                 raise RequestError(400, 'invalid_query')
             if handler.command == 'GET':
@@ -306,13 +310,18 @@ class ViewerFacade:
         elif path == '/options':
             value = self.service.options()
         else:
-            route = re.fullmatch(r'/task/([^/]+)/(info|output|download/all\.zip)', path)
+            route = re.fullmatch(r'/task/([^/]+)/(info|output|download/all\.zip|ledgetop/input-inventory)', path)
             if not route:
                 raise RequestError(404, 'not_found')
             identifier, action = task_uuid(unquote(route[1])), route[2]
             self._authorize(identifier, environment, handler)
             if action == 'info':
                 value = self.service.info(identifier)
+            elif action == 'ledgetop/input-inventory':
+                if not self.inventory_enabled:
+                    raise RequestError(404, 'not_found')
+                value = self.service.input_inventory(identifier, environment, self._capability(handler),
+                                                     query.get('cursor', [None])[0])
             elif action == 'output':
                 line = query.get('line', ['0'])[0]
                 if not re.fullmatch(r'0|[1-9][0-9]{0,14}', line) or int(line) > 2 ** 53 - 1:
