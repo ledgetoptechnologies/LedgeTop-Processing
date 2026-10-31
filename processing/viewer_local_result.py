@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from . import reference_protocol as p
 from .direct_outbox_contract import validate_binding
-from .direct_output_slot import _identity
+from .direct_output_slot import _identity,open_slot
 from .direct_slot_capture import begin_capture,open_sealed_reader,_persist,_read_record,_check_record
 from .node_gate import NodeGate
 from .viewer_node_enrollment import ViewerNodeEnrollment
@@ -110,6 +110,68 @@ def _check_observation(slot,digest,expected):
         os.fsync(fd);_check_record(slot,fd,name,value);os.fsync(slot._root);_check_record(slot,fd,name,value)
         return value
     finally:os.close(fd)
+
+
+def resume_capture_status(worker,*,synthetic_fixture=False):
+    """Read-only offline status; legacy, lost and ambiguous state is held."""
+    if synthetic_fixture is not True:raise LocalResultHeld('synthetic_fixture_required')
+    claim,binding,digest,identity,origin,grant=_local(worker,include_grant=True)
+    parsed=urlsplit(origin)
+    if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or parsed.port is None:
+        raise LocalResultHeld('synthetic_engine_required')
+    with worker._db() as db:
+        guard=db.execute('SELECT binding_sha,slot_identity,phase FROM capture_guard WHERE singleton=1').fetchone()
+    if not guard or guard[0]!=digest or guard[1]!=p.canonical_json(identity).decode():
+        raise LocalResultHeld('capture_guard_invalid')
+    if guard[2]=='started':return resume_sealed(worker,synthetic_fixture=True)
+    if guard[2]!='ready':raise LocalResultHeld('capture_guard_invalid')
+    c=worker.config
+    with NodeGate(c['engineId']) as gate:
+        reservation=_gate(worker,claim,binding,gate)
+        slot=open_slot(c['outputRoot'],c['outputRootIdentity'],digest,c['outputBudget'],max_budget=c['maxBudget'],create=False)
+        try:
+            actual=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
+            if actual!=identity:raise LocalResultHeld('output_identity_changed')
+            allowed={'slot-'+digest+'.alloc','slot-'+digest+'.json'}
+            if any(name.startswith('slot-'+digest+'.') and name not in allowed for name in os.listdir(slot._root)):
+                raise LocalResultHeld('capture_requires_inspection')
+            slot._check()
+            with worker._db() as db:
+                current=db.execute('SELECT binding_sha,slot_identity,phase FROM capture_guard WHERE singleton=1').fetchone()
+                if current!=guard:raise LocalResultHeld('capture_guard_changed')
+            if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+            return dict(state='absent_no_dispatch',jobId=claim['jobId'])
+        finally:slot.close()
+
+
+def resume_sealed(worker,*,synthetic_fixture=False):
+    """Inspect a verified sealed result offline, without creation or dispatch.
+
+    Missing or incomplete journals fail closed. This cannot prove that capture
+    has never started if artifacts were lost, so it never reports "absent".
+    It does not prove coordinator, Viewer, or physical storage custody.
+    """
+    if synthetic_fixture is not True:raise LocalResultHeld('synthetic_fixture_required')
+    claim,binding,digest,identity,origin,grant=_local(worker,include_grant=True)
+    parsed=urlsplit(origin)
+    if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or parsed.port is None:
+        raise LocalResultHeld('synthetic_engine_required')
+    with worker._db() as db:
+        guard=db.execute('SELECT binding_sha,slot_identity,phase FROM capture_guard WHERE singleton=1').fetchone()
+    if not guard or guard!=(digest,p.canonical_json(identity).decode(),'started'):
+        raise LocalResultHeld('capture_guard_invalid')
+    c=worker.config
+    with NodeGate(c['engineId']) as gate:
+        reservation=_gate(worker,claim,binding,gate)
+        with open_sealed_reader(c['outputRoot'],c['outputRootIdentity'],binding,max_budget=c['maxBudget']) as reader:
+            slot=reader._slot
+            actual=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
+            if actual!=identity:raise LocalResultHeld('output_identity_changed')
+            _check_observation(slot,digest,_observation(claim,digest,grant))
+            reader._check()
+            if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+            return dict(state='sealed_no_dispatch',jobId=claim['jobId'],viewerTaskId=claim['viewerTaskId'],
+                        viewerGeneration=claim['viewerGeneration'],archiveBytes=reader.length,archiveSha256=reader.sha256)
 
 
 def register(worker):
@@ -282,6 +344,13 @@ def capture(worker,engine,*,synthetic_fixture=False):
         if (not isinstance(info,dict) or info.get('uuid')!=claim['engineTaskId'] or not isinstance(info.get('status'),dict)
                 or type(info['status'].get('code')) is not int or info['status']['code']!=40):
             raise LocalResultHeld('engine_not_confirmed_complete')
+        # Durable monotonic transition precedes every capture-side filesystem write.
+        with worker._db() as db:
+            recorded=db.execute('SELECT binding_sha,slot_identity,phase FROM capture_guard WHERE singleton=1').fetchone()
+            if not recorded or recorded[0]!=digest or recorded[1]!=p.canonical_json(identity).decode() or recorded[2]!='ready':
+                raise LocalResultHeld('capture_requires_inspection')
+            if db.execute("UPDATE capture_guard SET phase='started' WHERE singleton=1 AND phase='ready'").rowcount!=1:
+                raise LocalResultHeld('capture_requires_inspection')
         response=engine.download(claim['engineTaskId'])
         try:
             lengths=response.headers.get_all('Content-Length',[])

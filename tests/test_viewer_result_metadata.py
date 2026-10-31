@@ -35,6 +35,44 @@ class ViewerResultMetadataTests(unittest.TestCase):
 
     def worker(self,owner):return ViewerNodeEnrollment(owner,**self.base.base.base.config)
 
+    def test_sealed_local_resume_after_kill_with_coordinator_offline(self):
+        self.fixture.stop_server()
+        code='''import json,os,signal,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_local_result import resume_sealed,resume_capture_status
+root,config,mode=sys.argv[1:]
+with DaemonStateLock(root) as owner:
+ result=resume_capture_status(ViewerNodeEnrollment(owner,**json.loads(config)),synthetic_fixture=True)
+ if mode=='kill':os.kill(os.getpid(),signal.SIGKILL)
+ print(json.dumps(result))
+'''
+        root=self.base.base.base.worker;config=json.dumps(self.base.base.base.config)
+        killed=subprocess.run([sys.executable,'-c',code,str(root),config,'kill'],capture_output=True,timeout=15)
+        self.assertEqual(killed.returncode,-signal.SIGKILL)
+        replay=subprocess.run([sys.executable,'-c',code,str(root),config,'resume'],capture_output=True,text=True,timeout=15)
+        self.assertEqual(replay.returncode,0,replay.stderr)
+        result=json.loads(replay.stdout);self.assertEqual(result['state'],'sealed_no_dispatch')
+        self.assertEqual(result['archiveSha256'],self.record['archiveSha256'])
+        self.assertEqual(result['archiveBytes'],self.record['archiveBytes'])
+
+    def test_sealed_local_resume_fails_closed_when_seal_missing(self):
+        from processing.viewer_local_result import resume_sealed
+        seal=next(self.base.base.base.output.glob('*.seal'));seal.unlink()
+        with DaemonStateLock(self.base.base.base.worker) as owner:
+            with self.assertRaises(Exception):resume_sealed(self.worker(owner),synthetic_fixture=True)
+        self.assertFalse(seal.exists())
+
+    def test_sealed_local_resume_detects_mutated_archive_and_owner_contention(self):
+        from processing.viewer_local_result import resume_sealed
+        slot=next(self.base.base.base.output.glob('*.alloc'))
+        with DaemonStateLock(self.base.base.base.worker) as owner:
+            worker=self.worker(owner)
+            with self.assertRaises(Exception):
+                with DaemonStateLock(self.base.base.base.worker):pass
+            with slot.open('r+b') as stream:stream.write(b'X');stream.flush();os.fsync(stream.fileno())
+            with self.assertRaises(Exception):resume_sealed(worker,synthetic_fixture=True)
+
     def test_metadata_receipt_exact_replay_does_not_complete_viewer(self):
         with DaemonStateLock(self.base.base.base.worker) as owner:
             worker=self.worker(owner);first=send_metadata(worker,synthetic_fixture=True)

@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler,HTTPServer
 import io
 import json
+import signal
 import os
 from pathlib import Path
 import sqlite3
@@ -67,6 +68,65 @@ class SyntheticSubmissionTests(unittest.TestCase):
 
     def prepare(self,owner):
         inputs=self.base.make(owner);inputs.freeze_inventory();inputs.transfer(self.base.object_id(inputs));return inputs
+
+    def test_missing_capture_guard_is_not_migrated_or_recreated(self):
+        import sqlite3
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+        path=self.base.base.worker/'viewer-enrollment.sqlite'
+        # Discover the fixture's actual enrollment journal name without assuming it.
+        candidates=list(self.base.base.worker.glob('*.sqlite'))
+        path=next(candidate for candidate in candidates if 'enrollment' in candidate.name)
+        with sqlite3.connect(path) as db:db.execute('DROP TABLE capture_guard')
+        with DaemonStateLock(self.base.base.worker) as owner:
+            with self.assertRaises(Exception):self.base.base.make(owner)
+        with sqlite3.connect(path) as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='capture_guard'").fetchone())
+
+    def test_first_capture_after_process_restart_with_coordinator_offline(self):
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+        self.base.base.fixture.stop_server()
+        code='''import json,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_local_result import capture,resume_capture_status
+from processing.viewer_service import NativeEngine
+root,config,origin=sys.argv[1:]
+with DaemonStateLock(root) as owner:
+ worker=ViewerNodeEnrollment(owner,**json.loads(config))
+ assert resume_capture_status(worker,synthetic_fixture=True)['state']=='absent_no_dispatch'
+ print(json.dumps(capture(worker,NativeEngine(origin),synthetic_fixture=True)))
+'''
+        child=subprocess.run([sys.executable,'-c',code,str(self.base.base.worker),json.dumps(self.base.base.config),self.origin],capture_output=True,text=True,timeout=15)
+        self.assertEqual(child.returncode,0,child.stderr)
+        self.assertEqual(json.loads(child.stdout)['archiveBytes'],len(self.archive))
+
+    def test_offline_capture_guard_holds_after_kill_before_output(self):
+        from processing.viewer_local_result import resume_capture_status
+        with DaemonStateLock(self.base.base.worker) as owner:
+            inputs=self.prepare(owner);submit(inputs,NativeEngine(self.origin),synthetic_fixture=True)
+        self.base.base.fixture.stop_server()
+        with DaemonStateLock(self.base.base.worker) as owner:
+            status=resume_capture_status(self.base.base.make(owner),synthetic_fixture=True)
+            self.assertEqual(status['state'],'absent_no_dispatch')
+        code='''import json,os,signal,sys
+from unittest.mock import patch
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_local_result import capture
+from processing.viewer_service import NativeEngine
+root,config,origin=sys.argv[1:]
+def stop(*args,**kwargs):os.kill(os.getpid(),signal.SIGKILL)
+with DaemonStateLock(root) as owner:
+ with patch.object(NativeEngine,'download',stop):capture(ViewerNodeEnrollment(owner,**json.loads(config)),NativeEngine(origin),synthetic_fixture=True)
+'''
+        child=subprocess.run([sys.executable,'-c',code,str(self.base.base.worker),json.dumps(self.base.base.config),self.origin],capture_output=True,timeout=15)
+        self.assertEqual(child.returncode,-signal.SIGKILL)
+        with DaemonStateLock(self.base.base.worker) as owner:
+            worker=self.base.base.make(owner)
+            with self.assertRaises(Exception):resume_capture_status(worker,synthetic_fixture=True)
+            with self.assertRaises(Exception):capture(worker,NativeEngine(self.origin),synthetic_fixture=True)
 
     def test_exact_submission_once_and_replay_without_cleanup(self):
         with DaemonStateLock(self.base.base.worker) as owner:

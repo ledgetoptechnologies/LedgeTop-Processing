@@ -207,3 +207,15 @@ Before removal, volume labels and absence of attached containers were checked;
 Docker confirmed removal of both synthetic volumes. A later verification
 compares retained input, node-result and coordinator-spool bytes with expected
 synthetic bytes before the test fixture is torn down.
+
+The disabled local worker draft uses enrollment journal version 1 with an exact
+`capture_guard` table. Fresh slot commitment creates the bound `ready` marker in
+the same SQLite transaction; capture transitions it to `started` before engine
+download or output writes. An offline status verifies the committed submission,
+node gate, slot identity and capture artifacts: `ready` with no artifacts may
+be reported absent, while `started` without a fully verified seal is held.
+Legacy or partial journal schemas fail closed and are not migrated automatically.
+This assumes cooperative ownership, trusted filesystem and no rollback to an
+older valid database snapshot; it cannot detect privileged tampering or power
+loss beyond the filesystem durability guarantees. No runtime worker loop or
+automatic dispatch is enabled by this API.

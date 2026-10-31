@@ -30,6 +30,7 @@ class EnrollmentHeld(RuntimeError):pass
 
 CONFIG_DDL='CREATE TABLE config (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL)'
 INTENT_DDL='CREATE TABLE intent (singleton INTEGER PRIMARY KEY CHECK(singleton=1), request TEXT NOT NULL, receipt TEXT NOT NULL, claim TEXT, binding TEXT, slot_phase TEXT NOT NULL, slot_identity TEXT)'
+CAPTURE_DDL="CREATE TABLE capture_guard (singleton INTEGER PRIMARY KEY CHECK(singleton=1), binding_sha TEXT NOT NULL, slot_identity TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('ready','started')))"
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -99,7 +100,8 @@ class ViewerNodeEnrollment:
         finally:os.close(rootfd)
         with self._db(bootstrap=True) as db:
             objects=db.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
-            if not objects:db.execute(CONFIG_DDL);db.execute(INTENT_DDL)
+            if not objects:
+                db.execute(CONFIG_DDL);db.execute(INTENT_DDL);db.execute(CAPTURE_DDL);db.execute('PRAGMA user_version=1')
             self._schema(db)
             value=p.canonical_json(self.config).decode();existing=db.execute('SELECT value FROM config WHERE singleton=1').fetchone()
             if existing and existing[0]!=value:raise EnrollmentHeld('enrollment_policy_changed')
@@ -143,10 +145,11 @@ class ViewerNodeEnrollment:
 
     @staticmethod
     def _schema(db):
+        if db.execute('PRAGMA user_version').fetchone()[0]!=1:raise EnrollmentHeld('journal_version_changed')
         query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         memory=sqlite3.connect(':memory:')
         try:
-            memory.execute(CONFIG_DDL);memory.execute(INTENT_DDL)
+            memory.execute(CONFIG_DDL);memory.execute(INTENT_DDL);memory.execute(CAPTURE_DDL)
             if db.execute(query).fetchall()!=memory.execute(query).fetchall():raise EnrollmentHeld('journal_schema_changed')
         finally:memory.close()
 
@@ -294,7 +297,12 @@ class ViewerNodeEnrollment:
                     current=db.execute('SELECT slot_phase,slot_identity FROM intent WHERE singleton=1').fetchone()
                     if current==('creating',None):
                         db.execute("UPDATE intent SET slot_phase='committed',slot_identity=? WHERE singleton=1",(actual,))
+                        db.execute("INSERT INTO capture_guard VALUES(1,?,?,'ready')",(digest,actual))
                     elif current!=('committed',actual):raise EnrollmentHeld('slot_identity_changed')
+                    else:
+                        guard=db.execute('SELECT binding_sha,slot_identity,phase FROM capture_guard WHERE singleton=1').fetchone()
+                        if not guard or guard[0]!=digest or guard[1]!=actual or guard[2] not in ('ready','started'):
+                            raise EnrollmentHeld('capture_guard_invalid')
                 slot._check();self._check_gate(gate)
                 attestation=dict(binding=binding,slotIdentity=json.loads(actual))
                 ack=self._request(attestation,job_id=job_id,claim_token=claim['claimToken'])
