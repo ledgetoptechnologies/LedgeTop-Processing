@@ -414,7 +414,7 @@ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 
 
 class ReferenceCoordinatorUpdate:
-    def __init__(self,root,*,gate_factory,transport=legacy,cluster_probe=None,predecessor=None,lease_dir=None):
+    def __init__(self,root,*,gate_factory,transport=legacy,cluster_probe=None,predecessor=None,lease_dir=None,cluster_binding=None):
         if predecessor is None:predecessor=(OLD_ID,OLD_IMAGE,OLD_SOURCE)
         if (not isinstance(predecessor,tuple) or len(predecessor)!=3 or
                 not isinstance(predecessor[0],str) or not re.fullmatch(r'[a-f0-9]{64}',predecessor[0]) or
@@ -423,6 +423,13 @@ class ReferenceCoordinatorUpdate:
             raise Stopped('exact_predecessor_identity_required')
         self.old_id,self.old_image,self.old_source=predecessor
         self.lease_dir=lease_dir
+        if cluster_binding is not None:
+            if (not isinstance(cluster_binding,tuple) or len(cluster_binding)!=3
+                    or not re.fullmatch(r'[a-f0-9]{64}',cluster_binding[0])
+                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',cluster_binding[1])
+                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',cluster_binding[2])):
+                raise Stopped('exact_cluster_binding_required')
+        self.cluster_binding=cluster_binding
         self.root=Path(root).absolute();self.t=transport;self.gate_factory=gate_factory
         self.cluster_probe=cluster_probe or self.cluster_idle
         if self.root.resolve()!=self.root or any(path.is_symlink() for path in (self.root,*self.root.parents)):
@@ -445,7 +452,8 @@ class ReferenceCoordinatorUpdate:
             raise Stopped('lease_binding_changed')
         if (state.get('schemaVersion')!=2 or state.get('mode')!=MODE or state.get('authorityId')!=AUTHORITY
                 or state.get('old',{}).get('containerId')!=self.old_id or state['old'].get('image')!=self.old_image
-                or state.get('gateBinding')!=self.gate_factory.binding):raise Stopped('reference_update_checkpoint_binding_changed')
+                or state.get('gateBinding')!=self.gate_factory.binding
+                or (self.cluster_binding is not None and state.get('clusterBinding')!=list(self.cluster_binding))):raise Stopped('reference_update_checkpoint_binding_changed')
         if (type(state.get('image')) is not str or not re.fullmatch(r'sha256:[a-f0-9]{64}',state['image'])
                 or type(state.get('sourceCommit')) is not str or not re.fullmatch(r'[a-f0-9]{40}',state['sourceCommit'])
                 or state.get('oldSourceCommit')!=self.old_source or type(state.get('operation')) is not str
@@ -480,12 +488,13 @@ class ReferenceCoordinatorUpdate:
     def cluster_idle(self,state):
         """Fixed existing private backend: no token/command arguments in proof."""
         from processing.container_update import ComposeNode
-        item=self.t.inspected('node-odx-gpu')
+        binding=self.cluster_binding or (state['clusterContainerId'],'node-odx-gpu','ledgetop-cluster-node-private')
+        item=self.t.inspected(binding[0]) if self.cluster_binding is not None else self.t.inspected('node-odx-gpu')
         labels=item['Config'].get('Labels') or {}
         bindings=item.get('NetworkSettings',{}).get('Ports',{}).get('3000/tcp')
-        if (item['Id']!=state['clusterContainerId'] or item['Name']!='/node-odx-gpu'
+        if (item['Id']!=state['clusterContainerId'] or item['Name']!='/'+binding[1]
                 or item['Image']!=state['engineImages']['cluster'] or item['State']['Running'] is not True
-                or labels.get('com.docker.compose.project')!='ledgetop-cluster-node-private'
+                or labels.get('com.docker.compose.project')!=binding[2]
                 or labels.get('com.docker.compose.service')!='nodeodm'
                 or bindings!=[{'HostIp':'127.0.0.1','HostPort':'13001'}]):raise Stopped('fixed_cluster_backend_changed')
         token=self.t.environment().get('LOCAL_NODE_TOKEN')
@@ -503,6 +512,14 @@ class ReferenceCoordinatorUpdate:
         inspector.docker=docker
         if not inspector.uploads_idle(item['Id']) or not inspector.processing_idle(item['Id']):
             raise Stopped('cluster_upload_or_child_process_not_idle')
+        current=self.t.inspected(binding[0] if self.cluster_binding is not None else 'node-odx-gpu')
+        current_labels=current['Config'].get('Labels') or {}
+        if (current['Id']!=item['Id'] or current['Name']!=item['Name'] or current['Image']!=item['Image']
+                or current['State']['Running'] is not True
+                or current_labels.get('com.docker.compose.project')!=binding[2]
+                or current_labels.get('com.docker.compose.service')!='nodeodm'
+                or current.get('NetworkSettings',{}).get('Ports',{}).get('3000/tcp')!=bindings):
+            raise Stopped('cluster_backend_identity_changed')
 
     def original(self,state=None):
         item=self.t.inspected(NAME)
@@ -531,8 +548,8 @@ class ReferenceCoordinatorUpdate:
         if history['count']!=12:raise Stopped('reviewed_twelve_terminal_jobs_required')
         nodes={row['id']:row for row in api.json('GET','/v1/prototype/nodes')['nodes']}
         if set(nodes)!={'main','cluster'} or any(row['state']!='active' for row in nodes.values()):raise Stopped('other_maintenance_present')
-        cluster=self.t.inspected('node-odx-gpu')
-        if (not cluster['State']['Running'] or not re.fullmatch(r'[a-f0-9]{64}',cluster['Id'])
+        cluster=self.t.inspected(self.cluster_binding[0] if self.cluster_binding else 'node-odx-gpu')
+        if (not cluster['State']['Running'] or (self.cluster_binding is not None and cluster['Id']!=self.cluster_binding[0]) or not re.fullmatch(r'[a-f0-9]{64}',cluster['Id'])
                 or not re.fullmatch(r'sha256:[0-9a-f]{64}',main_image)):raise Stopped('verified_processing_images_required')
         operation=uuid.uuid4().hex
         state=dict(schemaVersion=2,mode=MODE,operation=operation,phase='preparing',image=target,sourceCommit=source_commit,
@@ -541,6 +558,7 @@ class ReferenceCoordinatorUpdate:
             engineImages=dict(main=main_image,cluster=cluster['Image']),clusterContainerId=cluster['Id'],
             rollbackName=NAME+'-pre-reference-update-'+operation,failedName=NAME+'-failed-reference-update-'+operation)
         if self.lease_dir is not None:state['leaseBinding']=lease_binding(self.lease_dir)
+        if self.cluster_binding is not None:state['clusterBinding']=list(self.cluster_binding)
         self.validate(state)
         self.cluster_probe(state)
         for name in (state['rollbackName'],state['failedName']):
@@ -824,6 +842,7 @@ def main(argv=None):
     parser.add_argument('--predecessor-source',required=True)
     parser.add_argument('--lease-dir',required=True,help='existing private host authority lease directory')
     parser.add_argument('--receipt-dir',required=True);parser.add_argument('--verified-main-image',required=True)
+    parser.add_argument('--cluster-id',required=True);parser.add_argument('--cluster-name',required=True);parser.add_argument('--cluster-project',required=True)
     parser.add_argument('--gate-config',required=True,help='private reviewed live dual-host gate bridge configuration')
     args=parser.parse_args(argv)
     try:
@@ -847,7 +866,8 @@ def main(argv=None):
             state=None if args.action=='prepare' else json.loads(legacy.private_file(root/'checkpoint.json').read_text())
             factory=GateFactory(json.loads(legacy.private_file(args.gate_config).read_text()),operation_id=state['operation'] if state else None)
             updater=ReferenceCoordinatorUpdate(root,gate_factory=factory,
-                predecessor=(args.predecessor_id,args.predecessor_image,args.predecessor_source),lease_dir=args.lease_dir)
+                predecessor=(args.predecessor_id,args.predecessor_image,args.predecessor_source),lease_dir=args.lease_dir,
+                cluster_binding=(args.cluster_id,args.cluster_name,args.cluster_project))
             if args.action=='prepare':state=updater.prepare(args.image,args.source_commit,args.verified_main_image)
             else:
                 if not ACTIVATION_REVIEWED:raise Stopped('source_review_required_before_activation')

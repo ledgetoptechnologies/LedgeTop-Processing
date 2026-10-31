@@ -31,7 +31,8 @@ def specification(**changes):
         main_image='sha256:' + 'd' * 64, operation_id='e' * 32,
         receipt_dir=controller.BASE + '/test-update/receipt',
         gate_config=controller.BASE + '/test-update/bridge.json',predecessor_id='1'*64,
-        predecessor_image='sha256:'+'2'*64,predecessor_source='3'*40,lease_dir=controller.BASE+'/test-update/lease')
+        predecessor_image='sha256:'+'2'*64,predecessor_source='3'*40,lease_dir=controller.BASE+'/test-update/lease',
+        cluster_id='4'*64,cluster_name='candidate',cluster_project='migration')
     values.update(changes)
     return controller.RunSpec(**values)
 

@@ -96,6 +96,9 @@ class RunSpec:
     predecessor_image: str
     predecessor_source: str
     lease_dir: str
+    cluster_id: str
+    cluster_name: str
+    cluster_project: str
 
     def __post_init__(self):
         if self.action not in ('activate', 'rollback'):
@@ -106,6 +109,8 @@ class RunSpec:
         if type(self.predecessor_id) is not str or not re.fullmatch(r'[a-f0-9]{64}',self.predecessor_id):
             raise BridgeError('exact_predecessor_container_required')
         _image(self.predecessor_image); _commit(self.predecessor_source)
+        if not re.fullmatch(r'[a-f0-9]{64}',self.cluster_id) or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',v) for v in (self.cluster_name,self.cluster_project)):
+            raise BridgeError('exact_cluster_binding_required')
         _private_remote_path(self.lease_dir)
         if type(self.operation_id) is not str or not re.fullmatch(r'[a-f0-9]{32}', self.operation_id):
             raise BridgeError('prepared_update_operation_required')
@@ -194,7 +199,7 @@ def ssh_argv(node, spec, config):
             '--receipt-dir', spec.receipt_dir, '--verified-main-image', spec.main_image,
             '--gate-config', spec.gate_config, '--predecessor-id',spec.predecessor_id,
             '--predecessor-image',spec.predecessor_image,'--predecessor-source',spec.predecessor_source,
-            '--lease-dir',spec.lease_dir]
+            '--lease-dir',spec.lease_dir,'--cluster-id',spec.cluster_id,'--cluster-name',spec.cluster_name,'--cluster-project',spec.cluster_project]
     command = shlex.join(['python3', '-I', '-B', '-c', BOOTSTRAP,
         json.dumps(payload, sort_keys=True, separators=(',', ':'), allow_nan=False)])
     return [str(SSH), *OPTIONS, HOSTS[node], command]
@@ -259,7 +264,7 @@ def main(argv=None):
     parser.add_argument('action', choices=('activate', 'rollback'))
     for flag in ('source-commit', 'bundle-commit', 'bundle-manifest-sha256', 'image', 'main-image', 'operation-id', 'receipt-dir',
                  'gate-config', 'local-gate-config', 'evidence-dir', 'predecessor-id', 'predecessor-image',
-                 'predecessor-source', 'lease-dir'):
+                 'predecessor-source', 'lease-dir', 'cluster-id', 'cluster-name', 'cluster-project'):
         parser.add_argument('--' + flag, required=True)
     args = parser.parse_args(argv)
     try:
@@ -271,7 +276,7 @@ def main(argv=None):
         config = json.loads(config_path.read_text(encoding='utf-8'))
         spec = RunSpec(args.action, args.source_commit, args.bundle_commit, args.bundle_manifest_sha256, args.image, args.main_image,
             args.operation_id, args.receipt_dir, args.gate_config, args.predecessor_id,
-            args.predecessor_image,args.predecessor_source,args.lease_dir)
+            args.predecessor_image,args.predecessor_source,args.lease_dir,args.cluster_id,args.cluster_name,args.cluster_project)
         from ops.make_cutover_manifest import manifest_for_commit
         if hashlib.sha256(manifest_for_commit(spec.bundle_commit)).hexdigest()!=spec.bundle_manifest_sha256:
             raise BridgeError('bundle_manifest_commit_mismatch')

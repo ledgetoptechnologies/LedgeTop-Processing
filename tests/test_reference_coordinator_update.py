@@ -677,6 +677,39 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         config['main']['helperSha256']='b'*64
         with self.assertRaises(module.Stopped):module.GateFactory(config,operation_id=self.state['operation'])
 
+    def test_migrated_cluster_exact_binding_and_checkpoint(self):
+        binding=('f'*64,'migration-candidate','migration-project')
+        self.updater.cluster_binding=binding
+        self.state['clusterBinding']=list(binding)
+        self.updater.validate(self.state)
+        bad=dict(self.state,clusterBinding=['f'*64,'other','migration-project'])
+        with self.assertRaises(module.Stopped):self.updater.validate(bad)
+        container=dict(Id='f'*64,Name='/migration-candidate',Image=self.state['engineImages']['cluster'],State={'Running':True},
+            Config={'Labels':{'com.docker.compose.project':'migration-project','com.docker.compose.service':'nodeodm'}},
+            NetworkSettings={'Ports':{'3000/tcp':[{'HostIp':'127.0.0.1','HostPort':'13001'}]}})
+        from processing.container_update import ComposeNode
+        with patch.object(self.transport,'environment',return_value={'LOCAL_NODE_TOKEN':'test'}), \
+                patch.object(self.transport,'inspected',return_value=container) as inspect, \
+                patch.object(module,'cluster_http_json',side_effect=[{'engine':'odm','taskQueueCount':0},[]]), \
+                patch.object(ComposeNode,'uploads_idle',return_value=True),patch.object(ComposeNode,'processing_idle',return_value=True):
+            self.updater.cluster_idle(self.state)
+            self.assertEqual([v.args for v in inspect.call_args_list],[('f'*64,),('f'*64,)])
+        import copy
+        changed=copy.deepcopy(container);changed['NetworkSettings']['Ports']['3000/tcp'][0]['HostPort']='9999'
+        with patch.object(self.transport,'environment',return_value={'LOCAL_NODE_TOKEN':'test'}), \
+                patch.object(self.transport,'inspected',side_effect=[container,changed]), \
+                patch.object(module,'cluster_http_json',side_effect=[{'engine':'odm','taskQueueCount':0},[]]), \
+                patch.object(ComposeNode,'uploads_idle',return_value=True),patch.object(ComposeNode,'processing_idle',return_value=True):
+            with self.assertRaises(module.Stopped):self.updater.cluster_idle(self.state)
+        for field in ('id','name','project'):
+            import copy
+            bad=copy.deepcopy(container)
+            if field=='id':bad['Id']='e'*64
+            elif field=='name':bad['Name']='/wrong'
+            else:bad['Config']['Labels']['com.docker.compose.project']='wrong'
+            with patch.object(self.transport,'inspected',return_value=bad):
+                with self.assertRaises(module.Stopped):self.updater.cluster_idle(self.state)
+
     def test_cluster_probe_actual_node_http_and_fixed_upload_process_census(self):
         from ops.native_node_fixture import NativeNodeFixture
         fixture=NativeNodeFixture(self.root/'native-fixture.sqlite',synthetic_enabled=True)
