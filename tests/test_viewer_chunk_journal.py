@@ -138,3 +138,32 @@ with patch.object(m,'_persist',persist),patch.object(OutputSlot,'write_at',write
                     else:
                         with self.assertRaises(ChunkHeld):j.write(0,0,b'abcd')
                 finally:slot.close()
+    def test_header_reopens_without_enumerating_4096_records(self):
+        import resource
+        from processing.viewer_chunk_journal import MAX_CHUNKS
+        other='b'*64;data=b'x'*MAX_CHUNKS
+        binding=dict(self.binding,archiveBytes=len(data),archiveSha256=hashlib.sha256(data).hexdigest())
+        slot=open_slot(self.root,self.identity,other,len(data),max_budget=len(data),create=True)
+        try:
+            journal=SyntheticChunkJournal(slot,binding,legacy_state='new',synthetic_fixture=True)
+            with patch('processing.viewer_chunk_journal.os.listdir',side_effect=AssertionError('quadratic scan')):
+                for i in range(MAX_CHUNKS):
+                    journal=SyntheticChunkJournal(slot,binding,legacy_state='new',synthetic_fixture=True)
+                    journal.write(i,i,b'x')
+                self.assertEqual(journal.finish(MAX_CHUNKS)['sha256'],binding['archiveSha256'])
+            print('synthetic chunks=%d journal_entries=%d rss_kib=%d'%(MAX_CHUNKS,MAX_CHUNKS*2+2,resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),flush=True)
+        finally:slot.close()
+
+    def test_missing_header_with_existing_marker_still_holds(self):
+        key='b'*64;slot=open_slot(self.root,self.identity,key,65536,max_budget=65536,create=True)
+        try:
+            (self.root/('slot-'+key+'.alloc.chunks-v1.partial')).write_bytes(b'uncertain')
+            with self.assertRaisesRegex(ChunkHeld,'journal_requires_inspection'):
+                SyntheticChunkJournal(slot,self.binding,legacy_state='new',synthetic_fixture=True)
+        finally:slot.close()
+    def test_existing_modified_header_does_not_trigger_scan_or_repair(self):
+        path=self.root/('slot-'+self.key+'.alloc.chunks-v1.header')
+        original=path.read_bytes();path.write_bytes(b'{}')
+        with patch('processing.viewer_chunk_journal.os.listdir',side_effect=AssertionError('unexpected scan')):
+            with self.assertRaises(Exception):self.open()
+        self.assertEqual(path.read_bytes(),b'{}');self.assertNotEqual(original,b'{}')

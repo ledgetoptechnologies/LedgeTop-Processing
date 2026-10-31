@@ -37,9 +37,12 @@ class SyntheticChunkJournal:
         self.header=self.prefix+'header';self.seal=self.prefix+'seal'
         self.expected=dict(schemaVersion=1,binding=self.binding,root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
         slot._check()
-        names=[n for n in os.listdir(slot._root) if n.startswith(self.prefix)]
         if not _exists(slot._root,self.header):
-            if names:raise ChunkHeld('journal_requires_inspection')
+            # Only absence of the header needs a full ambiguity scan. Once it
+            # exists, exact header verification below is sufficient; scanning
+            # thousands of prior records on every reopen was quadratic.
+            if any(n.startswith(self.prefix) for n in os.listdir(slot._root)):
+                raise ChunkHeld('journal_requires_inspection')
             _persist(slot._root,slot._root_identity,self.header,self.expected)
         self._verify(self.header,self.expected)
 
