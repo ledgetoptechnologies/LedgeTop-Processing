@@ -10,6 +10,7 @@ from unittest.mock import patch
 from ops.reference_worker_daemon import DaemonStateLock
 from processing.direct_output_slot import _identity
 from processing.viewer_node_inputs import InputHeld, ViewerNodeInputs
+from processing.viewer_node_enrollment import EnrollmentHeld, ViewerNodeEnrollment
 from tests.test_viewer_node_enrollment import NodeEnrollmentTests
 from processing.viewer_worker_claim import _InputStream
 
@@ -80,6 +81,39 @@ class NodeInputsTests(unittest.TestCase):
                 inputs.freeze_inventory()
             with inputs._db() as db:
                 self.assertIsNone(db.execute('SELECT phase FROM manifest').fetchone())
+
+    def test_lost_ack_replays_exact_enrollment_after_commit(self):
+        original=ViewerNodeEnrollment._request
+        def lose_response(worker,request,**kwargs):
+            result=original(worker,request,**kwargs)
+            if kwargs.get('job_id') is not None:raise EnrollmentHeld('synthetic_response_lost')
+            return result
+        with DaemonStateLock(self.base.worker) as owner:
+            with patch.object(ViewerNodeEnrollment,'_request',lose_response):
+                with self.assertRaisesRegex(EnrollmentHeld,'synthetic_response_lost'):self.make(owner)
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner)
+            self.assertEqual(inputs.freeze_inventory()['count'],1)
+
+    def test_process_exit_after_ack_commit_replays(self):
+        code='''import json,os,signal,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+worker_root,config,job=sys.argv[1:]
+original=ViewerNodeEnrollment._request
+def request(self,payload,**kwargs):
+ result=original(self,payload,**kwargs)
+ if kwargs.get('job_id') is not None:os.kill(os.getpid(),signal.SIGKILL)
+ return result
+ViewerNodeEnrollment._request=request
+with DaemonStateLock(worker_root) as owner:
+ ViewerNodeEnrollment(owner,**json.loads(config)).enroll(job,'enroll-1','production')
+'''
+        result=subprocess.run([sys.executable,'-c',code,str(self.base.worker),json.dumps(self.base.config),self.base.fixture.job],
+                              stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+        self.assertEqual(result.returncode,-9)
+        with DaemonStateLock(self.base.worker) as owner:
+            self.assertEqual(self.make(owner).freeze_inventory()['count'],1)
 
     def test_killed_midwrite_holds_persistent_state_after_restart(self):
         ready=self.root/'input-write-ready'

@@ -21,6 +21,7 @@ from .maintenance import Conflict
 from .viewer_tasks import PHOTO_SUFFIXES, VIEWER_PROFILE, canonical
 from .reference_binary import BinaryResponse
 from .direct_output_slot import _identity
+from .direct_outbox_contract import validate_binding
 from pathlib import Path
 
 
@@ -37,6 +38,8 @@ FILES_DDL = '''CREATE TABLE viewer_worker_inventory (
  source_name TEXT NOT NULL, source_device INTEGER NOT NULL, source_inode INTEGER NOT NULL,
  source_mtime INTEGER NOT NULL, source_ctime INTEGER NOT NULL, source_mount INTEGER NOT NULL,
  PRIMARY KEY(job_id,ordinal), UNIQUE(job_id,object_id))'''
+ENROLL_DDL = '''CREATE TABLE viewer_worker_enrollments (
+ job_id TEXT PRIMARY KEY, attestation TEXT NOT NULL, receipt TEXT NOT NULL)'''
 PAGE_SIZE=100
 MAX_INPUT_READERS=2
 
@@ -86,16 +89,16 @@ class ViewerWorkerClaims:
         self.node_environments=MappingProxyType({node:frozenset(values) for node,values in node_environments.items()})
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory')").fetchall()
-            if not objects:db.execute(DDL);db.execute(FILES_DDL)
+            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments')").fetchall()
+            if not objects:db.execute(DDL);db.execute(FILES_DDL);db.execute(ENROLL_DDL)
             self._schema(db)
 
     @staticmethod
     def _schema(db):
-        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory') ORDER BY type,name"
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments') ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
-            expected.execute(DDL);expected.execute(FILES_DDL)
+            expected.execute(DDL);expected.execute(FILES_DDL);expected.execute(ENROLL_DDL)
             if [tuple(row) for row in db.execute(query)] != [tuple(row) for row in expected.execute(query)]:
                 raise Conflict('Viewer claim schema changed')
         finally:expected.close()
@@ -203,7 +206,7 @@ class ViewerWorkerClaims:
                 (identity['node_id'],engine_uuid,token,task['uuid']))
             return {**value,'claimRequestId':payload['claimRequestId'],'claimToken':token}
 
-    def _authorize_inventory(self,db,job_id,identity,claim_token):
+    def _authorize_inventory(self,db,job_id,identity,claim_token,*,require_enrollment=True):
         if type(claim_token) is not str or not claim_token.isascii() or not 1<=len(claim_token)<=128:
             raise Conflict('Viewer claim token required')
         self._schema(db)
@@ -228,7 +231,32 @@ class ViewerWorkerClaims:
             or task['claim_token']!=row['token'] or job['node_id']!=row['node_id'] or job['worker_id']!=row['worker_id']):
             raise Conflict('Viewer inventory ownership changed')
         p._hash(saved['inputInventorySha256'],'input inventory digest')
+        if require_enrollment:
+            receipt=db.execute('SELECT attestation,receipt FROM viewer_worker_enrollments WHERE job_id=?',(job_id,)).fetchone()
+            if not receipt or not hmac.compare_digest(receipt['receipt'],p.digest(json.loads(receipt['attestation']))):
+                raise Conflict('Viewer node enrollment unavailable')
         return saved,task
+
+    def enroll(self,job_id,payload,identity,claim_token):
+        p._uuid(job_id,'job ID');p._closed(payload,('binding','slotIdentity'),'node enrollment')
+        binding=payload['binding'];validate_binding(binding)
+        p._closed(payload['slotIdentity'],('root','allocation','metadata'),'output slot identity')
+        for key in ('root','allocation','metadata'):
+            value=payload['slotIdentity'][key]
+            if type(value) is not list or len(value)!=3 or any(type(v) is not int or v<0 for v in value):
+                raise Conflict('node slot identity invalid')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');saved,_=self._authorize_inventory(db,job_id,identity,claim_token,require_enrollment=False)
+            if any(binding[a]!=saved[b] for a,b in (('authorityId','authorityId'),('nodeId','nodeId'),('workerId','workerId'),
+                    ('environment','environment'),('viewerTaskId','viewerTaskId'),('viewerGeneration','viewerGeneration'),
+                    ('jobId','jobId'),('engineTaskId','engineTaskId'),('inputSetSha256','inputInventorySha256'),('pipelineSha256','pipelineSha256'))):
+                raise Conflict('node enrollment claim mismatch')
+            text=p.canonical_json(payload).decode();receipt=p.digest(payload)
+            old=db.execute('SELECT attestation,receipt FROM viewer_worker_enrollments WHERE job_id=?',(job_id,)).fetchone()
+            if old:
+                if (old['attestation'],old['receipt'])!=(text,receipt):raise Conflict('node enrollment changed')
+            else:db.execute('INSERT INTO viewer_worker_enrollments VALUES(?,?,?)',(job_id,text,receipt))
+            return dict(jobId=job_id,enrollmentReceipt=receipt,state='enrolled_no_dispatch')
 
     def inventory_page(self,job_id,cursor,identity,claim_token):
         """Bounded metadata page; does not serve or verify any input bytes."""

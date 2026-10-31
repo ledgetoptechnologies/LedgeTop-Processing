@@ -150,10 +150,12 @@ class ViewerNodeEnrollment:
             if db.execute(query).fetchall()!=memory.execute(query).fetchall():raise EnrollmentHeld('journal_schema_changed')
         finally:memory.close()
 
-    def _request(self,request):
+    def _request(self,request,*,job_id=None,claim_token=None):
         url=self.config['origin']+'/ltds/worker/v1/viewer-claims'
-        query=Request(url,data=p.canonical_json(request),method='POST',headers={'Authorization':'Bearer '+self._bearer,
-            'Accept':'application/json','Content-Type':'application/json','Accept-Encoding':'identity'})
+        headers={'Authorization':'Bearer '+self._bearer,'Accept':'application/json','Content-Type':'application/json','Accept-Encoding':'identity'}
+        if job_id is not None:
+            p._uuid(job_id,'job ID');url+='/'+job_id+'/enrollment';headers['X-Claim-Token']=claim_token
+        query=Request(url,data=p.canonical_json(request),method='POST',headers=headers)
         watchdog=_TransferWatchdog(30)
         try:
             opener=build_opener(ProxyHandler({}),_NoRedirect(),_DeadlineHTTPSHandler(watchdog,context=self._ssl_context)).open
@@ -292,5 +294,12 @@ class ViewerNodeEnrollment:
                         db.execute("UPDATE intent SET slot_phase='committed',slot_identity=? WHERE singleton=1",(actual,))
                     elif current!=('committed',actual):raise EnrollmentHeld('slot_identity_changed')
                 slot._check();self._check_gate(gate)
+                attestation=dict(binding=binding,slotIdentity=json.loads(actual))
+                ack=self._request(attestation,job_id=job_id,claim_token=claim['claimToken'])
+                if ack!=dict(jobId=job_id,enrollmentReceipt=p.digest(attestation),state='enrolled_no_dispatch'):
+                    raise EnrollmentHeld('enrollment_ack_changed')
+                slot._check()
+                if self._check_gate(gate)['reservation']!=state['reservation']:
+                    raise EnrollmentHeld('gate_binding_changed')
                 return dict(state='enrolled_no_dispatch',bindingSha256=digest)
             finally:slot.close()

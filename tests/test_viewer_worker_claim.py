@@ -105,6 +105,21 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         except HTTPError as error:
             with error:return error.code,error.read()
 
+    def attest(self,claim,*,token=TOKEN_A,budget=1000):
+        binding=dict(schemaVersion=1,authorityId=claim['authorityId'],coordinatorOrigin='https://127.0.0.1',
+            gateGeneration=1,gateReservationId='a'*32,nodeId=claim['nodeId'],workerId=claim['workerId'],engineId='engine-a',
+            environment=claim['environment'],viewerTaskId=claim['viewerTaskId'],viewerGeneration=claim['viewerGeneration'],
+            jobId=claim['jobId'],engineTaskId=claim['engineTaskId'],inputSetSha256=claim['inputInventorySha256'],
+            pipelineSha256=claim['pipelineSha256'],outputBudgetBytes=budget)
+        data=protocol.canonical_json(dict(binding=binding,slotIdentity=dict(root=[1,2,3],allocation=[1,4,3],metadata=[1,5,3])))
+        request=Request(self.origin+ROUTE+'/'+claim['jobId']+'/enrollment',data=data,method='POST',
+            headers={'Authorization':'Bearer '+token,'X-Claim-Token':claim['claimToken'],'Content-Type':'application/json'})
+        try:
+            with build_opener(ProxyHandler({}),HTTPSHandler(context=self.client)).open(request,timeout=3) as response:
+                return response.status,json.load(response)
+        except HTTPError as error:
+            with error:return error.code,json.load(error)
+
     def test_authenticated_claim_replay_after_restart_and_no_legacy_dispatch(self):
         status,claim=self.request();self.assertEqual(status,200)
         self.assertEqual(claim['state'],'claimed_unenrolled')
@@ -126,6 +141,7 @@ class ViewerWorkerClaimTests(unittest.TestCase):
 
     def test_inventory_requires_exact_principal_and_claim_token(self):
         status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(self.attest(claim)[0],200)
         code,page=self.inventory(0,claim['claimToken']);self.assertEqual(code,200)
         self.assertEqual(page['inputInventorySha256'],claim['inputInventorySha256'])
         self.assertEqual(page['viewerGeneration'],claim['viewerGeneration'])
@@ -139,8 +155,19 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         self.assertEqual(self.inventory(0,'wrong')[0],409)
         self.assertEqual(self.inventory(1,claim['claimToken'])[0],409)
 
+    def test_enrollment_is_required_and_idempotent_for_exact_principal(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(self.inventory(0,claim['claimToken'])[0],409)
+        self.assertEqual(self.input_object('f'*64,claim['claimToken'])[0],409)
+        self.assertEqual(self.attest(claim,token=TOKEN_B)[0],409)
+        receipt=self.attest(claim);self.assertEqual(receipt[0],200)
+        self.assertEqual(self.attest(claim),receipt)
+        self.assertEqual(self.attest(claim,budget=1001)[0],409)
+        self.assertEqual(self.inventory(0,claim['claimToken'])[0],200)
+
     def test_inventory_replay_after_restart_and_frozen_metadata(self):
         status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(self.attest(claim)[0],200)
         initial=self.inventory(0,claim['claimToken']);self.assertEqual(initial[0],200)
         with self.queue._db() as db:
             db.execute("UPDATE viewer_files SET sha256=? WHERE uuid=?",('b'*64,TASK))
@@ -165,6 +192,7 @@ class ViewerWorkerClaimTests(unittest.TestCase):
 
     def test_claim_bound_source_stream_is_principal_and_object_scoped(self):
         status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(self.attest(claim)[0],200)
         page=self.inventory(0,claim['claimToken'])[1];object_id=page['entries'][0]['objectId']
         self.assertEqual(self.input_object(object_id,claim['claimToken']),(200,b'synthetic'))
         self.assertEqual(self.input_object(object_id,claim['claimToken'],token='z'*32)[0],401)
@@ -174,12 +202,14 @@ class ViewerWorkerClaimTests(unittest.TestCase):
 
     def test_source_mutation_after_claim_refuses_stream(self):
         status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(self.attest(claim)[0],200)
         object_id=self.inventory(0,claim['claimToken'])[1]['entries'][0]['objectId']
         path=Path(self.store.task(TASK)['files'][0]['path']);path.write_bytes(b'different')
         self.assertEqual(self.input_object(object_id,claim['claimToken'])[0],409)
 
     def test_source_stream_permits_are_bounded_and_released(self):
         status,claim=self.request();self.assertEqual(status,200)
+        self.assertEqual(self.attest(claim)[0],200)
         object_id=self.inventory(0,claim['claimToken'])[1]['entries'][0]['objectId']
         identity=dict(node_id='cluster',worker_id='worker-a',worker_instance_id='instance-a')
         one=self.claims.input_object(self.job,object_id,identity,claim['claimToken'])
@@ -207,6 +237,7 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         with self.queue._db() as db:
             db.executemany('INSERT INTO viewer_files(uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)',values)
         status,claim=self.request(token=TOKEN_MAIN);self.assertEqual(status,200)
+        self.assertEqual(self.attest(claim,token=TOKEN_MAIN)[0],200)
         digest=hashlib.sha256();digest.update(b'[');first=True;count=0;cursor=0
         while cursor is not None:
             code,page=self.inventory(cursor,claim['claimToken'],token=TOKEN_MAIN);self.assertEqual(code,200)
