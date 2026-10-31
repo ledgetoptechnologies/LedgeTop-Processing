@@ -40,7 +40,7 @@ class SyntheticScalePolicyTests(unittest.TestCase):
   self.assertEqual(len(list(fixture.base.inputs.rglob('*.alloc'))),66)
   print('synthetic_objects=66 elapsed_seconds=%.2f'%(time.monotonic()-start),flush=True)
  @unittest.skipUnless(os.environ.get('OWNED_SCALE_PROBE_ID'),'explicit isolated scale run only')
- def test_10000_tiny_synthetic_objects_through_supervisor(self):
+ def test_large_tiny_synthetic_photos_through_main(self):
   import re,resource,stat
   from pathlib import Path
   root=Path('/work');info=root.lstat();token=os.environ['OWNED_SCALE_PROBE_ID'];marker=root/'owned-scale-marker'
@@ -50,13 +50,24 @@ class SyntheticScalePolicyTests(unittest.TestCase):
    raise RuntimeError('isolated owned work mount and network-none required')
   memory=Path('/sys/fs/cgroup/memory.max').read_text().strip();cpu=Path('/sys/fs/cgroup/cpu.max').read_text().split()
   if memory=='max' or int(memory)>768*1024*1024 or len(cpu)!=2 or cpu[0]=='max' or int(cpu[0])*2>int(cpu[1]):raise RuntimeError('resource limits required')
+  count=int(os.environ.get('OWNED_SCALE_PROBE_COUNT','10000'))
+  if count not in (1001,10000):raise RuntimeError('unapproved synthetic object count')
   original=TaskStore.commit;start=time.monotonic()
   def populate(store,identifier,*args,**kwargs):
-   for index in range(9999):
-    ext='jpg' if index<999 else 'txt';store.upload(identifier,f'synthetic-{index:05}.{ext}',io.BytesIO(b'x'),1,'production')
+   for index in range(count-1):
+    store.upload(identifier,f'synthetic-{index:05}.jpg',io.BytesIO(b'x'),1,'production')
    return original(store,identifier,*args,**kwargs)
+  from processing.node_gate import NodeGate
+  from tests.test_viewer_node_enrollment import NodeEnrollmentTests
+  original_setup=NodeEnrollmentTests.setUp
+  def main_node_setup(node):
+   original_setup(node)
+   with NodeGate('synthetic-main-engine') as gate:
+    gate.provision('main','http://127.0.0.1:18080',node.authority);gate_identity=_identity(gate._stream.fileno())
+   node.config.update(node_id='main',worker_id='worker-main',instance_id='instance-main',bearer='m'*32,
+                      engine_id='synthetic-main-engine',gate_lock_identity=gate_identity)
   fixture=SyntheticSubmissionTests('test_exact_submission_once_and_replay_without_cleanup');self.addCleanup(fixture.doCleanups)
-  with patch.object(TaskStore,'commit',populate):fixture.setUp()
+  with patch.object(TaskStore,'commit',populate),patch.object(NodeEnrollmentTests,'setUp',main_node_setup):fixture.setUp()
   coordinator=fixture.base.base.fixture;spool_root=coordinator.root/'scale-spool';spool_root.mkdir(mode=0o700)
   fd=os.open(spool_root,os.O_RDONLY|os.O_DIRECTORY)
   try:identity=_identity(fd)
@@ -70,13 +81,13 @@ class SyntheticScalePolicyTests(unittest.TestCase):
    self.assertEqual(result['kind'],'viewer-completion-attestation-receipt')
    with worker._db() as db:
     import json
-    claim=json.loads(db.execute('SELECT claim FROM intent').fetchone()[0]);self.assertEqual((claim['objectCount'],claim['imageCount'],claim['inputBytes']),(10000,1000,10008))
+    claim=json.loads(db.execute('SELECT claim FROM intent').fetchone()[0]);self.assertEqual((claim['objectCount'],claim['imageCount'],claim['inputBytes'],claim['nodeId']),(count,count,count+8,'main'))
   elapsed=time.monotonic()-started
-  self.assertEqual(len([call for call in fixture.calls if call[0]=='upload']),10000)
-  self.assertEqual(len(list(fixture.base.inputs.rglob('*.alloc'))),10000)
+  self.assertEqual(len([call for call in fixture.calls if call[0]=='upload']),count)
+  self.assertEqual(len(list(fixture.base.inputs.rglob('*.alloc'))),count)
   journal=fixture.base.base.worker/'viewer-inputs.sqlite';journal_bytes=journal.stat().st_size
   self.assertLess(journal_bytes,64*1024*1024)
-  print('synthetic_scale_result objects=10000 photos=1000 bytes=10008 setup_seconds=%.2f run_seconds=%.2f journal_bytes=%d maxrss_kib=%d'%(setup_seconds,elapsed,journal_bytes,resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),flush=True)
+  print('synthetic_scale_result node=main objects=%d photos=%d bytes=%d setup_seconds=%.2f run_seconds=%.2f journal_bytes=%d maxrss_kib=%d'%(count,count,count+8,setup_seconds,elapsed,journal_bytes,resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),flush=True)
  def test_preflight_exact_count_bytes_and_capacity_fail_closed(self):
   import tempfile
   from types import SimpleNamespace
