@@ -37,10 +37,21 @@ the same full binding and inode, rereads and rehashes the exact used bytes,
 rechecks ZIP structure, and syncs the file, records and directory before
 returning the same seal. It then closes the slot and releases its flock; the
 returned dictionary is a point-in-time observation, not a retained lock or
-pin. Bytes can change after it returns. Any future consumer must hold the same
-exclusive slot lock while it revalidates and streams or transfers bytes, then
-independently verify the bytes and custody before issuing an acknowledgement.
-There is no such locked handoff in this draft. It never treats file existence alone as completion.
+pin. Bytes can change after it returns. `open_sealed_reader` is a separate
+local streaming interface: it revalidates the same binding, inode, seal and
+bytes, holds the exclusive cooperative flock until explicitly closed, checks
+the slot and records during bounded reads, and withholds the final chunk until
+a second full hash/ZIP check succeeds. An early close or transport error does
+not acknowledge or delete anything; a later reader starts from the beginning
+and revalidates. Callers must close the reader, including on exceptions.
+
+This lock excludes cooperating slot users only. A noncooperating same-UID or
+privileged writer can alter bytes during or immediately after verification;
+the last-chunk check is not an atomic remote transfer or a source-authenticity
+proof. A future receiver must verify its own complete bytes and issue a separate
+authenticated custody acknowledgement. This draft implements no transport,
+receiver, acceptance record or cleanup, and never treats file existence alone
+as completion.
 The original unjournaled slot opener refuses files carrying either journal
 marker. External noncooperating access to raw files remains outside this guard.
 
