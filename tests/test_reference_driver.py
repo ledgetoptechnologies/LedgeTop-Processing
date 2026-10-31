@@ -258,6 +258,51 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.driver._db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM driver_jobs WHERE stage='awaiting_acceptance'").fetchone()[0], 2)
 
+    def test_worker_finishes_offline_and_redelivers_after_both_restart(self):
+        job = self.submit(contents=(b'outage-synthetic-photo',))
+        self.advance(job, 'executing')
+        now = [time.time()]
+        self.outbox.clock = lambda: now[0]
+        self.outbox.random = lambda: 0.0
+
+        # The coordinator process disappears after the engine has started.
+        # The engine completes while offline; its result is sealed locally.
+        self.queue.close()
+        self.driver.sender._open = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('offline'))
+        result = self.driver.step()
+        self.assertEqual(result['state'], 'delivering')
+        identifier = result['outboxId']
+        before = self.outbox.get(identifier)
+        self.assertEqual(before['state'], 'pending')
+        archives = list(self.scratch.glob('jobs/*/all.zip'))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_bytes(), self.transport.archive)
+        self.assertEqual(self.driver.step()['deliveryState'], 'retry_scheduled')
+        self.assertEqual(self.outbox.get(identifier)['state'], 'pending')
+
+        # Restart both durable components; no Viewer acknowledgement exists yet.
+        self.queue = Queue(self.root / 'queue', reference_enabled=True)
+        self.store = ReferenceStore(self.queue)
+        self.api = ReferenceControlAPI(self.store, viewer_bearers={VIEWER: 'staging'},
+            worker_bearers={TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
+            capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
+            options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'])
+        self.outbox = WorkerOutbox(self.root / 'outbox.sqlite', clock=lambda: now[0], random_source=lambda: 0.0)
+        self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger, outbox=self.outbox,
+            engine=self.native, engine_id='engine', node_id='cluster', authority_id=self.queue.authority_id,
+            coordinator_origin=self.gate_origin, gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+        self.driver = self.make_driver()
+        now[0] += 10
+        self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        after = self.outbox.get(identifier)
+        self.assertEqual(after['state'], 'acknowledged')
+        self.assertEqual(after['digest'], before['digest'])
+        self.assertEqual(after['payload'], before['payload'])
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+        self.assertEqual(archives[0].read_bytes(), self.transport.archive)
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+
     def test_authority_version_and_active_native_tasks_prevent_claim(self):
         job = self.submit()
         self.transport.version = 'unapproved-engine-version'
