@@ -23,7 +23,7 @@ class PerObjectLayoutTests(unittest.TestCase):
     for i in range(10000):
      ident=f'{i:064x}';slot=inputs._input_slot(ident,ident,1,create=True)
      slot.write_at(0,b'x');slot.close()
-   self.assertEqual(scans[0],20000);self.assertLessEqual(scans[1],20000)
+   self.assertEqual(scans[0],20000);self.assertEqual(scans[1],10000)
    self.assertLess(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,128*1024)
    print('10k allocated synthetic slots; marker scans=%d scanned entries=%d maxrss_kib=%d'%(*scans,resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),flush=True)
  def test_missing_replaced_and_ambiguous_directories_hold(self):

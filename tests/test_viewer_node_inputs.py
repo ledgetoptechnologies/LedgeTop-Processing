@@ -278,3 +278,41 @@ with DaemonStateLock(worker_root) as owner:
        from processing import reference_protocol as p
        db.execute('UPDATE policy SET value=?',(p.canonical_json(value).decode(),))
       with self.assertRaises(InputHeld):self.make(owner)
+    def test_killed_after_mkdir_before_identity_is_held_after_restart(self):
+        import signal
+        code='''import json,os,signal,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_node_inputs import ViewerNodeInputs,InputHeld
+root,config,job,input_root,identity,mode=sys.argv[1:]
+with DaemonStateLock(root) as owner:
+ worker=ViewerNodeEnrollment(owner,**json.loads(config))
+ inputs=ViewerNodeInputs(worker,job,'enroll-1','production',input_root=input_root,input_root_identity=json.loads(identity),max_total=100000,max_object=100000)
+ inputs.freeze_inventory()
+ with inputs._db() as db:object_id=db.execute('SELECT object_id FROM objects WHERE ordinal=0').fetchone()[0]
+ if mode=='kill':
+  original=os.mkdir
+  def intercept(path,*args,**kwargs):
+   result=original(path,*args,**kwargs)
+   if str(path).startswith('object-'):os.kill(os.getpid(),signal.SIGKILL)
+   return result
+  os.mkdir=intercept
+  inputs.transfer(object_id)
+  raise AssertionError('mkdir kill point not reached')
+ else:
+  with inputs._db() as db:phase,slot_identity=db.execute('SELECT phase,slot_identity FROM objects WHERE object_id=?',(object_id,)).fetchone()
+  assert phase=='creating' and slot_identity is None
+  try:inputs.transfer(object_id)
+  except InputHeld as error:assert str(error)=='input_requires_inspection'
+  else:raise AssertionError('ambiguous creation was retried')
+'''
+        args=[sys.executable,'-c',code,str(self.base.worker),json.dumps(self.base.config),self.base.fixture.job,
+              str(self.inputs),json.dumps(self.input_id)]
+        killed=subprocess.run(args+['kill'],capture_output=True,timeout=15)
+        self.assertEqual(killed.returncode,-signal.SIGKILL,killed.stderr)
+        dirs=list(self.inputs.glob('object-*'));self.assertEqual(len(dirs),1)
+        before=(dirs[0].stat().st_dev,dirs[0].stat().st_ino);self.assertEqual(list(dirs[0].iterdir()),[])
+        resumed=subprocess.run(args+['check'],capture_output=True,timeout=15)
+        self.assertEqual(resumed.returncode,0,resumed.stderr)
+        self.assertEqual((dirs[0].stat().st_dev,dirs[0].stat().st_ino),before)
+        self.assertEqual(list(dirs[0].iterdir()),[])
