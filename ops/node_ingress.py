@@ -12,10 +12,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from processing.maintenance_authority import maintenance_authority, MaintenanceAuthorityBusy, local_engine_id
 
 
 class GateError(Exception):
@@ -252,13 +256,18 @@ def main():
     parser.add_argument('--wait-seconds', type=int, choices=range(1, 86401), default=60)
     args = parser.parse_args()
     try:
-        root = Path(args.root).absolute()
-        if root.resolve() != root or not root.is_dir() or root.stat().st_mode & 0o077:
-            raise GateError('real private operator root required')
-        with locked(root):
-            print(json.dumps(Ingress(root).change(args.action == 'close', args.expected_image, args.wait_seconds)))
+        engine_id = local_engine_id()
+        with maintenance_authority(engine_id):
+            root = Path(args.root).absolute()
+            if root.resolve() != root or not root.is_dir() or root.stat().st_mode & 0o077:
+                raise GateError('real private operator root required')
+            with locked(root):
+                ingress = Ingress(root)
+                if ingress.config['engineId'] != engine_id:
+                    raise GateError('physical engine identity changed')
+                print(json.dumps(ingress.change(args.action == 'close', args.expected_image, args.wait_seconds)))
         return 0
-    except (GateError, OSError, ValueError, KeyError):
+    except (GateError, MaintenanceAuthorityBusy, OSError, ValueError, KeyError):
         print('Ingress operation stopped. Inspect private state and exact containers; no automatic reopen.')
         return 2
 

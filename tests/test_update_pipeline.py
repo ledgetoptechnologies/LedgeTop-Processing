@@ -130,15 +130,15 @@ class UpdatePipelineTests(unittest.TestCase):
 
     def test_lost_managed_completion_ack_reconciles_without_running_again(self):
         identifier=self.staged();self.supervisor.advance(identifier);self.supervisor.advance(identifier)
-        original=maintenance_module.managed.run
+        original=maintenance_module.managed._run_locked
         def lost(*args,**kwargs):
             original(*args,**kwargs)
             raise OSError('synthetic completed run response lost')
-        with patch.object(maintenance_module.managed,'run',side_effect=lost):
+        with patch.object(maintenance_module.managed,'_run_locked',side_effect=lost):
             with self.assertRaises(SupervisorHeld):self.supervisor.advance(identifier)
         self.assertEqual(self.host.host.adapter.calls,[engine_fixture.NEW])
         self.restart()
-        with patch.object(maintenance_module.managed,'run',side_effect=AssertionError('lookup must not run')):
+        with patch.object(maintenance_module.managed,'_run_locked',side_effect=AssertionError('lookup must not run')):
             self.assertEqual(self.supervisor.reconcile(identifier)['state'],'completed')
         self.assertEqual(self.host.host.adapter.calls,[engine_fixture.NEW])
         self.assertEqual(self.supervisor._current(),engine_fixture.NEW)

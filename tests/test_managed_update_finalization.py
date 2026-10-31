@@ -2,6 +2,7 @@
 import json
 import os
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 from ops import node_maintenance as maintenance
@@ -15,6 +16,9 @@ from tests import test_container_update as update_fixture
 @unittest.skipIf(os.name=='nt','managed host locking requires Linux')
 class ManagedFinalizationTests(unittest.TestCase):
     def setUp(self):
+        for patcher in (patch('ops.node_maintenance.local_engine_id', return_value='synthetic-engine'),
+                        patch('ops.node_maintenance.maintenance_authority', side_effect=lambda _: nullcontext())):
+            patcher.start();self.addCleanup(patcher.stop)
         self.fixture=update_fixture.MaintenanceUpdateTests(methodName='runTest')
         self.fixture.setUp();self.addCleanup(self.fixture.tearDown)
         self.root,self.receipt=self.fixture.root,self.fixture.work

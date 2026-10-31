@@ -19,6 +19,7 @@ import uuid
 
 from processing.container_update import ComposeNode,loopback,finish_matches
 from processing.node_gate import NodeGate,GateBusy
+from processing.maintenance_authority import maintenance_authority,MaintenanceAuthorityBusy
 from processing.odx_smoke_worker import Client
 from processing.update_supervisor import seal_receipt,UpdateSupervisor
 from ops.node_ingress import Ingress
@@ -83,6 +84,15 @@ class ScheduleWindow:
 class UpdateMaintenanceAdapter:
     def __init__(self,managed_root,*,state_path,receipt_root,api,operator,node_id,authority_id,engine_id,adapter_id,
                  window,clock=lambda:datetime.now(timezone.utc)):
+        try:
+            with maintenance_authority(engine_id):
+                self._initialize(managed_root,state_path=state_path,receipt_root=receipt_root,api=api,operator=operator,
+                    node_id=node_id,authority_id=authority_id,engine_id=engine_id,adapter_id=adapter_id,window=window,clock=clock)
+        except MaintenanceAuthorityBusy:
+            raise MaintenanceAdapterHeld('maintenance_authority_unavailable') from None
+
+    def _initialize(self,managed_root,*,state_path,receipt_root,api,operator,node_id,authority_id,engine_id,adapter_id,
+                    window,clock):
         if not sys_linux():raise MaintenanceAdapterHeld('linux_maintenance_adapter_required')
         if type(window) is not ScheduleWindow or not isinstance(api,Client) or not isinstance(operator,Client):
             raise MaintenanceAdapterHeld('fixed_clients_and_window_required')
@@ -148,14 +158,18 @@ class UpdateMaintenanceAdapter:
 
     @contextmanager
     def _operation(self):
-        self._check()
-        with self._mutex:
-            if self._busy:raise MaintenanceAdapterHeld('adapter_operation_active')
-            self._busy=True
-            try:self._check();yield
-            except MaintenanceAdapterHeld:raise
-            except Exception:raise MaintenanceAdapterHeld('maintenance_evidence_unavailable') from None
-            finally:self._busy=False
+        try:
+            with maintenance_authority(self.binding['engineId']):
+                self._check()
+                with self._mutex:
+                    if self._busy:raise MaintenanceAdapterHeld('adapter_operation_active')
+                    self._busy=True
+                    try:self._check();yield
+                    except MaintenanceAdapterHeld:raise
+                    except Exception:raise MaintenanceAdapterHeld('maintenance_evidence_unavailable') from None
+                    finally:self._busy=False
+        except MaintenanceAuthorityBusy:
+            raise MaintenanceAdapterHeld('maintenance_authority_unavailable') from None
 
     @contextmanager
     def _db(self,*,write=False):
@@ -344,8 +358,8 @@ class UpdateMaintenanceAdapter:
                 db.execute("INSERT INTO run_intents VALUES(?,?,?,?,'intent',NULL)",
                     (request['requestSha256'],request['operationId'],request['hostGeneration'],canonical(request)))
             try:
-                result=managed.run(self.root,self.api,self.operator,Path(request['receiptDirectory']),self.window.wait_seconds,
-                    self.window.drain_seconds,expected_plan_id=request['plan']['planId'],expected_target=request['localImageId'])
+                result=managed._run_locked(self.root,self.api,self.operator,Path(request['receiptDirectory']),self.window.wait_seconds,
+                    self.window.drain_seconds,engine_id=self.binding['engineId'],expected_plan_id=request['plan']['planId'],expected_target=request['localImageId'])
             except Exception:raise MaintenanceAdapterHeld('managed_run_requires_read_only_reconciliation') from None
             if result.get('status')!='succeeded':raise MaintenanceAdapterHeld('issued_run_has_no_successful_completion')
             value=self._completion(request)

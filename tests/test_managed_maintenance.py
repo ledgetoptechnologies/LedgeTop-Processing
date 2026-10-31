@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 from ops.node_ingress import GateError, save
@@ -52,6 +53,8 @@ class ManagedMaintenanceTests(unittest.TestCase):
     def context(self):
         from contextlib import ExitStack
         stack = ExitStack()
+        stack.enter_context(patch('ops.node_maintenance.local_engine_id', return_value='engine'))
+        stack.enter_context(patch('ops.node_maintenance.maintenance_authority', side_effect=lambda _: nullcontext()))
         stack.enter_context(patch('ops.node_maintenance.Ingress', return_value=self.ingress))
         stack.enter_context(patch('ops.node_maintenance.ComposeNode', return_value=self.adapter))
         gate = stack.enter_context(patch('ops.node_maintenance.NodeGate'))

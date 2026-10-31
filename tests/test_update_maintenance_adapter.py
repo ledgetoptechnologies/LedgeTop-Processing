@@ -1,5 +1,6 @@
 """Real owned-schedule HTTP and managed finalization, fake host transports only."""
 from datetime import datetime,timedelta,timezone
+from contextlib import nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -18,6 +19,7 @@ from tests import test_container_update as update_fixture
 @unittest.skipIf(os.name=='nt','actual managed maintenance requires Linux')
 class UpdateMaintenanceAdapterTests(unittest.TestCase):
     def setUp(self):
+        lease=patch.object(module,'maintenance_authority',side_effect=lambda _: nullcontext());lease.start();self.addCleanup(lease.stop)
         self.host=managed_fixture.ManagedFinalizationTests(methodName='runTest')
         self.host.setUp();self.addCleanup(self.host.doCleanups)
         self.root,self.api,self.operator=self.host.root,self.host.api,self.host.operator
@@ -80,7 +82,7 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
         for secret in (private['updateToken'],self.api.token,self.operator.token,self.host.ingress.config['backendToken']):
             self.assertNotIn(secret,json.dumps(result))
         before=self.db_hash()
-        with patch.object(module.managed,'run',side_effect=AssertionError('lookup cannot call run')), \
+        with patch.object(module.managed,'_run_locked',side_effect=AssertionError('lookup cannot call run')), \
                 patch.object(self.host.ingress,'change',side_effect=AssertionError('lookup cannot reload ingress')):
             self.assertEqual(self.adapter.lookup_completion(request),result)
         self.assertEqual(self.db_hash(),before)
@@ -196,14 +198,14 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
         self.assertEqual(self.host.adapter.calls,[])
 
     def test_managed_success_response_loss_reconstructs_read_only_completion(self):
-        request=self.scheduled();original=module.managed.run
+        request=self.scheduled();original=module.managed._run_locked
         def lost(*args,**kwargs):
             original(*args,**kwargs)
             raise OSError('synthetic adapter response loss')
-        with patch.object(module.managed,'run',side_effect=lost):
+        with patch.object(module.managed,'_run_locked',side_effect=lost):
             with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.run(request)
         self.adapter=self.open();before=self.db_hash()
-        with patch.object(module.managed,'run',side_effect=AssertionError('read-only lookup')):
+        with patch.object(module.managed,'_run_locked',side_effect=AssertionError('read-only lookup')):
             receipt=self.adapter.lookup_completion(request)
         self.assertTrue(receipt['coordinatorFinished'])
         self.assertEqual(self.db_hash(),before)
@@ -211,7 +213,7 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
 
     def known_no_completion(self,status):
         request=self.scheduled()
-        with patch.object(module.managed,'run',return_value={'status':status}) as run:
+        with patch.object(module.managed,'_run_locked',return_value={'status':status}) as run:
             for _ in range(2):
                 with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.run(request)
             self.assertEqual(run.call_count,1)
@@ -226,7 +228,7 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
         with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.run(request)
         self.assertEqual(self.host.adapter.current,update_fixture.NEW)
         self.assertIsNone(self.adapter.lookup_completion(request))
-        with patch.object(module.managed,'run',side_effect=AssertionError('no replacement replay')):
+        with patch.object(module.managed,'_run_locked',side_effect=AssertionError('no replacement replay')):
             with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.run(request)
         self.assertEqual(self.host.adapter.calls,[update_fixture.NEW])
 

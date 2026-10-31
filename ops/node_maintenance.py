@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.container_update import (ComposeNode,execute,lock,UpdateError,deferred_receipt,
                                          finalize_deferred,finish_matches)
 from processing.node_gate import NodeGate, GateBusy, GateError as NodeGateError
+from processing.maintenance_authority import maintenance_authority, MaintenanceAuthorityBusy, local_engine_id
 from processing.odx_smoke_worker import Client, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
 
@@ -140,6 +141,13 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
 
 
 def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_plan_id=None,expected_target=None):
+    engine_id = local_engine_id()
+    with maintenance_authority(engine_id):
+        return _run_locked(root, api, operator, receipt, wait_seconds, drain_seconds,
+                           engine_id=engine_id, expected_plan_id=expected_plan_id, expected_target=expected_target)
+
+
+def _run_locked(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,engine_id,expected_plan_id=None,expected_target=None):
     settings = json.loads((root / 'maintenance.json').read_text())
     node_id = settings['nodeId']
     if (expected_plan_id is None)!=(expected_target is None):
@@ -150,6 +158,8 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
     if expected_plan_id is not None:
         fence(api.json('GET','/v1/prototype/nodes/'+node_id)['node'])
     ingress = Ingress(root / 'ingress')
+    if ingress.config['engineId'] != engine_id:
+        raise GateError('physical engine identity changed')
     args=adapter_args(root,settings,ingress)
     adapter = ComposeNode(args, receipt)
     deadline = time.monotonic() + wait_seconds
@@ -266,6 +276,16 @@ def main():
     runner.add_argument('--drain-seconds', type=int, choices=range(1, 86401), default=3600)
     args = parser.parse_args()
     try:
+        engine_id = local_engine_id()
+        with maintenance_authority(engine_id):
+            return _main_locked(args, engine_id)
+    except (GateError, NodeGateError, MaintenanceAuthorityBusy, UpdateError, SmokeError, OSError, ValueError, KeyError):
+        print('Managed maintenance stopped. Inspect private receipt, ingress and coordinator gate; no automatic replay or reopen.')
+        return 2
+
+
+def _main_locked(args, engine_id):
+    try:
         root = private_directory(args.root)
         path = Path(args.credentials).absolute()
         if path.resolve() != path or not path.is_file() or path.stat().st_mode & 0o077:
@@ -283,16 +303,20 @@ def main():
         if args.action == 'status':
             result = {'node': node, 'ingressState': json.loads((root / 'ingress/state.json').read_text())['state']}
         elif args.action == 'schedule':
-            receipt_args=adapter_args(root,settings,Ingress(root/'ingress'))
+            ingress=Ingress(root/'ingress')
+            if ingress.config['engineId'] != engine_id:
+                raise GateError('physical engine identity changed')
+            receipt_args=adapter_args(root,settings,ingress)
             ComposeNode(receipt_args, root).image(args.target_image)
             result = operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule', {
                 'expectedRevision': node['revision'], 'targetImage': args.target_image,
                 'drainAt': args.drain_at, 'notBefore': args.not_before, 'afterJobId': args.after_job_id})
         else:
-            result = run(root, api, operator, private_directory(args.receipt), args.wait_seconds, args.drain_seconds)
+            result = _run_locked(root, api, operator, private_directory(args.receipt), args.wait_seconds,
+                                 args.drain_seconds, engine_id=engine_id)
         print(json.dumps(result, sort_keys=True))
         return 1 if result.get('status') == 'failed' else 0
-    except (GateError, NodeGateError, UpdateError, SmokeError, OSError, ValueError, KeyError):
+    except (GateError, NodeGateError, MaintenanceAuthorityBusy, UpdateError, SmokeError, OSError, ValueError, KeyError):
         print('Managed maintenance stopped. Inspect private receipt, ingress and coordinator gate; no automatic replay or reopen.')
         return 2
 
