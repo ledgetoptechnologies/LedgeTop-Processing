@@ -95,17 +95,32 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         copied=self.root/'viewer-schema-copy';shutil.copytree(self.volume,copied)
         module.compatible(module.volume_census(copied,uid=os.geteuid(),offline=True),after)
 
-    def test_archive_status_opt_in_schema_fails_closed_for_upgrade_and_rollback(self):
+    def test_archive_status_exact_empty_candidate_and_rollback_hold(self):
         before=module.volume_census(self.volume,uid=os.geteuid())
         store=TaskStore(self.queue,self.volume/'viewer-tasks')
         unchanged=module.volume_census(self.volume,uid=os.geteuid())
         module.compatible(unchanged,before,allow_owned=True)
         store.enable_archive_status()
         after=module.volume_census(self.volume,uid=os.geteuid())
-        with self.assertRaises(module.Stopped):
-            module.compatible(after,before,allow_owned=True,allow_viewer_additions=True)
+        # Only candidate verification permits the exact empty additive schema.
+        module.compatible(after,before,allow_owned=True,allow_viewer_additions=True,allow_archive_columns=True)
         with self.assertRaises(module.Stopped):
             module.compatible(after,before,allow_owned=True)
+        malformed=copy.deepcopy(after)
+        malformed['tables']['viewer_tasks']['columns'][-1][2]='BLOB'
+        with self.assertRaises(module.Stopped):
+            module.compatible(malformed,before,allow_archive_columns=True)
+        partial=copy.deepcopy(after)
+        partial['tables']['viewer_tasks']['columns'].pop()
+        with self.assertRaises(module.Stopped):
+            module.compatible(partial,before,allow_archive_columns=True)
+        with self.queue._db() as db:
+            db.execute("INSERT INTO viewer_tasks(uuid,directory,name,options,outputs,environment) VALUES('example','/tmp/example','name','[]','[]','staging')")
+        with self.assertRaises(AssertionError):
+            module.volume_census(self.volume,uid=os.geteuid())
+        # Failed census does not remove the newly added row or its columns.
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT archive_state FROM viewer_tasks WHERE uuid=?',('example',)).fetchone()[0], 'pending')
 
     def test_viewer_extra_tables_partial_schema_holds(self):
         with self.queue._db() as db:db.execute('DROP TABLE viewer_option_evidence')

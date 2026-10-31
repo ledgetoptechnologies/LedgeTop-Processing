@@ -234,7 +234,7 @@ def normalized_schema(rows):
     return [[*row[:3],re.sub(r'\s+',' ',row[3]).strip() if row[3] is not None else None] for row in rows]
 
 
-def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False):
+def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False, allow_archive_columns=False):
     """Compare complete censuses; allow exact empty additions only explicitly.
 
     Viewer additions are permitted for candidate verification, not the offline
@@ -243,6 +243,28 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
     a,b=json.loads(canonical(observed)),json.loads(canonical(baseline))
     for value in (a,b):
         if value['authorityId']!=AUTHORITY or value['sqliteQuickCheck']!='ok':raise Stopped('census_authority_or_integrity_changed')
+    # Candidate-only, exact empty-table migration. Never normalize these
+    # columns during rollback: an older binary is not qualified to own them.
+    if allow_archive_columns:
+        before=b['tables'].get('viewer_tasks'); after=a['tables'].get('viewer_tasks')
+        if before and after and after['columns'] != before['columns']:
+            prefix=before['columns']; n=len(prefix)
+            added=[[n,'archive_state','TEXT',1,"'pending'",0],
+                   [n+1,'archive_reason','TEXT',0,None,0]]
+            old_table=[r for r in b['schema'] if r[0]=='table' and r[1]=='viewer_tasks']
+            new_table=[r for r in a['schema'] if r[0]=='table' and r[1]=='viewer_tasks']
+            if (before['count']!=0 or after['count']!=0 or after['columns']!=prefix+added
+                    or len(old_table)!=1 or len(new_table)!=1
+                    or before['sha256']!=after['sha256']):
+                raise Stopped('unreviewed_archive_schema_or_rows')
+            old=old_table[0][3]; new=new_table[0][3]
+            if not isinstance(old,str) or not isinstance(new,str) or not old.rstrip().endswith(')'):
+                raise Stopped('unreviewed_archive_schema')
+            expected=old.rstrip()[:-1]+", archive_state TEXT NOT NULL DEFAULT 'pending', archive_reason TEXT)"
+            if re.sub(r'\s+',' ',new).strip()!=re.sub(r'\s+',' ',expected).strip():
+                raise Stopped('unreviewed_archive_schema')
+            after['columns']=prefix
+            new_table[0][3]=old
     extra={'viewer_reservations','viewer_option_evidence'}
     added=extra & set(a['tables']);prior=extra & set(b['tables'])
     if allow_viewer_additions and not prior and added:
@@ -548,7 +570,7 @@ class ReferenceCoordinatorUpdate:
                 self.activity(state,api)
                 observed=self.census(state,container=state.get('newContainerId') or OLD_ID)
                 self.node_census(state,observed)
-                compatible(observed,state['drained'],allow_owned=True,allow_viewer_additions=True)
+                compatible(observed,state['drained'],allow_owned=True,allow_viewer_additions=True,allow_archive_columns=True)
             current=api.json('GET','/v1/prototype/nodes/'+identifier)['node']
             if current['planId']!=plan['planId'] or current['targetImage']!=state['engineImages'][identifier]:raise Stopped('cannot_reopen_peer_plan')
             intent=plan.get('cancelIntent')
@@ -614,7 +636,7 @@ class ReferenceCoordinatorUpdate:
                 self.save(state,'started',replacementStarted=True)
                 self.t.health(api,container_id=identifier);self.t.sole_owner(identifier)
                 self.check(state,gates);self.activity(state,api);self.plans(state,api)
-                compatible(self.census(state,container=identifier),drained,allow_owned=True,allow_viewer_additions=True)
+                compatible(self.census(state,container=identifier),drained,allow_owned=True,allow_viewer_additions=True,allow_archive_columns=True)
                 verified=self.t.verify_reference();verified.update(owned_api_probe(operator))
                 self.save(state,'verified',verification=verified)
                 self.reopen(state,gates,api,operator)
@@ -665,7 +687,7 @@ class ReferenceCoordinatorUpdate:
                 return self.finish_rollback(state,gates)
             if item is not None and item['State']['Running']:
                 _env,api,_operator=self.t.local_clients();self.activity(state,api)
-                compatible(self.census(state,container=item['Id']),state['drained'],allow_owned=True,allow_viewer_additions=True)
+                compatible(self.census(state,container=item['Id']),state['drained'],allow_owned=True,allow_viewer_additions=True,allow_archive_columns=True)
                 self.save(state,'rollback_stop_pending')
                 self.mutation(state,gates,'stop','--time','-1',item['Id'],timeout=60)
                 if self.t.inspected(item['Id'])['State']['Running']:raise Stopped('candidate_not_confirmed_stopped')
