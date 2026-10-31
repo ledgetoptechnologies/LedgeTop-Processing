@@ -52,23 +52,29 @@ class Tests(unittest.TestCase):
                 self.send_response(200);self.end_headers()
                 if self.server.mode=='malformed':self.wfile.write(b'{bad');return
                 try:
-                    for _ in range(60):
-                        self.wfile.write(b' ');self.wfile.flush();time.sleep(.1)
+                    while not self.server.stop.is_set():
+                        self.wfile.write(b' ');self.wfile.flush();self.server.stop.wait(.1)
                 except (BrokenPipeError,ConnectionResetError):pass
         for mode in ('redirect','malformed','trickle'):
             with self.subTest(mode=mode):
-                server=HTTPServer(('127.0.0.1',0),Handler);server.mode=mode
+                server=HTTPServer(('127.0.0.1',0),Handler);server.mode=mode;server.stop=threading.Event()
                 thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
                 source=("from ops import gateway_health_probe as m; "
                         "m._ENDPOINTS=('http://127.0.0.1:%d/info','http://127.0.0.1:%d/task/list'); "
                         "raise SystemExit(m.main())") % (server.server_port,server.server_port)
                 try:
+                    started=time.monotonic()
                     result=subprocess.run([sys.executable,'-c',source],input=b'{"token":"test-secret","engine":"odm"}',
                                           capture_output=True,timeout=8)
+                    elapsed=time.monotonic()-started
                     self.assertEqual(result.returncode,1)
+                    if mode=='trickle':
+                        self.assertGreater(elapsed,4.0)
+                        self.assertLess(elapsed,7.0)
+                        self.assertFalse(server.stop.is_set())
                     self.assertNotIn(b'test-secret',result.stdout+result.stderr)
                 finally:
-                    server.shutdown();server.server_close();thread.join(timeout=3)
+                    server.stop.set();server.shutdown();server.server_close();thread.join(timeout=3)
                     self.assertFalse(thread.is_alive())
 
     def test_bad_input_ambiguous_json_and_busy_hold(self):
