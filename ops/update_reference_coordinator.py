@@ -306,6 +306,24 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
             raise Stopped('unreviewed_viewer_schema_or_rows')
         a['schema']=[row for row in a['schema'] if row[2] not in extra]
         for name in extra:a['tables'].pop(name)
+    if allow_viewer_additions:
+        old_task=b['tables'].get('viewer_tasks');new_task=a['tables'].get('viewer_tasks')
+        if old_task is not None and new_task is not None:
+            old_columns=old_task['columns'];new_columns=new_task['columns']
+            if (not any(c[1]=='option_evidence_required' for c in old_columns)
+                    and any(c[1]=='option_evidence_required' for c in new_columns)):
+                old_ddl=[row for row in b['schema'] if row[:3]==['table','viewer_tasks','viewer_tasks']]
+                new_ddl=[row for row in a['schema'] if row[:3]==['table','viewer_tasks','viewer_tasks']]
+                suffix=', option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1)))'
+                if (len(old_ddl)!=1 or len(new_ddl)!=1 or not isinstance(old_ddl[0][3],str)
+                        or not old_ddl[0][3].rstrip().endswith(')')
+                        or new_ddl[0][3]!=old_ddl[0][3].rstrip()[:-1]+suffix
+                        or old_task['count']!=0 or new_task['count']!=0
+                        or old_task['sha256']!=new_task['sha256']
+                        or new_columns!=old_columns+[[len(old_columns),'option_evidence_required','INTEGER',1,'0',0]]):
+                    raise Stopped('unreviewed_viewer_option_column_migration')
+                new_task['columns']=old_columns
+                a['schema']=[old_ddl[0] if row is new_ddl[0] else row for row in a['schema']]
     if allow_owned and 'owned_maintenance_schedules' not in b['tables'] and 'owned_maintenance_schedules' in a['tables']:
         additions=[row for row in a['schema'] if row[2]=='owned_maintenance_schedules']
         if (normalized_schema(additions)!=normalized_schema(owned_schema())
@@ -737,6 +755,72 @@ class ReferenceCoordinatorUpdate:
                 self.save(state,'needs_inspection');raise
         return state
 
+    def backup_census(self,state):
+        destination=self.root/'original-state-backup'
+        info=destination.lstat()
+        if (destination.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid!=10001
+                or info.st_gid!=10001 or stat.S_IMODE(info.st_mode)!=0o700):
+            raise Stopped('private_backup_identity_changed')
+        code=inspect.getsource(volume_census)+"\nimport json\nprint(json.dumps(volume_census('/backup',offline=True)))"
+        raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
+            '--cap-drop','ALL','--security-opt','no-new-privileges',
+            '--mount','type=bind,src='+str(destination)+',dst=/backup,readonly',
+            '--entrypoint','python',state['image'],'-I','-c',code,timeout=120)
+        result=json.loads(raw)
+        if result.get('rootMode')!=0o700:raise Stopped('private_backup_identity_changed')
+        result['rootMode']=state['drained']['rootMode']
+        if (digest(result)!=state['backup']['sourceCensusSha256'] or
+                state['backup']['sourceCensusSha256']!=state['backup']['fullCensusSha256']):
+            raise Stopped('backup_census_changed')
+
+    def reconcile_direct_release(self,state):
+        """Confirm separately journaled exact CAS releases before recording success."""
+        self.validate(state)
+        if (state.get('phase')!='needs_inspection' or state.get('pendingPlan') or
+                state.get('reopeningStarted') or not state.get('replacementStarted') or
+                not state.get('backup') or set(state.get('plans',{}))!={'main','cluster'}):
+            raise Stopped('direct_reconciliation_not_applicable')
+        evidence=self.root/'direct-release-evidence'
+        if evidence.is_symlink() or not evidence.is_dir():raise Stopped('direct_release_evidence_required')
+        proofs={}
+        for node in ('main','cluster'):
+            plan=state['plans'][node];ack=plan['acknowledgedNode'];rev=ack['revision']
+            intent=dict(operation=state['operation'],node=node,planId=plan['planId'],expectedRevision=rev)
+            actual=json.loads(self.t.private_file(evidence/(node+'.intent.json')).read_text())
+            done=json.loads(self.t.private_file(evidence/(node+'.done.json')).read_text())
+            if actual!=intent or done!=dict(intent,result='active',revision=rev+1):
+                raise Stopped('direct_release_evidence_changed')
+            proofs[node]=dict(planId=plan['planId'],expectedRevision=rev)
+        with self.gate_factory() as gates:
+            self.check(state,gates)
+            item=self.t.inspected(state['newContainerId'])
+            if (item['Id']!=state['newContainerId'] or item['Name']!='/'+NAME or item['Image']!=state['image']
+                    or item['State']['Running'] is not True):raise Stopped('canonical_candidate_retention_only')
+            leases=[m for m in item.get('Mounts',[]) if m.get('Destination')=='/run/ledgetop-authority-lease']
+            if (self.lease_dir is None or len(leases)!=1 or leases[0].get('Type')!='bind'
+                    or leases[0].get('Source')!=self.lease_dir or leases[0].get('RW') is not True):
+                raise Stopped('candidate_lease_mount_changed')
+            self.t.facts(dict(item,Mounts=[m for m in item.get('Mounts',[]) if m not in leases]),reference=True)
+            if application_environment(self.t,item,lease=True)!=state['applicationEnvironmentSha256']:
+                raise Stopped('candidate_application_environment_changed')
+            _env,api,operator=self.t.local_clients();self.t.health(api,container_id=item['Id']);self.t.sole_owner(item['Id'])
+            self.activity(state,api)
+            for node in ('main','cluster'):
+                plan=state['plans'][node];ack=plan['acknowledgedNode']
+                if api.json('GET','/v1/prototype/nodes/'+node)['node']!=dict(ack,state='active',revision=ack['revision']+1):
+                    raise Stopped('direct_release_readback_changed')
+            current=self.census(state,container=item['Id'])
+            verified_state=json.loads(canonical(state))
+            for node in ('main','cluster'):verified_state['plans'][node]['cancelIntent']=proofs[node]
+            self.node_census(verified_state,current,reopening=True)
+            compatible(current,state['drained'],ignore_nodes=True,allow_owned=True,allow_viewer_additions=True,allow_lease_addition=True)
+            self.backup_census(state);self.t.verify_reference();owned_api_probe(operator);self.check(state,gates)
+            for node in ('main','cluster'):
+                plan=state['plans'][node];plan['cancelIntent']=proofs[node];plan['cancelled']=True
+            self.save(state,'completed',sameAuthority=True,sameStateVolume=True,databaseRestored=False,
+                      reconciledDirectRelease=True,reopeningStarted=True)
+        return state
+
     def retain(self,state,gates,item):
         self.check(state,gates)
         current=self.candidate(state)
@@ -836,7 +920,7 @@ class GateFactory:
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('prepare','activate','rollback'))
+    parser.add_argument('action',choices=('prepare','activate','rollback','reconcile'))
     parser.add_argument('--image',required=True);parser.add_argument('--source-commit',required=True)
     parser.add_argument('--predecessor-id',required=True);parser.add_argument('--predecessor-image',required=True)
     parser.add_argument('--predecessor-source',required=True)
@@ -873,7 +957,8 @@ def main(argv=None):
                 if not ACTIVATION_REVIEWED:raise Stopped('source_review_required_before_activation')
                 state=updater.load()
                 if (state['image'],state['sourceCommit'],state['engineImages']['main'])!=(args.image,args.source_commit,args.verified_main_image):raise Stopped('prepared_argument_binding_changed')
-                state=updater.activate(state) if args.action=='activate' else updater.rollback(state)
+                state=(updater.activate(state) if args.action=='activate' else
+                       updater.rollback(state) if args.action=='rollback' else updater.reconcile_direct_release(state))
         # Activation stdout belongs to the root relay until process EOF.
         print(json.dumps(dict(operation=state['operation'],phase=state['phase'],authorityId=AUTHORITY)),
             file=__import__('sys').stdout if args.action=='prepare' else __import__('sys').stderr)

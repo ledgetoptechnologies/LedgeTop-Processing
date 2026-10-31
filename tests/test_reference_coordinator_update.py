@@ -528,6 +528,28 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             item['Config']['Env'].append('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease')
             with self.assertRaises(module.Stopped):updater.candidate(state)
 
+    def test_exact_empty_viewer_option_column_is_forward_only(self):
+        baseline=copy.deepcopy(self.state['baseline'])
+        table=baseline['tables']['viewer_tasks'];table.update(count=0,sha256=module.digest([]),columns=[[0,'uuid','TEXT',0,None,1]])
+        baseline['schema']=[row for row in baseline['schema'] if row[:3]!=['table','viewer_tasks','viewer_tasks']]
+        baseline['schema'].append(['table','viewer_tasks','viewer_tasks','CREATE TABLE viewer_tasks (uuid TEXT)'])
+        candidate=copy.deepcopy(baseline)
+        candidate['tables']['viewer_tasks']['columns'].append([1,'option_evidence_required','INTEGER',1,'0',0])
+        for row in candidate['schema']:
+            if row[:3]==['table','viewer_tasks','viewer_tasks']:
+                row[3]='CREATE TABLE viewer_tasks (uuid TEXT, option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1)))'
+        module.compatible(candidate,baseline,allow_viewer_additions=True)
+        with self.assertRaises(module.Stopped):module.compatible(candidate,baseline)
+        for change in ('rows','default','ddl','unrelated'):
+            bad=copy.deepcopy(candidate)
+            if change=='rows':bad['tables']['viewer_tasks']['count']=1
+            elif change=='default':bad['tables']['viewer_tasks']['columns'][-1][4]='1'
+            elif change=='ddl':
+                for row in bad['schema']:
+                    if row[:3]==['table','viewer_tasks','viewer_tasks']:row[3]=row[3].replace('DEFAULT 0','DEFAULT 1')
+            else:bad['tables']['jobs']['sha256']='0'*64
+            with self.assertRaises(module.Stopped):module.compatible(bad,baseline,allow_viewer_additions=True)
+
     def test_new_lease_marker_is_forward_only_not_rollback_compatible(self):
         baseline=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
         with self.queue._db() as db:
@@ -536,6 +558,62 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         candidate=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
         module.compatible(candidate,baseline,allow_lease_addition=True)
         with self.assertRaises(module.Stopped):module.compatible(candidate,baseline)
+
+    @unittest.skipUnless(os.geteuid()==0,'synthetic uid ownership requires root')
+    def test_reconciliation_backup_census_is_readonly_and_bound(self):
+        destination=self.operation/'original-state-backup';destination.mkdir(mode=0o700);destination.chmod(0o700)
+        os.chown(destination,10001,10001)
+        state=copy.deepcopy(self.state);state['drained']=copy.deepcopy(state['baseline'])
+        backed=copy.deepcopy(state['drained']);backed['rootMode']=0o700
+        digest=module.digest(state['drained']);state['backup']={'sourceCensusSha256':digest,'fullCensusSha256':digest}
+        calls=[]
+        def docker(*args,**kwargs):
+            calls.append(args);return json.dumps(backed)
+        with patch.object(self.transport,'docker',side_effect=docker):self.updater.backup_census(state)
+        self.assertIn('type=bind,src='+str(destination)+',dst=/backup,readonly',calls[0])
+        backed['tables']['jobs']['sha256']='0'*64
+        with patch.object(self.transport,'docker',side_effect=docker):
+            with self.assertRaises(module.Stopped):self.updater.backup_census(state)
+
+    def test_reconcile_direct_release_validates_private_node_fields_before_saving(self):
+        lease=self.root/'lease';lease.mkdir(mode=0o711);lease.chmod(0o711)
+        (lease/(module.AUTHORITY+'.lease')).write_bytes(b'');(lease/(module.AUTHORITY+'.lease')).chmod(0o600)
+        binding=module.lease_binding(str(lease),uid=os.geteuid())
+        self.updater.lease_dir=str(lease);self.state['leaseBinding']=binding
+        docker=self.transport.docker
+        def with_lease(*args,**kwargs):
+            value=docker(*args,**kwargs)
+            if args[0]=='create':
+                item=self.transport.containers[NEW_ID]
+                item['Config']['Env'].append('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease')
+                item['Mounts'].append({'Type':'bind','Source':str(lease),'Destination':'/run/ledgetop-authority-lease','RW':True})
+            return value
+        inspect_binding=module.lease_binding
+        with patch.object(module,'lease_binding',side_effect=lambda path:inspect_binding(path,uid=os.geteuid())), \
+                patch.object(self.transport,'docker',side_effect=with_lease):
+            with patch.object(self.transport,'verify_reference',side_effect=module.Stopped('synthetic hold')):
+                with self.assertRaises(module.Stopped):self.activate()
+            self.assertEqual(self.state['phase'],'needs_inspection')
+            evidence=self.operation/'direct-release-evidence';evidence.mkdir(mode=0o700)
+            for node in ('main','cluster'):
+                plan=self.state['plans'][node];ack=plan['acknowledgedNode'];rev=ack['revision']
+                intent=dict(operation=self.state['operation'],node=node,planId=plan['planId'],expectedRevision=rev)
+                self.operator.json('POST','/v1/prototype/nodes/'+node+'/cancel',{'planId':plan['planId'],'expectedRevision':rev})
+                for suffix,value in (('intent',intent),('done',dict(intent,result='active',revision=rev+1))):
+                    p=evidence/(node+'.'+suffix+'.json');p.write_text(json.dumps(value));p.chmod(0o600)
+            with patch.object(self.updater,'backup_census',return_value=None):
+                with self.queue._db() as db:db.execute("UPDATE nodes SET finish_status='foreign' WHERE id='main'")
+                with self.assertRaises(module.Stopped):self.updater.reconcile_direct_release(self.state)
+                self.assertEqual(self.state['phase'],'needs_inspection')
+                with self.queue._db() as db:db.execute("UPDATE nodes SET finish_status=NULL WHERE id='main'")
+                done=evidence/'main.done.json';good=done.read_text();done.write_text('{}')
+                with self.assertRaises(module.Stopped):self.updater.reconcile_direct_release(self.state)
+                self.assertEqual(self.state['phase'],'needs_inspection');done.write_text(good)
+                with patch.object(self.updater,'backup_census',side_effect=module.Stopped('backup mismatch')):
+                    with self.assertRaises(module.Stopped):self.updater.reconcile_direct_release(self.state)
+                self.assertEqual(self.state['phase'],'needs_inspection')
+                self.assertEqual(self.updater.reconcile_direct_release(self.state)['phase'],'completed')
+                self.assertTrue(self.state['reconciledDirectRelease'])
 
     def test_full_synthetic_activation_preserves_lease_binding(self):
         lease=self.root/'lease';lease.mkdir(mode=0o711);lease.chmod(0o711)

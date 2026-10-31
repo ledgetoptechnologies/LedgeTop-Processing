@@ -101,7 +101,7 @@ class RunSpec:
     cluster_project: str
 
     def __post_init__(self):
-        if self.action not in ('activate', 'rollback'):
+        if self.action not in ('activate', 'rollback', 'reconcile'):
             raise BridgeError('prepared_update_action_required')
         _commit(self.source_commit); _commit(self.bundle_commit); _image(self.image); _image(self.main_image)
         if type(self.bundle_manifest_sha256) is not str or not re.fullmatch(r'[a-f0-9]{64}',self.bundle_manifest_sha256):
@@ -261,7 +261,7 @@ def run(spec, config, evidence_dir, *, popen=subprocess.Popen, relay_factory=Roo
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('activate', 'rollback'))
+    parser.add_argument('action', choices=('activate', 'rollback', 'reconcile'))
     for flag in ('source-commit', 'bundle-commit', 'bundle-manifest-sha256', 'image', 'main-image', 'operation-id', 'receipt-dir',
                  'gate-config', 'local-gate-config', 'evidence-dir', 'predecessor-id', 'predecessor-image',
                  'predecessor-source', 'lease-dir', 'cluster-id', 'cluster-name', 'cluster-project'):
