@@ -30,11 +30,14 @@ def _post(engine,route,body,headers):
         if connection is not None:connection.close()
 
 
-def initialize(engine,identifier,plan,pipeline_sha):
+def initialize(engine,identifier,plan,pipeline_sha,task_name,task_name_sha):
     p._uuid(identifier,'engine task ID');p._hash(pipeline_sha,'pipeline digest')
+    p._hash(task_name_sha,'task name digest')
+    if (type(task_name) is not str or len(task_name)>256 or any(ord(c)<32 for c in task_name)
+            or p.digest(task_name)!=task_name_sha):raise SmokeError('task name changed')
     p._closed(plan,('options','outputs'),'Viewer plan')
     if direct_pipeline_digest(plan['options'],plan['outputs'])!=pipeline_sha:raise SmokeError('plan digest changed')
-    fields={'name':'','options':json.dumps(plan['options'])}
+    fields={'name':task_name,'options':json.dumps(plan['options'])}
     if plan['outputs'] is not None:fields['outputs']=json.dumps(plan['outputs'])
     boundary='smoke-'+uuid.uuid4().hex;parts=[]
     for name,value in fields.items():

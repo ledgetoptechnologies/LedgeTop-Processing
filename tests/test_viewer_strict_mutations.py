@@ -7,6 +7,7 @@ from processing.direct_outbox_contract import direct_pipeline_digest
 from processing.odx_smoke_worker import SmokeError
 from processing.viewer_service import NativeEngine
 from processing.viewer_strict_mutations import initialize,commit
+from processing import reference_protocol as p
 
 ID='11111111-1111-4111-8111-111111111111'
 
@@ -34,21 +35,21 @@ class StrictMutationTests(unittest.TestCase):
         self.server.shutdown();self.server.server_close();self.thread.join(5);self.assertFalse(self.thread.is_alive())
 
     def test_wire_uses_exact_uuid_and_ordered_plan(self):
-        initialize(self.engine,ID,self.plan,self.digest);commit(self.engine,ID)
+        initialize(self.engine,ID,self.plan,self.digest,'synthetic',p.digest('synthetic'));commit(self.engine,ID)
         self.assertEqual([call[0] for call in self.calls],['/task/new/init','/task/new/commit/'+ID])
         self.assertEqual(self.calls[0][1]['set-uuid'],ID)
         self.assertIn(b'[{"name": "alpha", "value": 2}]',self.calls[0][2])
         self.assertIn(b'["orthophoto"]',self.calls[0][2])
 
     def test_wrong_plan_or_wrong_identity_fails_closed(self):
-        with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,'0'*64)
+        with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,'0'*64,'synthetic',p.digest('synthetic'))
         self.assertEqual(self.calls,[])
         self.answer={'uuid':'22222222-2222-4222-8222-222222222222'}
-        with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,self.digest)
+        with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,self.digest,'synthetic',p.digest('synthetic'))
         for value in (False,0,None,'true'):
             with self.subTest(value=value):
                 self.answer={'uuid':ID,'success':value}
-                with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,self.digest)
+                with self.assertRaises(SmokeError):initialize(self.engine,ID,self.plan,self.digest,'synthetic',p.digest('synthetic'))
 
     def test_missing_commit_success_and_lost_ack_hold(self):
         self.answer={}

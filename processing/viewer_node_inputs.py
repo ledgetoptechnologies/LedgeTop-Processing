@@ -30,6 +30,7 @@ OBJECT_DDL='''CREATE TABLE objects (ordinal INTEGER PRIMARY KEY, object_id TEXT 
  mac TEXT NOT NULL, phase TEXT NOT NULL, slot_key TEXT, slot_identity TEXT)'''
 PLAN_DDL='CREATE TABLE plan (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL)'
 GRANT_DDL='CREATE TABLE execution_grant (singleton INTEGER PRIMARY KEY CHECK(singleton=1), request TEXT NOT NULL, value TEXT NOT NULL)'
+SUBMISSION_DDL='CREATE TABLE synthetic_submission (singleton INTEGER PRIMARY KEY CHECK(singleton=1), grant_value TEXT NOT NULL, origin TEXT NOT NULL, phase TEXT NOT NULL, ordinal INTEGER NOT NULL, object_id TEXT)'
 
 
 class ViewerNodeInputs:
@@ -63,12 +64,12 @@ class ViewerNodeInputs:
         finally:os.close(rootfd)
         with self._db(bootstrap=True) as db:
             objects=db.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
-            if not objects:db.execute(POLICY_DDL);db.execute(MANIFEST_DDL);db.execute(OBJECT_DDL);db.execute(PLAN_DDL);db.execute(GRANT_DDL)
+            if not objects:db.execute(POLICY_DDL);db.execute(MANIFEST_DDL);db.execute(OBJECT_DDL);db.execute(PLAN_DDL);db.execute(GRANT_DDL);db.execute(SUBMISSION_DDL)
             self._schema(db);value=p.canonical_json(self.policy).decode()
             existing=db.execute('SELECT value,mac_key FROM policy WHERE singleton=1').fetchone()
             if existing and existing[0]!=value:raise InputHeld('input_policy_changed')
             if not existing:
-                if db.execute('SELECT 1 FROM manifest UNION ALL SELECT 1 FROM objects UNION ALL SELECT 1 FROM plan UNION ALL SELECT 1 FROM execution_grant LIMIT 1').fetchone():
+                if db.execute('SELECT 1 FROM manifest UNION ALL SELECT 1 FROM objects UNION ALL SELECT 1 FROM plan UNION ALL SELECT 1 FROM execution_grant UNION ALL SELECT 1 FROM synthetic_submission LIMIT 1').fetchone():
                     raise InputHeld('input_policy_missing')
                 db.execute('INSERT INTO policy VALUES(1,?,?)',(value,secrets.token_hex(32)))
 
@@ -77,7 +78,7 @@ class ViewerNodeInputs:
         query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
-            for sql in (POLICY_DDL,MANIFEST_DDL,OBJECT_DDL,PLAN_DDL,GRANT_DDL):expected.execute(sql)
+            for sql in (POLICY_DDL,MANIFEST_DDL,OBJECT_DDL,PLAN_DDL,GRANT_DDL,SUBMISSION_DDL):expected.execute(sql)
             if db.execute(query).fetchall()!=expected.execute(query).fetchall():raise InputHeld('input_schema_changed')
         finally:expected.close()
 
