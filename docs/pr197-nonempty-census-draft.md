@@ -20,6 +20,11 @@ writer fencing, cutover and rollback are not qualified. A read-only mount and
 point-in-time comparisons do not prevent another mount namespace or privileged
 writer from modifying data, including transient writes between checks. Do not
 use this as sole authority to deploy or restore a production coordinator.
+The census now also exclusively flocks the existing `coordinator.lock` inode
+throughout the read and refuses a busy, missing, replaced or cross-mount lock.
+This rejects the tested cooperating predecessor while it is running; the lock
+is released when the census returns and cannot constrain writers that ignore
+it, administrators, or alternate lock inodes. It is not a cutover lease.
 The caps bound application-level materialization and file bytes read; they do
 not impose a wall-clock deadline on filesystem or SQLite operations, protect
 against an uncooperative privileged writer, or reserve memory/storage on a

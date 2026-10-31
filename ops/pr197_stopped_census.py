@@ -4,6 +4,7 @@ Only exact schemas observed from the installed predecessor image are admitted.
 An externally read-only mount does not exclude writers in other namespaces.
 """
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -63,8 +64,24 @@ def stopped_census(root,key,*,limits=None):
     limits=limits.copy()
     _mount(root)
     directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    lock=None
     try:
         identity=_identity(directory)
+        # The predecessor's own flock is held throughout this read. It stops
+        # cooperating coordinators on this exact inode, not privileged or
+        # uncooperative writers, and is released when this function returns.
+        lock=os.open('coordinator.lock',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=directory)
+        lock_info=os.fstat(lock)
+        named_lock=os.stat('coordinator.lock',dir_fd=directory,follow_symlinks=False)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink!=1 or
+            (lock_info.st_dev,lock_info.st_ino)!=(named_lock.st_dev,named_lock.st_ino) or
+            _identity(lock)[2]!=identity[2]):
+            raise CensusHeld('coordinator_lock_identity_required')
+        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError:raise CensusHeld('coordinator_lock_busy_or_unavailable') from None
+        named_lock=os.stat('coordinator.lock',dir_fd=directory,follow_symlinks=False)
+        if (lock_info.st_dev,lock_info.st_ino)!=(named_lock.st_dev,named_lock.st_ino):
+            raise CensusHeld('coordinator_lock_changed')
         db_path=root/'jobs.sqlite3';info=db_path.lstat()
         snapshot=lambda item:(item.st_dev,item.st_ino,item.st_mode,item.st_uid,item.st_gid,item.st_nlink,item.st_size,item.st_mtime_ns,item.st_ctime_ns)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>limits['database_bytes']:
@@ -87,10 +104,15 @@ def stopped_census(root,key,*,limits=None):
         named=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         try:
             if _identity(named)!=identity or _identity(directory)!=identity:raise CensusHeld('mount_identity_changed')
+            named_lock=os.stat('coordinator.lock',dir_fd=named,follow_symlinks=False)
+            if (lock_info.st_dev,lock_info.st_ino)!=(named_lock.st_dev,named_lock.st_ino):
+                raise CensusHeld('coordinator_lock_changed')
         finally:os.close(named)
         # Schema equality cannot establish which executable wrote the state.
         return {'schemaProfileRevision':PREDECESSOR_REVISION,'schemaProfileImage':PREDECESSOR_IMAGE,'schemaSha256':schema,
                 'limits':limits,'writerFenceQualified':False,'cutoverAuthorized':False,'rollbackAuthorized':False,'census':document}
     except CensusHeld:raise
     except (OSError,sqlite3.Error,KeyError,ValueError):raise CensusHeld('census_unavailable') from None
-    finally:os.close(directory)
+    finally:
+        if lock is not None:os.close(lock)
+        os.close(directory)

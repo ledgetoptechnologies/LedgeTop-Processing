@@ -1,4 +1,5 @@
 import os
+import fcntl
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -84,6 +85,31 @@ class StoppedCensusTests(unittest.TestCase):
         invalid=DEFAULT_LIMITS.copy();invalid['file_bytes']=True
         with self.assertRaisesRegex(CensusHeld,'bounded_census_limits_required'):
             stopped_census(self.root,bytes(range(32)),limits=invalid)
+
+    def test_live_coordinator_lock_is_refused_and_source_preserved(self):
+        queue=Queue(self.root,node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            with self.assertRaisesRegex(CensusHeld,'coordinator_lock_busy_or_unavailable'):self.inspect()
+        finally:queue.close()
+        self.assertEqual(self.inspect()['census']['database']['rowCounts']['owned_maintenance_schedules'],1)
+
+    def test_lock_held_throughout_census(self):
+        from ops import pr197_stopped_census as module
+        original=module.census;checked=[]
+        def check(*args,**kwargs):
+            fd=os.open(self.root/'coordinator.lock',os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError):fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                checked.append(True)
+            finally:os.close(fd)
+            return original(*args,**kwargs)
+        with patch('ops.pr197_stopped_census.census',side_effect=check):self.inspect()
+        self.assertEqual(checked,[True])
+
+    def test_missing_lock_is_not_created(self):
+        lock=self.root/'coordinator.lock';lock.unlink()
+        with self.assertRaises(CensusHeld):self.inspect()
+        self.assertFalse(lock.exists())
 
 
 if __name__=='__main__':unittest.main()
