@@ -10,8 +10,8 @@ HARNESS_BASE=d9f44b555f7851ea87f5391afc5f75af1cdf5dac
 FULL_HARNESS_BASE=044de218b05424776037d355acb963e304c29390
 FULL_SERVER_SHA256=f8d93cb6ba6f4634fac1eb5e18399bcc481c0a244c295e4ef904054a9c10e344
 FULL_CLIENT_SHA256=9cc627374bdfa2eb198232edaa53335e82681ac20e1228e2861d454f3556029a
-VIEWER_IMAGE=viewer-gcp-validation-faa3fd8bca374cb9ba721eea97a4674a:latest
-PYTHON_IMAGE=python:3.12-slim
+VIEWER_IMAGE=sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668
+PYTHON_IMAGE=sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 BRIDGE_MODE=${BRIDGE_MODE:-full}
 case "$BRIDGE_MODE" in
     reconcile) printf 'reconcile mode is not qualified for the per-object input layout\n' >&2; exit 1;;
@@ -89,18 +89,21 @@ git -C "$PROCESSING" diff --quiet "$PROCESSING_BASE" HEAD -- processing ops \
     tests/test_viewer_archive_spool.py tests/test_viewer_result_metadata.py \
     tests/test_viewer_synthetic_submission.py tests/test_viewer_node_inputs.py \
     tests/test_viewer_node_enrollment.py tests/test_viewer_worker_claim.py \
-    ':(exclude)ops/run_viewer_bridge_rehearsal.sh'
+    ':(exclude)ops/run_viewer_bridge_rehearsal.sh' ':(exclude)ops/verify_viewer_export.py'
+verifier_sum=$(sha256sum "$PROCESSING/ops/verify_viewer_export.py")
+[ "${verifier_sum%% *}" = 2e2550b7b64418f04f4529ebbf380211ca4118f6ade5718cd4d791d71becf718 ] || { printf 'Viewer export verifier hash mismatch\n' >&2; exit 1; }
 printf 'Viewer tree: %s\nProcessing base: %s\nProcessing checkout: %s\n' "$VIEWER_TREE" "$PROCESSING_BASE" "$(git -C "$PROCESSING" rev-parse HEAD)"
 git -C "$PROCESSING" rev-parse HEAD > "$RUN_DIR/processing.commit"
 if [ "$BRIDGE_MODE" != full ]; then
     sha256sum "$PROCESSING/tests/$SERVER_SCRIPT" "$PROCESSING/tests/$CLIENT_SCRIPT" | tee "$RUN_DIR/fixture-scripts.sha256"
 fi
-mkdir "$RUN_DIR/export" "$RUN_DIR/exchange"
+mkdir -m 700 "$RUN_DIR/export"
+mkdir "$RUN_DIR/exchange"
 chmod 0777 "$RUN_DIR/exchange" # synthetic dummy files only
-git -C "$VIEWER_REPO" archive "$VIEWER_TREE" apps/viewer packages/shared > "$RUN_DIR/viewer.tar"
-sha256sum "$RUN_DIR/viewer.tar" | tee "$RUN_DIR/viewer-archive.sha256"
-tar -xf "$RUN_DIR/viewer.tar" -C "$RUN_DIR/export"
-tar -df "$RUN_DIR/viewer.tar" -C "$RUN_DIR/export"
+git -C "$VIEWER_REPO" -c tar.umask=0022 archive --format=tar --prefix=apps/viewer/ "$VIEWER_TREE:apps/viewer" > "$RUN_DIR/viewer-app.tar"
+git -C "$VIEWER_REPO" -c tar.umask=0022 archive --format=tar --prefix=packages/shared/ "$VIEWER_TREE:packages/shared" > "$RUN_DIR/viewer-shared.tar"
+sha256sum "$RUN_DIR/viewer-app.tar" "$RUN_DIR/viewer-shared.tar" | tee "$RUN_DIR/viewer-archive.sha256"
+python3 "$PROCESSING/ops/verify_viewer_export.py" extract "$RUN_DIR/export" "$RUN_DIR/viewer-app.tar" "$RUN_DIR/viewer-shared.tar"
 VIEWER_IMAGE_ID=$(docker_short image inspect "$VIEWER_IMAGE" --format '{{.Id}}')
 PYTHON_IMAGE_ID=$(docker_short image inspect "$PYTHON_IMAGE" --format '{{.Id}}')
 [ "$VIEWER_IMAGE_ID" = 'sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668' ]
@@ -122,7 +125,7 @@ while [ ! -f "$RUN_DIR/exchange/ready.json" ]; do
     }
     i=$((i+1));sleep 1
 done
-tar -df "$RUN_DIR/viewer.tar" -C "$RUN_DIR/export"
+python3 "$PROCESSING/ops/verify_viewer_export.py" verify "$RUN_DIR/export" "$RUN_DIR/viewer-app.tar" "$RUN_DIR/viewer-shared.tar"
 CLIENT_ATTEMPTED=1
 CLIENT_ID=$(timeout 30s docker run -d --pull never --name "$CLIENT_NAME" --label "org.openai.codex.bridge=$RUN_ID" \
     --network "container:$SERVER_ID" --cpus 0.5 --memory 512m --pids-limit 64 --user 10001:10001 --read-only \

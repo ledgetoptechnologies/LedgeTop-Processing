@@ -14,6 +14,7 @@ class ViewerBridgeHarnessTests(unittest.TestCase):
     def test_changed_container_identity_is_never_stopped_or_removed(self):self._failure('identity-mismatch')
     def test_full_mode_records_uncertain_creation_without_cleanup(self):self._failure('uncertain','full')
     def test_full_mode_rejects_modified_fixture_before_docker(self):self._failure('tampered','full')
+    def test_archive_failure_stops_before_docker(self):self._failure('archive-failure','full')
     def test_default_mode_is_full(self):self._failure('uncertain',None)
     def test_reconcile_mode_is_rejected_before_docker(self):
         script=Path(__file__).resolve().parents[1]/'ops'/'run_viewer_bridge_rehearsal.sh'
@@ -30,10 +31,11 @@ class ViewerBridgeHarnessTests(unittest.TestCase):
             root=Path(directory);bin_dir=root/'bin';bin_dir.mkdir();log=root/'docker.log'
             (bin_dir/'git').write_text('''#!/bin/sh
 shift 2
+if [ "$1" = -c ]; then shift 2; fi
 case "$1" in
  rev-parse) case "$2" in HEAD) echo 1111111111111111111111111111111111111111;; *) echo baaaf2439d5a641ae59c3f550f77dc7512e3b84d;; esac;;
  status|merge-base|diff|ls-files) exit 0;;
- archive) printf synthetic;;
+ archive) [ "$MOCK_MODE" != archive-failure ] || exit 7; printf synthetic;;
  *) exit 1;;
 esac
 ''')
@@ -43,6 +45,7 @@ esac
             (bin_dir/'sha256sum').write_text('''#!/bin/sh
 for item in "$@"; do
  case "$item" in
+ */verify_viewer_export.py) hash=2e2550b7b64418f04f4529ebbf380211ca4118f6ade5718cd4d791d71becf718;;
  */viewer_full_bridge_server.py) hash="$MOCK_SERVER_HASH"; [ "$MOCK_MODE" != tampered ] || hash=bad;;
  */viewer_full_bridge_client.cjs) hash="$MOCK_CLIENT_HASH";;
  *) hash=synthetic;;
@@ -50,12 +53,13 @@ for item in "$@"; do
  printf '%s  %s\\n' "$hash" "$item"
 done
 ''')
+            (bin_dir/'python3').write_text('#!/bin/sh\ncase "$1" in */verify_viewer_export.py) exit 0;; esac\nexec "$MOCK_PYTHON" "$@"\n')
             (bin_dir/'tar').write_text('#!/bin/sh\nexit 0\n')
             (bin_dir/'docker').write_text('''#!/bin/sh
 printf '%s\\n' "$*" >> "$MOCK_DOCKER_LOG"
 if [ "$1" = image ]; then
- case "$3" in viewer-*) echo sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668;;
- python:*) echo sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159;; *) exit 1;; esac
+ case "$3" in sha256:0bb883*) echo sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668;;
+ sha256:aa943*) echo sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159;; *) exit 1;; esac
  exit 0
 fi
 if [ "$1" = run ]; then
@@ -69,11 +73,14 @@ exit 1
             try:subprocess.run([str(bin_dir/'tar')],check=True,timeout=2)
             except PermissionError:self.skipTest('temporary filesystem does not permit fixture execution')
             env={**os.environ,'PATH':str(bin_dir)+os.pathsep+os.environ['PATH'],'TMPDIR':str(root),
-                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode,'MOCK_SERVER_HASH':server_hash,'MOCK_CLIENT_HASH':client_hash}
+                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode,'MOCK_PYTHON':__import__('sys').executable,'MOCK_SERVER_HASH':server_hash,'MOCK_CLIENT_HASH':client_hash}
             if bridge_mode is None:env.pop('BRIDGE_MODE',None)
             else:env['BRIDGE_MODE']=bridge_mode
             result=subprocess.run(['sh',str(script)],env=env,text=True,capture_output=True,timeout=10)
             self.assertNotEqual(result.returncode,0)
+            if mode=='archive-failure':
+                self.assertFalse(log.exists())
+                return
             if mode=='tampered':
                 self.assertIn('Full server fixture hash mismatch',result.stderr)
                 self.assertIn('bad  ',result.stdout)
