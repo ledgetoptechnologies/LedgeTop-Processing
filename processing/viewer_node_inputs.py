@@ -35,7 +35,7 @@ SUBMISSION_DDL='CREATE TABLE synthetic_submission (singleton INTEGER PRIMARY KEY
 
 class ViewerNodeInputs:
     """One authenticated enrollment, bounded metadata and same-inode inputs."""
-    def __init__(self,enrollment,job_id,request_id,environment,*,input_root,input_root_identity,max_total,max_object):
+    def __init__(self,enrollment,job_id,request_id,environment,*,input_root,input_root_identity,max_total,max_object,synthetic_scale_policy=None):
         if type(enrollment) is not ViewerNodeEnrollment:raise InputHeld('enrollment_required')
         if type(max_total) is not int or type(max_object) is not int or not 1<=max_object<=max_total<=p.MAX_SAFE_INTEGER:
             raise InputHeld('input_budget_invalid')
@@ -47,9 +47,13 @@ class ViewerNodeInputs:
             raise InputHeld('enrollment_unavailable')
         self.request=row[0];self.claim=json.loads(row[1]);self.binding=json.loads(row[2]);self.receipt=row[5]
         self.binding_sha=p.digest(self.binding)
-        self.policy=json.loads(p.canonical_json(dict(jobId=job_id,requestId=request_id,environment=environment,
+        policy=dict(jobId=job_id,requestId=request_id,environment=environment,
             bindingSha256=self.binding_sha,claimSha256=p.digest(self.claim),inputRoot=str(input_root),
-            inputRootIdentity=input_root_identity,inputLayout="per-object-v1",maxTotal=max_total,maxObject=max_object)))
+            inputRootIdentity=input_root_identity,inputLayout="per-object-v1",maxTotal=max_total,maxObject=max_object)
+        if synthetic_scale_policy is not None:
+            p._closed(synthetic_scale_policy,('version','maxObjects','maxInputBytes'),'synthetic scale policy')
+            policy['syntheticScalePolicy']=synthetic_scale_policy
+        self.policy=json.loads(p.canonical_json(policy))
         self.path=enrollment.owner.root/'viewer-inputs.sqlite'
         fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
         try:
