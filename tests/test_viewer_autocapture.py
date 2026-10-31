@@ -441,6 +441,8 @@ finally:s.close();lease.close();q.close()
              patch.object(self.service.store, 'set_archive_status') as persist:
             self.service._archive_run()
         persist.assert_not_called()
+        self.assertIsNone(self.service._archive_retry[self.identifier][0])
+        self.assertGreater(self.service._archive_retry[self.identifier][1],time.monotonic())
         self.assertEqual(self.service._archive_health(), {'state': 'inspection', 'reason': 'status_persistence_failed'})
         self.assertNotIn('private detail', str(self.service._archive_health()))
 

@@ -243,7 +243,11 @@ class ViewerService:
                     continue
                 self._archive_cursor, identifier = candidate
                 identity = None
-                due, failures = 0, 0
+                prior = self._archive_retry.get(identifier)
+                if prior is not None and prior[0] is None and time.monotonic() < prior[1]:
+                    self._stop.wait(.25)
+                    continue
+                due, failures = (prior[1], prior[2]) if prior is not None and prior[0] is None else (0, 0)
                 try:
                     task = self.store.task(identifier)
                     identity = (task['generation'], task['job_id'])
@@ -266,7 +270,10 @@ class ViewerService:
                 except Exception as exc:
                     if identity is None:
                         # No trustworthy task identity can be associated with this failure.
+                        # Preserve bounded retry for an unavailable metadata store.
                         self._archive_status_persistence_failed = True
+                        failures += 1
+                        self._archive_retry[identifier] = (None, time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
                     else:
                         inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
                         try:
