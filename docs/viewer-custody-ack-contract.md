@@ -144,3 +144,11 @@ a concurrently writable source could still change afterward, so a future
 release-grade rehearsal needs an immutable export. Outer fixture cleanup is
 registered before setup, but nested legacy fixture setup is not independently
 proven to clean every resource if it fails before registering its own cleanup.
+The pinned hashes now match the raw Git blobs in staged tree
+`baaaf2439d5a641ae59c3f550f77dc7512e3b84d`, not the CRLF working checkout.
+The cross-language rehearsal used separate files written from `git cat-file`
+blob bytes; the export was mounted read-only in the test container. An ordinary
+`git archive` on this checkout applied line-ending attributes and was not
+byte-identical, so its extracted copies were not used for the final test. The
+host-side export is still writable by its owner; hashing followed by execution
+is not an atomic immutable snapshot against concurrent host modification.

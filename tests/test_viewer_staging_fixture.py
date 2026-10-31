@@ -23,8 +23,8 @@ TASK=claim_tests.TASK
 
 CAP=base64.urlsafe_b64encode(b'b'*32).decode().rstrip('=')
 VIEWER_CLIENTS={
-    'apps/viewer/server/stagedCommitmentClient.js':'11ccc2b2158ac00abe9509dd25b1e473dbee9cbdfdafb70f30e1aa4d7e448f92',
-    'apps/viewer/server/stagedAckDelivery.js':'2dfd36c0f34a6fd5e3d96a7e4934d416c27e96a7532004751972eaa3f9f1fc84',
+    'apps/viewer/server/stagedCommitmentClient.js':'38e1a5c47b8d7ed7aa87472578be6438e13784e4be39ae65ffdff1ac27e7dedb',
+    'apps/viewer/server/stagedAckDelivery.js':'91a2287902c867a47fd7efba2f300bb1167b892130fdea22ad2aa359cff732b3',
 }
 
 def verify_viewer_clients(root):
