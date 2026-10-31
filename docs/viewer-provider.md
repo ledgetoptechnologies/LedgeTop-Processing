@@ -179,3 +179,5 @@ held for inspection. These checks do not establish Viewer ingestion, provide an
 acknowledgement, or prove power-loss behavior at every filesystem boundary.
 Concurrent recovery tests exercise threads in one coordinator service, whose
 per-task lock serializes them. They do not establish multi-process exclusion.
+
+Unreceipted incomplete downloads and failed or ambiguous restore slots are retained for inspection. Automatic retry does not replace them; this trades availability for preserving the only remaining bytes if the engine result has expired. A complete receipt-verified partial may still be published and its redundant same-inode name removed after identity checks. This does not change engine retention, establish Viewer custody, provide automatic cleanup, or protect a rollback to an older coordinator that deletes partials. Existing upgrade and rollback guards remain required.
