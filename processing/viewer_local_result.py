@@ -5,6 +5,7 @@ gate/slot identity. Does not connect to the coordinator, mark a job complete,
 send results, acknowledge Viewer custody or delete any data.
 """
 import json
+import http.client
 import os
 from pathlib import Path
 import sqlite3
@@ -19,6 +20,7 @@ from .node_gate import NodeGate
 from .viewer_node_enrollment import ViewerNodeEnrollment
 from .viewer_node_inputs import ViewerNodeInputs
 from .viewer_service import NativeEngine
+from .viewer_locked_upload import strict_response
 
 
 class LocalResultHeld(RuntimeError):pass
@@ -144,6 +146,68 @@ def send_metadata(worker,*,synthetic_fixture=False):
             reader._check()
             if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
     return expected
+
+
+def send_archive(worker,*,synthetic_fixture=False):
+    """Send sealed bytes once or replay a verified coordinator spool receipt."""
+    if synthetic_fixture is not True:raise LocalResultHeld('synthetic_fixture_required')
+    record=register(worker);claim,binding,digest,identity,_=_local(worker);c=worker.config
+    parsed=urlsplit(c['origin']);path='/ltds/worker/v1/viewer-claims/'+claim['jobId']
+    metadata_sha=p.digest(record)
+    slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=claim['jobId'],metadataSha256=metadata_sha))
+    expected=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=claim['jobId'],metadataSha256=metadata_sha,
+                  archiveBytes=record['archiveBytes'],archiveSha256=record['archiveSha256'],slotKey=slot_key)
+    headers={'Authorization':'Bearer '+worker._bearer,'X-Claim-Token':claim['claimToken']}
+    with NodeGate(c['engineId']) as gate:
+        reservation=_gate(worker,claim,binding,gate)
+        with open_sealed_reader(c['outputRoot'],c['outputRootIdentity'],binding,max_budget=c['maxBudget']) as reader:
+            slot=reader._slot;actual=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
+            if actual!=identity or reader.sha256!=record['archiveSha256'] or reader.length!=record['archiveBytes']:
+                raise LocalResultHeld('result_intent_changed')
+            metadata_receipt=dict(schemaVersion=1,kind='viewer-result-metadata-receipt',jobId=claim['jobId'],payloadSha256=metadata_sha,
+                                  archiveSha256=record['archiveSha256'],archiveBytes=record['archiveBytes'])
+            existing,fd=_read_record(slot,'slot-'+digest+'.viewer-metadata-receipt')
+            try:
+                _check_record(slot,fd,'slot-'+digest+'.viewer-metadata-receipt',existing)
+                if p.canonical_json(existing)!=p.canonical_json(metadata_receipt):raise LocalResultHeld('metadata_receipt_changed')
+            finally:os.close(fd)
+            def connection():return http.client.HTTPSConnection(parsed.hostname,parsed.port,context=worker._ssl_context,timeout=30)
+            client=connection()
+            try:
+                client.request('GET',path+'/archive-receipt',headers=headers)
+                status=strict_response(client.getresponse())
+            except Exception:raise LocalResultHeld('archive_status_unavailable') from None
+            finally:client.close()
+            if status=={'state':'held'}:raise LocalResultHeld('coordinator_spool_requires_inspection')
+            if status=={'state':'missing'}:
+                client=connection()
+                try:
+                    client.putrequest('POST',path+'/archive')
+                    for key,value in headers.items():client.putheader(key,value)
+                    client.putheader('Content-Type','application/octet-stream');client.putheader('Content-Length',str(reader.length))
+                    client.endheaders()
+                    while True:
+                        data=reader.read(1024*1024)
+                        if not data:break
+                        client.send(data)
+                    response=strict_response(client.getresponse())
+                except Exception:raise LocalResultHeld('archive_delivery_uncertain') from None
+                finally:client.close()
+            elif type(status) is dict and set(status)=={'state','receipt'} and status['state']=='sealed':response=status['receipt']
+            else:raise LocalResultHeld('archive_status_invalid')
+            if p.canonical_json(response)!=p.canonical_json(expected):raise LocalResultHeld('archive_receipt_changed')
+            name='slot-'+digest+'.viewer-archive-receipt'
+            try:_persist(slot._root,slot._root_identity,name,expected)
+            except FileExistsError:
+                old,fd=_read_record(slot,name)
+                try:
+                    _check_record(slot,fd,name,old)
+                    if p.canonical_json(old)!=p.canonical_json(expected):raise LocalResultHeld('archive_receipt_changed')
+                    os.fsync(fd);_check_record(slot,fd,name,old);os.fsync(slot._root);_check_record(slot,fd,name,old)
+                finally:os.close(fd)
+            reader._check()
+            if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+            return expected
 
 
 def capture(worker,engine,*,synthetic_fixture=False):

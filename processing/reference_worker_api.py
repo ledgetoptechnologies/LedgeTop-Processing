@@ -19,7 +19,7 @@ PREFIX = "/ltds/worker/v1"
 
 
 class ReferenceWorkerAPI:
-    def __init__(self, store, receiver, *, bearer_workers, recovery_bindings=None, viewer_claims=None):
+    def __init__(self, store, receiver, *, bearer_workers, recovery_bindings=None, viewer_claims=None, viewer_spool=None):
         if type(bearer_workers) is not dict or not bearer_workers:
             raise ValueError("explicit private worker bearer configuration required")
         workers = {}
@@ -39,6 +39,11 @@ class ReferenceWorkerAPI:
         self.terminal = TerminalService(store)
         self._workers = MappingProxyType(workers)
         self.viewer_claims = viewer_claims
+        if viewer_spool is not None:
+            from .viewer_archive_spool import ViewerArchiveSpool
+            if type(viewer_spool) is not ViewerArchiveSpool or viewer_spool.claims is not viewer_claims:
+                raise ValueError('bound viewer spool required')
+        self.viewer_spool=viewer_spool
         self.recovery = None
         if recovery_bindings is not None:
             from .reference_recovery import ClaimRecoveryService
@@ -64,6 +69,20 @@ class ReferenceWorkerAPI:
             if hmac.compare_digest(token, configured):
                 identity = worker
         return identity
+
+    def handle_archive(self,path,headers,length,chunks,*,protected_transport=False):
+        """Authenticate and reserve before iterating an archive request body."""
+        if protected_transport is not True:return self._error(503,'protected_transport_required')
+        identity=self._authenticate(headers)
+        if identity is None:return self._error(401,'unauthorized')
+        match=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/archive',path)
+        if not match or self.viewer_spool is None:return self._error(404,'not_found')
+        if self._header(headers,'Content-Type')!='application/octet-stream':return self._error(415,'invalid_content_type')
+        token=self._header(headers,'X-Claim-Token')
+        try:
+            receipt=self.viewer_spool.receive(match[1],identity,token,chunks,expected_length=length)
+            return Response(200,receipt)
+        except Exception:return self._error(409,'archive_requires_inspection')
 
     @staticmethod
     def _error(status, code):
@@ -146,6 +165,11 @@ class ReferenceWorkerAPI:
                 if self.viewer_claims is None:return self._error(404,'not_found')
                 return Response(200,self.viewer_claims.result_metadata(metadata[1],protocol.decode_submission(body),identity,
                                                                       self._header(headers,'X-Claim-Token')))
+            archive_status=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/archive-receipt',path) if type(path) is str else None
+            if method=='GET' and archive_status:
+                if self.viewer_spool is None:return self._error(404,'not_found')
+                if body:return self._error(400,'invalid_request')
+                return Response(200,self.viewer_spool.lookup(archive_status[1],identity,self._header(headers,'X-Claim-Token')))
             fence=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/(mutation-permit|mutation-finish|mutation-hold)',path) if type(path) is str else None
             if method=='POST' and fence:
                 if self.viewer_claims is None:return self._error(404,'not_found')

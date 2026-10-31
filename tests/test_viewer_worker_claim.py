@@ -262,6 +262,8 @@ class ViewerWorkerClaimTests(unittest.TestCase):
             db.execute('DROP TABLE viewer_worker_fences')
             db.execute('DROP TABLE viewer_worker_permits')
             db.execute('DROP TABLE viewer_worker_result_metadata')
+            db.execute('DROP TABLE viewer_worker_spool_config')
+            db.execute('DROP TABLE viewer_worker_spool')
             db.execute('DROP TABLE viewer_worker_claims')
             db.execute('DROP TABLE viewer_worker_inventory')
             db.execute('DROP TABLE viewer_worker_plans')
@@ -284,6 +286,8 @@ class ViewerWorkerClaimTests(unittest.TestCase):
             db.execute('DROP TABLE viewer_worker_fences')
             db.execute('DROP TABLE viewer_worker_permits')
             db.execute('DROP TABLE viewer_worker_result_metadata')
+            db.execute('DROP TABLE viewer_worker_spool_config')
+            db.execute('DROP TABLE viewer_worker_spool')
             for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_grants'):
                 db.execute('DROP TABLE '+table)
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
@@ -302,6 +306,8 @@ class ViewerWorkerClaimTests(unittest.TestCase):
             db.execute('DROP TABLE viewer_worker_fences')
             db.execute('DROP TABLE viewer_worker_permits')
             db.execute('DROP TABLE viewer_worker_result_metadata')
+            db.execute('DROP TABLE viewer_worker_spool_config')
+            db.execute('DROP TABLE viewer_worker_spool')
             for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans'):
                 db.execute('DROP TABLE '+table)
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
@@ -318,7 +324,7 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         with self.queue._db() as db:
             db.execute('DROP TRIGGER viewer_worker_active_permit_hold')
             for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans',
-                          'viewer_worker_grants','viewer_worker_fences','viewer_worker_permits'):
+                          'viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_spool_config','viewer_worker_spool'):
                 db.execute('DROP TABLE '+table)
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
         class Bomb:

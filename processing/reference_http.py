@@ -1,4 +1,4 @@
-"""Explicitly started, protected HTTP listener for reference metadata only."""
+"""Explicitly started protected listener; archive ingress requires opt-in spool."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
@@ -6,6 +6,7 @@ import math
 import re
 import socket
 import ssl
+import threading
 
 from .reference_api import Response
 from .reference_binary import BinaryResponse
@@ -49,6 +50,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         if not addresses or any(not _loopback(item[4][0]) for item in addresses):
             raise ValueError("plaintext reference listener requires loopback binding")
 
+    archive_readers=threading.BoundedSemaphore(2)
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "ReferenceMetadata"
@@ -167,7 +169,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             if self.headers.get_all("Transfer-Encoding"):
                 self._error(400, "transfer_encoding_not_supported")
                 return
-            for name in ("Authorization", "Content-Length", "X-Claim-Token", "X-LedgeTop-Capability"):
+            for name in ("Authorization", "Content-Length", "Content-Type", "X-Claim-Token", "X-LedgeTop-Capability"):
                 if len(self.headers.get_all(name, [])) > 1:
                     self._error(400, "duplicate_header")
                     return
@@ -176,18 +178,36 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 self._error(411, "content_length_required")
                 return
             length = 0
+            archive_request=(self.command=='POST' and re.fullmatch(r'/ltds/worker/v1/viewer-claims/[a-f0-9-]{36}/archive',self.path) is not None)
             if lengths:
                 text = lengths[0]
                 if not re.fullmatch(r"[0-9]+", text):
                     self._error(400, "invalid_content_length")
                     return
-                if len(text) > 10 or int(text) > MAX_BODY_BYTES:
+                if (len(text)>16 or int(text)>9007199254740991 or (not archive_request and int(text)>MAX_BODY_BYTES)):
                     self._error(413, "metadata_too_large")
                     return
                 length = int(text)
             if self.command != "POST" and length:
                 self._error(400, "unexpected_request_body")
                 return
+            if archive_request:
+                if not archive_readers.acquire(blocking=False):
+                    self._error(503,'archive_capacity_unavailable');return
+                try:
+                    def chunks():
+                        remaining=length
+                        while remaining:
+                            data=self.rfile.read(min(1024*1024,remaining))
+                            if not data:return
+                            remaining-=len(data);yield data
+                    try:
+                        response=api.handle_archive(self.path,dict(self.headers.items()),length,chunks(),
+                                                    protected_transport=_protected(self.connection))
+                    except Exception:
+                        self._error(500,'internal_error');return
+                    self._reply(response);return
+                finally:archive_readers.release()
             try:
                 body = self.rfile.read(length) if length else b""
                 if len(body) != length:
