@@ -9,8 +9,10 @@ The separate `pr205-host-attestor-probe-reviewed.py.txt` is a later, unrun
 revision: it records the intended container identity before creation, treats
 creation and inspection as uncertain until verified removal, and preserves its
 socket directory and recovery metadata when the Docker outcome is unknown.
-Local mocked tests cover create-timeout and inspection-failure retention; this
-revised source was **not** run on the remote host.
+Local mocked tests cover create-timeout, inspection-failure and daemon-switch
+retention before either stop or removal; this revised source was **not** run
+on the remote host. Docker administrators and daemon changes between an
+identity check and its next operation remain outside this experiment's fence.
 
 On 2026-10-31, the source from Git commit
 `e929c6424db5f5ab3b465d61bc6e0ac5c29805d5` at
