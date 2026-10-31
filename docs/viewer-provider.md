@@ -179,3 +179,5 @@ held for inspection. These checks do not establish Viewer ingestion, provide an
 acknowledgement, or prove power-loss behavior at every filesystem boundary.
 Concurrent recovery tests exercise threads in one coordinator service, whose
 per-task lock serializes them. They do not establish multi-process exclusion.
+
+Authenticated observers can read `GET /v1/prototype/viewer-dispatcher` for the Viewer dispatch thread state and whether an unexpected exception escaped its scheduler turn. The failure flag is sticky for the process lifetime, contains no exception or job details, and resets when the process is recreated. This is an observation rather than proof of job progress, node availability, result retention, or failure-free operations caught inside a turn. Public `/healthz` and job handling remain unchanged.

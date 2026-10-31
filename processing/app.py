@@ -136,6 +136,10 @@ def make_handler(config: Config):
         def do_GET(self):
             if facade and facade.handle(self):
                 return
+            if self.path == '/v1/prototype/viewer-dispatcher':
+                if not self._authorized(observer=True):return
+                self._reply(200, service.dispatcher_status() if service is not None else {'enabled': False})
+                return
             if self.path == '/v1/prototype/admission-drain':
                 if not self._authorized(operator=True):return
                 gate = getattr(queue, 'admission_drain', None)
