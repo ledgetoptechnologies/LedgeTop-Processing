@@ -34,6 +34,18 @@ class EngineUnavailable(OSError):
     pass
 
 
+class OptionCatalogUnavailable(Conflict):
+    pass
+
+
+class OptionDefinitionChanged(Conflict):
+    pass
+
+
+class OptionMissing(ValueError):
+    pass
+
+
 class NativeEngine:
     def __init__(self, origin, token=''):
         self.origin, self.token = origin, token
@@ -130,7 +142,7 @@ class ViewerService:
     def options(self):
         current = self._catalog()
         if not current['ready']:
-            raise Conflict('engine catalog unavailable')
+            raise OptionCatalogUnavailable('engine catalog unavailable')
         return current['commonOptions']
 
     def capabilities(self):
@@ -153,7 +165,7 @@ class ViewerService:
             raise Conflict('unknown selected node')
         snapshot = discover_node(role, origin, token)
         if not snapshot['available']:
-            raise Conflict('selected engine options unavailable')
+            raise OptionCatalogUnavailable('selected engine options unavailable')
         return snapshot['options']
 
     def _check_options(self, options, *, node_id=None, evidence=None):
@@ -163,10 +175,10 @@ class ViewerService:
         allowed = {item['name'] for item in definitions}
         if (not isinstance(options, list) or any(not isinstance(item, dict)
                 or item.get('name') not in allowed for item in options)):
-            raise ValueError('option unavailable on configured engines')
+            raise OptionMissing('option unavailable on configured engines')
         selected = [item for item in definitions if item['name'] in {option['name'] for option in options}]
         if evidence is not None and json.dumps(sorted(selected,key=lambda item:item['name']),sort_keys=True,separators=(',',':'),allow_nan=False) != json.dumps(evidence,sort_keys=True,separators=(',',':'),allow_nan=False):
-            raise Conflict('selected engine option definitions changed')
+            raise OptionDefinitionChanged('selected engine option definitions changed')
         return selected
 
     def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
@@ -419,7 +431,13 @@ class ViewerService:
                             stream = self._verify_archive(partial, receipt)
                             os.link(partial, path)
                         else:
-                            raise Conflict('archive receipt has no file')
+                            # The receipt already binds the exact bytes to this
+                            # completed task. If local copies disappeared before
+                            # archive_path was persisted, recover only that same
+                            # content from the retained engine result.
+                            stream, size = self._restore_recorded_archive(task, path, receipt)
+                            self.store.update(identifier, archive_path=str(path))
+                            return stream, size
                         current = path.lstat(); opened = os.fstat(stream.fileno())
                         if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
                             raise Conflict('archive identity changed during publication')
@@ -649,7 +667,17 @@ class ViewerService:
             # Submission uses the fleet-wide common catalog. At dispatch,
             # refresh the selected engine specifically so an unrelated node
             # outage does not strand an already accepted job.
-            self._check_options(task['options'], node_id=node_id, evidence=task['option_evidence'])
+            try:
+                self._check_options(task['options'], node_id=node_id, evidence=task['option_evidence'])
+            except OptionCatalogUnavailable:
+                self.store.update(task['uuid'], phase='waiting_node', error='option_catalog_unavailable')
+                return
+            except (OptionMissing, OptionDefinitionChanged):
+                self.store.update(task['uuid'], phase='waiting_node', error='option_definition_changed')
+                return
+            if task['phase'] == 'waiting_node' and task['error'] in (
+                    'option_catalog_unavailable', 'option_definition_changed'):
+                self.store.update(task['uuid'], phase='queued', error=None)
             job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
                                    'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
             if not job:
