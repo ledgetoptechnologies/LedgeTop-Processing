@@ -85,6 +85,84 @@ def acquire(directory, state_dir):
     return AuthorityLease(directory, authority)
 
 
+def acquire_transferred(sock, directory, state_dir, *, supervisor_uid, operation_id,
+                        container_id, image_id, experimental=False):
+    """Receive one held lease FD from a trusted supervisor before DB writes.
+
+    Not wired to application startup: host writer exclusion, exact container
+    attestation, supervisor lifetime and lost-ACK recovery are unqualified.
+    """
+    import array, fcntl, hashlib, socket, stat, struct
+    if experimental is not True or sock.family!=socket.AF_UNIX or not hasattr(socket,'SO_PEERCRED'):
+        raise LeaseUnavailable('experimental_handoff_required')
+    fd=None;fds=array.array('i')
+    try:
+        _pid,uid,_gid=struct.unpack('3i',sock.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,struct.calcsize('3i')))
+        if uid!=supervisor_uid:raise ValueError()
+        authority=existing_authority(state_dir)
+        if authority is None or not AUTHORITY.fullmatch(authority):raise ValueError()
+        sock.settimeout(5)
+        data,ancillary,flags,_=sock.recvmsg(4100,socket.CMSG_SPACE(array.array('i').itemsize))
+        unexpected=False
+        for level,kind,value in ancillary:
+            if level==socket.SOL_SOCKET and kind==socket.SCM_RIGHTS:
+                fds.frombytes(value[:len(value)-(len(value)%fds.itemsize)])
+            else:unexpected=True
+        if flags & (socket.MSG_CTRUNC|socket.MSG_TRUNC) or unexpected or len(fds)!=1:raise ValueError()
+        fd=fds.pop()
+        os.set_inheritable(fd,False)
+        while len(data)<4:
+            part=sock.recv(4-len(data))
+            if not part:raise ValueError()
+            data+=part
+        size=int.from_bytes(data[:4],'big')
+        if size<1 or size>4096 or len(data)>size+4:raise ValueError()
+        while len(data)<size+4:
+            part=sock.recv(size+4-len(data))
+            if not part:raise ValueError()
+            data+=part
+        def unique(pairs):
+            result={}
+            for key,item in pairs:
+                if key in result:raise ValueError()
+                result[key]=item
+            return result
+        payload=data[4:];value=json.loads(payload,object_pairs_hook=unique,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        keys={'version','operationId','authorityId','pid','startTime','containerId','imageId','leaseDevice','leaseInode'}
+        if (type(value) is not dict or set(value)!=keys or value['version']!=1 or value['operationId']!=operation_id
+                or value['authorityId']!=authority or value['containerId']!=container_id or value['imageId']!=image_id):
+            raise ValueError()
+        held=os.fstat(fd);named=(Path(directory)/(authority+'.lease')).lstat()
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink!=1 or not stat.S_ISREG(named.st_mode)
+                or (held.st_dev,held.st_ino)!=(named.st_dev,named.st_ino)
+                or (held.st_dev,held.st_ino)!=(value['leaseDevice'],value['leaseInode'])):raise ValueError()
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        # A different open description must see the same inode locked.
+        probe=os.open(Path(directory)/(authority+'.lease'),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            info=os.fstat(probe)
+            if (info.st_dev,info.st_ino)!=(held.st_dev,held.st_ino):raise ValueError()
+            try:fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:pass
+            else:raise ValueError()
+        finally:os.close(probe)
+        sock.sendall(hashlib.sha256(payload).hexdigest().encode()+b'\n')
+        response=b''
+        while len(response)<3:
+            part=sock.recv(3-len(response))
+            if not part:raise ValueError()
+            response+=part
+        if response!=b'GO\n':raise ValueError()
+        lease=object.__new__(AuthorityLease);lease.authority=authority
+        lease.path=Path(directory)/(authority+'.lease');lease._descriptor=fd;fd=None
+        return lease
+    except Exception:raise LeaseUnavailable('authority_handoff_uncertain') from None
+    finally:
+        if fd is not None:os.close(fd)
+        for extra in fds:os.close(extra)
+
+
 def record_required(queue, lease):
     """Persist that this state needs a lease, after checking the queue's authority."""
     if queue.authority_id != lease.authority:
