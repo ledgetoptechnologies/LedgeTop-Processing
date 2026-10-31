@@ -110,7 +110,7 @@ def _entry(key, path, info):
     return entry
 
 
-def tree(root, key):
+def tree(root, key, *, limits=None):
     root = Path(root)
     root_info = root.lstat()
     entries = {path_id(key, '.'): dict(_entry(key, root, root_info), root=True)}
@@ -120,6 +120,8 @@ def tree(root, key):
     discovered = 1
     incoming = 0
     spool_entries = None
+    total_bytes = 0
+    entry_limit = MAX_TREE_ENTRIES if limits is None else min(MAX_TREE_ENTRIES, limits['entries'])
 
     def failed(error):
         errors.append(type(error).__name__)
@@ -135,7 +137,7 @@ def tree(root, key):
         with os.scandir(directory) as scan:
             for item in scan:
                 names.append(item.name)
-                if len(names) > MAX_TREE_ENTRIES:
+                if len(names) > entry_limit:
                     raise OSError('census entry limit')
         return tuple(sorted(names))
 
@@ -149,7 +151,7 @@ def tree(root, key):
             if directory_identity(directory.lstat()) != before:
                 raise OSError('census directory changed')
             discovered += len(names)
-            if discovered > MAX_TREE_ENTRIES:
+            if discovered > entry_limit:
                 raise OSError('census entry limit')
             directories.append((directory, before, names))
             if directory == root / 'viewer-spool':
@@ -157,6 +159,10 @@ def tree(root, key):
             for name in names:
                 path = directory / name
                 info = path.lstat()
+                if limits is not None and stat.S_ISREG(info.st_mode):
+                    if info.st_size > limits['file_bytes'] or total_bytes + info.st_size > limits['total_bytes']:
+                        raise OSError('census byte limit')
+                    total_bytes += info.st_size
                 entries[path_id(key, path.relative_to(root).as_posix())] = _entry(key, path, info)
                 if name.startswith('.incoming-'):
                     incoming += 1
@@ -197,7 +203,7 @@ VIEWER_NEW_COLUMN = 'option_evidence_required'
 VIEWER_LEGACY_SCHEMA_SHA256 = 'e7bbc127917f0c8c21007a79f35b434d00a1446fed25b369e1b3ab7579c628a3'
 VIEWER_MIGRATED_SCHEMA_SHA256 = 'a637e43b58241be981e0c056d8e6fd7d4a83e7c590598f837f6fccfdcf77d424'
 
-def database(path, key):
+def database(path, key, *, limits=None):
     # immutable mode ignores WAL: callers must census stopped, checkpointed
     # state with no live writer or SQLite sidecar; it is not a live snapshot.
     with Path(path).open('rb') as stream:
@@ -206,14 +212,33 @@ def database(path, key):
     uri = 'file:' + str(path) + '?mode=ro&immutable=1'
     db = sqlite3.connect(uri, uri=True)
     try:
+        if limits is not None:
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, limits['row_bytes'])
         check = db.execute('PRAGMA quick_check').fetchone()[0]
         objects = {'%s:%s' % (kind, name): hashlib.sha256((sql or '').encode()).hexdigest()
                    for kind, name, sql in db.execute('SELECT type,name,sql FROM sqlite_master')}
         tables = sorted(name for name, in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'"))
         counts, digests = {}, {}
+        total_rows = 0
+        materialized_rows = 0
+        total_row_bytes = 0
         for name in tables:
-            rows = sorted(repr(tuple(row)) for row in db.execute('SELECT * FROM "%s"' % name.replace('"', '""')))
+            if limits is not None:
+                count = db.execute('SELECT COUNT(*) FROM "%s"' % name.replace('"', '""')).fetchone()[0]
+                total_rows += count
+                if total_rows > limits['rows']:
+                    raise ValueError('census row limit')
+            rows = []
+            for row in db.execute('SELECT * FROM "%s"' % name.replace('"', '""')):
+                rendered = repr(tuple(row))
+                if limits is not None:
+                    materialized_rows += 1
+                    total_row_bytes += len(rendered.encode())
+                    if materialized_rows > limits['rows'] or total_row_bytes > limits['row_total_bytes']:
+                        raise ValueError('census row materialization limit')
+                rows.append(rendered)
+            rows.sort()
             counts[name] = len(rows)
             # Keyed so that a guessed row cannot be confirmed; detects same-count updates.
             digests[name] = _keyed(key, b'table\0' + '\n'.join(rows).encode()).hexdigest()
@@ -233,7 +258,15 @@ def database(path, key):
             columns = tuple(row[1] for row in column_info)
             if all(row[6] == 0 for row in column_info) and columns in (VIEWER_LEGACY_COLUMNS, VIEWER_LEGACY_COLUMNS + (VIEWER_NEW_COLUMN,)):
                 names = ','.join('"'+name+'"' for name in VIEWER_LEGACY_COLUMNS)
-                rows = sorted(repr(tuple(row)) for row in db.execute('SELECT '+names+' FROM viewer_tasks'))
+                rows = []
+                projection_bytes = 0
+                for row in db.execute('SELECT '+names+' FROM viewer_tasks'):
+                    rendered = repr(tuple(row))
+                    projection_bytes += len(rendered.encode())
+                    if limits is not None and (len(rows)>=limits['rows'] or projection_bytes>limits['row_total_bytes']):
+                        raise ValueError('census projection limit')
+                    rows.append(rendered)
+                rows.sort()
                 invalid = None if columns == VIEWER_LEGACY_COLUMNS else db.execute(
                     "SELECT count(*) FROM viewer_tasks WHERE option_evidence_required IS NOT 0 OR typeof(option_evidence_required) != 'integer'").fetchone()[0]
                 viewer_projection = {'columns':list(columns), 'digest':_keyed(key,b'viewer-legacy\0'+'\n'.join(rows).encode()).hexdigest(), 'invalidDefaults':invalid}
@@ -249,11 +282,11 @@ def database(path, key):
         db.close()
 
 
-def census(root, key, database_name='jobs.sqlite3'):
-    summary, entries = tree(root, key)
+def census(root, key, database_name='jobs.sqlite3', *, limits=None):
+    summary, entries = tree(root, key, limits=limits)
     document = {'schemaVersion': SCHEMA_VERSION, 'tree': summary, 'entries': entries}
     if (Path(root) / database_name).is_file():
-        document['database'] = database(Path(root) / database_name, key)
+        document['database'] = database(Path(root) / database_name, key, limits=limits)
     return document
 
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ops.pr197_stopped_census import stopped_census,CensusHeld,SCHEMAS
+from ops.pr197_stopped_census import stopped_census,CensusHeld,SCHEMAS,DEFAULT_LIMITS
 from processing.prototype import Queue
 from processing.viewer_tasks import TaskStore
 
@@ -73,6 +73,17 @@ class StoppedCensusTests(unittest.TestCase):
         result=compare(before,after,bytes(range(32)),allow_paths=('jobs.sqlite3:mtime,bytes,content',))
         self.assertFalse(result['identical'])
         self.assertTrue(result['database']);self.assertTrue(result['files'])
+
+    def test_caps_refuse_without_removing_source(self):
+        photo=self.root/'viewer-tasks'/'synthetic';photo.write_bytes(b'abc')
+        for name,value in (('file_bytes',2),('total_bytes',2),('database_bytes',2),('rows',1),('entries',1)):
+            limits=DEFAULT_LIMITS.copy();limits[name]=value
+            with self.subTest(name=name),patch('ops.pr197_stopped_census._mount'):
+                with self.assertRaises(CensusHeld):stopped_census(self.root,bytes(range(32)),limits=limits)
+                self.assertEqual(photo.read_bytes(),b'abc')
+        invalid=DEFAULT_LIMITS.copy();invalid['file_bytes']=True
+        with self.assertRaisesRegex(CensusHeld,'bounded_census_limits_required'):
+            stopped_census(self.root,bytes(range(32)),limits=invalid)
 
 
 if __name__=='__main__':unittest.main()
