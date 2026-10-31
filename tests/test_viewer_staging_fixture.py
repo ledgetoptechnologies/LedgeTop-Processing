@@ -1,5 +1,6 @@
 """Synthetic staging-only node/spool setup; no live data or runtime activation."""
 import base64
+import hashlib
 import io
 import http.client
 import json
@@ -7,6 +8,7 @@ import os
 import shutil
 import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from ops.reference_worker_daemon import DaemonStateLock
@@ -20,6 +22,22 @@ from tests import test_viewer_worker_claim as claim_tests
 TASK=claim_tests.TASK
 
 CAP=base64.urlsafe_b64encode(b'b'*32).decode().rstrip('=')
+VIEWER_CLIENTS={
+    'apps/viewer/server/stagedCommitmentClient.js':'11ccc2b2158ac00abe9509dd25b1e473dbee9cbdfdafb70f30e1aa4d7e448f92',
+    'apps/viewer/server/stagedAckDelivery.js':'2dfd36c0f34a6fd5e3d96a7e4934d416c27e96a7532004751972eaa3f9f1fc84',
+}
+
+def verify_viewer_clients(root):
+    for name,expected in VIEWER_CLIENTS.items():
+        actual=hashlib.sha256((Path(root)/name).read_bytes()).hexdigest()
+        print('Viewer client SHA-256:',name,actual,flush=True)
+        if actual!=expected:raise ValueError('Viewer client content mismatch')
+
+def setup_fixture(owner,fixture):
+    owner.addCleanup(fixture.doCleanups)
+    with patch.object(claim_tests.ViewerWorkerClaimTests,'setUp',staging_coordinator),patch.object(enrollment_tests.NodeEnrollmentTests,'setUp',staging_enrollment),patch.object(input_tests.NodeInputsTests,'make',staging_inputs):
+        fixture.setUp()
+
 
 def staging_coordinator(fixture):
     cert=os.environ.get('SYNTHETIC_TEST_CERT');key=os.environ.get('SYNTHETIC_TEST_KEY')
@@ -46,11 +64,26 @@ def staging_inputs(fixture,owner):
         input_root=fixture.inputs,input_root_identity=fixture.input_id,max_total=100000,max_object=100000)
 
 class StagingFixtureTests(unittest.TestCase):
+    def test_failed_outer_setup_runs_registered_cleanup(self):
+        from unittest.mock import Mock
+        owner=unittest.TestCase()
+        fixture=Mock()
+        fixture.setUp.side_effect=RuntimeError('synthetic setup failure')
+        with self.assertRaisesRegex(RuntimeError,'synthetic setup failure'):
+            setup_fixture(owner,fixture)
+        owner.doCleanups()
+        fixture.doCleanups.assert_called_once_with()
+
+    def test_client_hash_mismatch_fails_before_execution(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            for name in VIEWER_CLIENTS:
+                target=Path(root)/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'altered')
+            with self.assertRaisesRegex(ValueError,'content mismatch'):verify_viewer_clients(root)
+
     def test_node_spool_and_completion_are_created_as_staging(self):
         fixture=spool_tests.ViewerSpoolProviderTests('test_authenticated_provider_download_keeps_running_and_retains_data')
-        with patch.object(claim_tests.ViewerWorkerClaimTests,'setUp',staging_coordinator),patch.object(enrollment_tests.NodeEnrollmentTests,'setUp',staging_enrollment),patch.object(input_tests.NodeInputsTests,'make',staging_inputs):
-            fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        setup_fixture(self,fixture)
         self.assertEqual(fixture.fixture.store.task(TASK)['environment'],'staging')
         with DaemonStateLock(fixture.base.base.base.base.base.worker) as owner:
             send_completion(fixture.base.base.worker(owner),synthetic_fixture=True)
@@ -67,8 +100,7 @@ class StagingFixtureTests(unittest.TestCase):
         from processing.viewer_staged_ack import ROUTE
         from processing import reference_protocol as protocol
         fixture=spool_tests.ViewerSpoolProviderTests('test_authenticated_provider_download_keeps_running_and_retains_data')
-        with patch.object(claim_tests.ViewerWorkerClaimTests,'setUp',staging_coordinator),patch.object(enrollment_tests.NodeEnrollmentTests,'setUp',staging_enrollment),patch.object(input_tests.NodeInputsTests,'make',staging_inputs):fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        setup_fixture(self,fixture)
         with DaemonStateLock(fixture.base.base.base.base.base.worker) as owner:
             send_completion(fixture.base.base.worker(owner),synthetic_fixture=True)
         initialize_staged_ack_schema(fixture.fixture.queue)
@@ -102,6 +134,7 @@ class StagingFixtureTests(unittest.TestCase):
         self.assertEqual(call('POST',path,body=protocol.canonical_json(dict(value,generation=value['generation']+1)))[0],409)
         viewer_source=os.environ.get('VIEWER_SOURCE')
         if viewer_source:
+            verify_viewer_clients(viewer_source)
             env=dict(os.environ,NODE_EXTRA_CA_CERTS=str(fixture.fixture.cert),NODE_NO_WARNINGS='1',
                 SYNTHETIC_BRIDGE_CONFIG=json.dumps(dict(origin='https://127.0.0.1:'+str(runtime._server.server_port),
                     authority=fixture.fixture.queue.authority_id,bearer=bearer,capability=CAP,task=TASK)))

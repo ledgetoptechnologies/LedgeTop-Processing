@@ -138,3 +138,9 @@ existing authenticated lookup. This is a simulated lost response, not a
 process-kill test, and the in-memory outbox provides no durable Viewer custody.
 The runtime fixture patches qualification flags only for the test. It does not
 wire the spool into ViewerService or enable completion projection in deployment.
+The staging harness verifies SHA-256 of both Viewer client source files before
+starting the client process. This detects changes present at verification time;
+a concurrently writable source could still change afterward, so a future
+release-grade rehearsal needs an immutable export. Outer fixture cleanup is
+registered before setup, but nested legacy fixture setup is not independently
+proven to clean every resource if it fails before registering its own cleanup.
