@@ -79,7 +79,7 @@ class Rehearsal:
             root_fd=os.open(self.root,flags)
             spool_fd=os.open('viewer-tasks',flags,dir_fd=root_fd)
             task_fd=os.open(directory,flags,dir_fd=spool_fd)
-            descriptor=os.open(relative,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=task_fd)
+            descriptor=os.open(relative,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK,dir_fd=task_fd)
             before=os.fstat(descriptor)
             named=os.stat(relative,dir_fd=task_fd,follow_symlinks=False)
             if (not stat.S_ISREG(before.st_mode) or before.st_size!=size

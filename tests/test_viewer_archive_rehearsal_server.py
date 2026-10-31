@@ -60,6 +60,13 @@ class RehearsalServerTest(unittest.TestCase):
             fixture=Rehearsal(str(root),'unused',identifier)
             source.unlink();source.symlink_to('other')
             with self.assertRaises((OSError,ValueError)):fixture.input_evidence(identifier,'photo.jpg')
+            source.unlink();os.mkfifo(source)
+            previous=signal.signal(signal.SIGALRM,lambda *_:(_ for _ in ()).throw(TimeoutError('FIFO read blocked')))
+            try:
+                signal.alarm(3)
+                with self.assertRaises(ValueError):fixture.input_evidence(identifier,'photo.jpg')
+            finally:
+                signal.alarm(0);signal.signal(signal.SIGALRM,previous)
             source.unlink();task.rename(task.with_name('other'));task.symlink_to('other',target_is_directory=True)
             with self.assertRaises((OSError,ValueError)):fixture.input_evidence(identifier,'photo.jpg')
             task.unlink();task.with_name('other').rename(task)
