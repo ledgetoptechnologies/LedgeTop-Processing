@@ -55,7 +55,7 @@ class MountRestoreE2E(unittest.TestCase):
     def test_backup_remount_restore(self):
         image_compat = os.environ.get('LEDGETOP_IMAGE_COMPAT_E2E') == '1'
         old_image = 'sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004'
-        candidate_image = 'sha256:4c5bd4bd43c75510b1c1ab2e58d601aa880a028f1b16f6d24053850adfe4d3d1'
+        candidate_image = 'sha256:df741c6ad340ebc32dc3a4c9caf4b6468260cd9cf42523c6f6406e7e05bbbdee'
         ident = 'codex-viewer-e2e-' + uuid.uuid4().hex
         print('synthetic owner label: ' + ident, flush=True)
         volume = ident + '-backup'
@@ -111,7 +111,10 @@ root=Path('/scratch/{ident}/{state}'); uid='12345678-1234-4234-8234-123456789abc
 env=os.environ.copy(); env.update(PROCESSING_API_TOKEN='a'*32,PROCESSING_PROTOTYPE_STATE_DIR=str(root),
  PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_VIEWER_ENABLED='1',
  PROCESSING_VIEWER_TOKEN='b'*32,LOCAL_NODE_URL='http://127.0.0.1:19991',MAIN_NODE_URL='http://127.0.0.1:19992',
- PROCESSING_BIND_HOST='127.0.0.1',PROCESSING_PORT='18080')
+ PROCESSING_BIND_HOST='127.0.0.1',PROCESSING_PORT='18080',PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE='0')
+from processing.config import Config
+if {state == 'candidate'!r}:
+    assert Config.__dataclass_fields__['viewer_archive_autocapture'].default is False
 server=subprocess.Popen([sys.executable,'-m','processing.app'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 base='http://127.0.0.1:18080'; opener=urllib.request.build_opener(urllib.request.ProxyHandler({{}}))
 try:
@@ -225,7 +228,7 @@ print('synthetic candidate enabled capture and inspection verified',flush=True)
                    'import time; time.sleep(120)')
             if image_compat:
                 for image, revision in ((old_image, '693cb7eca32295da959a4f42399f317577ef8a8a'),
-                                        (candidate_image, '1cdedc87b4f0b4fbe7631853c02d39883a2ff532')):
+                                        (candidate_image, '4d7c3c7f08eaf965b84098fbb69ee407c2335bcf')):
                     observed = json.loads(docker('image', 'inspect', image).stdout)[0]
                     if observed.get('Id') != image or observed.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != revision:
                         raise RuntimeError('exact image revision required')
@@ -246,6 +249,10 @@ from processing.viewer_tasks import TaskStore
 p=Path('/scratch/{ident}'); root=p/'source'
 q=Queue(root, node_ids=('cluster','main'), viewer_enabled=True)
 with q._db() as db: db.execute("UPDATE coordinator_identity SET authority_id='12345678-1234-1234-1234-123456789abc' WHERE singleton=1")
+with q._db() as db:
+ for i in range(16):
+  db.execute('INSERT INTO owned_maintenance_schedules VALUES(?,?,?,?,?,?)',
+   ('synthetic-'+str(i),'cluster','12345678-1234-1234-1234-123456789abc','a'*64,'{{}}','{{}}'))
 t=TaskStore(q, root/'viewer-tasks'); uid='12345678-1234-4234-8234-123456789abc'
 t.initialize(uid,name='synthetic task',options=[],outputs=[],environment='production')
 q.close()
@@ -297,11 +304,11 @@ for field in ('objects','rowCounts','tableDigest','viewerTaskProjection','author
     assert before['database'][field]==after['database'][field], field
 assert before['database']['rowCounts']['viewer_tasks']==1
 assert before['database']['rowCounts']['viewer_files']==1
+assert before['database']['rowCounts']['owned_maintenance_schedules']==16
 ''')
             if image_compat:
-                run('--mount', scratch, image=candidate_image, uid='10001:10001', code=capture_script())
-                # Existing updater still rejects nonempty candidate state; do not
-                # reinterpret restoring the old independent copy as rollback.
+                # Capture stays disabled. Existing updater rejects nonempty
+                # candidate state; restoring an earlier copy is not rollback.
                 run('--mount', scratch, uid='10001:10001', code=f"""
 from pathlib import Path
 from ops.update_reference_coordinator import volume_census
