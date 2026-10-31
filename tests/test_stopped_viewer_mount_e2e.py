@@ -1,6 +1,8 @@
 """Opt-in Linux Docker daemon test; uses disposable synthetic data only."""
 import os
 import json
+import contextlib
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +41,15 @@ def save_recovery_metadata(ident, volumes, containers, reason):
     return path
 
 
+def try_save_recovery_metadata(ident, volumes, containers, reason):
+    try:
+        save_recovery_metadata(ident, volumes, containers, reason)
+    except BaseException:
+        # Preserve the original failure; never emit exception details that
+        # could contain host paths or daemon responses.
+        print('Warning: Docker recovery metadata could not be saved; resource outcome remains unknown.', file=sys.stderr)
+
+
 @unittest.skipUnless(os.environ.get('LEDGETOP_DOCKER_MOUNT_E2E') == '1', 'requires local Docker')
 class MountRestoreE2E(unittest.TestCase):
     def test_backup_remount_restore(self):
@@ -64,10 +75,13 @@ class MountRestoreE2E(unittest.TestCase):
         def run(*mounts, code):
             name = ident + '-run-' + str(len(container_names))
             container_names.append(name)
+            # In addition to the client timeout, each task process has its
+            # own deadline, including if the daemon starts it much later.
             return docker('run', '--rm', '-i', '--name', name, '--label', 'ledgetop.codex.owner=' + ident,
                           '--network', 'none', '--memory', '256m',
                           '--cpus', '1', '-v', str(repo) + ':/work:ro', *mounts,
-                          '-w', '/work', 'python:3.12-slim', 'python', '-B', '-', code=code)
+                          '-w', '/work', 'python:3.12-slim', 'python', '-B', '-c',
+                          'import signal,sys; signal.alarm(120); exec(sys.stdin.read())', code=code)
 
         def volume_create(name, *options):
             nonlocal uncertain
@@ -132,7 +146,7 @@ d=sqlite3.connect(destination/'jobs.sqlite3'); assert d.execute('SELECT * FROM v
             # reconcile exact names whose labels prove ownership, and retain
             # every volume if any container's identity or removal is unclear.
             if uncertain:
-                save_recovery_metadata(ident, [volume, scratch_volume], container_names, 'mutating request outcome uncertain')
+                try_save_recovery_metadata(ident, [volume, scratch_volume], container_names, 'mutating request outcome uncertain')
             else:
                 try:
                     for name in container_names:
@@ -153,7 +167,7 @@ d=sqlite3.connect(destination/'jobs.sqlite3'); assert d.execute('SELECT * FROM v
                         if name in docker('volume', 'ls', '--format', '{{.Name}}').stdout.splitlines():
                             raise RuntimeError('volume removal unverified')
                 except BaseException:
-                    save_recovery_metadata(ident, [volume, scratch_volume], container_names, 'cleanup outcome uncertain')
+                    try_save_recovery_metadata(ident, [volume, scratch_volume], container_names, 'cleanup outcome uncertain')
                     raise
 
 
@@ -225,6 +239,39 @@ class OwnershipTest(unittest.TestCase):
                 MountRestoreE2E('test_backup_remount_restore').test_backup_remount_restore()
         self.assertFalse(any(action[:2] == ['volume', 'rm'] for action in actions))
         self.assertIn('codex-viewer-e2e-' + token + '-backup', record.call_args.args[1])
+
+    def test_metadata_write_failure_preserves_original_timeout(self):
+        def fake(argv, **kwargs):
+            if argv[1:3] == ['volume', 'create']:
+                raise subprocess.TimeoutExpired(argv, 60)
+            return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+        stderr = io.StringIO()
+        with mock.patch.object(subprocess, 'run', side_effect=fake), \
+             mock.patch(__name__ + '.save_recovery_metadata', side_effect=OSError('private path')), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                MountRestoreE2E('test_backup_remount_restore').test_backup_remount_restore()
+        self.assertIn('resource outcome remains unknown', stderr.getvalue())
+        self.assertNotIn('private path', stderr.getvalue())
+
+    def test_test_container_has_independent_deadline(self):
+        token = '1234567890abcdef1234567890abcdef'
+        ident = 'codex-viewer-e2e-' + token
+        observed = []
+        def fake(argv, **kwargs):
+            args = argv[1:]
+            if args[:2] == ['volume', 'inspect']:
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([{'Labels': {'ledgetop.codex.owner': ident}}]), stderr='')
+            if args[:2] == ['run', '--rm']:
+                observed.append(argv)
+                raise subprocess.TimeoutExpired(argv, 60)
+            return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+        with mock.patch.object(uuid, 'uuid4') as new_id, mock.patch.object(subprocess, 'run', side_effect=fake), \
+             mock.patch(__name__ + '.save_recovery_metadata'):
+            new_id.return_value.hex = token
+            with self.assertRaises(subprocess.TimeoutExpired):
+                MountRestoreE2E('test_backup_remount_restore').test_backup_remount_restore()
+        self.assertIn('import signal,sys; signal.alarm(120); exec(sys.stdin.read())', observed[0])
 
 
 if __name__ == '__main__':
