@@ -182,6 +182,15 @@ It must reserve scratch before exposing a transfer request, fetch only through
 the scoped broker grant, and pass verified reservation-owned input paths to the
 engine controller. No submitted path or engine origin is trusted.
 
+After a successful `fetching` step, the worker service continues without the
+normal polling delay. It yields for 10 ms after at most 16 consecutive fetch
+steps, checks for shutdown between steps, and retains the existing retry, idle,
+and other-state polling. Each driver step still performs its background pass
+and persists one input before proceeding. This removes a fixed per-object wait;
+it does not establish a transfer-time bound or qualify a 10,000-object job.
+Grant lifetime, broker request limits, source I/O and metadata serialization
+remain independent constraints.
+
 The private API supports claim, reservation, transfer/processing phase, grant,
 result receipt and Viewer-acceptance relay operations. Public submission lookup
 by immutable submission UUID recovers a lost response without creating another

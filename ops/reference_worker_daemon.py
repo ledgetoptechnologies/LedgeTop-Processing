@@ -36,6 +36,10 @@ from processing.worker_outbox import WorkerOutbox
 from ops.private_worker_directory import private_worker_directory, sync_worker_lease
 
 MAX_CONFIG_BYTES = 64 * 1024
+# A fetch step publishes at most one verified input. Yield regularly even when
+# a large manifest contains many ready objects, without a full poll delay each.
+MAX_IMMEDIATE_FETCH_STEPS = 16
+FETCH_YIELD_SECONDS = 0.01
 REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInstanceId','authorityId',
     'engineId','gateGeneration','gateCoordinatorOrigin','coordinatorOrigin','brokerOrigin','engineOrigin',
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
@@ -209,6 +213,23 @@ class WorkerService:
                 driverAlive=self._driver_thread is not None and self._driver_thread.is_alive(),
                 listenerAlive=self._server_thread is not None and self._server_thread.is_alive())
 
+    def _drive(self, stop):
+        backoff = self.poll_seconds
+        fetch_steps = 0
+        while not stop.is_set():
+            state = self.driver.step()['state']
+            if state == 'fetching':
+                backoff = self.poll_seconds
+                fetch_steps += 1
+                if fetch_steps >= MAX_IMMEDIATE_FETCH_STEPS:
+                    fetch_steps = 0
+                    stop.wait(FETCH_YIELD_SECONDS)
+                continue
+            fetch_steps = 0
+            backoff = (min(60, max(self.poll_seconds, backoff * 2))
+                       if state in ('retry_wait','held','not_ready') else self.poll_seconds)
+            stop.wait(backoff)
+
     def run(self, stop):
         if self._server_thread is not None:
             raise ValueError('worker service already started')
@@ -221,12 +242,8 @@ class WorkerService:
                 self._failed('listener_thread_failed', stop)
 
         def drive():
-            backoff = self.poll_seconds
             try:
-                while not stop.is_set():
-                    state = self.driver.step()['state']
-                    backoff = min(60, max(self.poll_seconds, backoff * 2)) if state in ('retry_wait','held','not_ready') else self.poll_seconds
-                    stop.wait(backoff)
+                self._drive(stop)
             except BaseException:
                 self._failed('driver_thread_failed', stop)
 
