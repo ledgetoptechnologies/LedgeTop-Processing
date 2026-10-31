@@ -117,6 +117,19 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         self.assertEqual(self.docker_calls,[])
         self.assertFalse(any(self.backend.counts().values()))
 
+    def test_broker_response_limit_is_optional_and_bounded(self):
+        self.assertNotIn('brokerMaxResponseBytes', self.load())
+        for value in (1, 16 * 1024 * 1024):
+            self.config['brokerMaxResponseBytes'] = value
+            self.assertEqual(self.load()['brokerMaxResponseBytes'], value)
+        self.config['brokerMaxResponseBytes'] = 1024
+        driver, _ = self.build(provision=True)
+        self.assertEqual(driver.broker.max_response_bytes, 1024)
+        for value in (0, True, 16 * 1024 * 1024 + 1, 1.5):
+            self.config['brokerMaxResponseBytes'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.load()
+
     def test_cluster_odm_only_opt_in_uses_router_without_treedar_or_issuer(self):
         self.config['nodeId']='cluster';self.config['workerId']='worker-cluster'
         self.route(tree=False)

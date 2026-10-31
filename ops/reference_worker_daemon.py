@@ -27,7 +27,7 @@ from processing.reference_failure import FailureOutbox
 from processing.reference_http import create_reference_http_server
 from processing.reference_result_api import ReferenceResultAPI
 from processing.reference_results import ReferenceResults
-from processing.reference_transfer import BrokerClient
+from processing.reference_transfer import BrokerClient, RANGE_BYTES
 from processing.reference_tls import verified_client_context
 from processing.scratch_cleanup import ScratchCleanupExecutor
 from processing.scratch_policy import ScratchLedger
@@ -41,7 +41,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting'))
+                      'executionRouting','brokerMaxResponseBytes'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -327,6 +327,10 @@ def load_config(path):
         p._integer(config['gateGeneration'], 'gate generation')
         for field in ('outputBudget','transferTtl'):
             p._integer(config[field], 'worker budget')
+        if 'brokerMaxResponseBytes' in config and (
+                type(config['brokerMaxResponseBytes']) is not int
+                or not 1 <= config['brokerMaxResponseBytes'] <= RANGE_BYTES):
+            raise ValueError('invalid broker response limit')
         for field in ('safetyFloor','cleanupGrace'):
             p._integer(config[field], 'worker policy', allow_zero=True)
         if (type(config['listenPort']) is not int or not 1 <= config['listenPort'] <= 65535
@@ -420,7 +424,8 @@ def _build_worker(config,owner,resources):
         engine_id=config['engineId'], node_id=config['nodeId'], authority_id=config['authorityId'],
         coordinator_origin=config['gateCoordinatorOrigin'], gate_generation=config['gateGeneration'],
         worker_id=config['workerId'], engine_version=config['engineVersion'])
-    broker = BrokerClient(config['brokerOrigin'], ssl_context=client_tls)
+    broker = BrokerClient(config['brokerOrigin'], ssl_context=client_tls,
+                          max_response_bytes=config.get('brokerMaxResponseBytes', RANGE_BYTES))
     router = provenance = None
     if routing is not None:
         from processing.reference_execution import ExecutionRouter

@@ -21,6 +21,8 @@ from . import reference_protocol as p
 
 OBJECT_PREFIX = "/api/processing/reference/v1/objects/"
 CHUNK_BYTES = 1024 * 1024
+# Match the reference Viewer broker's default maximum response size.
+RANGE_BYTES = 16 * 1024 * 1024
 
 
 class TransferError(ValueError):
@@ -113,7 +115,8 @@ class _RefuseRedirects(HTTPRedirectHandler):
 
 
 class BrokerClient:
-    def __init__(self, origin, *, ssl_context=None, opener=None, clock=time.time, timeout=30):
+    def __init__(self, origin, *, ssl_context=None, opener=None, clock=time.time, timeout=30,
+                 max_response_bytes=RANGE_BYTES):
         parsed = urlsplit(origin)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.path not in ("", "/")
@@ -131,8 +134,11 @@ class BrokerClient:
             raise ValueError("broker TLS verification is required")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 300:
             raise ValueError("invalid transfer timeout")
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= RANGE_BYTES:
+            raise ValueError("invalid broker response limit")
         self.origin = origin.rstrip("/")
         self.clock, self.timeout = clock, timeout
+        self.max_response_bytes = max_response_bytes
         self._open = opener or build_opener(_RefuseRedirects(), HTTPSHandler(context=context)).open
 
     def download_object(self, grant, object_id, destination):
@@ -165,42 +171,58 @@ class BrokerClient:
         try:
             descriptor = os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
             owned_part = True
-            request = Request(self.origin + OBJECT_PREFIX + obj.id,
-                headers={"Authorization": "Bearer " + grant.token, "Accept-Encoding": "identity"}, method="GET")
-            try:
-                response = self._open(request, timeout=self.timeout)
-            except HTTPError as error:
-                error.close()
-                raise TransferError("broker request rejected") from None
-            try:
-                if response.status != 200 or response.geturl() != request.full_url:
-                    raise TransferError("unexpected broker response")
-                length = response.headers.get("Content-Length")
-                if length is not None and (not length.isascii() or not length.isdecimal() or int(length) != obj.byte_size):
-                    raise TransferError("broker object length mismatch")
-                encoding = response.headers.get("Content-Encoding", "identity")
-                if encoding.lower() != "identity":
-                    raise TransferError("encoded broker objects are forbidden")
-                digest, count = hashlib.sha256(), 0
-                with os.fdopen(descriptor, "wb") as output:
-                    descriptor = None
-                    while True:
-                        if grant.expires <= _now(self.clock):
-                            raise TransferError("transfer grant expired")
-                        chunk = response.read(min(CHUNK_BYTES, obj.byte_size - count + 1))
-                        if not chunk:
-                            break
-                        if not isinstance(chunk, bytes) or count + len(chunk) > obj.byte_size:
-                            raise TransferError("broker object exceeds declared size")
-                        count += len(chunk)
-                        digest.update(chunk)
-                        output.write(chunk)
-                    if count != obj.byte_size or digest.hexdigest() != obj.sha256:
-                        raise TransferError("broker object integrity mismatch")
-                    output.flush()
-                    os.fsync(output.fileno())
-            finally:
-                response.close()
+            digest, count = hashlib.sha256(), 0
+            with os.fdopen(descriptor, "wb") as output:
+                descriptor = None
+                while count < obj.byte_size or (obj.byte_size == 0 and count == 0):
+                    ranged = obj.byte_size > self.max_response_bytes
+                    end = min(count + self.max_response_bytes, obj.byte_size) - 1
+                    headers = {"Authorization": "Bearer " + grant.token, "Accept-Encoding": "identity"}
+                    if ranged:
+                        headers["Range"] = f"bytes={count}-{end}"
+                    request = Request(self.origin + OBJECT_PREFIX + obj.id, headers=headers, method="GET")
+                    if grant.expires <= _now(self.clock):
+                        raise TransferError("transfer grant expired")
+                    try:
+                        response = self._open(request, timeout=self.timeout)
+                    except HTTPError as error:
+                        error.close()
+                        raise TransferError("broker request rejected") from None
+                    expected = end - count + 1 if ranged else obj.byte_size
+                    try:
+                        if response.status != (206 if ranged else 200) or response.geturl() != request.full_url:
+                            raise TransferError("unexpected broker response")
+                        length = response.headers.get("Content-Length")
+                        if length is not None and (not length.isascii() or not length.isdecimal() or int(length) != expected):
+                            raise TransferError("broker object length mismatch")
+                        if ranged and response.headers.get("Content-Range") != f"bytes {count}-{end}/{obj.byte_size}":
+                            raise TransferError("broker object range mismatch")
+                        encoding = response.headers.get("Content-Encoding", "identity")
+                        if encoding.lower() != "identity":
+                            raise TransferError("encoded broker objects are forbidden")
+                        received = 0
+                        while True:
+                            if grant.expires <= _now(self.clock):
+                                raise TransferError("transfer grant expired")
+                            chunk = response.read(min(CHUNK_BYTES, expected - received + 1))
+                            if not chunk:
+                                break
+                            if not isinstance(chunk, bytes) or received + len(chunk) > expected:
+                                raise TransferError("broker object exceeds declared size")
+                            received += len(chunk)
+                            digest.update(chunk)
+                            output.write(chunk)
+                        if received != expected:
+                            raise TransferError("broker object length mismatch")
+                    finally:
+                        response.close()
+                    count += received
+                    if not ranged:
+                        break
+                if count != obj.byte_size or digest.hexdigest() != obj.sha256:
+                    raise TransferError("broker object integrity mismatch")
+                output.flush()
+                os.fsync(output.fileno())
             current = parent.stat()
             if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or parent.resolve() != parent:
                 raise TransferError("destination directory changed")

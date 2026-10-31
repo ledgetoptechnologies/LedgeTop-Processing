@@ -174,6 +174,18 @@ the manifest's total input bytes and `min(2^53-1, 3 * totalBytes)`. Successful
 input files still have the exact manifest byte counts and hashes. This allowance
 is separate from the worker's input-plus-output scratch capacity reservation.
 
+The worker requests objects larger than its configured response limit in
+sequential, bounded HTTP ranges. `brokerMaxResponseBytes` defaults to 16 MiB,
+matching the reference Viewer broker's default, and may be lowered to the
+actual broker limit. It
+validates every range response and publishes the file only after the complete
+size and SHA-256 match. Smaller files retain a single whole-object request. This
+does not negotiate the broker limit, renew expired grants, or increase the
+broker's request budget; the default request count and grant lifetime must be
+qualified separately for large photo sets. The reference broker can rehash the
+whole source for each range, so large objects may also incur substantial extra
+I/O. The socket timeout is an inactivity timeout, not a total transfer deadline.
+
 ## Worker integration contract
 
 The deployment driver must configure the actual loopback engine origin, physical

@@ -155,6 +155,99 @@ class ReferenceTransferTests(unittest.TestCase):
         self.assertGreater(len(sizes), 2)
         self.assertTrue(all(0 < size <= CHUNK_BYTES for size in sizes))
 
+    def test_smaller_configured_broker_limit_is_respected(self):
+        ranges = []
+        def opener(request, *, timeout):
+            value = request.get_header('Range')
+            ranges.append(value)
+            start, end = map(int, value.removeprefix('bytes=').split('-'))
+            return Response(b'abc'[start:end + 1], status=206, url=request.full_url,
+                headers={'Content-Range': f'bytes {start}-{end}/3'})
+        target = self.root / 'input.jpg'
+        BrokerClient('https://broker.example', opener=opener, clock=lambda: self.now,
+                     max_response_bytes=2).download_object(self.grant(), 'image-1', target)
+        self.assertEqual(ranges, ['bytes=0-1', 'bytes=2-2'])
+        self.assertEqual(target.read_bytes(), b'abc')
+        for invalid in (True, 0, -1, 16 * 1024 * 1024 + 1, 1.5):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                BrokerClient('https://broker.example', max_response_bytes=invalid)
+
+    def test_large_object_is_downloaded_in_verified_ranges(self):
+        from processing.reference_transfer import RANGE_BYTES
+        body = b'x' * RANGE_BYTES + b'last-range-data'
+        manifest = self.job['submission']['manifest']
+        manifest['totalBytes'] = manifest['objects'][0]['byteSize'] = len(body)
+        manifest['objects'][0]['sha256'] = hashlib.sha256(body).hexdigest()
+        manifest['sha256'] = p.manifest_sha256(manifest)
+        self.job['manifestSha256'] = self.raw['manifestSha256'] = manifest['sha256']
+        self.raw['byteBudget'] = len(body)
+        self.job['transferRequest'].update(manifestSha256=manifest['sha256'], byteBudget=len(body))
+        ranges = []
+        def opener(request, *, timeout):
+            value = request.get_header('Range')
+            ranges.append(value)
+            start, end = map(int, value.removeprefix('bytes=').split('-'))
+            return Response(body[start:end + 1], status=206, url=request.full_url,
+                headers={'Content-Length': str(end - start + 1),
+                         'Content-Range': f'bytes {start}-{end}/{len(body)}'})
+        target = self.root / 'input.jpg'
+        BrokerClient('https://broker.example', opener=opener, clock=lambda: self.now).download_object(
+            self.grant(), 'image-1', target)
+        self.assertEqual(ranges, [f'bytes=0-{RANGE_BYTES - 1}',
+                                  f'bytes={RANGE_BYTES}-{len(body) - 1}'])
+        self.assertEqual(hashlib.sha256(target.read_bytes()).hexdigest(), hashlib.sha256(body).hexdigest())
+
+    def test_invalid_range_never_publishes_a_partial_object(self):
+        from processing.reference_transfer import RANGE_BYTES
+        body = b'x' * (RANGE_BYTES + 1)
+        manifest = self.job['submission']['manifest']
+        manifest['totalBytes'] = manifest['objects'][0]['byteSize'] = len(body)
+        manifest['objects'][0]['sha256'] = hashlib.sha256(body).hexdigest()
+        manifest['sha256'] = p.manifest_sha256(manifest)
+        self.job['manifestSha256'] = self.raw['manifestSha256'] = manifest['sha256']
+        self.raw['byteBudget'] = len(body)
+        self.job['transferRequest'].update(manifestSha256=manifest['sha256'], byteBudget=len(body))
+        for kind in ('wrong_status', 'wrong_range', 'short_body', 'corrupt'):
+            def opener(request, *, timeout):
+                start, end = map(int, request.get_header('Range').removeprefix('bytes=').split('-'))
+                chunk = body[start:end + 1]
+                if kind == 'short_body': chunk = chunk[:-1]
+                if kind == 'corrupt': chunk = b'y' + chunk[1:]
+                return Response(chunk, status=200 if kind == 'wrong_status' else 206,
+                    url=request.full_url, headers={'Content-Range': 'bytes 1-2/3' if kind == 'wrong_range'
+                    else f'bytes {start}-{end}/{len(body)}'})
+            with self.subTest(kind=kind), self.assertRaises(TransferError):
+                BrokerClient('https://broker.example', opener=opener, clock=lambda: self.now).download_object(
+                    self.grant(), 'image-1', self.root / 'input.jpg')
+            self.assert_no_files()
+
+    def test_expiry_between_ranges_preserves_no_partial_object(self):
+        from processing.reference_transfer import RANGE_BYTES
+        body = b'x' * (RANGE_BYTES + 1)
+        manifest = self.job['submission']['manifest']
+        manifest['totalBytes'] = manifest['objects'][0]['byteSize'] = len(body)
+        manifest['objects'][0]['sha256'] = hashlib.sha256(body).hexdigest()
+        manifest['sha256'] = p.manifest_sha256(manifest)
+        self.job['manifestSha256'] = self.raw['manifestSha256'] = manifest['sha256']
+        self.raw['byteBudget'] = len(body)
+        self.job['transferRequest'].update(manifestSha256=manifest['sha256'], byteBudget=len(body))
+        grant = self.grant()
+        calls = []
+        test = self
+        class ExpiringResponse(Response):
+            def close(self):
+                test.now = grant.expires
+                super().close()
+        def opener(request, *, timeout):
+            calls.append(request)
+            return ExpiringResponse(body[:RANGE_BYTES], status=206, url=request.full_url,
+                headers={'Content-Range': f'bytes 0-{RANGE_BYTES - 1}/{len(body)}'})
+        with self.assertRaises(TransferError):
+            BrokerClient('https://broker.example', opener=opener, clock=lambda: self.now).download_object(
+                grant, 'image-1', self.root / 'input.jpg')
+        self.assertEqual(len(calls), 1)
+        self.assert_no_files()
+
     def test_headers_status_and_redirect_final_url_rejected(self):
         for options in ({"headers": {"Content-Length": "4"}},
                         {"headers": {"Content-Length": "-3"}},
