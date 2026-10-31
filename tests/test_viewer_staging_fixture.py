@@ -174,7 +174,13 @@ class StagingFixtureTests(unittest.TestCase):
                     os.killpg(child.pid,signal.SIGKILL);child.communicate(timeout=5);raise
                 self.assertEqual(child.returncode,0,stderr);self.assertEqual(json.loads(stdout)['replay'],'lookup')
                 with fixture.fixture.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0],1)
-                self.assertEqual(len(list(fixture.base.root.glob('*.alloc'))),1)
+                copies=(('node input',fixture.base.base.base.base.inputs,b'synthetic'),
+                        ('node result',fixture.base.base.base.base.base.output,fixture.base.base.base.archive),
+                        ('coordinator spool',fixture.base.root,fixture.base.base.base.archive))
+                for label,root,expected in copies:
+                    paths=list(root.glob('*.alloc'));self.assertEqual(len(paths),1,label)
+                    with paths[0].open('rb') as stream:actual=stream.read(len(expected))
+                    self.assertEqual(hashlib.sha256(actual).hexdigest(),hashlib.sha256(expected).hexdigest(),label)
                 return
             child=subprocess.Popen(['node',str(Path(__file__).with_name('viewer_staged_clients_synthetic.cjs'))],
                                    env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)

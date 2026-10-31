@@ -191,7 +191,7 @@ archive export, and its host copy remains writable.
 A subsequent isolated named-volume rehearsal exercised actual Viewer
 `processIngest` and its `completeIngestAndEnqueueDerivatives` outbox write,
 with a full migrated Viewer DB, synthetic AES-GCM reserved capability and
-valid synthetic mesh/EPT ZIP. It then killed and restarted the actual staged
+ZIP with placeholder mesh, texture and EPT entries. Its geometry, textures and point cloud are not validated data. It then killed and restarted the actual staged
 sender against that same on-volume outbox, observing exactly POST then GET.
 The coordinator task was created directly by the fixture, the fixed synthetic
 capability was sealed through the real reservation method, and option discovery
@@ -200,3 +200,10 @@ pinned Viewer files were exact Git blobs; other Viewer source came from an
 archive with checkout line-ending conversion, and image dependencies were not
 individually pinned. The test verifies process restart, not power-loss durability
 or real Viewer custody. Both synthetic named volumes were removed after testing.
+
+The named-volume wrapper used a uniquely named volume with a task label and
+limited the test container to 0.5 CPU, 384 MiB, 64 processes and no network.
+Before removal, volume labels and absence of attached containers were checked;
+Docker confirmed removal of both synthetic volumes. A later verification
+compares retained input, node-result and coordinator-spool bytes with expected
+synthetic bytes before the test fixture is torn down.
