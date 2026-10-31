@@ -3,6 +3,10 @@ import unittest
 import hashlib
 import http.client
 import json
+import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +23,36 @@ class ChunkSpoolTests(unittest.TestCase):
         self.job=self.base.fixture.job;self.identity=self.base.identity()
         with self.base.fixture.queue._db() as db:self.token=db.execute('SELECT token FROM viewer_worker_claims WHERE job_id=?',(self.job,)).fetchone()['token']
         self.archive=self.base.base.base.archive
+    def test_sender_process_restart_replays_finished_chunks_over_tls(self):
+        self.base.fixture.api.viewer_chunks=self.chunk
+        code='''import json,os,signal,sys
+from unittest.mock import patch
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+import processing.viewer_synthetic_chunk_sender as sender
+root,config,mode=sys.argv[1:]
+original=sender.strict_response
+def observe(response):
+ value=original(response)
+ if mode=='kill' and isinstance(value,dict) and value.get('state')=='finished' and 'receipt' in value:os.kill(os.getpid(),signal.SIGKILL)
+ return value
+with DaemonStateLock(root) as owner:
+ with patch.object(sender,'strict_response',observe):
+  print(json.dumps(sender.send(ViewerNodeEnrollment(owner,**json.loads(config)),synthetic_fixture=True,chunk_bytes=16)))
+'''
+        root=self.base.base.base.base.base.worker;config=json.dumps(self.base.base.base.base.base.config);args=[sys.executable,'-c',code,str(root),config]
+        first=subprocess.run(args+['kill'],capture_output=True,timeout=20);self.assertEqual(first.returncode,-signal.SIGKILL,first.stderr)
+        with self.base.fixture.queue._db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_worker_chunk_permits WHERE state='finished'").fetchone()[0],1)
+        second=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(second.returncode,0,second.stderr)
+        result=json.loads(second.stdout);self.assertEqual(result['kind'],'synthetic-chunk-seal')
+        third=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(third.returncode,0,third.stderr);self.assertEqual(json.loads(third.stdout),result)
+        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token),{'state':'held'})
+        self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+        self.assertEqual(len(list(self.base.base.base.base.base.output.glob('*.alloc'))),1)
+
     def test_assembled_runtime_tls_chunk_is_disabled_by_default(self):
         from processing.config import Config
         from processing.viewer_service import ViewerService

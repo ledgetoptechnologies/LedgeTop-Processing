@@ -306,3 +306,13 @@ Exact finished replay verifies the retained chunk before replying. The route is
 disabled by default; begin, status and finish are still direct-call only and
 there is no worker chunk sender. This is not a complete network protocol or
 Viewer custody, and no standard spool success is exposed.
+
+A later disabled synthetic draft adds TLS begin/status/chunk/finish and a
+loopback-only synthetic worker sender reading a locked verified sealed result.
+The sender checks status before each bounded chunk; completed chunks are
+revalidated on disk, while a partial or active permit holds. A process-kill
+rehearsal restarts after one completed chunk and then verifies final-seal replay.
+The resulting seal is synthetic: the standard coordinator spool stays held, no
+Viewer custody is claimed, and there is no production enablement or migration.
+Socket timeouts do not impose a hard deadline on DNS, filesystem calls or
+full-archive hashing. Network test results do not qualify power-loss recovery.

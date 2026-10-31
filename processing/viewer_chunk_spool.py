@@ -48,6 +48,17 @@ class SyntheticChunkSpool:
                 db.execute('BEGIN IMMEDIATE');metadata,sha,key,session,row=self._snapshot(db,job,identity,token)
                 self._admit_operation(db,job)
                 if session is not None:
+                    if session['state']=='sealed' and row is not None and row['state']=='receiving':
+                        from .direct_slot_capture import _read_record,_check_record
+                        _,_,_,existing_slot,journal=self._open(job,identity,token)
+                        try:
+                            record,fd=_read_record(existing_slot,journal.seal)
+                            try:_check_record(existing_slot,fd,journal.seal,record)
+                            finally:os.close(fd)
+                            journal.finish(record.get('count'))
+                            return dict(state='sealed',receipt=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=job,metadataSha256=sha,
+                                        archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key))
+                        finally:existing_slot.close()
                     if session['state']!='ready' or not row or row['state']!='receiving' or not session['slot_identity'] or session['slot_identity']!=row['slot_identity']:
                         raise SpoolHeld('chunk_session_requires_inspection')
                     _,_,_,existing_slot,_=self._open(job,identity,token)
@@ -114,6 +125,25 @@ class SyntheticChunkSpool:
         nonce=secrets.token_hex(16)
         with self._permit_lock:self._active[(job,operation_id)]=nonce
         return dict(state='active',permit=nonce)
+
+    def status_chunk(self,job,identity,token,operation_id,index,offset,length,sha256):
+        """Authenticated point-in-time lookup; never creates a permit."""
+        from .viewer_chunk_journal import MAX_CHUNK,MAX_CHUNKS
+        p._slug(operation_id,'chunk operation');p._hash(sha256,'chunk sha256')
+        if type(index) is not int or not 0<=index<MAX_CHUNKS or type(offset) is not int or offset<0 or type(length) is not int or not 1<=length<=MAX_CHUNK:
+            raise SpoolHeld('chunk_spec_invalid')
+        spec=p.canonical_json(dict(index=index,offset=offset,length=length,sha256=sha256)).decode()
+        with self.spool.claims.queue._db() as db:
+            db.execute('BEGIN');metadata,_,_,session,row=self._snapshot(db,job,identity,token)
+            if not session or not row or offset+length>metadata['archiveBytes']:raise SpoolHeld('chunk_state_changed')
+            permit=db.execute('SELECT specification,state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id=?',(job,operation_id)).fetchone()
+            if not permit:
+                if db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():raise SpoolHeld('chunk_permit_requires_inspection')
+                return dict(state='missing')
+            if permit['specification']!=spec or permit['state']!='finished':raise SpoolHeld('chunk_permit_requires_inspection')
+        _,_,_,slot,journal=self._open(job,identity,token)
+        try:journal.verify_chunk(index,offset,length,sha256);return dict(state='finished')
+        finally:slot.close()
 
     def abandon_admission(self,job,operation_id,permit_nonce):
         """Discard only the local nonce; the durable active permit stays held."""

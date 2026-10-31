@@ -95,10 +95,22 @@ class ReferenceWorkerAPI:
         if self._header(headers,'Content-Type')!='application/octet-stream':return self._error(415,'invalid_content_type')
         token=self._header(headers,'X-Claim-Token');permit=None
         try:
+            operation=match[2]
+            if operation=='begin':
+                if length!=0:raise ValueError('control body forbidden')
+                return Response(200,self.viewer_chunks.begin(match[1],identity,token))
+            if operation=='finish':
+                count=self._header(headers,'X-Chunk-Count')
+                if length!=0 or not isinstance(count,str) or not re.fullmatch(r'[1-9][0-9]{0,3}',count):raise ValueError('invalid count')
+                return Response(200,self.viewer_chunks.finish(match[1],identity,token,int(count)))
             index=self._header(headers,'X-Chunk-Index');offset=self._header(headers,'X-Chunk-Offset');digest=self._header(headers,'X-Chunk-SHA256')
             if not isinstance(index,str) or not re.fullmatch(r'0|[1-9][0-9]{0,3}',index) or not isinstance(offset,str) or not re.fullmatch(r'0|[1-9][0-9]{0,15}',offset):
                 raise ValueError('invalid chunk headers')
-            permit=self.viewer_chunks.admit_chunk(match[1],identity,token,match[2],int(index),int(offset),length,digest)
+            if operation.startswith('status-'):
+                saved_length=self._header(headers,'X-Chunk-Length')
+                if length!=0 or not isinstance(saved_length,str) or not re.fullmatch(r'[1-9][0-9]{0,5}',saved_length):raise ValueError('invalid status length')
+                return Response(200,self.viewer_chunks.status_chunk(match[1],identity,token,operation[7:],int(index),int(offset),int(saved_length),digest))
+            permit=self.viewer_chunks.admit_chunk(match[1],identity,token,operation,int(index),int(offset),length,digest)
             if permit['state']=='finished':return Response(200,{'state':'finished'})
             parts=[];total=0
             for part in chunks:

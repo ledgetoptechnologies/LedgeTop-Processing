@@ -169,7 +169,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             if self.headers.get_all("Transfer-Encoding"):
                 self._error(400, "transfer_encoding_not_supported")
                 return
-            for name in ("Authorization", "Content-Length", "Content-Type", "X-Claim-Token", "X-LedgeTop-Capability", "X-Chunk-Index", "X-Chunk-Offset", "X-Chunk-SHA256"):
+            for name in ("Authorization", "Content-Length", "Content-Type", "X-Claim-Token", "X-LedgeTop-Capability", "X-Chunk-Index", "X-Chunk-Offset", "X-Chunk-SHA256", "X-Chunk-Length", "X-Chunk-Count"):
                 if len(self.headers.get_all(name, [])) > 1:
                     self._error(400, "duplicate_header")
                     return
@@ -189,7 +189,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                     self._error(413, "metadata_too_large")
                     return
                 length = int(text)
-            if chunk_request and not 1<=length<=256*1024:
+            if chunk_request and not 0<=length<=256*1024:
                 self._error(413,'chunk_size_invalid');return
             if self.command != "POST" and length:
                 self._error(400, "unexpected_request_body")
