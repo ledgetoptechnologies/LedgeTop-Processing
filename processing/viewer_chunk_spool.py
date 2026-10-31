@@ -30,6 +30,11 @@ class SyntheticChunkSpool:
         spool=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(job,)).fetchone()
         if session and (not spool or session['metadata_sha']!=sha or session['slot_key']!=key
                 or spool['metadata_sha']!=sha or spool['slot_key']!=key):raise SpoolHeld('chunk_binding_changed')
+        if session:
+            size,count=session['chunk_bytes'],session['chunk_count']
+            if (size is None)!=(count is None):raise SpoolHeld('chunk_geometry_changed')
+            if size is not None and (type(size) is not int or not 1<=size<=256*1024 or type(count) is not int or count!=(metadata['archiveBytes']+size-1)//size or not 1<=count<=4096):
+                raise SpoolHeld('chunk_geometry_changed')
         return metadata,sha,key,session,spool
 
     @staticmethod
@@ -42,12 +47,17 @@ class SyntheticChunkSpool:
         if db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():
             raise SpoolHeld('chunk_permit_requires_inspection')
 
-    def begin(self,job,identity,token):
+    def begin(self,job,identity,token,*,chunk_bytes=None):
         with self.spool._admit():
+            from .viewer_chunk_journal import MAX_CHUNK,MAX_CHUNKS
+            if chunk_bytes is not None and (type(chunk_bytes) is not int or not 1<=chunk_bytes<=MAX_CHUNK):raise SpoolHeld('chunk_geometry_invalid')
             with self.spool.claims.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');metadata,sha,key,session,row=self._snapshot(db,job,identity,token)
                 self._admit_operation(db,job)
+                chunk_count=None if chunk_bytes is None else (metadata['archiveBytes']+chunk_bytes-1)//chunk_bytes
+                if chunk_count is not None and chunk_count>MAX_CHUNKS:raise SpoolHeld('chunk_geometry_invalid')
                 if session is not None:
+                    if (session['chunk_bytes'],session['chunk_count'])!=(chunk_bytes,chunk_count):raise SpoolHeld('chunk_geometry_changed')
                     if (session['state'] not in ('ready','sealed') or not row or row['state'] not in (('receiving','sealed') if session['state']=='sealed' else ('receiving',))
                             or not session['slot_identity'] or session['slot_identity']!=row['slot_identity']):
                         raise SpoolHeld('chunk_session_requires_inspection')
@@ -55,7 +65,7 @@ class SyntheticChunkSpool:
                 else:
                     if row is not None:raise SpoolHeld('legacy_spool_requires_inspection')
                     db.execute("INSERT INTO viewer_worker_spool VALUES(?,?,?,'creating',NULL,NULL)",(job,sha,key))
-                    db.execute("INSERT INTO viewer_worker_chunk_sessions VALUES(?,?,?,NULL,'creating')",(job,sha,key))
+                    db.execute("INSERT INTO viewer_worker_chunk_sessions VALUES(?,?,?,NULL,'creating',?,?)",(job,sha,key,chunk_bytes,chunk_count))
                     existing_state=None;recorded=None
             if existing_state is not None:
                 _,_,_,existing_slot,journal=self._open(job,identity,token)
@@ -72,7 +82,7 @@ class SyntheticChunkSpool:
                         db.execute('BEGIN IMMEDIATE');current,csha,ckey,current_session,current_row=self._snapshot(db,job,identity,token)
                         self._admit_operation(db,job)
                         if (csha!=sha or ckey!=key or current_session['state']!=existing_state
-                                or current_row['state']!=existing_spool_state or current_session['slot_identity']!=recorded
+                                or current_row['state']!=existing_spool_state or (current_session['chunk_bytes'],current_session['chunk_count'])!=(chunk_bytes,chunk_count) or current_session['slot_identity']!=recorded
                                 or current_row['slot_identity']!=recorded or self.spool._slot_identity(existing_slot)!=recorded):
                             raise SpoolHeld('chunk_state_changed')
                         existing_slot._check()
@@ -90,7 +100,7 @@ class SyntheticChunkSpool:
                 actual=self.spool._slot_identity(slot)
                 with self.spool.claims.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE');current,csha,ckey,session,row=self._snapshot(db,job,identity,token)
-                    if csha!=sha or ckey!=key or not session or session['state']!='creating' or not row or row['state']!='creating':raise SpoolHeld('chunk_state_changed')
+                    if csha!=sha or ckey!=key or not session or session['state']!='creating' or (session['chunk_bytes'],session['chunk_count'])!=(chunk_bytes,chunk_count) or not row or row['state']!='creating':raise SpoolHeld('chunk_state_changed')
                     if db.execute("UPDATE viewer_worker_chunk_sessions SET state='ready',slot_identity=? WHERE job_id=? AND state='creating'",(actual,job)).rowcount!=1:raise SpoolHeld('chunk_state_changed')
                     if db.execute("UPDATE viewer_worker_spool SET state='receiving',slot_identity=? WHERE job_id=? AND state='creating'",(actual,job)).rowcount!=1:raise SpoolHeld('chunk_state_changed')
                 return dict(state='ready')
@@ -113,7 +123,7 @@ class SyntheticChunkSpool:
             return metadata,sha,key,slot,journal
         except BaseException:slot.close();raise
 
-    def admit_chunk(self,job,identity,token,operation_id,index,offset,length,sha256):
+    def admit_chunk(self,job,identity,token,operation_id,index,offset,length,sha256,*,require_geometry=False):
         """Persist a synthetic operation permit before reading any body.
 
         Active permits never auto-resume after interruption. This is a direct
@@ -129,6 +139,10 @@ class SyntheticChunkSpool:
             self._admit_operation(db,job)
             if not session or not row or session['state']!='ready' or row['state']!='receiving' or offset+length>metadata['archiveBytes']:
                 raise SpoolHeld('chunk_state_changed')
+            size=session['chunk_bytes'];count=session['chunk_count']
+            if require_geometry and size is None:raise SpoolHeld('chunk_geometry_unavailable')
+            if size is not None and (index>=count or offset!=index*size or length!=min(size,metadata['archiveBytes']-offset)):
+                raise SpoolHeld('chunk_geometry_changed')
             prior=db.execute('SELECT specification,state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id=?',(job,operation_id)).fetchone()
             if prior and (prior['specification'],prior['state'])!=(spec,'finished'):raise SpoolHeld('chunk_permit_requires_inspection')
             if not prior and db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():
@@ -143,7 +157,7 @@ class SyntheticChunkSpool:
         with self._permit_lock:self._active[(job,operation_id)]=nonce
         return dict(state='active',permit=nonce)
 
-    def status_chunk(self,job,identity,token,operation_id,index,offset,length,sha256):
+    def status_chunk(self,job,identity,token,operation_id,index,offset,length,sha256,*,require_geometry=False):
         """Authenticated point-in-time lookup; never creates a permit."""
         from .viewer_chunk_journal import MAX_CHUNK,MAX_CHUNKS
         p._slug(operation_id,'chunk operation');p._hash(sha256,'chunk sha256')
@@ -153,6 +167,9 @@ class SyntheticChunkSpool:
         with self.spool.claims.queue._db() as db:
             db.execute('BEGIN');metadata,_,_,session,row=self._snapshot(db,job,identity,token)
             if not session or not row or offset+length>metadata['archiveBytes']:raise SpoolHeld('chunk_state_changed')
+            size=session['chunk_bytes'];count=session['chunk_count']
+            if require_geometry and size is None:raise SpoolHeld('chunk_geometry_unavailable')
+            if size is not None and (index>=count or offset!=index*size or length!=min(size,metadata['archiveBytes']-offset)):raise SpoolHeld('chunk_geometry_changed')
             permit=db.execute('SELECT specification,state FROM viewer_worker_chunk_permits WHERE job_id=? AND operation_id=?',(job,operation_id)).fetchone()
             if not permit:
                 if db.execute("SELECT 1 FROM viewer_worker_chunk_permits WHERE job_id=? AND state='active'",(job,)).fetchone():raise SpoolHeld('chunk_permit_requires_inspection')
@@ -188,6 +205,9 @@ class SyntheticChunkSpool:
                     if (current_sha!=sha or current_key!=key or session['state']!='ready' or row['state']!='receiving'
                             or not permit or permit['specification']!=spec or permit['state'] not in ('active','finished')):
                         raise SpoolHeld('chunk_permit_changed')
+                    size=session['chunk_bytes'];count=session['chunk_count']
+                    if size is not None and (index>=count or offset!=index*size or len(data)!=min(size,metadata['archiveBytes']-offset)):
+                        raise SpoolHeld('chunk_geometry_changed')
                 receipt=journal.write(index,offset,data)
                 with self.spool.claims.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE');self._snapshot(db,job,identity,token)
@@ -202,9 +222,12 @@ class SyntheticChunkSpool:
             metadata,sha,key,slot,journal=self._open(job,identity,token)
             try:
                 with self.spool.claims.queue._db() as db:
-                    db.execute('BEGIN IMMEDIATE');_,current_sha,current_key,session,row=self._snapshot(db,job,identity,token)
+                    db.execute('BEGIN IMMEDIATE');current,current_sha,current_key,session,row=self._snapshot(db,job,identity,token)
                     self._admit_operation(db,job)
                     if current_sha!=sha or current_key!=key or session['state']!='ready' or row['state']!='receiving':raise SpoolHeld('chunk_state_changed')
+                    size=session['chunk_bytes'];count=session['chunk_count']
+                    if size is not None and (type(index) is not int or not 0<=index<count or offset!=index*size or len(data)!=min(size,current['archiveBytes']-offset)):
+                        raise SpoolHeld('chunk_geometry_changed')
                 return journal.write(index,offset,data)
             finally:slot.close()
 
@@ -213,14 +236,15 @@ class SyntheticChunkSpool:
             metadata,sha,key,slot,journal=self._open(job,identity,token)
             try:
                 with self.spool.claims.queue._db() as db:
-                    db.execute('BEGIN IMMEDIATE');self._snapshot(db,job,identity,token);self._admit_operation(db,job)
+                    db.execute('BEGIN IMMEDIATE');_,_,_,session,_=self._snapshot(db,job,identity,token);self._admit_operation(db,job)
+                    if session['chunk_count'] is not None and count!=session['chunk_count']:raise SpoolHeld('chunk_geometry_changed')
                 journal.finish(count)
                 receipt=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=job,metadataSha256=sha,
                              archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key)
                 encoded=p.canonical_json(receipt).decode();actual=self.spool._slot_identity(slot)
                 with self.spool.claims.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE');_,current_sha,current_key,session,row=self._snapshot(db,job,identity,token)
-                    if current_sha!=sha or current_key!=key or session['slot_identity']!=actual or row['slot_identity']!=actual:raise SpoolHeld('chunk_state_changed')
+                    if current_sha!=sha or current_key!=key or session['slot_identity']!=actual or row['slot_identity']!=actual or (session['chunk_count'] is not None and session['chunk_count']!=count):raise SpoolHeld('chunk_state_changed')
                     if session['state']=='sealed' and row['state']=='receiving':return receipt
                     if session['state']!='ready' or row['state']!='receiving':raise SpoolHeld('chunk_state_changed')
                     db.execute("UPDATE viewer_worker_chunk_sessions SET state='sealed' WHERE job_id=?",(job,))
@@ -234,7 +258,7 @@ class SyntheticChunkSpool:
             try:
                 with self.spool.claims.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE');_,_,_,session,row=self._snapshot(db,job,identity,token);self._admit_operation(db,job)
-                    if session['state']!='sealed' or row['state'] not in ('receiving','sealed'):raise SpoolHeld('chunk_state_changed')
+                    if session['state']!='sealed' or row['state'] not in ('receiving','sealed') or (session['chunk_count'] is not None and count!=session['chunk_count']):raise SpoolHeld('chunk_state_changed')
                 journal.finish(count)
                 actual=self.spool._slot_identity(slot)
                 receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=job,metadataSha256=sha,
@@ -242,7 +266,7 @@ class SyntheticChunkSpool:
                 encoded=p.canonical_json(receipt).decode()
                 with self.spool.claims.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE');_,csha,ckey,session,row=self._snapshot(db,job,identity,token);self._admit_operation(db,job)
-                    if csha!=sha or ckey!=key or session['state']!='sealed' or session['slot_identity']!=actual or row['slot_identity']!=actual:
+                    if csha!=sha or ckey!=key or session['state']!='sealed' or session['slot_identity']!=actual or row['slot_identity']!=actual or (session['chunk_count'] is not None and session['chunk_count']!=count):
                         raise SpoolHeld('chunk_state_changed')
                     slot._check()
                     if row['state']=='sealed' and row['receipt']==encoded:return receipt

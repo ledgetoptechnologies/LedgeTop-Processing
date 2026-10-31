@@ -332,3 +332,10 @@ hold during hashing prevents promotion. This is coordinator archive custody
 only, not Viewer acceptance, and triggers no cleanup. Coordinator SIGKILL at
 the database commit boundary, storage power loss and live migration remain
 unqualified; the 1 GiB synthetic chunk limit still applies.
+
+Chunk sessions now persist an immutable chunk size and count; the synthetic
+TLS sender supplies its configured size at begin and a changed configuration
+fails before any new chunk is sent. Existing databases lack the revised exact
+schema and fail closed; no migration is included. Standard full-archive POST
+replay against a chunk-promoted spool remains unsupported and fails closed;
+standard authenticated receipt lookup and Viewer download remain available.

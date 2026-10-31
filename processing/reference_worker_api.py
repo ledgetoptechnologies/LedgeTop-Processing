@@ -97,8 +97,9 @@ class ReferenceWorkerAPI:
         try:
             operation=match[2]
             if operation=='begin':
-                if length!=0:raise ValueError('control body forbidden')
-                return Response(200,self.viewer_chunks.begin(match[1],identity,token))
+                size=self._header(headers,'X-Chunk-Size')
+                if length!=0 or not isinstance(size,str) or not re.fullmatch(r'[1-9][0-9]{0,5}',size):raise ValueError('invalid chunk size')
+                return Response(200,self.viewer_chunks.begin(match[1],identity,token,chunk_bytes=int(size)))
             if operation in ('finish','promote'):
                 count=self._header(headers,'X-Chunk-Count')
                 if length!=0 or not isinstance(count,str) or not re.fullmatch(r'[1-9][0-9]{0,3}',count):raise ValueError('invalid count')
@@ -110,8 +111,8 @@ class ReferenceWorkerAPI:
             if operation.startswith('status-'):
                 saved_length=self._header(headers,'X-Chunk-Length')
                 if length!=0 or not isinstance(saved_length,str) or not re.fullmatch(r'[1-9][0-9]{0,5}',saved_length):raise ValueError('invalid status length')
-                return Response(200,self.viewer_chunks.status_chunk(match[1],identity,token,operation[7:],int(index),int(offset),int(saved_length),digest))
-            permit=self.viewer_chunks.admit_chunk(match[1],identity,token,operation,int(index),int(offset),length,digest)
+                return Response(200,self.viewer_chunks.status_chunk(match[1],identity,token,operation[7:],int(index),int(offset),int(saved_length),digest,require_geometry=True))
+            permit=self.viewer_chunks.admit_chunk(match[1],identity,token,operation,int(index),int(offset),length,digest,require_geometry=True)
             if permit['state']=='finished':return Response(200,{'state':'finished'})
             parts=[];total=0
             for part in chunks:

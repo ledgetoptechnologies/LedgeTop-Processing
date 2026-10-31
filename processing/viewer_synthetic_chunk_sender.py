@@ -41,7 +41,7 @@ def send(worker,*,synthetic_fixture=False,chunk_bytes=MAX_CHUNK):
             expected=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=claim['jobId'],metadataSha256=metadata_sha,
                           archiveBytes=reader.length,archiveSha256=reader.sha256,slotKey=key)
             standard=dict(expected,kind='viewer-coordinator-archive-receipt')
-            beginning=call('begin')
+            beginning=call('begin',extra={'X-Chunk-Size':str(chunk_bytes)})
             if type(beginning) is dict and beginning.get('state')=='promoted':
                 if p.canonical_json(beginning.get('receipt'))!=p.canonical_json(standard):raise LocalResultHeld('chunk_receipt_invalid')
                 reader._check()

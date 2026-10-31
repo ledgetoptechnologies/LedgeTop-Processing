@@ -39,17 +39,20 @@ def observe(response):
  return value
 with DaemonStateLock(root) as owner:
  with patch.object(sender,'strict_response',observe):
-  print(json.dumps(sender.send(ViewerNodeEnrollment(owner,**json.loads(config)),synthetic_fixture=True,chunk_bytes=16)))
+  print(json.dumps(sender.send(ViewerNodeEnrollment(owner,**json.loads(config)),synthetic_fixture=True,chunk_bytes=17 if mode=='wrong' else 16)))
 '''
         root=self.base.base.base.base.base.worker;config=json.dumps(self.base.base.base.base.base.config);args=[sys.executable,'-c',code,str(root),config]
         first=subprocess.run(args+['kill'],capture_output=True,timeout=20);self.assertEqual(first.returncode,-signal.SIGKILL,first.stderr)
         with self.base.fixture.queue._db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_worker_chunk_permits WHERE state='finished'").fetchone()[0],1)
+        wrong=subprocess.run(args+['wrong'],capture_output=True,text=True,timeout=20);self.assertNotEqual(wrong.returncode,0)
+        with self.base.fixture.queue._db() as db:self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_worker_chunk_permits").fetchone()[0],1)
         second=subprocess.run(args+['kill-promotion'],capture_output=True,text=True,timeout=20)
         self.assertEqual(second.returncode,-signal.SIGKILL,second.stderr)
         third=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
         self.assertEqual(third.returncode,0,third.stderr)
         result=json.loads(third.stdout);self.assertEqual(result['kind'],'viewer-coordinator-archive-receipt')
+        wrong=subprocess.run(args+['wrong'],capture_output=True,text=True,timeout=20);self.assertNotEqual(wrong.returncode,0)
         third=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
         self.assertEqual(third.returncode,0,third.stderr);self.assertEqual(json.loads(third.stdout),result)
         self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token)['receipt'],result)
@@ -73,7 +76,7 @@ with DaemonStateLock(root) as owner:
         with patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True),patch('processing.reference_runtime.SYNTHETIC_CHUNK_TLS_QUALIFIED',True):
             runtime=ReferenceRuntime(queue,config,settings,viewer_service=service,synthetic_chunk_tls=True);runtime.start()
         self.addCleanup(runtime.close)
-        runtime.control.worker.viewer_chunks.begin(self.job,self.identity,self.token)
+        runtime.control.worker.viewer_chunks.begin(self.job,self.identity,self.token,chunk_bytes=8)
         data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
         route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
         headers={'Authorization':'Bearer '+'a'*32,'X-Claim-Token':self.token,'X-Chunk-Index':'0','X-Chunk-Offset':'0','X-Chunk-SHA256':digest,'Content-Type':'application/octet-stream'}
@@ -85,7 +88,7 @@ with DaemonStateLock(root) as owner:
 
     def test_tls_auth_before_body_and_exact_replay(self):
         self.base.fixture.api.viewer_chunks=self.chunk
-        self.chunk.begin(self.job,self.identity,self.token)
+        self.chunk.begin(self.job,self.identity,self.token,chunk_bytes=8)
         data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
         route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
         def connect():return http.client.HTTPSConnection('127.0.0.1',self.base.fixture.server.server_port,context=self.base.fixture.client,timeout=3)
@@ -109,7 +112,7 @@ with DaemonStateLock(root) as owner:
         finally:conn.close()
 
     def test_tls_partial_body_stays_active_and_replay_holds(self):
-        self.base.fixture.api.viewer_chunks=self.chunk;self.chunk.begin(self.job,self.identity,self.token)
+        self.base.fixture.api.viewer_chunks=self.chunk;self.chunk.begin(self.job,self.identity,self.token,chunk_bytes=8)
         data=self.archive[:8];digest=hashlib.sha256(data).hexdigest();route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
         def start():
             conn=http.client.HTTPSConnection('127.0.0.1',self.base.fixture.server.server_port,context=self.base.fixture.client,timeout=3)
@@ -130,7 +133,7 @@ with DaemonStateLock(root) as owner:
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
 
     def test_tls_admission_then_hold_allows_only_admitted_chunk(self):
-        self.base.fixture.api.viewer_chunks=self.chunk;self.chunk.begin(self.job,self.identity,self.token)
+        self.base.fixture.api.viewer_chunks=self.chunk;self.chunk.begin(self.job,self.identity,self.token,chunk_bytes=8)
         data=self.archive[:8];digest=hashlib.sha256(data).hexdigest();route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
         conn=http.client.HTTPSConnection('127.0.0.1',self.base.fixture.server.server_port,context=self.base.fixture.client,timeout=5)
         try:
@@ -265,6 +268,9 @@ with DaemonStateLock(root) as owner:
         receipt=self.chunk.promote(self.job,self.identity,self.token,1)
         self.assertEqual(receipt['kind'],'viewer-coordinator-archive-receipt')
         self.assertEqual(self.chunk.promote(self.job,self.identity,self.token,1),receipt)
+        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token)['receipt'],receipt)
+        def forbidden_body():raise AssertionError('mixed-client body consumed');yield b''
+        with self.assertRaises(Exception):self.base.spool.receive(self.job,self.identity,self.token,forbidden_body())
         self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token)['receipt'],receipt)
         task=self.base.fixture.store.task('22222222-2222-4222-8222-222222222222')
         reader,length=self.base.spool.open_for_viewer(task)

@@ -47,7 +47,7 @@ PERMIT_DDL = '''CREATE TABLE viewer_worker_permits (job_id TEXT NOT NULL, operat
 RESULT_DDL = '''CREATE TABLE viewer_worker_result_metadata (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL, receipt TEXT NOT NULL)'''
 SPOOL_CONFIG_DDL = '''CREATE TABLE viewer_worker_spool_config (singleton INTEGER PRIMARY KEY CHECK(singleton=1), policy TEXT NOT NULL)'''
 SPOOL_DDL = '''CREATE TABLE viewer_worker_spool (job_id TEXT PRIMARY KEY, metadata_sha TEXT NOT NULL, slot_key TEXT NOT NULL, state TEXT NOT NULL, slot_identity TEXT, receipt TEXT)'''
-CHUNK_DDL = '''CREATE TABLE viewer_worker_chunk_sessions (job_id TEXT PRIMARY KEY, metadata_sha TEXT NOT NULL, slot_key TEXT NOT NULL, slot_identity TEXT, state TEXT NOT NULL CHECK(state IN ('creating','ready','sealed')))'''
+CHUNK_DDL = '''CREATE TABLE viewer_worker_chunk_sessions (job_id TEXT PRIMARY KEY, metadata_sha TEXT NOT NULL, slot_key TEXT NOT NULL, slot_identity TEXT, state TEXT NOT NULL CHECK(state IN ('creating','ready','sealed')), chunk_bytes INTEGER, chunk_count INTEGER)'''
 CHUNK_PERMIT_DDL = '''CREATE TABLE viewer_worker_chunk_permits (job_id TEXT NOT NULL, operation_id TEXT NOT NULL, specification TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','finished')), PRIMARY KEY(job_id,operation_id))'''
 COMPLETION_DDL = '''CREATE TABLE viewer_worker_completions (job_id TEXT PRIMARY KEY, observation TEXT NOT NULL, spool_receipt TEXT NOT NULL, receipt TEXT NOT NULL)'''
 TRIGGER_DDL = '''CREATE TRIGGER viewer_worker_active_permit_hold BEFORE UPDATE OF status ON jobs WHEN OLD.status='running' AND NEW.status!='running' AND EXISTS(SELECT 1 FROM viewer_worker_permits WHERE job_id=OLD.id AND state='active') BEGIN SELECT RAISE(ABORT,'viewer active permit requires drain'); END'''

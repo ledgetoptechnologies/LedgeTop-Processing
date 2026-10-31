@@ -169,7 +169,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             if self.headers.get_all("Transfer-Encoding"):
                 self._error(400, "transfer_encoding_not_supported")
                 return
-            for name in ("Authorization", "Content-Length", "Content-Type", "X-Claim-Token", "X-LedgeTop-Capability", "X-Chunk-Index", "X-Chunk-Offset", "X-Chunk-SHA256", "X-Chunk-Length", "X-Chunk-Count"):
+            for name in ("Authorization", "Content-Length", "Content-Type", "X-Claim-Token", "X-LedgeTop-Capability", "X-Chunk-Index", "X-Chunk-Offset", "X-Chunk-SHA256", "X-Chunk-Length", "X-Chunk-Count", "X-Chunk-Size"):
                 if len(self.headers.get_all(name, [])) > 1:
                     self._error(400, "duplicate_header")
                     return
