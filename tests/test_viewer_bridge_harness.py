@@ -1,4 +1,5 @@
 """Mock-only safety checks; never calls a Docker daemon or shared resource."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ class ViewerBridgeHarnessTests(unittest.TestCase):
     def test_uncertain_creation_records_identity_and_never_removes_by_name(self):self._failure('uncertain')
     def test_changed_container_identity_is_never_stopped_or_removed(self):self._failure('identity-mismatch')
     def test_full_mode_records_uncertain_creation_without_cleanup(self):self._failure('uncertain','full')
+    def test_full_mode_rejects_modified_fixture_before_docker(self):self._failure('tampered','full')
 
     def _failure(self,mode,bridge_mode='reconcile'):
         script=Path(__file__).resolve().parents[1]/'ops'/'run_viewer_bridge_rehearsal.sh'
@@ -25,6 +27,19 @@ case "$1" in
  archive) printf synthetic;;
  *) exit 1;;
 esac
+''')
+            fixture_dir=script.parents[1]/'tests'
+            server_hash=hashlib.sha256((fixture_dir/'viewer_full_bridge_server.py').read_bytes()).hexdigest()
+            client_hash=hashlib.sha256((fixture_dir/'viewer_full_bridge_client.cjs').read_bytes()).hexdigest()
+            (bin_dir/'sha256sum').write_text('''#!/bin/sh
+for item in "$@"; do
+ case "$item" in
+ */viewer_full_bridge_server.py) hash="$MOCK_SERVER_HASH"; [ "$MOCK_MODE" != tampered ] || hash=bad;;
+ */viewer_full_bridge_client.cjs) hash="$MOCK_CLIENT_HASH";;
+ *) hash=synthetic;;
+ esac
+ printf '%s  %s\\n' "$hash" "$item"
+done
 ''')
             (bin_dir/'tar').write_text('#!/bin/sh\nexit 0\n')
             (bin_dir/'docker').write_text('''#!/bin/sh
@@ -45,9 +60,14 @@ exit 1
             try:subprocess.run([str(bin_dir/'tar')],check=True,timeout=2)
             except PermissionError:self.skipTest('temporary filesystem does not permit fixture execution')
             env={**os.environ,'PATH':str(bin_dir)+os.pathsep+os.environ['PATH'],'TMPDIR':str(root),
-                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode,'BRIDGE_MODE':bridge_mode}
+                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode,'BRIDGE_MODE':bridge_mode,'MOCK_SERVER_HASH':server_hash,'MOCK_CLIENT_HASH':client_hash}
             result=subprocess.run(['sh',str(script)],env=env,text=True,capture_output=True,timeout=10)
             self.assertNotEqual(result.returncode,0)
+            if mode=='tampered':
+                self.assertIn('Full server fixture hash mismatch',result.stderr)
+                self.assertIn('bad  ',result.stdout)
+                self.assertFalse(log.exists())
+                return
             if mode=='uncertain':self.assertIn('Server creation outcome uncertain',result.stderr)
             else:self.assertIn('Container identity unavailable or changed',result.stderr)
             evidence=list(root.glob('codex-viewer-bridge-*/run-identity.json'));self.assertEqual(len(evidence),1)

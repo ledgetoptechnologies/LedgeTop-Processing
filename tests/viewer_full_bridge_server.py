@@ -39,6 +39,16 @@ def empty_coordinator(self):
     self.start_server()
 
 
+def stop_worker(worker, cancel, timeout=10):
+    """Do not tear down fixture state while its owned worker may still use it."""
+    cancel.set()
+    if worker is not None:
+        worker.join(timeout)
+        if worker.is_alive():
+            os.write(2,b'synthetic worker did not stop; terminating owned fixture process\n')
+            os._exit(2)
+
+
 def main():
     original=zipfile.ZipFile.writestr
     entries=[('odm_texturing/odm_textured_model_geo.glb','glb'),
@@ -52,7 +62,7 @@ def main():
             return
         return original(archive,name,data,*args,**kwargs)
     synthetic=SyntheticSubmissionTests('test_exact_submission_once_and_replay_without_cleanup')
-    discovery=provider=None;discovery_thread=provider_thread=worker_thread=None;failure=[];done=threading.Event()
+    discovery=provider=None;discovery_thread=provider_thread=worker_thread=None;failure=[];done=threading.Event();cancel=threading.Event()
     try:
         with patch.object(ViewerWorkerClaimTests,'setUp',empty_coordinator),patch.object(zipfile.ZipFile,'writestr',write):synthetic.setUp()
         fixture=synthetic.base.base.fixture
@@ -86,13 +96,15 @@ def main():
         def execute():
             try:
                 deadline=time.monotonic()+45
-                while time.monotonic()<deadline:
+                while time.monotonic()<deadline and not cancel.is_set():
                     try:
                         task=fixture.store.task(TASK)
                         if task['phase']=='queued':break
                     except KeyError:pass
                     time.sleep(.05)
-                else:raise RuntimeError('Viewer submission did not reach queue')
+                else:
+                    if cancel.is_set():return
+                    raise RuntimeError('Viewer submission did not reach queue')
                 fixture.job=task['job_id']
                 if len(task['files'])!=1 or Path(task['files'][0]['path']).read_bytes()!=b'synthetic':raise RuntimeError('Viewer input mismatch')
                 with DaemonStateLock(synthetic.base.base.worker) as owner:
@@ -112,7 +124,7 @@ def main():
                 done.set()
             except BaseException as error:
                 failure.append(type(error).__name__+': '+str(error));done.set()
-        worker_thread=threading.Thread(target=execute);worker_thread.start()
+        worker_thread=threading.Thread(target=execute,daemon=True);worker_thread.start()
         ready=dict(port=provider.server_port,task=TASK,archiveSha256=hashlib.sha256(synthetic.archive).hexdigest(),token='viewer-production-token')
         Path(os.environ['BRIDGE_READY']).write_text(json.dumps(ready))
         deadline=time.monotonic()+120
@@ -129,6 +141,7 @@ def main():
             raise AssertionError('synthetic retention changed')
         Path(os.environ['BRIDGE_STOP']+'.result').write_text(json.dumps(retained))
     finally:
+        stop_worker(worker_thread,cancel)
         if provider is not None:provider.shutdown();provider.server_close();provider_thread.join(5)
         if discovery is not None:discovery.shutdown();discovery.server_close();discovery_thread.join(5)
         synthetic.doCleanups()

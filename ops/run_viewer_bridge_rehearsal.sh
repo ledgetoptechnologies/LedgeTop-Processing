@@ -7,6 +7,9 @@ case "$PROCESSING" in /*) ;; *) printf 'PROCESSING must be an absolute path\n' >
 VIEWER_TREE=baaaf2439d5a641ae59c3f550f77dc7512e3b84d
 PROCESSING_BASE=60ae84f7572f611b03a340d17ceb17d82ff84721
 HARNESS_BASE=d9f44b555f7851ea87f5391afc5f75af1cdf5dac
+FULL_HARNESS_BASE=044de218b05424776037d355acb963e304c29390
+FULL_SERVER_SHA256=b59d94c0495758fff116e985eca608c5960cd6f6989cd59ca886eb9734ed4fab
+FULL_CLIENT_SHA256=9cc627374bdfa2eb198232edaa53335e82681ac20e1228e2861d454f3556029a
 VIEWER_IMAGE=viewer-gcp-validation-faa3fd8bca374cb9ba721eea97a4674a:latest
 PYTHON_IMAGE=python:3.12-slim
 BRIDGE_MODE=${BRIDGE_MODE:-reconcile}
@@ -22,11 +25,12 @@ CLIENT_NAME="viewer-bridge-client-$RUN_ID"
 SERVER_ID= CLIENT_ID=
 SERVER_ATTEMPTED=0 CLIENT_ATTEMPTED=0
 printf 'Rehearsal run ID: %s\nEvidence directory: %s\nServer name: %s\nClient name: %s\n' "$RUN_ID" "$RUN_DIR" "$SERVER_NAME" "$CLIENT_NAME"
-python3 - "$RUN_DIR" "$RUN_ID" "$SERVER_NAME" "$CLIENT_NAME" "$VIEWER_TREE" "$PROCESSING_BASE" "$HARNESS_BASE" "$PYTHON_IMAGE" "$VIEWER_IMAGE" "$BRIDGE_MODE" <<'PY'
+python3 - "$RUN_DIR" "$RUN_ID" "$SERVER_NAME" "$CLIENT_NAME" "$VIEWER_TREE" "$PROCESSING_BASE" "$HARNESS_BASE" "$FULL_HARNESS_BASE" "$PYTHON_IMAGE" "$VIEWER_IMAGE" "$BRIDGE_MODE" <<'PY'
 import json,os,sys
-root,run,server,client,viewer_tree,processing_base,harness_base,python_image,viewer_image,bridge_mode=sys.argv[1:]
+root,run,server,client,viewer_tree,processing_base,harness_base,full_harness_base,python_image,viewer_image,bridge_mode=sys.argv[1:]
 data=json.dumps(dict(runId=run,label='org.openai.codex.bridge',serverName=server,clientName=client,
                      viewerTree=viewer_tree,processingBase=processing_base,harnessBase=harness_base,
+                     fullHarnessBase=full_harness_base,
                      pythonImage=python_image,viewerImage=viewer_image,bridgeMode=bridge_mode),sort_keys=True).encode()
 fd=os.open(os.path.join(root,'run-identity.json'),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 try:
@@ -73,6 +77,12 @@ git -C "$PROCESSING" merge-base --is-ancestor "$HARNESS_BASE" HEAD
 git -C "$PROCESSING" diff --quiet "$HARNESS_BASE" HEAD -- tests/viewer_bridge_client.cjs tests/viewer_bridge_server.py
 if [ "$BRIDGE_MODE" = full ]; then
     git -C "$PROCESSING" ls-files --error-unmatch tests/viewer_full_bridge_client.cjs tests/viewer_full_bridge_server.py >/dev/null
+    git -C "$PROCESSING" merge-base --is-ancestor "$FULL_HARNESS_BASE" HEAD
+    server_sum=$(sha256sum "$PROCESSING/tests/$SERVER_SCRIPT")
+    client_sum=$(sha256sum "$PROCESSING/tests/$CLIENT_SCRIPT")
+    printf '%s\n%s\n' "$server_sum" "$client_sum" | tee "$RUN_DIR/fixture-scripts.sha256"
+    [ "${server_sum%% *}" = "$FULL_SERVER_SHA256" ] || { printf 'Full server fixture hash mismatch\n' >&2; exit 1; }
+    [ "${client_sum%% *}" = "$FULL_CLIENT_SHA256" ] || { printf 'Full client fixture hash mismatch\n' >&2; exit 1; }
 fi
 git -C "$PROCESSING" diff --quiet "$PROCESSING_BASE" HEAD -- processing ops \
     tests/test_viewer_completion_projection.py tests/test_viewer_spool_provider.py \
@@ -82,6 +92,9 @@ git -C "$PROCESSING" diff --quiet "$PROCESSING_BASE" HEAD -- processing ops \
     ':(exclude)ops/run_viewer_bridge_rehearsal.sh'
 printf 'Viewer tree: %s\nProcessing base: %s\nProcessing checkout: %s\n' "$VIEWER_TREE" "$PROCESSING_BASE" "$(git -C "$PROCESSING" rev-parse HEAD)"
 git -C "$PROCESSING" rev-parse HEAD > "$RUN_DIR/processing.commit"
+if [ "$BRIDGE_MODE" != full ]; then
+    sha256sum "$PROCESSING/tests/$SERVER_SCRIPT" "$PROCESSING/tests/$CLIENT_SCRIPT" | tee "$RUN_DIR/fixture-scripts.sha256"
+fi
 mkdir "$RUN_DIR/export" "$RUN_DIR/exchange"
 chmod 0777 "$RUN_DIR/exchange" # synthetic dummy files only
 git -C "$VIEWER_REPO" archive "$VIEWER_TREE" apps/viewer packages/shared > "$RUN_DIR/viewer.tar"

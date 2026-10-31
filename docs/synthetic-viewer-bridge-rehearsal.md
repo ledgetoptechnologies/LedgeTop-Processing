@@ -20,3 +20,10 @@ Every run prints and durably records a random run ID, label and intended contain
 After container creation, readiness polling is limited to 60 seconds, the client wait to 45 seconds in `reconcile` mode or 75 seconds in `full` mode, and the final server wait to 15 seconds; these are separate limits, not an end-to-end deadline. Git export, archive comparison and host filesystem operations have no overall deadline. The Python fixture's own 120-second deadline starts after setup. The script retains its new synthetic export and evidence directory and prints its path even on failure; inspect that directory separately if cleanup is desired. It never reuses or removes another run's export.
 
 The client prints the synthetic archive digest, Viewer attempt phase and pending derivative count. The Processing fixture writes the retention check to `stop.result` before teardown. The fixture tokens are local dummy values. The locally supplied dependency image is not proven to match the exported tree's dependency lockfile; this is a compatibility limitation of the rehearsal.
+
+Full-mode fixture scripts are checked against fixed SHA-256 values, and their actual
+hashes are printed and retained before Docker is invoked. The owned fixture worker
+receives cancellation and is joined for up to 10 seconds during shutdown. If it
+remains active, the isolated fixture process exits rather than tearing down state
+under that thread. Container cleanup still depends on verified ownership. This is
+not a guarantee about shutdown of production workers.
