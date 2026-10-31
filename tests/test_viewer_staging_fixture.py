@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -103,7 +104,13 @@ class StagingFixtureTests(unittest.TestCase):
         from processing.viewer_staged_ack import ROUTE
         from processing import reference_protocol as protocol
         fixture=spool_tests.ViewerSpoolProviderTests('test_authenticated_provider_download_keeps_running_and_retains_data')
-        setup_fixture(self,fixture)
+        original=zipfile.ZipFile.writestr
+        def write(archive,name,data,*args,**kwargs):
+            if name=='synthetic.txt' and os.environ.get('SYNTHETIC_INGEST_VOLUME'):
+                for entry,body in [('odm_texturing/odm_textured_model_geo.glb','glb'),('odm_texturing/odm_textured_model_geo.obj','mtllib model.mtl\nv 0 0 0\n'),('odm_texturing/model.mtl','newmtl surface\nmap_Kd texture.jpg\n'),('odm_texturing/texture.jpg','texture'),('entwine_pointcloud/ept.json','{}')]:original(archive,entry,body)
+                return
+            return original(archive,name,data,*args,**kwargs)
+        with patch.object(zipfile.ZipFile,'writestr',write):setup_fixture(self,fixture)
         with DaemonStateLock(fixture.base.base.base.base.base.worker) as owner:
             send_completion(fixture.base.base.worker(owner),synthetic_fixture=True)
         initialize_staged_ack_schema(fixture.fixture.queue)
@@ -142,6 +149,33 @@ class StagingFixtureTests(unittest.TestCase):
                 SYNTHETIC_BRIDGE_CONFIG=json.dumps(dict(origin='https://127.0.0.1:'+str(runtime._server.server_port),
                     authority=fixture.fixture.queue.authority_id,bearer=bearer,capability=CAP,task=TASK)))
             env['NODE_PATH']='/src/apps/viewer/node_modules'
+            ingest_volume=os.environ.get('SYNTHETIC_INGEST_VOLUME')
+            if ingest_volume:
+                from http.server import ThreadingHTTPServer
+                import threading
+                tls_viewer=ThreadingHTTPServer(('127.0.0.1',0),fixture.server.RequestHandlerClass)
+                tls_viewer.socket=fixture.fixture.tls.wrap_socket(tls_viewer.socket,server_side=True)
+                tls_thread=threading.Thread(target=tls_viewer.serve_forever,kwargs={'poll_interval':.05},daemon=True);tls_thread.start()
+                def stop_tls_viewer():tls_viewer.shutdown();tls_viewer.server_close();tls_thread.join(5)
+                self.addCleanup(stop_tls_viewer)
+                config=json.loads(env['SYNTHETIC_BRIDGE_CONFIG']);config.update(viewerOrigin='https://127.0.0.1:'+str(tls_viewer.server_port),viewerToken='viewer-staging-token')
+                env['SYNTHETIC_BRIDGE_CONFIG']=json.dumps(config)
+                with patch.object(fixture.service,'options',return_value=[]):
+                    child=subprocess.Popen(['node',str(Path(__file__).with_name('viewer_staged_ingest_volume.cjs'))],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+                    try:stdout,stderr=child.communicate(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(child.pid,signal.SIGKILL);child.communicate(timeout=5);raise
+                self.assertEqual(child.returncode,0,stderr)
+                ingest=json.loads(stdout);self.assertTrue(ingest['ok'])
+                config['attempt']=ingest['attempt'];config['providerId']=ingest['providerId'];env['SYNTHETIC_BRIDGE_CONFIG']=json.dumps(config);env['SYNTHETIC_DB_PATH']=ingest['dbPath']
+                child=subprocess.Popen(['node',str(Path(__file__).with_name('viewer_staged_clients_synthetic.cjs')),'existing'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+                try:stdout,stderr=child.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid,signal.SIGKILL);child.communicate(timeout=5);raise
+                self.assertEqual(child.returncode,0,stderr);self.assertEqual(json.loads(stdout)['replay'],'lookup')
+                with fixture.fixture.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0],1)
+                self.assertEqual(len(list(fixture.base.root.glob('*.alloc'))),1)
+                return
             child=subprocess.Popen(['node',str(Path(__file__).with_name('viewer_staged_clients_synthetic.cjs'))],
                                    env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
             try:stdout,stderr=child.communicate(timeout=30)

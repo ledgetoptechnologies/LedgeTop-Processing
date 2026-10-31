@@ -19,7 +19,7 @@ function migration(number){
  const match=source.match(new RegExp('\\{version:'+number+',name:\\x27[^\\x27]+\\x27,sql:`([\\s\\S]*?)`\\}'));
  if(!match)throw Error('expected exact Viewer migration absent');return match[1];
 }
-function setup(db,clock,fetchImpl=fetch){return {db,enabled:true,bindings:{provider:binding},resolveCredential:async()=>config.bearer,resolveCapability:async()=>config.capability,clock:()=>clock,fetchImpl};}
+function setup(db,clock,fetchImpl=fetch){return {db,enabled:true,bindings:{[config.providerId||'provider']:binding},resolveCredential:async()=>config.bearer,resolveCapability:async()=>config.capability,clock:()=>clock,fetchImpl};}
 (async()=>{
  const mode=process.argv[2];
  if(mode==='kill'||mode==='replay'){
@@ -30,8 +30,9 @@ function setup(db,clock,fetchImpl=fetch){return {db,enabled:true,bindings:{provi
  const opts={enabled:true,...binding,bearer:config.bearer,capability:config.capability,taskId:config.task};
  const commitment=await getStagedCommitment(opts);
  await assert.rejects(getStagedCommitment({...opts,bearer:config.capability}));
- const id=()=>crypto.randomUUID();const assertion={...commitment,attemptId:id(),modelId:id(),modelVersionId:id(),stagingCommitId:id()};
- let db=new DatabaseSync(dbPath);
+ const id=()=>crypto.randomUUID();let assertion={...commitment,attemptId:id(),modelId:id(),modelVersionId:id(),stagingCommitId:id()};
+ let db=new DatabaseSync(dbPath),body;
+ if(mode!=='existing'){
  db.exec('CREATE TABLE processing_attempts(id TEXT PRIMARY KEY); CREATE TABLE processing_providers(id TEXT PRIMARY KEY); CREATE TABLE models(id TEXT PRIMARY KEY,display_name TEXT); CREATE TABLE model_outputs(id TEXT PRIMARY KEY,model_id TEXT,attempt_id TEXT,status TEXT); CREATE TABLE processing_attempt_transfer_provenance(attempt_id TEXT PRIMARY KEY,initialization_json TEXT,archive_json TEXT);');
  db.exec(migration(46));db.exec(migration(47));
  db.prepare('INSERT INTO processing_attempts VALUES(?)').run(assertion.attemptId);db.prepare('INSERT INTO processing_providers VALUES(?)').run('provider');
@@ -42,8 +43,10 @@ function setup(db,clock,fetchImpl=fetch){return {db,enabled:true,bindings:{provi
  const attempt={id:assertion.attemptId,providerId:'provider',providerTaskId:config.task,resultModelId:assertion.modelId,resultModelVersionId:assertion.modelVersionId};
  const repository=Object.create(ProcessingRepository.prototype);repository.database=db;db.exec('BEGIN IMMEDIATE');
  repository.enqueueDisabledStagedByteAck(attempt,commitment,{origin:config.origin,credentialRef:'synthetic',capabilitySha256:sha(config.capability)});db.exec('COMMIT');
- const body=db.prepare('SELECT assertion_json FROM processing_staged_byte_ack_outbox').get().assertion_json;
- const saved=JSON.parse(body);assert.equal(saved.attemptId,assertion.attemptId);assert.equal(saved.archiveSha256,commitment.archiveSha256);db.close();
+ body=db.prepare('SELECT assertion_json FROM processing_staged_byte_ack_outbox').get().assertion_json;
+ const saved=JSON.parse(body);assert.equal(saved.attemptId,assertion.attemptId);assert.equal(saved.archiveSha256,commitment.archiveSha256);
+ }else{body=db.prepare('SELECT assertion_json FROM processing_staged_byte_ack_outbox WHERE attempt_id=?').get(config.attempt).assertion_json;assertion=JSON.parse(body);assert.equal(assertion.archiveSha256,commitment.archiveSha256);}
+ db.close();
  const first=spawnSync(process.execPath,[__filename,'kill'],{env:process.env,encoding:'utf8',timeout:8000});
  assert.equal(first.signal,'SIGKILL',`sender was not killed: ${first.status} ${first.stderr}`);
  db=new DatabaseSync(dbPath);let row=db.prepare('SELECT * FROM processing_staged_ack_delivery').get();
