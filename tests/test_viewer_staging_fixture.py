@@ -148,3 +148,59 @@ class StagingFixtureTests(unittest.TestCase):
             self.assertEqual(call('GET',path+'/generations/'+str(value['generation']))[1]['assertion'],value)
         self.assertEqual(fixture.fixture.queue.get(fixture.fixture.job)['status'],'running')
         self.assertEqual(len(list(fixture.base.root.glob('*.alloc'))),1)
+
+    def test_runtime_injection_scopes_real_viewer_http_to_staging(self):
+        from dataclasses import replace
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        import threading
+        from processing.reference_runtime import ReferenceRuntime,ReferenceSettings,RuntimeConfigurationError
+        from processing.viewer_staged_ack_schema import initialize_staged_ack_schema
+        from processing.viewer_service import ViewerService
+        from processing.viewer_http import ViewerFacade
+        fixture=spool_tests.ViewerSpoolProviderTests('test_authenticated_provider_download_keeps_running_and_retains_data')
+        setup_fixture(self,fixture)
+        with DaemonStateLock(fixture.base.base.base.base.base.worker) as owner:
+            send_completion(fixture.base.base.worker(owner),synthetic_fixture=True)
+        initialize_staged_ack_schema(fixture.fixture.queue)
+        bearer=base64.urlsafe_b64encode(b'c'*32).decode().rstrip('=')
+        workers={node:dict(bearer=key*32,workerId='worker-'+node,instanceId='instance-'+node,
+                resultOrigin='https://127.0.0.1:'+port,resultBearer=other*32)
+                for node,key,port,other in [('cluster','a','1234','r'),('main','m','1235','s')]}
+        config=replace(fixture.service.config,prototype_node_ids=('cluster','main'),viewer_worker_claim_enabled=True,
+            viewer_worker_claim_env_policy=(('cluster',('staging',)),('main',('staging',))))
+        service=ViewerService(fixture.fixture.queue,config,store=fixture.fixture.store,engines={})
+        self.addCleanup(service.close)
+        facade=ViewerFacade(service,'production-viewer','staging-viewer')
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if not facade.handle(self):self.send_error(404)
+            def log_message(self,*args):pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.05},daemon=True);thread.start()
+        def stop():server.shutdown();server.server_close();thread.join(5);self.assertFalse(thread.is_alive())
+        self.addCleanup(stop)
+        def get(suffix,token='staging-viewer',identifier=TASK):
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+            try:
+                conn.request('GET','/task/'+identifier+'/'+suffix+'?token='+token,headers={'X-LedgeTop-Capability':CAP})
+                resp=conn.getresponse();return resp.status,resp.read()
+            finally:conn.close()
+        self.assertNotEqual(json.loads(get('info')[1])['status']['code'],40)
+        policy=dict(root=str(fixture.base.root),rootIdentity=fixture.base.root_identity,maxArchiveBytes=65536)
+        settings=ReferenceSettings(dict(host='127.0.0.1',port=0,certificate=str(fixture.fixture.cert),
+            privateKey=str(fixture.fixture.key),clientCA=str(fixture.fixture.cert)),{'v'*32:'staging'},workers,
+            dict(maxConcurrent=1,maxObjectBytes=65536),staged_ack_bearers={bearer:{'environment':'staging','principalId':'viewer-stage'}},viewer_archive_spool=policy,viewer_projection_environments=('staging',))
+        with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(fixture.fixture.queue,config,settings,viewer_service=service)
+        with patch('processing.reference_runtime.STAGED_ACK_SCHEMA_QUALIFIED',True),patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True),patch('processing.reference_runtime.VIEWER_RUNTIME_PROJECTION_QUALIFIED',True):
+            runtime=ReferenceRuntime(fixture.fixture.queue,config,settings,viewer_service=service);runtime.start()
+        self.addCleanup(runtime.close)
+        self.assertEqual(json.loads(get('info')[1])['status']['code'],40)
+        self.assertEqual(get('download/all.zip')[1],fixture.base.base.base.archive)
+        self.assertEqual(get('download/all.zip','production-viewer')[0],404)
+        self.assertEqual(get('info',identifier='33333333-3333-4333-8333-333333333333')[0],404)
+        with fixture.fixture.queue._db() as db:
+            db.execute("INSERT INTO viewer_worker_fences VALUES(?,1) ON CONFLICT(job_id) DO UPDATE SET stop_requested=1",(fixture.fixture.job,))
+        self.assertNotEqual(json.loads(get('info')[1])['status']['code'],40)
+        self.assertEqual(get('download/all.zip')[0],409)
+        self.assertEqual(len(list(fixture.base.root.glob('*.alloc'))),1)
+        runtime.close();self.assertIsNone(service._runtime_projection)

@@ -137,6 +137,7 @@ class ViewerService:
         if type(viewer_completion_projection) is not bool or (viewer_completion_projection and viewer_spool is None):
             raise ValueError('Viewer completion projection requires spool')
         self.viewer_completion_projection=viewer_completion_projection
+        self._runtime_projection=None  # Atomically published scoped binding.
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -204,10 +205,13 @@ class ViewerService:
 
     def info(self, identifier):
         info=self.store.info(identifier)
-        if self.viewer_completion_projection and info['status']['code']==20:
+        binding=self._runtime_projection
+        if (self.viewer_completion_projection or binding is not None) and info['status']['code']==20:
             try:
                 task=self.store.task(identifier)
-                if task['phase']=='worker_claimed' and self.viewer_spool.completion_ready(task):
+                spool=(binding[0] if binding is not None and task['environment'] in binding[1] else
+                       self.viewer_spool if self.viewer_completion_projection else None)
+                if spool is not None and task['phase']=='worker_claimed' and spool.completion_ready(task):
                     return {**info,'status':{'code':40},'progress':100}
             except Exception:pass # A missing or uncertain proof never becomes success.
         return info
@@ -457,6 +461,16 @@ class ViewerService:
 
     def download(self, identifier):
         task = self.store.task(identifier)
+        binding=self._runtime_projection
+        if binding is not None and task['environment'] in binding[1] and task['phase']=='worker_claimed':
+            try:
+                reader,length=binding[0].open_for_viewer(task)
+                try:
+                    if not binding[0]._completion_ready_locked(task,reader):raise Conflict('Viewer completion unavailable')
+                except BaseException:
+                    reader.close();raise
+                return reader,length
+            except Exception:raise Conflict('Viewer spool archive unavailable') from None
         if self.viewer_spool is not None and task['phase']=='worker_claimed':
             try:return self.viewer_spool.open_for_viewer(task)
             except Exception:raise Conflict('Viewer spool archive unavailable') from None

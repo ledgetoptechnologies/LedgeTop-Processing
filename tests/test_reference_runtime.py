@@ -125,6 +125,11 @@ class ReferenceRuntimeTests(unittest.TestCase):
                           stagedAckPrincipals=[dict(environment='staging',principalId='viewer-a',bearer=token)])
         self.write_config();config=replace(self.config,viewer_worker_claim_enabled=True)
         settings=load_reference_settings(str(self.path),config)
+        self.value.update(schemaVersion=6,viewerProjectionEnvironments=['staging']);self.write_config()
+        scoped=load_reference_settings(str(self.path),config)
+        self.assertEqual(scoped.viewer_projection_environments,('staging',))
+        self.value['viewerProjectionEnvironments']=['production'];self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):load_reference_settings(str(self.path),config)
         query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         with queue._db() as db:before=[tuple(row) for row in db.execute(query)]
         with self.assertRaises(RuntimeConfigurationError):_preflight_spool_settings(settings,config,queue,settings.viewer_archive_spool)

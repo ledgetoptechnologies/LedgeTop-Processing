@@ -29,6 +29,7 @@ MAX_CONFIG_BYTES = 64 * 1024
 # Tests may patch this in an isolated fixture; production must remain closed.
 STAGED_ACK_SCHEMA_QUALIFIED = False
 VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED = False
+VIEWER_RUNTIME_PROJECTION_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -46,6 +47,7 @@ class ReferenceSettings:
     recovery_bindings: dict | None = None
     staged_ack_bearers: dict | None = None
     viewer_archive_spool: dict | None = None
+    viewer_projection_environments: tuple | None = None
 
 
 def _spool_policy(value):
@@ -157,11 +159,11 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5, 6):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
         has_recovery=value['schemaVersion']==2 or (value['schemaVersion']==3 and 'recoveryBindings' in value)
-        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"] in (3,5) else ()) + (("viewerArchiveSpool",) if value["schemaVersion"] in (4,5) else ()), "runtime configuration")
+        p._closed(value, fields + (("recoveryBindings",) if has_recovery else ()) + (("stagedAckPrincipals",) if value["schemaVersion"] in (3,5,6) else ()) + (("viewerArchiveSpool",) if value["schemaVersion"] in (4,5,6) else ()) + (("viewerProjectionEnvironments",) if value["schemaVersion"]==6 else ()), "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -202,7 +204,7 @@ def load_reference_settings(path, config):
                     or any(ord(c) < 33 or ord(c) > 126 for c in token)):
                 raise RuntimeConfigurationError("reference credentials must be separate bounded printable secrets")
         staged=None
-        if value['schemaVersion'] in (3,5):
+        if value['schemaVersion'] in (3,5,6):
             import base64
             staged_config=value['stagedAckPrincipals']
             if type(staged_config) is not list or not 1<=len(staged_config)<=32:
@@ -241,11 +243,16 @@ def load_reference_settings(path, config):
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
         spool=None
-        if value['schemaVersion'] in (4,5):
+        if value['schemaVersion'] in (4,5,6):
             if not config.viewer_worker_claim_enabled:raise RuntimeConfigurationError('Viewer worker claims required')
             spool=_spool_policy(value['viewerArchiveSpool'])
+        projection=None
+        if value['schemaVersion']==6:
+            if value['viewerProjectionEnvironments']!=['staging'] or 'staging' not in viewers:
+                raise RuntimeConfigurationError('staging projection scope required')
+            projection=('staging',)
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, staged, spool)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery, staged, spool, projection)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -325,7 +332,19 @@ class ReferenceRuntime:
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
+        self._projection_owner=None;self._projection_binding=None
         try:
+            projection=settings.viewer_projection_environments
+            if projection is not None:
+                from .viewer_service import ViewerService
+                if (not VIEWER_RUNTIME_PROJECTION_QUALIFIED or projection!=('staging',)
+                        or settings.viewer_archive_spool is None or type(settings.staged_ack_bearers) is not dict
+                        or not any(type(v) is dict and v.get('environment')=='staging' for v in settings.staged_ack_bearers.values())
+                        or 'staging' not in settings.viewer_bearers.values()
+                        or type(viewer_service) is not ViewerService or viewer_service.queue is not queue
+                        or viewer_service.viewer_spool is not None or viewer_service.viewer_completion_projection
+                        or viewer_service._runtime_projection is not None):
+                    raise RuntimeConfigurationError('Viewer projection is not qualified or scoped')
             recovery=settings.recovery_bindings
             if recovery is not None:
                 if (type(recovery) is not dict or set(recovery)!=set(config.prototype_node_ids)
@@ -408,6 +427,13 @@ class ReferenceRuntime:
                     raise RuntimeConfigurationError('staged credential scope or separation changed')
                 staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers,spool=viewer_spool)
             self.api = _DynamicAPI(self.control, config, settings, discover, staged)
+            if projection is not None:
+                # One publication point; no user data or queue state is changed.
+                with viewer_service._lock:
+                    if viewer_service._runtime_projection is not None:raise RuntimeConfigurationError('Viewer projection already bound')
+                    self._projection_binding=(viewer_spool,projection)
+                    viewer_service._runtime_projection=self._projection_binding
+                    self._projection_owner=viewer_service
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
 
@@ -435,13 +461,18 @@ class ReferenceRuntime:
         except Exception:
             self._server, self._thread = None, None
             server.server_close()
+            self.close()
             raise RuntimeConfigurationError("reference listener start failed") from None
 
     def close(self):
-        if self._server is None:
-            return
-        server, thread = self._server, self._thread
-        self._server, self._thread = None, None
-        server.shutdown()
-        server.server_close()
-        thread.join()
+        if self._server is not None:
+            server, thread = self._server, self._thread
+            self._server, self._thread = None, None
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        if self._projection_owner is not None:
+            with self._projection_owner._lock:
+                if self._projection_owner._runtime_projection is self._projection_binding:
+                    self._projection_owner._runtime_projection=None
+            self._projection_owner=None;self._projection_binding=None

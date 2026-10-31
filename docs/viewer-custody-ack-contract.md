@@ -152,3 +152,13 @@ blob bytes; the export was mounted read-only in the test container. An ordinary
 byte-identical, so its extracted copies were not used for the final test. The
 host-side export is still writable by its owner; hashing followed by execution
 is not an atomic immutable snapshot against concurrent host modification.
+
+An isolated schema-6 draft adds a separately qualified, staging-only runtime
+binding for Viewer status and download. The binding publishes the actual
+coordinator spool as one scoped unit and is removed on runtime close. The
+projection verifies completion evidence before streaming; it does not revoke a
+stream already in flight when a hold arrives. The new qualification guard is
+false outside tests. Existing production Viewer behavior remains unchanged.
+The current fixture creates the synthetic task through TaskStore before testing
+NodeODM-compatible status and download; it does not yet test submission through
+the Viewer HTTP interface or prove Viewer custody.
