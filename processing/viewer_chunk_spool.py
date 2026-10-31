@@ -115,6 +115,13 @@ class SyntheticChunkSpool:
         with self._permit_lock:self._active[(job,operation_id)]=nonce
         return dict(state='active',permit=nonce)
 
+    def abandon_admission(self,job,operation_id,permit_nonce):
+        """Discard only the local nonce; the durable active permit stays held."""
+        with self._permit_lock:
+            current=self._active.get((job,operation_id))
+            if current and isinstance(permit_nonce,str) and secrets.compare_digest(current,permit_nonce):
+                del self._active[(job,operation_id)]
+
     def write_admitted(self,job,identity,token,operation_id,permit_nonce,index,offset,data):
         """Finish a previously admitted operation even if a hold follows."""
         from .viewer_chunk_journal import MAX_CHUNK

@@ -44,6 +44,7 @@ class ReferenceWorkerAPI:
             if type(viewer_spool) is not ViewerArchiveSpool or viewer_spool.claims is not viewer_claims:
                 raise ValueError('bound viewer spool required')
         self.viewer_spool=viewer_spool
+        self.viewer_chunks=None  # Explicit synthetic fixture injection only.
         self.recovery = None
         if recovery_bindings is not None:
             from .reference_recovery import ClaimRecoveryService
@@ -83,6 +84,34 @@ class ReferenceWorkerAPI:
             receipt=self.viewer_spool.receive(match[1],identity,token,chunks,expected_length=length)
             return Response(200,receipt)
         except Exception:return self._error(409,'archive_requires_inspection')
+
+    def handle_chunk(self,path,headers,length,chunks,*,tls_transport=False):
+        """Synthetic TLS ingress: authenticate and admit before body iteration."""
+        if tls_transport is not True:return self._error(503,'tls_required')
+        identity=self._authenticate(headers)
+        if identity is None:return self._error(401,'unauthorized')
+        match=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/chunks/([A-Za-z0-9_-]{1,128})',path)
+        if not match or self.viewer_chunks is None:return self._error(404,'not_found')
+        if self._header(headers,'Content-Type')!='application/octet-stream':return self._error(415,'invalid_content_type')
+        token=self._header(headers,'X-Claim-Token');permit=None
+        try:
+            index=self._header(headers,'X-Chunk-Index');offset=self._header(headers,'X-Chunk-Offset');digest=self._header(headers,'X-Chunk-SHA256')
+            if not isinstance(index,str) or not re.fullmatch(r'0|[1-9][0-9]{0,3}',index) or not isinstance(offset,str) or not re.fullmatch(r'0|[1-9][0-9]{0,15}',offset):
+                raise ValueError('invalid chunk headers')
+            permit=self.viewer_chunks.admit_chunk(match[1],identity,token,match[2],int(index),int(offset),length,digest)
+            if permit['state']=='finished':return Response(200,{'state':'finished'})
+            parts=[];total=0
+            for part in chunks:
+                total+=len(part)
+                if total>length:raise ValueError('chunk overflow')
+                parts.append(part)
+            if total!=length:raise ValueError('truncated chunk')
+            receipt=self.viewer_chunks.write_admitted(match[1],identity,token,match[2],permit['permit'],int(index),int(offset),b''.join(parts))
+            return Response(200,{'state':'finished','receipt':receipt})
+        except Exception:
+            if permit and permit.get('state')=='active':
+                self.viewer_chunks.abandon_admission(match[1],match[2],permit.get('permit'))
+            return self._error(409,'chunk_requires_inspection')
 
     @staticmethod
     def _error(status, code):

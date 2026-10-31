@@ -18,6 +18,9 @@ class ReferenceControlAPI:
         self.worker = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers=worker_bearers,
             recovery_bindings=recovery_bindings,viewer_claims=viewer_claims,viewer_spool=viewer_spool)
 
+    def handle_chunk(self,*args,**kwargs):
+        return self.worker.handle_chunk(*args,**kwargs)
+
     def handle_archive(self,path,headers,length,chunks,*,protected_transport=False):
         return self.worker.handle_archive(path,headers,length,chunks,protected_transport=protected_transport)
 

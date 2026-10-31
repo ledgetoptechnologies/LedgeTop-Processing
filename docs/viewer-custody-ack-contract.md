@@ -296,3 +296,13 @@ A wrong process-local nonce does not consume the valid nonce. Coordinator hold
 prevents new admissions but does not wait for an already-active chunk permit;
 that admitted operation may finish after hold, and no continuous revocation or
 engine-drain guarantee is implied.
+
+A synthetic-only chunk POST route is now dispatched by the real TLS runtime
+when an additional fixture-only qualification flag is explicitly patched. It
+authenticates and persists a claim-bound permit before reading a bounded body;
+an admitted chunk may finish after hold, while later admissions are blocked.
+Partial bodies leave active permits held and discard the process-local nonce.
+Exact finished replay verifies the retained chunk before replying. The route is
+disabled by default; begin, status and finish are still direct-call only and
+there is no worker chunk sender. This is not a complete network protocol or
+Viewer custody, and no standard spool success is exposed.

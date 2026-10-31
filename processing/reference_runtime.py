@@ -30,6 +30,7 @@ MAX_CONFIG_BYTES = 64 * 1024
 STAGED_ACK_SCHEMA_QUALIFIED = False
 VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED = False
 VIEWER_RUNTIME_PROJECTION_QUALIFIED = False
+SYNTHETIC_CHUNK_TLS_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -283,6 +284,9 @@ class _DynamicAPI:
     def __init__(self, control, config, settings, discover, staged_ack=None):
         self.control, self.config, self.settings, self.discover, self.staged_ack = control, config, settings, discover, staged_ack
 
+    def handle_chunk(self,*args,**kwargs):
+        return self.control.handle_chunk(*args,**kwargs)
+
     def handle_archive(self,path,headers,length,chunks,*,protected_transport=False):
         return self.control.handle_archive(path,headers,length,chunks,protected_transport=protected_transport)
 
@@ -327,7 +331,7 @@ class _DynamicAPI:
 
 
 class ReferenceRuntime:
-    def __init__(self, queue, config, settings, *, discover=None, server_factory=None, viewer_service=None):
+    def __init__(self, queue, config, settings, *, discover=None, server_factory=None, viewer_service=None, synthetic_chunk_tls=False):
         """Construct services around the existing authority; never create a Queue."""
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
@@ -335,6 +339,8 @@ class ReferenceRuntime:
         self._projection_owner=None;self._projection_binding=None;self._closed=False
         self._lifecycle_lock=threading.RLock()
         try:
+            if type(synthetic_chunk_tls) is not bool or (synthetic_chunk_tls and (not SYNTHETIC_CHUNK_TLS_QUALIFIED or settings.viewer_archive_spool is None)):
+                raise RuntimeConfigurationError('synthetic chunk TLS is not qualified')
             projection=settings.viewer_projection_environments
             if projection is not None:
                 from .viewer_service import ViewerService
@@ -408,6 +414,9 @@ class ReferenceRuntime:
                 worker_bearers=workers, capability_fingerprint=placeholder,
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
                 recovery_bindings=recovery,viewer_claims=viewer_claims,viewer_spool=viewer_spool)
+            if synthetic_chunk_tls:
+                from .viewer_chunk_spool import SyntheticChunkSpool
+                self.control.worker.viewer_chunks=SyntheticChunkSpool(viewer_spool,synthetic_fixture=True)
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))

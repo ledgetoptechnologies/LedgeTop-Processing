@@ -169,7 +169,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             if self.headers.get_all("Transfer-Encoding"):
                 self._error(400, "transfer_encoding_not_supported")
                 return
-            for name in ("Authorization", "Content-Length", "Content-Type", "X-Claim-Token", "X-LedgeTop-Capability"):
+            for name in ("Authorization", "Content-Length", "Content-Type", "X-Claim-Token", "X-LedgeTop-Capability", "X-Chunk-Index", "X-Chunk-Offset", "X-Chunk-SHA256"):
                 if len(self.headers.get_all(name, [])) > 1:
                     self._error(400, "duplicate_header")
                     return
@@ -179,6 +179,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 return
             length = 0
             archive_request=(self.command=='POST' and re.fullmatch(r'/ltds/worker/v1/viewer-claims/[a-f0-9-]{36}/archive',self.path) is not None)
+            chunk_request=(self.command=='POST' and re.fullmatch(r'/ltds/worker/v1/viewer-claims/[a-f0-9-]{36}/chunks/[A-Za-z0-9_-]{1,128}',self.path) is not None)
             if lengths:
                 text = lengths[0]
                 if not re.fullmatch(r"[0-9]+", text):
@@ -188,9 +189,28 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                     self._error(413, "metadata_too_large")
                     return
                 length = int(text)
+            if chunk_request and not 1<=length<=256*1024:
+                self._error(413,'chunk_size_invalid');return
             if self.command != "POST" and length:
                 self._error(400, "unexpected_request_body")
                 return
+            if chunk_request:
+                self.close_connection=True
+                if not callable(getattr(api,'handle_chunk',None)):
+                    self._error(404,'not_found');return
+                if not archive_readers.acquire(blocking=False):
+                    self._error(503,'archive_capacity_unavailable');return
+                try:
+                    def chunk_body():
+                        remaining=length
+                        while remaining:
+                            data=self.rfile.read(min(65536,remaining))
+                            if not data:return
+                            remaining-=len(data);yield data
+                    try:response=api.handle_chunk(self.path,dict(self.headers.items()),length,chunk_body(),tls_transport=isinstance(self.connection,ssl.SSLSocket) and self.connection.cipher() is not None)
+                    except Exception:self._error(500,'internal_error');return
+                    self._reply(response);return
+                finally:archive_readers.release()
             if archive_request:
                 if not archive_readers.acquire(blocking=False):
                     self._error(503,'archive_capacity_unavailable');return

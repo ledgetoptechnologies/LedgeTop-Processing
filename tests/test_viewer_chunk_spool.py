@@ -1,7 +1,10 @@
 """Synthetic coordinator database integration; no transport route."""
 import unittest
 import hashlib
+import http.client
+import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from processing.viewer_archive_spool import SpoolHeld
@@ -16,6 +19,98 @@ class ChunkSpoolTests(unittest.TestCase):
         self.job=self.base.fixture.job;self.identity=self.base.identity()
         with self.base.fixture.queue._db() as db:self.token=db.execute('SELECT token FROM viewer_worker_claims WHERE job_id=?',(self.job,)).fetchone()['token']
         self.archive=self.base.base.base.archive
+    def test_assembled_runtime_tls_chunk_is_disabled_by_default(self):
+        from processing.config import Config
+        from processing.viewer_service import ViewerService
+        from processing.reference_runtime import ReferenceRuntime,ReferenceSettings,RuntimeConfigurationError
+        fixture=self.base.fixture;queue=fixture.queue
+        config=Config('legacy-'+'l'*32,'http://127.0.0.1:19001','http://127.0.0.1:19002',1000,100000,
+            prototype_state_dir=str(fixture.root/'state'),prototype_node_ids=('cluster','main'),viewer_enabled=True,
+            viewer_worker_claim_enabled=True,viewer_worker_claim_env_policy=(('cluster',('production','staging')),('main',('production','staging'))))
+        workers={'cluster':dict(bearer='a'*32,workerId='worker-a',instanceId='instance-a',resultOrigin='https://127.0.0.1:1234',resultBearer='r'*32),
+                 'main':dict(bearer='m'*32,workerId='worker-main',instanceId='instance-main',resultOrigin='https://127.0.0.1:1235',resultBearer='s'*32)}
+        settings=ReferenceSettings(dict(host='127.0.0.1',port=0,certificate=str(fixture.cert),privateKey=str(fixture.key),clientCA=str(fixture.cert)),
+            {'v'*32:'production'},workers,dict(maxConcurrent=1,maxObjectBytes=65536),viewer_archive_spool=dict(root=str(self.base.root),rootIdentity=self.base.root_identity,maxArchiveBytes=65536))
+        service=ViewerService(queue,config,store=fixture.store,engines={});self.addCleanup(service.close)
+        with self.assertRaises(RuntimeConfigurationError):ReferenceRuntime(queue,config,settings,viewer_service=service,synthetic_chunk_tls=True)
+        with patch('processing.reference_runtime.VIEWER_ARCHIVE_SPOOL_SCHEMA_QUALIFIED',True),patch('processing.reference_runtime.SYNTHETIC_CHUNK_TLS_QUALIFIED',True):
+            runtime=ReferenceRuntime(queue,config,settings,viewer_service=service,synthetic_chunk_tls=True);runtime.start()
+        self.addCleanup(runtime.close)
+        runtime.control.worker.viewer_chunks.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
+        route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
+        headers={'Authorization':'Bearer '+'a'*32,'X-Claim-Token':self.token,'X-Chunk-Index':'0','X-Chunk-Offset':'0','X-Chunk-SHA256':digest,'Content-Type':'application/octet-stream'}
+        conn=http.client.HTTPSConnection('127.0.0.1',runtime._server.server_port,context=fixture.client,timeout=3)
+        try:
+            conn.request('POST',route,data,headers);response=conn.getresponse();self.assertEqual(response.status,200);self.assertEqual(json.loads(response.read())['state'],'finished')
+        finally:conn.close()
+        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token),{'state':'held'})
+
+    def test_tls_auth_before_body_and_exact_replay(self):
+        self.base.fixture.api.viewer_chunks=self.chunk
+        self.chunk.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest()
+        route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
+        def connect():return http.client.HTTPSConnection('127.0.0.1',self.base.fixture.server.server_port,context=self.base.fixture.client,timeout=3)
+        def headers(conn,bearer):
+            conn.putrequest('POST',route);conn.putheader('Authorization','Bearer '+bearer)
+            conn.putheader('X-Claim-Token',self.token);conn.putheader('X-Chunk-Index','0');conn.putheader('X-Chunk-Offset','0')
+            conn.putheader('X-Chunk-SHA256',digest);conn.putheader('Content-Type','application/octet-stream');conn.putheader('Content-Length',str(len(data)));conn.endheaders()
+        conn=connect()
+        try:
+            headers(conn,'wrong-token');response=conn.getresponse();self.assertEqual(response.status,401);response.read()
+        finally:conn.close()
+        with self.base.fixture.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_chunk_permits').fetchone()[0],0)
+        conn=connect()
+        try:
+            headers(conn,'a'*32);conn.send(data);response=conn.getresponse();self.assertEqual(response.status,200);first=json.loads(response.read());self.assertEqual(first['state'],'finished')
+        finally:conn.close()
+        conn=connect()
+        try:
+            # Replay returns only after disk verification and before body read.
+            headers(conn,'a'*32);response=conn.getresponse();self.assertEqual(response.status,200);self.assertEqual(json.loads(response.read()),{'state':'finished'})
+        finally:conn.close()
+
+    def test_tls_partial_body_stays_active_and_replay_holds(self):
+        self.base.fixture.api.viewer_chunks=self.chunk;self.chunk.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest();route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
+        def start():
+            conn=http.client.HTTPSConnection('127.0.0.1',self.base.fixture.server.server_port,context=self.base.fixture.client,timeout=3)
+            conn.putrequest('POST',route)
+            for key,value in {'Authorization':'Bearer '+'a'*32,'X-Claim-Token':self.token,'X-Chunk-Index':'0','X-Chunk-Offset':'0','X-Chunk-SHA256':digest,'Content-Type':'application/octet-stream','Content-Length':str(len(data))}.items():conn.putheader(key,value)
+            conn.endheaders();return conn
+        conn=start();conn.send(data[:1]);conn.close()
+        deadline=time.monotonic()+5;row=None
+        while time.monotonic()<deadline:
+            with self.base.fixture.queue._db() as db:row=db.execute('SELECT state FROM viewer_worker_chunk_permits WHERE job_id=?',(self.job,)).fetchone()
+            if row:break
+            time.sleep(.05)
+        self.assertEqual(row['state'],'active')
+        restarted=SyntheticChunkSpool(self.base.spool,synthetic_fixture=True);self.base.fixture.api.viewer_chunks=restarted
+        conn=start()
+        try:response=conn.getresponse();self.assertEqual(response.status,409);response.read()
+        finally:conn.close()
+        self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
+    def test_tls_admission_then_hold_allows_only_admitted_chunk(self):
+        self.base.fixture.api.viewer_chunks=self.chunk;self.chunk.begin(self.job,self.identity,self.token)
+        data=self.archive[:8];digest=hashlib.sha256(data).hexdigest();route='/ltds/worker/v1/viewer-claims/'+self.job+'/chunks/part-0'
+        conn=http.client.HTTPSConnection('127.0.0.1',self.base.fixture.server.server_port,context=self.base.fixture.client,timeout=5)
+        try:
+            conn.putrequest('POST',route)
+            for key,value in {'Authorization':'Bearer '+'a'*32,'X-Claim-Token':self.token,'X-Chunk-Index':'0','X-Chunk-Offset':'0','X-Chunk-SHA256':digest,'Content-Type':'application/octet-stream','Content-Length':str(len(data))}.items():conn.putheader(key,value)
+            conn.endheaders()
+            deadline=time.monotonic()+5;row=None
+            while time.monotonic()<deadline:
+                with self.base.fixture.queue._db() as db:row=db.execute('SELECT state FROM viewer_worker_chunk_permits WHERE job_id=?',(self.job,)).fetchone()
+                if row:break
+                time.sleep(.05)
+            self.assertIsNotNone(row)
+            self.assertEqual(self.base.fixture.claims.mutation_hold(self.job,self.identity,self.token)['state'],'held')
+            conn.send(data);response=conn.getresponse();self.assertEqual(response.status,200);response.read()
+        finally:conn.close()
+        with self.assertRaises(SpoolHeld):self.chunk.admit_chunk(self.job,self.identity,self.token,'later',1,8,1,hashlib.sha256(b'x').hexdigest())
+
     def test_exact_coordinator_chunk_replay_and_final_receipt(self):
         self.assertEqual(self.chunk.begin(self.job,self.identity,self.token),{'state':'ready'})
         self.assertEqual(self.chunk.begin(self.job,self.identity,self.token),{'state':'ready'})
