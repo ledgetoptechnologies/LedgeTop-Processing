@@ -67,11 +67,11 @@ def _args(name, value):
 
 
 LEASE_DESTINATION = '/run/ledgetop-authority-lease'
-ADDED_KEYS = ('PROCESSING_AUTHORITY_LEASE_DIR', 'PROCESSING_VIEWER_PRODUCTION_ADMISSION')
+ADDED_KEYS = ('PROCESSING_AUTHORITY_LEASE_DIR', 'PROCESSING_VIEWER_PRODUCTION_ADMISSION', 'PROCESSING_LEGACY_FENCE_REQUIRED')
 
 
 def derive(container, old_image, new_image, *, mode, volume, name, network=None, lease_dir=None, lease_volume=None,
-           production_admission=None, accept_compose_source=False, extra_labels=()):
+           production_admission=None, accept_compose_source=False, extra_labels=(), legacy_fence_volume=None):
     if mode not in ('isolated', 'promoted'):
         raise SpecError('mode must be isolated or promoted')
     host, config = container['HostConfig'], container['Config']
@@ -110,6 +110,11 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None,
             raise SpecError('labels must be plain KEY=VALUE')
     argv = ['docker', 'create', '--name', name, *[item for label in extra_labels for item in ('--label', label)],
             '--mount', 'type=volume,source=%s,destination=%s' % (volume, mounts[0]['Destination'])]
+    if legacy_fence_volume is not None:
+        if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',legacy_fence_volume) or
+                legacy_fence_volume != mounts[0].get('Name') or legacy_fence_volume in (volume,lease_volume)):
+            raise SpecError('legacy fence must use exact original volume, distinct from candidate and lease')
+        argv += ['--mount','type=volume,source=%s,destination=/legacy-state,readonly' % legacy_fence_volume]
     for field in CARRIED:
         if not _empty(host.get(field)):
             argv += _args(field, host[field])
@@ -157,6 +162,8 @@ def derive(container, old_image, new_image, *, mode, volume, name, network=None,
         added.append('PROCESSING_AUTHORITY_LEASE_DIR=' + LEASE_DESTINATION)
     if production_admission is not None:
         added.append('PROCESSING_VIEWER_PRODUCTION_ADMISSION=' + production_admission)
+    if legacy_fence_volume is not None:
+        added.append('PROCESSING_LEGACY_FENCE_REQUIRED=1')
     keys = sorted({item.split('=', 1)[0] for item in env + added})
     return {'argv': argv, 'envKeys': keys, 'oldNetworks': networks,
             'envFile': [item for item in env if item not in image_env] + added}
@@ -173,6 +180,7 @@ def main(argv=None):
     parser.add_argument('--env-out', required=True, type=Path)
     parser.add_argument('--lease-dir', help='host directory holding the authority lease')
     parser.add_argument('--lease-volume', help='named volume holding the authority lease (same daemon only)')
+    parser.add_argument('--legacy-fence-volume', help='exact original named state volume to fence (requires offline enrollment)')
     parser.add_argument('--production-admission', choices=('open', 'held'))
     parser.add_argument('--label', action='append', default=[], help='KEY=VALUE label for the new container')
     parser.add_argument('--accept-compose-source', action='store_true',
@@ -183,7 +191,8 @@ def main(argv=None):
         spec = derive(load(args.container), load(args.old_image), load(args.new_image), mode=args.mode,
                       volume=args.volume, name=args.name, network=args.network, lease_dir=args.lease_dir, lease_volume=args.lease_volume,
                       production_admission=args.production_admission,
-                      accept_compose_source=args.accept_compose_source, extra_labels=args.label)
+                      accept_compose_source=args.accept_compose_source, extra_labels=args.label,
+                      legacy_fence_volume=args.legacy_fence_volume)
     except SpecError as error:
         print('refused: ' + str(error), file=sys.stderr)
         return 2

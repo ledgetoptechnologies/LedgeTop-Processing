@@ -3,6 +3,7 @@
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import signal
 import sys
@@ -18,6 +19,8 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if config.legacy_fence_required and not config.prototype_state_dir:
+        raise RuntimeError('legacy_fence_marker_required')
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
@@ -27,14 +30,22 @@ def make_handler(config: Config):
             raise RuntimeError('production_hold_idle_state_unavailable')
         from .prototype import _require_safe_idle_database_file
         _require_safe_idle_database_file(Path(config.prototype_state_dir) / 'jobs.sqlite3')
-    lease = None
+    legacy_fence = None
     if config.prototype_state_dir:
+        from .legacy_fence_enforcement import enforce
+        legacy_fence = enforce(config.prototype_state_dir, required=config.legacy_fence_required)
+    lease = None
+    try:
+      if config.prototype_state_dir:
         from . import authority_lease
         if config.authority_lease_dir:
             # Before any state write: a second holder of this authority refuses here.
             lease = authority_lease.acquire(config.authority_lease_dir, config.prototype_state_dir)
         elif authority_lease.required(config.prototype_state_dir):
             raise RuntimeError('authority_lease_configuration_required')
+    except BaseException:
+        if legacy_fence is not None: os.close(legacy_fence)
+        raise
     try:
         queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
                       node_ids=config.prototype_node_ids,
@@ -45,49 +56,62 @@ def make_handler(config: Config):
     except BaseException:
         if lease is not None:
             lease.close()
+        if legacy_fence is not None: os.close(legacy_fence)
         raise
+    if queue is not None and legacy_fence is not None:
+        queue.legacy_fence_fd = legacy_fence
     if config.viewer_production_held and queue is None:
         raise RuntimeError('production_hold_idle_state_unavailable')
     if lease is not None:
         try:
             authority_lease.record_required(queue, lease)
-        except Exception:
+        except BaseException:
             queue.close()
             raise
         queue.authority_lease = lease  # held, by this process, until it exits
     if queue is not None and config.admission_drain_enabled:
-        from .admission_drain import AdmissionDrain
         try:
+            from .admission_drain import AdmissionDrain
             queue.admission_drain = AdmissionDrain(queue)
-        except Exception:
+        except BaseException:
             queue.close()
             raise
     elif queue is not None:
         # Never silently bypass a previously enabled persistent barrier.
-        with queue._db() as db:
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
-        if exists:
+        try:
+            with queue._db() as db:
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
+            if exists:
+                raise RuntimeError('admission_drain_configuration_required')
+        except BaseException:
             queue.close()
-            raise RuntimeError('admission_drain_configuration_required')
+            raise
     service = facade = None
     if config.viewer_enabled:
-        from .viewer_service import ViewerService
-        from .viewer_http import ViewerFacade
-        service = ViewerService(queue, config)
-        spool = Path(config.prototype_state_dir) / 'viewer-spool'
-        spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
-                              production_held=config.viewer_production_held)
+        try:
+            from .viewer_service import ViewerService
+            from .viewer_http import ViewerFacade
+            service = ViewerService(queue, config)
+            spool = Path(config.prototype_state_dir) / 'viewer-spool'
+            spool.mkdir(mode=0o700, exist_ok=True)
+            facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
+                                  production_held=config.viewer_production_held)
+        except BaseException:
+            try:
+                if service is not None: service.close()
+            finally:
+                if queue is not None: queue.close()
+            raise
     reference_runtime = None
     if reference_settings is not None:
-        from .reference_runtime import ReferenceRuntime
         try:
+            from .reference_runtime import ReferenceRuntime
             reference_runtime = ReferenceRuntime(queue, config, reference_settings, viewer_service=service)
-        except Exception:
-            if service:
-                service.close()
-            if queue:
-                queue.close()
+        except BaseException:
+            try:
+                if service: service.close()
+            finally:
+                if queue: queue.close()
             raise
 
     class Handler(BaseHTTPRequestHandler):

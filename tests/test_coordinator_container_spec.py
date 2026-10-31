@@ -36,6 +36,17 @@ def derive(container=CONTAINER, new=NEW, **kwargs):
 
 
 class ContainerSpecTest(unittest.TestCase):
+    def test_legacy_fence_requires_original_distinct_volume_and_sets_required_flag(self):
+        result=derive(legacy_fence_volume='state')
+        self.assertIn('type=volume,source=state,destination=/legacy-state,readonly',result['argv'])
+        self.assertIn('PROCESSING_LEGACY_FENCE_REQUIRED=1',result['envFile'])
+        for options in ({'legacy_fence_volume':'other'}, {'legacy_fence_volume':'state','volume':'state'},
+                        {'legacy_fence_volume':'state','lease_volume':'state'}):
+            with self.assertRaises(spec.SpecError):derive(**options)
+        source=copy.deepcopy(CONTAINER)
+        source['Config']['Env'].append('PROCESSING_LEGACY_FENCE_REQUIRED=1')
+        with self.assertRaises(spec.SpecError):derive(source)
+        with self.assertRaises(spec.SpecError):derive(source,legacy_fence_volume='state')
     def test_isolated_has_no_ports_and_no_restart(self):
         argv = derive()['argv']
         self.assertNotIn('--publish', argv)

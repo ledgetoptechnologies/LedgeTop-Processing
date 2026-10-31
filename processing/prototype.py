@@ -174,6 +174,10 @@ class Queue(Maintenance):
             if self._database_users:
                 raise RuntimeError('coordinator transaction still active')
             self._lock.close()
+            fd = getattr(self, 'legacy_fence_fd', None)
+            if fd is not None:
+                self.legacy_fence_fd = None
+                os.close(fd)
 
     def node_profiles(self, node_id):
         return sorted(profile for profile in self.allowed_profiles

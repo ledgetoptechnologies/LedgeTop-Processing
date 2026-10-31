@@ -34,6 +34,7 @@ class Config:
     admission_drain_enabled: bool = False
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
+    legacy_fence_required: bool = False
 
 
 def _node_origin(value: str) -> str:
@@ -83,6 +84,9 @@ def from_environment() -> Config:
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    legacy_fence = os.environ.get('PROCESSING_LEGACY_FENCE_REQUIRED', '0')
+    if legacy_fence not in ('0','1') or (legacy_fence == '1' and not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
+        raise ValueError('legacy fence requires persistent state and must be 0 or 1')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
     if lease_dir and (not os.path.isabs(lease_dir) or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
         raise ValueError('PROCESSING_AUTHORITY_LEASE_DIR must be an absolute path used with persistent state')
@@ -137,5 +141,6 @@ def from_environment() -> Config:
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         admission_drain_enabled=admission == '1',
         authority_lease_dir=lease_dir,
+        legacy_fence_required=legacy_fence == '1',
         viewer_production_held=production_admission == 'held',
     )
