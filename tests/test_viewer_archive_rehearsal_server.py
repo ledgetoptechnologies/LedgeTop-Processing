@@ -23,12 +23,21 @@ def read_response(process):
 
 
 def cleanup(process):
-    if os.name=='posix':
-        try:os.killpg(process.pid,signal.SIGKILL)
-        except ProcessLookupError:pass
-    elif process.poll() is None:process.kill()
-    process.wait(timeout=5)
-    process.stdin.close();process.stdout.close()
+    try:
+        if process.poll() is None:
+            # The group leader remains unreaped until wait(), so its identity
+            # cannot be recycled between this liveness check and killpg.
+            if os.name=='posix':
+                try:os.killpg(process.pid,signal.SIGKILL)
+                except ProcessLookupError:pass
+            else:process.kill()
+            process.wait(timeout=5)
+        elif process.returncode != 0:
+            # Once the leader has been reaped, its group identity is no longer
+            # safe to signal. Child ownership is uncertain; report it.
+            raise RuntimeError('fixture exited abnormally; descendant cleanup unverified')
+    finally:
+        process.stdin.close();process.stdout.close()
 
 
 class RehearsalServerTest(unittest.TestCase):
