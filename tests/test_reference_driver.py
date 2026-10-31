@@ -659,6 +659,8 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         server = None
         server_thread = None
+        result_server = None
+        result_thread = None
         try:
             import select
             ready, _, _ = select.select([process.stdout], [], [], 10)
@@ -764,11 +766,71 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
             self.assertEqual(archive[0].read_bytes(), ARCHIVE)
             self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+
+            # A Viewer outage means no client polls or accepts. Completion and
+            # its bytes remain retained while the worker continues polling.
+            for _ in range(3):
+                self.driver.step()
+            self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+            self.assertEqual(archive[0].read_bytes(), ARCHIVE)
+            self.assertEqual(self.ledger.cleanup_candidates(), [])
+
+            # Serve real worker result API over TLS and the real coordinator
+            # ResultProxy; Viewer is an authenticated synthetic HTTPS client.
+            from contextlib import nullcontext
+            from urllib.request import Request, urlopen
+            from processing.reference_results import ReferenceResults
+            from processing.reference_result_api import ReferenceResultAPI
+            from processing.reference_result_proxy import ResultProxy
+            read_token = 'synthetic-worker-result-reader-credential'
+            result_api = ReferenceResultAPI(ReferenceResults(self.worker), bearer_readers={read_token: dict(
+                node_id='cluster', worker_id='worker', environments=['staging'], share_policy=lambda _metadata: True)})
+            result_server = create_reference_http_server(result_api, ssl_context=server_context)
+            result_thread = threading.Thread(target=result_server.serve_forever)
+            result_thread.start()
+            self.api.viewer.result_proxy = ResultProxy({'cluster': 'https://127.0.0.1:' + str(result_server.server_port)},
+                worker_bearers={'cluster': read_token}, admit_read=lambda _binding: nullcontext(), ssl_context=client_context)
+            path = '/ltds/v1/jobs/' + job['jobId']
+            def viewer_request(suffix, payload=None):
+                headers = {'Authorization': 'Bearer ' + VIEWER}
+                body = None
+                if payload is not None:
+                    headers['Content-Type'] = 'application/json'
+                    body = json.dumps(payload).encode()
+                request = Request(coordinator_origin + path + suffix, data=body, headers=headers)
+                with urlopen(request, context=client_context, timeout=5) as response:
+                    return response.read()
+            manifest = json.loads(viewer_request('/results'))
+            self.assertEqual(manifest['resultManifestSha256'], after['payload']['resultManifestSha256'])
+            self.assertEqual(len(manifest['objects']), 1)
+            obj = manifest['objects'][0]
+            received = viewer_request('/results/' + obj['id'])
+            self.assertEqual(received, ARCHIVE)
+            self.assertEqual(hashlib.sha256(received).hexdigest(), obj['sha256'])
+            receipt = dict(schemaVersion=1, receiptId='synthetic-viewer-receipt',
+                storageReceiptId='synthetic-viewer-storage', jobId=job['jobId'], generation=1,
+                environment='staging', inputManifestSha256=job['manifestSha256'],
+                pipelineDigest=job['pipelineDigest'], resultManifestSha256=manifest['resultManifestSha256'],
+                acceptedObjectIds=[obj['id']], acceptedAt='2026-10-27T22:00:00Z',
+                validationVersion='ltds-reference-v1')
+            first = json.loads(viewer_request('/acceptance', receipt))
+            self.assertTrue(first['created']); self.assertTrue(first['fullyAccepted'])
+            # A client that lost its response can submit the same receipt again.
+            replay = json.loads(viewer_request('/acceptance', receipt))
+            self.assertFalse(replay['created']); self.assertTrue(replay['fullyAccepted'])
+            self.driver.step()
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], 'completed')
+            # Acceptance is recorded, but this test never enables cleanup.
+            self.assertEqual(archive[0].read_bytes(), ARCHIVE)
+            self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
             with sqlite3.connect(fixture_db) as db:
                 counts = dict(db.execute('SELECT action,COUNT(*) FROM calls GROUP BY action'))
             self.assertEqual(counts.get('initialize'), 1)
             self.assertEqual(counts.get('commit'), 1)
         finally:
+            if result_server is not None:
+                result_server.shutdown(); result_thread.join(timeout=5); result_server.server_close()
             if server is not None:
                 server.shutdown(); server_thread.join(timeout=5); server.server_close()
             process.terminate()
