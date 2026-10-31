@@ -3,9 +3,40 @@ import os
 import json
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
 import uuid
+
+
+def save_recovery_metadata(ident, volumes, containers, reason):
+    """Retain names/owner and best-effort immutable IDs when outcome is unclear."""
+    observations = {}
+    for name in containers:
+        try:
+            result = subprocess.run(['docker', 'inspect', '--format',
+                                     '{{.Id}} {{index .Config.Labels "ledgetop.codex.owner"}} {{.State.Status}}', name],
+                                    text=True, capture_output=True, timeout=2)
+            observations[name] = result.stdout.strip() if result.returncode == 0 else 'not observed; may appear later'
+        except (OSError, subprocess.TimeoutExpired):
+            observations[name] = 'daemon unavailable; outcome unknown'
+    for name in volumes:
+        try:
+            result = subprocess.run(['docker', 'volume', 'inspect', '--format',
+                                     '{{.Name}} {{index .Labels "ledgetop.codex.owner"}}', name],
+                                    text=True, capture_output=True, timeout=2)
+            observations[name] = result.stdout.strip() if result.returncode == 0 else 'not observed; may appear later'
+        except (OSError, subprocess.TimeoutExpired):
+            observations[name] = 'daemon unavailable; outcome unknown'
+    document = {'owner_label': ident, 'candidate_volumes': volumes, 'candidate_containers': containers,
+                'observations': observations, 'reason': reason,
+                'instruction': 'Retain; inspect exact names, labels and immutable IDs after Docker settles.'}
+    fd, path = tempfile.mkstemp(prefix='codex-viewer-docker-recovery-', suffix='.json')
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump(document, stream); stream.flush(); os.fsync(stream.fileno())
+    print('Docker cleanup uncertain; recovery metadata retained at ' + path, file=sys.stderr)
+    return path
 
 
 @unittest.skipUnless(os.environ.get('LEDGETOP_DOCKER_MOUNT_E2E') == '1', 'requires local Docker')
@@ -17,10 +48,18 @@ class MountRestoreE2E(unittest.TestCase):
         repo = Path(__file__).resolve().parents[1]
         owned_volumes = []
         container_names = []
+        uncertain = False
 
         def docker(*args, code=None):
-            return subprocess.run(['docker', *args], input=code, text=True, check=True,
-                                  capture_output=True, timeout=60)
+            nonlocal uncertain
+            try:
+                return subprocess.run(['docker', *args], input=code, text=True, check=True,
+                                      capture_output=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                # Any failed mutating client may have reached the daemon.
+                if args[0] in ('run', 'rm') or args[:2] in (('volume', 'create'), ('volume', 'rm')):
+                    uncertain = True
+                raise
 
         def run(*mounts, code):
             name = ident + '-run-' + str(len(container_names))
@@ -31,14 +70,17 @@ class MountRestoreE2E(unittest.TestCase):
                           '-w', '/work', 'python:3.12-slim', 'python', '-B', '-', code=code)
 
         def volume_create(name, *options):
+            nonlocal uncertain
             existing = docker('volume', 'ls', '--format', '{{.Name}}').stdout.splitlines()
             if name in existing:
                 raise RuntimeError('refusing existing volume')
             docker('volume', 'create', '--label', 'ledgetop.codex.owner=' + ident, *options, name)
+            uncertain = True
             details = json.loads(docker('volume', 'inspect', name).stdout)[0]
             if details.get('Labels', {}).get('ledgetop.codex.owner') != ident:
                 raise RuntimeError('volume identity mismatch')
             owned_volumes.append(name)
+            uncertain = False
 
         scratch = f'type=volume,src={scratch_volume},dst=/scratch'
         try:
@@ -89,26 +131,44 @@ d=sqlite3.connect(destination/'jobs.sqlite3'); assert d.execute('SELECT * FROM v
             # A timed-out Docker client can leave its container behind. Only
             # reconcile exact names whose labels prove ownership, and retain
             # every volume if any container's identity or removal is unclear.
-            for name in container_names:
-                names = docker('ps', '-a', '--format', '{{.Names}}').stdout.splitlines()
-                if name in names:
-                    details = json.loads(docker('inspect', name).stdout)[0]
-                    if details.get('Config', {}).get('Labels', {}).get('ledgetop.codex.owner') != ident:
-                        raise RuntimeError('container identity mismatch; retaining volumes')
-                    docker('rm', '-f', details['Id'])
-                names = docker('ps', '-a', '--format', '{{.Names}}').stdout.splitlines()
-                if name in names:
-                    raise RuntimeError('container removal unverified; retaining volumes')
-            for name in reversed(owned_volumes):
-                details = json.loads(docker('volume', 'inspect', name).stdout)[0]
-                if details.get('Labels', {}).get('ledgetop.codex.owner') != ident:
-                    raise RuntimeError('volume identity changed; retaining volume')
-                docker('volume', 'rm', name)
-                if name in docker('volume', 'ls', '--format', '{{.Name}}').stdout.splitlines():
-                    raise RuntimeError('volume removal unverified')
+            if uncertain:
+                save_recovery_metadata(ident, [volume, scratch_volume], container_names, 'mutating request outcome uncertain')
+            else:
+                try:
+                    for name in container_names:
+                        names = docker('ps', '-a', '--format', '{{.Names}}').stdout.splitlines()
+                        if name in names:
+                            details = json.loads(docker('inspect', name).stdout)[0]
+                            if details.get('Config', {}).get('Labels', {}).get('ledgetop.codex.owner') != ident:
+                                raise RuntimeError('container identity mismatch; retaining volumes')
+                            docker('rm', '-f', details['Id'])
+                        names = docker('ps', '-a', '--format', '{{.Names}}').stdout.splitlines()
+                        if name in names:
+                            raise RuntimeError('container removal unverified; retaining volumes')
+                    for name in reversed(owned_volumes):
+                        details = json.loads(docker('volume', 'inspect', name).stdout)[0]
+                        if details.get('Labels', {}).get('ledgetop.codex.owner') != ident:
+                            raise RuntimeError('volume identity changed; retaining volume')
+                        docker('volume', 'rm', name)
+                        if name in docker('volume', 'ls', '--format', '{{.Name}}').stdout.splitlines():
+                            raise RuntimeError('volume removal unverified')
+                except BaseException:
+                    save_recovery_metadata(ident, [volume, scratch_volume], container_names, 'cleanup outcome uncertain')
+                    raise
 
 
 class OwnershipTest(unittest.TestCase):
+    def test_recovery_metadata_survives_daemon_unavailable(self):
+        real_mkstemp = tempfile.mkstemp
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(subprocess, 'run', side_effect=OSError('offline')), \
+             mock.patch.object(tempfile, 'mkstemp', side_effect=lambda **kw: real_mkstemp(dir=directory, **kw)):
+            path = save_recovery_metadata('owner', ['vol'], ['container'], 'timeout')
+            data = json.loads(Path(path).read_text())
+            self.assertEqual(data['owner_label'], 'owner')
+            self.assertEqual(data['observations']['container'], 'daemon unavailable; outcome unknown')
+            self.assertEqual(data['observations']['vol'], 'daemon unavailable; outcome unknown')
+
     def test_existing_volume_is_never_adopted_or_removed(self):
         token = '1234567890abcdef1234567890abcdef'
         existing = 'codex-viewer-e2e-' + token + '-backup'
@@ -121,7 +181,7 @@ class OwnershipTest(unittest.TestCase):
         self.assertEqual(command.call_count, 1)
         self.assertEqual(command.call_args.args[0][1:3], ['volume', 'ls'])
 
-    def test_timed_out_owned_container_is_removed_before_volumes(self):
+    def test_timed_out_container_retains_resources_even_if_not_yet_visible(self):
         token = 'fedcba0987654321fedcba0987654321'
         ident = 'codex-viewer-e2e-' + token
         running = True
@@ -142,14 +202,29 @@ class OwnershipTest(unittest.TestCase):
             elif args[:2] == ['run', '-d']:
                 raise subprocess.TimeoutExpired(argv, 60)
             return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
-        with mock.patch.object(uuid, 'uuid4') as new_id, mock.patch.object(subprocess, 'run', side_effect=fake):
+        with mock.patch.object(uuid, 'uuid4') as new_id, mock.patch.object(subprocess, 'run', side_effect=fake), \
+             mock.patch(__name__ + '.save_recovery_metadata') as record:
             new_id.return_value.hex = token
             with self.assertRaises(subprocess.TimeoutExpired):
                 MountRestoreE2E('test_backup_remount_restore').test_backup_remount_restore()
-        container_rm = next(i for i, action in enumerate(actions) if action[:2] == ['rm', '-f'])
-        volume_rm = [i for i, action in enumerate(actions) if action[:2] == ['volume', 'rm']]
-        self.assertEqual(len(volume_rm), 2)
-        self.assertTrue(all(container_rm < index for index in volume_rm))
+        self.assertFalse(any(action[:2] in (['rm', '-f'], ['volume', 'rm']) for action in actions))
+        self.assertEqual(record.call_args.args[2], [ident + '-keeper'])
+
+    def test_volume_create_lost_response_is_retained(self):
+        token = 'aabbccddeeff00112233445566778899'
+        actions = []
+        def fake(argv, **kwargs):
+            args = argv[1:]; actions.append(args)
+            if args[:2] == ['volume', 'create']:
+                raise subprocess.TimeoutExpired(argv, 60)
+            return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+        with mock.patch.object(uuid, 'uuid4') as new_id, mock.patch.object(subprocess, 'run', side_effect=fake), \
+             mock.patch(__name__ + '.save_recovery_metadata') as record:
+            new_id.return_value.hex = token
+            with self.assertRaises(subprocess.TimeoutExpired):
+                MountRestoreE2E('test_backup_remount_restore').test_backup_remount_restore()
+        self.assertFalse(any(action[:2] == ['volume', 'rm'] for action in actions))
+        self.assertIn('codex-viewer-e2e-' + token + '-backup', record.call_args.args[1])
 
 
 if __name__ == '__main__':
