@@ -44,10 +44,11 @@ class BackupTest(unittest.TestCase):
     def run_backup(self, **kwargs):
         # Real readonly bind mount is covered separately; this mocks only the
         # mount flag so file/SQLite/lock behavior can be exercised in CI.
-        with mock.patch.object(backup.os, 'statvfs') as mounted:
+        with mock.patch.object(backup.os, 'statvfs') as mounted, \
+             mock.patch.object(backup, '_require_isolated_mounts'):
             mounted.return_value.f_flag = os.ST_RDONLY
             return backup.backup(self.source, self.destination, self.leases, AUTHORITY, KEY,
-                                 stopped_writers_confirmed=True, **kwargs)
+                                 stopped_writers_confirmed=True, independent_destination_confirmed=True, **kwargs)
 
     def test_nonempty_snapshot_preserves_bytes_and_rows(self):
         result = self.run_backup()
@@ -64,10 +65,12 @@ class BackupTest(unittest.TestCase):
     def test_requires_confirmation_and_readonly_mount(self):
         with self.assertRaisesRegex(backup.BackupRefused, 'explicit_writer'):
             backup.backup(self.source, self.destination, self.leases, AUTHORITY, KEY)
+        with self.assertRaisesRegex(backup.BackupRefused, 'independent_destination'):
+            backup.backup(self.source, self.destination, self.leases, AUTHORITY, KEY, stopped_writers_confirmed=True)
         with mock.patch.object(backup.os, 'statvfs') as mount:
             mount.return_value.f_flag = 0
             with self.assertRaisesRegex(backup.BackupRefused, 'not_readonly'):
-                backup.backup(self.source, self.destination, self.leases, AUTHORITY, KEY, stopped_writers_confirmed=True)
+                backup.backup(self.source, self.destination, self.leases, AUTHORITY, KEY, stopped_writers_confirmed=True, independent_destination_confirmed=True)
         self.assertFalse(self.destination.exists())
 
     def test_refuses_active_and_sidecar(self):
@@ -126,6 +129,21 @@ class BackupTest(unittest.TestCase):
                 self.run_backup()
         self.assertTrue(changed)
         self.assertEqual((self.source / 'viewer-tasks/synthetic-task/photo.bin').read_bytes(), b'changed')
+
+
+class RealMountTopologyTest(unittest.TestCase):
+    """Opt-in: mount disposable fixtures as documented in the test runner."""
+    def test_real_nested_mount(self):
+        if os.environ.get('LEDGETOP_MOUNT_CASE') != 'nested':
+            self.skipTest('requires disposable nested Docker mounts')
+        with self.assertRaisesRegex(backup.BackupRefused, 'nested_source_mount'):
+            backup._require_isolated_mounts(Path('/source'), Path('/destination'))
+
+    def test_real_writable_alias(self):
+        if os.environ.get('LEDGETOP_MOUNT_CASE') != 'alias':
+            self.skipTest('requires disposable aliased Docker mounts')
+        with self.assertRaisesRegex(backup.BackupRefused, 'destination_not_separate_filesystem'):
+            backup._require_isolated_mounts(Path('/source'), Path('/alias'))
 
 
 if __name__ == '__main__':

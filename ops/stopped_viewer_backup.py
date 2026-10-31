@@ -1,6 +1,7 @@
 """Copy and verify a stopped coordinator volume; never starts an update.
 
-The operator must stop every writer, including legacy coordinators and workers.
+The operator must stop every writer, including legacy coordinators and workers,
+and provision a destination independent of the source and all its aliases.
 Both existing cooperative locks are held throughout; they cannot fence writers
 that ignore them. The source mount must be read-only and have no SQLite
 sidecars. Failure preserves the incomplete destination for inspection.
@@ -19,6 +20,35 @@ from ops import state_census
 
 class BackupRefused(RuntimeError):
     pass
+
+
+def _mount_path(value):
+    # mountinfo escapes whitespace and backslashes as octal byte sequences.
+    return re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), value)
+
+
+def _require_isolated_mounts(source, destination_parent):
+    """Refuse ambiguous topology; a different device is a conservative gate.
+
+    Neither mount inspection nor device identity fences writes via another
+    namespace or device mapping. Stopping all writers remains a prerequisite.
+    """
+    if source.stat().st_dev == destination_parent.stat().st_dev:
+        raise BackupRefused('destination_not_separate_filesystem')
+    try:
+        with open('/proc/self/mountinfo', encoding='utf-8') as stream:
+            mountpoints = []
+            for line in stream:
+                fields = line.split()
+                if len(fields) < 10 or '-' not in fields:
+                    raise BackupRefused('mountinfo_invalid')
+                mountpoints.append(Path(_mount_path(fields[4])))
+    except OSError as error:
+        raise BackupRefused('mountinfo_unavailable') from error
+    if source not in mountpoints:
+        raise BackupRefused('source_must_be_mount_root')
+    if any(source in mount.parents for mount in mountpoints):
+        raise BackupRefused('nested_source_mount_refused')
 
 
 def _canonical_dir(value):
@@ -93,7 +123,8 @@ def _require_known_quiescent_state(source):
         db.close()
 
 
-def backup(source, destination, lease_directory, authority_id, key, *, stopped_writers_confirmed=False):
+def backup(source, destination, lease_directory, authority_id, key, *, stopped_writers_confirmed=False,
+           independent_destination_confirmed=False):
     """Create a new owned destination and compare source/copy/source censuses.
 
     Returns keyed census documents. Never prints task names, rows or tokens.
@@ -103,6 +134,8 @@ def backup(source, destination, lease_directory, authority_id, key, *, stopped_w
         raise BackupRefused('linux_required')
     if not stopped_writers_confirmed:
         raise BackupRefused('explicit_writer_stop_confirmation_required')
+    if not independent_destination_confirmed:
+        raise BackupRefused('independent_destination_confirmation_required')
     if not isinstance(key, bytes) or len(key) != 32 or not isinstance(authority_id, str) or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', authority_id):
         raise BackupRefused('invalid_identity')
     source = _canonical_dir(source)
@@ -117,6 +150,7 @@ def backup(source, destination, lease_directory, authority_id, key, *, stopped_w
         raise BackupRefused('destination_parent_not_private')
     if not os.statvfs(source).f_flag & os.ST_RDONLY:
         raise BackupRefused('source_mount_not_readonly')
+    _require_isolated_mounts(source, destination.parent)
     # Open existing files only; don't create/truncate the authority lease.
     authority_fd = _lock(leases / (authority_id + '.lease'))
     queue_fd = None
@@ -191,11 +225,14 @@ def main(argv=None):
     parser.add_argument('--authority-id', required=True)
     parser.add_argument('--stopped-writers-confirmed', action='store_true', required=True,
                         help='Operator has stopped and excluded all writers, including legacy instances')
+    parser.add_argument('--independent-destination-confirmed', action='store_true', required=True,
+                        help='Operator provisioned an independent destination, not an alias of source')
     args = parser.parse_args(argv)
     try:
         key = bytes.fromhex(sys.stdin.readline().strip())
         backup(args.source, args.destination, args.lease_directory, args.authority_id, key,
-               stopped_writers_confirmed=args.stopped_writers_confirmed)
+               stopped_writers_confirmed=args.stopped_writers_confirmed,
+               independent_destination_confirmed=args.independent_destination_confirmed)
         print(json.dumps({'status': 'verified', 'scope': 'stopped read-only source; writer exclusion required'}))
         return 0
     except (OSError, ValueError, sqlite3.Error, BackupRefused) as error:
