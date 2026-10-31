@@ -2,7 +2,7 @@
 // Build-time exact-source patcher. Never accept other upstream file versions.
 const fs=require('fs'); const crypto=require('crypto');
 const sourcePath='/var/www/libs/TaskManager.js';
-const originals={'89ff48a399f87fdcec78ad49fa48fc8f7dd233c5421645bd816e9e0510916bbd':'9e427fe4c56852cc585161fee67e00ea8565148c6a8b6c1c827d8b2a5835f470','9f43fff4882e7fba113c69f73328daa927ebb7e5716414eea5d9225b15d50efb':'e84e7eda6c8e9ff380d73daf8cd6b6b44ef1c6d6d17448fd3f8992667a0046d3'};
+const originals={'89ff48a399f87fdcec78ad49fa48fc8f7dd233c5421645bd816e9e0510916bbd':'da380f38690cfe40625aff19fa76dedba18c5b692833f07d6bcb94e34c4c9d45','9f43fff4882e7fba113c69f73328daa927ebb7e5716414eea5d9225b15d50efb':'892aae3d9d7b7fab3de2d0666e2ba72442283a4ff770ebf2eaaa4aa50a32815a'};
 const digest=x=>crypto.createHash('sha256').update(x).digest('hex');
 const before=digest(fs.readFileSync(sourcePath)); if (!originals[before]) throw Error('unsupported TaskManager source');
 let src = fs.readFileSync(sourcePath,'utf8');
@@ -67,6 +67,8 @@ replaceOnce('if (done !== undefined) done();\n                    return;\n     
     "if (done !== undefined) done(new Error('task index invalid'));\n                    return;\n                }\n\n                async.each(tasks,");
 replaceOnce('fs.readFile(TASKS_DUMP_FILE, (err, data) => {',
     'process.nextTick(() => { const err = null, data = this._guardIndexRaw;');
+replaceOnce('                async.each(tasks, (taskJson, done) => {',
+    '                async.eachSeries(tasks, (taskJson, done) => {');
 replaceOnce("logger.info(`Initialized ${tasks.length} tasks`);\n                    if (done !== undefined) done();",
     "if (err) return done(err);\n                    logger.info(`Initialized ${tasks.length} tasks`);\n                    if (done !== undefined) done();");
 replaceOnce(`                    this.removeOldTasks();

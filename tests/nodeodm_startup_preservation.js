@@ -6,12 +6,12 @@ const sourcePath = '/var/www/libs/TaskManager.js';
 const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const other = '11111111-2222-3333-4444-555555555555';
 const scenario = process.env.GUARD_SCENARIO;
-const allowed = ['fresh','missing','malformed','wrongshape','duplicate','incomplete','pathid','uppercase','deserialize','validold','oldplusorphan','running','queued','queuedstarted','statusmissing','swapindex','swapdir'];
+const allowed = ['fresh','missing','malformed','wrongshape','duplicate','incomplete','pathid','uppercase','deserialize','validold','oldplusorphan','running','queued','queuedstarted','statusmissing','swapindex','swapdir','optionsseries','asyncfailure'];
 if (!allowed.includes(scenario)) throw Error('bad scenario');
 process.argv = ['node','index.js','--cleanup_tasks_after','0','--cleanup_uploads_after','0'];
 const mkdirTask = (uuid) => {
   fs.mkdirSync(root+'/'+uuid); fs.writeFileSync(root+'/'+uuid+'/sentinel','synthetic');
-  fs.mkdirSync(root+'/'+uuid+'/images'); fs.mkdirSync(root+'/'+uuid+'/gcp');
+  fs.mkdirSync(root+'/'+uuid+'/images'); if (!(scenario==='asyncfailure' && uuid===id)) fs.mkdirSync(root+'/'+uuid+'/gcp');
 };
 const task = (uuid) => ({uuid, name:'synthetic', options:[], outputs:[], skipPostProcessing:true,
     dateCreated:1, processingTime:1, status:{code:40}, initialized:true});
@@ -28,24 +28,34 @@ if (scenario === 'queued') fs.writeFileSync(root+'/tasks.json',JSON.stringify([{
 if (scenario === 'queuedstarted') fs.writeFileSync(root+'/tasks.json',JSON.stringify([{...task(id),status:{code:10},dateStarted:123}]));
 if (scenario === 'statusmissing') {const t=task(id);delete t.status;fs.writeFileSync(root+'/tasks.json',JSON.stringify([t]));}
 if (scenario === 'oldplusorphan') mkdirTask(other);
+if (['optionsseries','asyncfailure'].includes(scenario)) {
+  mkdirTask(other);
+  fs.writeFileSync(root+'/tasks.json',JSON.stringify([{...task(id),skipPostProcessing:false},{...task(other),skipPostProcessing:false}]));
+}
 require.cache[require.resolve('/var/www/libs/logger.js')] = {exports:{debug(){},warn(){},info(){},error(){}}};
 const schedules=[];
 require.cache[require.resolve('/var/www/node_modules/node-schedule')] = {exports:{scheduleJob(_when, fn){schedules.push(fn);}}};
+let optionCalls=0, optionPending=0, maxOptionPending=0;
+if (['optionsseries','asyncfailure'].includes(scenario)) {
+  const odmInfo=require('/var/www/libs/odmInfo.js');
+  odmInfo.supportsOption=(_option, cb)=>{optionCalls++;optionPending++;maxOptionPending=Math.max(maxOptionPending,optionPending);setTimeout(()=>{optionPending--;cb(null,false);},10);};
+}
 const Task = require('/var/www/libs/Task.js');
-let attempts = 0;
+let attempts = 0, restoring=0, maxRestoring=0;
 const original = Task.CreateFromSerialized;
 Task.CreateFromSerialized = (value, done) => {
   attempts++;
   if (scenario === 'deserialize') return process.nextTick(() => done(new Error('synthetic restore failure')));
   if (scenario === 'swapindex') fs.writeFileSync(root+'/tasks.json','[]');
   if (scenario === 'swapdir') mkdirTask(other);
-  return original.call(Task,value,done);
+  restoring++;maxRestoring=Math.max(maxRestoring,restoring);
+  return original.call(Task,value,(err,result)=>{restoring--;done(err,result);});
 };
 const m=require(sourcePath);
 m.initialize(err=>{
-  const shouldFail=!['fresh','validold'].includes(scenario);
+  const shouldFail=!['fresh','validold','optionsseries'].includes(scenario);
   const retained=scenario==='fresh'||fs.existsSync(root+'/'+id+'/sentinel');
-  const retainedOther=scenario!=='oldplusorphan'||fs.existsSync(root+'/'+other+'/sentinel');
+  const retainedOther=!['oldplusorphan','optionsseries','asyncfailure'].includes(scenario)||fs.existsSync(root+'/'+other+'/sentinel');
   const noRestoreOnPreflight=!['missing','malformed','wrongshape','duplicate','incomplete','pathid','uppercase','oldplusorphan','running','queued','queuedstarted','statusmissing'].includes(scenario)||attempts===0;
   let scheduledSafe=true;
   if (scenario==='validold' && !err) {
@@ -55,7 +65,8 @@ m.initialize(err=>{
     try { if (schedules.length!==1) throw Error('missing schedule'); schedules[0](); }
     catch (_) { scheduledSafe=false; }
   }
-  const pass=(!!err===shouldFail)&&retained&&retainedOther&&noRestoreOnPreflight&&scheduledSafe&&(scenario!=='validold'||attempts===1);
-  console.log(JSON.stringify({scenario,failed:!!err,retained,retainedOther,attempts,scheduledSafe,pass})); process.exit(pass?0:1);
+  const seriesSafe=scenario==='optionsseries' ? (attempts===2 && optionCalls===6 && maxRestoring===1 && maxOptionPending===1 && restoring===0 && optionPending===0) : scenario==='asyncfailure' ? (attempts===1 && optionCalls===3 && maxRestoring===1 && maxOptionPending===1 && restoring===0 && optionPending===0) : true;
+  const pass=(!!err===shouldFail)&&retained&&retainedOther&&noRestoreOnPreflight&&scheduledSafe&&seriesSafe&&(scenario!=='validold'||attempts===1);
+  console.log(JSON.stringify({scenario,failed:!!err,retained,retainedOther,attempts,scheduledSafe,optionCalls,maxRestoring,maxOptionPending,seriesSafe,pass})); process.exit(pass?0:1);
 });
 setTimeout(()=>{console.error('timeout');process.exit(3)},12000);
