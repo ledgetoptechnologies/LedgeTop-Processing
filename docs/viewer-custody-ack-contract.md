@@ -167,3 +167,12 @@ starts cannot create untracked listeners and close cannot miss a starting
 listener or leave its projection bound. Thread creation or `thread.start()`
 does not prove that a listener remains alive or healthy afterward; independent
 health monitoring and recovery remain necessary.
+
+A later isolated rehearsal uses an on-disk synthetic SQLite database with the
+actual Viewer migration 46 and 47 SQL, and the actual staged sender. A separate
+sender process is killed after the coordinator response arrives but before the
+Viewer records it; after the recorded lease expires, a new process looks up
+the exact assertion and marks it accepted. The fixture directly inserts its
+synthetic outbox rows and does not exercise Viewer ingest or its real outbox
+writer. The database resides on container tmpfs, so the test verifies process
+restart, not host power loss, Viewer custody, or real storage durability.

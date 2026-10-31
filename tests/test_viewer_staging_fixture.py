@@ -25,6 +25,7 @@ CAP=base64.urlsafe_b64encode(b'b'*32).decode().rstrip('=')
 VIEWER_CLIENTS={
     'apps/viewer/server/stagedCommitmentClient.js':'38e1a5c47b8d7ed7aa87472578be6438e13784e4be39ae65ffdff1ac27e7dedb',
     'apps/viewer/server/stagedAckDelivery.js':'91a2287902c867a47fd7efba2f300bb1167b892130fdea22ad2aa359cff732b3',
+    'apps/viewer/server/database.js':'e654cd76e427085f54f274a6e64350be695543edb5e4137442c8f01f0b1f9a8e',
 }
 
 def verify_viewer_clients(root):
@@ -135,11 +136,12 @@ class StagingFixtureTests(unittest.TestCase):
         viewer_source=os.environ.get('VIEWER_SOURCE')
         if viewer_source:
             verify_viewer_clients(viewer_source)
-            env=dict(os.environ,NODE_EXTRA_CA_CERTS=str(fixture.fixture.cert),NODE_NO_WARNINGS='1',
+            env=dict(os.environ,NODE_EXTRA_CA_CERTS=str(fixture.fixture.cert),NODE_NO_WARNINGS='1',SYNTHETIC_DB_PATH=str(fixture.fixture.root/'synthetic-viewer-outbox.sqlite3'),
                 SYNTHETIC_BRIDGE_CONFIG=json.dumps(dict(origin='https://127.0.0.1:'+str(runtime._server.server_port),
                     authority=fixture.fixture.queue.authority_id,bearer=bearer,capability=CAP,task=TASK)))
             result=subprocess.run(['node',str(__import__('pathlib').Path(__file__).with_name('viewer_staged_clients_synthetic.cjs'))],
-                                  env=env,capture_output=True,text=True,timeout=30,check=True)
+                                  env=env,capture_output=True,text=True,timeout=30,check=False)
+            self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(json.loads(result.stdout)['replay'],'lookup')
             with fixture.fixture.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0],1)
         else:
