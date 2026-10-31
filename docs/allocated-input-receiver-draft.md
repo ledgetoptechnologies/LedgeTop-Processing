@@ -5,11 +5,21 @@ bootstrap can explicitly select `inputCopyAccounting` schema 5 with the
 `indexed-worker-fetch-three-retained-v1` journal and closed
 `allocatedReceiver: {schemaVersion: 1}` marker. The bootstrap binds that choice
 to its private receipts and latches the receiver only before any reservation.
+Schema 5 is a local proposal and has not been coordinated or reserved across
+other worker profiles or branches.
 Existing state is not migrated. Normal startup validates the completed marker;
 it does not create or latch it. An external host-owned fence must establish that no
 old or competing worker can write the scratch filesystem. The marker makes
 older ledger implementations reject subsequent transactions; it does not stop
 an older process that is already writing outside a transaction.
+
+The existing indexed maintenance census expects a completion receipt with
+`schemaVersion: 2`; this profile writes a schema-3 completion receipt and an
+additional ledger marker. The current maintenance census will refuse it. This
+is a separate, intentional deployment blocker: do not relax the census or use
+this profile in maintenance until its exact schema and lifecycle are reviewed
+and supported. The factory test runs with `cleanupEnabled` and
+`engineCleanupEnabled` both false; it does not qualify either cleanup path.
 
 The indexed path first records its existing attempt, then the scratch ledger
 atomically binds the attempt and input identity and changes the reservation to
@@ -40,4 +50,6 @@ identity, actual indexed-driver and synthetic HTTPS paths, interruption and
 process death with retention. A broader indexed suite had one failure in its
 existing 10,000-object legacy-publisher test at object 1,206, reported as
 `indexed_transfer_unavailable`; its underlying cause was not exposed by the
-publisher and remains unknown. That test was not rerun.
+publisher and remains unknown. One later broader run passed the 10,000-object
+legacy-publisher test, but the allocated receiver was disabled for that case.
+Neither result qualifies 10,000-object allocated transfer or a 50 GB job.
