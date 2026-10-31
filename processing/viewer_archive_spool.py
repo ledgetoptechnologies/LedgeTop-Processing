@@ -18,6 +18,35 @@ from .viewer_worker_claim import ViewerWorkerClaims
 class SpoolHeld(RuntimeError):pass
 
 
+class _ViewerReader:
+    def __init__(self,spool,slot,task,receipt):
+        self.spool,self.slot,self.task,self.receipt=spool,slot,task,receipt
+        self.ledgetop_archive_sha256=receipt['archiveSha256'];self.length=receipt['archiveBytes']
+        self.position=0;self.digest=hashlib.sha256();self.closed=False
+
+    def read(self,size):
+        try:return self._read(size)
+        except Exception:raise OSError('viewer archive requires inspection') from None
+
+    def _read(self,size):
+        if self.closed or type(size) is not int or not 1<=size<=1024*1024:raise SpoolHeld('viewer_reader_invalid')
+        self.spool._viewer_snapshot(self.task);self.slot._check()
+        if self.position==self.length:return b''
+        data=os.pread(self.slot._fd,min(size,self.length-self.position),self.position)
+        if not data:raise SpoolHeld('viewer_archive_truncated')
+        self.position+=len(data);self.digest.update(data);self.slot._check();self.spool._viewer_snapshot(self.task)
+        if self.position==self.length:
+            if self.digest.hexdigest()!=self.ledgetop_archive_sha256 or self.spool._digest(self.slot,self.length)!=self.ledgetop_archive_sha256:
+                raise SpoolHeld('viewer_archive_changed')
+        return data
+
+    def close(self):
+        if not self.closed:
+            self.closed=True
+            try:self.slot.close()
+            finally:self.spool._work.release()
+
+
 class ViewerArchiveSpool:
     def __init__(self,claims,*,root,root_identity,max_archive_bytes,enabled=False):
         if type(claims) is not ViewerWorkerClaims or enabled is not True:raise SpoolHeld('spool_disabled')
@@ -60,6 +89,44 @@ class ViewerArchiveSpool:
             if not data:raise SpoolHeld('spool_truncated')
             digest.update(data);offset+=len(data)
         slot._check();return digest.hexdigest()
+
+    def _viewer_snapshot(self,task):
+        """Revalidate the task incarnation against claim, metadata and spool."""
+        with self.claims.queue._db() as db:
+            db.execute('BEGIN');self.claims._schema(db)
+            current=db.execute('SELECT * FROM viewer_tasks WHERE uuid=? AND removed=0',(task['uuid'],)).fetchone()
+            if not current or any(current[key]!=task[key] for key in ('uuid','generation','environment','job_id','node_id','engine_uuid','claim_token','stage','phase')):
+                raise SpoolHeld('viewer_task_changed')
+            claim=db.execute('SELECT * FROM viewer_worker_claims WHERE job_id=?',(task['job_id'],)).fetchone()
+            if not claim:raise SpoolHeld('viewer_claim_unavailable')
+            identity=dict(node_id=claim['node_id'],worker_id=claim['worker_id'],worker_instance_id=claim['instance_id'])
+            metadata=self._metadata(db,task['job_id'],identity,claim['token'])
+            if (metadata['viewerTaskId']!=task['uuid'] or metadata['viewerGeneration']!=task['generation']
+                    or metadata['environment']!=task['environment'] or metadata['engineTaskId']!=task['engine_uuid']):
+                raise SpoolHeld('viewer_metadata_changed')
+            metadata_sha=p.digest(metadata);slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=task['job_id'],metadataSha256=metadata_sha))
+            row=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(task['job_id'],)).fetchone()
+            receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=task['job_id'],metadataSha256=metadata_sha,
+                         archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=slot_key)
+            if (not row or row['state']!='sealed' or row['slot_key']!=slot_key or row['metadata_sha']!=metadata_sha
+                    or row['receipt']!=p.canonical_json(receipt).decode() or not isinstance(row['slot_identity'],str)):
+                raise SpoolHeld('viewer_spool_unavailable')
+            return receipt,row['slot_identity']
+
+    def open_for_viewer(self,task):
+        """Return a locked verified stream, never Viewer custody or completion."""
+        if not self._work.acquire(blocking=False):raise SpoolHeld('spool_capacity_unavailable')
+        slot=None
+        try:
+            receipt,identity=self._viewer_snapshot(task)
+            slot=open_slot(self.root,self.root_identity,receipt['slotKey'],receipt['archiveBytes'],max_budget=self.max_bytes,create=False)
+            if self._slot_identity(slot)!=identity or self._digest(slot,receipt['archiveBytes'])!=receipt['archiveSha256']:
+                raise SpoolHeld('viewer_archive_changed')
+            self._viewer_snapshot(task)
+            return _ViewerReader(self,slot,dict(task),receipt),receipt['archiveBytes']
+        except BaseException:
+            if slot is not None:slot.close()
+            self._work.release();raise
 
     @contextmanager
     def _admit(self):

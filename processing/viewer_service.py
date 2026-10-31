@@ -122,13 +122,18 @@ class NativeEngine:
 
 
 class ViewerService:
-    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node):
+    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, viewer_spool=None):
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
         self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
                                   'main': NativeEngine(config.main_node_url, config.main_node_token)}
         self.probe = probe
+        if viewer_spool is not None:
+            from .viewer_archive_spool import ViewerArchiveSpool
+            if type(viewer_spool) is not ViewerArchiveSpool or viewer_spool.claims.queue is not queue:
+                raise ValueError('Viewer spool authority mismatch')
+        self.viewer_spool=viewer_spool
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -442,6 +447,9 @@ class ViewerService:
 
     def download(self, identifier):
         task = self.store.task(identifier)
+        if self.viewer_spool is not None and task['phase']=='worker_claimed':
+            try:return self.viewer_spool.open_for_viewer(task)
+            except Exception:raise Conflict('Viewer spool archive unavailable') from None
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
         with self._lock:
