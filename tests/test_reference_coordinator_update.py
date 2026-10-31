@@ -45,6 +45,8 @@ class Gates:
 
 @unittest.skipUnless(os.name=='posix','Linux ownership and offline helper contract')
 class ReferenceCoordinatorUpdateTests(unittest.TestCase):
+    def test_updated_updater_is_not_activation_reviewed(self):
+        self.assertFalse(module.ACTIVATION_REVIEWED)
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.root.chmod(0o700)
@@ -60,6 +62,11 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.queue._db() as db:
             db.execute('UPDATE coordinator_identity SET authority_id=?',(module.AUTHORITY,))
             db.execute('DROP TABLE owned_maintenance_schedules')
+            # Model the updater's explicitly pinned historical e2 predecessor,
+            # not the newer TaskStore schema present in this test checkout.
+            db.execute('DROP TABLE viewer_upload_intents')
+            db.execute('DROP TABLE viewer_reservations')
+            db.execute('DROP TABLE viewer_option_evidence')
             for index in range(12):
                 db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,'staging','treedar-synthetic-v1',?)",
                     (str(__import__('uuid').uuid4()),'synthetic-'+str(index),'failed' if index<2 else 'succeeded'))
@@ -176,6 +183,25 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual({self.queue.get_node(node)['state'] for node in ('cluster','main')}, {'active'})
         self.assertFalse(self.state['databaseRestored'])
 
+    def test_enrolled_fence_refuses_historical_update_before_mutation(self):
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE legacy_fence_requirement(singleton INTEGER)')
+        with self.assertRaisesRegex(module.EnrolledFenceUnsupported,'requires_new_updater'):
+            self.activate()
+        self.assertEqual(self.transport.calls,[])
+        self.assertTrue(self.transport.old['State']['Running'])
+
+    def test_fence_appearing_after_stop_does_not_restart_unverified_candidate(self):
+        self.fail_after_start()
+        def late(action):
+            if action=='stop':
+                with self.queue._db() as db:db.execute('CREATE TABLE legacy_fence_requirement(singleton INTEGER)')
+        self.transport.hook=late;before=len(self.transport.calls)
+        with self.assertRaises(module.EnrolledFenceUnsupported):self.updater.rollback(self.state)
+        self.assertEqual([row[0] for row in self.transport.calls[before:]],['stop'])
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
     def test_lost_legacy_schedule_ack_holds_no_adoption_or_repost(self):
         original=self.operator.json;posts=[]
         def lose(method,route,payload=None,**kwargs):
@@ -244,7 +270,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual((restored['Id'],restored['Image']),(module.OLD_ID,module.OLD_IMAGE))
         self.assertEqual(restored['HostConfig']['PortBindings'],module.legacy.REFERENCE_PORTS)
 
-    def test_receipt_admitted_while_new_stops_refuses_old_and_restarts_only_new(self):
+    def test_receipt_admitted_while_new_stops_holds_both_on_census_refusal(self):
         self.fail_after_start()
         def late(action):
             if action=='stop':
@@ -252,10 +278,9 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.transport.hook=late
         calls=len(self.transport.calls)
         with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
-        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
         self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
-        self.assertEqual([row[0] for row in self.transport.calls[calls:]],['stop','start'])
-        self.assertTrue(self.state['downgradeRefused'])
+        self.assertEqual([row[0] for row in self.transport.calls[calls:]],['stop'])
 
     def test_partial_reopen_unknown_second_ack_cannot_rollback_or_cancel_peer(self):
         original=self.operator.json;cancels=[]
@@ -284,7 +309,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual(self.queue.get_node('main')['state'],'draining')
         self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
 
-    def test_unavailable_stopped_census_restarts_exact_candidate_never_old(self):
+    def test_unavailable_stopped_census_holds_both_containers(self):
         self.fail_after_start();original=self.updater.census
         def unavailable(state,**kwargs):
             if kwargs.get('offline'):raise OSError('synthetic offline read unavailable')
@@ -292,8 +317,8 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         before=len(self.transport.calls)
         with patch.object(self.updater,'census',side_effect=unavailable):
             with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
-        self.assertEqual([call[0] for call in self.transport.calls[before:]],['stop','start'])
-        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertEqual([call[0] for call in self.transport.calls[before:]],['stop'])
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
         self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
 
     def test_online_new_owned_receipt_refuses_before_any_candidate_stop(self):

@@ -42,8 +42,11 @@ MODE = 'reference-to-reference-v1'
 # Explicit preparation, immutable argument binding and every live fence remain.
 # Follow-up census compatibility includes the existing TerminalService table;
 # its reference_* zero-row admission fence remains unchanged.
-ACTIVATION_REVIEWED = True
+# Historical review covered a different source revision, not this draft.
+ACTIVATION_REVIEWED = False
 class Stopped(ValueError):pass
+class EnrolledFenceUnsupported(Stopped):
+    """This historical updater cannot preserve or roll back an enrolled fence."""
 
 
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
@@ -165,6 +168,11 @@ def volume_census(root, *, uid=10001, offline=False):
         assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
         objects=[list(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
         names={row[1] for row in objects if row[0]=='table'}
+        # Signal the caller before the legacy schema allowlist rejects the
+        # table, so rollback cannot mistake this for a generic census failure
+        # and automatically restart an unfenced historical candidate.
+        if any(row[1]=='legacy_fence_requirement' for row in objects):
+            return {'legacyFencePresent':True}
         assert not names-allowed and {'jobs','coordinator_identity','nodes','reference_jobs','viewer_tasks'}<=names
         assert not any(row[0] in ('trigger','view') for row in objects)
         assert all(row[0]!='index' or row[1].startswith('sqlite_autoindex_') or row[1]=='viewer_engine_uuid' for row in objects)
@@ -345,6 +353,8 @@ class ReferenceCoordinatorUpdate:
                 '--entrypoint','python',state['image'],'-c',code)
         else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
         result=json.loads(raw)
+        if result.get('legacyFencePresent') is True or 'legacy_fence_requirement' in result.get('tables',{}):
+            raise EnrolledFenceUnsupported('enrolled_legacy_fence_requires_new_updater')
         if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=12:raise Stopped('reviewed_idle_history_required')
         return result
 
@@ -422,8 +432,9 @@ class ReferenceCoordinatorUpdate:
         self.cluster_probe(state)
         for name in (state['rollbackName'],state['failedName']):
             if self.t.docker('ps','--all','--filter','name=^/'+name+'$','--format','{{.ID}}').strip():raise Stopped('retention_name_exists')
-        self.save(state);self.t.candidate_loader(target,operation)
-        self.save(state,'prepared',baseline=self.census(state),tls=self.tls(state))
+        self.save(state);baseline=self.census(state)
+        self.t.candidate_loader(target,operation)
+        self.save(state,'prepared',baseline=baseline,tls=self.tls(state))
         return state
 
     def check(self,state,gates):
@@ -626,7 +637,16 @@ class ReferenceCoordinatorUpdate:
                 self.save(state,'rollback_stop_pending')
                 self.mutation(state,gates,'stop','--time','-1',item['Id'],timeout=60)
                 if self.t.inspected(item['Id'])['State']['Running']:raise Stopped('candidate_not_confirmed_stopped')
-            try:compatible(self.census(state,offline=True),state['drained'],allow_owned=True)
+            try:offline=self.census(state,offline=True)
+            except EnrolledFenceUnsupported:
+                # The historical candidate cannot prove a safe fence. Never
+                # start it as a fallback after detecting an enrolled marker.
+                raise
+            except Exception:
+                # An unavailable census cannot prove an enrolled marker is
+                # absent. Leave both containers stopped for inspection.
+                raise Stopped('offline_rollback_census_unavailable') from None
+            try:compatible(offline,state['drained'],allow_owned=True)
             except Exception:
                 if item is not None:self.retain(state,gates,item)
                 raise Stopped('offline_rollback_refused') from None
