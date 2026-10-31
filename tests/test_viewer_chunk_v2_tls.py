@@ -140,13 +140,13 @@ with DaemonStateLock(root) as owner:
   from processing.viewer_archive_spool import SpoolHeld
   self.f.spool.synthetic_v2_viewer=True
   with DaemonStateLock(self.f.base.base.base.base.worker) as owner:send(self.f.base.worker(owner),synthetic_fixture=True,chunk_bytes=16)
-  entered=threading.Event();release=threading.Event();original=SyntheticV2ChunkJournal.finish
+  entered=threading.Event();release=threading.Event();original=SyntheticV2ChunkJournal.verify_sealed
   def paused(journal,count):
    entered.set()
    if not release.wait(5):raise RuntimeError('barrier timed out')
    return original(journal,count)
   count=(len(self.f.base.base.archive)+15)//16
-  with patch.object(SyntheticV2ChunkJournal,'finish',paused):
+  with patch.object(SyntheticV2ChunkJournal,'verify_sealed',paused):
    with ThreadPoolExecutor(max_workers=2) as pool:
     future=pool.submit(self.api.viewer_v2_chunks.promote,self.job,self.f.identity(),self.token,count)
     try:
@@ -196,3 +196,20 @@ with DaemonStateLock(root) as owner:
   self.api.viewer_v2_chunks.promote(self.job,self.f.identity(),self.token,count)
   with self.f.fixture.queue._db() as db:db.execute("INSERT INTO viewer_worker_permits VALUES(?,?,'upload','active')",(self.job,'v2-later'))
   with self.assertRaises(Exception):self.f.spool.lookup(self.job,self.f.identity(),self.token)
+ def test_missing_v2_seal_before_promotion_never_recreated(self):
+  self.f.spool.synthetic_v2_viewer=True
+  with DaemonStateLock(self.f.base.base.base.base.worker) as owner:send(self.f.base.worker(owner),synthetic_fixture=True,chunk_bytes=16)
+  seal=next(self.f.root.glob('*.chunks-v2.seal'));seal.unlink();count=(len(self.f.base.base.archive)+15)//16
+  with self.assertRaises(Exception):self.api.viewer_v2_chunks.prepare(self.job,self.f.identity(),self.token)
+  with self.assertRaises(Exception):self.api.viewer_v2_chunks.finish(self.job,self.f.identity(),self.token,count)
+  with self.assertRaises(Exception):self.api.viewer_v2_chunks.promote(self.job,self.f.identity(),self.token,count)
+  self.assertFalse(seal.exists())
+  with self.f.fixture.queue._db() as db:self.assertIsNone(db.execute('SELECT 1 FROM viewer_worker_spool WHERE job_id=?',(self.job,)).fetchone())
+ def test_missing_v2_seal_after_promotion_blocks_reader_without_recreation(self):
+  self.f.spool.synthetic_v2_viewer=True
+  with DaemonStateLock(self.f.base.base.base.base.worker) as owner:send(self.f.base.worker(owner),synthetic_fixture=True,chunk_bytes=16,promote=True)
+  seal=next(self.f.root.glob('*.chunks-v2.seal'));seal.unlink()
+  with self.assertRaises(Exception):self.f.spool.lookup(self.job,self.f.identity(),self.token)
+  task=self.f.fixture.store.task('22222222-2222-4222-8222-222222222222')
+  with self.assertRaises(Exception):self.f.spool.open_for_viewer(task)
+  self.assertFalse(seal.exists())

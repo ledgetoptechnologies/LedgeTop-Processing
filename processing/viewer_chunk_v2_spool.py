@@ -56,7 +56,7 @@ class SyntheticV2Spool:
    if existing:
     slot,journal,_,_,state=self._open(job,identity,token)
     try:
-     if state=='sealed':journal.finish(binding['chunkCount'])
+     if state=='sealed':journal.verify_sealed(binding['chunkCount'])
      return dict(state=state)
     finally:slot.close()
    slot=open_slot(self.spool.root,self.spool.root_identity,key,binding['archiveBytes'],max_budget=self.spool.max_bytes,create=True)
@@ -161,7 +161,7 @@ class SyntheticV2Spool:
    try:
     if state!='sealed' or count!=journal.binding['chunkCount']:raise SpoolHeld('v2_slot_requires_inspection')
     # Full archive verification and fsync occur outside the DB write barrier.
-    journal.finish(count);actual=self.spool._slot_identity(slot)
+    journal.verify_sealed(count);actual=self.spool._slot_identity(slot)
     with self.spool.claims.queue._db() as db:
      db.execute('BEGIN IMMEDIATE');binding,current,current_key=self._binding(db,job,identity,token);SyntheticChunkSpool._admit_operation(db,job);self._schema(db)
      metadata=self.spool._metadata(db,job,identity,token);metadata_sha=p.digest(metadata)
@@ -185,7 +185,7 @@ class SyntheticV2Spool:
   with self.spool._admit():
    slot,journal,encoded,key,state=self._open(job,identity,token)
    try:
-    seal=journal.finish(count)
+    seal=journal.verify_sealed(count) if state=='sealed' else journal.finish(count)
     with self.spool.claims.queue._db() as db:
      db.execute('BEGIN IMMEDIATE');_,current,current_key=self._binding(db,job,identity,token);SyntheticChunkSpool._admit_operation(db,job);self._schema(db)
      if current!=encoded or current_key!=key:raise SpoolHeld('v2_binding_changed')

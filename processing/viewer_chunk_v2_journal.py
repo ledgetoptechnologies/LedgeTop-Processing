@@ -119,8 +119,12 @@ class SyntheticV2ChunkJournal:
     def finish(self,count):
         with self.slot._operation_lock:return self._finish(count)
 
-    def _finish(self,count):
+    def verify_sealed(self,count):
+        with self.slot._operation_lock:return self._finish(count,allow_create=False)
+
+    def _finish(self,count,*,allow_create=True):
         if type(count) is not int or count!=self.binding['chunkCount']:raise V2ChunkHeld('count_invalid')
+        if not allow_create and not _exists(self.slot._root,self.seal):raise V2ChunkHeld('v2_seal_missing')
         self._verify(self.header,self.expected);offset=0;digest=hashlib.sha256()
         for index in range(count):
             intent_name,receipt_name=self._names(index);intent,fd=_read_record(self.slot,intent_name)
@@ -135,5 +139,6 @@ class SyntheticV2ChunkJournal:
         seal=dict(schemaVersion=2,bindingSha256=self.digest,count=count,bytes=offset,sha256=digest.hexdigest(),allocation=_identity(self.slot._fd))
         self.slot.sync()
         if _exists(self.slot._root,self.seal):self._verify(self.seal,seal)
-        else:_persist(self.slot._root,self.slot._root_identity,self.seal,seal)
+        elif allow_create:_persist(self.slot._root,self.slot._root_identity,self.seal,seal)
+        else:raise V2ChunkHeld('v2_seal_missing')
         self.slot._check();return seal

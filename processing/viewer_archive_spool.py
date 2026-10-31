@@ -167,7 +167,7 @@ class ViewerArchiveSpool:
             try:
                 if self._slot_identity(slot)!=recorded or not _exists(slot._root,slot._name+'.chunks-v2.header'):raise SpoolHeld('v2_slot_changed')
                 journal=SyntheticV2ChunkJournal(slot,binding,legacy_state='new',synthetic_fixture=True)
-                journal.finish(binding['chunkCount']);return slot
+                journal.verify_sealed(binding['chunkCount']);return slot
             except BaseException:slot.close();raise
         if not session:
             return open_slot(self.root,self.root_identity,key,metadata['archiveBytes'],max_budget=self.max_bytes,create=False)
