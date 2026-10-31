@@ -167,3 +167,14 @@ with patch.object(m,'_persist',persist),patch.object(OutputSlot,'write_at',write
         with patch('processing.viewer_chunk_journal.os.listdir',side_effect=AssertionError('unexpected scan')):
             with self.assertRaises(Exception):self.open()
         self.assertEqual(path.read_bytes(),b'{}');self.assertNotEqual(original,b'{}')
+    def test_existing_header_partial_chunk_intent_remains_held(self):
+        slot=self.open()
+        try:
+            journal=SyntheticChunkJournal(slot,self.binding,legacy_state='new',synthetic_fixture=True)
+            intent,_=journal._names(0)
+            (self.root/intent).write_bytes(b'partial')
+            with patch('processing.viewer_chunk_journal.os.listdir',side_effect=AssertionError('unexpected scan')):
+                reopened=SyntheticChunkJournal(slot,self.binding,legacy_state='new',synthetic_fixture=True)
+                with self.assertRaisesRegex(ChunkHeld,'chunk_requires_inspection'):reopened.write(0,0,b'abcd')
+            self.assertEqual((self.root/intent).read_bytes(),b'partial')
+        finally:slot.close()
