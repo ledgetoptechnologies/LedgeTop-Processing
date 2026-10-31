@@ -67,8 +67,31 @@ def _project(fd):
     flags,_,_,project,_=struct.unpack('=IIIII',data[:20]);return project,flags
 
 
+def _mount_id(fd):
+    with open('/proc/self/fdinfo/'+str(fd),encoding='ascii') as stream:
+        values=[line.split(':',1)[1].strip() for line in stream if line.startswith('mnt_id:')]
+    _require(len(values)==1 and values[0].isdecimal());return int(values[0])
+
+
+def _open_directory(path):
+    """Walk from root using no-follow descriptors for every component."""
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    fd=os.open('/',flags)
+    try:
+        for part in Path(path).parts[1:]:
+            child=os.open(part,flags,dir_fd=fd);os.close(fd);fd=child
+        return fd
+    except BaseException:
+        os.close(fd);raise
+
+
 def observe(mount_path,project_directory,project_id,hard_bytes):
-    """Snapshot only; callers must not treat success as permission to write."""
+    """Disabled until process-free quota reads and real validation exist."""
+    raise ObservationUnavailable('XFS quota observation unavailable')
+
+
+def _observe_unqualified(mount_path,project_directory,project_id,hard_bytes):
+    """Test-only draft; subprocess lifecycle is not qualified for use."""
     _require(sys.platform.startswith('linux') and os.geteuid()==0 and type(project_id) is int and 1<=project_id<=4294967295
              and type(hard_bytes) is int and hard_bytes>=1024 and hard_bytes%1024==0)
     mount=Path(mount_path);directory=Path(project_directory)
@@ -77,10 +100,10 @@ def observe(mount_path,project_directory,project_id,hard_bytes):
     root_fd=project_fd=None
     try:
         flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
-        root_fd=os.open(mount,flags);project_fd=os.open(directory.name,flags,dir_fd=root_fd)
+        root_fd=_open_directory(mount);project_fd=os.open(directory.name,flags,dir_fd=root_fd)
         before=os.fstat(root_fd);project_before=os.fstat(project_fd)
         snapshot=_mount(str(mount));_require(snapshot['maj:min']=='%d:%d'%(os.major(before.st_dev),os.minor(before.st_dev)))
-        _require(project_before.st_dev==before.st_dev)
+        _require(project_before.st_dev==before.st_dev and _mount_id(root_fd)==_mount_id(project_fd)==snapshot['id'])
         project,project_flags=_project(project_fd);_require(project==project_id and project_flags&0x200)
         state=_run(['/usr/sbin/xfs_quota','-x','-c','state -p',str(mount)])
         _require(re.findall(r'^Project quota state on (.+)$',state,re.M)==[str(mount)+' ('+snapshot['source']+')']
@@ -95,6 +118,7 @@ def observe(mount_path,project_directory,project_id,hard_bytes):
         named_root=os.stat(mount,follow_symlinks=False)
         _require((before.st_dev,before.st_ino)==(after.st_dev,after.st_ino)==(named_root.st_dev,named_root.st_ino)
                  and (project_before.st_dev,project_before.st_ino)==(project_after.st_dev,project_after.st_ino)==(named.st_dev,named.st_ino)
+                 and _mount_id(root_fd)==_mount_id(project_fd)==snapshot['id']
                  and _mount(str(mount))==snapshot and _project(project_fd)==(project,project_flags))
         return {'projectId':project,'hardBytes':hard,'usedBytes':used,'device':snapshot['maj:min']}
     except (OSError,ValueError,KeyError,UnicodeError,subprocess.SubprocessError):

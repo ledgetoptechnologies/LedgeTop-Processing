@@ -23,8 +23,8 @@ class ObservationTest(unittest.TestCase):
     def check(self,state=None,report=REPORT,mounts=None,project=(42001,0x200)):
         if state is None:state=self.state
         with patch.object(x.os,'geteuid',return_value=0),patch.object(x,'_mount',side_effect=mounts or [self.mapping,self.mapping]),\
-             patch.object(x,'_project',return_value=project),patch.object(x,'_run',side_effect=[state,report]):
-            return x.observe(str(self.mount),str(self.project),42001,64*1024*1024)
+             patch.object(x,'_project',return_value=project),patch.object(x,'_mount_id',return_value=123),patch.object(x,'_run',side_effect=[state,report]):
+            return x._observe_unqualified(str(self.mount),str(self.project),42001,64*1024*1024)
 
     def test_observed_kernel_shape(self):
         self.assertEqual(self.check()['hardBytes'],64*1024*1024)
@@ -41,6 +41,16 @@ class ObservationTest(unittest.TestCase):
         with self.assertRaises(x.ObservationUnavailable):self.check(mounts=[self.mapping,dict(self.mapping,source='/dev/other')])
         self.project.rename(self.mount/'elsewhere');self.project.symlink_to('elsewhere',target_is_directory=True)
         with self.assertRaises(x.ObservationUnavailable):self.check()
+
+    def test_same_device_bind_overmount_and_symlink_ancestor_hold(self):
+        with patch.object(x.os,'geteuid',return_value=0),patch.object(x,'_mount',return_value=self.mapping),\
+             patch.object(x,'_mount_id',side_effect=[123,124]):
+            with self.assertRaises(x.ObservationUnavailable):x._observe_unqualified(str(self.mount),str(self.project),42001,64*1024*1024)
+        link=self.mount/'alias';link.symlink_to(self.project,target_is_directory=True)
+        with self.assertRaises(OSError):x._open_directory(link)
+
+    def test_public_observation_is_disabled(self):
+        with self.assertRaises(x.ObservationUnavailable):x.observe(str(self.mount),str(self.project),42001,64*1024*1024)
 
     def test_findmnt_rejects_ext4_empty_and_multiple(self):
         import json
