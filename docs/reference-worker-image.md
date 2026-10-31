@@ -32,3 +32,30 @@ start a second worker against an active engine until the ownership, maintenance,
 retention and recovery procedures have been qualified for the target host.
 The draft reference v2 protocol is not wired or supported by this image; its
 candidate contract resources are intentionally not included.
+
+## Opt-in synthetic image test
+
+`tests.test_reference_worker_image_e2e` is skipped unless explicitly enabled.
+Build the image from the source revision under test, with its full Git commit
+in the `org.opencontainers.image.revision` label. Set
+`LT_REFERENCE_WORKER_TEST_IMAGE` to the resulting local `sha256:...` image ID
+and `LT_REFERENCE_WORKER_SOURCE_REVISION` to that same 40-character commit;
+then run `python -m unittest tests.test_reference_worker_image_e2e -v`.
+The test verifies the image ID and revision label before running. Docker must
+be available, and the pinned base/image and `openssl` inside the image must
+already be available. It does not pull an image.
+
+The test uses generated credentials and three bytes of synthetic input. It
+starts the packaged daemon CLI in a nonroot, network-disabled, read-only
+container with temporary state, a synthetic HTTPS broker, a synthetic engine,
+and the real local coordinator API. The coordinator listener is stopped before
+the transfer grant is made available; the test confirms the engine has received
+no work, kills the worker process, restarts both, and verifies a single engine
+submission, retained input, archive digest and coordinator receipt. Container
+and test state are removed afterward.
+
+The coordinator runs as a thread in the same container and the engine and
+broker are fixtures. This test does not cover a worker restart during engine
+processing, real NodeODM, Viewer acceptance, NAS storage, or power loss. The
+revision label is supplied by the builder and is not itself a provenance
+attestation.
