@@ -119,12 +119,15 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.release = threading.Event()
         self.release.set()
         self.include_length = True
+        self.engine_http_status = 200
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_GET(self):
                 owner.requests += 1
+                if owner.engine_http_status != 200:
+                    self.send_response(owner.engine_http_status); self.send_header('Content-Length','0'); self.end_headers(); return
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/zip')
                 if owner.include_length:
@@ -241,6 +244,50 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         restarted = ViewerService(self.queue, self.fixture.config, engines=self.fixture.engines, probe=self.fixture.probe)
         self.assertEqual(restarted.info(self.identifier)['ledgetopArchive'], info['ledgetopArchive'])
         self.assertTrue(Path(self.fixture.task(self.identifier)['directory'], 'all.zip.partial').exists())
+
+    def test_real_http_503_before_restore_slot_allows_retry_after_process_restart(self):
+        import hashlib
+        self.service._archive_once(self.identifier)
+        task=self.fixture.task(self.identifier);path=Path(task['archive_path']);receipt=path.with_suffix('.zip.receipt');receipt_before=receipt.read_bytes()
+        source=Path(task['files'][0]['path']);source_before=source.read_bytes();path.unlink();authority=self.queue.authority_id
+        self.service.close();self.queue.close();self.lease.close()
+        code=r"""
+import hashlib,sys
+from types import SimpleNamespace
+from urllib.error import HTTPError
+from processing.authority_lease import AuthorityLease
+from processing.prototype import Queue
+from processing.viewer_service import ViewerService
+root,lease_dir,authority,identifier,origin,mode,expected=sys.argv[1:]
+q=Queue(root,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+lease=AuthorityLease(lease_dir,authority);q.authority_lease=lease
+c=SimpleNamespace(prototype_state_dir=root,viewer_max_input_bytes=20*1024**3,viewer_max_archive_bytes=4*1024**2,viewer_archive_free_floor=1,local_node_url=origin,local_node_token='',main_node_url=origin,main_node_token='')
+s=ViewerService(q,c)
+try:
+ if mode=='fail':
+  try:s.download(identifier)
+  except HTTPError as error:
+   if error.code!=503:raise
+  else:raise AssertionError('expected synthetic 503')
+ else:
+  stream,size=s.download(identifier)
+  with stream:data=stream.read()
+  if len(data)!=size or hashlib.sha256(data).hexdigest()!=expected:raise AssertionError('result mismatch')
+finally:s.close();lease.close();q.close()
+"""
+        args=[sys.executable,'-c',code,str(self.root/'state'),str(self.lease_dir),authority,self.identifier,self.fixture.config.local_node_url]
+        digest=hashlib.sha256(self.engine_response).hexdigest();self.engine_http_status=503
+        first=subprocess.run(args+['fail',digest],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+        self.assertEqual(first.returncode,0)
+        pending=path.parent/'.all.zip.restore-pending';self.assertFalse(pending.exists());self.assertEqual(receipt.read_bytes(),receipt_before)
+        self.engine_http_status=200
+        second=subprocess.run(args+['recover',digest],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+        self.assertEqual(second.returncode,0);self.assertEqual(path.read_bytes(),self.engine_response)
+        self.assertEqual(receipt.read_bytes(),receipt_before);self.assertEqual(source.read_bytes(),source_before)
+        self.assertEqual(self.requests,3);self.assertEqual(len(self.fixture.fleet.commits),1)
+        self.queue=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        self.lease=authority_lease.AuthorityLease(self.lease_dir,authority);self.queue.authority_lease=self.lease
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
 
     def test_interrupted_restore_is_retained_and_reported_for_inspection(self):
         # Simulate a child that published a receipt but whose result vanished
