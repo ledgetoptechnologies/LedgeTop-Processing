@@ -1,0 +1,13 @@
+**
+!Dockerfile.reference-worker
+!processing/
+!processing/**/*.py
+!ops/
+!ops/reference_worker_daemon.py
+!ops/private_worker_directory.py
+**/__pycache__/
+**/.git/
+**/.env
+**/.env.*
+**/.venv/
+**/venv/

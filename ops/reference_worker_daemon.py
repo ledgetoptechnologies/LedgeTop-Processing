@@ -533,10 +533,16 @@ def _build_worker(config,owner,resources):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, help='owner-private JSON settings file')
+    parser.add_argument('--odm-only', action='store_true',
+                        help='reject TreeDar routing before opening worker state')
     args = parser.parse_args(argv)
     server = None
     try:
         config = load_config(args.config)
+        if args.odm_only:
+            routing = _execution_routing(config)
+            if routing is not None and routing['treedar'] is not None:
+                raise ValueError('TreeDar is unavailable in this worker image')
         driver, server = build_worker(config)
         stop = threading.Event()
         for name in ('SIGINT','SIGTERM'):
