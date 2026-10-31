@@ -40,6 +40,17 @@ class ConnectionLimitTests(unittest.TestCase):
   self.assertEqual(b.recv(1),b'')
   c=self.client.wrap_socket(socket.create_connection(self.address,timeout=2),server_hostname='localhost');self.addCleanup(c.close)
   c.sendall(b'GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n');self.assertIn(b'200',c.recv(512))
+ def test_accepted_socket_closed_if_timeout_setup_fails(self):
+  from unittest.mock import Mock,patch
+  sock=Mock();sock.settimeout.side_effect=OSError('timeout setup failed')
+  listener=Mock();listener.accept.return_value=(sock,('127.0.0.1',1))
+  server=create_reference_http_server(object(),max_connections=1)
+  try:
+   with patch.object(server,'socket',listener):
+    with self.assertRaisesRegex(OSError,'timeout setup failed'):server.get_request()
+   sock.close.assert_called_once_with()
+  finally:server.server_close()
+
  def test_invalid_limit_fails_before_bind(self):
   for value in (0,257,True,"2"):
    with self.subTest(value=value),self.assertRaises(ValueError):create_reference_http_server(object(),max_connections=value)

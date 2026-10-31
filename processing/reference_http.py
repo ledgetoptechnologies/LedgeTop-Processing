@@ -267,7 +267,12 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
 
         def get_request(self):
             connection, address = self.socket.accept()
-            connection.settimeout(request_timeout)
+            try:
+                connection.settimeout(request_timeout)
+            except BaseException:
+                try:connection.close()
+                except OSError:pass
+                raise
             if ssl_context is not None and connection_slots is None:
                 try:
                     connection = ssl_context.wrap_socket(connection, server_side=True)
