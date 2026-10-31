@@ -16,7 +16,8 @@ BRIDGE_MODE=${BRIDGE_MODE:-full}
 case "$BRIDGE_MODE" in
     reconcile) printf 'reconcile mode is not qualified for the per-object input layout\n' >&2; exit 1;;
     full) SERVER_SCRIPT=viewer_full_bridge_server.py; CLIENT_SCRIPT=viewer_full_bridge_client.cjs; CLIENT_WAIT=75s;;
-    *) printf 'BRIDGE_MODE must be reconcile or full\n' >&2; exit 1;;
+    staged-full) SERVER_SCRIPT=viewer_staged_full_server.py; CLIENT_SCRIPT=viewer_staged_full_client.cjs; CLIENT_WAIT=90s; FULL_SERVER_SHA256=3ffb5a8c564b9f03379ceb5a4da4d38ea5b186fd37220375aa1af8809cc222ee; FULL_CLIENT_SHA256=541a1ea22503e062cf935d096290bcb6a07134b196bf9aef3ee1be0ea87cdc02; NODE_EXTRA_CA_CERTS=/exchange/synthetic-ca.pem; export NODE_EXTRA_CA_CERTS;;
+    *) printf 'BRIDGE_MODE must be full or staged-full\n' >&2; exit 1;;
 esac
 RUN_ID=$(python3 -c 'import secrets; print(secrets.token_hex(12))')
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-viewer-bridge-${RUN_ID}-XXXXXX")
@@ -75,14 +76,19 @@ trap 'exit 143' TERM
 git -C "$PROCESSING" merge-base --is-ancestor "$PROCESSING_BASE" HEAD
 git -C "$PROCESSING" merge-base --is-ancestor "$HARNESS_BASE" HEAD
 git -C "$PROCESSING" diff --quiet "$HARNESS_BASE" HEAD -- tests/viewer_bridge_client.cjs tests/viewer_bridge_server.py
-if [ "$BRIDGE_MODE" = full ]; then
-    git -C "$PROCESSING" ls-files --error-unmatch tests/viewer_full_bridge_client.cjs tests/viewer_full_bridge_server.py >/dev/null
+if [ "$BRIDGE_MODE" = full ] || [ "$BRIDGE_MODE" = staged-full ]; then
+    git -C "$PROCESSING" ls-files --error-unmatch "tests/$SERVER_SCRIPT" "tests/$CLIENT_SCRIPT" >/dev/null
     git -C "$PROCESSING" merge-base --is-ancestor "$FULL_HARNESS_BASE" HEAD
     server_sum=$(sha256sum "$PROCESSING/tests/$SERVER_SCRIPT")
     client_sum=$(sha256sum "$PROCESSING/tests/$CLIENT_SCRIPT")
     printf '%s\n%s\n' "$server_sum" "$client_sum" | tee "$RUN_DIR/fixture-scripts.sha256"
     [ "${server_sum%% *}" = "$FULL_SERVER_SHA256" ] || { printf 'Full server fixture hash mismatch\n' >&2; exit 1; }
     [ "${client_sum%% *}" = "$FULL_CLIENT_SHA256" ] || { printf 'Full client fixture hash mismatch\n' >&2; exit 1; }
+    if [ "$BRIDGE_MODE" = staged-full ]; then
+        ack_sum=$(sha256sum "$PROCESSING/tests/viewer_staged_clients_synthetic.cjs")
+        [ "${ack_sum%% *}" = 4cf091e9e2b124202ff5ef7104d47ff84fbb70f6e5c97f6b65bfb15f48910f69 ] || { printf 'Staged sender fixture hash mismatch\n' >&2; exit 1; }
+        printf '%s\n' "$ack_sum" >> "$RUN_DIR/fixture-scripts.sha256"
+    fi
 fi
 git -C "$PROCESSING" diff --quiet "$PROCESSING_BASE" HEAD -- processing ops \
     tests/test_viewer_completion_projection.py tests/test_viewer_spool_provider.py \
@@ -131,7 +137,7 @@ CLIENT_ID=$(timeout 30s docker run -d --pull never --name "$CLIENT_NAME" --label
     --network "container:$SERVER_ID" --cpus 0.5 --memory 512m --pids-limit 64 --user 10001:10001 --read-only \
     --tmpfs /tmp:rw,nosuid,nodev,size=2g --mount "type=bind,src=$RUN_DIR/export,dst=/viewer,readonly" \
     --mount "type=bind,src=$PROCESSING,dst=/processing,readonly" --mount "type=bind,src=$RUN_DIR/exchange,dst=/exchange,readonly" \
-    -e NODE_PATH=/src/apps/viewer/node_modules -e VIEWER_SOURCE_ROOT=/tmp/viewer -e BRIDGE_READY=/exchange/ready.json \
+    -e NODE_EXTRA_CA_CERTS -e NODE_PATH=/src/apps/viewer/node_modules -e VIEWER_SOURCE_ROOT=/tmp/viewer -e BRIDGE_READY=/exchange/ready.json \
     --entrypoint sh "$VIEWER_IMAGE_ID" -c 'mkdir -p /tmp/viewer/apps /tmp/viewer/packages && cp -a /viewer/apps/viewer /tmp/viewer/apps/ && cp -a /viewer/packages/shared /tmp/viewer/packages/ && ln -s /src/apps/viewer/node_modules /tmp/viewer/apps/viewer/node_modules && exec node "/processing/tests/$1"' sh "$CLIENT_SCRIPT")
 printf '%s\n' "$CLIENT_ID" > "$RUN_DIR/client.id"
 owned "$CLIENT_ID"
