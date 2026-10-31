@@ -85,6 +85,7 @@ class Rehearsal:
 
     def state(self):
         return dict(port=self.port, token=TOKEN, uuid=self.identifier,
+                    # uuid is a fallback for commands, not proof a task exists.
                     archiveSha256=hashlib.sha256(Path(self.archive).read_bytes()).hexdigest(),
                     archiveBytes=Path(self.archive).stat().st_size)
 
@@ -106,10 +107,10 @@ def main():
                 request=json.loads(line);command=request['command']
                 if command=='restart':
                     instance.stop();instance.start('normal');result=instance.state()
-                elif command=='archive_path':result={'path':instance.command('path')}
-                elif command in ('tick','finish'):
+                elif command in ('tick','finish','archive_path'):
                     identifier=request.get('uuid',instance.identifier);uuid.UUID(identifier)
-                    result={'result':instance.command(command,identifier)}
+                    if command=='archive_path':result={'path':instance.command('path',identifier)}
+                    else:result={'result':instance.command(command,identifier)}
                 elif command=='stop':
                     instance.stop();print(json.dumps({'ok':True}),flush=True);break
                 else:raise ValueError('unknown command')

@@ -63,6 +63,8 @@ class RehearsalServerTest(unittest.TestCase):
                     process.stdin.write(json.dumps({'command':command,'uuid':identifier})+'\n');process.stdin.flush();self.assertEqual(read_response(process),{'result':'ok'})
                 with request('/task/'+identifier+'/info') as response:self.assertEqual(json.load(response)['status']['code'],40)
                 with request('/task/'+identifier+'/download/all.zip') as response:self.assertEqual(response.read(),archive.read_bytes())
+                process.stdin.write(json.dumps({'command':'archive_path','uuid':identifier})+'\n');process.stdin.flush()
+                captured=Path(read_response(process)['path']);self.assertEqual(captured.read_bytes(),archive.read_bytes())
                 process.stdin.write('{"command":"stop"}\n');process.stdin.flush();self.assertEqual(read_response(process),{'ok':True});self.assertEqual(process.wait(timeout=10),0)
                 self.assertEqual(archive.read_bytes(),synthetic_zip())
             finally:cleanup(process)
