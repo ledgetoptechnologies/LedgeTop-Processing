@@ -758,7 +758,11 @@ class ReferenceDriver:
             status, grant = self._request('GET', suffix + '/transfer-grant', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_grant', 'jobId': job_id}
-            validated = validate_grant(grant, job=claim, clock=self.clock)
+            try:
+                validated = validate_grant(grant, job=claim, clock=self.clock)
+            except ValueError:
+                self._save(job_id, 'fetch_held', data)
+                raise DriverHeld('worker_fetch_requires_inspection') from None
             if self._kind(job_id) == 'treedar':
                 data['provenance'] = self._fetch_provenance(claim, validated)
             data['grant'] = grant
@@ -772,8 +776,14 @@ class ReferenceDriver:
             claim.update(public)
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
+        if stage == 'fetch_held':
+            raise DriverHeld('worker_fetch_requires_inspection')
         if stage == 'fetching':
-            grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+            try:
+                grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+            except ValueError:
+                self._save(job_id, 'fetch_held', data)
+                raise DriverHeld('worker_fetch_requires_inspection') from None
             reservation = data['reservation']['reservationId']
             directory = self.ledger.ensure_job_directory(reservation)
             paths = dict(data.get('inputPaths', {}))
@@ -797,6 +807,11 @@ class ReferenceDriver:
                         # Attempt and budget remain consumed/uncertain; retain the
                         # existing cap and grant semantics. No automatic renewal.
                         raise DriverWait('broker_response_unavailable') from None
+                    except ValueError:
+                        # Integrity, grant and post-publication ambiguity require
+                        # inspection; never automatically replay the transfer.
+                        self._save(job_id, 'fetch_held', data)
+                        raise DriverHeld('worker_fetch_requires_inspection') from None
                 paths[obj['id']] = relative
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))

@@ -6,13 +6,16 @@ destination directory. Grants and Authorization headers must never be logged.
 from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
+import http.client
 import math
 import os
 from pathlib import Path
 import secrets
+import socket
 import ssl
 import stat
 import time
+import threading
 from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
@@ -120,8 +123,98 @@ class _RefuseRedirects(HTTPRedirectHandler):
         raise TransferError("broker redirects are forbidden")
 
 
+class _TransferWatchdog:
+    """Interrupt active sockets at one monotonic object-transfer deadline.
+
+    DNS resolution and filesystem syscalls cannot be interrupted by this
+    watchdog; an expired deadline is checked before any result is published.
+    """
+    def __init__(self, seconds):
+        self.deadline = time.monotonic() + seconds
+        self._lock = threading.Lock()
+        self._connection = None
+        self._socket = None
+        self._expired = False
+        self._timer = threading.Timer(seconds, self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _expire(self):
+        with self._lock:
+            self._expired = True
+            sockets = (self._socket, getattr(self._connection, 'sock', None))
+            for sock in sockets:
+                if sock is not None:
+                    try: sock.shutdown(socket.SHUT_RDWR)
+                    except OSError: pass
+
+    def connection(self, connection):
+        with self._lock:
+            if self._expired: raise TransferResponseUnavailable('transfer deadline expired')
+            self._connection = connection
+            self._socket = None
+
+    def response(self, response):
+        sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+        with self._lock:
+            if self._expired: raise TransferResponseUnavailable('transfer deadline expired')
+            self._socket = sock
+
+    def remaining(self):
+        remaining = self.deadline - time.monotonic()
+        if self._expired or remaining <= 0: raise TransferResponseUnavailable('transfer deadline expired')
+        return remaining
+
+    def expired(self):
+        return self._expired or time.monotonic() >= self.deadline
+
+    def close(self):
+        self._timer.cancel()
+        self._timer.join()
+        with self._lock:
+            self._connection = self._socket = None
+
+
+class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, *, watchdog, **kwargs):
+        super().__init__(host, **kwargs)
+        self._watchdog = watchdog
+        watchdog.connection(self)
+
+    def connect(self):
+        # HTTPConnection assigns the raw socket before proxy tunnelling. The
+        # watchdog can interrupt the tunnel and TLS handshake as well as HTTP.
+        http.client.HTTPConnection.connect(self)
+        self._watchdog.connection(self)  # DNS/connect may have exceeded the budget.
+        server_hostname = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname,
+                                              do_handshake_on_connect=False)
+        self._watchdog.connection(self)
+        self.sock.settimeout(min(self.timeout, self._watchdog.remaining()))
+        self.sock.do_handshake()
+
+
+class _DeadlineHTTPSHandler(HTTPSHandler):
+    def __init__(self, watchdog, *, context):
+        super().__init__(context=context)
+        self._watchdog = watchdog
+
+    def https_open(self, request):
+        watchdog = self._watchdog
+        def connection(host, **kwargs):
+            return _DeadlineHTTPSConnection(host, watchdog=watchdog, **kwargs)
+        response = self.do_open(connection, request, context=self._context)
+        try:
+            watchdog.response(response)
+            return response
+        except BaseException:
+            response.close()
+            raise
+
+
 class BrokerClient:
-    def __init__(self, origin, *, ssl_context=None, opener=None, clock=time.time, timeout=30, max_response_bytes=MAX_RANGE_BYTES, enable_ranges=False):
+    def __init__(self, origin, *, ssl_context=None, opener=None, clock=time.time, timeout=30,
+                 max_response_bytes=MAX_RANGE_BYTES, enable_ranges=False, total_timeout=3600):
         parsed = urlsplit(origin)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
                 or parsed.password is not None or parsed.path not in ("", "/")
@@ -143,11 +236,15 @@ class BrokerClient:
             raise ValueError('bounded broker response size required')
         if type(enable_ranges) is not bool:
             raise ValueError('explicit range setting required')
+        if type(total_timeout) not in (int, float) or not math.isfinite(total_timeout) or not 0 < total_timeout <= 86400:
+            raise ValueError('invalid total transfer timeout')
         self.origin = origin.rstrip("/")
-        self.clock, self.timeout = clock, timeout
+        self.clock, self.timeout, self.total_timeout = clock, timeout, total_timeout
         self.max_response_bytes = max_response_bytes
         self.enable_ranges = enable_ranges
+        self._custom_opener = opener is not None
         self._open = opener or build_opener(_RefuseRedirects(), HTTPSHandler(context=context)).open
+        self._ssl_context = context
 
     def download_object(self, grant, object_id, destination):
         """Publish one verified object without replacing any existing filesystem entry.
@@ -178,6 +275,7 @@ class BrokerClient:
         part = parent / (".reference-" + secrets.token_hex(16) + ".part")
         descriptor = None
         owned_part = False
+        watchdog = _TransferWatchdog(self.total_timeout)
         try:
             descriptor = os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
             owned_part = True
@@ -186,6 +284,7 @@ class BrokerClient:
             with os.fdopen(descriptor, "wb") as output:
                 descriptor = None
                 while count < obj.byte_size or (obj.byte_size == 0 and count == 0):
+                    watchdog.remaining()
                     if grant.expires <= _now(self.clock):
                         raise TransferError("transfer grant expired")
                     start = count
@@ -195,19 +294,28 @@ class BrokerClient:
                     if ranged: headers['Range'] = f'bytes={start}-{end}'
                     request = Request(self.origin + OBJECT_PREFIX + obj.id, headers=headers, method="GET")
                     try:
-                        response = self._open(request, timeout=self.timeout)
+                        open_request = self._open if self._custom_opener else build_opener(_RefuseRedirects(), _DeadlineHTTPSHandler(watchdog, context=self._ssl_context)).open
+                        response = open_request(request, timeout=min(self.timeout, watchdog.remaining()))
                     except HTTPError as error:
                         error.close()
                         raise TransferError("broker request rejected") from None
-                    except ssl.SSLError:
+                    except ssl.SSLError as error:
+                        if isinstance(error, ssl.SSLCertVerificationError):
+                            raise TransferError("broker TLS validation failed") from None
+                        if watchdog.expired(): raise TransferResponseUnavailable("transfer deadline expired") from None
                         raise TransferError("broker TLS validation failed") from None
                     except URLError as error:
+                        if isinstance(error.reason, ssl.SSLCertVerificationError):
+                            raise TransferError("broker TLS validation failed") from None
+                        if watchdog.expired(): raise TransferResponseUnavailable("transfer deadline expired") from None
                         if isinstance(error.reason, ssl.SSLError):
                             raise TransferError("broker TLS validation failed") from None
                         raise TransferResponseUnavailable("broker response unavailable") from None
                     except OSError:
                         raise TransferResponseUnavailable("broker response unavailable") from None
                     try:
+                        watchdog.response(response)
+                        watchdog.remaining()
                         if response.status != (206 if ranged else 200) or response.geturl() != request.full_url:
                             raise TransferError("unexpected broker response")
                         if ranged and response.headers.get('Content-Range') != f'bytes {start}-{end}/{obj.byte_size}':
@@ -219,17 +327,30 @@ class BrokerClient:
                         if encoding.lower() != "identity":
                             raise TransferError("encoded broker objects are forbidden")
                         part_count = 0
+                        read = response.read if self._custom_opener else getattr(response, 'read1', response.read)
                         while True:
+                            remaining = watchdog.remaining()
                             if grant.expires <= _now(self.clock):
                                 raise TransferError("transfer grant expired")
-                            chunk = response.read(min(CHUNK_BYTES, length_expected - part_count + 1))
-                            if not chunk: break
-                            if not isinstance(chunk, bytes) or part_count + len(chunk) > length_expected:
+                            sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+                            if sock is not None: sock.settimeout(min(self.timeout, remaining))
+                            try:
+                                chunk = read(min(CHUNK_BYTES, length_expected - part_count + 1))
+                            except ssl.SSLCertVerificationError:
+                                raise TransferError("broker TLS validation failed") from None
+                            except (OSError, http.client.HTTPException):
+                                raise TransferResponseUnavailable("broker response unavailable") from None
+                            if chunk and (not isinstance(chunk, bytes) or part_count + len(chunk) > length_expected):
                                 raise TransferError("broker object exceeds declared size")
-                            part_count += len(chunk); count += len(chunk)
-                            digest.update(chunk); output.write(chunk)
+                            watchdog.remaining()
+                            if not chunk:
+                                break
+                            part_count += len(chunk)
+                            count += len(chunk)
+                            digest.update(chunk)
+                            output.write(chunk)
                         if part_count != length_expected:
-                            raise TransferError('broker range truncated')
+                            raise TransferError("broker object length mismatch")
                     finally:
                         response.close()
                     if obj.byte_size == 0: break
@@ -240,6 +361,7 @@ class BrokerClient:
             current = parent.stat()
             if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or parent.resolve() != parent:
                 raise TransferError("destination directory changed")
+            watchdog.remaining()
             if grant.expires <= _now(self.clock):
                 raise TransferError("transfer grant expired")
             # Same-directory hard link atomically fails if target exists, including
@@ -260,6 +382,7 @@ class BrokerClient:
             # they can embed request headers and credentials.
             raise TransferError("reference object transfer failed") from None
         finally:
+            watchdog.close()
             if descriptor is not None:
                 os.close(descriptor)
             if owned_part:
