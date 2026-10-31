@@ -41,11 +41,25 @@ def private_directory(value):
     return root
 
 
+def node_has_outstanding_work(response, node_id):
+    """Treat incomplete or unknown coordinator work records as unsafe to update."""
+    if not isinstance(response,dict) or type(response.get('jobs')) is not list:
+        raise GateError('coordinator job inventory unavailable')
+    busy=False
+    for job in response['jobs']:
+        if not isinstance(job,dict) or job.get('status') not in ('queued','running','held','succeeded','failed','cancelled'):
+            raise GateError('coordinator job inventory invalid')
+        if job['status'] in ('running','held'):
+            if not isinstance(job.get('nodeId'),str) or not job['nodeId']:
+                raise GateError('active job node unknown')
+            busy |= job['nodeId']==node_id
+    return busy
+
+
 @contextmanager
 def idle_host_gate(api, node_id, engine_id, deadline):
     while True:
-        jobs = api.json('GET', '/v1/prototype/jobs')['jobs']
-        busy = any(j.get('nodeId') == node_id and j['status'] in ('running', 'held') for j in jobs)
+        busy = node_has_outstanding_work(api.json('GET', '/v1/prototype/jobs'), node_id)
         gate = None
         if not busy:
             candidate = NodeGate(engine_id)
