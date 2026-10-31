@@ -260,7 +260,9 @@ class ReferenceDriverTests(unittest.TestCase):
 
     def test_worker_finishes_offline_and_redelivers_after_both_restart(self):
         job = self.submit(contents=(b'outage-synthetic-photo',))
+        self.transport.code = 20
         self.advance(job, 'executing')
+        self.assertEqual(self.transport.tasks[job['jobId']], 20)
         now = [time.time()]
         self.outbox.clock = lambda: now[0]
         self.outbox.random = lambda: 0.0
@@ -268,6 +270,8 @@ class ReferenceDriverTests(unittest.TestCase):
         # The coordinator process disappears after the engine has started.
         # The engine completes while offline; its result is sealed locally.
         self.queue.close()
+        self.transport.tasks[job['jobId']] = 40
+        self.assertEqual(self.transport.tasks[job['jobId']], 40)
         self.driver.sender._open = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError('offline'))
         result = self.driver.step()
         self.assertEqual(result['state'], 'delivering')
