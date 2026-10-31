@@ -117,3 +117,10 @@ completion responses, restart readback, future/busy waits, changed plans,
 one-shot waiting/uncertain outcomes, and frozen request/config rejection.
 These are source tests; they do not qualify an image or install unattended
 updating on either processing host.
+
+The prototype job inventory check rejects malformed responses, unknown statuses,
+and running or held jobs without a node ID. A syntactically valid but incomplete
+inventory is not detectable by this check. It covers prototype jobs only: direct
+NodeODM activity and work appearing after the inventory read require the separate
+engine idle, ingress-drain and node-gate protections. This check alone is not a
+physical fence or proof that every process has stopped.

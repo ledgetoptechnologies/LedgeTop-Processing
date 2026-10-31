@@ -132,6 +132,21 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
         with self.adapter._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM run_intents').fetchone()[0],0)
         self.assertEqual(self.host.adapter.calls,[])
 
+    def test_malformed_job_inventory_blocks_readiness_without_replacement_or_open(self):
+        request=self.scheduled()
+        original=self.api.json
+        for response in ({'jobs':[{'status':'running'}]}, {'jobs':None}):
+            def malformed(method,route,*args,**kwargs):
+                if route=='/v1/prototype/jobs':return response
+                return original(method,route,*args,**kwargs)
+            with self.subTest(response=response),patch.object(self.api,'json',side_effect=malformed):
+                with self.assertRaises(module.MaintenanceAdapterHeld):
+                    self.adapter.ready_to_run(request)
+            self.assertEqual(self.host.adapter.calls,[])
+            self.assertEqual(self.host.ingress.opens,0)
+            with self.adapter._db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM run_intents').fetchone()[0],0)
+
     def test_peer_plan_and_cancelled_plan_are_not_run_or_rescheduled(self):
         request=self.scheduled();node=self.host.fixture.queue.get_node('cluster')
         self.operator.json('POST','/v1/prototype/nodes/cluster/cancel',dict(planId=node['planId'],expectedRevision=node['revision']))
