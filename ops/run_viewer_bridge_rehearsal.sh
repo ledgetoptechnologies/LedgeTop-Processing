@@ -16,7 +16,7 @@ BRIDGE_MODE=${BRIDGE_MODE:-full}
 case "$BRIDGE_MODE" in
     reconcile) printf 'reconcile mode is not qualified for the per-object input layout\n' >&2; exit 1;;
     full) SERVER_SCRIPT=viewer_full_bridge_server.py; CLIENT_SCRIPT=viewer_full_bridge_client.cjs; CLIENT_WAIT=75s;;
-    staged-full) SERVER_SCRIPT=viewer_staged_full_server.py; CLIENT_SCRIPT=viewer_staged_full_client.cjs; CLIENT_WAIT=90s; FULL_SERVER_SHA256=3ffb5a8c564b9f03379ceb5a4da4d38ea5b186fd37220375aa1af8809cc222ee; FULL_CLIENT_SHA256=6e2879eafa87deea8b1f4dc3d2f26970f4b387a495c84a1d2f229b5b90d1c268; NODE_EXTRA_CA_CERTS=/exchange/synthetic-ca.pem; export NODE_EXTRA_CA_CERTS;;
+    staged-full) SERVER_SCRIPT=viewer_staged_full_server.py; CLIENT_SCRIPT=viewer_staged_full_client.cjs; CLIENT_WAIT=90s; FULL_SERVER_SHA256=2835fc443b45c83297b3a633cbe807861d6e749a7b01d33081478c4cac1b0c1e; FULL_CLIENT_SHA256=6e2879eafa87deea8b1f4dc3d2f26970f4b387a495c84a1d2f229b5b90d1c268; NODE_EXTRA_CA_CERTS=/exchange/synthetic-ca.pem; export NODE_EXTRA_CA_CERTS;;
     *) printf 'BRIDGE_MODE must be full or staged-full\n' >&2; exit 1;;
 esac
 RUN_ID=$(python3 -c 'import secrets; print(secrets.token_hex(12))')
@@ -143,7 +143,7 @@ printf '%s\n' "$CLIENT_ID" > "$RUN_DIR/client.id"
 owned "$CLIENT_ID"
 code=$(timeout "$CLIENT_WAIT" docker wait "$CLIENT_ID")
 docker_short logs "$CLIENT_ID"
-[ "$code" = 0 ]
+if [ "$code" != 0 ]; then docker_short logs "$SERVER_ID" || :; exit 1; fi
 touch "$RUN_DIR/exchange/stop"
 [ "$(timeout 15s docker wait "$SERVER_ID")" = 0 ]
 cat "$RUN_DIR/exchange/stop.result"
