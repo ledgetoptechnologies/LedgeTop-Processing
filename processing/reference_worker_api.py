@@ -131,6 +131,12 @@ class ReferenceWorkerAPI:
             if method == 'POST' and path == PREFIX + '/viewer-claims':
                 if self.viewer_claims is None:return self._error(404,'not_found')
                 return Response(200,self.viewer_claims.claim(protocol.decode_submission(body),identity))
+            inventory=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/inventory/(0|[1-9][0-9]{0,5})',path) if type(path) is str else None
+            if method=='GET' and inventory:
+                if self.viewer_claims is None:return self._error(404,'not_found')
+                if body:return self._error(400,'invalid_request')
+                token=self._header(headers,'X-Claim-Token')
+                return Response(200,self.viewer_claims.inventory_page(inventory[1],int(inventory[2]),identity,token))
             if method == 'GET' and path == PREFIX + '/authority':
                 return Response(200, {'authorityId': self.store.queue.authority_id})
             if method == 'GET' and path == PREFIX + '/next':

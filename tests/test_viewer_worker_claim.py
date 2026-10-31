@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from processing.reference_worker_api import ReferenceWorkerAPI
 from processing.viewer_service import ViewerService
 from processing.viewer_tasks import TaskStore, VIEWER_PROFILE
 from processing.viewer_worker_claim import ViewerWorkerClaims
+from processing import reference_protocol as protocol
 
 TOKEN_A='a'*32;TOKEN_B='b'*32;TOKEN_MAIN='m'*32
 ENV_POLICY={'cluster':('production','staging'),'main':('production','staging')}
@@ -84,6 +86,15 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         except HTTPError as error:
             with error:return error.code,json.load(error)
 
+    def inventory(self,cursor,claim_token,*,token=TOKEN_A,job=None):
+        request=Request(self.origin+ROUTE+'/'+(job or self.job)+'/inventory/'+str(cursor),
+            headers={'Authorization':'Bearer '+token,'X-Claim-Token':claim_token})
+        try:
+            with build_opener(ProxyHandler({}),HTTPSHandler(context=self.client)).open(request,timeout=3) as response:
+                return response.status,json.load(response)
+        except HTTPError as error:
+            with error:return error.code,json.load(error)
+
     def test_authenticated_claim_replay_after_restart_and_no_legacy_dispatch(self):
         status,claim=self.request();self.assertEqual(status,200)
         self.assertEqual(claim['state'],'claimed_unenrolled')
@@ -102,6 +113,76 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         self.start_server()
         self.assertEqual(self.request(),(200,claim))
         self.assertEqual(self.queue.get(self.job)['status'],'held')
+
+    def test_inventory_requires_exact_principal_and_claim_token(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        code,page=self.inventory(0,claim['claimToken']);self.assertEqual(code,200)
+        self.assertEqual(page['inputInventorySha256'],claim['inputInventorySha256'])
+        self.assertEqual(page['viewerGeneration'],claim['viewerGeneration'])
+        self.assertEqual(len(page['entries']),1);self.assertIsNone(page['nextCursor'])
+        entry=page['entries'][0]
+        self.assertEqual(entry['name'],'photo.jpg');self.assertEqual(entry['bytes'],9)
+        self.assertNotIn('path',json.dumps(page));self.assertEqual(entry['sha256'],hashlib.sha256(b'synthetic').hexdigest())
+        self.assertEqual(self.inventory(0,claim['claimToken'],token='z'*32)[0],401)
+        self.assertEqual(self.inventory(0,claim['claimToken'],token=TOKEN_B)[0],409)
+        self.assertEqual(self.inventory(0,claim['claimToken'],token=TOKEN_MAIN)[0],409)
+        self.assertEqual(self.inventory(0,'wrong')[0],409)
+        self.assertEqual(self.inventory(1,claim['claimToken'])[0],409)
+
+    def test_inventory_replay_after_restart_and_frozen_metadata(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        initial=self.inventory(0,claim['claimToken']);self.assertEqual(initial[0],200)
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_files SET sha256=? WHERE uuid=?",('b'*64,TASK))
+        # The pages come from the transactionally frozen metadata, not the
+        # mutable task table; this is not proof the underlying bytes exist.
+        self.assertEqual(self.inventory(0,claim['claimToken']),initial)
+        self.assertEqual(self.request()[0],409)
+        self.stop_server();self.queue.close();self.queue=None
+        self.start_queue();self.claims=ViewerWorkerClaims(self.queue,self.store,local_max_photos=1000,local_max_input_bytes=100000,node_environments=ENV_POLICY)
+        self.start_server()
+        self.assertEqual(self.inventory(0,claim['claimToken']),initial)
+
+    def test_inventory_rejects_changed_job_environment(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        with self.queue._db() as db:db.execute("UPDATE jobs SET environment='staging' WHERE id=?",(self.job,))
+        self.assertEqual(self.inventory(0,claim['claimToken'])[0],409)
+
+    def test_inventory_rejects_altered_frozen_entry(self):
+        status,claim=self.request();self.assertEqual(status,200)
+        with self.queue._db() as db:db.execute('UPDATE viewer_worker_inventory SET bytes=bytes+1 WHERE job_id=?',(self.job,))
+        self.assertEqual(self.inventory(0,claim['claimToken'])[0],409)
+
+    def test_partial_inventory_schema_blocks_restart(self):
+        self.stop_server()
+        with self.queue._db() as db:db.execute('DROP TABLE viewer_worker_claims')
+        self.queue.close();self.queue=None
+        with self.assertRaisesRegex(RuntimeError,'configuration_required'):
+            make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state')))
+
+    @unittest.skipUnless(os.environ.get('LEDGETOP_INVENTORY_10K')=='1','bounded synthetic 10k opt-in')
+    def test_ten_thousand_metadata_entries_are_paged_and_digest_matches(self):
+        directory=Path(self.store.task(TASK)['directory']);sha=hashlib.sha256(b'x').hexdigest()
+        values=[]
+        for index in range(9999):
+            name='fixture-%05d.jpg'%index;path='entry-%05d'%index
+            (directory/path).write_bytes(b'x')
+            values.append((TASK,name,name,path,1,sha,1))
+        with self.queue._db() as db:
+            db.executemany('INSERT INTO viewer_files(uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)',values)
+        status,claim=self.request(token=TOKEN_MAIN);self.assertEqual(status,200)
+        digest=hashlib.sha256();digest.update(b'[');first=True;count=0;cursor=0
+        while cursor is not None:
+            code,page=self.inventory(cursor,claim['claimToken'],token=TOKEN_MAIN);self.assertEqual(code,200)
+            self.assertLessEqual(len(page['entries']),100);self.assertEqual(page['start'],cursor)
+            for item in page['entries']:
+                self.assertEqual(item['ordinal'],count)
+                entry={key:item[key] for key in ('name','bytes','sha256','isPhoto')}
+                if not first:digest.update(b',')
+                first=False;digest.update(protocol.canonical_json(entry));count+=1
+            cursor=page['nextCursor']
+        digest.update(b']');self.assertEqual(count,10000)
+        self.assertEqual(digest.hexdigest(),claim['inputInventorySha256'])
 
     def test_wrong_identity_environment_node_and_request_fail(self):
         self.assertEqual(self.request(token='z'*32)[0],401)
@@ -168,6 +249,7 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         self.assertEqual(self.request()[0],500)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM viewer_worker_claims').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM viewer_worker_inventory').fetchone()[0],0)
             self.assertEqual(db.execute('SELECT status FROM jobs WHERE id=?',(self.job,)).fetchone()[0],'queued')
             db.execute('DROP TRIGGER injected_failure')
         self.assertEqual(self.request()[0],200)

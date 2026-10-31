@@ -31,6 +31,27 @@ dispatch. The pipeline hash uses the Viewer's canonical stored options and
 outputs. Claims may scan many input rows and stat files inside a SQLite write
 transaction; performance and starvation on large projects are unqualified.
 
+This draft also freezes the ordered upload-time inventory in the same transaction
+as the claim. The authenticated worker may read pages of at most 100 entries at
+`GET /ltds/worker/v1/viewer-claims/<job-id>/inventory/<cursor>` using its worker
+bearer and exact claim token. Each entry includes an ordinal, opaque identity,
+name, byte count, stored SHA-256 and photo flag; it does not expose a source
+filesystem path or input bytes. The next cursor is null at the end. Consumers
+must iterate from zero without gaps and independently recompute the original
+`inputInventorySha256` over the canonical JSON array of `{name, bytes, sha256,
+isPhoto}` entries in order. A page or object ID alone does not prove a complete
+inventory or current file bytes. A held-on-restart claim permits only the same
+authenticated metadata read; it grants no node enrollment or dispatch.
+
+Paging bounds individual responses and does not rescan every file per page.
+Claim creation currently loads O(N) filename/hash metadata and stats O(N) files
+under one SQLite write transaction. One isolated tmpfs test exercised 10,000
+tiny synthetic inputs over TLS and verified 100 bounded pages and the digest;
+it does not establish memory, storage, time or correctness for a real 50 GB
+dataset, concurrent clients, network interruption or a deployed server. There
+is still no direct-Viewer object streaming endpoint, node input allocation,
+byte verification, durable input custody or safe dispatch.
+
 Creating the new table is a durable mode marker. In source containing this
 draft, the legacy Viewer scheduler and generic Viewer-profile queue claims
 refuse to dispatch while it exists. Startup with the marker but without the
