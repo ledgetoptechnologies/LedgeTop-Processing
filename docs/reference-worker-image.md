@@ -51,12 +51,17 @@ container explicitly run as UID/GID `10001:10001`, with temporary state, a synth
 and the real local coordinator API. The coordinator listener is stopped before
 the transfer grant is made available; the test confirms the engine has received
 no work, kills the worker process, restarts both, and verifies a single engine
-submission, retained input, archive digest and coordinator receipt. Container
+submission and retained input and archive digests. An authenticated synthetic
+Viewer client fetches the archive through the coordinator result proxy, checks
+the bytes, and submits and replays a full acceptance receipt. The test verifies
+retention over a short pre-acceptance wait and the exact stored receipt. Container
 and test state are removed afterward.
 
 The coordinator runs as a thread in the same container and the engine and
 broker are fixtures. This test does not cover a worker restart during engine
-processing, real NodeODM, Viewer acceptance, NAS storage, or power loss. The
+processing, real NodeODM, the real Viewer implementation, NAS storage, or
+power loss. The short pre-acceptance wait is not a cleanup grace-period or
+long-duration retention test; post-acceptance deletion is not tested. The
 revision label is supplied by the builder and is not itself a provenance
 attestation. The fixture script, synthetic-engine implementation and contract
 JSON are mounted from the test checkout; their bytes are not pinned to the
