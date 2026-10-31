@@ -444,7 +444,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
 
     def test_configured_predecessor_is_exact_and_checkpoint_bound(self):
-        predecessor=('a'*64,'sha256:'+'b'*64,'c'*40)
+        predecessor=('8'*64,'sha256:'+'9'*64,'c'*40)
         updated=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,predecessor=predecessor)
         with self.assertRaises(module.Stopped):updated.validate(self.state)
         state=copy.deepcopy(self.state)
@@ -454,6 +454,23 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             with self.assertRaises(module.Stopped):module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,predecessor=candidate)
         state['old']['containerId']='d'*64
         with self.assertRaises(module.Stopped):updated.validate(state)
+
+    def test_prepare_checks_configured_predecessor_image_and_revision(self):
+        predecessor=('8'*64,'sha256:'+'9'*64,'c'*40)
+        original_image=self.transport.image
+        def image(value):
+            result=original_image(value)
+            if value==predecessor[1]:result['Config']['Labels']['org.opencontainers.image.revision']=predecessor[2]
+            return result
+        with patch.object(self.transport,'image',side_effect=image):
+            item=self.transport.container(predecessor[0],predecessor[1],module.NAME,True)
+            self.transport.containers.pop(module.OLD_ID);self.transport.containers[predecessor[0]]=item
+            root=self.root/'configured';root.mkdir(mode=0o700)
+            updater=module.ReferenceCoordinatorUpdate(root,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None,predecessor=predecessor)
+            state=updater.prepare(TARGET,SOURCE,MAIN)
+            self.assertEqual((state['old']['containerId'],state['old']['image'],state['oldSourceCommit']),predecessor)
+            wrong=module.ReferenceCoordinatorUpdate(root,gate_factory=self.gates,transport=self.transport,predecessor=(predecessor[0],predecessor[1],'d'*40))
+            with self.assertRaises(module.Stopped):wrong.validate(state)
 
     def test_existing_owned_schedule_history_is_preserved_and_compared(self):
         with self.queue._db() as db:
