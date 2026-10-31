@@ -19,7 +19,7 @@ async function main(){
     fs.mkdirSync(path.join(config.datasetsMount,'source'));const photo=Buffer.from('synthetic');fs.writeFileSync(path.join(config.datasetsMount,'source','photo.jpg'),photo);
     const hash=crypto.createHash('sha256').update(photo).digest('hex');
     processing.finalizeDataset(dataset.id,[{id:'synthetic-photo',relativePath:'photo.jpg',byteSize:photo.length,sha256:hash,contentType:'image/jpeg',metadata:{width:100,height:100}}],hash);
-    const provider=processing.upsertProvider({authEnvKey:NO_AUTH_MARKER,type:'nodeodm',displayName:'Synthetic Processing',endpoint:`http://127.0.0.1:${bridge.port}`,enabled:true,capabilities:{reservations:{version:1}}});
+    const provider=processing.upsertProvider({authEnvKey:NO_AUTH_MARKER,type:'nodeodm',displayName:'Synthetic Processing',endpoint:`https://127.0.0.1:${bridge.port}`,enabled:true,capabilities:{reservations:{version:1}}});
     const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic full bridge task'});
     const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,providerTaskId:bridge.task,options:{dsm:true},createdBy:'fixture'});
     const sealed=new ProviderCredentials({processing,activeKeyId:'fixture',keys:{fixture:Buffer.alloc(32,3).toString('base64')}});

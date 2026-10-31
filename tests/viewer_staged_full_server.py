@@ -118,6 +118,7 @@ def main():
                 print('synthetic-provider',self.command,self.path,code,flush=True)
             def log_message(self,*_args):pass
         provider=ThreadingHTTPServer(('127.0.0.1',0),Provider)
+        provider.socket=fixture.tls.wrap_socket(provider.socket,server_side=True)
         provider_thread=threading.Thread(target=provider.serve_forever,kwargs={'poll_interval':.05});provider_thread.start()
         def execute():
             try:
