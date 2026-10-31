@@ -51,6 +51,7 @@ FILE_FIELDS = ('kind', 'mode', 'uid', 'gid', 'mtime', 'bytes', 'content')
 DIRECTORY_FIELDS = ('kind', 'mode', 'uid', 'gid', 'mtime')
 ALLOWABLE_FIELDS = frozenset(FILE_FIELDS) - {'kind'}
 SCHEMA_VERSION = 3
+MAX_TREE_ENTRIES = 250_000
 
 
 def read_key(stream):
@@ -113,30 +114,73 @@ def tree(root, key):
     root = Path(root)
     entries = {path_id(key, '.'): dict(_entry(key, root, root.lstat()), root=True)}
     errors = []
+    directories = []
+    pending = [root]
+    discovered = 1
+    incoming = 0
+    spool_entries = None
 
     def failed(error):
         errors.append(type(error).__name__)
 
-    for directory, names, files in os.walk(root, followlinks=False, onerror=failed):
-        names.sort()
-        for name in sorted(names) + sorted(files):
-            path = Path(directory) / name
-            try:
-                entries[path_id(key, path.relative_to(root).as_posix())] = _entry(key, path, path.lstat())
-            except OSError as error:
-                failed(error)
+    def directory_identity(info):
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError('census directory changed')
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def names_in(directory):
+        names = []
+        with os.scandir(directory) as scan:
+            for item in scan:
+                names.append(item.name)
+                if len(names) > MAX_TREE_ENTRIES:
+                    raise OSError('census entry limit')
+        return tuple(sorted(names))
+
+    while pending:
+        directory = pending.pop()
+        try:
+            before = directory_identity(directory.lstat())
+            names = names_in(directory)
+            if directory_identity(directory.lstat()) != before:
+                raise OSError('census directory changed')
+            discovered += len(names)
+            if discovered > MAX_TREE_ENTRIES:
+                raise OSError('census entry limit')
+            directories.append((directory, before, names))
+            if directory == root / 'viewer-spool':
+                spool_entries = len(names)
+            for name in names:
+                path = directory / name
+                info = path.lstat()
+                entries[path_id(key, path.relative_to(root).as_posix())] = _entry(key, path, info)
+                if name.startswith('.incoming-'):
+                    incoming += 1
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(path)
+        except OSError as error:
+            failed(error)
+
+    # Detect persistent membership or metadata changes after a directory was
+    # first scanned. This remains a point-in-time check, never a writer fence.
+    for directory, identity, names in directories:
+        try:
+            if directory_identity(directory.lstat()) != identity or names_in(directory) != names:
+                raise OSError('census directory changed')
+        except OSError as error:
+            failed(error)
     values = list(entries.values())
     rejected = {'symlinks': sum(e['kind'] == 'symlink' for e in values),
                 'other': sum(e['kind'] == 'other' for e in values),
                 'hardlinked': sum(e.get('links', 1) > 1 for e in values),
                 'unreadable': len(errors)}
     canonical = json.dumps(sorted(entries.items()), sort_keys=True, separators=(',', ':')).encode()
-    spool = root / 'viewer-spool'
     summary = {'treeDigest': _keyed(key, canonical).hexdigest(), 'entries': len(values),
                'regularFiles': sum(e['kind'] == 'file' for e in values),
                'bytes': sum(e.get('bytes', 0) for e in values),
-               'incomingPartials': sum(1 for _ in root.rglob('.incoming-*')),
-               'spoolEntries': sum(1 for _ in spool.iterdir()) if spool.is_dir() else None,
+               'incomingPartials': incoming,
+               'spoolEntries': spool_entries,
                'rejected': rejected}
     return summary, entries
 

@@ -77,6 +77,33 @@ class CensusFixture(unittest.TestCase):
 
 
 class CensusTest(CensusFixture):
+    def test_add_or_remove_after_directory_scan_is_rejected(self):
+        original_entry = state_census._entry
+        for change in ('add', 'remove'):
+            with self.subTest(change=change):
+                extra = self.root / 'after-scan'
+                if change == 'remove':
+                    extra.write_bytes(b'synthetic')
+                changed = False
+                def modify(key, path, info):
+                    nonlocal changed
+                    result = original_entry(key, path, info)
+                    if not changed and path.name == 'DJI_0001.JPG':
+                        changed = True
+                        if change == 'add': extra.write_bytes(b'synthetic')
+                        else: extra.unlink()
+                    return result
+                with mock.patch('ops.state_census._entry', side_effect=modify):
+                    summary, _ = state_census.tree(self.root, KEY)
+                self.assertTrue(changed)
+                self.assertGreater(summary['rejected']['unreadable'], 0)
+                if extra.exists(): extra.unlink()
+
+    def test_entry_limit_fails_closed(self):
+        with mock.patch('ops.state_census.MAX_TREE_ENTRIES', 2):
+            summary, _ = state_census.tree(self.root, KEY)
+        self.assertGreater(summary['rejected']['unreadable'], 0)
+
     def test_changed_file_during_hash_is_rejected(self):
         target = self.root / 'viewer-tasks' / 'task-1' / 'DJI_0001.JPG'
         real_read = os.read
