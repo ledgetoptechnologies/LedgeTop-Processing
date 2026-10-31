@@ -29,6 +29,7 @@ MANIFEST_DDL='CREATE TABLE manifest (singleton INTEGER PRIMARY KEY CHECK(singlet
 OBJECT_DDL='''CREATE TABLE objects (ordinal INTEGER PRIMARY KEY, object_id TEXT NOT NULL UNIQUE, entry TEXT NOT NULL,
  mac TEXT NOT NULL, phase TEXT NOT NULL, slot_key TEXT, slot_identity TEXT)'''
 PLAN_DDL='CREATE TABLE plan (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL)'
+GRANT_DDL='CREATE TABLE execution_grant (singleton INTEGER PRIMARY KEY CHECK(singleton=1), request TEXT NOT NULL, value TEXT NOT NULL)'
 
 
 class ViewerNodeInputs:
@@ -62,12 +63,12 @@ class ViewerNodeInputs:
         finally:os.close(rootfd)
         with self._db(bootstrap=True) as db:
             objects=db.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
-            if not objects:db.execute(POLICY_DDL);db.execute(MANIFEST_DDL);db.execute(OBJECT_DDL);db.execute(PLAN_DDL)
+            if not objects:db.execute(POLICY_DDL);db.execute(MANIFEST_DDL);db.execute(OBJECT_DDL);db.execute(PLAN_DDL);db.execute(GRANT_DDL)
             self._schema(db);value=p.canonical_json(self.policy).decode()
             existing=db.execute('SELECT value,mac_key FROM policy WHERE singleton=1').fetchone()
             if existing and existing[0]!=value:raise InputHeld('input_policy_changed')
             if not existing:
-                if db.execute('SELECT 1 FROM manifest UNION ALL SELECT 1 FROM objects UNION ALL SELECT 1 FROM plan LIMIT 1').fetchone():
+                if db.execute('SELECT 1 FROM manifest UNION ALL SELECT 1 FROM objects UNION ALL SELECT 1 FROM plan UNION ALL SELECT 1 FROM execution_grant LIMIT 1').fetchone():
                     raise InputHeld('input_policy_missing')
                 db.execute('INSERT INTO policy VALUES(1,?,?)',(value,secrets.token_hex(32)))
 
@@ -76,7 +77,7 @@ class ViewerNodeInputs:
         query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
-            for sql in (POLICY_DDL,MANIFEST_DDL,OBJECT_DDL,PLAN_DDL):expected.execute(sql)
+            for sql in (POLICY_DDL,MANIFEST_DDL,OBJECT_DDL,PLAN_DDL,GRANT_DDL):expected.execute(sql)
             if db.execute(query).fetchall()!=expected.execute(query).fetchall():raise InputHeld('input_schema_changed')
         finally:expected.close()
 
@@ -197,6 +198,48 @@ class ViewerNodeInputs:
                 if saved and saved[0]!=encoded:raise InputHeld('plan_replay_changed')
                 if not saved:db.execute('INSERT INTO plan VALUES(1,?)',(encoded,))
             return plan
+
+    def request_execution_grant(self):
+        """Request a synthetic grant only after rechecking every retained input."""
+        with self._lock:
+            self.fetch_plan();self.freeze_inventory()
+            with self._gate():
+                with self._db() as db:
+                    manifest=db.execute('SELECT phase,digest,count,total FROM manifest WHERE singleton=1').fetchone()
+                    self._verify_inventory_rows(db,manifest)
+                    rows=db.execute('SELECT entry,phase,slot_key,slot_identity FROM objects ORDER BY ordinal').fetchall()
+                for encoded,phase,key,recorded in rows:
+                    entry=p.decode_submission(encoded)
+                    expected_key=p.digest(dict(purpose='viewer-input-slot-v1',bindingSha256=self.binding_sha,objectId=entry['objectId']))
+                    if phase!='verified' or key!=expected_key or not isinstance(recorded,str):raise InputHeld('input_not_verified')
+                    slot=open_slot(self.policy['inputRoot'],self.policy['inputRootIdentity'],key,entry['bytes'],
+                                   max_budget=self.policy['maxObject'],create=False)
+                    try:
+                        actual=p.canonical_json(dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))).decode()
+                        if actual!=recorded or self._hash_slot(slot,entry['bytes'])!=entry['sha256']:
+                            raise InputHeld('input_identity_or_hash_changed')
+                    finally:slot.close()
+                slot_identity=json.loads(self._local_claim())
+                request=dict(enrollmentReceipt=p.digest(dict(binding=self.binding,slotIdentity=slot_identity)),
+                    inputInventorySha256=self.claim['inputInventorySha256'],pipelineSha256=self.claim['pipelineSha256'],
+                    inputCount=manifest[2],inputBytes=manifest[3])
+                grant=self.worker._request(request,job_id=self.claim['jobId'],claim_token=self.claim['claimToken'],kind='execution-grant')
+                expected=dict(schemaVersion=1,kind='synthetic_execution_grant',authorityId=self.claim['authorityId'],jobId=self.claim['jobId'],
+                    viewerTaskId=self.claim['viewerTaskId'],viewerGeneration=self.claim['viewerGeneration'],
+                    environment=self.claim['environment'],nodeId=self.claim['nodeId'],workerId=self.claim['workerId'],
+                    workerInstanceId=self.claim['workerInstanceId'],engineTaskId=self.claim['engineTaskId'],
+                    inputInventorySha256=request['inputInventorySha256'],pipelineSha256=request['pipelineSha256'],
+                    enrollmentReceipt=request['enrollmentReceipt'],inputCount=request['inputCount'],inputBytes=request['inputBytes'])
+                p._closed(grant,(*expected.keys(),'taskName'),'execution grant')
+                if (any(grant[k]!=v or type(grant[k]) is not type(v) for k,v in expected.items()) or type(grant['taskName']) is not str
+                        or len(grant['taskName'])>256 or any(ord(char)<32 for char in grant['taskName'])):
+                    raise InputHeld('execution_grant_changed')
+                encoded=p.canonical_json(grant).decode();request_text=p.canonical_json(request).decode()
+                with self._db() as db:
+                    old=db.execute('SELECT request,value FROM execution_grant WHERE singleton=1').fetchone()
+                    if old and old!=(request_text,encoded):raise InputHeld('execution_grant_replay_changed')
+                    if not old:db.execute('INSERT INTO execution_grant VALUES(1,?,?)',(request_text,encoded))
+                return grant
 
     def _verify_inventory_rows(self,db,manifest):
         key=bytes.fromhex(db.execute('SELECT mac_key FROM policy WHERE singleton=1').fetchone()[0])

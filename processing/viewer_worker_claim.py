@@ -40,7 +40,8 @@ FILES_DDL = '''CREATE TABLE viewer_worker_inventory (
  PRIMARY KEY(job_id,ordinal), UNIQUE(job_id,object_id))'''
 ENROLL_DDL = '''CREATE TABLE viewer_worker_enrollments (
  job_id TEXT PRIMARY KEY, attestation TEXT NOT NULL, receipt TEXT NOT NULL)'''
-PLAN_DDL = '''CREATE TABLE viewer_worker_plans (job_id TEXT PRIMARY KEY, plan TEXT NOT NULL)'''
+PLAN_DDL = '''CREATE TABLE viewer_worker_plans (job_id TEXT PRIMARY KEY, plan TEXT NOT NULL, task_name TEXT NOT NULL)'''
+GRANT_DDL = '''CREATE TABLE viewer_worker_grants (job_id TEXT PRIMARY KEY, request TEXT NOT NULL, grant_value TEXT NOT NULL)'''
 PAGE_SIZE=100
 MAX_INPUT_READERS=2
 
@@ -90,16 +91,16 @@ class ViewerWorkerClaims:
         self.node_environments=MappingProxyType({node:frozenset(values) for node,values in node_environments.items()})
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans')").fetchall()
-            if not objects:db.execute(DDL);db.execute(FILES_DDL);db.execute(ENROLL_DDL);db.execute(PLAN_DDL)
+            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants')").fetchall()
+            if not objects:db.execute(DDL);db.execute(FILES_DDL);db.execute(ENROLL_DDL);db.execute(PLAN_DDL);db.execute(GRANT_DDL)
             self._schema(db)
 
     @staticmethod
     def _schema(db):
-        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans') ORDER BY type,name"
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants') ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
-            expected.execute(DDL);expected.execute(FILES_DDL);expected.execute(ENROLL_DDL);expected.execute(PLAN_DDL)
+            expected.execute(DDL);expected.execute(FILES_DDL);expected.execute(ENROLL_DDL);expected.execute(PLAN_DDL);expected.execute(GRANT_DDL)
             if [tuple(row) for row in db.execute(query)] != [tuple(row) for row in expected.execute(query)]:
                 raise Conflict('Viewer claim schema changed')
         finally:expected.close()
@@ -150,7 +151,7 @@ class ViewerWorkerClaims:
             workerInstanceId=identity['worker_instance_id'],engineTaskId=engine_uuid,
             inputInventorySha256=p.digest(manifest),pipelineSha256=hashlib.sha256(settings).hexdigest(),
             imageCount=item['images_count'],inputBytes=item['input_bytes'],state='claimed_unenrolled')
-        return (value,manifest,source,settings.decode()) if include_manifest else value
+        return (value,manifest,source,settings.decode(),item['name']) if include_manifest else value
 
     def claim(self,payload,identity):
         p._closed(payload,('jobId','claimRequestId','environment'),'Viewer worker claim')
@@ -197,11 +198,11 @@ class ViewerWorkerClaims:
             if not head or head['id']!=job['id'] or job['status']!='queued':raise Conflict('Viewer queue head changed')
             if task['stage']!='queued' or task['phase'] not in ('queued','waiting_node') or any(task[k] is not None for k in ('node_id','engine_uuid','claim_token')):
                 raise Conflict('Viewer task is not unclaimed')
-            engine_uuid=str(uuid.uuid4());value,manifest,source,settings=self._binding(db,job,task,identity,engine_uuid,include_manifest=True)
+            engine_uuid=str(uuid.uuid4());value,manifest,source,settings,task_name=self._binding(db,job,task,identity,engine_uuid,include_manifest=True)
             token=secrets.token_urlsafe(32);encoded=p.canonical_json(value).decode()
             db.execute('INSERT INTO viewer_worker_claims VALUES(?,?,?,?,?,?,?,?)',
                 (job['id'],payload['claimRequestId'],identity['node_id'],identity['worker_id'],identity['worker_instance_id'],job['environment'],encoded,token))
-            db.execute('INSERT INTO viewer_worker_plans VALUES(?,?)',(job['id'],settings))
+            db.execute('INSERT INTO viewer_worker_plans VALUES(?,?,?)',(job['id'],settings,task_name))
             db.executemany('INSERT INTO viewer_worker_inventory VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(
                 (job['id'],index,p.digest(dict(jobId=job['id'],generation=task['generation'],ordinal=index,entry=entry)),
                  entry['name'],entry['bytes'],entry['sha256'],int(entry['isPhoto']),*source[index]) for index,entry in enumerate(manifest)))
@@ -255,6 +256,40 @@ class ViewerWorkerClaims:
                     raise ValueError()
             except (ValueError,TypeError,RecursionError):raise Conflict('Viewer plan changed') from None
             return dict(jobId=job_id,viewerGeneration=saved['viewerGeneration'],pipelineSha256=saved['pipelineSha256'],plan=value)
+
+    def execution_grant(self,job_id,payload,identity,claim_token):
+        """Prototype grant after a trusted worker attests complete local inputs."""
+        p._uuid(job_id,'job ID')
+        p._closed(payload,('enrollmentReceipt','inputInventorySha256','pipelineSha256','inputCount','inputBytes'),'execution grant request')
+        for field in ('enrollmentReceipt','inputInventorySha256','pipelineSha256'):p._hash(payload[field],field)
+        for field in ('inputCount','inputBytes'):p._integer(payload[field],field)
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');saved,_=self._authorize_inventory(db,job_id,identity,claim_token)
+            enrollment=db.execute('SELECT receipt FROM viewer_worker_enrollments WHERE job_id=?',(job_id,)).fetchone()
+            plan=db.execute('SELECT plan,task_name FROM viewer_worker_plans WHERE job_id=?',(job_id,)).fetchone()
+            job=db.execute('SELECT status FROM jobs WHERE id=?',(job_id,)).fetchone()
+            inventory=db.execute('SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM viewer_worker_inventory WHERE job_id=?',(job_id,)).fetchone()
+            if (not enrollment or not plan or not job or job['status']!='running' or type(plan['task_name']) is not str or len(plan['task_name'])>256
+                or any(ord(char)<32 for char in plan['task_name'])
+                or payload['enrollmentReceipt']!=enrollment['receipt'] or payload['inputInventorySha256']!=saved['inputInventorySha256']
+                or payload['pipelineSha256']!=saved['pipelineSha256'] or payload['inputBytes']!=saved['inputBytes']
+                or tuple(inventory)!=(payload['inputCount'],payload['inputBytes'])):
+                raise Conflict('execution grant binding changed')
+            try:
+                value=json.loads(plan['plan']);p._closed(value,('options','outputs'),'Viewer plan')
+                if canonical(value)!=plan['plan'] or direct_pipeline_digest(value['options'],value['outputs'])!=saved['pipelineSha256']:raise ValueError()
+            except (ValueError,TypeError,RecursionError):raise Conflict('Viewer plan changed') from None
+            request=p.canonical_json(payload).decode()
+            grant=dict(schemaVersion=1,kind='synthetic_execution_grant',authorityId=saved['authorityId'],jobId=job_id,viewerTaskId=saved['viewerTaskId'],
+                viewerGeneration=saved['viewerGeneration'],environment=saved['environment'],nodeId=saved['nodeId'],
+                workerId=saved['workerId'],workerInstanceId=saved['workerInstanceId'],engineTaskId=saved['engineTaskId'],
+                taskName=plan['task_name'],inputInventorySha256=saved['inputInventorySha256'],pipelineSha256=saved['pipelineSha256'],
+                enrollmentReceipt=enrollment['receipt'],inputCount=payload['inputCount'],inputBytes=payload['inputBytes'])
+            encoded=p.canonical_json(grant).decode();old=db.execute('SELECT request,grant_value FROM viewer_worker_grants WHERE job_id=?',(job_id,)).fetchone()
+            if old:
+                if (old['request'],old['grant_value'])!=(request,encoded):raise Conflict('execution grant changed')
+            else:db.execute('INSERT INTO viewer_worker_grants VALUES(?,?,?)',(job_id,request,encoded))
+            return grant
 
     def enroll(self,job_id,payload,identity,claim_token):
         p._uuid(job_id,'job ID');p._closed(payload,('binding','slotIdentity'),'node enrollment')

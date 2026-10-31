@@ -136,6 +136,11 @@ class ReferenceWorkerAPI:
                 if self.viewer_claims is None:return self._error(404,'not_found')
                 token=self._header(headers,'X-Claim-Token')
                 return Response(200,self.viewer_claims.enroll(enrollment[1],protocol.decode_submission(body),identity,token))
+            grant=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/execution-grant',path) if type(path) is str else None
+            if method=='POST' and grant:
+                if self.viewer_claims is None:return self._error(404,'not_found')
+                return Response(200,self.viewer_claims.execution_grant(grant[1],protocol.decode_submission(body),identity,
+                                                                      self._header(headers,'X-Claim-Token')))
             plan=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/plan',path) if type(path) is str else None
             if method=='GET' and plan:
                 if self.viewer_claims is None:return self._error(404,'not_found')

@@ -287,7 +287,7 @@ class Queue(Maintenance):
             if not row:
                 return None
             if row['profile']=='odm-viewer-v1' and db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans')").fetchone():
+                    "SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants')").fetchone():
                 # Once enrolled mode has ever created its durable marker,
                 # generic claims cannot bypass the authenticated worker path.
                 return None

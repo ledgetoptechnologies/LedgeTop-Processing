@@ -261,6 +261,7 @@ class ViewerWorkerClaimTests(unittest.TestCase):
             db.execute('DROP TABLE viewer_worker_claims')
             db.execute('DROP TABLE viewer_worker_inventory')
             db.execute('DROP TABLE viewer_worker_plans')
+            db.execute('DROP TABLE viewer_worker_grants')
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
         class Bomb:
             def __getattribute__(self,name):raise AssertionError('engine access forbidden')
@@ -275,7 +276,21 @@ class ViewerWorkerClaimTests(unittest.TestCase):
 
     def test_plan_only_marker_blocks_legacy_claim_tick_and_startup(self):
         with self.queue._db() as db:
-            for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments'):
+            for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_grants'):
+                db.execute('DROP TABLE '+table)
+        self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
+        class Bomb:
+            def __getattribute__(self,name):raise AssertionError('engine access forbidden')
+        service=ViewerService(self.queue,Config('x'*32,'','',1000,100000,viewer_enabled=True),store=self.store,
+                              engines={'cluster':Bomb(),'main':Bomb()},probe=lambda *a:self.fail('probe forbidden'))
+        service.tick();self.assertEqual(self.queue.get(self.job)['status'],'queued')
+        self.stop_server();self.queue.close();self.queue=None
+        with self.assertRaisesRegex(RuntimeError,'configuration_required'):
+            make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state')))
+
+    def test_grant_only_marker_blocks_legacy_claim_tick_and_startup(self):
+        with self.queue._db() as db:
+            for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans'):
                 db.execute('DROP TABLE '+table)
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
         class Bomb:

@@ -150,11 +150,13 @@ class ViewerNodeEnrollment:
             if db.execute(query).fetchall()!=memory.execute(query).fetchall():raise EnrollmentHeld('journal_schema_changed')
         finally:memory.close()
 
-    def _request(self,request,*,job_id=None,claim_token=None):
+    def _request(self,request,*,job_id=None,claim_token=None,kind='enrollment'):
         url=self.config['origin']+'/ltds/worker/v1/viewer-claims'
         headers={'Authorization':'Bearer '+self._bearer,'Accept':'application/json','Content-Type':'application/json','Accept-Encoding':'identity'}
         if job_id is not None:
-            p._uuid(job_id,'job ID');url+='/'+job_id+'/enrollment';headers['X-Claim-Token']=claim_token
+            p._uuid(job_id,'job ID')
+            if kind not in ('enrollment','execution-grant'):raise EnrollmentHeld('request_kind_invalid')
+            url+='/'+job_id+'/'+kind;headers['X-Claim-Token']=claim_token
         query=Request(url,data=p.canonical_json(request),method='POST',headers=headers)
         watchdog=_TransferWatchdog(30)
         try:

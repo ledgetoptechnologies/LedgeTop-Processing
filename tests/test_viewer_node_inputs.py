@@ -6,6 +6,8 @@ import sys
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import HTTPSHandler,ProxyHandler,Request,build_opener
 
 from ops.reference_worker_daemon import DaemonStateLock
 from processing.direct_output_slot import _identity
@@ -84,6 +86,92 @@ class NodeInputsTests(unittest.TestCase):
                 inputs.freeze_inventory()
             with inputs._db() as db:
                 self.assertIsNone(db.execute('SELECT phase FROM manifest').fetchone())
+
+    def test_grant_requires_verified_inputs_and_replays_after_restart(self):
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner)
+            with self.assertRaisesRegex(InputHeld,'input_not_verified'):inputs.request_execution_grant()
+            object_id=self.object_id(inputs);inputs.transfer(object_id)
+            with self.base.fixture.queue._db() as db:
+                db.execute("UPDATE viewer_tasks SET name='changed' WHERE uuid=?",(inputs.claim['viewerTaskId'],))
+            grant=inputs.request_execution_grant()
+            self.assertEqual(grant['taskName'],'synthetic')
+            self.assertEqual(grant['kind'],'synthetic_execution_grant')
+            self.assertEqual(inputs.request_execution_grant(),grant)
+        with DaemonStateLock(self.base.worker) as owner:
+            self.assertEqual(self.make(owner).request_execution_grant(),grant)
+        self.assertEqual(self.base.fixture.queue.get(self.base.fixture.job)['status'],'running')
+
+    def test_grant_holds_after_input_mutation(self):
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner);inputs.freeze_inventory();object_id=self.object_id(inputs);inputs.transfer(object_id)
+            with inputs._db() as db:key=db.execute('SELECT slot_key FROM objects WHERE object_id=?',(object_id,)).fetchone()[0]
+            (self.inputs/('slot-'+key+'.alloc')).write_bytes(b'different')
+            with self.assertRaises(InputHeld):inputs.request_execution_grant()
+        with self.base.fixture.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_grants').fetchone()[0],0)
+
+    def test_lost_grant_response_replays_without_new_identity(self):
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner);inputs.freeze_inventory();inputs.transfer(self.object_id(inputs))
+            original=ViewerNodeEnrollment._request
+            def lose(worker,request,**kwargs):
+                value=original(worker,request,**kwargs)
+                if kwargs.get('kind')=='execution-grant':raise EnrollmentHeld('synthetic_response_lost')
+                return value
+            with patch.object(ViewerNodeEnrollment,'_request',lose):
+                with self.assertRaisesRegex(EnrollmentHeld,'synthetic_response_lost'):inputs.request_execution_grant()
+            grant=inputs.request_execution_grant()
+            self.assertEqual(inputs.request_execution_grant(),grant)
+        with self.base.fixture.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_worker_grants').fetchone()[0],1)
+
+    def test_grant_rejects_wrong_claim_token_and_evidence(self):
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner);inputs.freeze_inventory();inputs.transfer(self.object_id(inputs))
+            grant=inputs.request_execution_grant()
+            payload={k:grant[k] for k in ('enrollmentReceipt','inputInventorySha256','pipelineSha256','inputCount','inputBytes')}
+            request=Request(self.base.fixture.origin+'/ltds/worker/v1/viewer-claims/'+inputs.claim['jobId']+'/execution-grant',
+                            data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'Bearer '+'b'*32,
+                            'X-Claim-Token':inputs.claim['claimToken'],'Content-Type':'application/json'})
+            with self.assertRaises(HTTPError) as error:
+                build_opener(ProxyHandler({}),HTTPSHandler(context=self.base.fixture.client)).open(request,timeout=3)
+            self.assertEqual(error.exception.code,409);error.exception.close()
+            with self.assertRaises(EnrollmentHeld):
+                inputs.worker._request(payload,job_id=inputs.claim['jobId'],claim_token='wrong',kind='execution-grant')
+            payload['inputBytes']+=1
+            with self.assertRaises(EnrollmentHeld):
+                inputs.worker._request(payload,job_id=inputs.claim['jobId'],claim_token=inputs.claim['claimToken'],kind='execution-grant')
+            payload['inputBytes']-=1
+            with self.base.fixture.queue._db() as db:
+                db.execute("UPDATE jobs SET status='held',held_reason='coordinator_restart' WHERE id=?",(inputs.claim['jobId'],))
+            with self.assertRaises(EnrollmentHeld):
+                inputs.worker._request(payload,job_id=inputs.claim['jobId'],claim_token=inputs.claim['claimToken'],kind='execution-grant')
+
+    def test_grant_replays_after_node_killed_after_coordinator_response(self):
+        with DaemonStateLock(self.base.worker) as owner:
+            inputs=self.make(owner);inputs.freeze_inventory();inputs.transfer(self.object_id(inputs))
+        code='''import json,os,signal,sys
+from ops.reference_worker_daemon import DaemonStateLock
+from processing.viewer_node_enrollment import ViewerNodeEnrollment
+from processing.viewer_node_inputs import ViewerNodeInputs
+root,config,job,input_root,identity=sys.argv[1:]
+original=ViewerNodeEnrollment._request
+def request(self,payload,**kwargs):
+ result=original(self,payload,**kwargs)
+ if kwargs.get('kind')=='execution-grant':os.kill(os.getpid(),signal.SIGKILL)
+ return result
+ViewerNodeEnrollment._request=request
+with DaemonStateLock(root) as owner:
+ worker=ViewerNodeEnrollment(owner,**json.loads(config))
+ inputs=ViewerNodeInputs(worker,job,'enroll-1','production',input_root=input_root,input_root_identity=json.loads(identity),max_total=100000,max_object=100000)
+ inputs.request_execution_grant()
+'''
+        result=subprocess.run([sys.executable,'-c',code,str(self.base.worker),json.dumps(self.base.config),self.base.fixture.job,
+                               str(self.inputs),json.dumps(self.input_id)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+        self.assertEqual(result.returncode,-9)
+        with DaemonStateLock(self.base.worker) as owner:
+            self.assertEqual(self.make(owner).request_execution_grant()['taskName'],'synthetic')
 
     def test_lost_ack_replays_exact_enrollment_after_commit(self):
         original=ViewerNodeEnrollment._request
