@@ -37,5 +37,3 @@ is offline beyond the engine's retention period.** Existing engine 48-hour
 cleanup and unsafe restart behavior require their own qualified solution.
 
 Interrupted automatic transfers without a verified receipt are preserved and held for operator inspection; automatic retry will not remove or overwrite those partials. Failures before a partial is created can retry automatically. This limits availability until a separate safe recovery procedure exists.
-
-The task info response reports `ledgetopArchive` separately from processing success: `pending`, `inspection`, `archived`, or `disabled`, with only fixed sanitized reasons. Pending/inspection state is persisted and survives coordinator restart. Archived means a local receipt-backed archive was recorded, not that Viewer has acknowledged it. A failed database update can prevent status reporting; monitoring must account for service/database availability.

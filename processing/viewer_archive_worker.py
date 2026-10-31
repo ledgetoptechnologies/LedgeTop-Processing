@@ -5,7 +5,6 @@ child inherits the parent's coordinator flocks so a surviving child cannot race
 a replacement coordinator after parent death.
 """
 import json
-from pathlib import Path
 import sys
 from types import SimpleNamespace
 
@@ -44,15 +43,6 @@ def main():
         stream.close()
         return 0
     except BaseException:
-        # Only fixed exit codes cross the boundary; never reveal exception text.
-        # A partial left by this or an earlier attempt requires inspection.
-        try:
-            directory = Path(task['directory'])
-            if any(p.exists() or p.is_symlink() for p in
-                   (directory / 'all.zip.partial', directory / '.all.zip.restore')):
-                return 2
-        except BaseException:
-            pass
         return 1
 
 

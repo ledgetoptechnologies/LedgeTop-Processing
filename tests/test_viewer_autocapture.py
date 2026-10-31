@@ -160,30 +160,6 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.assertEqual(Path(self.fixture.task(self.identifier)['archive_path']).read_bytes(), self.engine_response)
         self.assertEqual(self.requests, 1)
 
-    def test_inspection_status_survives_service_restart_and_is_sanitized(self):
-        self.fixture.config.viewer_archive_autocapture = True
-        self.fixture.config.viewer_archive_free_floor = 10**18
-        self.service.start()
-        deadline = time.monotonic() + 10
-        while self.service.info(self.identifier).get('ledgetopArchive', {}).get('state') != 'inspection':
-            if time.monotonic() >= deadline: self.fail('inspection status not persisted')
-            time.sleep(.05)
-        info = self.service.info(self.identifier)
-        self.assertEqual(info['status']['code'], 40)
-        self.assertEqual(info['ledgetopArchive'], {'state': 'inspection', 'reason': 'partial_requires_inspection'})
-        self.service.close()
-        restarted = ViewerService(self.queue, self.fixture.config, engines=self.fixture.engines, probe=self.fixture.probe)
-        self.assertEqual(restarted.info(self.identifier)['ledgetopArchive'], info['ledgetopArchive'])
-        self.assertTrue(Path(self.fixture.task(self.identifier)['directory'], 'all.zip.partial').exists())
-
-    def test_capture_status_distinguishes_processing_and_custody(self):
-        self.fixture.config.viewer_archive_autocapture = True
-        self.assertEqual(self.service.info(self.identifier)['ledgetopArchive']['state'], 'pending')
-        self.service._archive_once(self.identifier)
-        info = self.service.info(self.identifier)
-        self.assertEqual(info['status']['code'], 40)
-        self.assertEqual(info['ledgetopArchive'], {'state': 'archived', 'reason': None})
-
     def test_shutdown_kills_and_reaps_blocked_capture_before_authority_release(self):
         self.release.clear()
         self.fixture.config.viewer_archive_autocapture = True
@@ -197,14 +173,10 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.release.set()
         # Interrupted bytes remain untouched; an operator must inspect them.
         partial = Path(self.fixture.task(self.identifier)['directory'], 'all.zip.partial')
+        before = partial.read_bytes()
         self.service._stop.clear()
-        if partial.exists():
-            before = partial.read_bytes()
-            with self.assertRaises(Exception): self.service._archive_once(self.identifier)
-            self.assertEqual(partial.read_bytes(), before)
-        else:
-            self.service._archive_once(self.identifier)
-            self.assertEqual(Path(self.fixture.task(self.identifier)['archive_path']).read_bytes(), self.engine_response)
+        with self.assertRaises(Exception): self.service._archive_once(self.identifier)
+        self.assertEqual(partial.read_bytes(), before)
 
     def test_parent_death_leaves_coordinator_flocks_held_until_capture_child_exits(self):
         # A slow fixture keeps the actual capture child alive while its parent
