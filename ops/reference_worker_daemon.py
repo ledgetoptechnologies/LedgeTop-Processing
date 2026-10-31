@@ -566,7 +566,7 @@ def _build_worker(config,owner,resources):
     profile = _service_profile(config)
     routing = _execution_routing(config)
     option_evidence = _option_evidence(config)
-    from ops.bootstrap_worker_input_accounting import require_worker_input_profile,require_worker_indexed_context,indexed_profile
+    from ops.bootstrap_worker_input_accounting import require_worker_input_profile,require_worker_indexed_context,indexed_profile,allocated_profile
     if indexed_profile(config):
         from processing.reference_indexed_recovery import recover_indexed_driver
         recover_indexed_driver(config,owner)
@@ -595,6 +595,7 @@ def _build_worker(config,owner,resources):
         ledger_arguments['capacity_probe'] = indexed_capacity_probe(indexed_context,owner,scratch)
     ledger = ScratchLedger(root / 'scratch.sqlite', scratch, safety_floor_bytes=config['safetyFloor'],
                            cleanup_grace_seconds=config['cleanupGrace'], input_copy_accounting=input_accounting,
+                           allocated_receiver=allocated_profile(config),
                            **ledger_arguments)
     from processing.reference_readers import ReaderSession
     session=ReaderSession(ledger)

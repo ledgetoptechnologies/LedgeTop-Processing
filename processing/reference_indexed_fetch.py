@@ -134,7 +134,8 @@ def policy_from_binding(binding):
     if profile is not None:
         if encoded(profile)==encoded(dict(schemaVersion=4,fetchJournal=dict(schemaVersion=1,policyId=RETIRING_POLICY_ID))):
             selected=_RETIRING_POLICY
-        elif encoded(profile)==encoded(dict(schemaVersion=3,fetchJournal=dict(schemaVersion=1,policyId=THREE_POLICY_ID))):
+        elif encoded(profile) in (encoded(dict(schemaVersion=3,fetchJournal=dict(schemaVersion=1,policyId=THREE_POLICY_ID))),
+                                  encoded(dict(schemaVersion=5,fetchJournal=dict(schemaVersion=1,policyId=THREE_POLICY_ID),allocatedReceiver=dict(schemaVersion=1)))):
             selected=_THREE_POLICY
         else:
             require(encoded(profile)==encoded(dict(schemaVersion=2,fetchJournal=dict(schemaVersion=1,policyId=POLICY_ID))),

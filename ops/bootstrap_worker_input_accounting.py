@@ -18,7 +18,7 @@ import sys
 import uuid
 from urllib.parse import urlsplit
 
-from processing.scratch_policy import ScratchLedger, INPUT_SCHEMA, INPUT_TABLES
+from processing.scratch_policy import ScratchLedger, INPUT_SCHEMA, INPUT_TABLES, ALLOCATED_RECEIVER_SCHEMA
 
 DIRECTORY = 'input-copy-bootstrap'
 CLAIM = '.input-copy-bootstrap.json'
@@ -48,11 +48,14 @@ def input_profile(config):
     if value['schemaVersion']==1:
         _require(set(value)=={'schemaVersion'})
     else:
-        _require(value['schemaVersion'] in (2,3) and set(value)=={'schemaVersion','fetchJournal'})
+        _require(value['schemaVersion'] in (2,3,5) and set(value)==({'schemaVersion','fetchJournal','allocatedReceiver'} if value['schemaVersion']==5 else {'schemaVersion','fetchJournal'}))
         fetch=value['fetchJournal']
         _require(type(fetch) is dict and set(fetch)=={'schemaVersion','policyId'}
                  and type(fetch['schemaVersion']) is int and fetch['schemaVersion']==1
                  and fetch['policyId']==('indexed-worker-fetch-v1' if value['schemaVersion']==2 else 'indexed-worker-fetch-three-retained-v1'))
+        if value['schemaVersion']==5:
+            _require(type(value['allocatedReceiver']) is dict and value['allocatedReceiver']=={'schemaVersion':1}
+                     and type(value['allocatedReceiver']['schemaVersion']) is int)
         routing=config.get('executionRouting')
         _require(routing is None or type(routing) is dict and routing.get('treedar') is None)
     return True
@@ -60,7 +63,12 @@ def input_profile(config):
 
 def indexed_profile(config):
     """A closed v2 composition request, never an authority to initialize state."""
-    return input_profile(config) and config['inputCopyAccounting']['schemaVersion'] in (2,3)
+    return input_profile(config) and config['inputCopyAccounting']['schemaVersion'] in (2,3,5)
+
+
+def allocated_profile(config):
+    """Explicit composition marker; bootstrap still requires fresh state."""
+    return indexed_profile(config) and config['inputCopyAccounting']['schemaVersion']==5
 
 
 def _indexed_descriptor(config=None):
@@ -196,13 +204,22 @@ def _ledger(path,binding,*,fresh=False,expected_identity=None):
         _require(len(rows)==1)
         config=json.loads(rows[0][0])
         base={'root':binding['scratchRoot'],'floor':binding['policy']['safetyFloor'],'grace':binding['policy']['cleanupGrace']}
-        _require(set(config)<=set(base)|{'accountingVersion','inputCopyAccountingVersion'}
+        _require(set(config)<=set(base)|{'accountingVersion','inputCopyAccountingVersion','allocatedReceiverVersion'}
                  and _encoded({k:config.get(k) for k in base})==_encoded(base))
-        for marker in ('accountingVersion','inputCopyAccountingVersion'):
+        for marker in ('accountingVersion','inputCopyAccountingVersion','allocatedReceiverVersion'):
             if marker in config:_require(type(config[marker]) is int and config[marker]==1)
         tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         _require(set(BUSINESS)|{'metadata'}<=tables)
         enabled='inputCopyAccountingVersion' in config
+        allocated='allocatedReceiverVersion' in config
+        _require(not allocated or (enabled and binding['inputCopyAccounting']['schemaVersion']==5))
+        actual_allocated=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='allocated_input_receipts'").fetchone()
+        _require((allocated and actual_allocated==(ALLOCATED_RECEIVER_SCHEMA,)) or (not allocated and actual_allocated is None))
+        if allocated:
+            with closing(sqlite3.connect(':memory:')) as expected_allocated:
+                expected_allocated.execute(ALLOCATED_RECEIVER_SCHEMA)
+                query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name='allocated_input_receipts' ORDER BY type,name"
+                _require(db.execute(query).fetchall()==expected_allocated.execute(query).fetchall())
         _require((set(INPUT_TABLES)&tables)==(set(INPUT_TABLES) if enabled else set()))
         if enabled:
             _require(db.execute('SELECT singleton,version FROM input_accounting').fetchall()==[(1,1)])
@@ -213,15 +230,16 @@ def _ledger(path,binding,*,fresh=False,expected_identity=None):
         control=bool(db.execute('SELECT 1 FROM control_charges LIMIT 1').fetchone())
         _require(control==('accountingVersion' in config))
         if fresh:
-            _require(tables==set(BUSINESS)|{'metadata'}|(set(INPUT_TABLES) if enabled else set()))
+            _require(tables==set(BUSINESS)|{'metadata'}|(set(INPUT_TABLES) if enabled else set())|({'allocated_input_receipts'} if allocated else set()))
             _require(not any(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() for table in BUSINESS))
             if enabled:
                 _require(not any(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() for table in INPUT_TABLES if table!='input_accounting'))
+            if allocated:_require(db.execute('SELECT 1 FROM allocated_input_receipts LIMIT 1').fetchone() is None)
             _require({row[0] for row in db.execute('SELECT key FROM metadata')}=={'config','clock'})
     after=path.lstat()
     _require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==
              (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns))
-    return {'identity':_identity(after),'enabled':enabled}
+    return {'identity':_identity(after),'enabled':enabled,'allocated':allocated}
 
 
 def _read_intent(directory,binding):
@@ -300,8 +318,9 @@ def _records(config,owner,*,completed,external_indexed=False):
         expected=dict(schemaVersion=1,bootstrapId=intent['bootstrapId'],intentSha256=intent_sha,
                       createdSha256=created_sha,inputCopyAccountingVersion=1)
         if indexed:expected.update(schemaVersion=2,indexedCreatedSha256=indexed_sha)
+        if allocated_profile(config):expected.update(schemaVersion=3,allocatedReceiverVersion=1)
         _require(_encoded(receipt)==_encoded(expected)
-                 and ledger['enabled'])
+                 and ledger['enabled'] and ledger['allocated']==allocated_profile(config))
     owner.check(root)
     return intent,created,ledger
 
@@ -414,7 +433,7 @@ def bootstrap_input_copy_accounting(config):
         if not os.path.lexists(directory/'ledger-created.json'):
             _require(not os.path.lexists(ledger_path));owner.check(root)
             _read_intent(directory,_binding(config))
-            ledger=ScratchLedger(ledger_path,scratch,safety_floor_bytes=config['safetyFloor'],cleanup_grace_seconds=config['cleanupGrace'],input_copy_accounting=True)
+            ledger=ScratchLedger(ledger_path,scratch,safety_floor_bytes=config['safetyFloor'],cleanup_grace_seconds=config['cleanupGrace'],input_copy_accounting=True,allocated_receiver=allocated_profile(config))
             snapshot=_ledger(ledger_path,binding,fresh=True);_require(not snapshot['enabled'])
             _,_,intent_sha=_file(directory/'intent.json')
             _write_record(directory/'ledger-created.json',dict(schemaVersion=1,bootstrapId=intent['bootstrapId'],intentSha256=intent_sha,claimSha256=claim_sha,claimIdentity=claim_id,ledgerIdentity=snapshot['identity']),owner)
@@ -433,16 +452,24 @@ def bootstrap_input_copy_accounting(config):
                 driverIdentity=list(context.driver_identity),rootIdentity=list(context.root_identity),bindingSha256=context.binding_sha256),owner)
         _fresh_namespace(root,scratch,ledger=True,claim=True,indexed=indexed);owner.check(root)
         if not snapshot['enabled']:
-            ledger=ScratchLedger(ledger_path,scratch,safety_floor_bytes=config['safetyFloor'],cleanup_grace_seconds=config['cleanupGrace'],input_copy_accounting=True)
+            ledger=ScratchLedger(ledger_path,scratch,safety_floor_bytes=config['safetyFloor'],cleanup_grace_seconds=config['cleanupGrace'],input_copy_accounting=True,allocated_receiver=allocated_profile(config))
             _records(config,owner,completed=False)
             _fresh_namespace(root,scratch,ledger=True,claim=True,indexed=indexed);owner.check(root)
             ledger.enable_input_copy_accounting()
         intent,created,snapshot=_records(config,owner,completed=False);_require(snapshot['enabled'])
+        if allocated_profile(config) and not snapshot['allocated']:
+            ledger=ScratchLedger(ledger_path,scratch,safety_floor_bytes=config['safetyFloor'],cleanup_grace_seconds=config['cleanupGrace'],input_copy_accounting=True,allocated_receiver=True)
+            _records(config,owner,completed=False)
+            _fresh_namespace(root,scratch,ledger=True,claim=True,indexed=indexed);owner.check(root)
+            ledger.enable_allocated_receiver()
+            intent,created,snapshot=_records(config,owner,completed=False)
+        _require(snapshot['allocated']==allocated_profile(config))
         _,_,intent_sha=_file(directory/'intent.json');_,_,created_sha=_file(directory/'ledger-created.json')
         completion=dict(schemaVersion=1,bootstrapId=intent['bootstrapId'],intentSha256=intent_sha,createdSha256=created_sha,inputCopyAccountingVersion=1)
         if indexed:
             _,_,indexed_sha=_file(directory/'indexed-created.json')
             completion.update(schemaVersion=2,indexedCreatedSha256=indexed_sha)
+        if allocated_profile(config):completion.update(schemaVersion=3,allocatedReceiverVersion=1)
         _write_record(directory/'completed.json',completion,owner)
         require_worker_input_profile(config,owner)
         return {'state':'enabled','bootstrapId':intent['bootstrapId']}

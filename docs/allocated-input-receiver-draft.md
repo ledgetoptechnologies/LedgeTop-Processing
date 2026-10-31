@@ -1,9 +1,12 @@
 # Allocated indexed input receiver (unqualified draft)
 
-This source experiment is disabled by default and is not deployable. The
-packaged worker configuration and its input-accounting bootstrap do not accept
-or enable the new receiver marker. The bootstrap must be extended and reviewed
-before any deployment, and an external host-owned fence must establish that no
+This source experiment is disabled by default and is not deployable. A fresh
+bootstrap can explicitly select `inputCopyAccounting` schema 5 with the
+`indexed-worker-fetch-three-retained-v1` journal and closed
+`allocatedReceiver: {schemaVersion: 1}` marker. The bootstrap binds that choice
+to its private receipts and latches the receiver only before any reservation.
+Existing state is not migrated. Normal startup validates the completed marker;
+it does not create or latch it. An external host-owned fence must establish that no
 old or competing worker can write the scratch filesystem. The marker makes
 older ledger implementations reject subsequent transactions; it does not stop
 an older process that is already writing outside a transaction.
