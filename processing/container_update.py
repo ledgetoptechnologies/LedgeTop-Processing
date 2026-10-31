@@ -140,7 +140,7 @@ class ComposeNode:
 
     def idle(self):
         item = self.inspect()
-        if not item['State']['Running']:
+        if not isinstance(item.get('State'),dict) or item['State'].get('Running') is not True:
             raise UpdateError('engine must be running for independent idle checks')
         info = self.node.json('GET', '/info')
         tasks = self.node.json('GET', '/task/list')

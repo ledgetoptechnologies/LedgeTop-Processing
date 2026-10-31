@@ -340,6 +340,25 @@ class ComposeBoundaryTests(unittest.TestCase):
                 self.adapter.engine()
             self.assertIn('remote', command.call_args.args[0])
 
+    def test_engine_idle_rejects_unknown_tasks_and_malformed_running_flag(self):
+        item={'Id':'fixture','State':{'Running':True}}
+        with patch.object(self.adapter,'inspect',return_value=item), \
+             patch.object(self.adapter.node,'json',side_effect=lambda method,path:
+                 {'engine':self.adapter.expected_engine,'taskQueueCount':0} if path=='/info' else self.task_list), \
+             patch.object(self.adapter,'uploads_idle',return_value=True), \
+             patch.object(self.adapter,'processing_idle',return_value=True):
+            self.task_list=[]
+            self.assertTrue(self.adapter.idle())
+            for value in (None,{},[{}],[{'status':999}],['unknown']):
+                with self.subTest(tasks=value):
+                    self.task_list=value
+                    self.assertFalse(self.adapter.idle())
+            self.task_list=[]
+            for value in (1,'true',None,False):
+                with self.subTest(running=value):
+                    item['State']['Running']=value
+                    with self.assertRaises(UpdateError):self.adapter.idle()
+
     def test_orphan_processing_child_blocks_idle_census(self):
         base = 'PID COMMAND\n1 /sbin/docker-init -- /usr/bin/node /var/www/index.js\n7 node /var/www/index.js\n'
         with patch.object(self.adapter, 'docker', return_value=base):
