@@ -14,4 +14,6 @@ The input metadata database is capped at 64 MiB even though the protocol permits
 
 The experimental authenticated plan endpoint freezes ordered options and outputs in the claim transaction, limits canonical plan bytes to 64 KiB, and checks the claim digest on both coordinator and worker. Worker replay requires a fresh authenticated coordinator response and exact local persisted plan; offline replay holds. The plan contains no dispatch authority. Older prototype databases without the new plan schema fail closed; no migration has been implemented. Initialization and upload acknowledgements remain ambiguous on interruption and must hold rather than be blindly retried.
 
+The new 64 KiB limit applies to the entire wrapped canonical plan object. The earlier validation limited the combined serialized options and outputs without that wrapper, so a previously valid task near the limit can now be held at claim time. No compatibility migration or alternate handling has been qualified.
+
 The synthetic tests use an actual TLS coordinator endpoint, temporary files, process interruption and an isolated container. The 10,000-entry test exercises coordinator metadata only; it does not establish transfer throughput, real reboot behavior, 50 GB capacity, Viewer integration, or an end-to-end production workflow. No live NodeODM or TrueNAS is involved.
