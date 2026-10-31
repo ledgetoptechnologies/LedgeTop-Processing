@@ -6,13 +6,24 @@ synthetic binding. Legacy/ambiguous spool state must never be imported.
 import hashlib
 import os
 from . import reference_protocol as p
-from .direct_output_slot import OutputSlot,SlotHeld,_identity
+from .direct_output_slot import OutputSlot,SlotHeld,_identity,_open_slot
 from .direct_slot_capture import _persist,_read_record,_check_record,_exists
 
 MAX_CHUNK=256*1024
 MAX_CHUNKS=4096
 
 class ChunkHeld(RuntimeError):pass
+
+def open_synthetic_chunk_slot(root,root_identity,digest,budget,*,max_budget,binding,legacy_state,synthetic_fixture=False):
+    """Explicit fixture-only open, qualified by exact journal binding."""
+    if synthetic_fixture is not True:raise ChunkHeld('synthetic_fixture_required')
+    slot=_open_slot(root,root_identity,digest,budget,max_budget=max_budget,allow_chunk_journal=True)
+    try:
+        SyntheticChunkJournal(slot,binding,legacy_state=legacy_state,synthetic_fixture=True)
+        return slot
+    except BaseException:
+        slot.close();raise
+
 
 class SyntheticChunkJournal:
     def __init__(self,slot,binding,*,legacy_state,synthetic_fixture=False):

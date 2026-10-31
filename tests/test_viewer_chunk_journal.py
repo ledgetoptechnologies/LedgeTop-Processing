@@ -10,7 +10,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import unittest
 from processing.direct_output_slot import open_slot,_identity
-from processing.viewer_chunk_journal import SyntheticChunkJournal,ChunkHeld
+from processing.viewer_chunk_journal import SyntheticChunkJournal,ChunkHeld,open_synthetic_chunk_slot
 
 @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'Linux allocation required')
 class ChunkJournalTests(unittest.TestCase):
@@ -21,7 +21,9 @@ class ChunkJournalTests(unittest.TestCase):
         finally:os.close(fd)
         self.key='a'*64;self.data=b'abcdefgh';self.binding=dict(jobId='11111111-1111-4111-8111-111111111111',taskId='22222222-2222-4222-8222-222222222222',generation=1,environment='staging',archiveBytes=8,archiveSha256=hashlib.sha256(self.data).hexdigest())
         slot=self.open(create=True);SyntheticChunkJournal(slot,self.binding,legacy_state='new',synthetic_fixture=True);slot.close()
-    def open(self,create=False):return open_slot(self.root,self.identity,self.key,65536,max_budget=65536,create=create)
+    def open(self,create=False):
+        if create:return open_slot(self.root,self.identity,self.key,65536,max_budget=65536,create=True)
+        return open_synthetic_chunk_slot(self.root,self.identity,self.key,65536,max_budget=65536,binding=self.binding,legacy_state='new',synthetic_fixture=True)
     def test_exact_replay_sequence_and_full_seal(self):
         slot=self.open()
         try:
@@ -43,6 +45,14 @@ class ChunkJournalTests(unittest.TestCase):
             with self.assertRaises(ChunkHeld):journal.write(0,0,b'abcd')
         finally:slot.close()
 
+    def test_ordinary_open_rejects_existing_or_partial_chunk_marker(self):
+        with self.assertRaises(Exception):open_slot(self.root,self.identity,self.key,65536,max_budget=65536)
+        other='b'*64
+        slot=open_slot(self.root,self.identity,other,65536,max_budget=65536,create=True);slot.close()
+        (self.root/('slot-'+other+'.alloc.chunks-v1.partial')).write_bytes(b'partial')
+        with self.assertRaises(Exception):open_slot(self.root,self.identity,other,65536,max_budget=65536)
+        with self.assertRaises(ChunkHeld):open_synthetic_chunk_slot(self.root,self.identity,self.key,65536,max_budget=65536,binding=self.binding,legacy_state='new')
+
     def test_legacy_receiving_never_reopened(self):
         slot=self.open()
         try:
@@ -51,10 +61,10 @@ class ChunkJournalTests(unittest.TestCase):
     def test_kill_at_chunk_boundaries(self):
         code='''import json,os,signal,sys
 from unittest.mock import patch
-from processing.direct_output_slot import open_slot,OutputSlot
+from processing.direct_output_slot import OutputSlot
 import processing.viewer_chunk_journal as m
 root,identity,key,binding,mode=sys.argv[1:]
-slot=open_slot(root,json.loads(identity),key,65536,max_budget=65536)
+slot=m.open_synthetic_chunk_slot(root,json.loads(identity),key,65536,max_budget=65536,binding=json.loads(binding),legacy_state='new',synthetic_fixture=True)
 j=m.SyntheticChunkJournal(slot,json.loads(binding),legacy_state='new',synthetic_fixture=True)
 def stop():os.kill(os.getpid(),signal.SIGKILL)
 oldpersist=m._persist;oldwrite=OutputSlot.write_at;oldsync=OutputSlot.sync

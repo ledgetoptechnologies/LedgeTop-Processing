@@ -259,3 +259,8 @@ is true; it must not be connected to live work. It assumes a trusted directory
 and no deletion or rollback of previously durable journal records. It does not
 provide recovery of an in-flight incomplete chunk, power-loss certification or
 independent storage custody.
+
+Ordinary output-slot and capture opens now reject any matching chunk-journal
+marker, including partial or unknown suffixes; the dedicated synthetic open
+checks the journal binding before returning. This prototype is capped at 4,096
+chunks of 256 KiB, or 1 GiB total, and is not suitable evidence for large jobs.

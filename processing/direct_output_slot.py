@@ -146,7 +146,7 @@ def open_slot(root, expected_root, binding_digest, budget, *, max_budget, create
     return _open_slot(root,expected_root,binding_digest,budget,max_budget=max_budget,create=create)
 
 
-def _open_slot(root, expected_root, binding_digest, budget, *, max_budget, create=False, allow_capture=False):
+def _open_slot(root, expected_root, binding_digest, budget, *, max_budget, create=False, allow_capture=False, allow_chunk_journal=False):
     """Allocate or reopen a slot; never overwrite, truncate, unlink or clean up.
 
     Existing incomplete/ambiguous files are held. A complete metadata record
@@ -164,6 +164,11 @@ def _open_slot(root, expected_root, binding_digest, budget, *, max_budget, creat
     name = 'slot-' + binding_digest + '.alloc'; meta_name = 'slot-' + binding_digest + '.json'
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     try:
+        if not allow_chunk_journal:
+            # Includes incomplete headers, unknown suffixes and symlinks.
+            with os.scandir(root_fd) as entries:
+                if any(entry.name.startswith(name+'.chunks-v1.') for entry in entries):
+                    raise SlotHeld('slot_chunk_journal_requires_inspection')
         if create:
             try: fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root_fd)
             except OSError: raise SlotHeld('slot_already_exists_or_unavailable') from None
