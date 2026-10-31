@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,15 @@ from processing.legacy_state_gate import acquire
 from processing.prototype import Queue
 from processing.config import Config
 from processing.app import make_handler
+
+
+def wait_ready(child, ready_file, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ready_file.is_file(): return
+        if child.poll() is not None: raise RuntimeError('legacy contender exited before readiness')
+        time.sleep(.02)
+    raise TimeoutError('legacy contender readiness timeout')
 
 
 @unittest.skipUnless(os.name == 'posix', 'POSIX flock required')
@@ -95,22 +105,37 @@ class LegacyFenceVectorTests(unittest.TestCase):
 
     def test_cross_process_legacy_owner_blocks_and_candidate_release_unblocks(self):
         self.enroll()
-        code = "from processing.legacy_state_gate import acquire; import sys,time; f=acquire(sys.argv[1]); print('ready',flush=True); time.sleep(30)"
-        for path in self.paths:
-            child=subprocess.Popen([sys.executable,'-c',code,str(path)],stdout=subprocess.PIPE,text=True)
+        code = "from processing.legacy_state_gate import acquire; from pathlib import Path; import sys,time; f=acquire(sys.argv[1]); Path(sys.argv[2]).touch(exist_ok=False); time.sleep(30)"
+        for slot,path in enumerate(self.paths):
+            ready=self.root/('ready-'+str(slot))
+            child=subprocess.Popen([sys.executable,'-c',code,str(path),str(ready)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
             try:
-                self.assertEqual(child.stdout.readline().strip(),'ready')
+                wait_ready(child,ready)
                 with self.assertRaisesRegex(RuntimeError,'legacy_fence_held'): self.enforce()
             finally:
-                child.terminate(); child.wait(timeout=5); child.stdout.close()
+                if child.poll() is None: child.terminate()
+                try: child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill(); child.wait(timeout=5)
             self.assert_free()
         fds=self.enforce()
         try:
-            for path in self.paths:
-                result=subprocess.run([sys.executable,'-c',code,str(path)],capture_output=True,text=True,timeout=5)
+            for slot,path in enumerate(self.paths):
+                result=subprocess.run([sys.executable,'-c',code,str(path),str(self.root/('blocked-'+str(slot)))],capture_output=True,text=True,timeout=5)
                 self.assertNotEqual(result.returncode,0); self.assertIn('legacy_fence_held',result.stderr)
         finally:fence.close_fence(fds)
         self.assert_free()
+
+    def test_readiness_timeout_allows_bounded_child_cleanup(self):
+        child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+        try:
+            with self.assertRaises(TimeoutError):wait_ready(child,self.root/'never-ready',timeout=.1)
+        finally:
+            if child.poll() is None: child.terminate()
+            try: child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill(); child.wait(timeout=5)
+        self.assertIsNotNone(child.poll())
 
     def test_marker_validation_and_enrollment_same_candidate(self):
         with self.assertRaisesRegex(RuntimeError,'same_candidate_lock'):
