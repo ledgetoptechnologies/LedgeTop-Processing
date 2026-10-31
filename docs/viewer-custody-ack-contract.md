@@ -176,3 +176,14 @@ the exact assertion and marks it accepted. The fixture directly inserts its
 synthetic outbox rows and does not exercise Viewer ingest or its real outbox
 writer. The database resides on container tmpfs, so the test verifies process
 restart, not host power loss, Viewer custody, or real storage durability.
+The later staging rehearsal calls the actual pinned Viewer
+`ProcessingRepository.enqueueDisabledStagedByteAck` method against migrated
+outbox/delivery tables, with synthetic staged commitment, output and transfer
+provenance rows and a frozen delivery binding. It invokes the repository
+prototype directly without its normal constructor and does not run the normal
+Viewer ingest transaction or prove its upstream provenance. It logs and checks
+exactly one POST followed by one GET during sender restart; the GET response is
+validated by the actual Viewer sender. The parent process starts the Node
+harness in a separate process group and kills and waits for that group on timeout.
+Viewer dependency files besides the four pinned files come from a separate Git
+archive export, and its host copy remains writable.
