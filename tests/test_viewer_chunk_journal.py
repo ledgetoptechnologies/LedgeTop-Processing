@@ -7,6 +7,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 import unittest
 from processing.direct_output_slot import open_slot,_identity
@@ -52,6 +54,49 @@ class ChunkJournalTests(unittest.TestCase):
         (self.root/('slot-'+other+'.alloc.chunks-v1.partial')).write_bytes(b'partial')
         with self.assertRaises(Exception):open_slot(self.root,self.identity,other,65536,max_budget=65536)
         with self.assertRaises(ChunkHeld):open_synthetic_chunk_slot(self.root,self.identity,self.key,65536,max_budget=65536,binding=self.binding,legacy_state='new')
+
+    def test_marker_created_between_scan_and_lock_blocks_ordinary_open(self):
+        import processing.direct_output_slot as slots
+        key='b'*64
+        slot=open_slot(self.root,self.identity,key,65536,max_budget=65536,create=True);slot.close()
+        arrived=threading.Event();release=threading.Event();original=slots.fcntl.flock
+        def barrier(fd,operation):
+            if threading.current_thread().name.startswith('ordinary'):
+                arrived.set()
+                if not release.wait(5):raise RuntimeError('lock barrier timeout')
+            return original(fd,operation)
+        with patch.object(slots.fcntl,'flock',side_effect=barrier):
+            with ThreadPoolExecutor(max_workers=1,thread_name_prefix='ordinary') as pool:
+                future=pool.submit(open_slot,self.root,self.identity,key,65536,max_budget=65536)
+                try:
+                    self.assertTrue(arrived.wait(5))
+                    chunk=open_synthetic_chunk_slot(self.root,self.identity,key,65536,max_budget=65536,
+                        binding=self.binding,legacy_state='new',synthetic_fixture=True)
+                    chunk.close()
+                finally:release.set()
+                with self.assertRaisesRegex(Exception,'slot_chunk_journal_requires_inspection'):future.result(timeout=5)
+        # Reopening the dedicated fixture slot proves the rejected open released its lock.
+        chunk=open_synthetic_chunk_slot(self.root,self.identity,key,65536,max_budget=65536,
+            binding=self.binding,legacy_state='new',synthetic_fixture=True);chunk.close()
+
+    def test_marker_race_on_create_holds_new_allocation(self):
+        import processing.direct_output_slot as slots
+        key='c'*64;arrived=threading.Event();release=threading.Event();original=slots.fcntl.flock
+        def barrier(fd,operation):
+            if threading.current_thread().name.startswith('ordinary-create'):
+                arrived.set()
+                if not release.wait(5):raise RuntimeError('lock barrier timeout')
+            return original(fd,operation)
+        with patch.object(slots.fcntl,'flock',side_effect=barrier):
+            with ThreadPoolExecutor(max_workers=1,thread_name_prefix='ordinary-create') as pool:
+                future=pool.submit(open_slot,self.root,self.identity,key,65536,max_budget=65536,create=True)
+                try:
+                    self.assertTrue(arrived.wait(5))
+                    (self.root/('slot-'+key+'.alloc.chunks-v1.partial')).write_bytes(b'partial')
+                finally:release.set()
+                with self.assertRaisesRegex(Exception,'slot_chunk_journal_requires_inspection'):future.result(timeout=5)
+        self.assertTrue((self.root/('slot-'+key+'.alloc')).exists())
+        self.assertFalse((self.root/('slot-'+key+'.json')).exists())
 
     def test_legacy_receiving_never_reopened(self):
         slot=self.open()

@@ -142,6 +142,13 @@ def _open_root(path, expected):
         os.close(fd); raise
 
 
+def _reject_chunk_markers(root_fd,name):
+    # Matching entries are unsafe even if partial, unknown or symlinks.
+    with os.scandir(root_fd) as entries:
+        if any(entry.name.startswith(name+'.chunks-v1.') for entry in entries):
+            raise SlotHeld('slot_chunk_journal_requires_inspection')
+
+
 def open_slot(root, expected_root, binding_digest, budget, *, max_budget, create=False):
     return _open_slot(root,expected_root,binding_digest,budget,max_budget=max_budget,create=create)
 
@@ -165,10 +172,7 @@ def _open_slot(root, expected_root, binding_digest, budget, *, max_budget, creat
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     try:
         if not allow_chunk_journal:
-            # Includes incomplete headers, unknown suffixes and symlinks.
-            with os.scandir(root_fd) as entries:
-                if any(entry.name.startswith(name+'.chunks-v1.') for entry in entries):
-                    raise SlotHeld('slot_chunk_journal_requires_inspection')
+            _reject_chunk_markers(root_fd,name)
         if create:
             try: fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root_fd)
             except OSError: raise SlotHeld('slot_already_exists_or_unavailable') from None
@@ -179,6 +183,9 @@ def _open_slot(root, expected_root, binding_digest, budget, *, max_budget, creat
         _file(fd, expected_root)
         try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError: raise SlotHeld('slot_busy') from None
+        # A chunk owner may have acquired the lock and created a marker after
+        # the first scan but before this lock was acquired.
+        if not allow_chunk_journal:_reject_chunk_markers(root_fd,name)
         if not allow_capture:
             for suffix in ('.intent','.seal'):
                 try: os.stat('slot-'+binding_digest+suffix,dir_fd=root_fd,follow_symlinks=False)
