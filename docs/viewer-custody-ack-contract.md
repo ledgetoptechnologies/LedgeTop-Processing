@@ -264,3 +264,14 @@ Ordinary output-slot and capture opens now reject any matching chunk-journal
 marker, including partial or unknown suffixes; the dedicated synthetic open
 checks the journal binding before returning. This prototype is capped at 4,096
 chunks of 256 KiB, or 1 GiB total, and is not suitable evidence for large jobs.
+
+The next disabled synthetic chunk-spool draft binds new sessions to the actual
+authenticated coordinator claim and spool metadata in a dedicated exact-schema
+table. Existing receiving spools without a session remain held, and an
+interrupted creating session is never recreated. The new table is included in
+the startup, scheduler and claim partial-schema guards. The direct-call API
+checks the existing allocated inode and chunk header, and seals only its
+synthetic journal; the standard coordinator spool remains receiving/held. There
+is no TLS chunk route, client, migration or Viewer result exposure. Existing
+databases without the new exact schema require a separately qualified upgrade
+and fail closed; no automatic migration is included.

@@ -47,6 +47,7 @@ PERMIT_DDL = '''CREATE TABLE viewer_worker_permits (job_id TEXT NOT NULL, operat
 RESULT_DDL = '''CREATE TABLE viewer_worker_result_metadata (job_id TEXT PRIMARY KEY, payload TEXT NOT NULL, receipt TEXT NOT NULL)'''
 SPOOL_CONFIG_DDL = '''CREATE TABLE viewer_worker_spool_config (singleton INTEGER PRIMARY KEY CHECK(singleton=1), policy TEXT NOT NULL)'''
 SPOOL_DDL = '''CREATE TABLE viewer_worker_spool (job_id TEXT PRIMARY KEY, metadata_sha TEXT NOT NULL, slot_key TEXT NOT NULL, state TEXT NOT NULL, slot_identity TEXT, receipt TEXT)'''
+CHUNK_DDL = '''CREATE TABLE viewer_worker_chunk_sessions (job_id TEXT PRIMARY KEY, metadata_sha TEXT NOT NULL, slot_key TEXT NOT NULL, slot_identity TEXT, state TEXT NOT NULL CHECK(state IN ('creating','ready','sealed')))'''
 COMPLETION_DDL = '''CREATE TABLE viewer_worker_completions (job_id TEXT PRIMARY KEY, observation TEXT NOT NULL, spool_receipt TEXT NOT NULL, receipt TEXT NOT NULL)'''
 TRIGGER_DDL = '''CREATE TRIGGER viewer_worker_active_permit_hold BEFORE UPDATE OF status ON jobs WHEN OLD.status='running' AND NEW.status!='running' AND EXISTS(SELECT 1 FROM viewer_worker_permits WHERE job_id=OLD.id AND state='active') BEGIN SELECT RAISE(ABORT,'viewer active permit requires drain'); END'''
 PAGE_SIZE=100
@@ -98,18 +99,18 @@ class ViewerWorkerClaims:
         self.node_environments=MappingProxyType({node:frozenset(values) for node,values in node_environments.items()})
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_completions','viewer_worker_active_permit_hold')").fetchall()
+            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_chunk_sessions','viewer_worker_completions','viewer_worker_active_permit_hold')").fetchall()
             if not objects:
-                for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,RESULT_DDL,SPOOL_CONFIG_DDL,SPOOL_DDL,COMPLETION_DDL,TRIGGER_DDL):db.execute(sql)
+                for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,RESULT_DDL,SPOOL_CONFIG_DDL,SPOOL_DDL,CHUNK_DDL,COMPLETION_DDL,TRIGGER_DDL):db.execute(sql)
             self._schema(db)
 
     @staticmethod
     def _schema(db):
-        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_completions') OR name='viewer_worker_active_permit_hold' ORDER BY type,name"
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_chunk_sessions','viewer_worker_completions') OR name='viewer_worker_active_permit_hold' ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
             expected.execute('CREATE TABLE jobs (id TEXT,status TEXT)')
-            for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,RESULT_DDL,SPOOL_CONFIG_DDL,SPOOL_DDL,COMPLETION_DDL,TRIGGER_DDL):expected.execute(sql)
+            for sql in (DDL,FILES_DDL,ENROLL_DDL,PLAN_DDL,GRANT_DDL,FENCE_DDL,PERMIT_DDL,RESULT_DDL,SPOOL_CONFIG_DDL,SPOOL_DDL,CHUNK_DDL,COMPLETION_DDL,TRIGGER_DDL):expected.execute(sql)
             if [tuple(row) for row in db.execute(query)] != [tuple(row) for row in expected.execute(query)]:
                 raise Conflict('Viewer claim schema changed')
         finally:expected.close()
