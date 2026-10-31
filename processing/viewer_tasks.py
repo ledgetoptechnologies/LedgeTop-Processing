@@ -120,6 +120,11 @@ class TaskStore:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
             if 'option_evidence_required' not in {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1))')
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}
+            if 'archive_state' not in columns:
+                db.execute("ALTER TABLE viewer_tasks ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'pending'")
+            if 'archive_reason' not in columns:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_reason TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_files (
                 uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
                 path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -589,9 +594,13 @@ class TaskStore:
 
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
-                   'progress', 'output_lines', 'archive_path'}
+                   'progress', 'output_lines', 'archive_path', 'archive_state', 'archive_reason'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('unexpected broker update fields')
+        if 'archive_state' in fields and fields['archive_state'] not in ('pending', 'inspection'):
+            raise ValueError('invalid archive state')
+        if 'archive_reason' in fields and fields['archive_reason'] not in (None, 'capture_failed', 'partial_requires_inspection'):
+            raise ValueError('invalid archive reason')
         if 'stage' in fields and fields['stage'] not in STAGES:
             raise ValueError('invalid task stage')
         for field in ('phase', 'node_id'):
