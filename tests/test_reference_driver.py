@@ -767,6 +767,10 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             self.assertEqual(archive[0].read_bytes(), ARCHIVE)
             self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
 
+            # Enable the actual optional cleanup paths before simulating the
+            # Viewer outage, so a missing acceptance must actively prevent them.
+            self.driver.cleanup_executor = ScratchCleanupExecutor(self.ledger)
+            self.driver.engine_cleanup = EngineCacheCleanup(self.worker, path=self.root / 'process-engine-cleanup.sqlite')
             # A Viewer outage means no client polls or accepts. Completion and
             # its bytes remain retained while the worker continues polling.
             for _ in range(3):
@@ -774,6 +778,9 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
             self.assertEqual(archive[0].read_bytes(), ARCHIVE)
             self.assertEqual(self.ledger.cleanup_candidates(), [])
+            with sqlite3.connect(fixture_db) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM calls WHERE action='remove'").fetchone()[0], 0)
+            self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 40)
 
             # Serve real worker result API over TLS and the real coordinator
             # ResultProxy; Viewer is an authenticated synthetic HTTPS client.
@@ -813,6 +820,13 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
                 pipelineDigest=job['pipelineDigest'], resultManifestSha256=manifest['resultManifestSha256'],
                 acceptedObjectIds=[obj['id']], acceptedAt='2026-10-27T22:00:00Z',
                 validationVersion='ltds-reference-v1')
+            partial = dict(receipt, receiptId='synthetic-partial-receipt',
+                storageReceiptId='synthetic-partial-storage', acceptedObjectIds=[])
+            self.assertFalse(json.loads(viewer_request('/acceptance', partial))['fullyAccepted'])
+            self.driver.step()
+            self.assertTrue(archive[0].exists())
+            with sqlite3.connect(fixture_db) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM calls WHERE action='remove'").fetchone()[0], 0)
             first = json.loads(viewer_request('/acceptance', receipt))
             self.assertTrue(first['created']); self.assertTrue(first['fullyAccepted'])
             # A client that lost its response can submit the same receipt again.
@@ -821,13 +835,16 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             self.driver.step()
             with self.driver._db() as db:
                 self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], 'completed')
-            # Acceptance is recorded, but this test never enables cleanup.
-            self.assertEqual(archive[0].read_bytes(), ARCHIVE)
+            # Full acceptance permits exact-object cleanup and engine cache
+            # removal, while the original input remains retained.
+            self.assertFalse(archive[0].exists())
             self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+            self.assertEqual(list(self.scratch.glob('jobs/*/*.input'))[0].read_bytes(), b'abc')
             with sqlite3.connect(fixture_db) as db:
                 counts = dict(db.execute('SELECT action,COUNT(*) FROM calls GROUP BY action'))
             self.assertEqual(counts.get('initialize'), 1)
             self.assertEqual(counts.get('commit'), 1)
+            self.assertEqual(counts.get('remove'), 1)
         finally:
             if result_server is not None:
                 result_server.shutdown(); result_thread.join(timeout=5); result_server.server_close()
