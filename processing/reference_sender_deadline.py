@@ -1,4 +1,10 @@
-"""Sender socket watchdog; DNS and filesystem operations are not bounded."""
+"""Sender-only socket watchdog; no strict wall-clock execution bound.
+
+TLS wrapping can detach the raw socket before the replacement SSL socket is
+registered. Expiry during that gap may miss shutdown until the next deadline
+check. DNS, filesystem operations, timer scheduling and close/join can delay
+return. This is a copy, not the broker transfer watchdog.
+"""
 import http.client
 import socket
 import threading
@@ -67,7 +73,8 @@ class _DeadlineHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self):
         # HTTPConnection assigns the raw socket before proxy tunnelling. The
-        # watchdog can interrupt the tunnel and TLS handshake as well as HTTP.
+        # The watchdog can interrupt tracked sockets. During wrapping the raw
+    # descriptor can be detached before the SSL socket is registered.
         http.client.HTTPConnection.connect(self)
         self._watchdog.connection(self)  # DNS/connect may have exceeded the budget.
         server_hostname = self._tunnel_host or self.host

@@ -214,9 +214,13 @@ test counts below describe their named source checkpoints.
   the credentials cannot overlap. Reservation and phase updates require the
   exact durable worker claim. `reference_sender.py` sends only stored completion
   records and verifies an exact durable receipt before marking delivery complete.
-  Its network deadline (30 seconds by default) interrupts active TLS and slow
-  headers or response bodies; DNS/socket creation and local calls cannot be
-  interrupted. A timeout after coordinator commit retries the same immutable
+  Its sender-specific watchdog (30 seconds by default) attempts to interrupt
+  tracked sockets during TLS and slow headers or response bodies. It is separate
+  from the broker transfer watchdog and does not provide a hard time bound:
+  TLS wrapping can detach a raw socket before its replacement is tracked, and
+  DNS, socket creation, local calls, timer scheduling and timer close/join may
+  delay return. Expiry during the wrap gap is observed at the next check.
+  A timeout after coordinator commit retries the same immutable
   outbox ID. Lease expiry permits replay; a verified late receipt remains valid.
   Neither timeout nor this receipt authorizes file cleanup.
 - `reference_engine_worker.py` connects reserved, verified local photo inputs to
