@@ -29,6 +29,7 @@ SOURCE_FILES = ('__init__.py', 'reference_protocol.py', 'node_gate.py',
                 'treedar_admission.py', 'treedar_engine.py')
 REQUIRED_OUTPUTS = {'dtm.tif','chm.tif','chm_raw.tif','crowns.tif','trees.csv','tree_features.csv',
                     'summary.json','manifest.json','report.html','tree_map.geojson','areas.png','tree_map.png'}
+MAX_RESULT_METADATA_BYTES = 1024 * 1024
 INSPECT = ('{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Running}},'
            '"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},'
            '"binding":{{json (index .Config.Labels "ltds.treedar.binding")}}}')
@@ -135,6 +136,35 @@ def _file(path, maximum, *, expected_bytes=None, expected_sha=None):
         if (expected_bytes is not None and count != expected_bytes) or (expected_sha is not None and sha != expected_sha):
             raise TreeDarHeld('file_integrity_changed')
         return count, sha
+    finally:
+        os.close(fd)
+
+
+def _read_result_metadata(path, maximum):
+    """Read a small regular engine metadata file without following links or FIFOs."""
+    if any(item.is_symlink() for item in (path, *path.parents)):
+        raise TreeDarHeld('owned_regular_file_required')
+    limit=min(maximum,MAX_RESULT_METADATA_BYTES)
+    fd=os.open(path,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before=os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or not 0<=before.st_size<=limit:
+            raise TreeDarHeld('result_metadata_budget_or_identity_changed')
+        data=bytearray()
+        while True:
+            part=os.read(fd,min(65536,limit-len(data)+1))
+            if not part: break
+            data.extend(part)
+            if len(data)>limit:
+                raise TreeDarHeld('result_metadata_budget_exceeded')
+        after,current=os.fstat(fd),path.lstat()
+        snapshot=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_nlink)
+        if len(data)!=before.st_size or snapshot(before)!=snapshot(after) or snapshot(after)!=snapshot(current):
+            raise TreeDarHeld('result_metadata_changed_during_read')
+        result=json.loads(data)
+        if type(result) is not dict:
+            raise TreeDarHeld('result_metadata_object_required')
+        return result
     finally:
         os.close(fd)
 
@@ -522,8 +552,8 @@ def _inside():
             for _, window in raster.block_windows(1):
                 if not np.isfinite(raster.read(1, window=window)).all():
                     return 1
-    summary = json.loads((run / 'summary.json').read_bytes())
-    native_manifest = json.loads((run / 'manifest.json').read_bytes())
+    summary = _read_result_metadata(run / 'summary.json', per_file)
+    native_manifest = _read_result_metadata(run / 'manifest.json', per_file)
     if (summary['n_points_used'] != admission['pointCount'] or summary['version'] != __version__
             or native_manifest['command'] != 'pipeline' or native_manifest['treedar_version'] != __version__):
         return 1
