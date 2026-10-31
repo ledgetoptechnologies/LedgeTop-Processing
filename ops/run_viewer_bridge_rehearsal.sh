@@ -12,9 +12,9 @@ FULL_SERVER_SHA256=f8d93cb6ba6f4634fac1eb5e18399bcc481c0a244c295e4ef904054a9c10e
 FULL_CLIENT_SHA256=9cc627374bdfa2eb198232edaa53335e82681ac20e1228e2861d454f3556029a
 VIEWER_IMAGE=viewer-gcp-validation-faa3fd8bca374cb9ba721eea97a4674a:latest
 PYTHON_IMAGE=python:3.12-slim
-BRIDGE_MODE=${BRIDGE_MODE:-reconcile}
+BRIDGE_MODE=${BRIDGE_MODE:-full}
 case "$BRIDGE_MODE" in
-    reconcile) SERVER_SCRIPT=viewer_bridge_server.py; CLIENT_SCRIPT=viewer_bridge_client.cjs; CLIENT_WAIT=45s;;
+    reconcile) printf 'reconcile mode is not qualified for the per-object input layout\n' >&2; exit 1;;
     full) SERVER_SCRIPT=viewer_full_bridge_server.py; CLIENT_SCRIPT=viewer_full_bridge_client.cjs; CLIENT_WAIT=75s;;
     *) printf 'BRIDGE_MODE must be reconcile or full\n' >&2; exit 1;;
 esac

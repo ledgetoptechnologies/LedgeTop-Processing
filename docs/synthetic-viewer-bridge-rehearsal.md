@@ -13,7 +13,7 @@ VIEWER_REPO=/path/to/viewer/repository PROCESSING=/path/to/isolated/processing \
   sh /path/to/isolated/processing/ops/run_viewer_bridge_rehearsal.sh
 ```
 
-Set `BRIDGE_MODE=full` in that command to exercise actual Viewer submission before reconciliation and ingest. The default is `reconcile`. The full fixture uses the same fixed synthetic task UUID as the original fixture but creates it through the Viewer provider API rather than inserting the Processing task beforehand. Its Viewer producer-provenance record is synthetic and is not a custody acknowledgement.
+The default is `BRIDGE_MODE=full`, which exercises actual Viewer submission before reconciliation and ingest. The old `reconcile` mode is rejected until its fixture is updated and requalified. The full fixture uses the same fixed synthetic task UUID as the original fixture but creates it through the Viewer provider API rather than inserting the Processing task beforehand. Its Viewer producer-provenance record is synthetic and is not a custody acknowledgement.
 
 Every run prints and durably records a random run ID, label and intended container names before creating containers. Docker create calls are bounded to 30 seconds and ordinary inspect, stop, remove, image inspection and log calls to 15 seconds each. Cleanup verifies each immutable container ID and its run label before stopping or removing it; an identity mismatch or uncertain Docker response is left for manual inspection. If a create times out before returning an ID, the recorded name and label identify what to investigate, but the script never deletes by name alone.
 
@@ -28,4 +28,4 @@ remains active, the isolated fixture process exits rather than tearing down stat
 under that thread. Container cleanup still depends on verified ownership. This is
 not a guarantee about shutdown of production workers.
 
-The full-mode retention check follows the `per-object-v1` input layout. The script pins the updated full fixture hash and requires the reviewed Processing base; the separate default reconcile fixture still targets the previous layout and has not been requalified for this base. No offline/restart behavior is proven by the full-mode run.
+The full-mode retention check follows the `per-object-v1` input layout. The script pins the updated full fixture hash and requires the reviewed Processing base; the separate reconcile fixture still targets the previous layout, has not been requalified for this base, and is rejected before container creation. No offline/restart behavior is proven by the full-mode run.
