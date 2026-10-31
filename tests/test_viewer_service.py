@@ -1026,6 +1026,171 @@ class ViewerServiceTests(unittest.TestCase):
         with stream:self.assertEqual(stream.read(),self.engines['cluster'].archive)
         self.assertEqual(orphan.read_bytes(),b'unrelated')
 
+    def test_crashed_restore_is_preserved_and_blocks_new_copies(self):
+        for recorded in (True, False):
+            with self.subTest(recorded=recorded):
+                identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+                stream,_=self.service.download(identifier);stream.close()
+                task=self.task(identifier);path=Path(task['archive_path'])
+                if not recorded:self.service.store.update(identifier,archive_path=None)
+                path.unlink()
+                orphan=path.parent/'.all.zip.restore-pending'
+                orphan.write_bytes(b'incomplete retained bytes')
+                receipt=path.with_suffix('.zip.receipt');before=receipt.read_bytes()
+                calls=self.engines['cluster'].download_calls
+                for _ in range(2):
+                    with self.assertRaises(Conflict):
+                        self.service.download(identifier)
+                self.assertEqual(orphan.read_bytes(),b'incomplete retained bytes')
+                self.assertEqual(receipt.read_bytes(),before)
+                self.assertFalse(path.exists())
+                self.assertEqual(self.engines['cluster'].download_calls,calls)
+                self.assertEqual(self.task(identifier)['job']['status'],'succeeded')
+
+    def test_completed_restore_slot_is_reused_without_engine_download(self):
+        for recorded in (True, False):
+            with self.subTest(recorded=recorded):
+                identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+                stream,_=self.service.download(identifier)
+                with stream: expected=stream.read()
+                task=self.task(identifier);path=Path(task['archive_path'])
+                if not recorded:self.service.store.update(identifier,archive_path=None)
+                path.unlink()
+                pending=path.parent/'.all.zip.restore-pending';pending.write_bytes(expected)
+                calls=self.engines['cluster'].download_calls
+                self.service.close();self.queue.close();self.make_queue_service()
+                stream,size=self.service.download(identifier)
+                with stream:self.assertEqual(stream.read(),expected)
+                self.assertEqual(size,len(expected));self.assertEqual(path.read_bytes(),expected)
+                self.assertFalse(pending.exists())
+                self.assertEqual(self.engines['cluster'].download_calls,calls)
+
+    def test_process_death_during_restore_recovers_complete_slot(self):
+        payload=io.BytesIO()
+        with zipfile.ZipFile(payload,'w',compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr('fixture.bin',b'x'*(2*1024*1024))
+        self.engines['cluster'].archive=payload.getvalue()
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        task=self.task(identifier);path=Path(task['archive_path']);path.unlink()
+        source=path.parent/'synthetic-crash-source.zip';source.write_bytes(self.engines['cluster'].archive)
+        code='''
+import hashlib, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from processing.viewer_service import ViewerService
+path=Path(sys.argv[1]); raw=Path(sys.argv[2]).read_bytes()
+class Response:
+    status=200
+    headers={'Content-Length':str(len(raw))}
+    def __enter__(self): return self
+    def __exit__(self,*args): pass
+    def read(self,n):
+        if not hasattr(self,'done'):
+            self.done=True
+            return raw
+        os._exit(77)
+class Engine:
+    def download(self,uuid): return Response()
+service=ViewerService.__new__(ViewerService)
+service.config=SimpleNamespace(viewer_max_archive_bytes=len(raw)+1)
+service.engines={'cluster':Engine()}
+service._restore_recorded_archive({'directory':str(path.parent),'node_id':'cluster','engine_uuid':'fixture'},path,
+    {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()})
+'''
+        child=subprocess.run([sys.executable,'-c',code,str(path),str(source)],timeout=20)
+        self.assertEqual(child.returncode,77)
+        pending=path.parent/'.all.zip.restore-pending'
+        self.assertEqual(pending.read_bytes(),self.engines['cluster'].archive)
+        calls=self.engines['cluster'].download_calls
+        self.service.close();self.queue.close();self.make_queue_service()
+        stream,size=self.service.download(identifier)
+        with stream:self.assertEqual(stream.read(),source.read_bytes())
+        self.assertEqual(size,source.stat().st_size)
+        self.assertEqual(self.engines['cluster'].download_calls,calls)
+        self.assertFalse(pending.exists())
+
+    def test_recovered_restore_syncs_before_publication_and_preserves_on_sync_failure(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier)
+        with stream: expected=stream.read()
+        path=Path(self.task(identifier)['archive_path']);path.unlink()
+        pending=path.parent/'.all.zip.restore-pending';pending.write_bytes(expected)
+        calls=self.engines['cluster'].download_calls
+        with patch('processing.viewer_service.os.fsync',side_effect=OSError('synthetic sync failure')):
+            with self.assertRaisesRegex(Conflict,'archive restore sync failed'):
+                self.service.download(identifier)
+        self.assertEqual(pending.read_bytes(),expected);self.assertFalse(path.exists())
+        events=[];original_fsync=os.fsync;original_link=os.link
+        def sync(fd):
+            events.append('sync');return original_fsync(fd)
+        def link(source,destination):
+            events.append('link');return original_link(source,destination)
+        with patch('processing.viewer_service.os.fsync',side_effect=sync), patch('processing.viewer_service.os.link',side_effect=link):
+            stream,_=self.service.download(identifier)
+            with stream:self.assertEqual(stream.read(),expected)
+        self.assertLess(events.index('sync'),events.index('link'))
+        self.assertEqual(self.engines['cluster'].download_calls,calls)
+
+    def test_process_death_mid_restore_preserves_short_slot_for_inspection(self):
+        payload=io.BytesIO()
+        with zipfile.ZipFile(payload,'w',compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr('fixture.bin',b'x'*(2*1024*1024))
+        self.engines['cluster'].archive=payload.getvalue()
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        task=self.task(identifier);path=Path(task['archive_path']);path.unlink()
+        source=path.parent/'synthetic-partial-source.zip';source.write_bytes(self.engines['cluster'].archive)
+        code='''
+import hashlib, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from processing.viewer_service import ViewerService
+path=Path(sys.argv[1]); raw=Path(sys.argv[2]).read_bytes()
+class Response:
+    status=200
+    headers={'Content-Length':str(len(raw))}
+    def __enter__(self): return self
+    def __exit__(self,*args): pass
+    def read(self,n):
+        if not hasattr(self,'done'):
+            self.done=True
+            return raw[:65536]
+        os._exit(77)
+class Engine:
+    def download(self,uuid): return Response()
+service=ViewerService.__new__(ViewerService)
+service.config=SimpleNamespace(viewer_max_archive_bytes=len(raw)+1)
+service.engines={'cluster':Engine()}
+service._restore_recorded_archive({'directory':str(path.parent),'node_id':'cluster','engine_uuid':'fixture'},path,
+    {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()})
+'''
+        child=subprocess.run([sys.executable,'-c',code,str(path),str(source)],timeout=20)
+        self.assertEqual(child.returncode,77)
+        pending=path.parent/'.all.zip.restore-pending';partial=pending.read_bytes()
+        self.assertEqual(partial,source.read_bytes()[:65536])
+        calls=self.engines['cluster'].download_calls
+        self.service.close();self.queue.close();self.make_queue_service()
+        with self.assertRaises(Conflict):self.service.download(identifier)
+        self.assertEqual(pending.read_bytes(),partial);self.assertFalse(path.exists())
+        self.assertEqual(self.engines['cluster'].download_calls,calls)
+
+    def test_new_verified_restore_is_retained_when_final_sync_fails(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier)
+        with stream:expected=stream.read()
+        path=Path(self.task(identifier)['archive_path']);path.unlink()
+        calls=[];original_fsync=os.fsync
+        def sync(fd):
+            calls.append(fd)
+            if len(calls)==2:raise OSError('synthetic sync failure')
+            return original_fsync(fd)
+        with patch('processing.viewer_service.os.fsync',side_effect=sync):
+            with self.assertRaisesRegex(Conflict,'archive restore sync failed'):
+                self.service.download(identifier)
+        self.assertFalse(path.exists())
+        self.assertEqual((path.parent/'.all.zip.restore-pending').read_bytes(),expected)
+
     def test_real_service_over_http_returns_receipt_backed_digest(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from urllib.request import urlopen

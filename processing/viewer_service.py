@@ -346,35 +346,70 @@ class ViewerService:
         directory = Path(task['directory'])
         if path != directory / 'all.zip' or directory.resolve(strict=True) != directory:
             raise Conflict('retained archive path requires inspection')
-        temporary = directory / ('.all.zip.restore-' + uuid.uuid4().hex)
+        # A single deterministic recovery slot prevents repeated crashes from
+        # creating an unbounded number of archives. The per-task lock and the
+        # single-coordinator fence remain necessary for safe serialization.
+        temporary = directory / '.all.zip.restore-pending'
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
-        fd = os.open(temporary, flags, 0o600)
-        original = os.fstat(fd); stream = None
+        stream = None
         try:
-            with os.fdopen(fd, 'wb') as output:
-                fd = None
-                with self.engines[task['node_id']].download(task['engine_uuid']) as response:
-                    if getattr(response, 'status', 200) != 200:
-                        raise EngineUnavailable('archive_unavailable')
-                    media = response.headers.get('Content-Type', '').split(';')[0].lower()
-                    if media and media not in ('application/zip','application/octet-stream','application/x-zip-compressed'):
-                        raise EngineUnavailable('archive_not_ready')
-                    declared = response.headers.get('Content-Length')
-                    if declared is not None and (not declared.isdigit() or int(declared) != receipt['bytes']):
-                        raise Conflict('archive response differs from retained receipt')
-                    total = 0
-                    while chunk := response.read(1024 ** 2):
-                        total += len(chunk)
-                        if total > receipt['bytes']:
-                            raise Conflict('archive response differs from retained receipt')
-                        output.write(chunk)
-                    if total != receipt['bytes']:
-                        raise EngineUnavailable('archive_transfer_incomplete')
-                output.flush(); os.fsync(output.fileno())
+            fd = os.open(temporary, flags, 0o600)
+        except FileExistsError:
+            # Existing data is not ours to delete. Reuse only a complete file
+            # matching the task-bound receipt; an incomplete/unknown file is
+            # retained for inspection rather than overwritten or redownloaded.
+            fd = None
             stream = self._verify_archive(temporary, receipt)
+            original = os.fstat(stream.fileno())
+            if original.st_nlink != 1:
+                stream.close()
+                raise Conflict('previous archive restore requires inspection')
+            created = False
+        else:
+            original = os.fstat(fd)
+            created = True
+        try:
+            if created:
+                with os.fdopen(fd, 'wb') as output:
+                    fd = None
+                    with self.engines[task['node_id']].download(task['engine_uuid']) as response:
+                        if getattr(response, 'status', 200) != 200:
+                            raise EngineUnavailable('archive_unavailable')
+                        media = response.headers.get('Content-Type', '').split(';')[0].lower()
+                        if media and media not in ('application/zip','application/octet-stream','application/x-zip-compressed'):
+                            raise EngineUnavailable('archive_not_ready')
+                        declared = response.headers.get('Content-Length')
+                        if declared is not None and (not declared.isdigit() or int(declared) != receipt['bytes']):
+                            raise Conflict('archive response differs from retained receipt')
+                        total = 0
+                        while chunk := response.read(1024 ** 2):
+                            total += len(chunk)
+                            if total > receipt['bytes']:
+                                raise Conflict('archive response differs from retained receipt')
+                            output.write(chunk)
+                        if total != receipt['bytes']:
+                            raise EngineUnavailable('archive_transfer_incomplete')
+                    output.flush(); os.fsync(output.fileno())
+                stream = self._verify_archive(temporary, receipt)
             opened = os.fstat(stream.fileno()); observed = temporary.lstat()
             if (opened.st_dev,opened.st_ino)!=(original.st_dev,original.st_ino) or (observed.st_dev,observed.st_ino)!=(original.st_dev,original.st_ino):
                 raise Conflict('archive restore identity changed')
+            # A recovered file can have been written by a process that died
+            # before fsync. Make its verified data durable before publication.
+            # On failure retain even a slot created by this invocation.
+            try:
+                sync_fd = os.open(temporary, os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+                                  | getattr(os, 'O_NONBLOCK', 0))
+                try:
+                    sync_identity = os.fstat(sync_fd)
+                    if (sync_identity.st_dev,sync_identity.st_ino)!=(opened.st_dev,opened.st_ino):
+                        raise OSError('archive restore identity changed')
+                    os.fsync(sync_fd)
+                finally:
+                    os.close(sync_fd)
+            except OSError:
+                created = False
+                raise Conflict('archive restore sync failed') from None
             try: os.link(temporary,path)
             except FileExistsError: raise Conflict('archive restore destination changed') from None
             linked = path.lstat()
@@ -399,10 +434,11 @@ class ViewerService:
         finally:
             if fd is not None: os.close(fd)
             if stream is not None: stream.close()
-            try:
-                current=temporary.lstat()
-                if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino): temporary.unlink()
-            except FileNotFoundError: pass
+            if created:
+                try:
+                    current=temporary.lstat()
+                    if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino): temporary.unlink()
+                except FileNotFoundError: pass
 
     def download(self, identifier):
         task = self.store.task(identifier)
