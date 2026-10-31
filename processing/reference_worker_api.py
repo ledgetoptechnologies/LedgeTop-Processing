@@ -45,6 +45,7 @@ class ReferenceWorkerAPI:
                 raise ValueError('bound viewer spool required')
         self.viewer_spool=viewer_spool
         self.viewer_chunks=None  # Explicit synthetic fixture injection only.
+        self.viewer_restart_census=None  # Explicit synthetic fixture injection only.
         self.recovery = None
         if recovery_bindings is not None:
             from .reference_recovery import ClaimRecoveryService
@@ -215,6 +216,12 @@ class ReferenceWorkerAPI:
                 state=self.viewer_spool.lookup(completion[1],identity,token)
                 if state.get('state')!='sealed':raise Conflict('spool unavailable')
                 return Response(200,self.viewer_claims.completion_attestation(completion[1],payload,identity,token,state['receipt']))
+            census=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/restart-evidence',path) if type(path) is str else None
+            if method=='GET' and census:
+                if self.viewer_restart_census is None:return self._error(404,'not_found')
+                token=self._header(headers,'X-Claim-Token')
+                try:return Response(200,self.viewer_restart_census.report(census[1],identity,token))
+                except Exception:return self._error(409,'restart_evidence_unavailable')
             archive_status=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/archive-receipt',path) if type(path) is str else None
             if method=='GET' and archive_status:
                 if self.viewer_spool is None:return self._error(404,'not_found')

@@ -203,17 +203,17 @@ class ViewerArchiveSpool:
             db.execute('BEGIN IMMEDIATE')
             return self._completion_evidence(db,task,reader)
 
-    def _completion_evidence(self,db,task,reader):
+    def _completion_evidence(self,db,task,reader,*,allow_restart_hold=False):
         """Shared evidence gate; caller holds verified reader and write barrier."""
         self.claims._schema(db)
-        job=db.execute('SELECT status FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
+        job=db.execute('SELECT status,held_reason FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
         fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(task['job_id'],)).fetchone()
         active=db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(task['job_id'],)).fetchone()
         row=db.execute('SELECT * FROM viewer_worker_completions WHERE job_id=?',(task['job_id'],)).fetchone()
         grant=db.execute('SELECT grant_value FROM viewer_worker_grants WHERE job_id=?',(task['job_id'],)).fetchone()
         enrollment=db.execute('SELECT attestation FROM viewer_worker_enrollments WHERE job_id=?',(task['job_id'],)).fetchone()
         commit=db.execute("SELECT state,operation FROM viewer_worker_permits WHERE job_id=? AND operation_id='commit'",(task['job_id'],)).fetchone()
-        if (not job or job['status']!='running' or (fence and fence['stop_requested']) or active or not row
+        if (not job or not (job['status']=='running' or (allow_restart_hold and job['status']=='held' and job['held_reason']=='coordinator_restart')) or (fence and fence['stop_requested']) or active or not row
                 or not grant or not enrollment or not commit or (commit['state'],commit['operation'])!=('finished','commit')):return False
         observation=p.decode_submission(row['observation'].encode());spool_receipt=p.decode_submission(row['spool_receipt'].encode())
         receipt=p.decode_submission(row['receipt'].encode())
