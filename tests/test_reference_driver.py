@@ -526,6 +526,17 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(len(checks), 4)
         self.assertEqual(self.driver.step()['state'], 'claim_pending')
 
+    @unittest.expectedFailure
+    def test_task_status_change_during_bounded_sweep_must_not_claim(self):
+        # Known unsafe case: an unchanged UUID list is not an atomic snapshot
+        # of task statuses. This expected failure documents the missing fence.
+        self.submit()
+        self.transport.tasks = {str(uuid.uuid4()): 40 for _ in range(5)}
+        changed = next(iter(self.transport.tasks))
+        self.assertEqual(self.driver.step()['state'], 'not_ready')
+        self.transport.tasks[changed] = 50
+        self.assertEqual(self.driver.step()['state'], 'not_ready')
+
     def test_authority_mismatch_and_actual_native_engine_requirement(self):
         self.submit()
         original = self.driver._request
