@@ -166,8 +166,8 @@ def begin_capture(root,root_identity,binding,*,max_budget,declared_length=None):
         slot.close();raise
 
 
-def verify_sealed(root,root_identity,binding,*,max_budget):
-    """Reopen and reverify sealed bytes; never infer a seal from file existence."""
+def _open_verified(root,root_identity,binding,*,max_budget):
+    """Return verified, locked slot plus open journal descriptors."""
     digest=validate_binding(binding);budget=binding['outputBudgetBytes']
     slot=_open_slot(root,root_identity,digest,budget,max_budget=max_budget,allow_capture=True)
     intent_name,seal_name=_names(digest);intent_fd=seal_fd=None
@@ -191,9 +191,79 @@ def verify_sealed(root,root_identity,binding,*,max_budget):
         if _digest_and_zip(slot,seal['bytes'])!=seal['sha256']:raise SlotHeld('capture_content_changed')
         os.fsync(slot._fd);os.fsync(intent_fd);os.fsync(seal_fd);os.fsync(slot._root);slot._check()
         _check_record(slot,intent_fd,intent_name,intent);_check_record(slot,seal_fd,seal_name,seal)
-        return dict(seal)
-    except (OSError,ValueError):raise SlotHeld('capture_requires_inspection') from None
-    finally:
+        return slot,intent_name,intent,intent_fd,seal_name,seal,seal_fd
+    except BaseException as error:
         if intent_fd is not None:os.close(intent_fd)
         if seal_fd is not None:os.close(seal_fd)
         slot.close()
+        if isinstance(error,(OSError,ValueError)):raise SlotHeld('capture_requires_inspection') from None
+        raise
+
+
+class SealedReader:
+    """Exclusive locked, revalidated local stream; conveys no remote custody."""
+    def __init__(self,slot,intent_name,intent,intent_fd,seal_name,seal,seal_fd):
+        self._slot,self._intent_name,self._intent,self._intent_fd=slot,intent_name,intent,intent_fd
+        self._seal_name,self._seal,self._seal_fd=seal_name,seal,seal_fd
+        self._position=0;self._digest=hashlib.sha256();self._pid=os.getpid()
+        self._lock=threading.RLock();self._held=False
+
+    @property
+    def length(self):return self._seal['bytes']
+
+    @property
+    def sha256(self):return self._seal['sha256']
+
+    def _check(self):
+        if os.getpid()!=self._pid or self._slot is None or self._held:raise SlotHeld('reader_requires_inspection')
+        self._slot._check()
+        _check_record(self._slot,self._intent_fd,self._intent_name,self._intent)
+        _check_record(self._slot,self._seal_fd,self._seal_name,self._seal)
+
+    def read(self,size):
+        if os.getpid()!=self._pid:raise SlotHeld('reader_requires_inspection')
+        if type(size) is not int or not 1<=size<=CHUNK:raise SlotHeld('reader_chunk_invalid')
+        with self._lock:
+            try:
+                self._check()
+                if self._position==self.length:return b''
+                count=min(size,self.length-self._position)
+                data=os.pread(self._slot._fd,count,self._position)
+                if len(data)!=count:raise SlotHeld('reader_incomplete')
+                self._digest.update(data);self._position+=count
+                self._check()
+                if self._position==self.length:
+                    # Do not release the last chunk until a second full read
+                    # validates bytes again while the same flock is held.
+                    if self._digest.hexdigest()!=self.sha256 or _digest_and_zip(self._slot,self.length)!=self.sha256:
+                        raise SlotHeld('reader_content_changed')
+                    self._check()
+                return data
+            except OSError:
+                self._held=True;raise SlotHeld('reader_requires_inspection') from None
+            except BaseException:
+                self._held=True;raise
+
+    def close(self):
+        if os.getpid()!=self._pid:raise SlotHeld('reader_requires_inspection')
+        with self._lock:
+            if self._slot is not None:
+                try:os.close(self._intent_fd)
+                finally:
+                    try:os.close(self._seal_fd)
+                    finally:
+                        self._slot.close();self._slot=None
+
+    def __enter__(self):return self
+    def __exit__(self,*_):self.close()
+
+
+def open_sealed_reader(root,root_identity,binding,*,max_budget):
+    """Open a verified stream and retain its cooperative lock until close."""
+    return SealedReader(*_open_verified(root,root_identity,binding,max_budget=max_budget))
+
+
+def verify_sealed(root,root_identity,binding,*,max_budget):
+    """Point-in-time verification only; the lock is released on return."""
+    with open_sealed_reader(root,root_identity,binding,max_budget=max_budget) as reader:
+        return dict(reader._seal)
