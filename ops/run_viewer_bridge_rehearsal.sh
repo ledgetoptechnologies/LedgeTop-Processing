@@ -91,7 +91,7 @@ git -C "$PROCESSING" diff --quiet "$PROCESSING_BASE" HEAD -- processing ops \
     tests/test_viewer_node_enrollment.py tests/test_viewer_worker_claim.py \
     ':(exclude)ops/run_viewer_bridge_rehearsal.sh' ':(exclude)ops/verify_viewer_export.py'
 verifier_sum=$(sha256sum "$PROCESSING/ops/verify_viewer_export.py")
-[ "${verifier_sum%% *}" = 2e2550b7b64418f04f4529ebbf380211ca4118f6ade5718cd4d791d71becf718 ] || { printf 'Viewer export verifier hash mismatch\n' >&2; exit 1; }
+[ "${verifier_sum%% *}" = b075ad603632339d38b31fbdc1de614889546a1014aa814c8c6381e5999b34ef ] || { printf 'Viewer export verifier hash mismatch\n' >&2; exit 1; }
 printf 'Viewer tree: %s\nProcessing base: %s\nProcessing checkout: %s\n' "$VIEWER_TREE" "$PROCESSING_BASE" "$(git -C "$PROCESSING" rev-parse HEAD)"
 git -C "$PROCESSING" rev-parse HEAD > "$RUN_DIR/processing.commit"
 if [ "$BRIDGE_MODE" != full ]; then

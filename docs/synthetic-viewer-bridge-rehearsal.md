@@ -31,3 +31,5 @@ not a guarantee about shutdown of production workers.
 The full-mode retention check follows the `per-object-v1` input layout. The script pins the updated full fixture hash and requires the reviewed Processing base; the separate reconcile fixture still targets the previous layout, has not been requalified for this base, and is rejected before container creation. No offline/restart behavior is proven by the full-mode run.
 
 The archive verifier intentionally rejects links, special files, traversal, duplicate paths, unsafe modes and unexpected or missing extracted paths. It assumes the task-owned private export directory and its ancestors are not concurrently modified by the same user or root; it is not an independent sandbox against a hostile same-UID process. Git archive uses a fixed 0022 mask so source modes do not depend on host umask.
+
+The export bind root becomes mode 0755 for the non-root Viewer container; its enclosing run directory must remain owned by the operator and mode 0700. The verifier checks both before the client starts.

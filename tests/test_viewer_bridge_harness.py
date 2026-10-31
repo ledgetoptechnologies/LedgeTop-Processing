@@ -45,7 +45,7 @@ esac
             (bin_dir/'sha256sum').write_text('''#!/bin/sh
 for item in "$@"; do
  case "$item" in
- */verify_viewer_export.py) hash=2e2550b7b64418f04f4529ebbf380211ca4118f6ade5718cd4d791d71becf718;;
+ */verify_viewer_export.py) hash=b075ad603632339d38b31fbdc1de614889546a1014aa814c8c6381e5999b34ef;;
  */viewer_full_bridge_server.py) hash="$MOCK_SERVER_HASH"; [ "$MOCK_MODE" != tampered ] || hash=bad;;
  */viewer_full_bridge_client.cjs) hash="$MOCK_CLIENT_HASH";;
  *) hash=synthetic;;
