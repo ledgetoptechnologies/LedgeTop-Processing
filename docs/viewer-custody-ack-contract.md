@@ -115,3 +115,10 @@ credential-separation qualification before activation; no completion or cleanup
 may follow this assertion. Exercise actual Viewer staged commitment and ACK
 clients against an isolated TLS coordinator with lost response/replay,
 wrong-authority and task-generation tests and retained upstream copies.
+
+The isolated staged-ACK spool draft adds a held-reader transactional
+revalidation and routes the existing handler through it. It remains unassembled:
+runtime schema 3 and schema 4 are mutually exclusive, spool settings explicitly
+reject staged principals, and both schema qualification flags remain false.
+There is no cross-language staged-ACK or crash/replay verification yet. Synthetic
+handler replay is not proof of process-crash durability or real Viewer custody.

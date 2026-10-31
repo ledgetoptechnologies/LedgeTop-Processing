@@ -90,28 +90,31 @@ class ViewerArchiveSpool:
             digest.update(data);offset+=len(data)
         slot._check();return digest.hexdigest()
 
-    def _viewer_snapshot(self,task):
-        """Revalidate the task incarnation against claim, metadata and spool."""
-        with self.claims.queue._db() as db:
-            db.execute('BEGIN');self.claims._schema(db)
-            current=db.execute('SELECT * FROM viewer_tasks WHERE uuid=? AND removed=0',(task['uuid'],)).fetchone()
-            if not current or any(current[key]!=task[key] for key in ('uuid','generation','environment','job_id','node_id','engine_uuid','claim_token','stage','phase')):
-                raise SpoolHeld('viewer_task_changed')
-            claim=db.execute('SELECT * FROM viewer_worker_claims WHERE job_id=?',(task['job_id'],)).fetchone()
-            if not claim:raise SpoolHeld('viewer_claim_unavailable')
-            identity=dict(node_id=claim['node_id'],worker_id=claim['worker_id'],worker_instance_id=claim['instance_id'])
-            metadata=self._metadata(db,task['job_id'],identity,claim['token'])
-            if (metadata['viewerTaskId']!=task['uuid'] or metadata['viewerGeneration']!=task['generation']
-                    or metadata['environment']!=task['environment'] or metadata['engineTaskId']!=task['engine_uuid']):
-                raise SpoolHeld('viewer_metadata_changed')
-            metadata_sha=p.digest(metadata);slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=task['job_id'],metadataSha256=metadata_sha))
-            row=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(task['job_id'],)).fetchone()
-            receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=task['job_id'],metadataSha256=metadata_sha,
-                         archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=slot_key)
-            if (not row or row['state']!='sealed' or row['slot_key']!=slot_key or row['metadata_sha']!=metadata_sha
-                    or row['receipt']!=p.canonical_json(receipt).decode() or not isinstance(row['slot_identity'],str)):
-                raise SpoolHeld('viewer_spool_unavailable')
-            return receipt,row['slot_identity']
+    def _viewer_snapshot(self,task,db=None):
+        """Revalidate against the caller's transaction when supplied."""
+        if db is None:
+            with self.claims.queue._db() as connection:
+                connection.execute('BEGIN')
+                return self._viewer_snapshot(task,connection)
+        self.claims._schema(db)
+        current=db.execute('SELECT * FROM viewer_tasks WHERE uuid=? AND removed=0',(task['uuid'],)).fetchone()
+        if not current or any(current[key]!=task[key] for key in ('uuid','generation','environment','job_id','node_id','engine_uuid','claim_token','stage','phase')):
+            raise SpoolHeld('viewer_task_changed')
+        claim=db.execute('SELECT * FROM viewer_worker_claims WHERE job_id=?',(task['job_id'],)).fetchone()
+        if not claim:raise SpoolHeld('viewer_claim_unavailable')
+        identity=dict(node_id=claim['node_id'],worker_id=claim['worker_id'],worker_instance_id=claim['instance_id'])
+        metadata=self._metadata(db,task['job_id'],identity,claim['token'])
+        if (metadata['viewerTaskId']!=task['uuid'] or metadata['viewerGeneration']!=task['generation']
+                or metadata['environment']!=task['environment'] or metadata['engineTaskId']!=task['engine_uuid']):
+            raise SpoolHeld('viewer_metadata_changed')
+        metadata_sha=p.digest(metadata);slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=task['job_id'],metadataSha256=metadata_sha))
+        row=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(task['job_id'],)).fetchone()
+        receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=task['job_id'],metadataSha256=metadata_sha,
+                     archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=slot_key)
+        if (not row or row['state']!='sealed' or row['slot_key']!=slot_key or row['metadata_sha']!=metadata_sha
+                or row['receipt']!=p.canonical_json(receipt).decode() or not isinstance(row['slot_identity'],str)):
+            raise SpoolHeld('viewer_spool_unavailable')
+        return receipt,row['slot_identity']
 
     def open_for_viewer(self,task):
         """Return a locked verified stream, never Viewer custody or completion."""
@@ -131,6 +134,25 @@ class ViewerArchiveSpool:
                     except BaseException:pass  # Preserve the original failure.
             finally:self._work.release()
             raise
+
+    def revalidate_staged_ack_locked(self,db,task,reader):
+        """Revalidate a held reader under the caller's BEGIN IMMEDIATE barrier.
+
+        This supplies a building block only; it neither commits an assertion nor
+        proves Viewer custody. The caller must hold the reader until commit.
+        """
+        if (not db.in_transaction or not isinstance(reader,_ViewerReader)
+                or reader.spool is not self or reader.closed or reader.task != task):
+            raise SpoolHeld('viewer_reader_invalid')
+        job=db.execute('SELECT status FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
+        fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(task['job_id'],)).fetchone()
+        if not job or job['status']!='running' or (fence and fence['stop_requested']):
+            raise SpoolHeld('viewer_job_held')
+        receipt,identity=self._viewer_snapshot(task,db)
+        reader.slot._check()
+        if self._slot_identity(reader.slot)!=identity or receipt!=reader.receipt:
+            raise SpoolHeld('viewer_archive_changed')
+        return receipt
 
     def completion_ready(self,task):
         """Point-in-time synthetic projection; does not finish or release a job."""

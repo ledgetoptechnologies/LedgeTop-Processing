@@ -11,6 +11,7 @@ import hmac
 import json
 import base64
 from pathlib import Path
+from contextlib import ExitStack
 import re
 from types import MappingProxyType
 
@@ -18,6 +19,7 @@ from . import reference_protocol as p
 from .maintenance import Conflict
 from .reference_api import Response
 from .viewer_staged_ack_schema import validate_staged_ack_schema
+from .viewer_archive_spool import SpoolHeld
 
 ROUTE = p.PREFIX + '/viewer-staged-acks/'
 FIELDS = ('schemaVersion','taskId','generation','archiveSha256','archiveBytes',
@@ -96,44 +98,60 @@ class ViewerStagedAck:
                         'generation':row['generation'] if row is not None else None,
                         'issuer':principal,'audience':store.queue.authority_id,
                         'environment':environment,'namespace':NAMESPACE})
-            with self.service._lock,store._lock,store.queue._db() as db:
-                db.execute('BEGIN IMMEDIATE')
-                if is_lookup:
-                    prior=db.execute('SELECT capability_sha256,assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=? AND environment=? AND principal_id=? AND audience=? AND namespace=?',(identifier,lookup_generation,environment,principal,store.queue.authority_id,NAMESPACE)).fetchone()
-                    if not prior:raise KeyError()
-                    try: verifier=store._capability_hash(identifier,environment,caps[0])
-                    except ValueError:raise KeyError() from None
-                    if not hmac.compare_digest(prior['capability_sha256'],verifier):raise KeyError()
-                    return Response(200,{'assertion':json.loads(prior['assertion_json'])})
-                reservation=store._reservation(db,identifier,environment,caps[0])
-                if reservation is None:raise KeyError()
-                row=store._row(db,identifier)
-                if row['environment']!=environment:raise KeyError()
-                task=store._task(db,row)
-                if not task['job'] or task['job']['status']!='succeeded' or not task['archive_path']:
-                    raise Conflict('result not available')
-                path=Path(task['archive_path'])
-                if path!=Path(task['directory'])/'all.zip':raise Conflict('archive path changed')
-                receipt=self.service._archive_receipt(task,path.with_suffix('.zip.receipt'))
-                receipt_sha=hashlib.sha256(p.canonical_json(receipt)).hexdigest()
-                if is_commitment:
-                    return Response(200,{'schemaVersion':1,'taskId':identifier,'generation':row['generation'],
-                        'archiveSha256':receipt['sha256'],'archiveBytes':receipt['bytes'],
-                        'coordinatorReceiptSha256':receipt_sha,'issuer':principal,
-                        'audience':store.queue.authority_id,'environment':environment,'namespace':NAMESPACE})
-                if (value['generation']!=row['generation'] or value['archiveSha256']!=receipt['sha256']
-                        or value['archiveBytes']!=receipt['bytes'] or value['coordinatorReceiptSha256']!=receipt_sha):
-                    raise Conflict('result identity mismatch')
-                encoded=p.canonical_json(value);digest=hashlib.sha256(encoded).hexdigest()
-                old=db.execute('SELECT environment,principal_id,audience,namespace,assertion_sha256,assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=?',(identifier,row['generation'])).fetchone()
-                if old and (old['environment']!=environment or old['principal_id']!=principal or old['audience']!=store.queue.authority_id or old['namespace']!=NAMESPACE or old['assertion_sha256']!=digest or old['assertion_json']!=encoded.decode()):raise Conflict('assertion differs')
-                if not old:
-                    if db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0]>=100000:raise Conflict('assertion capacity reached')
-                    if db.execute('SELECT 1 FROM viewer_staged_acks WHERE attempt_id=? OR staging_commit_id=?',(value['attemptId'],value['stagingCommitId'])).fetchone():
-                        raise Conflict('assertion identity already bound')
-                    db.execute('INSERT INTO viewer_staged_acks VALUES (?,?,?,?,?,?,?,?,?,?,?)',(identifier,row['generation'],environment,principal,store.queue.authority_id,NAMESPACE,value['attemptId'],value['stagingCommitId'],reservation['capability_hash'],digest,encoded.decode()))
-                return Response(200,{'assertion':value,'created':old is None})
+            with ExitStack() as held:
+                reader=None;spool=getattr(self.service,'viewer_spool',None)
+                if not is_lookup and spool is not None:
+                    with store.queue._db() as preliminary:
+                        preliminary.execute('BEGIN')
+                        if store._reservation(preliminary,identifier,environment,caps[0]) is None:raise KeyError()
+                        preview=store._task(preliminary,store._row(preliminary,identifier))
+                    if preview['environment']!=environment:raise KeyError()
+                    if preview['phase']=='worker_claimed':
+                        reader,_=spool.open_for_viewer(preview)
+                        held.callback(reader.close)
+                with self.service._lock,store._lock,store.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    if is_lookup:
+                        prior=db.execute('SELECT capability_sha256,assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=? AND environment=? AND principal_id=? AND audience=? AND namespace=?',(identifier,lookup_generation,environment,principal,store.queue.authority_id,NAMESPACE)).fetchone()
+                        if not prior:raise KeyError()
+                        try: verifier=store._capability_hash(identifier,environment,caps[0])
+                        except ValueError:raise KeyError() from None
+                        if not hmac.compare_digest(prior['capability_sha256'],verifier):raise KeyError()
+                        return Response(200,{'assertion':json.loads(prior['assertion_json'])})
+                    reservation=store._reservation(db,identifier,environment,caps[0])
+                    if reservation is None:raise KeyError()
+                    row=store._row(db,identifier)
+                    if row['environment']!=environment:raise KeyError()
+                    task=store._task(db,row)
+                    if reader is not None:
+                        receipt=spool.revalidate_staged_ack_locked(db,task,reader)
+                        receipt_sha=hashlib.sha256(p.canonical_json(receipt)).hexdigest()
+                        receipt={'sha256':receipt['archiveSha256'],'bytes':receipt['archiveBytes']}
+                    else:
+                        if not task['job'] or task['job']['status']!='succeeded' or not task['archive_path']:
+                            raise Conflict('result not available')
+                        path=Path(task['archive_path'])
+                        if path!=Path(task['directory'])/'all.zip':raise Conflict('archive path changed')
+                        receipt=self.service._archive_receipt(task,path.with_suffix('.zip.receipt'))
+                        receipt_sha=hashlib.sha256(p.canonical_json(receipt)).hexdigest()
+                    if is_commitment:
+                        return Response(200,{'schemaVersion':1,'taskId':identifier,'generation':row['generation'],
+                            'archiveSha256':receipt['sha256'],'archiveBytes':receipt['bytes'],
+                            'coordinatorReceiptSha256':receipt_sha,'issuer':principal,
+                            'audience':store.queue.authority_id,'environment':environment,'namespace':NAMESPACE})
+                    if (value['generation']!=row['generation'] or value['archiveSha256']!=receipt['sha256']
+                            or value['archiveBytes']!=receipt['bytes'] or value['coordinatorReceiptSha256']!=receipt_sha):
+                        raise Conflict('result identity mismatch')
+                    encoded=p.canonical_json(value);digest=hashlib.sha256(encoded).hexdigest()
+                    old=db.execute('SELECT environment,principal_id,audience,namespace,assertion_sha256,assertion_json FROM viewer_staged_acks WHERE task_id=? AND generation=?',(identifier,row['generation'])).fetchone()
+                    if old and (old['environment']!=environment or old['principal_id']!=principal or old['audience']!=store.queue.authority_id or old['namespace']!=NAMESPACE or old['assertion_sha256']!=digest or old['assertion_json']!=encoded.decode()):raise Conflict('assertion differs')
+                    if not old:
+                        if db.execute('SELECT COUNT(*) FROM viewer_staged_acks').fetchone()[0]>=100000:raise Conflict('assertion capacity reached')
+                        if db.execute('SELECT 1 FROM viewer_staged_acks WHERE attempt_id=? OR staging_commit_id=?',(value['attemptId'],value['stagingCommitId'])).fetchone():
+                            raise Conflict('assertion identity already bound')
+                        db.execute('INSERT INTO viewer_staged_acks VALUES (?,?,?,?,?,?,?,?,?,?,?)',(identifier,row['generation'],environment,principal,store.queue.authority_id,NAMESPACE,value['attemptId'],value['stagingCommitId'],reservation['capability_hash'],digest,encoded.decode()))
+                    return Response(200,{'assertion':value,'created':old is None})
         except KeyError:return Response(404,{'error':'not_found'})
         except (p.ProtocolError,ValueError,TypeError):return Response(400,{'error':'invalid_request'})
-        except Conflict:return Response(409,{'error':'conflict'})
+        except (Conflict,SpoolHeld):return Response(409,{'error':'conflict'})
         except Exception:return Response(500,{'error':'internal_error'})

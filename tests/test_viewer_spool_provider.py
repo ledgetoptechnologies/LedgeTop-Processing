@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import uuid
 import http.client
 import json
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -84,6 +87,54 @@ class ViewerSpoolProviderTests(unittest.TestCase):
         finally:connection.close()
         self.assertEqual(self.get(path.split('?')[0])[2],self.base.base.base.archive)
         self.assertEqual(self.fixture.queue.get(self.fixture.job)['status'],'running')
+        self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
+    def test_staged_ack_binds_actual_spool_without_completion(self):
+        from processing import reference_protocol as p
+        from processing.viewer_staged_ack import ViewerStagedAck,ROUTE,NAMESPACE
+        from processing.viewer_staged_ack_schema import initialize_staged_ack_schema
+        token=base64.urlsafe_b64encode(b'a'*32).decode().rstrip('=')
+        cap=base64.urlsafe_b64encode(b'b'*32).decode().rstrip('=')
+        task=self.fixture.store.task('22222222-2222-4222-8222-222222222222')
+        capability_hash=self.fixture.store._capability_hash(task['uuid'],task['environment'],cap)
+        with self.fixture.queue._db() as db:
+            db.execute("INSERT INTO viewer_reservations(uuid,environment,capability_hash,state) VALUES(?,?,?,'reserved')",(task['uuid'],task['environment'],capability_hash))
+        initialize_staged_ack_schema(self.fixture.queue)
+        ack=ViewerStagedAck(self.service,{token:{'environment':task['environment'],'principalId':'viewer-a'}})
+        headers={'Authorization':'Bearer '+token,'X-LedgeTop-Capability':cap};path=ROUTE+task['uuid']
+        commitment=ack.handle('GET',path+'/commitment',headers,protected_transport=True)
+        self.assertEqual(commitment.status,200,commitment.body)
+        value=dict(commitment.body,attemptId=str(uuid.uuid4()),modelId=str(uuid.uuid4()),modelVersionId=str(uuid.uuid4()),stagingCommitId=str(uuid.uuid4()))
+        first=ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True)
+        self.assertEqual(first.status,200,first.body);self.assertTrue(first.body['created'])
+        replay=ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True)
+        self.assertEqual(replay.status,200,replay.body);self.assertFalse(replay.body['created'])
+        lookup=ack.handle('GET',path+'/generations/'+str(task['generation']),headers,protected_transport=True)
+        self.assertEqual(lookup.body['assertion'],value)
+        self.assertEqual(ack.handle('POST',path,headers,p.canonical_json(dict(value,generation=task['generation']+1)),protected_transport=True).status,409)
+        self.assertEqual(ack.handle('GET',path+'/commitment',dict(headers,Authorization='Bearer '+cap),protected_transport=True).status,401)
+        self.assertEqual(self.fixture.queue.get(self.fixture.job)['status'],'running')
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE jobs SET status='held' WHERE id=?",(task['job_id'],))
+        self.assertEqual(ack.handle('GET',path+'/commitment',headers,protected_transport=True).status,409)
+        self.assertEqual(ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True).status,409)
+        self.assertEqual(ack.handle('GET',path+'/generations/'+str(task['generation']),headers,protected_transport=True).body['assertion'],value)
+        self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
+    def test_staged_ack_reader_revalidates_inside_write_barrier(self):
+        task=self.fixture.store.task('22222222-2222-4222-8222-222222222222')
+        reader,_=self.base.spool.open_for_viewer(task)
+        try:
+            with self.fixture.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                receipt=self.base.spool.revalidate_staged_ack_locked(db,task,reader)
+                self.assertEqual(receipt,reader.receipt)
+            with self.fixture.queue._db() as db:
+                db.execute("UPDATE viewer_tasks SET generation=generation+1 WHERE uuid=?",(task['uuid'],))
+            with self.fixture.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                with self.assertRaises(SpoolHeld):self.base.spool.revalidate_staged_ack_locked(db,task,reader)
+        finally:reader.close()
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
 
     def test_task_change_during_read_aborts_stream(self):
