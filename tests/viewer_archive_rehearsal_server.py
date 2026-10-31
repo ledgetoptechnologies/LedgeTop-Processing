@@ -8,7 +8,10 @@ import argparse
 import hashlib
 import json
 import multiprocessing
+import os
 from pathlib import Path
+import sqlite3
+import stat
 import sys
 from urllib.request import Request, urlopen
 import uuid
@@ -54,6 +57,37 @@ class Rehearsal:
         self.pipe.send((name, self.identifier if identifier is None else identifier))
         if not self.pipe.poll(10): raise RuntimeError('fixture command timed out')
         return self.pipe.recv()
+
+    def input_evidence(self, identifier, filename):
+        """Read one synthetic stored input without disclosing a path or bytes."""
+        uuid.UUID(identifier)
+        if type(filename) is not str or not filename or len(filename)>255 or Path(filename).name!=filename:
+            raise ValueError('bounded filename required')
+        db_path=Path(self.root)/'jobs.sqlite3'
+        with sqlite3.connect(db_path.as_uri()+'?mode=ro',uri=True) as db:
+            rows=db.execute('SELECT t.directory,f.path,f.bytes,f.sha256 FROM viewer_tasks t JOIN viewer_files f ON f.uuid=t.uuid WHERE t.uuid=? AND f.name=?',(identifier,filename)).fetchall()
+        if len(rows)!=1:raise ValueError('one matching fixture input required')
+        directory,relative,size,expected=rows[0]
+        root=Path(self.root).resolve();path=(root/'viewer-tasks'/directory/relative).resolve()
+        if root not in path.parents or type(size) is not int or not 0<=size<=16*1024*1024:
+            raise ValueError('bounded fixture input required')
+        descriptor=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+        try:
+            before=os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_size!=size:raise ValueError('fixture input changed')
+            digest=hashlib.sha256()
+            with os.fdopen(descriptor,'rb',closefd=False) as stream:
+                remaining=size
+                while remaining:
+                    chunk=stream.read(min(remaining,1024*1024))
+                    if not chunk:raise ValueError('fixture input truncated')
+                    digest.update(chunk);remaining-=len(chunk)
+                if stream.read(1):raise ValueError('fixture input grew')
+            after=os.fstat(descriptor)
+            if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns) or digest.hexdigest()!=expected:
+                raise ValueError('fixture input changed')
+            return {'bytes':size,'sha256':expected}
+        finally:os.close(descriptor)
 
     def request(self, route, body=None, headers=None):
         url = 'http://127.0.0.1:%d%s?token=%s' % (self.port, route, TOKEN)
@@ -111,6 +145,8 @@ def main():
                     identifier=request.get('uuid',instance.identifier);uuid.UUID(identifier)
                     if command=='archive_path':result={'path':instance.command('path',identifier)}
                     else:result={'result':instance.command(command,identifier)}
+                elif command=='input_evidence':
+                    result=instance.input_evidence(request.get('uuid',instance.identifier),request.get('filename'))
                 elif command=='stop':
                     instance.stop();print(json.dumps({'ok':True}),flush=True);break
                 else:raise ValueError('unknown command')

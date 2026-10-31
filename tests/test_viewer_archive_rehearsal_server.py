@@ -1,5 +1,6 @@
 """Bounded subprocess test for the disposable cross-language fixture."""
 import json
+import hashlib
 import queue
 import signal
 import os
@@ -65,6 +66,13 @@ class RehearsalServerTest(unittest.TestCase):
                 with request('/task/'+identifier+'/download/all.zip') as response:self.assertEqual(response.read(),archive.read_bytes())
                 process.stdin.write(json.dumps({'command':'archive_path','uuid':identifier})+'\n');process.stdin.flush()
                 captured=Path(read_response(process)['path']);self.assertEqual(captured.read_bytes(),archive.read_bytes())
+                def evidence(task):
+                    process.stdin.write(json.dumps({'command':'input_evidence','uuid':task,'filename':'photo.jpg'})+'\n');process.stdin.flush()
+                    return read_response(process)
+                expected={'bytes':len(b'synthetic'),'sha256':hashlib.sha256(b'synthetic').hexdigest()}
+                self.assertEqual(evidence(identifier),expected);self.assertIn('error',evidence(fallback))
+                process.stdin.write('{"command":"restart"}\n');process.stdin.flush();self.assertEqual(read_response(process),ready)
+                self.assertEqual(evidence(identifier),expected)
                 process.stdin.write('{"command":"stop"}\n');process.stdin.flush();self.assertEqual(read_response(process),{'ok':True});self.assertEqual(process.wait(timeout=10),0)
                 self.assertEqual(archive.read_bytes(),synthetic_zip())
             finally:cleanup(process)
