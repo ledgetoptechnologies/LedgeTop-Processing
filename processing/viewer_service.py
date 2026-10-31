@@ -205,6 +205,8 @@ class ViewerService:
                     # coordinator flocks also remain held by any live child.
                     process.wait()
                     raise RuntimeError('archive capture child not reaped in time') from None
+                if code == 2 and not self._stop.is_set():
+                    raise Conflict('partial_requires_inspection')
                 if code != 0 or self._stop.is_set():
                     raise EngineUnavailable('archive capture incomplete')
                 path = Path(task['directory']) / 'all.zip'
@@ -237,7 +239,13 @@ class ViewerService:
                     try:
                         self._archive_once(identifier)
                         self._archive_retry.pop(identifier, None)
-                    except Exception:
+                    except Exception as exc:
+                        inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
+                        try:
+                            self.store.update(identifier, archive_state='inspection' if inspection else 'pending',
+                                              archive_reason='partial_requires_inspection' if inspection else 'capture_failed')
+                        except Exception:
+                            pass
                         failures += 1
                         self._archive_retry[identifier] = (time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
                 self._stop.wait(.25)
@@ -304,7 +312,17 @@ class ViewerService:
         return self.store.commit(identifier, environment, capability)
 
     def info(self, identifier):
-        return self.store.info(identifier)
+        info = self.store.info(identifier)
+        if info['status']['code'] == 40:
+            task = self.store.task(identifier)
+            if task['archive_path']:
+                archive = {'state': 'archived', 'reason': None}
+            elif not getattr(self.config, 'viewer_archive_autocapture', False):
+                archive = {'state': 'disabled', 'reason': None}
+            else:
+                archive = {'state': task['archive_state'], 'reason': task['archive_reason']}
+            info['ledgetopArchive'] = archive
+        return info
 
     def reserve(self, identifier, environment, capability):
         with self._lock:return self.store.reserve(identifier,environment,capability)
