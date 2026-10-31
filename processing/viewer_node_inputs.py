@@ -200,6 +200,26 @@ class ViewerNodeInputs:
                 if not saved:db.execute('INSERT INTO plan VALUES(1,?)',(encoded,))
             return plan
 
+    def _verified_input_rows(self,start,count,*,page_size=100):
+        """Yield MAC-checked inventory rows in bounded ordinal-keyset pages."""
+        if (type(start) is not int or type(count) is not int or not 0<=start<=count
+                or type(page_size) is not int or not 1<=page_size<=100):raise InputHeld('input_sequence_invalid')
+        cursor=start
+        while cursor<count:
+            with self._db() as db:
+                key=bytes.fromhex(db.execute('SELECT mac_key FROM policy WHERE singleton=1').fetchone()[0])
+                rows=db.execute('SELECT ordinal,object_id,entry,mac,phase,slot_key,slot_identity FROM objects WHERE ordinal>=? ORDER BY ordinal LIMIT ?',
+                                (cursor,min(page_size,count-cursor))).fetchall()
+            if not rows:raise InputHeld('input_sequence_invalid')
+            for ordinal,object_id,encoded,mac,phase,slot_key,slot_identity in rows:
+                if (ordinal!=cursor or not hmac.compare_digest(hmac.new(key,encoded.encode(),hashlib.sha256).hexdigest(),mac)):
+                    raise InputHeld('input_metadata_changed')
+                entry=p.decode_submission(encoded)
+                p._closed(entry,('ordinal','objectId','name','bytes','sha256','isPhoto'),'inventory entry')
+                if entry['ordinal']!=ordinal or entry['objectId']!=object_id:raise InputHeld('input_metadata_changed')
+                cursor+=1
+                yield entry,phase,slot_key,slot_identity
+
     def request_execution_grant(self):
         """Request a synthetic grant only after rechecking every retained input."""
         with self._lock:
@@ -208,9 +228,7 @@ class ViewerNodeInputs:
                 with self._db() as db:
                     manifest=db.execute('SELECT phase,digest,count,total FROM manifest WHERE singleton=1').fetchone()
                     self._verify_inventory_rows(db,manifest)
-                    rows=db.execute('SELECT entry,phase,slot_key,slot_identity FROM objects ORDER BY ordinal').fetchall()
-                for encoded,phase,key,recorded in rows:
-                    entry=p.decode_submission(encoded)
+                for entry,phase,key,recorded in self._verified_input_rows(0,manifest[2]):
                     expected_key=p.digest(dict(purpose='viewer-input-slot-v1',bindingSha256=self.binding_sha,objectId=entry['objectId']))
                     if phase!='verified' or key!=expected_key or not isinstance(recorded,str):raise InputHeld('input_not_verified')
                     slot=self._input_slot(entry['objectId'],key,entry['bytes'],create=False,recorded=recorded)

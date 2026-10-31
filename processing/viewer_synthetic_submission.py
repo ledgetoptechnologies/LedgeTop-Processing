@@ -32,23 +32,26 @@ def submit(inputs,engine,*,synthetic_fixture=False):
             with inputs._db() as db:
                 manifest=db.execute('SELECT phase,digest,count,total FROM manifest WHERE singleton=1').fetchone()
                 inputs._verify_inventory_rows(db,manifest)
-                rows=db.execute('SELECT entry,phase,slot_key,slot_identity FROM objects ORDER BY ordinal').fetchall()
+                row_count=db.execute('SELECT COUNT(*) FROM objects').fetchone()[0]
+                not_verified=db.execute("SELECT 1 FROM objects WHERE phase!='verified' LIMIT 1").fetchone()
                 current=db.execute('SELECT grant_value,origin,phase,ordinal,object_id FROM synthetic_submission WHERE singleton=1').fetchone()
                 if current is None:
                     db.execute('INSERT INTO synthetic_submission VALUES(1,?,?,?,?,NULL)',(encoded,engine.origin,'ready',0))
                     current=(encoded,engine.origin,'ready',0,None)
                 if current[0]!=encoded or current[1]!=engine.origin:raise SubmissionHeld('submission_binding_changed')
-            if len(rows)!=grant['inputCount'] or any(row[1]!='verified' for row in rows):raise SubmissionHeld('input_not_verified')
+            if row_count!=grant['inputCount'] or not_verified:raise SubmissionHeld('input_not_verified')
             phase,ordinal,object_id=current[2:]
             if phase.endswith('_pending'):raise SubmissionHeld('mutation_requires_inspection')
             if phase=='committed':
-                if ordinal!=len(rows) or object_id is not None:raise SubmissionHeld('submission_state_invalid')
+                if ordinal!=row_count or object_id is not None:raise SubmissionHeld('submission_state_invalid')
                 return {'state':'synthetic_submitted','engineTaskId':grant['engineTaskId']}
-            if phase not in ('ready','initialized','uploaded') or type(ordinal) is not int or not 0<=ordinal<=len(rows):
+            if phase not in ('ready','initialized','uploaded') or type(ordinal) is not int or not 0<=ordinal<=row_count:
                 raise SubmissionHeld('submission_state_invalid')
-            if ((phase in ('ready','initialized') and (ordinal!=0 or object_id is not None))
-                or (phase=='uploaded' and (ordinal<1 or object_id!=p.decode_submission(rows[ordinal-1][0])['objectId']))):
-                raise SubmissionHeld('submission_state_invalid')
+            if phase in ('ready','initialized') and (ordinal!=0 or object_id is not None):raise SubmissionHeld('submission_state_invalid')
+            if phase=='uploaded':
+                if ordinal<1:raise SubmissionHeld('submission_state_invalid')
+                previous=next(inputs._verified_input_rows(ordinal-1,ordinal),None)
+                if previous is None or object_id!=previous[0]['objectId']:raise SubmissionHeld('submission_state_invalid')
 
             def transition(before,after,index,expected_object=None,new_object=None):
                 with inputs._db() as db:
@@ -70,8 +73,8 @@ def submit(inputs,engine,*,synthetic_fixture=False):
                 try:mutation('init','init',lambda:initialize(engine,grant['engineTaskId'],plan,grant['pipelineSha256'],grant['taskName'],grant['taskNameSha256']))
                 except Exception:raise SubmissionHeld('initialization_uncertain') from None
                 transition('init_pending','initialized',0);phase='initialized'
-            while ordinal<len(rows):
-                entry=p.decode_submission(rows[ordinal][0]);key=rows[ordinal][2];recorded=rows[ordinal][3]
+            for entry,input_phase,key,recorded in inputs._verified_input_rows(ordinal,row_count):
+                if input_phase!='verified':raise SubmissionHeld('input_not_verified')
                 expected_key=p.digest(dict(purpose='viewer-input-slot-v1',bindingSha256=inputs.binding_sha,objectId=entry['objectId']))
                 if key!=expected_key or not isinstance(recorded,str):raise SubmissionHeld('input_identity_changed')
                 slot=inputs._input_slot(entry['objectId'],key,entry['bytes'],create=False,recorded=recorded)
@@ -79,7 +82,7 @@ def submit(inputs,engine,*,synthetic_fixture=False):
                     identity=dict(root=_identity(slot._root),allocation=_identity(slot._fd),metadata=_identity(slot._meta))
                     if p.canonical_json(identity).decode()!=recorded or inputs._hash_slot(slot,entry['bytes'])!=entry['sha256']:
                         raise SubmissionHeld('input_identity_changed')
-                    previous_object=None if phase=='initialized' else p.decode_submission(rows[ordinal-1][0])['objectId']
+                    previous_object=None if phase=='initialized' else object_id
                     transition(phase,'upload_pending',ordinal,previous_object,entry['objectId'])
                     try:mutation('upload','upload-'+str(ordinal),lambda:upload_locked(engine,grant['engineTaskId'],{k:entry[k] for k in ('name','bytes','sha256')},slot,identity))
                     except Exception:raise SubmissionHeld('upload_uncertain') from None
@@ -87,9 +90,9 @@ def submit(inputs,engine,*,synthetic_fixture=False):
                         changed=db.execute("UPDATE synthetic_submission SET phase='uploaded',ordinal=? WHERE singleton=1 AND phase='upload_pending' AND ordinal=? AND object_id=?",
                                            (ordinal+1,ordinal,entry['objectId'])).rowcount
                         if changed!=1:raise SubmissionHeld('submission_state_changed')
-                    ordinal+=1;phase='uploaded'
+                    ordinal+=1;phase='uploaded';object_id=entry['objectId']
                 finally:slot.close()
-            transition(phase,'commit_pending',ordinal,p.decode_submission(rows[-1][0])['objectId'],None)
+            transition(phase,'commit_pending',ordinal,object_id,None)
             try:mutation('commit','commit',lambda:commit(engine,grant['engineTaskId']))
             except Exception:raise SubmissionHeld('commit_uncertain') from None
             transition('commit_pending','committed',ordinal)
