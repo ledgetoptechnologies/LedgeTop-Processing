@@ -86,3 +86,32 @@ version, or reporting a completed reference job merely to satisfy the response
 validator, would cross the stated trust and lifecycle boundary. A compatible
 integration needs an agreed source-backed mapping and a Viewer-side custody
 implementation before an authenticated route can be meaningfully tested.
+
+## Staged-byte route is a distinct, narrower option
+
+The staged Viewer also contains `stagedCommitmentClient.js` and
+`stagedAckDelivery.js`, and Processing contains a disabled `ViewerStagedAck`.
+That protocol is narrower than reference acceptance: it records an authenticated
+Viewer assertion about staging exact bytes, with no cleanup or queue completion.
+It uses a separately scoped bearer principal, environment and task capability;
+the earlier shared-bearer limitation applies to `ViewerFacade`, not to that
+already-existing staged-byte handler.
+
+The existing staged-byte handler cannot yet attest a direct-worker spool. Its
+commitment and POST require a `succeeded` job and legacy `all.zip.receipt`; the
+direct-worker job stays `running` and its spool uses a different sealed receipt.
+The runtime configuration also allows staged acknowledgement principals only in
+schema 3 and the direct-worker spool only in schema 4. Staged ACK schema
+qualification remains explicitly disabled. These checks must not be bypassed.
+
+A safe integration must preserve the exact existing wire fields while holding a
+verified spool slot and binding the live task, generation, capability, scoped
+principal, environment and spool receipt in a coordinator transaction. Recheck
+hold/cancel and claim state under the same write barrier; use bounded hashing
+outside it, then retain the cooperative slot lock while revalidating identity.
+The stored assertion is the Viewer's claim, not proof of Viewer retention.
+A new opt-in runtime configuration needs independent schema/migration and
+credential-separation qualification before activation; no completion or cleanup
+may follow this assertion. Exercise actual Viewer staged commitment and ACK
+clients against an isolated TLS coordinator with lost response/replay,
+wrong-authority and task-generation tests and retained upstream copies.
