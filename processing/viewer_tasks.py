@@ -552,7 +552,9 @@ class TaskStore:
             row=self._row(db,task['uuid'])
             identity=('job_id','engine_uuid','node_id','claim_token','environment')
             if (any(type(row[k]) is not str or not row[k] or row[k]!=task[k] for k in identity)
-                    or row['phase'] not in ('processing','commit_pending','cancel_pending')):
+                    or row['removed'] or row['phase'] not in ('processing','commit_pending','cancel_pending')
+                    or db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE removed=0 AND job_id=?',
+                                  (row['job_id'],)).fetchone()[0]!=1):
                 raise Conflict('operator resolution identity changed')
             job=db.execute('SELECT status,result,node_id,environment,profile,claim_hash FROM jobs WHERE id=?',(row['job_id'],)).fetchone()
             if (job is None or not job['claim_hash'] or not hmac.compare_digest(

@@ -666,6 +666,37 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assert_operator_resolution_settled(first, second)
 
+    def test_operator_resolution_requires_one_live_mapping_in_transaction(self):
+        first = self.submit(); self.service.tick()
+        job_id = self.task(first)['job_id']
+        self.service.operator(job_id, 'hold', {'note': 'synthetic operator inspection'})
+        self.service.operator(job_id, 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
+        second = self.submit()
+        snapshot = self.task(first)  # read before the mapping changes
+        duplicate = str(uuid.uuid4())
+        with self.queue._db() as db:
+            columns = [row[1] for row in db.execute('PRAGMA table_info(viewer_tasks)')]
+            copied = ','.join('?' if name in ('uuid', 'engine_uuid') else name for name in columns)
+            db.execute('INSERT INTO viewer_tasks (' + ','.join(columns) + ') SELECT ' + copied +
+                       ' FROM viewer_tasks WHERE uuid=?', (duplicate, str(uuid.uuid4()), first))
+        with self.assertRaises(Conflict):
+            self.service.store.settle_operator_resolution(snapshot)
+        with self.assertRaises(Conflict):
+            self.service.tick()
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET removed=1 WHERE uuid=?', (first,))
+        with self.assertRaises((Conflict, KeyError)):  # a removed task is unknown
+            self.service.store.settle_operator_resolution(snapshot)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE phase='processing' AND job_id=?",
+                                        (job_id,)).fetchone()[0], 2)
+            db.execute('DELETE FROM viewer_tasks WHERE uuid=?', (duplicate,))
+            db.execute('UPDATE viewer_tasks SET removed=0 WHERE uuid=?', (first,))
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+        self.finish(first, 30)
+        self.service.tick()
+        self.assert_operator_resolution_settled(first, second)
+
     def test_restart_while_node_offline_retains_slot_then_returns_completed_result(self):
         first=self.submit();second=self.submit()
         self.service.tick();task=self.task(first);engine_uuid=task['engine_uuid']
