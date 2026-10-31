@@ -133,7 +133,7 @@ def main():
             time.sleep(.1)
         worker_thread.join(10)
         if worker_thread.is_alive() or failure or not done.is_set():raise RuntimeError('synthetic worker incomplete')
-        retained=dict(nodeInputCopies=len(list(synthetic.base.inputs.glob('*.alloc'))),
+        retained=dict(nodeInputCopies=len(list(synthetic.base.inputs.rglob('*.alloc'))),
                       nodeResultCopies=len(list(synthetic.base.base.output.glob('*.alloc'))),
                       coordinatorSpoolCopies=len(list(spool_root.glob('*.alloc'))),
                       coordinatorJobStatus=fixture.queue.get(fixture.job)['status'])
