@@ -15,6 +15,7 @@ class ViewerBridgeHarnessTests(unittest.TestCase):
     def test_full_mode_records_uncertain_creation_without_cleanup(self):self._failure('uncertain','full')
     def test_full_mode_rejects_modified_fixture_before_docker(self):self._failure('tampered','full')
     def test_archive_failure_stops_before_docker(self):self._failure('archive-failure','full')
+    def test_staged_mode_records_uncertain_creation_without_cleanup(self):self._failure('uncertain','staged-full')
     def test_default_mode_is_full(self):self._failure('uncertain',None)
     def test_reconcile_mode_is_rejected_before_docker(self):
         script=Path(__file__).resolve().parents[1]/'ops'/'run_viewer_bridge_rehearsal.sh'
@@ -42,9 +43,14 @@ esac
             fixture_dir=script.parents[1]/'tests'
             server_hash=hashlib.sha256((fixture_dir/'viewer_full_bridge_server.py').read_bytes()).hexdigest()
             client_hash=hashlib.sha256((fixture_dir/'viewer_full_bridge_client.cjs').read_bytes()).hexdigest()
+            staged_server_hash=hashlib.sha256((fixture_dir/'viewer_staged_full_server.py').read_bytes()).hexdigest()
+            staged_client_hash=hashlib.sha256((fixture_dir/'viewer_staged_full_client.cjs').read_bytes()).hexdigest()
             (bin_dir/'sha256sum').write_text('''#!/bin/sh
 for item in "$@"; do
  case "$item" in
+ */viewer_staged_full_server.py) hash="$MOCK_STAGED_SERVER_HASH";;
+ */viewer_staged_full_client.cjs) hash="$MOCK_STAGED_CLIENT_HASH";;
+ */viewer_staged_clients_synthetic.cjs) hash=4cf091e9e2b124202ff5ef7104d47ff84fbb70f6e5c97f6b65bfb15f48910f69;;
  */verify_viewer_export.py) hash=b075ad603632339d38b31fbdc1de614889546a1014aa814c8c6381e5999b34ef;;
  */viewer_full_bridge_server.py) hash="$MOCK_SERVER_HASH"; [ "$MOCK_MODE" != tampered ] || hash=bad;;
  */viewer_full_bridge_client.cjs) hash="$MOCK_CLIENT_HASH";;
@@ -73,7 +79,7 @@ exit 1
             try:subprocess.run([str(bin_dir/'tar')],check=True,timeout=2)
             except PermissionError:self.skipTest('temporary filesystem does not permit fixture execution')
             env={**os.environ,'PATH':str(bin_dir)+os.pathsep+os.environ['PATH'],'TMPDIR':str(root),
-                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode,'MOCK_PYTHON':__import__('sys').executable,'MOCK_SERVER_HASH':server_hash,'MOCK_CLIENT_HASH':client_hash}
+                 'VIEWER_REPO':str(root),'PROCESSING':str(root),'MOCK_DOCKER_LOG':str(log),'MOCK_MODE':mode,'MOCK_PYTHON':__import__('sys').executable,'MOCK_STAGED_SERVER_HASH':staged_server_hash,'MOCK_STAGED_CLIENT_HASH':staged_client_hash,'MOCK_SERVER_HASH':server_hash,'MOCK_CLIENT_HASH':client_hash}
             if bridge_mode is None:env.pop('BRIDGE_MODE',None)
             else:env['BRIDGE_MODE']=bridge_mode
             result=subprocess.run(['sh',str(script)],env=env,text=True,capture_output=True,timeout=10)
