@@ -44,7 +44,9 @@ def make_handler(config: Config):
         elif authority_lease.required(config.prototype_state_dir):
             raise RuntimeError('authority_lease_configuration_required')
     except BaseException:
-        if legacy_fence is not None: os.close(legacy_fence)
+        if legacy_fence is not None:
+            from .legacy_fence_enforcement import close_fence
+            close_fence(legacy_fence)
         raise
     try:
         queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
@@ -56,7 +58,9 @@ def make_handler(config: Config):
     except BaseException:
         if lease is not None:
             lease.close()
-        if legacy_fence is not None: os.close(legacy_fence)
+        if legacy_fence is not None:
+            from .legacy_fence_enforcement import close_fence
+            close_fence(legacy_fence)
         raise
     if queue is not None and legacy_fence is not None:
         queue.legacy_fence_fd = legacy_fence
