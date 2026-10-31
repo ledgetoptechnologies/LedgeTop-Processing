@@ -36,6 +36,15 @@ def coordinator(root,pipe,crash):
 
 
 class LostAdmissionHTTPTest(unittest.TestCase):
+    def stop_owned(self,process):
+        """Signal only our multiprocessing child and verify it is reaped."""
+        if process.is_alive():
+            process.terminate();process.join(5)
+        if process.is_alive():
+            process.kill();process.join(5)
+        self.assertFalse(process.is_alive(),'owned coordinator child could not be reaped')
+        process.join(0)
+
     def test_commit_then_process_death_replay_and_isolation(self):
         context=multiprocessing.get_context('spawn')
         with tempfile.TemporaryDirectory() as root:
@@ -67,7 +76,7 @@ class LostAdmissionHTTPTest(unittest.TestCase):
                 status,_=request(port,cross_environment,PRODUCTION);self.assertEqual(status,409)
                 changed=copy.deepcopy(FIXTURE['submission']);changed['submissionId']=str(uuid.uuid4())
                 status,_=request(port,changed);self.assertEqual(status,400)
-                second.terminate();second.join(5);self.assertFalse(second.is_alive())
+                self.stop_owned(second)
                 pipe.close();active.remove((second,pipe))
                 with sqlite3.connect(Path(root)/'jobs.sqlite3') as db:
                     self.assertEqual(db.execute('SELECT count(*) FROM reference_jobs').fetchone()[0],1)
@@ -75,5 +84,4 @@ class LostAdmissionHTTPTest(unittest.TestCase):
                 self.assertFalse(any(path.suffix.lower() in ('.jpg','.jpeg','.tif') for path in Path(root).rglob('*') if path.is_file()))
             finally:
                 for process,pipe in active:
-                    if process.is_alive():process.terminate()
-                    process.join(5);self.assertFalse(process.is_alive());pipe.close()
+                    self.stop_owned(process);pipe.close()
