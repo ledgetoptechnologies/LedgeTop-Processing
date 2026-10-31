@@ -29,7 +29,7 @@ class ReferenceWorkerImageE2ETests(unittest.TestCase):
         name = 'lt-test-worker-image-' + uuid.uuid4().hex
         command = ['docker', 'run', '--name', name, '--rm', '--network', 'none', '--read-only',
                    '--tmpfs', '/tmp:rw,noexec,nosuid,size=128m', '--cpus', '1', '--memory', '512m',
-                   '--pids-limit', '80', '-e', 'PYTHONPATH=/app']
+                   '--pids-limit', '80', '--user', '10001:10001', '-e', 'PYTHONPATH=/app']
         for source, destination in mounts:
             command += ['--mount', f'type=bind,src={source},dst={destination},readonly']
         command += ['--entrypoint', 'python', image, '/tmp/fixture.py']

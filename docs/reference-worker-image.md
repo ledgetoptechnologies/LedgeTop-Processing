@@ -47,7 +47,7 @@ already be available. It does not pull an image.
 
 The test uses generated credentials and three bytes of synthetic input. It
 starts the packaged daemon CLI in a nonroot, network-disabled, read-only
-container with temporary state, a synthetic HTTPS broker, a synthetic engine,
+container explicitly run as UID/GID `10001:10001`, with temporary state, a synthetic HTTPS broker, a synthetic engine,
 and the real local coordinator API. The coordinator listener is stopped before
 the transfer grant is made available; the test confirms the engine has received
 no work, kills the worker process, restarts both, and verifies a single engine
@@ -58,4 +58,7 @@ The coordinator runs as a thread in the same container and the engine and
 broker are fixtures. This test does not cover a worker restart during engine
 processing, real NodeODM, Viewer acceptance, NAS storage, or power loss. The
 revision label is supplied by the builder and is not itself a provenance
-attestation.
+attestation. The fixture script, synthetic-engine implementation and contract
+JSON are mounted from the test checkout; their bytes are not pinned to the
+image's revision label. Review the checkout alongside the image when using this
+test as release evidence.
