@@ -15,7 +15,11 @@ Tests use an isolated network-none Linux container with a loopback synthetic
 HTTP server that implements the `/task/<uuid>/download/all.zip` route. They
 exercise successful capture and locked replay, wrong task identity, duplicate
 length headers, truncated and disconnected response bodies, plus killing the
-capture process after sealing and replaying in a new process. Files remain after
+capture process **after the capture call returned and its descriptors closed**,
+then replaying in a new process. That test does not kill an active capture or
+prove process-death recovery at an in-progress network boundary. Network-none
+is supplied by the test invocation, not asserted or enforced by the test code.
+Files remain after
 success or incomplete capture; no engine or local cleanup and no acknowledgement
 are sent. A test also demonstrates that a different valid ZIP supplied by the
 server is locally sealed: the source API does not provide a trusted archive
