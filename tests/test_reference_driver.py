@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import ssl
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -637,6 +639,123 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
             acceptedObjectIds=[obj['id'] for obj in result['objects']] if full else [],
             acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires POSIX process death and loopback')
+    def test_worker_process_death_after_offline_completion_replays_outbox(self):
+        # Host a real synthetic NodeODM HTTP fixture in a separate OS process.
+        # It performs no processing; its test-only SQLite status is advanced by
+        # this test after the coordinator stops.
+        self.node_fixture.close()
+        fixture_db = self.root / 'process-node.sqlite'
+        source = (
+            'import sys,time\n'
+            'from ops.native_node_fixture import NativeNodeFixture\n'
+            'node=NativeNodeFixture(sys.argv[1],engine_version="pinned-engine-1",synthetic_enabled=True).start()\n'
+            'print(node.origin,flush=True)\n'
+            'try:\n while True: time.sleep(1)\n'
+            'finally: node.close()\n'
+        )
+        process = subprocess.Popen([sys.executable, '-u', '-c', source, str(fixture_db)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            import select
+            ready, _, _ = select.select([process.stdout], [], [], 10)
+            self.assertTrue(ready, 'synthetic engine failed to start')
+            origin = process.stdout.readline().strip()
+            self.assertTrue(origin.startswith('http://127.0.0.1:'))
+            self.native = NativeEngine(origin)
+            self.worker = ReferenceEngineWorker(self.root / 'actual-native-worker.sqlite', ledger=self.ledger,
+                outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
+                authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
+                gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+            def make_process_driver():
+                driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+                    'https://coordinator.invalid:9443', TOKEN, state_path=self.root / 'process-driver.sqlite',
+                    ssl_context=self.context, output_budget=1024 * 1024, transfer_ttl=240,
+                    safety_floor=1024, failure_outbox=self.failures, worker_instance_id='instance')
+                driver._request = self.request
+                driver.sender._open = self.sender_open
+                return driver
+            self.driver = make_process_driver()
+            job = self.submit(contents=(b'abc',))
+            self.advance(job, 'executing')
+            # The fixture's commit normally completes immediately; place its
+            # synthetic task in running state before simulating disconnection.
+            import sqlite3
+            with sqlite3.connect(fixture_db) as db:
+                db.execute('UPDATE tasks SET status=20 WHERE uuid=?', (job['jobId'],))
+            self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 20)
+            self.queue.close()
+            with sqlite3.connect(fixture_db) as db:
+                db.execute('UPDATE tasks SET status=40 WHERE uuid=?', (job['jobId'],))
+
+            # A real worker process seals completion and schedules an offline
+            # retry, then is SIGKILLed before any coordinator acknowledgement.
+            read_fd, write_fd = os.pipe()
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    os.close(read_fd)
+                    self.driver.sender._open = lambda *_a, **_k: (_ for _ in ()).throw(OSError('offline'))
+                    sealed = self.driver.step()
+                    retried = self.driver.step()
+                    os.write(write_fd, json.dumps({'sealed': sealed, 'retry': retried}).encode())
+                    os.close(write_fd)
+                    while True: time.sleep(1)
+                except BaseException:
+                    os._exit(2)
+            os.close(write_fd)
+            try:
+                ready, _, _ = select.select([read_fd], [], [], 15)
+                self.assertTrue(ready, 'worker did not seal result')
+                evidence = json.loads(os.read(read_fd, 65536))
+                self.assertEqual(evidence['sealed']['state'], 'delivering')
+                self.assertEqual(evidence['retry']['deliveryState'], 'retry_scheduled')
+            finally:
+                os.close(read_fd)
+                try: os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+                _, status = os.waitpid(pid, 0)
+            self.assertTrue(os.WIFSIGNALED(status))
+            self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+            identifier = evidence['sealed']['outboxId']
+            before = self.outbox.get(identifier)
+            self.assertEqual(before['state'], 'pending')
+            archive = list(self.scratch.glob('jobs/*/all.zip'))
+            self.assertEqual(len(archive), 1)
+            from ops.native_node_fixture import ARCHIVE
+            self.assertEqual(archive[0].read_bytes(), ARCHIVE)
+
+            self.queue = Queue(self.root / 'queue', reference_enabled=True)
+            self.store = ReferenceStore(self.queue)
+            self.api = ReferenceControlAPI(self.store, viewer_bearers={VIEWER: 'staging'},
+                worker_bearers={TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
+                capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
+                options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'])
+            self.outbox = WorkerOutbox(self.root / 'outbox.sqlite', clock=lambda: time.time() + 10)
+            self.worker = ReferenceEngineWorker(self.root / 'actual-native-worker.sqlite', ledger=self.ledger,
+                outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
+                authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
+                gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+            self.driver = make_process_driver()
+            self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+            after = self.outbox.get(identifier)
+            self.assertEqual(after['state'], 'acknowledged')
+            self.assertEqual(after['digest'], before['digest'])
+            self.assertEqual(after['payload'], before['payload'])
+            self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+            self.assertEqual(archive[0].read_bytes(), ARCHIVE)
+            self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+            with sqlite3.connect(fixture_db) as db:
+                counts = dict(db.execute('SELECT action,COUNT(*) FROM calls GROUP BY action'))
+            self.assertEqual(counts.get('initialize'), 1)
+            self.assertEqual(counts.get('commit'), 1)
+        finally:
+            process.terminate()
+            try: process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(timeout=5)
+            process.stdout.close(); process.stderr.close()
 
     def test_actual_native_http_cache_removed_once_only_after_full_viewer_ack_with_inputs_retained(self):
         job = self.submit(contents=(b'abc',))
