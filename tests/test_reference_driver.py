@@ -641,7 +641,7 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'requires POSIX process death and loopback')
-    def test_worker_process_death_after_offline_completion_replays_outbox(self):
+    def test_worker_process_death_retries_after_https_coordinator_restart(self):
         # Host a real synthetic NodeODM HTTP fixture in a separate OS process.
         # It performs no processing; its test-only SQLite status is advanced by
         # this test after the coordinator stops.
@@ -657,6 +657,8 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
         )
         process = subprocess.Popen([sys.executable, '-u', '-c', source, str(fixture_db)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        server = None
+        server_thread = None
         try:
             import select
             ready, _, _ = select.select([process.stdout], [], [], 10)
@@ -668,13 +670,24 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
                 outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
                 authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
                 gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+            cert, key = self.root / 'synthetic-cert.pem', self.root / 'synthetic-key.pem'
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                '-subj', '/CN=synthetic-loopback', '-addext', 'subjectAltName=IP:127.0.0.1',
+                '-addext', 'basicConstraints=critical,CA:TRUE', '-keyout', str(key), '-out', str(cert)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(cert, key)
+            client_context = ssl.create_default_context(cafile=str(cert))
+            server = create_reference_http_server(self.api, ssl_context=server_context)
+            port = server.server_port
+            server_thread = threading.Thread(target=server.serve_forever)
+            server_thread.start()
+            coordinator_origin = 'https://127.0.0.1:' + str(port)
             def make_process_driver():
                 driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
-                    'https://coordinator.invalid:9443', TOKEN, state_path=self.root / 'process-driver.sqlite',
-                    ssl_context=self.context, output_budget=1024 * 1024, transfer_ttl=240,
+                    coordinator_origin, TOKEN, state_path=self.root / 'process-driver.sqlite',
+                    ssl_context=client_context, output_budget=1024 * 1024, transfer_ttl=240,
                     safety_floor=1024, failure_outbox=self.failures, worker_instance_id='instance')
-                driver._request = self.request
-                driver.sender._open = self.sender_open
                 return driver
             self.driver = make_process_driver()
             job = self.submit(contents=(b'abc',))
@@ -685,6 +698,9 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             with sqlite3.connect(fixture_db) as db:
                 db.execute('UPDATE tasks SET status=20 WHERE uuid=?', (job['jobId'],))
             self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 20)
+            server.shutdown(); server_thread.join(timeout=5); server.server_close()
+            self.assertFalse(server_thread.is_alive())
+            server = server_thread = None
             self.queue.close()
             with sqlite3.connect(fixture_db) as db:
                 db.execute('UPDATE tasks SET status=40 WHERE uuid=?', (job['jobId'],))
@@ -696,7 +712,6 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             if pid == 0:
                 try:
                     os.close(read_fd)
-                    self.driver.sender._open = lambda *_a, **_k: (_ for _ in ()).throw(OSError('offline'))
                     sealed = self.driver.step()
                     retried = self.driver.step()
                     os.write(write_fd, json.dumps({'sealed': sealed, 'retry': retried}).encode())
@@ -732,6 +747,9 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
                 worker_bearers={TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
                 capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
                 options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'])
+            server = create_reference_http_server(self.api, port=port, ssl_context=server_context)
+            server_thread = threading.Thread(target=server.serve_forever)
+            server_thread.start()
             self.outbox = WorkerOutbox(self.root / 'outbox.sqlite', clock=lambda: time.time() + 10)
             self.worker = ReferenceEngineWorker(self.root / 'actual-native-worker.sqlite', ledger=self.ledger,
                 outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
@@ -751,6 +769,8 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             self.assertEqual(counts.get('initialize'), 1)
             self.assertEqual(counts.get('commit'), 1)
         finally:
+            if server is not None:
+                server.shutdown(); server_thread.join(timeout=5); server.server_close()
             process.terminate()
             try: process.wait(timeout=5)
             except subprocess.TimeoutExpired:
