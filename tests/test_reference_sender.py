@@ -27,6 +27,23 @@ from processing.reference_worker_api import ReferenceWorkerAPI
 from processing.reference_http import create_reference_http_server
 
 
+def spawn_fixture_sender(code, data):
+    process=subprocess.Popen([sys.executable,'-c',code],stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+    try:
+        process.stdin.write(json.dumps(data).encode())
+        process.stdin.close();process.stdin=None
+        return process
+    except BaseException:
+        try:
+            if process.poll() is None:process.kill()
+            process.wait(timeout=3)
+        finally:
+            for stream in (process.stdin,process.stdout,process.stderr):
+                if stream is not None:stream.close()
+        raise
+
+
 class Response(io.BytesIO):
     def __init__(self, body, *, url, status=200, headers=None):
         super().__init__(body)
@@ -216,12 +233,9 @@ sender=ReferenceSender(outbox,c['origin'],bearer_token=c['bearer'],
 print(json.dumps(sender.send_next()),flush=True)
 """
             def spawn_sender(now):
-                process=subprocess.Popen([sys.executable,'-c',child_code],stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
                 data=dict(path=str(path),now=now,origin=origin,bearer=self.bearer,
                           claim=claim['claimToken'],cert=str(cert))
-                process.stdin.write(json.dumps(data).encode());process.stdin.close();process.stdin=None
-                return process
+                return spawn_fixture_sender(child_code,data)
             worker=spawn_sender(self.now)
             try:
                 self.assertTrue(committed.wait(4),'coordinator did not commit in time')
@@ -255,6 +269,24 @@ print(json.dumps(sender.send_next()),flush=True)
         finally:
             release.set(); server.shutdown(); server.server_close(); thread.join(5); queue.close()
         self.assertFalse(thread.is_alive())
+
+    def test_sender_spawn_write_failure_reaps_owned_child(self):
+        class BadInput:
+            closed=False
+            def write(self,_):raise BrokenPipeError()
+            def close(self):self.closed=True
+        class FakeChild:
+            def __init__(self):
+                self.stdin=BadInput();self.stdout=io.BytesIO();self.stderr=io.BytesIO()
+                self.killed=False;self.waited=False
+            def poll(self):return None
+            def kill(self):self.killed=True
+            def wait(self,timeout):self.waited=(timeout==3)
+        child=FakeChild()
+        with patch('tests.test_reference_sender.subprocess.Popen',return_value=child):
+            with self.assertRaises(BrokenPipeError):spawn_fixture_sender('',{})
+        self.assertTrue(child.killed);self.assertTrue(child.waited)
+        self.assertTrue(child.stdin.closed and child.stdout.closed and child.stderr.closed)
 
     def test_default_internal_sender_ignores_proxy_environment(self):
         with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:9",
