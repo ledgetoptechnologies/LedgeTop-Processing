@@ -1,0 +1,88 @@
+# Viewer custody acknowledgement: proposed contract (not implemented)
+
+This is a design boundary for the disabled synthetic direct-worker path. It
+adds no HTTP endpoint, schema, acceptance, dispatch authority, or cleanup.
+A successful archive download is not custody acceptance.
+
+## Why the current endpoint cannot safely authenticate an acceptance
+
+`ViewerFacade._environment` in `processing/viewer_http.py` authenticates one
+shared bearer per environment; it identifies production versus staging, not
+which Viewer installation or principal has accepted custody. Existing task
+capabilities are optional for unreserved legacy tasks, and possession alone does
+not establish that its holder is the intended durable custody authority. The
+staged Viewer `server/ProcessingWorker.js` has no end-to-end acknowledgement
+for this direct-worker route. Its `server/referenceResultBridge.js` explicitly
+leaves its separate reference acceptance flow unmounted and acknowledgement
+disabled by default. Its reference receipt schema and `/jobs/.../acceptance`
+protocol cannot be assumed compatible with the NodeODM-compatible task API.
+
+## Required boundary before implementation
+
+* Provision an authenticated, individually identified Viewer principal with
+  explicit environment and task authority. Reject shared legacy bearer alone;
+  prohibit production/staging principal or key overlap. Bind the identity and
+  authorization policy durably to the task incarnation before accepting a
+  receipt; authenticate over a protected transport. Credential rotation must
+  preserve an auditable mapping without treating an arbitrary new principal as
+  the former custodian.
+* Viewer must first durably accept and verify the exact result, including its
+  own crash-recovery and storage guarantees, and persist an immutable
+  acknowledgement intent. The coordinator cannot infer these facts from a
+  request, a downloaded byte count, or a self-computed hash. A receipt is an
+  authenticated assertion by the trusted Viewer, not independent proof of its
+  hardware or filesystem durability.
+* Define a canonical versioned request including authenticated principal,
+  environment, Viewer task UUID and generation, Processing job and claim/grant
+  identity, archive byte count and SHA-256, exact coordinator spool receipt
+  digest, and immutable Viewer acceptance identifier. Reject missing,
+  contradictory, oversized, unknown-version or noncanonical fields.
+* Serialize acceptance with task replacement, cancellation and hold state in a
+  single coordinator write transaction. Revalidate the exact task incarnation,
+  eligible completion attestation, sealed spool receipt and authorized
+  principal under that barrier. Specify whether holds deny new acceptance and
+  preserve previously committed receipt lookup; do not use a precheck that can
+  race the transaction. Archive verification and slot locking must remain
+  coordinated with the transaction without unbounded hashing under the write
+  lock. A hold or uncertain state fails closed.
+* Persist the full canonical request and deterministic response atomically;
+  repeat of the identical authorized request returns the same receipt after a
+  restart or lost response. Same acceptance identifier with different content,
+  or a different identifier for the same immutable acceptance, must conflict.
+  Schema installation, migration and feature settings must fail closed with
+  partial tables; legacy scheduling must not bypass these markers.
+* No acceptance request or response may delete input, worker results or the
+  coordinator spool, finish a job, or trigger cleanup. Those operations require
+  a separate reviewed retention policy and explicit authority. Rate-limit
+  concurrent archive verification and bound request size and execution.
+
+## Validation required
+
+Use the real protected HTTP/TLS assembly and a real isolated Viewer custody
+implementation, not an in-memory stand-in claiming persistence. Exercise wrong
+principal, environment, task, generation, digest and spool identity; cancellation
+and hold races; concurrent requests; database rollback; process kill after commit
+before response; lost-response retry; disk/fsync failures; restart; and retained
+node and spool files. Verify idempotent exact replay with the same stored receipt.
+All tests must use synthetic data and never activate the production feature.
+
+## Staged Viewer reference protocol compatibility
+
+The staged Viewer reference provider calls `POST
+/ltds/v1/jobs/{jobId}/acceptance` and validates an exact response containing
+`job`, `created`, `fullyAccepted`, and `acceptedObjectIds`. It requires
+`fullyAccepted` to agree with `job.phase === 'completed'`. The request validator
+also requires a reference input manifest digest, pipeline digest, result
+manifest digest, and accepted object IDs. It is bound to the previously fetched
+reference job and result manifest. The direct Viewer task spool currently binds
+an archive hash and byte count to its own claim, metadata and spool receipt;
+it does not publish that reference result manifest or the required trusted
+engine version provenance. The staged reference bridge is explicitly unmounted
+and its acknowledgement disabled.
+
+A new credential alone therefore does not make that existing reference route
+compatible with the direct path. Fabricating a reference manifest or engine
+version, or reporting a completed reference job merely to satisfy the response
+validator, would cross the stated trust and lifecycle boundary. A compatible
+integration needs an agreed source-backed mapping and a Viewer-side custody
+implementation before an authenticated route can be meaningfully tested.
