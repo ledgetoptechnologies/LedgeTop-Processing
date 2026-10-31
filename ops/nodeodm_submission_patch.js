@@ -50,7 +50,7 @@ edit('task',`            // Check if dest directory already exists
                                 if (err) cb(new Error(\`Directory exists and we couldn't remove it.\`));
                                 else cb();
                             });
-                        } 
+                        }${' '}
                     });
                 } else {
                     cb();
