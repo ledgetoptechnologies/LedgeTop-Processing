@@ -435,11 +435,7 @@ class ViewerService:
         finally:
             if fd is not None: os.close(fd)
             if stream is not None: stream.close()
-            if created:
-                try:
-                    current=temporary.lstat()
-                    if (current.st_dev,current.st_ino)==(original.st_dev,original.st_ino): temporary.unlink()
-                except FileNotFoundError: pass
+            # Failed or uncertain restores are retained for inspection.
 
     def download(self, identifier):
         task = self.store.task(identifier)
@@ -510,13 +506,9 @@ class ViewerService:
                         raise Conflict('partial archive without intent requires inspection')
                     self._publish_archive_metadata(intent_path,self._archive_identity(task))
                 if partial.exists() or partial.is_symlink():
-                    info = partial.lstat()
-                    if (partial.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                            or (os.name != 'nt' and info.st_uid != os.geteuid())):
-                        raise Conflict('previous archive path requires inspection')
-                    # A GET is safe to repeat; the engine's original is retained.
-                    # Only this exact incomplete local transfer is replaced.
-                    partial.unlink()
+                    # Intent alone does not prove partial bytes or engine
+                    # availability. Preserve them rather than overwriting.
+                    raise Conflict('partial archive requires inspection')
                 total = 0
                 digest = hashlib.sha256()
                 with self.engines[task['node_id']].download(task['engine_uuid']) as response:
