@@ -1242,9 +1242,9 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
     def test_dynamic_options_removed_after_enqueue_prevent_dispatch(self):
         identifier = self.submit()
         self.option_catalog = [item for item in self.option_catalog if item['name'] != 'pc-ept']
-        with self.assertRaises((ValueError, Conflict)):
-            self.service.tick()
+        self.service.tick()
         self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertEqual(self.service.info(identifier)['ledgetopWaitReason'], 'option_definition_changed')
         self.assertFalse(self.fleet.commits)
         with self.assertRaises(ValueError):
             self.service.initialize(str(uuid.uuid4()), options=[{'name': 'unsupported', 'value': True}])
@@ -1269,11 +1269,12 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
     def test_selected_engine_option_refresh_refuses_missing_or_unavailable(self):
         identifier = self.submit()
         self.service._selected_options = ViewerService._selected_options.__get__(self.service)
-        for snapshot, error in (({'available':False,'options':[]}, Conflict),
-                                ({'available':True,'options':[item for item in OPTIONS if item['name']!='pc-ept']}, ValueError)):
+        for snapshot, reason in (({'available':False,'options':[]}, 'option_catalog_unavailable'),
+                                ({'available':True,'options':[item for item in OPTIONS if item['name']!='pc-ept']}, 'option_definition_changed')):
             with self.subTest(snapshot=snapshot), patch('processing.viewer_service.discover_node', return_value=snapshot):
-                with self.assertRaises(error): self.service.tick()
+                self.service.tick()
             self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+            self.assertEqual(self.service.info(identifier)['ledgetopWaitReason'], reason)
             self.assertEqual(self.engines['cluster'].calls, [])
 
     def test_selected_engine_changed_definition_is_refused(self):
@@ -1281,8 +1282,37 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.service._selected_options = ViewerService._selected_options.__get__(self.service)
         changed = [dict(item, type='string') if item['name']=='pc-ept' else dict(item) for item in OPTIONS]
         with patch('processing.viewer_service.discover_node',return_value={'available':True,'options':changed}):
-            with self.assertRaises(Conflict):self.service.tick()
+            self.service.tick()
         self.assertEqual(self.task(identifier)['job']['status'],'queued')
+        self.assertEqual(self.service.info(identifier)['ledgetopWaitReason'],'option_definition_changed')
+        self.assertEqual(self.engines['cluster'].calls,[])
+
+    def test_option_wait_survives_restart_preserves_priority_and_recovers(self):
+        first = self.submit(environment='production')
+        second = self.submit(environment='production')
+        staging = self.submit(environment='staging')
+        self.service._selected_options = ViewerService._selected_options.__get__(self.service)
+        with patch('processing.viewer_service.discover_node', return_value={'available':False,'options':[]}):
+            self.service.tick()
+        self.assertEqual(self.service.info(first)['ledgetopWaitReason'],'option_catalog_unavailable')
+        self.assertNotIn('ledgetopWaitReason', self.service.info(second))
+        self.assertFalse(self.fleet.commits)
+        self.service.close(); self.queue.close(); self.make_queue_service()
+        self.assertEqual(self.service.info(first)['ledgetopWaitReason'],'option_catalog_unavailable')
+        self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'],'running')
+        self.assertNotIn('ledgetopWaitReason',self.service.info(first))
+        self.assertEqual(self.task(second)['job']['status'],'queued')
+        self.assertEqual(self.task(staging)['job']['status'],'queued')
+
+    def test_option_wait_can_be_cancelled_without_engine_mutation(self):
+        first = self.submit()
+        self.option_catalog = []
+        self.service.tick()
+        self.assertEqual(self.service.info(first)['ledgetopWaitReason'],'option_definition_changed')
+        self.assertTrue(self.service.cancel(first)['success'])
+        self.assertEqual(self.service.info(first)['status']['code'],50)
+        self.assertNotIn('ledgetopWaitReason',self.service.info(first))
         self.assertEqual(self.engines['cluster'].calls,[])
 
     def test_new_task_missing_evidence_is_held_even_if_fleet_is_healthy(self):
@@ -1312,7 +1342,8 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.upload(identifier);self.service.commit(identifier)
         self.assertIsNone(self.task(identifier)['option_evidence'])
         self.catalog_ready=False;self.unavailable.add('main')
-        with self.assertRaises(Conflict):self.service.tick()
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['ledgetopWaitReason'],'option_catalog_unavailable')
         self.assertEqual(self.task(identifier)['job']['status'],'queued')
         self.assertEqual(self.engines['cluster'].calls,[])
 
@@ -1336,7 +1367,8 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.service.close();self.queue.close();self.make_queue_service()
         self.assertIsNone(self.task(identifier)['option_evidence'])
         self.catalog_ready=False;self.unavailable.add('main')
-        with self.assertRaises(Conflict):self.service.tick()
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['ledgetopWaitReason'],'option_catalog_unavailable')
         self.assertEqual(self.task(identifier)['job']['status'],'queued')
 
     def test_large_queued_job_uses_main_when_cluster_catalog_is_unavailable(self):

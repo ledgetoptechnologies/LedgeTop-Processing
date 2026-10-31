@@ -663,6 +663,10 @@ class TaskStore:
         info = {'uuid': identifier, 'name': task['name'], 'status': status,
                 'progress': 100 if code == 40 else task['progress'],
                 'imagesCount': task['images_count'], 'dateCreated': task['created_at']}
+        if (state == 'queued' and task['phase'] == 'waiting_node'
+                and task['error'] in ('option_catalog_unavailable', 'option_definition_changed')):
+            # Only our fixed reason codes are exposed; never engine error text.
+            info['ledgetopWaitReason'] = task['error']
         if state == 'held' and code == 20:
             # Fixed marker only: held notes and engine error text can be private.
             info['ledgetopHeld'] = True
