@@ -185,6 +185,9 @@ class ViewerService:
     def info(self, identifier):
         return self.store.info(identifier)
 
+    def input_inventory(self, identifier, environment, capability=None, cursor=None):
+        return self.store.input_inventory(identifier, environment, capability, cursor)
+
     def reserve(self, identifier, environment, capability):
         with self._lock:return self.store.reserve(identifier,environment,capability)
 

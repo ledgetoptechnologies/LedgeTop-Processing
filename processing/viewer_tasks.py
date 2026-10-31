@@ -30,6 +30,15 @@ class InputLimitExceeded(ValueError):
     """A task's configured cumulative input-byte allowance was exceeded."""
 
 
+_INVENTORY_TABLE = "CREATE TABLE viewer_inventory_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0))"
+_INVENTORY_TRIGGERS = {}
+for _table in ('viewer_files', 'viewer_upload_intents', 'viewer_tasks', 'viewer_reservations'):
+    for _event in ('INSERT', 'UPDATE', 'DELETE'):
+        _name = f'viewer_inventory_{_table}_{_event.lower()}'
+        _INVENTORY_TRIGGERS[_name] = (f"CREATE TRIGGER {_name} AFTER {_event} ON {_table} BEGIN "
+            "UPDATE viewer_inventory_revision SET revision=revision+1 WHERE id=1 AND revision<9007199254740991; "
+            "SELECT CASE WHEN changes()!=1 THEN RAISE(ABORT,'inventory revision unavailable') END; END")
+
 VIEWER_PROFILE = 'odm-viewer-v1'
 # Tombstones are retained while any delayed request can replay. This explicit
 # finite ceiling bounds authenticated storage use; do not silently purge.
@@ -69,7 +78,7 @@ def sync_directory(path):
 
 
 class TaskStore:
-    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3):
+    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3, *, inventory_enabled=False):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
             raise ValueError('positive input limit required')
         self.queue = queue
@@ -106,7 +115,14 @@ class TaskStore:
                 os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
+        self._inventory_epoch = secrets.token_hex(32)
+        if type(inventory_enabled) is not bool:
+            raise ValueError('inventory enable must be a boolean')
+        self._inventory_enabled = inventory_enabled
+        self._inventory_cursors = {}
         with self.queue._db() as db:
+            if inventory_enabled:
+                db.execute('BEGIN IMMEDIATE')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_tasks (
                 uuid TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1,
                 directory TEXT NOT NULL, name TEXT NOT NULL, options TEXT NOT NULL,
@@ -143,6 +159,33 @@ class TaskStore:
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
                 PRIMARY KEY(uuid,generation))''')
+            if inventory_enabled:
+                self._install_inventory_schema(db)
+
+    @staticmethod
+    def _inventory_schema(db):
+        names = ['viewer_inventory_revision', *_INVENTORY_TRIGGERS]
+        placeholders = ','.join('?' for _ in names)
+        rows = db.execute(f'SELECT name,type,sql FROM sqlite_master WHERE name IN ({placeholders})', names).fetchall()
+        actual = {r['name']:(r['type'],r['sql']) for r in rows}
+        expected = {'viewer_inventory_revision':('table',_INVENTORY_TABLE), **{n:('trigger',sql) for n,sql in _INVENTORY_TRIGGERS.items()}}
+        if actual != expected:
+            raise Conflict('inventory revision schema unavailable')
+        row = db.execute('SELECT id,revision,typeof(revision) AS kind FROM viewer_inventory_revision').fetchall()
+        if len(row)!=1 or row[0]['id']!=1 or row[0]['kind']!='integer' or not 0 <= row[0]['revision'] <= 9007199254740991:
+            raise Conflict('inventory revision unavailable')
+        return row[0]['revision']
+
+    @classmethod
+    def _install_inventory_schema(cls, db):
+        names = ['viewer_inventory_revision', *_INVENTORY_TRIGGERS]
+        placeholders = ','.join('?' for _ in names)
+        present = db.execute(f'SELECT count(*) FROM sqlite_master WHERE name IN ({placeholders})', names).fetchone()[0]
+        if present == 0:
+            db.execute(_INVENTORY_TABLE)
+            db.execute('INSERT INTO viewer_inventory_revision(id,revision) VALUES(1,0)')
+            for sql in _INVENTORY_TRIGGERS.values(): db.execute(sql)
+        cls._inventory_schema(db)
 
     def _row(self, db, identifier, *, removed=False):
         checked_uuid(identifier)
@@ -600,6 +643,72 @@ class TaskStore:
         """Read only the immutable credential domain without parsing evidence."""
         with self._lock, self.queue._db() as db:
             return self._row(db, identifier)['environment']
+
+    def input_inventory(self, identifier, environment, capability=None, cursor=None):
+        """Bounded database metadata page; no file verification or upload receipt."""
+        if not self._inventory_enabled:
+            raise Conflict('inventory disabled')
+        if cursor is not None and (not isinstance(cursor,str) or not re.fullmatch('[A-Za-z0-9_-]{43}',cursor)):
+            raise ValueError('invalid inventory cursor')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN')
+            revision = self._inventory_schema(db)
+            reservation = self._reservation(db, identifier, environment, capability, allow_cancelled=True)
+            if reservation is None:
+                raise KeyError('unknown task')
+            task = self._row(db, identifier)
+            if task['environment'] != environment:
+                raise KeyError('unknown task')
+            after = ''
+            if cursor is not None:
+                saved = self._inventory_cursors.get(cursor)
+                if saved is None or saved[:5] != (self._inventory_epoch,revision,identifier,environment,task['generation']):
+                    raise Conflict('inventory cursor expired or inventory changed')
+                after = saved[5]
+            if after and not (db.execute('SELECT 1 FROM viewer_files WHERE uuid=? AND name_key=?', (identifier,after)).fetchone() or
+                              db.execute('SELECT 1 FROM viewer_upload_intents WHERE uuid=? AND name_key=?', (identifier,after)).fetchone()):
+                raise Conflict('inventory cursor no longer identifies a row')
+            candidates = []
+            for table, state in (('viewer_files','recorded'),('viewer_upload_intents','pending_intent')):
+                # Guard oversized values before returning them to Python.
+                rows = db.execute(f"""SELECT CASE WHEN length(CAST(name_key AS BLOB))<=180 THEN name_key END AS name_key,
+                    CASE WHEN length(CAST(name AS BLOB))<=180 THEN name END AS name,
+                    CASE WHEN typeof(bytes)='integer' THEN bytes END AS bytes,
+                    CASE WHEN typeof(sha256)='text' AND length(CAST(sha256 AS BLOB))=64 THEN sha256 END AS sha256,
+                    CASE WHEN typeof(is_photo)='integer' THEN is_photo END AS is_photo
+                    FROM {table} WHERE uuid=? AND name_key>? ORDER BY name_key LIMIT 101""", (identifier,after))
+                for entry in rows:
+                    key,name,size,sha,photo = tuple(entry)
+                    if (not isinstance(key,str) or not isinstance(name,str) or type(size) is not int or
+                            not 1<=size<=9007199254740991 or not isinstance(sha,str) or
+                            type(photo) is not int or photo not in (0,1) or
+                            self._filename(name)!=key or photo != int(Path(name).suffix.lower() in PHOTO_SUFFIXES) or
+                            not re.fullmatch('[a-f0-9]{64}',sha)):
+                        raise Conflict('invalid input metadata')
+                    candidates.append((key, {'name':name,'nameKey':key,'bytes':size,'sha256':sha,
+                                              'isPhoto':bool(photo),'state':state}))
+            candidates.sort(key=lambda item:item[0])
+            page = candidates[:100]
+            if any(a[0]==b[0] for a,b in zip(candidates,candidates[1:])):
+                raise Conflict('conflicting input metadata')
+            for key,item in page:
+                if item['state']=='pending_intent' and db.execute('''SELECT 1 FROM viewer_upload_intents WHERE uuid=? AND name_key=? AND
+                        (generation IS NOT ? OR directory IS NOT ? OR environment IS NOT ?)''',
+                        (identifier,key,task['generation'],task['directory'],environment)).fetchone():
+                    raise Conflict('upload intent identity mismatch')
+            next_cursor = None
+            if len(candidates)>100:
+                next_cursor=secrets.token_urlsafe(32)
+                while next_cursor in self._inventory_cursors:
+                    next_cursor=secrets.token_urlsafe(32)
+                if len(self._inventory_cursors)>=1024:
+                    del self._inventory_cursors[next(iter(self._inventory_cursors))]
+                self._inventory_cursors[next_cursor]=(self._inventory_epoch,revision,identifier,environment,task['generation'],page[-1][0])
+            return {'uuid':identifier,'environment':environment,'generation':task['generation'],
+                    'stage':task['stage'],'revision':revision,'epoch':self._inventory_epoch,
+                    'files':[item for _,item in page], 'nextCursor':next_cursor,
+                    'semantics':'recorded-metadata-only'}
+
 
     def list_tasks(self):
         with self._lock, self.queue._db() as db:
