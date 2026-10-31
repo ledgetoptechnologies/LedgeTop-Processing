@@ -102,9 +102,26 @@ class ViewerSpoolProviderTests(unittest.TestCase):
         initialize_staged_ack_schema(self.fixture.queue)
         ack=ViewerStagedAck(self.service,{token:{'environment':task['environment'],'principalId':'viewer-a'}})
         headers={'Authorization':'Bearer '+token,'X-LedgeTop-Capability':cap};path=ROUTE+task['uuid']
+        self.assertEqual(ack.handle('GET',path+'/commitment',headers,protected_transport=True).status,409)
+        from processing.viewer_local_result import send_completion
+        with DaemonStateLock(self.base.base.base.base.base.worker) as owner:
+            send_completion(self.base.base.worker(owner),synthetic_fixture=True)
         commitment=ack.handle('GET',path+'/commitment',headers,protected_transport=True)
         self.assertEqual(commitment.status,200,commitment.body)
         value=dict(commitment.body,attemptId=str(uuid.uuid4()),modelId=str(uuid.uuid4()),modelVersionId=str(uuid.uuid4()),stagingCommitId=str(uuid.uuid4()))
+        with self.fixture.queue._db() as db:
+            original=db.execute('SELECT observation FROM viewer_worker_completions WHERE job_id=?',(task['job_id'],)).fetchone()[0]
+            db.execute('UPDATE viewer_worker_completions SET observation=? WHERE job_id=?',('{}',task['job_id']))
+        self.assertNotEqual(ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True).status,200)
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE viewer_worker_completions SET observation=? WHERE job_id=?',(original,task['job_id']))
+            db.execute("INSERT INTO viewer_worker_permits VALUES(?,?,'upload','active')",(task['job_id'],'late'))
+        self.assertEqual(ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True).status,409)
+        with self.fixture.queue._db() as db:
+            db.execute('DELETE FROM viewer_worker_permits WHERE job_id=? AND operation_id=?',(task['job_id'],'late'))
+            db.execute("UPDATE viewer_worker_permits SET state='active' WHERE job_id=? AND operation_id='commit'",(task['job_id'],))
+        self.assertEqual(ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True).status,409)
+        with self.fixture.queue._db() as db:db.execute("UPDATE viewer_worker_permits SET state='finished' WHERE job_id=? AND operation_id='commit'",(task['job_id'],))
         first=ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True)
         self.assertEqual(first.status,200,first.body);self.assertTrue(first.body['created'])
         replay=ack.handle('POST',path,headers,p.canonical_json(value),protected_transport=True)
@@ -122,6 +139,9 @@ class ViewerSpoolProviderTests(unittest.TestCase):
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
 
     def test_staged_ack_reader_revalidates_inside_write_barrier(self):
+        from processing.viewer_local_result import send_completion
+        with DaemonStateLock(self.base.base.base.base.base.worker) as owner:
+            send_completion(self.base.base.worker(owner),synthetic_fixture=True)
         task=self.fixture.store.task('22222222-2222-4222-8222-222222222222')
         reader,_=self.base.spool.open_for_viewer(task)
         try:

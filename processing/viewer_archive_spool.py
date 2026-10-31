@@ -148,6 +148,8 @@ class ViewerArchiveSpool:
         fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(task['job_id'],)).fetchone()
         if not job or job['status']!='running' or (fence and fence['stop_requested']):
             raise SpoolHeld('viewer_job_held')
+        if not self._completion_evidence(db,task,reader):
+            raise SpoolHeld('viewer_completion_unavailable')
         receipt,identity=self._viewer_snapshot(task,db)
         reader.slot._check()
         if self._slot_identity(reader.slot)!=identity or receipt!=reader.receipt:
@@ -170,34 +172,40 @@ class ViewerArchiveSpool:
 
     def _completion_ready_locked(self,task,reader):
         with self.claims.queue._db() as db:
-            db.execute('BEGIN IMMEDIATE');self.claims._schema(db)
-            job=db.execute('SELECT status FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
-            fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(task['job_id'],)).fetchone()
-            active=db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(task['job_id'],)).fetchone()
-            row=db.execute('SELECT * FROM viewer_worker_completions WHERE job_id=?',(task['job_id'],)).fetchone()
-            grant=db.execute('SELECT grant_value FROM viewer_worker_grants WHERE job_id=?',(task['job_id'],)).fetchone()
-            enrollment=db.execute('SELECT attestation FROM viewer_worker_enrollments WHERE job_id=?',(task['job_id'],)).fetchone()
-            commit=db.execute("SELECT state,operation FROM viewer_worker_permits WHERE job_id=? AND operation_id='commit'",(task['job_id'],)).fetchone()
-            if (not job or job['status']!='running' or (fence and fence['stop_requested']) or active or not row
-                    or not grant or not enrollment or not commit or (commit['state'],commit['operation'])!=('finished','commit')):return False
-            observation=p.decode_submission(row['observation'].encode());spool_receipt=p.decode_submission(row['spool_receipt'].encode())
-            receipt=p.decode_submission(row['receipt'].encode())
-            grant_value=p.decode_submission(grant['grant_value'].encode());enrollment_value=p.decode_submission(enrollment['attestation'].encode())
-            from .direct_outbox_contract import validate_binding
-            expected_observation=dict(schemaVersion=1,kind='viewer-engine-completion-observation',
-                bindingSha256=validate_binding(enrollment_value['binding']),grantSha256=p.digest(grant_value),
-                jobId=task['job_id'],viewerTaskId=task['uuid'],viewerGeneration=task['generation'],
-                engineTaskId=task['engine_uuid'],environment=task['environment'],engineStatus=40)
-            expected=dict(schemaVersion=1,kind='viewer-completion-attestation-receipt',jobId=task['job_id'],
-                          observationSha256=p.digest(observation),spoolReceiptSha256=p.digest(spool_receipt))
-            if (p.canonical_json(observation).decode()!=row['observation'] or p.canonical_json(spool_receipt).decode()!=row['spool_receipt']
-                    or p.canonical_json(receipt)!=p.canonical_json(expected)
-                    or p.canonical_json(observation)!=p.canonical_json(expected_observation)):
-                return False
-            actual,_=self._viewer_snapshot(task)
-            if p.canonical_json(actual)!=p.canonical_json(spool_receipt):return False
-            reader._read(1) # revalidate identity while the write barrier is held
-            return True
+            db.execute('BEGIN IMMEDIATE')
+            return self._completion_evidence(db,task,reader)
+
+    def _completion_evidence(self,db,task,reader):
+        """Shared evidence gate; caller holds verified reader and write barrier."""
+        self.claims._schema(db)
+        job=db.execute('SELECT status FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
+        fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(task['job_id'],)).fetchone()
+        active=db.execute("SELECT 1 FROM viewer_worker_permits WHERE job_id=? AND state='active'",(task['job_id'],)).fetchone()
+        row=db.execute('SELECT * FROM viewer_worker_completions WHERE job_id=?',(task['job_id'],)).fetchone()
+        grant=db.execute('SELECT grant_value FROM viewer_worker_grants WHERE job_id=?',(task['job_id'],)).fetchone()
+        enrollment=db.execute('SELECT attestation FROM viewer_worker_enrollments WHERE job_id=?',(task['job_id'],)).fetchone()
+        commit=db.execute("SELECT state,operation FROM viewer_worker_permits WHERE job_id=? AND operation_id='commit'",(task['job_id'],)).fetchone()
+        if (not job or job['status']!='running' or (fence and fence['stop_requested']) or active or not row
+                or not grant or not enrollment or not commit or (commit['state'],commit['operation'])!=('finished','commit')):return False
+        observation=p.decode_submission(row['observation'].encode());spool_receipt=p.decode_submission(row['spool_receipt'].encode())
+        receipt=p.decode_submission(row['receipt'].encode())
+        grant_value=p.decode_submission(grant['grant_value'].encode());enrollment_value=p.decode_submission(enrollment['attestation'].encode())
+        from .direct_outbox_contract import validate_binding
+        expected_observation=dict(schemaVersion=1,kind='viewer-engine-completion-observation',
+            bindingSha256=validate_binding(enrollment_value['binding']),grantSha256=p.digest(grant_value),
+            jobId=task['job_id'],viewerTaskId=task['uuid'],viewerGeneration=task['generation'],
+            engineTaskId=task['engine_uuid'],environment=task['environment'],engineStatus=40)
+        expected=dict(schemaVersion=1,kind='viewer-completion-attestation-receipt',jobId=task['job_id'],
+                      observationSha256=p.digest(observation),spoolReceiptSha256=p.digest(spool_receipt))
+        if (p.canonical_json(observation).decode()!=row['observation'] or p.canonical_json(spool_receipt).decode()!=row['spool_receipt']
+                or p.canonical_json(receipt)!=p.canonical_json(expected)
+                or p.canonical_json(observation)!=p.canonical_json(expected_observation)):
+            return False
+        actual,identity=self._viewer_snapshot(task,db)
+        if p.canonical_json(actual)!=p.canonical_json(spool_receipt):return False
+        reader.slot._check()
+        if self._slot_identity(reader.slot)!=identity or reader.receipt!=actual:return False
+        return True
 
     @contextmanager
     def _admit(self):
