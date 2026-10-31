@@ -1,0 +1,51 @@
+{
+  "status": "provisional-unwired",
+  "inputManifest": {
+    "id": "manifest-1",
+    "revision": 1,
+    "totalBytes": 3,
+    "objectCount": 2,
+    "inputCounts": {
+      "images": 2,
+      "lidarObjects": 0,
+      "points": 0
+    },
+    "objects": [
+      {
+        "id": "empty",
+        "name": "empty.jpg",
+        "byteSize": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "kind": "image",
+        "mediaType": "image/jpeg"
+      },
+      {
+        "id": "image-1",
+        "name": "image.jpg",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "kind": "image",
+        "mediaType": "image/jpeg"
+      }
+    ],
+    "sha256": "f1d82413f739293890433eacfa8f55e7b4e11f21865ea6245a65240fa05e95c0"
+  },
+  "documents": {
+    "root": {
+      "utf8": "{\"chunkBytes\":4194304,\"environment\":\"staging\",\"generation\":1,\"inputManifestSha256\":\"f1d82413f739293890433eacfa8f55e7b4e11f21865ea6245a65240fa05e95c0\",\"jobId\":\"job-1\",\"objects\":[{\"objectId\":\"empty\",\"objectProofSha256\":\"46a506c5adecb4f5f32a9ffa535b22c5e590b65aed5323a0f6c9cb72fe6e3f43\"},{\"objectId\":\"image-1\",\"objectProofSha256\":\"f6ddf132635af8173275e67c985d144ec1f5f8f5d9099e169fa5b59c4553b1c3\"}],\"version\":2}",
+      "sha256": "8b373693ecb1007c6e6256aef3a9c0c1feaf30dd1a6bb28d1e7da9d132152eab"
+    },
+    "emptyObject": {
+      "utf8": "{\"byteSize\":0,\"chunkCount\":0,\"objectId\":\"empty\",\"pageDigests\":[],\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"version\":2}",
+      "sha256": "46a506c5adecb4f5f32a9ffa535b22c5e590b65aed5323a0f6c9cb72fe6e3f43"
+    },
+    "object": {
+      "utf8": "{\"byteSize\":3,\"chunkCount\":1,\"objectId\":\"image-1\",\"pageDigests\":[\"1199bee941ad0f8b934781dda229d1f88cd0443dd9229e9ac1740937861b8b35\"],\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"version\":2}",
+      "sha256": "f6ddf132635af8173275e67c985d144ec1f5f8f5d9099e169fa5b59c4553b1c3"
+    },
+    "page": {
+      "utf8": "{\"chunks\":[{\"byteOffset\":0,\"byteSize\":3,\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"}],\"objectId\":\"image-1\",\"pageIndex\":0,\"version\":2}",
+      "sha256": "1199bee941ad0f8b934781dda229d1f88cd0443dd9229e9ac1740937861b8b35"
+    }
+  }
+}
