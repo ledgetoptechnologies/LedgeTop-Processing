@@ -234,6 +234,27 @@ with DaemonStateLock(root) as owner:
         with self.base.fixture.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_worker_chunk_permits WHERE job_id=?',(self.job,)).fetchone()['state'],'active')
 
+    def test_sealed_replay_hash_does_not_block_hold(self):
+        from processing.viewer_chunk_journal import SyntheticChunkJournal
+        self.chunk.begin(self.job,self.identity,self.token)
+        self.chunk.write(self.job,self.identity,self.token,0,0,self.archive)
+        self.chunk.finish(self.job,self.identity,self.token,1)
+        entered=threading.Event();release=threading.Event();original=SyntheticChunkJournal.finish
+        def paused(journal,count):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('hash barrier timeout')
+            return original(journal,count)
+        with patch.object(SyntheticChunkJournal,'finish',paused):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                replay=pool.submit(self.chunk.begin,self.job,self.identity,self.token)
+                try:
+                    self.assertTrue(entered.wait(5))
+                    hold=pool.submit(self.base.fixture.claims.mutation_hold,self.job,self.identity,self.token)
+                    self.assertEqual(hold.result(timeout=2)['state'],'held')
+                finally:release.set()
+                with self.assertRaises(SpoolHeld):replay.result(timeout=5)
+        self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
     def test_legacy_receiving_is_never_adopted(self):
         def fail():yield b'x';raise OSError('interrupted')
         with self.assertRaises(Exception):self.base.spool.receive(self.job,self.identity,self.token,fail())

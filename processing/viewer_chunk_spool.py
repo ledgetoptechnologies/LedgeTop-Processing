@@ -48,25 +48,38 @@ class SyntheticChunkSpool:
                 db.execute('BEGIN IMMEDIATE');metadata,sha,key,session,row=self._snapshot(db,job,identity,token)
                 self._admit_operation(db,job)
                 if session is not None:
-                    if session['state']=='sealed' and row is not None and row['state']=='receiving':
-                        from .direct_slot_capture import _read_record,_check_record
-                        _,_,_,existing_slot,journal=self._open(job,identity,token)
-                        try:
-                            record,fd=_read_record(existing_slot,journal.seal)
-                            try:_check_record(existing_slot,fd,journal.seal,record)
-                            finally:os.close(fd)
-                            journal.finish(record.get('count'))
-                            return dict(state='sealed',receipt=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=job,metadataSha256=sha,
-                                        archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key))
-                        finally:existing_slot.close()
-                    if session['state']!='ready' or not row or row['state']!='receiving' or not session['slot_identity'] or session['slot_identity']!=row['slot_identity']:
+                    if (session['state'] not in ('ready','sealed') or not row or row['state']!='receiving'
+                            or not session['slot_identity'] or session['slot_identity']!=row['slot_identity']):
                         raise SpoolHeld('chunk_session_requires_inspection')
-                    _,_,_,existing_slot,_=self._open(job,identity,token)
-                    existing_slot.close()
-                    return dict(state='ready')
-                if row is not None:raise SpoolHeld('legacy_spool_requires_inspection')
-                db.execute("INSERT INTO viewer_worker_spool VALUES(?,?,?,'creating',NULL,NULL)",(job,sha,key))
-                db.execute("INSERT INTO viewer_worker_chunk_sessions VALUES(?,?,?,NULL,'creating')",(job,sha,key))
+                    existing_state=session['state'];recorded=session['slot_identity']
+                else:
+                    if row is not None:raise SpoolHeld('legacy_spool_requires_inspection')
+                    db.execute("INSERT INTO viewer_worker_spool VALUES(?,?,?,'creating',NULL,NULL)",(job,sha,key))
+                    db.execute("INSERT INTO viewer_worker_chunk_sessions VALUES(?,?,?,NULL,'creating')",(job,sha,key))
+                    existing_state=None;recorded=None
+            if existing_state is not None:
+                _,_,_,existing_slot,journal=self._open(job,identity,token)
+                try:
+                    if existing_state=='sealed':
+                        from .direct_slot_capture import _read_record,_check_record
+                        record,fd=_read_record(existing_slot,journal.seal)
+                        try:_check_record(existing_slot,fd,journal.seal,record)
+                        finally:os.close(fd)
+                        # Potentially expensive hashing and fsync never hold the
+                        # coordinator write barrier. Keep the inode lock instead.
+                        journal.finish(record.get('count'))
+                    with self.spool.claims.queue._db() as db:
+                        db.execute('BEGIN IMMEDIATE');current,csha,ckey,current_session,current_row=self._snapshot(db,job,identity,token)
+                        self._admit_operation(db,job)
+                        if (csha!=sha or ckey!=key or current_session['state']!=existing_state
+                                or current_row['state']!='receiving' or current_session['slot_identity']!=recorded
+                                or current_row['slot_identity']!=recorded or self.spool._slot_identity(existing_slot)!=recorded):
+                            raise SpoolHeld('chunk_state_changed')
+                        existing_slot._check()
+                    if existing_state=='ready':return dict(state='ready')
+                    return dict(state='sealed',receipt=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=job,metadataSha256=sha,
+                                archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key))
+                finally:existing_slot.close()
             slot=open_slot(self.spool.root,self.spool.root_identity,key,metadata['archiveBytes'],max_budget=self.spool.max_bytes,create=True)
             try:
                 journal=SyntheticChunkJournal(slot,self._binding(metadata),legacy_state='new',synthetic_fixture=True)

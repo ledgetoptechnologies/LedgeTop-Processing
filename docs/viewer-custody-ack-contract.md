@@ -316,3 +316,9 @@ The resulting seal is synthetic: the standard coordinator spool stays held, no
 Viewer custody is claimed, and there is no production enablement or migration.
 Socket timeouts do not impose a hard deadline on DNS, filesystem calls or
 full-archive hashing. Network test results do not qualify power-loss recovery.
+
+For sealed chunk-session replay, archive hashing and fsync occur under the
+cooperative slot lock outside the coordinator write transaction. A short
+transaction then rechecks the claim, hold, session and slot identity; a hold
+that wins during verification prevents the replay response. Filesystem identity
+checks themselves still have no hard wall-clock deadline.
