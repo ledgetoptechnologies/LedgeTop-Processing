@@ -5,6 +5,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from urllib.request import ProxyHandler, build_opener
@@ -152,7 +153,7 @@ class ReferenceSenderTests(unittest.TestCase):
         self.assertTrue(all(item == delivered[0] for item in delivered))
         self.assertEqual(self.outbox.get(self.outbox_id)['state'], 'acknowledged')
 
-    @unittest.skipUnless(shutil.which('openssl'), 'openssl required for isolated TLS test')
+    @unittest.skipUnless(os.name=='posix' and shutil.which('openssl'), 'POSIX SIGKILL and openssl required')
     def test_actual_coordinator_commit_lost_response_restart_replays_receipt(self):
         cert, key = self.root / 'coordinator-cert.pem', self.root / 'coordinator-key.pem'
         subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
@@ -203,23 +204,47 @@ class ReferenceSenderTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever); thread.start()
         try:
             origin = 'https://127.0.0.1:' + str(server.server_port)
-            provider = lambda _: {'claimRequestId': 'claim-1', 'claimToken': claim['claimToken']}
-            sender = ReferenceSender(outbox, origin, bearer_token=self.bearer,
-                                     claim_binding_provider=provider, ssl_context=client_tls,
-                                     timeout=2, total_timeout=1)
-            self.assertEqual(sender.send_next()['state'], 'retry_scheduled')
-            self.assertTrue(committed.is_set())
-            self.assertEqual(queue.get(job['jobId'])['status'], 'succeeded')
-            self.assertEqual(store.get(job['jobId'])['phase'], 'awaiting_acceptance')
-            self.assertEqual(calls[0][2], 200)
-            self.assertEqual(outbox.get(outbox_id)['state'], 'pending')
-            self.now = outbox.get(outbox_id)['next_at']; release.set()
-            # Reopen durable worker state and construct a new sender, as after restart.
+            child_code = r"""
+import json, ssl, sys
+from processing.worker_outbox import WorkerOutbox
+from processing.reference_sender import ReferenceSender
+c=json.load(sys.stdin)
+outbox=WorkerOutbox(c['path'], clock=lambda:c['now'], random_source=lambda:0, retry_base_seconds=5)
+sender=ReferenceSender(outbox,c['origin'],bearer_token=c['bearer'],
+    claim_binding_provider=lambda _: {'claimRequestId':'claim-1','claimToken':c['claim']},
+    ssl_context=ssl.create_default_context(cafile=c['cert']),timeout=3,total_timeout=3,lease_seconds=1)
+print(json.dumps(sender.send_next()),flush=True)
+"""
+            def spawn_sender(now):
+                process=subprocess.Popen([sys.executable,'-c',child_code],stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+                data=dict(path=str(path),now=now,origin=origin,bearer=self.bearer,
+                          claim=claim['claimToken'],cert=str(cert))
+                process.stdin.write(json.dumps(data).encode());process.stdin.close();process.stdin=None
+                return process
+            worker=spawn_sender(self.now)
+            try:
+                self.assertTrue(committed.wait(4),'coordinator did not commit in time')
+                self.assertIsNone(worker.poll(),'sender exited before forced loss')
+                worker.kill();worker.wait(timeout=3)
+                self.assertNotEqual(worker.returncode,0)
+                self.assertEqual(queue.get(job['jobId'])['status'], 'succeeded')
+                self.assertEqual(store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+                self.assertEqual(calls[0][2], 200)
+                self.assertEqual(outbox.get(outbox_id)['state'], 'sending')
+                self.now+=2;release.set()
+                restarted_worker=spawn_sender(self.now)
+                try:
+                    stdout,stderr=restarted_worker.communicate(timeout=6)
+                    self.assertEqual(restarted_worker.returncode,0,stderr.decode())
+                    self.assertEqual(json.loads(stdout)['state'],'acknowledged')
+                finally:
+                    if restarted_worker.poll() is None:
+                        restarted_worker.kill();restarted_worker.wait(timeout=3)
+            finally:
+                if worker.poll() is None:worker.kill();worker.wait(timeout=3)
+                worker.stdout.close();worker.stderr.close()
             restarted = WorkerOutbox(path, clock=lambda: self.now, random_source=lambda: 0, retry_base_seconds=5)
-            sender = ReferenceSender(restarted, origin, bearer_token=self.bearer,
-                                     claim_binding_provider=provider, ssl_context=client_tls,
-                                     timeout=2, total_timeout=2)
-            self.assertEqual(sender.send_next()['state'], 'acknowledged')
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0], calls[1])
             self.assertEqual(restarted.get(outbox_id)['receipt'], calls[0][1])
