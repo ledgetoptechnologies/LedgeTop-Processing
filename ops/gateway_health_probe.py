@@ -2,6 +2,10 @@
 
 No runtime caller exists. The operator must first independently enforce gateway
 and backend network/container identity; DNS name alone is never authentication.
+Only main() is supported: its alarm covers stdin and network calls; the private
+_probe() is not independently deadline-bounded. A hard deadline is not assured
+for uninterruptible kernel work. No Python runtime is qualified in the current
+nginx image, and no network identity or executable/container wiring exists.
 The NodeODM API token is passed on stdin, never in helper argv or output. Its
 upstream query string can still appear in engine/proxy/network logs; log policy
 must be separately qualified. This helper never authorizes maintenance.
@@ -39,7 +43,8 @@ def _json(raw):
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self,*_args,**_kwargs):raise Refused('redirect')
 
-def probe(raw, *, opener=None, clock=time.monotonic):
+def _probe(raw, *, opener=None, clock=time.monotonic):
+    """Internal only: main supplies a POSIX alarm around input and this call."""
     if type(raw) is not bytes or len(raw)>_MAX_INPUT:raise Refused('input')
     request=_json(raw)
     if type(request) is not dict or set(request)!={'token','engine'} or request['engine'] not in ('odm','odx'):
@@ -78,7 +83,7 @@ def main():
         signal.signal(signal.SIGALRM,_alarm)
         signal.setitimer(signal.ITIMER_REAL,_DEADLINE)
         raw=sys.stdin.buffer.read(_MAX_INPUT+1)
-        result=probe(raw)
+        result=_probe(raw)
     except Exception:
         # Do not print input, URL, exceptions, or backend data.
         print('{"healthObserved":false,"maintenanceAuthorized":false}')
