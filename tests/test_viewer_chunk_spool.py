@@ -1,5 +1,7 @@
 """Synthetic coordinator database integration; no transport route."""
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from processing.viewer_archive_spool import SpoolHeld
 from processing.viewer_chunk_spool import SyntheticChunkSpool
@@ -34,6 +36,26 @@ class ChunkSpoolTests(unittest.TestCase):
         with self.base.fixture.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_worker_chunk_sessions WHERE job_id=?',(self.job,)).fetchone()['state'],'creating')
         self.assertEqual(list(self.base.root.glob('*.alloc')),[])
+
+    def test_hold_blocks_later_chunk_but_admitted_chunk_finishes(self):
+        from processing.viewer_chunk_journal import SyntheticChunkJournal
+        self.chunk.begin(self.job,self.identity,self.token)
+        entered=threading.Event();release=threading.Event();original=SyntheticChunkJournal.write
+        def paused(journal,*args):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('chunk barrier timeout')
+            return original(journal,*args)
+        with patch.object(SyntheticChunkJournal,'write',paused):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future=pool.submit(self.chunk.write,self.job,self.identity,self.token,0,0,self.archive[:4])
+                try:
+                    self.assertTrue(entered.wait(5))
+                    self.assertEqual(self.base.fixture.claims.mutation_hold(self.job,self.identity,self.token)['state'],'held')
+                finally:release.set()
+                self.assertEqual(future.result(timeout=5)['schemaVersion'],1)
+        with self.assertRaises(SpoolHeld):self.chunk.write(self.job,self.identity,self.token,1,4,self.archive[4:])
+        with self.assertRaises(SpoolHeld):self.chunk.finish(self.job,self.identity,self.token,1)
+        self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
 
     def test_legacy_receiving_is_never_adopted(self):
         def fail():yield b'x';raise OSError('interrupted')

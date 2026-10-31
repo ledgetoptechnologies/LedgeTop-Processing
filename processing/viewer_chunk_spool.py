@@ -28,10 +28,19 @@ class SyntheticChunkSpool:
                 or spool['metadata_sha']!=sha or spool['slot_key']!=key):raise SpoolHeld('chunk_binding_changed')
         return metadata,sha,key,session,spool
 
+    @staticmethod
+    def _admit_operation(db,job):
+        """Linearize new synthetic work with the coordinator hold transaction."""
+        status=db.execute('SELECT status FROM jobs WHERE id=?',(job,)).fetchone()
+        fence=db.execute('SELECT stop_requested FROM viewer_worker_fences WHERE job_id=?',(job,)).fetchone()
+        if not status or status['status']!='running' or (fence and fence['stop_requested']):
+            raise SpoolHeld('chunk_admission_held')
+
     def begin(self,job,identity,token):
         with self.spool._admit():
             with self.spool.claims.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');metadata,sha,key,session,row=self._snapshot(db,job,identity,token)
+                self._admit_operation(db,job)
                 if session is not None:
                     if session['state']!='ready' or not row or row['state']!='receiving' or not session['slot_identity'] or session['slot_identity']!=row['slot_identity']:
                         raise SpoolHeld('chunk_session_requires_inspection')
@@ -76,6 +85,7 @@ class SyntheticChunkSpool:
             try:
                 with self.spool.claims.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE');_,current_sha,current_key,session,row=self._snapshot(db,job,identity,token)
+                    self._admit_operation(db,job)
                     if current_sha!=sha or current_key!=key or session['state']!='ready' or row['state']!='receiving':raise SpoolHeld('chunk_state_changed')
                 return journal.write(index,offset,data)
             finally:slot.close()
@@ -84,6 +94,8 @@ class SyntheticChunkSpool:
         with self.spool._admit():
             metadata,sha,key,slot,journal=self._open(job,identity,token)
             try:
+                with self.spool.claims.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE');self._snapshot(db,job,identity,token);self._admit_operation(db,job)
                 journal.finish(count)
                 receipt=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=job,metadataSha256=sha,
                              archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key)

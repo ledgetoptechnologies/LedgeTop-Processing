@@ -275,3 +275,9 @@ synthetic journal; the standard coordinator spool remains receiving/held. There
 is no TLS chunk route, client, migration or Viewer result exposure. Existing
 databases without the new exact schema require a separately qualified upgrade
 and fail closed; no automatic migration is included.
+
+The disabled direct-call chunk-spool draft now serializes admission of each
+begin, write and finish with coordinator hold state. A chunk admitted before a
+hold may finish; new operations after the hold fail closed. This is a local
+transaction boundary, not a network pre-body permit or in-flight revocation.
+No authenticated TLS chunk ingress or sender has been implemented.
