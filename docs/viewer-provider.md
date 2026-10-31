@@ -191,6 +191,11 @@ unavailable capacity returns HTTP 503 before parsing the body. Reservations are
 released on success and exceptions. Startup rejects this setting if the spool
 and task storage roots have different filesystem device IDs.
 
+When the byte floor is enabled, `PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES`
+sets an additional positive inode floor (default 1024). Each in-flight request
+also reserves a conservative 132 inodes against the measured count. If the
+filesystem cannot report available inodes, admission fails closed with 503.
+
 This is not a disk quota, NAS-backed input, or a space reservation recognized by
 other processes. Already used space is reflected in the filesystem free-space
 measurement; in-flight reservations from this facade are tracked in memory.
@@ -199,6 +204,16 @@ space consumed after admission can still exhaust disk. It does not reserve
 NodeODX working space or results and does not make a large dataset safe. Keep
 this disabled until the single-owner deployment and filesystem layout have been
 reviewed.
+
+The separate cumulative `PROCESSING_VIEWER_MAX_INPUT_BYTES` limit defaults to
+20 GiB and is advertised to Viewer. A larger configured value requires a new
+provider capability probe and does not reserve the full job's input, engine
+scratch space, or results. The 2 GiB multipart body limit and 64-part limit
+remain per request. Uploads already accepted for waiting jobs occupy coordinator
+disk until separately cleaned up. Do not treat a higher cap or this per-request
+floor as qualification for a 50 GB or 10,000-photo job; validate cumulative
+storage, inodes, engine intermediates, interrupted transfers and retained output
+with representative workloads before relying on it.
 This check is per HTTP request. A rejected request is not parsed or written,
 but earlier successful requests and earlier parts of a request that later
 fails can already be stored. A 503 or a broken connection does not prove that

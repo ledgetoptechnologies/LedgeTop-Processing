@@ -77,7 +77,8 @@ def make_handler(config: Config):
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
         facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
-                              production_held=config.viewer_production_held, spool_min_free_bytes=config.viewer_spool_min_free_bytes)
+                              production_held=config.viewer_production_held, spool_min_free_bytes=config.viewer_spool_min_free_bytes,
+                              spool_min_free_inodes=config.viewer_spool_min_free_inodes)
     reference_runtime = None
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime

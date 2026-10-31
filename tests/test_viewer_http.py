@@ -201,6 +201,27 @@ class ViewerHTTPTests(unittest.TestCase):
             with gate.reserve(100): self.assertEqual(gate._reserved,200)
         self.assertEqual(gate._reserved,0)
 
+    def test_inode_floor_rejects_before_upload_and_conservatively_reserves(self):
+        from processing.viewer_http import SpoolCapacity,RequestError,MAX_PARTS
+        gate=SpoolCapacity(self.spool.name,100,inode_floor=1000)
+        per_request=2*MAX_PARTS+4
+        with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100000)), patch('processing.viewer_http.os.statvfs',return_value=SimpleNamespace(f_favail=1000+per_request*2-1)):
+            with gate.reserve(100):
+                self.assertEqual(gate._reserved_inodes,per_request)
+                with self.assertRaises(RequestError) as caught:
+                    with gate.reserve(100):pass
+                self.assertEqual(caught.exception.status,503)
+            self.assertEqual(gate._reserved_inodes,0)
+            with gate.reserve(100):pass
+
+    def test_missing_inode_capacity_fails_closed_before_read(self):
+        from processing.viewer_http import SpoolCapacity
+        self.initialize();self.facade.spool_capacity=SpoolCapacity(self.spool.name,100)
+        body=multipart([('images','first.jpg',b'fixture')])
+        with patch('processing.viewer_http.shutil.disk_usage',return_value=SimpleNamespace(free=100000)),patch('processing.viewer_http.os.statvfs',side_effect=OSError('unavailable')):
+            with self.assertRaises(HTTPError) as caught:self.request('/task/new/upload/'+IDENTIFIER,body,headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY})
+        self.assertEqual(caught.exception.code,503);self.assertEqual(self.service.uploads,{})
+
     def test_upload_exception_closes_spool_before_reservation_release(self):
         from processing.viewer_http import SpoolCapacity
         from contextlib import contextmanager

@@ -181,35 +181,44 @@ def _length(handler, maximum, *, allow_empty=False):
 
 class SpoolCapacity:
     """Process-local conservative reservations, not a filesystem quota."""
-    def __init__(self, directory, floor):
-        if type(floor) is not int or floor <= 0 or directory is None:
+    def __init__(self, directory, floor, inode_floor=1024):
+        if type(floor) is not int or floor <= 0 or directory is None or type(inode_floor) is not int or inode_floor <= 0:
             raise ValueError('positive spool floor and directory required')
-        self.directory, self.floor = directory, floor
+        self.directory, self.floor, self.inode_floor = directory, floor, inode_floor
         self._lock = threading.Lock()
         self._reserved = 0
+        self._reserved_inodes = 0
 
     @contextmanager
     def reserve(self, request_bytes):
         # Each part is first spooled and then copied to durable task storage.
         # Double the whole request is conservative even for many small parts.
         amount = 2 * request_bytes
+        # At most MAX_PARTS temporary parts and MAX_PARTS committed files,
+        # with a small allowance for per-request metadata.
+        inodes = 2 * MAX_PARTS + 4
         with self._lock:
             try:
                 free = shutil.disk_usage(self.directory).free
-            except OSError:
+                free_inodes = os.statvfs(self.directory).f_favail
+                if type(free_inodes) is not int or free_inodes < 0:
+                    raise OSError('inode count unavailable')
+            except (OSError, AttributeError):
                 raise RequestError(503, 'spool_capacity_unavailable') from None
-            if free - self._reserved - amount < self.floor:
+            if free - self._reserved - amount < self.floor or free_inodes - self._reserved_inodes - inodes < self.inode_floor:
                 raise RequestError(503, 'spool_capacity_unavailable')
             self._reserved += amount
+            self._reserved_inodes += inodes
         try:
             yield
         finally:
             with self._lock:
                 self._reserved -= amount
+                self._reserved_inodes -= inodes
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, spool_min_free_bytes=0):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, spool_min_free_bytes=0, spool_min_free_inodes=1024):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
@@ -231,7 +240,7 @@ class ViewerFacade:
             task_root = getattr(getattr(service, 'store', None), 'root', None)
             if task_root is None or temp_dir is None or os.stat(temp_dir).st_dev != os.stat(task_root).st_dev:
                 raise ValueError('spool and task storage must share a filesystem')
-            self.spool_capacity = SpoolCapacity(temp_dir, spool_min_free_bytes)
+            self.spool_capacity = SpoolCapacity(temp_dir, spool_min_free_bytes, spool_min_free_inodes)
         else:
             self.spool_capacity = None
 

@@ -35,6 +35,7 @@ class Config:
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
     viewer_spool_min_free_bytes: int = 0
+    viewer_spool_min_free_inodes: int = 1024
 
 
 def _node_origin(value: str) -> str:
@@ -145,4 +146,5 @@ def from_environment() -> Config:
         authority_lease_dir=lease_dir,
         viewer_production_held=production_admission == 'held',
         viewer_spool_min_free_bytes=spool_floor,
+        viewer_spool_min_free_inodes=_positive_int(os.environ.get('PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES', '1024'), 'PROCESSING_VIEWER_SPOOL_MIN_FREE_INODES', 10**12),
     )
