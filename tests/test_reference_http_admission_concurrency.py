@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
@@ -18,6 +19,42 @@ FIXTURE=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.
 
 
 class ConcurrentAdmissionHTTPTest(unittest.TestCase):
+    def test_capability_change_before_first_commit_can_reject_then_replay(self):
+        with tempfile.TemporaryDirectory() as root:
+            queue=Queue(root);queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
+            def make_api(capability,options):
+                return ReferenceAPI(store,bearer_tokens={TOKEN:'staging'},capability_fingerprint=capability,
+                    options_fingerprint=options,allowed_odm_options={'pc-quality','projection'})
+            class Delegator:
+                adapter=make_api(FIXTURE['capabilities']['capabilityFingerprint'],FIXTURE['capabilities']['engines']['odm']['optionsFingerprint'])
+                def handle(self,*args,**kwargs):return self.adapter.handle(*args,**kwargs)
+            adapter=Delegator();server=create_reference_http_server(adapter,request_timeout=3)
+            thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02});thread.start()
+            entered=threading.Event();release=threading.Event();original=store.submit
+            def blocked(value):
+                entered.set()
+                if not release.wait(5):raise RuntimeError('fixture timeout')
+                return original(value)
+            def submit():
+                connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=7)
+                try:
+                    connection.request('POST','/ltds/v1/jobs',json.dumps(FIXTURE['submission']).encode(),{'Authorization':'Bearer '+TOKEN})
+                    response=connection.getresponse();return response.status,json.loads(response.read())
+                finally:connection.close()
+            try:
+                with patch.object(store,'submit',side_effect=blocked),ThreadPoolExecutor(max_workers=1) as pool:
+                    first=pool.submit(submit)
+                    try:
+                        self.assertTrue(entered.wait(5));adapter.adapter=make_api('c'*64,'d'*64)
+                        self.assertEqual(submit()[0],400)
+                    finally:release.set()
+                    first_status,first_body=first.result(timeout=7);self.assertEqual(first_status,201)
+                status,replay=submit();self.assertEqual((status,replay['jobId']),(200,first_body['jobId']))
+                self.assertEqual(len(store.list()),1)
+            finally:
+                release.set();server.shutdown();server.server_close();thread.join(5)
+                self.assertFalse(thread.is_alive());queue.close()
+
     def test_concurrent_exact_and_changed_capability_replays(self):
         with tempfile.TemporaryDirectory() as root:
             queue=Queue(root);queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
