@@ -33,3 +33,5 @@ Tests use real separate processes, real flock and pidfd, actual Queue and
 AuthorityLease classes, and mocked Docker identity attestation. They do not
 establish Docker container identity, durable power-loss behavior, a safe
 candidate admission barrier, result custody or rollback after candidate writes.
+
+State root and named lock identity, including mount ID, are rechecked before and after the process probe. Nested candidate and old/authority/outer directories are rejected. These checks rely on trusted ancestors and do not eliminate rename races or establish an external writer fence. Candidate database authority is not verified: `candidateDatabaseAuthorityVerified` is always false, and lock observation alone must not authorize admission or cutover.

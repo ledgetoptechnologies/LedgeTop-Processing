@@ -51,6 +51,23 @@ class OuterAuthorityTests(unittest.TestCase):
                 with patch.object(attestor,'inspect',return_value=123):
                     observed=outer.observe_candidate(child,attestor,self.candidate)
                 self.assertTrue(observed['candidateLocksObserved']);self.assertFalse(observed['admissionAuthorized'])
+                self.assertFalse(observed['candidateDatabaseAuthorityVerified'])
+                old_lock=self.old/'coordinator.lock';saved=self.old/'saved.lock'
+                def replace_on_probe(_pid):
+                    if not saved.exists():
+                        old_lock.rename(saved);old_lock.touch(mode=0o600)
+                    return 123
+                with patch.object(attestor,'inspect',side_effect=replace_on_probe):
+                    with self.assertRaisesRegex(OuterHeld,'state_lock_changed'):
+                        outer.observe_candidate(child,attestor,self.candidate)
+                old_lock.unlink();saved.rename(old_lock)
+                from ops.outer_authority_guard import _root_identity
+                def changed_mount(path):
+                    identity=_root_identity(path)
+                    return (identity[0],identity[1],identity[2]+1) if Path(path)==self.old else identity
+                with patch('ops.outer_authority_guard._root_identity',side_effect=changed_mount):
+                    with self.assertRaisesRegex(OuterHeld,'state_root_changed'):
+                        outer.observe_candidate(child,attestor,self.candidate)
                 outer.pending.write_bytes(b'synthetic-tamper')
                 with patch.object(attestor,'inspect',return_value=123):
                     with self.assertRaisesRegex(OuterHeld,'outer_marker_changed'):
@@ -66,6 +83,15 @@ class OuterAuthorityTests(unittest.TestCase):
                     os.waitpid(child,0)
         with self.assertRaisesRegex(OuterHeld,'outer_handoff_requires_reconciliation'):
             with OuterAuthorityGuard(self.outer,self.authority,enabled=True):pass
+
+    def test_nested_state_rejected_before_release(self):
+        nested=self.old/'nested';nested.mkdir()
+        with OuterAuthorityGuard(self.outer,self.authority,enabled=True) as outer, \
+             OperationFence(self.old,self.leases,self.authority,enabled=True) as fence:
+            with self.assertRaisesRegex(OuterHeld,'separate_candidate_state_required'):
+                outer.prepare_candidate(fence,nested,self.image,operation_id='c'*32)
+            fence.check()
+            self.assertFalse(outer.pending.exists())
 
     def test_failure_after_marker_never_automatically_reopens(self):
         with OuterAuthorityGuard(self.outer,self.authority,enabled=True) as outer, \

@@ -13,11 +13,35 @@ import stat
 
 from ops.authority_handoff import DockerProcessAttestor,_read_private,_write_once
 from ops.pr197_operation_fence import OperationFence
+from ops.pr197_stopped_census import _identity
 from ops.state_fence import held_flocks
 from ops.stopped_viewer_backup import _lock
 
 
 class OuterHeld(ValueError):pass
+
+
+def _root_identity(path):
+    path=Path(path)
+    if not path.is_absolute() or path.resolve()!=path:raise OuterHeld('state_root_changed')
+    fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        held=os.fstat(fd); named=path.lstat()
+        if not stat.S_ISDIR(named.st_mode) or (held.st_dev,held.st_ino)!=(named.st_dev,named.st_ino):
+            raise OuterHeld('state_root_changed')
+        return _identity(fd)
+    finally:os.close(fd)
+
+
+def _lock_identity(path,root_identity):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        held=os.fstat(fd);named=path.lstat();identity=_identity(fd)
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink!=1 or
+            (held.st_dev,held.st_ino)!=(named.st_dev,named.st_ino) or identity[2]!=root_identity[2]):
+            raise OuterHeld('state_lock_changed')
+        return identity
+    finally:os.close(fd)
 
 
 class OuterAuthorityGuard:
@@ -67,8 +91,14 @@ class OuterAuthorityGuard:
             raise OuterHeld('outer_handoff_binding_required')
         self.check();fence.check();self._absent()
         state=Path(candidate_state)
-        if not state.is_absolute() or state.resolve()!=state or state==fence.root:
+        if (not state.is_absolute() or state.resolve()!=state or
+            any(state==p or state in p.parents or p in state.parents for p in (fence.root,fence.leases,self.directory))):
             raise OuterHeld('separate_candidate_state_required')
+        old_root=_root_identity(fence.root);candidate_root=_root_identity(state)
+        old_lock=_lock_identity(fence.root/'coordinator.lock',old_root)
+        candidate_identity=_lock_identity(state/'coordinator.lock',candidate_root)
+        if old_lock[:2]!=fence.facts[1][1:] or _identity(fence.fds[1])!=old_lock:
+            raise OuterHeld('old_state_lock_changed')
         info=state.lstat();candidate_lock=(state/'coordinator.lock').lstat()
         if not stat.S_ISDIR(info.st_mode) or not stat.S_ISREG(candidate_lock.st_mode) or candidate_lock.st_nlink!=1:
             raise OuterHeld('candidate_state_identity_required')
@@ -76,7 +106,9 @@ class OuterAuthorityGuard:
             raise OuterHeld('separate_candidate_lock_required')
         record={'schemaVersion':1,'operationId':operation_id,'authorityId':self.authority,'imageId':image_id,
                 'candidateDevice':info.st_dev,'candidateInode':info.st_ino,
-                'candidateLockDevice':candidate_lock.st_dev,'candidateLockInode':candidate_lock.st_ino}
+                'candidateLockDevice':candidate_lock.st_dev,'candidateLockInode':candidate_lock.st_ino,
+                'oldRoot':old_root,'oldLock':old_lock,'candidateRoot':candidate_root,
+                'candidateLock':candidate_identity,'candidatePath':str(state)}
         payload=json.dumps(record,sort_keys=True,separators=(',',':')).encode()
         _write_once(self.pending,payload)
         self.check();fence.check()
@@ -85,6 +117,18 @@ class OuterAuthorityGuard:
         os.close(fence.fds[0]);fence.fds[0]=None
         self.binding=(record,hashlib.sha256(payload).hexdigest(),fence)
         return {'state':'candidate_start_not_authorized','pending':True}
+
+    def _check_state_paths(self,record,fence,candidate_state):
+        state=Path(candidate_state)
+        if str(state)!=record['candidatePath']:raise OuterHeld('candidate_state_changed')
+        old_root=_root_identity(fence.root);candidate_root=_root_identity(state)
+        if old_root!=tuple(record['oldRoot']) or candidate_root!=tuple(record['candidateRoot']):
+            raise OuterHeld('state_root_changed')
+        old_lock=_lock_identity(fence.root/'coordinator.lock',old_root)
+        candidate_lock=_lock_identity(state/'coordinator.lock',candidate_root)
+        if (old_lock!=tuple(record['oldLock']) or _identity(fence.fds[1])!=old_lock or
+            candidate_lock!=tuple(record['candidateLock'])):
+            raise OuterHeld('state_lock_changed')
 
     def observe_candidate(self,pid,attestor,candidate_state):
         """Check exact process-owned independent locks; observation only."""
@@ -95,6 +139,7 @@ class OuterAuthorityGuard:
         if attestor.image!=record['imageId']:raise OuterHeld('candidate_image_changed')
         self.check()
         try:
+            self._check_state_paths(record,fence,candidate_state)
             payload=_read_private(self.pending,4096)
             if hashlib.sha256(payload).hexdigest()!=digest:raise OuterHeld('outer_marker_changed')
             info=Path(candidate_state).lstat();lock=(Path(candidate_state)/'coordinator.lock').lstat()
@@ -112,8 +157,10 @@ class OuterAuthorityGuard:
                         or not held_by(old,self.pid) or attestor.inspect(pid)!=start):
                     raise OuterHeld('candidate_lock_ownership_unverified')
             finally:os.close(pidfd)
+            self._check_state_paths(record,fence,candidate_state)
             self.check()
-            return {'candidateLocksObserved':True,'admissionAuthorized':False,'rollbackAuthorized':False}
+            return {'candidateLocksObserved':True,'candidateDatabaseAuthorityVerified':False,
+                    'admissionAuthorized':False,'rollbackAuthorized':False}
         except OuterHeld:raise
         except Exception:raise OuterHeld('candidate_observation_unavailable') from None
 
