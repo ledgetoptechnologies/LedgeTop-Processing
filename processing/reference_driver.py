@@ -954,13 +954,23 @@ class ReferenceDriver:
             copy=db.execute('SELECT path,sha,bytes,cleaned FROM input_copies WHERE reservation=? AND id=?',(reservation,object_id)).fetchone()
             require(copy is not None and tuple(copy)==(relative,expected['sha256'],expected['byte_size'],None),'indexed_scratch_copy_changed')
         self.ledger._owned_path(reservation,relative);target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        receiver=getattr(self.ledger,'allocated_receiver',False)
+        if receiver and (attempt is not None or os.path.lexists(target)):
+            raise DriverHeld('allocated_input_recovery_required')
         if os.path.lexists(target):
             require(attempt is not None,'indexed_unowned_input_file')
         else:
             with self._db() as db:progress,intent=self._indexed.begin_attempt(db,job_id,index,progress,previous_attempts=session['known_attempts'])
             session['known_attempts']=[*session['known_attempts'],dict(attempt=len(session['known_attempts'])+1,intent=intent,state='started')]
             session['progress']=progress;attempt=dict(intent=intent,state='started')
-            self.broker.download_indexed_object(session['grant'],object_id,target)
+            if receiver:
+                from .reference_allocated_receiver import receive
+                identity=dict(jobId=claim['jobId'],generation=claim['generation'],environment=claim['environment'],
+                    manifestSha256=claim['manifestSha256'],path=relative,sha256=expected['sha256'],byteSize=expected['byte_size'])
+                receive(self.ledger,self.broker,session['grant'],reservation,object_id,intent,identity,
+                        max(cached['allocated'],progress['bytes']+expected['byte_size']))
+            else:
+                self.broker.download_indexed_object(session['grant'],object_id,target)
         self.worker._file(reservation,relative,expected['byte_size'],expected['sha256'])
         self.ledger.confirm_input_copy(reservation,object_id,byte_size=expected['byte_size'],sha256=expected['sha256'])
         allocated=max(cached['allocated'],progress['bytes']+expected['byte_size'])

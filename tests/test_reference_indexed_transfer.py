@@ -278,6 +278,21 @@ class IndexedHTTPSPublisherTests(_IndexedTransferFixture, unittest.TestCase):
         with self.assertRaises(t.TransferError):self.https_client().download_indexed_object(handle,'image-1',target)
         self.assertEqual(target.read_bytes(),b'abc');self.assertEqual(len(self.served),1)
 
+    @unittest.skipUnless(hasattr(os,'pwrite'),'fd streaming requires positional writes')
+    def test_actual_https_fd_stream_checks_hash_and_retains_inode(self):
+        target=self.root/'allocated.part'
+        fd=os.open(target,os.O_CREAT | os.O_EXCL | os.O_RDWR,0o600)
+        self.addCleanup(os.close,fd)
+        os.posix_fallocate(fd,0,3)
+        inode=os.fstat(fd).st_ino
+        self.https_client().download_indexed_object_fd(self.grant(),'image-1',fd)
+        self.assertEqual(os.pread(fd,3,0),b'abc')
+        self.assertEqual(os.fstat(fd).st_ino,inode)
+        self.mode='bad'
+        with self.assertRaises(t.TransferError):
+            self.https_client().download_indexed_object_fd(self.grant(),'image-1',fd)
+        self.assertEqual(os.fstat(fd).st_ino,inode)
+
     def test_actual_https_hash_corruption_and_redirect_are_not_published_or_followed(self):
         for mode in ('corrupt','redirect'):
             self.mode=mode;self.served=[]

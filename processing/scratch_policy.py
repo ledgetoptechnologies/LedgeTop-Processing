@@ -36,6 +36,12 @@ import unicodedata
 MAX_INTEGER = 2**53 - 1
 ACCOUNTING_VERSION = 1
 INPUT_COPY_ACCOUNTING_VERSION = 1
+ALLOCATED_RECEIVER_VERSION = 1
+ALLOCATED_RECEIVER_SCHEMA = ("CREATE TABLE allocated_input_receipts ("
+    "reservation TEXT NOT NULL, object TEXT NOT NULL, intent TEXT NOT NULL, "
+    "identity TEXT NOT NULL, state TEXT NOT NULL, dev INTEGER, ino INTEGER, mount INTEGER, "
+    "dirdev INTEGER, dirino INTEGER, dirmount INTEGER, "
+    "PRIMARY KEY(reservation,object))")
 MAX_INPUT_COPIES = 10000  # Matches the paired v1 manifest object ceiling.
 MAX_RELEASE_RECORD_BYTES = 16384  # Compact: independent of closure size.
 RELEASE_FIELDS = ('schemaVersion', 'purpose', 'scope', 'releaseId', 'authorityId', 'reservationId', 'jobId',
@@ -147,7 +153,10 @@ class ScratchLedger:
 
     def __init__(self, path, storage_root, capacity_probe=None, clock=None,
                  safety_floor_bytes=1024**3, cleanup_grace_seconds=3600, input_copy_accounting=False,
-                 release_authority=None, auxiliary_budget=None):
+                 release_authority=None, auxiliary_budget=None, allocated_receiver=False):
+        if type(allocated_receiver) is not bool or (allocated_receiver and not input_copy_accounting):
+            raise ValueError('allocated receiver requires explicit input accounting')
+        self.allocated_receiver = allocated_receiver
         if type(input_copy_accounting) is not bool:
             raise ValueError("explicit input copy accounting profile required")
         if release_authority is not None and (not isinstance(release_authority, InputReleaseAuthority)
@@ -270,16 +279,24 @@ class ScratchLedger:
         config=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
         count=db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0]
         if config is None:raise PolicyConflict('accounting configuration missing')
-        shapes={_json(self._config(control=control,inputs=inputs)):(control,inputs) for control in (False,True) for inputs in (False,True)}
+        shapes={_json(self._config(control=control,inputs=inputs,receiver=receiver)):(control,inputs,receiver)
+                for control in (False,True) for inputs in (False,True) for receiver in (False,True)
+                if not receiver or inputs}
         if config[0] not in shapes:raise PolicyConflict('unknown accounting version or ledger policy')
-        control,inputs=shapes[config[0]]
+        control,inputs,receiver=shapes[config[0]]
+        marker=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='allocated_input_receipts'").fetchone()
+        if receiver:
+            if not self.allocated_receiver or marker is None or marker[0] != ALLOCATED_RECEIVER_SCHEMA:
+                raise PolicyConflict('allocated input receiver profile or schema differs')
+        elif marker is not None:
+            raise PolicyConflict('allocated receiver schema lacks its version marker')
         footprint=db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN (%s)"
             %",".join("'"+table+"'" for table in INPUT_TABLES)).fetchone()[0]
         if footprint and not inputs:raise PolicyConflict('input copy records exist without their latched marker')
         if inputs and (footprint!=len(INPUT_TABLES) or [tuple(row) for row in db.execute('SELECT singleton,version FROM input_accounting')]!=[(1,INPUT_COPY_ACCOUNTING_VERSION)]):
             raise PolicyConflict('latched input copy marker lacks its schema footprint')
         if inputs and not self.input_copy_accounting:raise PolicyConflict('latched input copy accounting requires its opt-in profile')
-        versioned=self._config(control=control,inputs=inputs)
+        versioned=self._config(control=control,inputs=inputs,receiver=receiver)
         if not control:
             if count:raise PolicyConflict('control accounting marker missing')
             return versioned
@@ -301,21 +318,24 @@ class ScratchLedger:
             self._control(row,reservation)
         return versioned
 
-    def _config(self, *, control, inputs):
+    def _config(self, *, control, inputs, receiver=False):
         config = dict(root=str(self.root), floor=self.floor, grace=self.grace)
         if control:
             config["accountingVersion"] = ACCOUNTING_VERSION
         if inputs:
             config["inputCopyAccountingVersion"] = INPUT_COPY_ACCOUNTING_VERSION
+        if receiver:
+            config['allocatedReceiverVersion'] = ALLOCATED_RECEIVER_VERSION
         return config
 
-    def _latch(self, db, *, control=False, inputs=False):
+    def _latch(self, db, *, control=False, inputs=False, receiver=False):
         """Write the config with every already latched marker preserved."""
         # Read the stored markers directly: a control latch runs after its first
         # charge row exists, before the marker would validate.
         current = json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
         config = self._config(control=control or "accountingVersion" in current,
-                              inputs=inputs or "inputCopyAccountingVersion" in current)
+                              inputs=inputs or "inputCopyAccountingVersion" in current,
+                              receiver=receiver or 'allocatedReceiverVersion' in current)
         db.execute("UPDATE metadata SET value=? WHERE key='config'", (_json(config),))
 
     def _reservation(self, db, reservation_id):
@@ -508,7 +528,7 @@ class ScratchLedger:
             row = self._reservation(db, reservation_id)
             if row["state"] == "reserved" and row["expires"] <= now:
                 raise PolicyConflict("lease expired before engine mutation")
-            if row["state"] == "expired" or (row["state"] == "terminal" and state != "terminal"):
+            if row["state"] not in ('reserved','engine_started','uncertain','terminal') or (row["state"] == "terminal" and state != "terminal"):
                 raise PolicyConflict("invalid engine transition")
             db.execute("UPDATE reservations SET state=?,terminal_at=CASE WHEN ?='terminal' "
                        "THEN COALESCE(terminal_at,?) ELSE terminal_at END, "
@@ -764,6 +784,84 @@ class ScratchLedger:
             db.execute("INSERT OR IGNORE INTO input_accounting VALUES(1,?)", (INPUT_COPY_ACCOUNTING_VERSION,))
             self._check_input_schema(db)
             self._latch(db, inputs=True)
+
+    def enable_allocated_receiver(self):
+        """Irreversibly latch a new receiver ledger before admitting any job.
+
+        This marker makes older ledger implementations reject the database; it
+        does not fence an already running old writer or qualify host migration.
+        """
+        if not self.allocated_receiver:
+            raise PolicyConflict('allocated receiver profile required')
+        with self._transaction() as db:
+            self._require_inputs(db)
+            if self.validate_accounting(db).get('allocatedReceiverVersion'):
+                return
+            if db.execute('SELECT 1 FROM reservations LIMIT 1').fetchone():
+                raise PolicyConflict('allocated receiver requires a fresh ledger')
+            db.execute(ALLOCATED_RECEIVER_SCHEMA)
+            self._latch(db, receiver=True)
+
+    def begin_allocated_input(self, reservation_id, object_id, attempt, identity):
+        """Durably hold capacity and bind intent before creating an input inode."""
+        _id(object_id)
+        if type(attempt) is not str or not attempt or len(attempt.encode()) > 4096:
+            raise PolicyConflict('bounded exact indexed attempt required')
+        if type(identity) is not dict or set(identity) != {'jobId','generation','environment','manifestSha256','path','sha256','byteSize'}:
+            raise PolicyConflict('closed input identity required')
+        _id(identity['jobId']); _integer(identity['generation'], 'generation', 1)
+        _sha(identity['manifestSha256']); _sha(identity['sha256']); _integer(identity['byteSize'], 'input size')
+        if identity['environment'] not in ('production', 'staging'):
+            raise PolicyConflict('invalid input environment')
+        self._owned_path(reservation_id, identity['path'])
+        encoded = _json(identity)
+        with self._transaction() as db:
+            if not self.validate_accounting(db).get('allocatedReceiverVersion'):
+                raise PolicyConflict('allocated receiver is not latched')
+            row=self._reservation(db,reservation_id)
+            settings=json.loads(row['settings'])
+            copy=db.execute('SELECT path,sha,bytes,fetched,cleaned FROM input_copies WHERE reservation=? AND id=?',
+                            (reservation_id,object_id)).fetchone()
+            if ((row['job'],row['generation'],row['environment'],settings['manifest_sha256']) !=
+                (identity['jobId'],identity['generation'],identity['environment'],identity['manifestSha256'])
+                or copy is None or tuple(copy)!=(identity['path'],identity['sha256'],identity['byteSize'],None,None)):
+                raise PolicyConflict('input binding changed')
+            existing=db.execute('SELECT intent,identity,state,dev,ino FROM allocated_input_receipts WHERE reservation=? AND object=?',
+                                (reservation_id,object_id)).fetchone()
+            if existing:
+                raise PolicyConflict('existing allocated input requires conservative recovery')
+            if row['state'] != 'reserved':
+                raise PolicyConflict('input allocation requires a live reservation')
+            db.execute('INSERT INTO allocated_input_receipts VALUES(?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,NULL)',
+                       (reservation_id,object_id,attempt,encoded,'intent'))
+            db.execute("UPDATE reservations SET state='receiving' WHERE id=?",(reservation_id,))
+
+    def record_allocated_input_inode(self, reservation_id, object_id, attempt, dev, ino, mount, dirdev, dirino, dirmount):
+        for name,value in (('device',dev),('inode',ino),('mount',mount),('directory device',dirdev),('directory inode',dirino),('directory mount',dirmount)):
+            _integer(value,name,1 if name in ('inode','directory inode','mount','directory mount') else 0)
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id)
+            result=db.execute("UPDATE allocated_input_receipts SET state='allocated',dev=?,ino=?,mount=?,dirdev=?,dirino=?,dirmount=? "
+                "WHERE reservation=? AND object=? AND intent=? AND state='intent'",
+                (dev,ino,mount,dirdev,dirino,dirmount,reservation_id,object_id,attempt))
+            if row['state']!='receiving' or result.rowcount!=1:
+                raise PolicyConflict('allocated input intent changed')
+
+    def finish_allocated_input(self, reservation_id, object_id, attempt, dev, ino, mount, dirdev, dirino, dirmount, allocated_bytes):
+        _integer(allocated_bytes,'allocated bytes')
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id)
+            delta=allocated_bytes-row['allocated']
+            if not 0 <= delta <= row['remaining']:
+                raise PolicyConflict('allocation outside reservation')
+            result=db.execute("UPDATE allocated_input_receipts SET state='published' "
+                "WHERE reservation=? AND object=? AND intent=? AND state='allocated' AND dev=? AND ino=? "
+                "AND mount=? AND dirdev=? AND dirino=? AND dirmount=?",
+                (reservation_id,object_id,attempt,dev,ino,mount,dirdev,dirino,dirmount))
+            if row['state']!='receiving' or result.rowcount!=1:
+                raise PolicyConflict('allocated input inode changed')
+            db.execute("UPDATE reservations SET state='reserved',allocated=?,remaining=remaining-? WHERE id=?",
+                       (allocated_bytes,delta,reservation_id))
 
     def _check_input_aliases(self, db, reservation_id, normalized):
         """Portable case/Unicode identity via the indexed path_key, plus single-link

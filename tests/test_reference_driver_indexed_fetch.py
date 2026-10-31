@@ -1,5 +1,6 @@
 """Actual one-object driver steps and SQLite writes for the explicit fresh ABI."""
 import json
+import os
 from contextlib import closing, contextmanager
 from pathlib import Path
 import sqlite3
@@ -56,6 +57,33 @@ class IndexedDriverTests(unittest.TestCase):
         self.assertLess(len(raw.encode()),8192)
         data=json.loads(raw);self.assertNotIn('submission',data['claim']);self.assertNotIn('inputPaths',data)
         self.assertNotIn('grant',data);self.assertNotIn('fetchAttempts',data)
+
+    @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'Linux allocated receiver required')
+    def test_opt_in_driver_uses_real_indexed_broker_into_allocated_inode(self):
+        self.f.ledger.allocated_receiver=True
+        self.f.ledger.enable_allocated_receiver()
+        job=self.fetching(contents=(b'first',))
+        self.assertEqual(self.f.driver.step()['state'],'fetching')
+        self.assertEqual(len(self.downloads),1)
+        self.assertEqual(self.progress(job)['next'],1)
+        self.assertEqual(self.f.driver.step()['state'],'processing_pending')
+
+    @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'Linux allocated receiver required')
+    def test_opt_in_driver_interruption_holds_without_second_broker_get(self):
+        self.f.ledger.allocated_receiver=True
+        self.f.ledger.enable_allocated_receiver()
+        job=self.fetching(contents=(b'first',))
+        def lost(grant,object_id,fd):
+            os.pwrite(fd,b'f',0)
+            raise OSError('synthetic interruption')
+        with patch.object(self.f.broker,'download_indexed_object_fd',side_effect=lost) as send:
+            first=self.f.driver.step()
+            self.assertIn(first['state'],('retry_wait','held'))
+            self.assertEqual(send.call_count,1)
+            self.f.driver=self.make_driver()
+            self.assertEqual(self.f.driver.step()['state'],'held')
+            self.assertEqual(send.call_count,1)
+        self.assertEqual(self.progress(job)['next'],0)
 
     def test_success_materializes_at_execution_boundary_and_retains_inputs(self):
         job=self.f.submit();self.f.advance(job,'awaiting_acceptance')

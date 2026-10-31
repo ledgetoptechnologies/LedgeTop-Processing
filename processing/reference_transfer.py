@@ -303,6 +303,50 @@ class BrokerClient:
         return self._publish_object(obj, state.record.token, destination,
                                     lambda: state.check_expiry(self.clock))
 
+    def download_indexed_object_fd(self, grant, object_id, descriptor):
+        """Stream one authorized object into an already allocated owned inode.
+
+        Ownership, preallocation, publication and any recovery are caller
+        responsibilities. Never closes or unlinks the supplied descriptor.
+        """
+        state=_indexed_state(grant); obj=_indexed_object(state,object_id)
+        state.check_expiry(self.clock)
+        request=Request(self.origin + OBJECT_PREFIX + obj.id,
+            headers={'Authorization':'Bearer '+state.record.token,'Accept-Encoding':'identity'},method='GET')
+        try:
+            try:
+                response=self._open(request,timeout=self.timeout)
+            except HTTPError as error:
+                error.close(); raise TransferError('broker request rejected') from None
+            try:
+                if response.status!=200 or response.geturl()!=request.full_url:
+                    raise TransferError('unexpected broker response')
+                length=response.headers.get('Content-Length')
+                if length is not None and (not length.isascii() or not length.isdecimal() or int(length)!=obj.byte_size):
+                    raise TransferError('broker object length mismatch')
+                if response.headers.get('Content-Encoding','identity').lower()!='identity':
+                    raise TransferError('encoded broker objects are forbidden')
+                digest=hashlib.sha256(); count=0
+                while True:
+                    state.check_expiry(self.clock)
+                    chunk=response.read(min(CHUNK_BYTES,obj.byte_size-count+1))
+                    if not chunk: break
+                    if not isinstance(chunk,bytes) or count+len(chunk)>obj.byte_size:
+                        raise TransferError('broker object exceeds declared size')
+                    offset=0
+                    while offset<len(chunk):
+                        written=os.pwrite(descriptor,chunk[offset:],count+offset)
+                        if written<=0: raise TransferError('input write failed')
+                        offset+=written
+                    count+=len(chunk); digest.update(chunk)
+                if count!=obj.byte_size or digest.hexdigest()!=obj.sha256:
+                    raise TransferError('broker object integrity mismatch')
+                os.fsync(descriptor)
+            finally:
+                response.close()
+        except Exception:
+            raise TransferError('reference object transfer failed') from None
+
     def _publish_object(self, obj, token, destination, check_expiry):
         """The single streaming/TLS/no-replace publisher for both grant APIs."""
         check_expiry()
