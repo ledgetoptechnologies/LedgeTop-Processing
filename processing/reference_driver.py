@@ -306,10 +306,28 @@ class ReferenceDriver:
         finally:
             db.close()
 
+    @staticmethod
+    def _next_background_order(db):
+        last = db.execute("""SELECT MAX(background_checked) FROM driver_jobs WHERE stage IN
+          ('awaiting_acceptance','awaiting_failure_acceptance')""").fetchone()[0]
+        if last is None:
+            return 1
+        if type(last) not in (int,float) or not math.isfinite(last) or not 0 <= last < 2**52:
+            raise DriverHeld('background_order_invalid')
+        return last + 1
+
     def _save(self, job_id, stage, data):
         with self._db() as db:
-            db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?',
-                       (stage, p.canonical_json(data).decode(), job_id))
+            old = db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
+            waiting = ('awaiting_acceptance','awaiting_failure_acceptance')
+            encoded = p.canonical_json(data).decode()
+            if old is not None and stage in waiting and old['stage'] not in waiting:
+                # New entries join the back of the durable acceptance queue.
+                order = self._next_background_order(db)
+                db.execute('UPDATE driver_jobs SET stage=?,data=?,background_checked=? WHERE job=?',
+                           (stage, encoded, order, job_id))
+            else:
+                db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?', (stage, encoded, job_id))
 
     def _request(self, method, suffix, payload=None, *, claim_token=None):
         url = self.origin + PREFIX + suffix
@@ -572,7 +590,10 @@ class ReferenceDriver:
             row = db.execute("""SELECT * FROM driver_jobs WHERE stage IN
               ('awaiting_acceptance','awaiting_failure_acceptance') ORDER BY background_checked,created LIMIT 1""").fetchone()
             if row is not None:
-                db.execute('UPDATE driver_jobs SET background_checked=? WHERE job=?', (self.clock(), row['job']))
+                # This is a durable round-robin position, not a timestamp.
+                # A wall-clock rewind must not keep selecting one failed poll.
+                order = self._next_background_order(db)
+                db.execute('UPDATE driver_jobs SET background_checked=? WHERE job=?', (order, row['job']))
         observed = {'state': 'background_idle'}
         if row is not None:
             data = json.loads(row['data'])

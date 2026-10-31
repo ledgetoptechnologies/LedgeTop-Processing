@@ -19,7 +19,7 @@ import zipfile
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
-from processing.reference_driver import ReferenceDriver, DriverHeld
+from processing.reference_driver import ReferenceDriver, DriverHeld, DriverWait
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
@@ -312,6 +312,32 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertTrue(stream.closed)
         self.assertEqual(hashlib.sha256(expected).hexdigest(), obj['sha256'])
         self.assertTrue(archive.exists())
+    def test_acceptance_retry_rotation_survives_clock_rewind_and_restart(self):
+        data=json.dumps({'claim':{'claimToken':'synthetic'}})
+        with self.driver._db() as db:
+            for job,checked in (('job-a',1000),('job-b',1001)):
+                db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data,background_checked) VALUES(?,?,?,?,?)",
+                    (job,'claim-'+job,'awaiting_acceptance',data,checked))
+        attempted=[]
+        def unavailable(method,route,**kwargs):
+            attempted.append(route)
+            raise DriverWait('synthetic unavailable')
+        self.driver.clock=lambda:1
+        with patch.object(self.driver,'_request',side_effect=unavailable):
+            with self.assertRaises(DriverWait):self.driver._background()
+        # A new completion must join behind the old pending acknowledgements.
+        with self.driver._db() as db:
+            db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,?,?)",
+                       ('job-c','claim-job-c','delivering',data))
+        self.driver._save('job-c','awaiting_acceptance',json.loads(data))
+        # A restarted worker reads the persisted rotation order. A backward wall
+        # clock and subsequent arrivals must not monopolize polling.
+        resumed=self.make_driver(clock=lambda:1)
+        with patch.object(resumed,'_request',side_effect=unavailable):
+            for _ in range(3):
+                with self.assertRaises(DriverWait):resumed._background()
+        self.assertEqual(attempted,['/jobs/job-a/acceptance','/jobs/job-b/acceptance',
+                                    '/jobs/job-a/acceptance','/jobs/job-c/acceptance'])
 
     def test_arbitrary_images_production_and_next_job_before_viewer_acceptance(self):
         first = self.submit(environment='production', contents=(b'not-abc-one', b'another-photo'))
