@@ -21,14 +21,14 @@ FIXTURE=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.
 class ConcurrentAdmissionHTTPTest(unittest.TestCase):
     def test_capability_change_before_first_commit_can_reject_then_replay(self):
         with tempfile.TemporaryDirectory() as root:
-            queue=Queue(root);queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
+            queue=Queue(root);self.addCleanup(queue.close);queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
             def make_api(capability,options):
                 return ReferenceAPI(store,bearer_tokens={TOKEN:'staging'},capability_fingerprint=capability,
                     options_fingerprint=options,allowed_odm_options={'pc-quality','projection'})
             class Delegator:
                 adapter=make_api(FIXTURE['capabilities']['capabilityFingerprint'],FIXTURE['capabilities']['engines']['odm']['optionsFingerprint'])
                 def handle(self,*args,**kwargs):return self.adapter.handle(*args,**kwargs)
-            adapter=Delegator();server=create_reference_http_server(adapter,request_timeout=3)
+            adapter=Delegator();server=create_reference_http_server(adapter,request_timeout=3);self.addCleanup(server.server_close)
             thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02});thread.start()
             entered=threading.Event();release=threading.Event();original=store.submit
             def blocked(value):
@@ -52,19 +52,23 @@ class ConcurrentAdmissionHTTPTest(unittest.TestCase):
                 status,replay=submit();self.assertEqual((status,replay['jobId']),(200,first_body['jobId']))
                 self.assertEqual(len(store.list()),1)
             finally:
-                release.set();server.shutdown();server.server_close();thread.join(5)
-                self.assertFalse(thread.is_alive());queue.close()
+                release.set()
+                try:
+                    server.shutdown();thread.join(5)
+                    self.assertFalse(thread.is_alive())
+                finally:
+                    server.server_close();queue.close()
 
     def test_concurrent_exact_and_changed_capability_replays(self):
         with tempfile.TemporaryDirectory() as root:
-            queue=Queue(root);queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
+            queue=Queue(root);self.addCleanup(queue.close);queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
             def make_api(capability,options):
                 return ReferenceAPI(store,bearer_tokens={TOKEN:'staging'},capability_fingerprint=capability,
                     options_fingerprint=options,allowed_odm_options={'pc-quality','projection'})
             class Delegator:
                 adapter=make_api(FIXTURE['capabilities']['capabilityFingerprint'],FIXTURE['capabilities']['engines']['odm']['optionsFingerprint'])
                 def handle(self,*args,**kwargs):return self.adapter.handle(*args,**kwargs)
-            adapter=Delegator();server=create_reference_http_server(adapter,request_timeout=3)
+            adapter=Delegator();server=create_reference_http_server(adapter,request_timeout=3);self.addCleanup(server.server_close)
             thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02});thread.start()
             def run_batch(payload):
                 barrier=threading.Barrier(4)
@@ -85,8 +89,14 @@ class ConcurrentAdmissionHTTPTest(unittest.TestCase):
                 self.assertEqual([status for status,_ in replay],[200]*4)
                 self.assertEqual({body['jobId'] for _,body in replay},identities)
                 changed=copy.deepcopy(FIXTURE['submission']);changed['manifest']['revision']+=1
-                self.assertTrue(all(status!=200 for status,_ in run_batch(changed)))
+                self.assertEqual([status for status,_ in run_batch(changed)],[400]*4)
                 self.assertEqual(len(store.list()),1)
+                with queue._db() as db:
+                    self.assertEqual(db.execute('SELECT count(*) FROM jobs').fetchone()[0],1)
+                    self.assertEqual(db.execute('SELECT count(*) FROM reference_jobs').fetchone()[0],1)
             finally:
-                server.shutdown();server.server_close();thread.join(5)
-                self.assertFalse(thread.is_alive());queue.close()
+                try:
+                    server.shutdown();thread.join(5)
+                    self.assertFalse(thread.is_alive())
+                finally:
+                    server.server_close();queue.close()
