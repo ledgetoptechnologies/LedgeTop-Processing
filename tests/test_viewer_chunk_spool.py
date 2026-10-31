@@ -35,6 +35,7 @@ original=sender.strict_response
 def observe(response):
  value=original(response)
  if mode=='kill' and isinstance(value,dict) and value.get('state')=='finished' and 'receipt' in value:os.kill(os.getpid(),signal.SIGKILL)
+ if mode=='kill-promotion' and isinstance(value,dict) and value.get('kind')=='viewer-coordinator-archive-receipt':os.kill(os.getpid(),signal.SIGKILL)
  return value
 with DaemonStateLock(root) as owner:
  with patch.object(sender,'strict_response',observe):
@@ -44,12 +45,14 @@ with DaemonStateLock(root) as owner:
         first=subprocess.run(args+['kill'],capture_output=True,timeout=20);self.assertEqual(first.returncode,-signal.SIGKILL,first.stderr)
         with self.base.fixture.queue._db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_worker_chunk_permits WHERE state='finished'").fetchone()[0],1)
-        second=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
-        self.assertEqual(second.returncode,0,second.stderr)
-        result=json.loads(second.stdout);self.assertEqual(result['kind'],'synthetic-chunk-seal')
+        second=subprocess.run(args+['kill-promotion'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(second.returncode,-signal.SIGKILL,second.stderr)
+        third=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
+        self.assertEqual(third.returncode,0,third.stderr)
+        result=json.loads(third.stdout);self.assertEqual(result['kind'],'viewer-coordinator-archive-receipt')
         third=subprocess.run(args+['resume'],capture_output=True,text=True,timeout=20)
         self.assertEqual(third.returncode,0,third.stderr);self.assertEqual(json.loads(third.stdout),result)
-        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token),{'state':'held'})
+        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token)['receipt'],result)
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
         self.assertEqual(len(list(self.base.base.base.base.base.output.glob('*.alloc'))),1)
 
@@ -254,6 +257,71 @@ with DaemonStateLock(root) as owner:
                 finally:release.set()
                 with self.assertRaises(SpoolHeld):replay.result(timeout=5)
         self.assertEqual(len(list(self.base.root.glob('*.alloc'))),1)
+
+    def test_promotion_exposes_verified_standard_spool_and_replays(self):
+        self.chunk.begin(self.job,self.identity,self.token);self.chunk.write(self.job,self.identity,self.token,0,0,self.archive)
+        self.chunk.finish(self.job,self.identity,self.token,1)
+        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token),{'state':'held'})
+        receipt=self.chunk.promote(self.job,self.identity,self.token,1)
+        self.assertEqual(receipt['kind'],'viewer-coordinator-archive-receipt')
+        self.assertEqual(self.chunk.promote(self.job,self.identity,self.token,1),receipt)
+        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token)['receipt'],receipt)
+        task=self.base.fixture.store.task('22222222-2222-4222-8222-222222222222')
+        reader,length=self.base.spool.open_for_viewer(task)
+        try:self.assertEqual(reader.read(length),self.archive)
+        finally:reader.close()
+        self.assertEqual(self.base.fixture.queue.get(self.job)['status'],'running')
+        from processing.config import Config
+        from processing.viewer_service import ViewerService
+        from processing.viewer_http import ViewerFacade
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        service=ViewerService(self.base.fixture.queue,Config('legacy','http://127.0.0.1:1','http://127.0.0.1:2',1000,100000,viewer_enabled=True),store=self.base.fixture.store,engines={},viewer_spool=self.base.spool)
+        self.addCleanup(service.close);facade=ViewerFacade(service,'viewer-token','staging-token')
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if not facade.handle(self):self.send_error(404)
+            def log_message(self,*args):pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.05},daemon=True);thread.start()
+        try:
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+            try:
+                conn.request('GET','/task/22222222-2222-4222-8222-222222222222/download/all.zip?token=viewer-token')
+                response=conn.getresponse();self.assertEqual(response.status,200);self.assertEqual(response.read(),self.archive)
+            finally:conn.close()
+        finally:server.shutdown();server.server_close();thread.join(5);self.assertFalse(thread.is_alive())
+        allocation=next(self.base.root.glob('*.alloc'))
+        with allocation.open('r+b') as stream:stream.write(b'X');stream.flush()
+        with self.assertRaises(Exception):self.base.spool.lookup(self.job,self.identity,self.token)
+
+    def test_promotion_failure_before_commit_replays_without_receipt(self):
+        self.chunk.begin(self.job,self.identity,self.token);self.chunk.write(self.job,self.identity,self.token,0,0,self.archive);self.chunk.finish(self.job,self.identity,self.token,1)
+        original=self.chunk._admit_operation;calls=[]
+        def fail_second(db,job):
+            calls.append(True)
+            if len(calls)==2:raise OSError('synthetic precommit failure')
+            return original(db,job)
+        with patch.object(self.chunk,'_admit_operation',side_effect=fail_second):
+            with self.assertRaises(OSError):self.chunk.promote(self.job,self.identity,self.token,1)
+        self.assertEqual(self.base.spool.lookup(self.job,self.identity,self.token),{'state':'held'})
+        self.assertEqual(self.chunk.promote(self.job,self.identity,self.token,1)['kind'],'viewer-coordinator-archive-receipt')
+
+    def test_hold_during_promotion_hash_prevents_promotion(self):
+        from processing.viewer_chunk_journal import SyntheticChunkJournal
+        self.chunk.begin(self.job,self.identity,self.token);self.chunk.write(self.job,self.identity,self.token,0,0,self.archive);self.chunk.finish(self.job,self.identity,self.token,1)
+        entered=threading.Event();release=threading.Event();original=SyntheticChunkJournal.finish
+        def paused(journal,count):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('hash barrier timeout')
+            return original(journal,count)
+        with patch.object(SyntheticChunkJournal,'finish',paused):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                future=pool.submit(self.chunk.promote,self.job,self.identity,self.token,1)
+                try:
+                    self.assertTrue(entered.wait(5));hold=pool.submit(self.base.fixture.claims.mutation_hold,self.job,self.identity,self.token)
+                    self.assertEqual(hold.result(timeout=2)['state'],'held')
+                finally:release.set()
+                with self.assertRaises(SpoolHeld):future.result(timeout=5)
+        with self.base.fixture.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM viewer_worker_spool WHERE job_id=?',(self.job,)).fetchone()['state'],'receiving')
 
     def test_legacy_receiving_is_never_adopted(self):
         def fail():yield b'x';raise OSError('interrupted')

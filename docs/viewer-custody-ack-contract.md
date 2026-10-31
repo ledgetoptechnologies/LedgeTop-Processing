@@ -322,3 +322,13 @@ cooperative slot lock outside the coordinator write transaction. A short
 transaction then rechecks the claim, hold, session and slot identity; a hold
 that wins during verification prevents the replay response. Filesystem identity
 checks themselves still have no hard wall-clock deadline.
+
+A later disabled synthetic promotion draft can convert a fully revalidated
+chunk seal into a standard coordinator archive receipt under a short
+claim/hold/identity transaction. Standard spool lookup and Viewer-compatible
+download reverify the chunk journal and bytes before exposure. A worker killed
+after receiving the promotion response can restart and replay the receipt; a
+hold during hashing prevents promotion. This is coordinator archive custody
+only, not Viewer acceptance, and triggers no cleanup. Coordinator SIGKILL at
+the database commit boundary, storage power loss and live migration remain
+unqualified; the 1 GiB synthetic chunk limit still applies.

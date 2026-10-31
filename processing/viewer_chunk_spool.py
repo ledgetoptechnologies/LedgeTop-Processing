@@ -48,10 +48,10 @@ class SyntheticChunkSpool:
                 db.execute('BEGIN IMMEDIATE');metadata,sha,key,session,row=self._snapshot(db,job,identity,token)
                 self._admit_operation(db,job)
                 if session is not None:
-                    if (session['state'] not in ('ready','sealed') or not row or row['state']!='receiving'
+                    if (session['state'] not in ('ready','sealed') or not row or row['state'] not in (('receiving','sealed') if session['state']=='sealed' else ('receiving',))
                             or not session['slot_identity'] or session['slot_identity']!=row['slot_identity']):
                         raise SpoolHeld('chunk_session_requires_inspection')
-                    existing_state=session['state'];recorded=session['slot_identity']
+                    existing_state=session['state'];recorded=session['slot_identity'];existing_spool_state=row['state']
                 else:
                     if row is not None:raise SpoolHeld('legacy_spool_requires_inspection')
                     db.execute("INSERT INTO viewer_worker_spool VALUES(?,?,?,'creating',NULL,NULL)",(job,sha,key))
@@ -72,11 +72,15 @@ class SyntheticChunkSpool:
                         db.execute('BEGIN IMMEDIATE');current,csha,ckey,current_session,current_row=self._snapshot(db,job,identity,token)
                         self._admit_operation(db,job)
                         if (csha!=sha or ckey!=key or current_session['state']!=existing_state
-                                or current_row['state']!='receiving' or current_session['slot_identity']!=recorded
+                                or current_row['state']!=existing_spool_state or current_session['slot_identity']!=recorded
                                 or current_row['slot_identity']!=recorded or self.spool._slot_identity(existing_slot)!=recorded):
                             raise SpoolHeld('chunk_state_changed')
                         existing_slot._check()
                     if existing_state=='ready':return dict(state='ready')
+                    if existing_spool_state=='sealed':
+                        receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=job,metadataSha256=sha,archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key)
+                        if current_row['receipt']!=p.canonical_json(receipt).decode():raise SpoolHeld('chunk_state_changed')
+                        return dict(state='promoted',receipt=receipt)
                     return dict(state='sealed',receipt=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=job,metadataSha256=sha,
                                 archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key))
                 finally:existing_slot.close()
@@ -220,5 +224,30 @@ class SyntheticChunkSpool:
                     if session['state']=='sealed' and row['state']=='receiving':return receipt
                     if session['state']!='ready' or row['state']!='receiving':raise SpoolHeld('chunk_state_changed')
                     db.execute("UPDATE viewer_worker_chunk_sessions SET state='sealed' WHERE job_id=?",(job,))
+                return receipt
+            finally:slot.close()
+
+    def promote(self,job,identity,token,count):
+        """Synthetic promotion after full seal verification; never Viewer ACK."""
+        with self.spool._admit():
+            metadata,sha,key,slot,journal=self._open(job,identity,token)
+            try:
+                with self.spool.claims.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE');_,_,_,session,row=self._snapshot(db,job,identity,token);self._admit_operation(db,job)
+                    if session['state']!='sealed' or row['state'] not in ('receiving','sealed'):raise SpoolHeld('chunk_state_changed')
+                journal.finish(count)
+                actual=self.spool._slot_identity(slot)
+                receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=job,metadataSha256=sha,
+                             archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=key)
+                encoded=p.canonical_json(receipt).decode()
+                with self.spool.claims.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE');_,csha,ckey,session,row=self._snapshot(db,job,identity,token);self._admit_operation(db,job)
+                    if csha!=sha or ckey!=key or session['state']!='sealed' or session['slot_identity']!=actual or row['slot_identity']!=actual:
+                        raise SpoolHeld('chunk_state_changed')
+                    slot._check()
+                    if row['state']=='sealed' and row['receipt']==encoded:return receipt
+                    if row['state']!='receiving':raise SpoolHeld('chunk_state_changed')
+                    if db.execute("UPDATE viewer_worker_spool SET state='sealed',receipt=? WHERE job_id=? AND state='receiving'",(encoded,job)).rowcount!=1:
+                        raise SpoolHeld('chunk_state_changed')
                 return receipt
             finally:slot.close()

@@ -99,10 +99,11 @@ class ReferenceWorkerAPI:
             if operation=='begin':
                 if length!=0:raise ValueError('control body forbidden')
                 return Response(200,self.viewer_chunks.begin(match[1],identity,token))
-            if operation=='finish':
+            if operation in ('finish','promote'):
                 count=self._header(headers,'X-Chunk-Count')
                 if length!=0 or not isinstance(count,str) or not re.fullmatch(r'[1-9][0-9]{0,3}',count):raise ValueError('invalid count')
-                return Response(200,self.viewer_chunks.finish(match[1],identity,token,int(count)))
+                action=self.viewer_chunks.finish if operation=='finish' else self.viewer_chunks.promote
+                return Response(200,action(match[1],identity,token,int(count)))
             index=self._header(headers,'X-Chunk-Index');offset=self._header(headers,'X-Chunk-Offset');digest=self._header(headers,'X-Chunk-SHA256')
             if not isinstance(index,str) or not re.fullmatch(r'0|[1-9][0-9]{0,3}',index) or not isinstance(offset,str) or not re.fullmatch(r'0|[1-9][0-9]{0,15}',offset):
                 raise ValueError('invalid chunk headers')

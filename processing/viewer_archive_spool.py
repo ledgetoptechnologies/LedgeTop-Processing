@@ -116,13 +116,41 @@ class ViewerArchiveSpool:
             raise SpoolHeld('viewer_spool_unavailable')
         return receipt,row['slot_identity']
 
+    def _open_receipt_slot(self,job,metadata,key,recorded):
+        """Open only a fully verified promoted chunk slot or legacy spool."""
+        with self.claims.queue._db() as db:
+            db.execute('BEGIN');session=db.execute('SELECT * FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone()
+        if not session:
+            return open_slot(self.root,self.root_identity,key,metadata['archiveBytes'],max_budget=self.max_bytes,create=False)
+        if session['state']!='sealed' or session['slot_key']!=key or session['slot_identity']!=recorded or session['metadata_sha']!=p.digest(metadata):
+            raise SpoolHeld('chunk_promotion_changed')
+        from .direct_output_slot import _open_slot
+        from .direct_slot_capture import _exists,_read_record,_check_record
+        from .viewer_chunk_journal import SyntheticChunkJournal
+        slot=_open_slot(self.root,self.root_identity,key,metadata['archiveBytes'],max_budget=self.max_bytes,allow_chunk_journal=True)
+        try:
+            if self._slot_identity(slot)!=recorded or not _exists(slot._root,slot._name+'.chunks-v1.header'):raise SpoolHeld('chunk_slot_changed')
+            binding=dict(jobId=job,taskId=metadata['viewerTaskId'],generation=metadata['viewerGeneration'],environment=metadata['environment'],archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'])
+            journal=SyntheticChunkJournal(slot,binding,legacy_state='new',synthetic_fixture=True)
+            seal,fd=_read_record(slot,journal.seal)
+            try:_check_record(slot,fd,journal.seal,seal)
+            finally:os.close(fd)
+            journal.finish(seal.get('count'))
+            return slot
+        except BaseException:slot.close();raise
+
     def open_for_viewer(self,task):
         """Return a locked verified stream, never Viewer custody or completion."""
         if not self._work.acquire(blocking=False):raise SpoolHeld('spool_capacity_unavailable')
         slot=None
         try:
             receipt,identity=self._viewer_snapshot(task)
-            slot=open_slot(self.root,self.root_identity,receipt['slotKey'],receipt['archiveBytes'],max_budget=self.max_bytes,create=False)
+            with self.claims.queue._db() as db:
+                claim=db.execute('SELECT * FROM viewer_worker_claims WHERE job_id=?',(task['job_id'],)).fetchone()
+                if not claim:raise SpoolHeld('viewer_claim_unavailable')
+                worker=dict(node_id=claim['node_id'],worker_id=claim['worker_id'],worker_instance_id=claim['instance_id'])
+                metadata=self._metadata(db,task['job_id'],worker,claim['token'])
+            slot=self._open_receipt_slot(task['job_id'],metadata,receipt['slotKey'],identity)
             if self._slot_identity(slot)!=identity or self._digest(slot,receipt['archiveBytes'])!=receipt['archiveSha256']:
                 raise SpoolHeld('viewer_archive_changed')
             self._viewer_snapshot(task)
@@ -227,7 +255,7 @@ class ViewerArchiveSpool:
             metadata_sha=p.digest(metadata);slot_key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=job_id,metadataSha256=metadata_sha))
             if row['metadata_sha']!=metadata_sha or row['slot_key']!=slot_key:raise SpoolHeld('spool_binding_changed')
             recorded=row['slot_identity'];saved=row['receipt']
-        slot=open_slot(self.root,self.root_identity,slot_key,metadata['archiveBytes'],max_budget=self.max_bytes,create=False)
+        slot=self._open_receipt_slot(job_id,metadata,slot_key,recorded)
         try:
             receipt=dict(schemaVersion=1,kind='viewer-coordinator-archive-receipt',jobId=job_id,metadataSha256=metadata_sha,
                          archiveBytes=metadata['archiveBytes'],archiveSha256=metadata['archiveSha256'],slotKey=slot_key)

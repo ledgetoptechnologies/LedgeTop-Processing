@@ -40,14 +40,24 @@ def send(worker,*,synthetic_fixture=False,chunk_bytes=MAX_CHUNK):
             key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=claim['jobId'],metadataSha256=metadata_sha))
             expected=dict(schemaVersion=1,kind='synthetic-chunk-seal',jobId=claim['jobId'],metadataSha256=metadata_sha,
                           archiveBytes=reader.length,archiveSha256=reader.sha256,slotKey=key)
+            standard=dict(expected,kind='viewer-coordinator-archive-receipt')
             beginning=call('begin')
+            if type(beginning) is dict and beginning.get('state')=='promoted':
+                if p.canonical_json(beginning.get('receipt'))!=p.canonical_json(standard):raise LocalResultHeld('chunk_receipt_invalid')
+                reader._check()
+                if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+                return standard
             if type(beginning) is dict and beginning.get('state')=='sealed':
                 result=beginning.get('receipt')
                 if p.canonical_json(result)!=p.canonical_json(expected):
                     raise LocalResultHeld('chunk_seal_invalid')
                 reader._check()
                 if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
-                return result
+                promoted=call('promote',extra={'X-Chunk-Count':str((reader.length+chunk_bytes-1)//chunk_bytes)})
+                if p.canonical_json(promoted)!=p.canonical_json(standard):raise LocalResultHeld('chunk_receipt_invalid')
+                reader._check()
+                if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
+                return promoted
             if beginning!={'state':'ready'}:raise LocalResultHeld('chunk_begin_unavailable')
             offset=0;index=0
             while offset<reader.length:
@@ -69,6 +79,8 @@ def send(worker,*,synthetic_fixture=False,chunk_bytes=MAX_CHUNK):
             result=call('finish',extra={'X-Chunk-Count':str(index)})
             if p.canonical_json(result)!=p.canonical_json(expected):
                 raise LocalResultHeld('chunk_seal_invalid')
+            promoted=call('promote',extra={'X-Chunk-Count':str(index)})
+            if p.canonical_json(promoted)!=p.canonical_json(standard):raise LocalResultHeld('chunk_receipt_invalid')
             reader._check()
             if _gate(worker,claim,binding,gate)!=reservation:raise LocalResultHeld('gate_binding_changed')
-            return result
+            return promoted
