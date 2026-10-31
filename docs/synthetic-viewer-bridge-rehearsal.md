@@ -6,24 +6,13 @@ The archive contains intentionally invalid placeholder geometry, textures and EP
 
 The original bounded run used locally available images `python:3.12-slim` (image ID `sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159`) and `viewer-gcp-validation-faa3fd8bca374cb9ba721eea97a4674a:latest` (image ID `sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668`). The second image supplies Node 24 and the Viewer dependencies; it is a local fixture image, not a published release. Other images must independently provide compatible Viewer dependencies and Python/openssl.
 
-To repeat on a Docker host, export the staged Viewer tree to a private temporary directory as `VIEWER_EXPORT`, create an empty writable `EXCHANGE` directory, and set `PROCESSING` to an isolated checkout at the Processing commit above. The export must include `apps/viewer` and `packages/shared`. Bind those directories into the containers as shown; do not bind a live Viewer or NAS storage directory. Docker's `container:` network mode shares the isolated loopback namespace and gives the Viewer container no external network.
+To repeat on a Linux Docker host with the two local images above, use an isolated, clean Processing checkout containing this harness and point `VIEWER_REPO` at a repository containing the exact staged tree. The script verifies the Viewer tree ID, exports it to a new private temporary directory, prints the archive SHA-256, compares the extracted files to that archive, and verifies the Processing base and fixture files before starting containers. It does not read or change live Viewer or NAS storage. Docker `container:` network mode shares the isolated loopback namespace and gives the Viewer container no external network. The script requires `python3`, GNU `tar`, `sha256sum`, and `timeout` on the host.
 
 ```sh
-git -C "$VIEWER_REPO" archive baaaf2439d5a641ae59c3f550f77dc7512e3b84d apps/viewer packages/shared | tar -x -C "$VIEWER_EXPORT"
-docker run -d --name viewer-bridge-processing --network none --cpus 0.5 --memory 384m --pids-limit 64 --user 10001:10001 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=128m \
-  --mount "type=bind,src=$PROCESSING,dst=/src,readonly" --mount "type=bind,src=$EXCHANGE,dst=/exchange" \
-  -w /src -e PYTHONPATH=/src -e PYTHONDONTWRITEBYTECODE=1 -e BRIDGE_READY=/exchange/ready.json -e BRIDGE_STOP=/exchange/stop \
-  python:3.12-slim python tests/viewer_bridge_server.py
-# Wait for $EXCHANGE/ready.json and confirm the container is running.
-docker run --rm --network container:viewer-bridge-processing --cpus 0.5 --memory 512m --pids-limit 64 --user 10001:10001 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=2g \
-  --mount "type=bind,src=$VIEWER_EXPORT,dst=/viewer,readonly" --mount "type=bind,src=$PROCESSING,dst=/processing,readonly" \
-  --mount "type=bind,src=$EXCHANGE,dst=/exchange,readonly" -e NODE_PATH=/src/apps/viewer/node_modules \
-  -e VIEWER_SOURCE_ROOT=/tmp/viewer -e BRIDGE_READY=/exchange/ready.json --entrypoint sh \
-  viewer-gcp-validation-faa3fd8bca374cb9ba721eea97a4674a:latest -c 'mkdir -p /tmp/viewer/apps /tmp/viewer/packages && cp -a /viewer/apps/viewer /tmp/viewer/apps/ && cp -a /viewer/packages/shared /tmp/viewer/packages/ && ln -s /src/apps/viewer/node_modules /tmp/viewer/apps/viewer/node_modules && exec node /processing/tests/viewer_bridge_client.cjs'
-touch "$EXCHANGE/stop"
-docker wait viewer-bridge-processing
-cat "$EXCHANGE/stop.result"
-docker rm viewer-bridge-processing
+VIEWER_REPO=/path/to/viewer/repository PROCESSING=/path/to/isolated/processing \
+  sh /path/to/isolated/processing/ops/run_viewer_bridge_rehearsal.sh
 ```
 
-The client prints the synthetic archive digest, Viewer attempt phase and pending derivative count. The Processing fixture writes the retention check to `stop.result` before teardown. Its lifetime is capped at 120 seconds; inspect and remove only the containers and temporary directories created for the rehearsal if any command fails. The fixture tokens are local dummy values.
+Every run has a random label and container names. Cleanup verifies each immutable container ID and its run label before stopping or removing it; an identity mismatch is left untouched. Setup readiness is bounded to 60 seconds, the client to 45 seconds, and the final server wait to 15 seconds. The Python fixture's own 120-second deadline starts after setup, so it is not a full setup deadline. The script retains its new synthetic export and evidence directory and prints its path; inspect that directory separately if cleanup is desired. It never reuses or removes another run's export.
+
+The client prints the synthetic archive digest, Viewer attempt phase and pending derivative count. The Processing fixture writes the retention check to `stop.result` before teardown. The fixture tokens are local dummy values. The locally supplied dependency image is not proven to match the exported tree's dependency lockfile; this is a compatibility limitation of the rehearsal.
