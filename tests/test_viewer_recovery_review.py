@@ -41,6 +41,7 @@ class ViewerRecoveryReviewTests(unittest.TestCase):
         self.assertEqual(fixture.task(identifier)['job']['status'], 'held')
         self.assertEqual(fixture.task(identifier)['error'], 'cancel_termination_unverified')
         self.assertIsNone(fixture.task(next_identifier)['node_id'])
+        self.assertEqual(fixture.task(next_identifier)['job']['status'], 'queued')
         self.assertEqual(sum(call[0] == 'commit' for call in actions), 1)
         self.assertEqual(sum(call[0] == 'cancel' for call in actions), 1)
         self.assertEqual(fixture.fleet.max_active, 1)
