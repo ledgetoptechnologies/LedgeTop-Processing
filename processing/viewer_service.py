@@ -244,6 +244,8 @@ class ViewerService:
                 self._archive_cursor, identifier = candidate
                 identity = None
                 prior = self._archive_retry.get(identifier)
+                # Without a readable identity we cannot distinguish a replacement;
+                # honor the bounded metadata-failure delay before trying again.
                 if prior is not None and prior[0] is None and time.monotonic() < prior[1]:
                     self._stop.wait(.25)
                     continue
@@ -253,8 +255,8 @@ class ViewerService:
                     identity = (task['generation'], task['job_id'])
                     prior = self._archive_retry.get(identifier)
                     if prior is None or prior[0] != identity:
-                        # A public UUID can be reused. Old-incarnation backoff
-                        # must never postpone a different job's result capture.
+                        # A public UUID can be reused. Once identity is readable,
+                        # discard a different incarnation's retry delay.
                         self._archive_retry.pop(identifier, None)
                         due, failures = 0, 0
                     else:

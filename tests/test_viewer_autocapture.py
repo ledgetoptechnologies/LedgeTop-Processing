@@ -431,6 +431,20 @@ finally:s.close();lease.close();q.close()
         self.assertEqual(self.requests, 0)
         self.assertNotIn(self.identifier, self.service._archive_retry)
 
+    def test_unknown_identity_backoff_defers_discovery_until_retry(self):
+        self.fixture.config.viewer_archive_autocapture=True
+        self.service.store.enable_archive_status()
+        due=time.monotonic()+60
+        self.service._archive_retry[self.identifier]=(None,due,6)
+        def stop_after_wait(_seconds):
+            self.service._stop.set();return True
+        with patch.object(self.service.store,'task',wraps=self.service.store.task) as read_task, \
+             patch.object(self.service._stop,'wait',side_effect=stop_after_wait):
+            self.service._archive_run()
+        read_task.assert_not_called()
+        self.assertEqual(self.service._archive_retry[self.identifier],(None,due,6))
+        self.assertEqual(self.requests,0)
+
     def test_discovery_identity_read_failure_signals_health_without_stale_status_write(self):
         self.fixture.config.viewer_archive_autocapture = True
         self.service.store.enable_archive_status()
