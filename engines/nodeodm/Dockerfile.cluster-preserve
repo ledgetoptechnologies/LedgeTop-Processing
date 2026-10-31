@@ -3,4 +3,6 @@ FROM opendronemap/nodeodm@sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f
 USER root
 COPY ops/nodeodm_startup_patch.js /tmp/ledgetop-nodeodm-startup-patch.js
 RUN node /tmp/ledgetop-nodeodm-startup-patch.js && rm /tmp/ledgetop-nodeodm-startup-patch.js
+COPY ops/nodeodm_submission_patch.js /tmp/ledgetop-nodeodm-submission-patch.js
+RUN node /tmp/ledgetop-nodeodm-submission-patch.js && rm /tmp/ledgetop-nodeodm-submission-patch.js
 USER odm

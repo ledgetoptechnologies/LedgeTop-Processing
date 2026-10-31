@@ -3,4 +3,6 @@ FROM webodm/nodeodx@sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2
 USER root
 COPY ops/nodeodm_startup_patch.js /tmp/ledgetop-nodeodm-startup-patch.js
 RUN node /tmp/ledgetop-nodeodm-startup-patch.js && rm /tmp/ledgetop-nodeodm-startup-patch.js
+COPY ops/nodeodm_submission_patch.js /tmp/ledgetop-nodeodm-submission-patch.js
+RUN node /tmp/ledgetop-nodeodm-submission-patch.js && rm /tmp/ledgetop-nodeodm-submission-patch.js
 USER root
