@@ -1,0 +1,7 @@
+# Held synthetic v2 geometry registry
+
+This disabled experiment binds an authenticated existing claim and result metadata to an immutable version-2 geometry record in the coordinator database. It only returns `held_no_transfer`; it cannot send, receive, allocate, seal, promote or expose an archive. New v1 spool operations reject a v2 record for the same job, and current legacy admission/startup guards recognize the marker. The schema is separate from v1 and has no migration. Exact replay is idempotent; changed geometry, claim, result metadata, wrong identity, a v1 session or existing spool holds.
+
+The pure geometry calculation accepts up to 4 GiB, with chunks up to 1 MiB and at most 4,096 chunks. Testing 1.5 GiB exercises integer arithmetic only; it creates no sparse or allocated output and provides no storage-capacity assurance. The v1 protocol remains capped at 1 GiB.
+
+This is not a negotiated wire protocol, not a version embedded in the original immutable worker claim, and not an exclusive fence against prior binaries which do not know this table. Do not run it against an existing coordinator, enable it in runtime, or rely on it for recovery. Completion requires independently enforced old-writer exclusion; an exact versioned schema migration and startup guards; authenticated TLS negotiation and streaming; a v2 crash-safe journal with capacity reservation; promotion and Viewer reads; and process-kill/mixed-version tests. This prototype does not provide those pieces.

@@ -26,6 +26,9 @@ class SyntheticChunkSpool:
     def _snapshot(self,db,job,identity,token):
         metadata=self.spool._metadata(db,job,identity,token);sha=p.digest(metadata)
         key=p.digest(dict(kind='viewer-coordinator-spool-v1',jobId=job,metadataSha256=sha))
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_chunk_v2_geometry'").fetchone():
+            if db.execute('SELECT 1 FROM viewer_chunk_v2_geometry WHERE job_id=?',(job,)).fetchone():
+                raise SpoolHeld('v2_session_requires_inspection')
         session=db.execute('SELECT * FROM viewer_worker_chunk_sessions WHERE job_id=?',(job,)).fetchone()
         spool=db.execute('SELECT * FROM viewer_worker_spool WHERE job_id=?',(job,)).fetchone()
         if session and (not spool or session['metadata_sha']!=sha or session['slot_key']!=key

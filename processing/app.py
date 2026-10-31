@@ -31,7 +31,7 @@ def make_handler(config: Config):
             if database.is_symlink() or database.absolute().resolve()!=database.absolute():
                 raise RuntimeError('viewer_worker_claim_database_invalid')
             with closing(sqlite3.connect(database.absolute().as_uri()+'?mode=ro',uri=True)) as db:
-                marker=db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_chunk_sessions','viewer_worker_chunk_permits','viewer_worker_completions','viewer_worker_active_permit_hold')").fetchone()
+                marker=db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans','viewer_worker_grants','viewer_worker_fences','viewer_worker_permits','viewer_worker_result_metadata','viewer_worker_spool_config','viewer_worker_spool','viewer_worker_chunk_sessions','viewer_worker_chunk_permits','viewer_worker_completions','viewer_worker_active_permit_hold','viewer_chunk_v2_geometry')").fetchone()
             if marker and not config.viewer_worker_claim_enabled:
                 raise RuntimeError('viewer_worker_claim_configuration_required')
     reference_settings = None
