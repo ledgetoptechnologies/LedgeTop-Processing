@@ -73,8 +73,13 @@ test counts below describe their named source checkpoints.
   on an explicit loopback/TLS listener. The coordinator's opt-in TLS listener is
   installed; downstream worker intake and clients remain inactive.
 - `reference_transfer.py` verifies scoped grants and streams bounded HTTPS input
-  objects with checksum verification, sync and exclusive publication. Redirects
-  and caller-selected origins are refused. The store persists grants privately
+  objects with checksum verification, sync and exclusive publication. A per-object
+  total timeout (default one hour, independently configurable from the idle socket
+  timeout) spans its HTTP ranges; an active socket watchdog interrupts stalled or
+  slow-trickling TLS, headers and bodies. DNS/socket creation and local filesystem
+  calls cannot be forcibly interrupted, so this is not a strict end-to-end wall
+  bound. An interrupted object is retried from zero, not from a durable range.
+  Redirects and caller-selected origins are refused. The store persists grants privately
   and returns only a safe binding acknowledgement for lost-response recovery.
 - `worker_outbox.py` persists immutable terminal results separately from local
   file paths. `reference_delivery.py` authenticates the durable execution claim,

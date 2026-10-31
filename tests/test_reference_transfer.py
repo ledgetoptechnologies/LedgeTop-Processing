@@ -1,17 +1,24 @@
 import copy
 import hashlib
+import http.client
+from contextlib import nullcontext
 import io
 import json
 import os
 from pathlib import Path
 import ssl
+import socket
+import subprocess
+import threading
+import time
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.reference_transfer import (
-    BrokerClient, OBJECT_PREFIX, TransferError, validate_grant,
+    BrokerClient, OBJECT_PREFIX, TransferError, TransferResponseUnavailable, TransferObject, ValidatedGrant, validate_grant,
 )
 
 
@@ -51,6 +58,135 @@ class ReferenceTransferTests(unittest.TestCase):
 
     def assert_no_files(self):
         self.assertEqual(list(self.root.iterdir()), [])
+
+    @unittest.skipUnless(shutil.which('openssl'), 'openssl required for isolated TLS test')
+    def test_real_tls_slow_headers_and_body_hit_total_deadline(self):
+        cert=self.root.parent/(self.root.name+'-cert.pem');key=self.root.parent/(self.root.name+'-key.pem')
+        self.addCleanup(lambda:cert.unlink(missing_ok=True));self.addCleanup(lambda:key.unlink(missing_ok=True))
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=synthetic-loopback','-addext','subjectAltName=IP:127.0.0.1',
+            '-addext','basicConstraints=critical,CA:TRUE','-keyout',str(key),'-out',str(cert)],
+            check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);server_context.load_cert_chain(cert,key)
+        client_context=ssl.create_default_context(cafile=str(cert))
+        for phase in ('handshake','header','body','normal'):
+            with self.subTest(phase=phase):
+                listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(1);listener.settimeout(3)
+                port=listener.getsockname()[1];done=threading.Event();failures=[]
+                def serve():
+                    try:
+                        raw,_=listener.accept()
+                        if phase=='handshake':
+                            time.sleep(.8);raw.close();return
+                        with server_context.wrap_socket(raw,server_side=True) as conn:
+                            conn.settimeout(2);request=b''
+                            while b'\r\n\r\n' not in request:request+=conn.recv(4096)
+                            if phase=='header':
+                                conn.sendall(b'HTTP/1.1 200 OK\r\nX-Slow: ')
+                                for _ in range(30):conn.sendall(b'x');time.sleep(.04)
+                            elif phase=='body':
+                                conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: application/octet-stream\r\n\r\na')
+                                time.sleep(.8);conn.sendall(b'bc')
+                            else:
+                                conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Type: application/octet-stream\r\n\r\nabc')
+                    except (OSError,ssl.SSLError):pass
+                    except Exception as error:failures.append(type(error).__name__)
+                    finally:listener.close();done.set()
+                thread=threading.Thread(target=serve);thread.start()
+                client=BrokerClient('https://127.0.0.1:'+str(port),ssl_context=client_context,
+                    clock=lambda:self.now,timeout=1,total_timeout=.3)
+                start=time.monotonic()
+                try:
+                    original_connect=http.client.HTTPConnection.connect
+                    def delayed_connect(connection):
+                        time.sleep(.2)
+                        return original_connect(connection)
+                    delay=patch.object(http.client.HTTPConnection,'connect',delayed_connect) if phase=='handshake' else nullcontext()
+                    with patch.dict(os.environ,{'NO_PROXY':'127.0.0.1','no_proxy':'127.0.0.1'}), delay:
+                        if phase=='normal':
+                            result=client.download_object(self.grant(),'image-1',self.root/'out')
+                            self.assertEqual(result.read_bytes(),b'abc');result.unlink()
+                        else:
+                            with self.assertRaises(TransferResponseUnavailable):client.download_object(self.grant(),'image-1',self.root/'out')
+                    self.assertLess(time.monotonic()-start,.46 if phase=='handshake' else 1.5)
+                    self.assert_no_files()
+                finally:
+                    listener.close();thread.join(3)
+                self.assertFalse(thread.is_alive());self.assertTrue(done.is_set());self.assertEqual(failures,[])
+
+
+    def test_post_link_failure_is_not_classified_as_retryable_timeout(self):
+        client=self.client(headers={'Content-Length':'3'});client.total_timeout=.03
+        real_link=os.link;real_unlink=Path.unlink
+        def delayed_link(*args,**kwargs):
+            real_link(*args,**kwargs);time.sleep(.08)
+        def fail_part(path,*args,**kwargs):
+            if path.name.endswith('.part'):raise OSError('synthetic unlink failure')
+            return real_unlink(path,*args,**kwargs)
+        with patch('processing.reference_transfer.os.link',side_effect=delayed_link), \
+                patch.object(Path,'unlink',autospec=True,side_effect=fail_part):
+            with self.assertRaises(TransferError) as caught:
+                client.download_object(self.grant(),'image-1',self.root/'input.jpg')
+        self.assertNotIsInstance(caught.exception,TransferResponseUnavailable)
+        self.assertEqual((self.root/'input.jpg').read_bytes(),b'abc')
+
+
+    def test_body_disconnect_is_retryable_without_publishing(self):
+        class Broken(Response):
+            def read(self, size=-1):raise OSError('synthetic disconnect')
+        response=[]
+        def opener(request,*,timeout):
+            value=Broken(url=request.full_url,headers={'Content-Length':'3'});response.append(value);return value
+        client=BrokerClient('https://broker.example',opener=opener,clock=lambda:self.now)
+        with self.assertRaises(TransferResponseUnavailable):client.download_object(self.grant(),'image-1',self.root/'input.jpg')
+        self.assertTrue(response[0].closed);self.assert_no_files()
+
+    def test_observed_oversize_is_not_masked_by_deadline(self):
+        class Oversize(Response):
+            def read(self, size=-1):
+                time.sleep(.08);return b'abcd'
+        def opener(request,*,timeout):return Oversize(url=request.full_url,headers={'Content-Length':'3'})
+        client=BrokerClient('https://broker.example',opener=opener,clock=lambda:self.now,total_timeout=.03)
+        with self.assertRaises(TransferError) as caught:
+            client.download_object(self.grant(),'image-1',self.root/'input.jpg')
+        self.assertNotIsInstance(caught.exception,TransferResponseUnavailable);self.assert_no_files()
+
+
+    def test_expired_open_result_is_closed_before_publication(self):
+        responses=[]
+        def delayed(request,*,timeout):
+            time.sleep(.08)
+            result=Response(b'abc',url=request.full_url,headers={'Content-Length':'3'})
+            responses.append(result);return result
+        client=BrokerClient('https://broker.example',opener=delayed,clock=lambda:self.now,total_timeout=.03)
+        with self.assertRaises(TransferResponseUnavailable):client.download_object(self.grant(),'image-1',self.root/'input.jpg')
+        self.assertEqual(len(responses),1);self.assertTrue(responses[0].closed);self.assert_no_files()
+
+
+    def ranged_fixture(self, payload=b'abcdefghij', *, mutate=None):
+        grant=ValidatedGrant('job-1','reservation-1',1,'staging',1000,
+            (TransferObject('image-1',len(payload),hashlib.sha256(payload).hexdigest()),),'private-token')
+        calls=[]
+        def opener(request, *, timeout):
+            value=request.get_header('Range');calls.append(value)
+            start,end=map(int,value.removeprefix('bytes=').split('-'))
+            data=payload[start:end+1]
+            options={'status':206,'url':request.full_url,'headers':{'Content-Length':str(len(data)),'Content-Range':f'bytes {start}-{end}/{len(payload)}'}}
+            if mutate is not None:data,options=mutate(len(calls),data,options)
+            return Response(data,**options)
+        return grant,calls,BrokerClient('https://broker.example',opener=opener,clock=lambda:self.now,max_response_bytes=4)
+
+
+    def test_total_budget_spans_multiple_range_responses(self):
+        def slow_range(_number,data,options):
+            time.sleep(.11)
+            return data,options
+        grant,calls,client=self.ranged_fixture(mutate=slow_range)
+        client.total_timeout=.2
+        with self.assertRaises(TransferError):client.download_object(grant,'image-1',self.root/'input.jpg')
+        self.assertGreaterEqual(len(calls),2)
+        self.assert_no_files()
+
 
     def test_valid_grant_detaches_objects_and_redacts_token(self):
         grant = self.grant()

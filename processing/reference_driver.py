@@ -25,7 +25,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
-from .reference_transfer import BrokerClient, validate_grant
+from .reference_transfer import BrokerClient, TransferResponseUnavailable, validate_grant
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
@@ -731,7 +731,11 @@ class ReferenceDriver:
             status, grant = self._request('GET', suffix + '/transfer-grant', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_grant', 'jobId': job_id}
-            validated = validate_grant(grant, job=claim, clock=self.clock)
+            try:
+                validated = validate_grant(grant, job=claim, clock=self.clock)
+            except ValueError:
+                self._save(job_id, 'fetch_held', data)
+                raise DriverHeld('worker_fetch_requires_inspection') from None
             if self._kind(job_id) == 'treedar':
                 data['provenance'] = self._fetch_provenance(claim, validated)
             data['grant'] = grant
@@ -745,8 +749,14 @@ class ReferenceDriver:
             claim.update(public)
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
+        if stage == 'fetch_held':
+            raise DriverHeld('worker_fetch_requires_inspection')
         if stage == 'fetching':
-            grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+            try:
+                grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+            except ValueError:
+                self._save(job_id, 'fetch_held', data)
+                raise DriverHeld('worker_fetch_requires_inspection') from None
             reservation = data['reservation']['reservationId']
             directory = self.ledger.root / 'jobs' / reservation
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -765,7 +775,16 @@ class ReferenceDriver:
                         raise DriverHeld('worker_fetch_attempt_budget_exhausted')
                     data['fetchAttempts'][obj['id']] = attempts + 1
                     self._save(job_id, stage, data)
-                    self.broker.download_object(grant, obj['id'], target)
+                    try:
+                        self.broker.download_object(grant, obj['id'], target)
+                    except TransferResponseUnavailable:
+                        # The existing durable attempt budget remains consumed.
+                        raise DriverWait('broker_response_unavailable') from None
+                    except ValueError:
+                        # Integrity, grant and post-publication ambiguity require
+                        # inspection; never automatically replay the transfer.
+                        self._save(job_id, 'fetch_held', data)
+                        raise DriverHeld('worker_fetch_requires_inspection') from None
                 paths[obj['id']] = relative
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
