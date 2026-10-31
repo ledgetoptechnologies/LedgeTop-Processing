@@ -1,37 +1,77 @@
 """Bounded subprocess test for the disposable cross-language fixture."""
 import json
+import queue
+import signal
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from urllib.request import urlopen
+from urllib.error import HTTPError
 import uuid
 
 from tests.test_viewer_service import synthetic_zip
 
 
+def read_response(process):
+    result=queue.Queue(maxsize=1)
+    threading.Thread(target=lambda:result.put(process.stdout.readline()),daemon=True).start()
+    return json.loads(result.get(timeout=15))
+
+
+def cleanup(process):
+    if os.name=='posix':
+        try:os.killpg(process.pid,signal.SIGKILL)
+        except ProcessLookupError:pass
+    elif process.poll() is None:process.kill()
+    process.wait(timeout=5)
+    process.stdin.close();process.stdout.close()
+
+
 class RehearsalServerTest(unittest.TestCase):
+    def test_interrupted_engine_download_holds_partial_through_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'state';root.mkdir();archive=Path(tmp)/'synthetic.zip';archive.write_bytes(synthetic_zip())
+            process=subprocess.Popen([sys.executable,'-m','tests.viewer_archive_rehearsal_server','--root',str(root),
+                '--archive',str(archive),'--uuid',str(uuid.uuid4()),'--interrupt-first'],stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,start_new_session=os.name=='posix')
+            try:
+                ready=read_response(process)
+                url='http://127.0.0.1:%d/task/%s/download/all.zip?token=%s' % (ready['port'],ready['uuid'],ready['token'])
+                with self.assertRaises(HTTPError) as first:urlopen(url,timeout=5)
+                self.assertEqual(first.exception.code,503)
+                partial=list(root.rglob('all.zip.partial'));self.assertEqual(len(partial),1)
+                saved=partial[0].read_bytes();self.assertTrue(saved)
+                process.stdin.write('{"command":"restart"}\n');process.stdin.flush();self.assertEqual(read_response(process),ready)
+                with self.assertRaises(HTTPError) as second:urlopen(url,timeout=5)
+                self.assertIn(second.exception.code,(409,503));self.assertEqual(partial[0].read_bytes(),saved)
+                self.assertEqual(archive.read_bytes(),synthetic_zip())
+                process.stdin.write('{"command":"stop"}\n');process.stdin.flush();self.assertEqual(read_response(process),{'ok':True})
+                self.assertEqual(process.wait(timeout=10),0)
+            finally:
+                cleanup(process)
+
     def test_loopback_archive_remains_available_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)/'state';root.mkdir();archive=Path(tmp)/'synthetic.zip';archive.write_bytes(synthetic_zip())
             identifier=str(uuid.uuid4())
             process=subprocess.Popen([sys.executable,'-m','tests.viewer_archive_rehearsal_server','--root',str(root),
-                '--archive',str(archive),'--uuid',identifier],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+                '--archive',str(archive),'--uuid',identifier],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,start_new_session=os.name=='posix')
             try:
-                ready=json.loads(process.stdout.readline());self.assertEqual(ready['uuid'],identifier)
+                ready=read_response(process);self.assertEqual(ready['uuid'],identifier)
                 url='http://127.0.0.1:%d/task/%s/download/all.zip?token=%s' % (ready['port'],identifier,ready['token'])
                 info=url.replace('/download/all.zip','/info')
                 with urlopen(info,timeout=5) as response:self.assertEqual(json.load(response)['status']['code'],40)
                 with urlopen(url,timeout=5) as response:self.assertEqual(response.read(),archive.read_bytes())
                 process.stdin.write('{"command":"restart"}\n');process.stdin.flush()
-                restarted=json.loads(process.stdout.readline());self.assertEqual(restarted,ready)
+                restarted=read_response(process);self.assertEqual(restarted,ready)
                 with urlopen(info,timeout=5) as response:self.assertEqual(json.load(response)['status']['code'],40)
                 with urlopen(url,timeout=5) as response:self.assertEqual(response.read(),archive.read_bytes())
                 process.stdin.write('{"command":"stop"}\n');process.stdin.flush()
-                self.assertEqual(json.loads(process.stdout.readline()),{'ok':True});self.assertEqual(process.wait(timeout=10),0)
+                self.assertEqual(read_response(process),{'ok':True});self.assertEqual(process.wait(timeout=10),0)
                 self.assertEqual(archive.read_bytes(),synthetic_zip())
             finally:
-                if process.poll() is None:process.kill();process.wait(timeout=5)
-                process.stdin.close();process.stdout.close()
+                cleanup(process)

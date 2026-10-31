@@ -24,6 +24,7 @@ def child(root, pipe, zip_path, mode, port):
         def __init__(self, *args):
             super().__init__(*args)
             self.archive = Path(zip_path).read_bytes()
+            self.interrupt_download_once = mode == 'interrupt'
 
     fixture.FakeEngine = FixtureEngine
     original_server = fixture.ThreadingHTTPServer
@@ -40,15 +41,14 @@ class Rehearsal:
         context = multiprocessing.get_context('spawn')
         parent, remote = context.Pipe()
         process = context.Process(target=child, args=(self.root, remote, self.archive, mode, self.port or 0))
-        process.start(); remote.close()
-        if not parent.poll(10):
-            process.terminate(); process.join(5); parent.close()
-            raise RuntimeError('fixture coordinator failed to start')
-        _, self.port, returned = parent.recv()
-        if returned != Path(self.archive).read_bytes():
-            process.terminate(); process.join(5); parent.close()
-            raise RuntimeError('fixture archive changed')
         self.process, self.pipe = process, parent
+        try:
+            process.start(); remote.close()
+            if not parent.poll(10): raise RuntimeError('fixture coordinator failed to start')
+            _, self.port, returned = parent.recv()
+            if returned != Path(self.archive).read_bytes(): raise RuntimeError('fixture archive changed')
+        except BaseException:
+            remote.close(); self.stop(); raise
 
     def command(self, name):
         self.pipe.send((name, self.identifier))
@@ -70,9 +70,17 @@ class Rehearsal:
 
     def stop(self):
         if self.process is None: return
-        if self.process.is_alive():
-            self.pipe.send(('stop', None)); self.process.join(5)
-        if self.process.is_alive(): self.process.terminate(); self.process.join(5)
+        if self.process.pid is not None and self.process.is_alive():
+            try: self.pipe.send(('stop', None))
+            except (BrokenPipeError,EOFError,OSError): pass
+            self.process.join(5)
+        if self.process.pid is not None and self.process.is_alive():
+            self.process.terminate(); self.process.join(5)
+        if self.process.pid is not None and self.process.is_alive():
+            self.process.kill(); self.process.join(5)
+        if self.process.pid is not None and self.process.is_alive():
+            raise RuntimeError('fixture coordinator could not be reaped')
+        if self.process.pid is not None:self.process.join(0)
         self.pipe.close(); self.process = self.pipe = None
 
     def state(self):
@@ -83,13 +91,13 @@ class Rehearsal:
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--archive',required=True)
-    parser.add_argument('--uuid',required=True);args=parser.parse_args()
+    parser.add_argument('--uuid',required=True);parser.add_argument('--interrupt-first',action='store_true');args=parser.parse_args()
     uuid.UUID(args.uuid)
     root=Path(args.root).resolve();archive=Path(args.archive).resolve()
     if not root.is_dir() or any(root.iterdir()) or not archive.is_file(): raise ValueError('empty fixture root and synthetic archive required')
     instance=Rehearsal(str(root),str(archive),args.uuid)
     try:
-        instance.start();instance.prepare()
+        instance.start('interrupt' if args.interrupt_first else 'normal');instance.prepare()
         print(json.dumps(instance.state()),flush=True)
         for line in sys.stdin:
             try:
