@@ -9,11 +9,12 @@ import sys
 import tempfile
 import threading
 import unittest
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 import uuid
 
 from tests.test_viewer_service import synthetic_zip
+from tests.test_viewer_http import BOUNDARY, multipart
 
 
 def read_response(process):
@@ -41,6 +42,31 @@ def cleanup(process):
 
 
 class RehearsalServerTest(unittest.TestCase):
+    def test_unprepared_accepts_client_submission_and_explicit_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'state';root.mkdir();archive=Path(tmp)/'synthetic.zip';archive.write_bytes(synthetic_zip())
+            identifier=str(uuid.uuid4());fallback=str(uuid.uuid4())
+            process=subprocess.Popen([sys.executable,'-m','tests.viewer_archive_rehearsal_server','--root',str(root),
+                '--archive',str(archive),'--uuid',fallback,'--unprepared'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,text=True,start_new_session=os.name=='posix')
+            try:
+                ready=read_response(process);base='http://127.0.0.1:%d'%ready['port'];token=ready['token']
+                def request(route,body=None,headers=None):
+                    return urlopen(Request(base+route+'?token='+token,data=body,headers=headers or {}),timeout=5)
+                with self.assertRaises(HTTPError) as missing:request('/task/'+identifier+'/info')
+                self.assertEqual(missing.exception.code,404)
+                headers={'Content-Type':'multipart/form-data; boundary='+BOUNDARY}
+                with request('/task/new/init',multipart([('name',None,b'Synthetic'),('options',None,b'[]')]),dict(headers,**{'set-uuid':identifier})) as response:self.assertEqual(json.load(response)['uuid'],identifier)
+                with request('/task/new/upload/'+identifier,multipart([('images','photo.jpg',b'synthetic')]),headers) as response:self.assertTrue(json.load(response)['success'])
+                with request('/task/new/commit/'+identifier,b'') as response:self.assertTrue(json.load(response)['success'])
+                for command in ('tick','finish'):
+                    process.stdin.write(json.dumps({'command':command,'uuid':identifier})+'\n');process.stdin.flush();self.assertEqual(read_response(process),{'result':'ok'})
+                with request('/task/'+identifier+'/info') as response:self.assertEqual(json.load(response)['status']['code'],40)
+                with request('/task/'+identifier+'/download/all.zip') as response:self.assertEqual(response.read(),archive.read_bytes())
+                process.stdin.write('{"command":"stop"}\n');process.stdin.flush();self.assertEqual(read_response(process),{'ok':True});self.assertEqual(process.wait(timeout=10),0)
+                self.assertEqual(archive.read_bytes(),synthetic_zip())
+            finally:cleanup(process)
+
     def test_interrupted_engine_download_holds_partial_through_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)/'state';root.mkdir();archive=Path(tmp)/'synthetic.zip';archive.write_bytes(synthetic_zip())

@@ -50,8 +50,8 @@ class Rehearsal:
         except BaseException:
             remote.close(); self.stop(); raise
 
-    def command(self, name):
-        self.pipe.send((name, self.identifier))
+    def command(self, name, identifier=None):
+        self.pipe.send((name, self.identifier if identifier is None else identifier))
         if not self.pipe.poll(10): raise RuntimeError('fixture command timed out')
         return self.pipe.recv()
 
@@ -91,20 +91,25 @@ class Rehearsal:
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--archive',required=True)
-    parser.add_argument('--uuid',required=True);parser.add_argument('--interrupt-first',action='store_true');args=parser.parse_args()
+    parser.add_argument('--uuid',required=True);parser.add_argument('--interrupt-first',action='store_true')
+    parser.add_argument('--unprepared',action='store_true');args=parser.parse_args()
     uuid.UUID(args.uuid)
     root=Path(args.root).resolve();archive=Path(args.archive).resolve()
     if not root.is_dir() or any(root.iterdir()) or not archive.is_file(): raise ValueError('empty fixture root and synthetic archive required')
     instance=Rehearsal(str(root),str(archive),args.uuid)
     try:
-        instance.start('interrupt' if args.interrupt_first else 'normal');instance.prepare()
+        instance.start('interrupt' if args.interrupt_first else 'normal')
+        if not args.unprepared:instance.prepare()
         print(json.dumps(instance.state()),flush=True)
         for line in sys.stdin:
             try:
-                command=json.loads(line)['command']
+                request=json.loads(line);command=request['command']
                 if command=='restart':
                     instance.stop();instance.start('normal');result=instance.state()
                 elif command=='archive_path':result={'path':instance.command('path')}
+                elif command in ('tick','finish'):
+                    identifier=request.get('uuid',instance.identifier);uuid.UUID(identifier)
+                    result={'result':instance.command(command,identifier)}
                 elif command=='stop':
                     instance.stop();print(json.dumps({'ok':True}),flush=True);break
                 else:raise ValueError('unknown command')
