@@ -461,15 +461,24 @@ class ReferenceDriverTests(unittest.TestCase):
     def test_legacy_cached_cancelled_task_is_rechecked_before_ready(self):
         identifier = str(uuid.uuid4())
         self.transport.tasks[identifier] = 50
+        # An old binary may write an unsafe cache entry after this binary has
+        # previously run. The new binary must ignore it on every reconstruction.
         with self.driver._db() as db:
-            db.execute('DROP TABLE readiness_policy')
             db.execute('INSERT INTO readiness_tasks VALUES(?)', (identifier,))
         restored = self.make_driver()
-        with restored._db() as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM readiness_tasks').fetchone()[0], 0)
         self.assertFalse(restored._ready())
         with restored._db() as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM readiness_tasks').fetchone()[0], 0)
+            db.execute('DELETE FROM readiness_tasks')
+            db.execute('INSERT INTO readiness_tasks VALUES(?)', (identifier,))
+        self.assertFalse(restored._ready())
+        self.assertFalse(self.make_driver()._ready())
+
+    def test_previously_ready_task_is_rechecked_after_status_changes(self):
+        identifier = str(uuid.uuid4())
+        self.transport.tasks[identifier] = 40
+        self.assertTrue(self.driver._ready())
+        self.transport.tasks[identifier] = 50
+        self.assertFalse(self.driver._ready())
 
     def test_background_success_acceptance_and_optional_cleanup_do_not_block_new_work(self):
         job = self.submit()

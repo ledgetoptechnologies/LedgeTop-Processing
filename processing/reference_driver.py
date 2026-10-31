@@ -181,6 +181,10 @@ class ReferenceDriver:
         self.origin, self._bearer = coordinator_origin.rstrip('/'), worker_bearer
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
+        # Readiness observations are valid only for one in-memory sweep. Never
+        # trust a prior process or an older binary's persistent task cache.
+        self._readiness_ids = None
+        self._readiness_seen = set()
         self.path = Path(state_path).absolute()
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(path.is_symlink() for path in (self.path, *self.path.parents)):
@@ -207,16 +211,6 @@ class ReferenceDriver:
               created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
               claim_request TEXT UNIQUE NOT NULL, stage TEXT NOT NULL, data TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS readiness_tasks (uuid TEXT PRIMARY KEY)')
-            # Older drivers cached cancelled tasks as physically terminal. The
-            # status alone does not prove that their engine process stopped.
-            # Recheck that advisory cache once when adopting this policy.
-            db.execute('CREATE TABLE IF NOT EXISTS readiness_policy (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL)')
-            policy = db.execute('SELECT version FROM readiness_policy WHERE singleton=1').fetchone()
-            if policy is None:
-                db.execute('DELETE FROM readiness_tasks')
-                db.execute('INSERT INTO readiness_policy VALUES(1,1)')
-            elif policy[0] != 1:
-                raise ValueError('unknown engine readiness policy')
             if 'background_checked' not in {row['name'] for row in db.execute('PRAGMA table_info(driver_jobs)')}:
                 db.execute('ALTER TABLE driver_jobs ADD COLUMN background_checked REAL NOT NULL DEFAULT 0')
             db.execute('CREATE TABLE IF NOT EXISTS driver_binding (singleton INTEGER PRIMARY KEY,binding TEXT NOT NULL)')
@@ -478,6 +472,13 @@ class ReferenceDriver:
         self.worker.allowed_options = frozenset(selected)
 
     def _ready(self):
+        try:
+            return self._ready_sweep()
+        except BaseException:
+            self._readiness_ids, self._readiness_seen = None, set()
+            raise
+
+    def _ready_sweep(self):
         _, authority = self._request('GET', '/authority')
         if authority.get('authorityId') != self.worker.authority_id:
             raise DriverHeld('coordinator_authority_changed')
@@ -487,36 +488,44 @@ class ReferenceDriver:
                     self.worker.authority_id, self.node_id, self.worker.origin.rstrip('/'), self.worker.gate_generation):
                 raise DriverHeld('physical_gate_binding_changed')
             if state['reservation'] is not None:
+                self._readiness_ids, self._readiness_seen = None, set()
                 return False
         info = self.worker.engine.read('/info')
         tasks = self.worker.engine.read('/task/list')
         if (type(info) is not dict or info.get('engineVersion') != self.worker.version
                 or type(info.get('taskQueueCount')) is not int or info['taskQueueCount'] != 0
                 or type(tasks) is not list or len(tasks) > p.MAX_OBJECTS):
+            self._readiness_ids, self._readiness_seen = None, set()
             return False
         self._refresh_options()
         identifiers = []
         for task in tasks:
             if type(task) is not dict:
+                self._readiness_ids, self._readiness_seen = None, set()
                 return False
             p._uuid(task.get('uuid'), 'engine task UUID')
             identifiers.append(task['uuid'])
         if len(set(identifiers)) != len(identifiers):
+            self._readiness_ids, self._readiness_seen = None, set()
             return False
-        with self._db() as db:
-            known = {row[0] for row in db.execute('SELECT uuid FROM readiness_tasks')}
-        pending = [identifier for identifier in identifiers if identifier not in known]
-        # NodeODM /task/list supplies UUIDs, not terminal status. Spread unknown
-        # retained task checks across bounded polls; /info remains fresh each time.
+        current = tuple(sorted(identifiers))
+        if current != self._readiness_ids:
+            self._readiness_ids, self._readiness_seen = current, set()
+        pending = [identifier for identifier in current if identifier not in self._readiness_seen]
+        # NodeODM /task/list supplies UUIDs, not terminal status. Check at most
+        # four per poll; discard the sweep after every readiness decision.
         for identifier in pending[:4]:
             task = self.worker.engine.read('/task/' + identifier + '/info')
             if (type(task) is not dict or task.get('uuid') != identifier or
                     type(task.get('status')) is not dict or type(task['status'].get('code')) is not int
                     or task['status']['code'] not in (30, 40)):
+                self._readiness_ids, self._readiness_seen = None, set()
                 return False
-            with self._db() as db:
-                db.execute('INSERT OR IGNORE INTO readiness_tasks VALUES(?)', (identifier,))
-        return len(pending) <= 4
+            self._readiness_seen.add(identifier)
+        if len(pending) > 4:
+            return False
+        self._readiness_ids, self._readiness_seen = None, set()
+        return True
 
     def _claim_binding(self, binding):
         with self._db() as db:
