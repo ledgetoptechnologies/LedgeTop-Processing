@@ -7,9 +7,10 @@ utilities. It checks an exact XFS mount, directory project inheritance, and
 the reported project accounting/enforcement and hard quota. It does not prove
 exclusive writers, current or future physical capacity, or reservation of
 space. The mount and project can change immediately after a successful snapshot.
-The public observation entry point is disabled: the prototype subprocess
-wrapper can strand descendants holding output pipes after its leader exits.
-Replace external commands with qualified kernel-backed reads before use.
+The public observation entry point is disabled. The current draft uses the
+Linux x86-64 `quotactl_fd` ABI and reads mount IDs directly; it has not yet
+been exercised against the real disposable XFS mount and needs independent
+review before use.
 
 On 2026-10-31 a disposable 512 MiB loop-backed XFS filesystem on the cluster
 host was mounted with project quotas. Its project 42001 had a 64 MiB hard

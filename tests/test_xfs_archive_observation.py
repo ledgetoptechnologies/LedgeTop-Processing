@@ -1,59 +1,41 @@
-"""No mounts, quotas, or host settings are modified by these parser tests."""
 import os
+import platform
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-
 from ops import xfs_archive_observation as x
 
-REPORT='#0 0 0 0 00 [--------]\n#42001 1024 0 65536 00 [--------]\n'
-
-
-@unittest.skipUnless(os.name=='posix','Linux filesystem descriptors required')
+@unittest.skipUnless(os.name=='posix','Linux directory descriptors required')
 class ObservationTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.mount=Path(self.tmp.name);self.project=self.mount/'project';self.project.mkdir()
-        device=self.mount.stat().st_dev
-        self.state='Project quota state on '+str(self.mount)+' (/dev/loop6)\n  Accounting: ON\n  Enforcement: ON\n'
-        self.mapping={'id':123,'target':str(self.mount),'source':'/dev/loop6','fstype':'xfs','options':'rw,prjquota',
-                      'maj:min':'%d:%d'%(os.major(device),os.minor(device))}
-
-    def check(self,state=None,report=REPORT,mounts=None,project=(42001,0x200)):
-        if state is None:state=self.state
-        with patch.object(x.os,'geteuid',return_value=0),patch.object(x,'_mount',side_effect=mounts or [self.mapping,self.mapping]),\
-             patch.object(x,'_project',return_value=project),patch.object(x,'_mount_id',return_value=123),patch.object(x,'_run',side_effect=[state,report]):
+        dev=self.mount.stat().st_dev
+        self.record=('123','%d:%d'%(os.major(dev),os.minor(dev)),'/',str(self.mount),'rw','xfs','/dev/loop6','rw')
+    def check(self,records=None,ids=None,project=(42001,0x200),quota=(64*1024*1024,0)):
+        with patch.object(x.os,'geteuid',return_value=0),patch.object(x,'_mount_record',side_effect=records or [self.record,self.record]),\
+             patch.object(x,'_mount_id',side_effect=ids or [123,123,123,123]),patch.object(x,'_project',return_value=project),\
+             patch.object(x,'_kernel_quota',return_value=quota):
             return x._observe_unqualified(str(self.mount),str(self.project),42001,64*1024*1024)
-
-    def test_observed_kernel_shape(self):
+    def test_draft_happy_path_and_public_disabled(self):
         self.assertEqual(self.check()['hardBytes'],64*1024*1024)
-
-    def test_empty_ambiguous_and_no_enforcement_hold(self):
-        for state in ('',self.state.replace('Enforcement: ON','Enforcement: OFF'),self.state+'  Accounting: ON\n'):
-            with self.subTest(state=state),self.assertRaises(x.ObservationUnavailable):self.check(state=state)
-        for report in ('',REPORT+REPORT,REPORT.replace('65536','0')):
-            with self.subTest(report=report),self.assertRaises(x.ObservationUnavailable):self.check(report=report)
-
-    def test_project_and_mount_substitution_hold(self):
-        with self.assertRaises(x.ObservationUnavailable):self.check(project=(42001,0))
-        with self.assertRaises(x.ObservationUnavailable):self.check(project=(42002,0x200))
-        with self.assertRaises(x.ObservationUnavailable):self.check(mounts=[self.mapping,dict(self.mapping,source='/dev/other')])
+        with self.assertRaises(x.ObservationUnavailable):x.observe(str(self.mount),str(self.project),42001,64*1024*1024)
+    def test_enforcement_and_substitution_fail_closed(self):
+        for kwargs in ({'project':(42001,0)},{'project':(42002,0x200)},{'quota':(0,0)},
+                       {'ids':[123,124]},{'records':[self.record,(*self.record[:-1],'changed')]}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(x.ObservationUnavailable):self.check(**kwargs)
         self.project.rename(self.mount/'elsewhere');self.project.symlink_to('elsewhere',target_is_directory=True)
         with self.assertRaises(x.ObservationUnavailable):self.check()
-
-    def test_same_device_bind_overmount_and_symlink_ancestor_hold(self):
-        with patch.object(x.os,'geteuid',return_value=0),patch.object(x,'_mount',return_value=self.mapping),\
-             patch.object(x,'_mount_id',side_effect=[123,124]):
-            with self.assertRaises(x.ObservationUnavailable):x._observe_unqualified(str(self.mount),str(self.project),42001,64*1024*1024)
+    def test_no_follow_ancestor(self):
         link=self.mount/'alias';link.symlink_to(self.project,target_is_directory=True)
         with self.assertRaises(OSError):x._open_directory(link)
-
-    def test_public_observation_is_disabled(self):
-        with self.assertRaises(x.ObservationUnavailable):x.observe(str(self.mount),str(self.project),42001,64*1024*1024)
-
-    def test_findmnt_rejects_ext4_empty_and_multiple(self):
-        import json
-        for filesystems in ([],[dict(self.mapping,fstype='ext4')],[self.mapping,self.mapping]):
-            with self.subTest(filesystems=filesystems),patch.object(x,'_run',return_value=json.dumps({'filesystems':filesystems})):
-                with self.assertRaises(x.ObservationUnavailable):x._mount(str(self.mount))
+    def test_non_xfs_or_foreign_mount_refused(self):
+        for record in (self.record[:5]+('ext4',)+self.record[6:],self.record[:3]+('/different',)+self.record[4:]):
+            with self.subTest(record=record),self.assertRaises(x.ObservationUnavailable):self.check(records=[record])
+    @unittest.skipUnless(platform.machine()=='x86_64','specific syscall ABI')
+    def test_actual_kernel_refuses_unqualified_non_xfs_directory(self):
+        fd=os.open(self.mount,os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            with self.assertRaises((OSError,x.ObservationUnavailable)):x._kernel_quota(fd,42001)
+        finally:os.close(fd)

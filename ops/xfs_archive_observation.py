@@ -1,128 +1,102 @@
-"""Opt-in read-only host observation, not an archive-write authority.
+"""Disabled read-only XFS quota research; never a write authority.
 
-Requires trusted host administrators, tools and mount namespace. It does not
-establish exclusive writers, physical free space or a safe retry reservation.
-Nothing invokes this module automatically.
+The experimental implementation supports only Linux x86-64's observed ABI.
+It cannot prove exclusive writers or physical free capacity. Shared host
+administrators and the calling mount namespace remain trusted.
 """
+import ctypes
 import fcntl
-import json
 import os
 from pathlib import Path
+import platform
 import re
-import selectors
-import signal
-import stat
 import struct
-import subprocess
 import sys
-import time
 
-class ObservationUnavailable(ValueError): pass
-
+class ObservationUnavailable(ValueError):pass
 
 def _require(value):
-    if not value: raise ObservationUnavailable('XFS quota observation unavailable')
+    if not value:raise ObservationUnavailable('XFS quota observation unavailable')
 
-
-def _run(argv):
-    """Bound elapsed time and combined output, including failing children."""
-    process=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                             env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'},start_new_session=True)
-    selector=selectors.DefaultSelector();out=bytearray();err=bytearray();deadline=time.monotonic()+5
-    try:
-        selector.register(process.stdout,selectors.EVENT_READ,out);selector.register(process.stderr,selectors.EVENT_READ,err)
-        while selector.get_map():
-            timeout=deadline-time.monotonic();_require(timeout>0)
-            events=selector.select(timeout);_require(bool(events))
-            for key,_ in events:
-                data=os.read(key.fd,4096)
-                if not data:selector.unregister(key.fileobj);continue
-                key.data.extend(data);_require(len(out)+len(err)<=16384)
-        code=process.wait(timeout=max(.01,deadline-time.monotonic()))
-        _require(code==0 and not err)
-        return out.decode('ascii')
-    except BaseException:
-        if process.poll() is None:
-            try:os.killpg(process.pid,signal.SIGKILL)
-            except ProcessLookupError:pass
-            process.wait(timeout=5)
-        raise
-    finally:
-        selector.close();process.stdout.close();process.stderr.close()
-
-
-def _mount(path):
-    value=json.loads(_run(['/usr/bin/findmnt','--json','--target',path,'--output','ID,TARGET,SOURCE,FSTYPE,OPTIONS,MAJ:MIN']))
-    mounts=value.get('filesystems');_require(type(mounts) is list and len(mounts)==1)
-    mount=mounts[0];_require(type(mount) is dict and set(mount)=={'id','target','source','fstype','options','maj:min'}
-                                  and type(mount['id']) is int and mount['id']>0)
-    _require(mount['target']==path and mount['fstype']=='xfs' and type(mount['source']) is str
-             and re.fullmatch(r'[0-9]+:[0-9]+',mount['maj:min']) is not None
-             and type(mount['options']) is str and 'rw' in mount['options'].split(','))
-    return mount
-
-
-def _project(fd):
-    data=bytearray(28);fcntl.ioctl(fd,0x801c581f,data,True)
-    flags,_,_,project,_=struct.unpack('=IIIII',data[:20]);return project,flags
-
-
-def _mount_id(fd):
-    with open('/proc/self/fdinfo/'+str(fd),encoding='ascii') as stream:
-        values=[line.split(':',1)[1].strip() for line in stream if line.startswith('mnt_id:')]
-    _require(len(values)==1 and values[0].isdecimal());return int(values[0])
-
+def observe(mount_path,project_directory,project_id,hard_bytes):
+    """Deliberately disabled until real positive tests and review pass."""
+    raise ObservationUnavailable('XFS quota observation unavailable')
 
 def _open_directory(path):
-    """Walk from root using no-follow descriptors for every component."""
     flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
     fd=os.open('/',flags)
     try:
         for part in Path(path).parts[1:]:
             child=os.open(part,flags,dir_fd=fd);os.close(fd);fd=child
         return fd
-    except BaseException:
-        os.close(fd);raise
+    except BaseException:os.close(fd);raise
 
+def _mount_id(fd):
+    with open('/proc/self/fdinfo/'+str(fd),encoding='ascii') as stream:
+        values=[line.split(':',1)[1].strip() for line in stream if line.startswith('mnt_id:')]
+    _require(len(values)==1 and values[0].isdecimal());return int(values[0])
 
-def observe(mount_path,project_directory,project_id,hard_bytes):
-    """Disabled until process-free quota reads and real validation exist."""
-    raise ObservationUnavailable('XFS quota observation unavailable')
+def _mount_record(mount_id):
+    with open('/proc/self/mountinfo','rb') as stream:data=stream.read(1024*1024+1)
+    _require(len(data)<=1024*1024)
+    matches=[]
+    for line in data.decode('ascii').splitlines():
+        left,sep,right=line.partition(' - ');_require(bool(sep))
+        fields=left.split();tail=right.split();_require(len(fields)>=6 and len(tail)>=3)
+        if fields[0]==str(mount_id):
+            def decode(value):
+                _require(re.search(r'\\(?!040|011|012|134)',value) is None)
+                return re.sub(r'\\(040|011|012|134)',lambda m:chr(int(m.group(1),8)),value)
+            matches.append((fields[0],fields[2],decode(fields[3]),decode(fields[4]),fields[5],tail[0],decode(tail[1]),tail[2]))
+    _require(len(matches)==1);return matches[0]
 
+def _project(fd):
+    data=bytearray(28);fcntl.ioctl(fd,0x801c581f,data,True)
+    flags,_,_,project,_=struct.unpack('=IIIII',data[:20]);return project,flags
+
+def _kernel_quota(fd,project):
+    """quotactl_fd x86-64; exact structures checked against host headers."""
+    _require(sys.platform.startswith('linux') and platform.machine()=='x86_64'
+             and ctypes.sizeof(ctypes.c_void_p)==8 and sys.byteorder=='little')
+    libc=ctypes.CDLL(None,use_errno=True);libc.syscall.restype=ctypes.c_long
+    # QCMD(('X'<<8)+operation, PRJQUOTA=2); syscall 443 quotactl_fd.
+    def call(operation,identifier,buffer):
+        result=libc.syscall(ctypes.c_long(443),ctypes.c_int(fd),ctypes.c_uint(((ord('X')<<8)+operation)<<8|2),
+                            ctypes.c_uint(identifier),ctypes.byref(buffer))
+        if result!=0:raise OSError(ctypes.get_errno(),'quota query failed')
+    state=(ctypes.c_ubyte*160)();state[0]=1;call(8,0,state)
+    _require(state[0]==1 and struct.unpack_from('=H',state,2)[0]&0x30==0x30)
+    quota=(ctypes.c_ubyte*112)();call(3,project,quota)
+    raw=bytes(quota);version,flags,_,returned=struct.unpack_from('=bbHI',raw,0)
+    hard=struct.unpack_from('=Q',raw,8)[0]*512;used=struct.unpack_from('=Q',raw,40)[0]*512
+    _require(version==1 and flags&2 and returned==project and hard>0 and used<=hard)
+    return hard,used
 
 def _observe_unqualified(mount_path,project_directory,project_id,hard_bytes):
-    """Test-only draft; subprocess lifecycle is not qualified for use."""
     _require(sys.platform.startswith('linux') and os.geteuid()==0 and type(project_id) is int and 1<=project_id<=4294967295
-             and type(hard_bytes) is int and hard_bytes>=1024 and hard_bytes%1024==0)
+             and type(hard_bytes) is int and hard_bytes>=512 and hard_bytes%512==0)
     mount=Path(mount_path);directory=Path(project_directory)
     _require(mount.is_absolute() and str(mount)==os.path.normpath(str(mount))
              and directory.parent==mount and directory.name not in ('','.','..'))
     root_fd=project_fd=None
     try:
-        flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
-        root_fd=_open_directory(mount);project_fd=os.open(directory.name,flags,dir_fd=root_fd)
+        root_fd=_open_directory(mount)
+        project_fd=os.open(directory.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=root_fd)
         before=os.fstat(root_fd);project_before=os.fstat(project_fd)
-        snapshot=_mount(str(mount));_require(snapshot['maj:min']=='%d:%d'%(os.major(before.st_dev),os.minor(before.st_dev)))
-        _require(project_before.st_dev==before.st_dev and _mount_id(root_fd)==_mount_id(project_fd)==snapshot['id'])
-        project,project_flags=_project(project_fd);_require(project==project_id and project_flags&0x200)
-        state=_run(['/usr/sbin/xfs_quota','-x','-c','state -p',str(mount)])
-        _require(re.findall(r'^Project quota state on (.+)$',state,re.M)==[str(mount)+' ('+snapshot['source']+')']
-                 and re.findall(r'^\s*Accounting:\s*(\S+)\s*$',state,re.M)==['ON']
-                 and re.findall(r'^\s*Enforcement:\s*(\S+)\s*$',state,re.M)==['ON'])
-        report=_run(['/usr/sbin/xfs_quota','-x','-c','report -p -n -N',str(mount)])
-        rows=[re.fullmatch(r'#([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+\S+\s+\[[^\]]+\]',line.strip()) for line in report.splitlines() if line.strip()]
-        _require(all(rows));selected=[m for m in rows if int(m.group(1))==project_id];_require(len(selected)==1)
-        used,hard=int(selected[0].group(2))*1024,int(selected[0].group(4))*1024
-        _require(hard==hard_bytes and used<=hard)
-        after=os.fstat(root_fd);project_after=os.fstat(project_fd);named=os.stat(directory.name,dir_fd=root_fd,follow_symlinks=False)
-        named_root=os.stat(mount,follow_symlinks=False)
+        mid=_mount_id(root_fd);record=_mount_record(mid)
+        _require(_mount_id(project_fd)==mid and record[1]=='%d:%d'%(os.major(before.st_dev),os.minor(before.st_dev))
+                 and record[2]=='/' and record[3]==str(mount) and record[5]=='xfs' and 'rw' in record[4].split(',')
+                 and project_before.st_dev==before.st_dev)
+        project,flags=_project(project_fd);_require(project==project_id and flags&0x200)
+        hard,used=_kernel_quota(root_fd,project_id);_require(hard==hard_bytes)
+        after=os.fstat(root_fd);project_after=os.fstat(project_fd)
+        named=os.stat(directory.name,dir_fd=root_fd,follow_symlinks=False);named_root=os.stat(mount,follow_symlinks=False)
         _require((before.st_dev,before.st_ino)==(after.st_dev,after.st_ino)==(named_root.st_dev,named_root.st_ino)
                  and (project_before.st_dev,project_before.st_ino)==(project_after.st_dev,project_after.st_ino)==(named.st_dev,named.st_ino)
-                 and _mount_id(root_fd)==_mount_id(project_fd)==snapshot['id']
-                 and _mount(str(mount))==snapshot and _project(project_fd)==(project,project_flags))
-        return {'projectId':project,'hardBytes':hard,'usedBytes':used,'device':snapshot['maj:min']}
-    except (OSError,ValueError,KeyError,UnicodeError,subprocess.SubprocessError):
-        raise ObservationUnavailable('XFS quota observation unavailable') from None
+                 and _mount_id(root_fd)==_mount_id(project_fd)==mid and _mount_record(mid)==record
+                 and _project(project_fd)==(project,flags))
+        return {'projectId':project,'hardBytes':hard,'usedBytes':used,'mountId':mid}
+    except (OSError,ValueError,UnicodeError,OverflowError):raise ObservationUnavailable('XFS quota observation unavailable') from None
     finally:
         if project_fd is not None:os.close(project_fd)
         if root_fd is not None:os.close(root_fd)
