@@ -311,8 +311,7 @@ class UpdateMaintenanceAdapter:
                 or node.get('targetImage')!=request['localImageId'] or node['state'] not in ('scheduled','draining')):
             raise MaintenanceAdapterHeld('frozen_plan_not_eligible')
         if node['state']!='draining' or stamp(node['notBefore'])>aware(self.clock()):return False
-        jobs=self.api.json('GET','/v1/prototype/jobs')['jobs']
-        if any(job.get('nodeId')==self.binding['nodeId'] and job['status'] in ('running','held') for job in jobs):return False
+        if managed.node_has_outstanding_work(self.api.json('GET','/v1/prototype/jobs'),self.binding['nodeId']):return False
         try:
             with NodeGate(self.binding['engineId']) as gate:
                 state=gate.snapshot()
