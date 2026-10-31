@@ -36,6 +36,8 @@ class NodeInputsTests(unittest.TestCase):
     def test_tls_inventory_then_actual_verified_transfer_and_restart(self):
         with DaemonStateLock(self.base.worker) as owner:
             inputs=self.make(owner)
+            self.assertEqual(inputs.fetch_plan(),dict(options=[],outputs=[]))
+            self.assertEqual(inputs.fetch_plan(),dict(options=[],outputs=[]))
             self.assertEqual(inputs.freeze_inventory(),dict(state='inventory_verified_no_dispatch',count=1,total=9))
             object_id=self.object_id(inputs)
             self.assertEqual(inputs.transfer(object_id)['state'],'input_verified_no_dispatch')
@@ -45,6 +47,7 @@ class NodeInputsTests(unittest.TestCase):
             self.assertEqual((self.inputs/('slot-'+row[0]+'.alloc')).read_bytes(),b'synthetic')
         with DaemonStateLock(self.base.worker) as owner:
             inputs=self.make(owner)
+            self.assertEqual(inputs.fetch_plan(),dict(options=[],outputs=[]))
             with self.assertRaisesRegex(InputHeld,'verified_inventory_required'):inputs.transfer(object_id)
             self.assertEqual(inputs.freeze_inventory()['count'],1)
             self.assertEqual(inputs.transfer(object_id)['state'],'input_verified_no_dispatch')

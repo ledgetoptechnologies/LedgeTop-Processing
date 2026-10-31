@@ -14,6 +14,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from . import reference_protocol as p
 from .direct_output_slot import _identity, open_slot
+from .direct_outbox_contract import direct_pipeline_digest
 from .node_gate import NodeGate
 from .reference_transfer import _DeadlineHTTPSHandler, _TransferWatchdog
 from .viewer_node_enrollment import ViewerNodeEnrollment, _NoRedirect
@@ -27,6 +28,7 @@ POLICY_DDL='CREATE TABLE policy (singleton INTEGER PRIMARY KEY CHECK(singleton=1
 MANIFEST_DDL='CREATE TABLE manifest (singleton INTEGER PRIMARY KEY CHECK(singleton=1), phase TEXT NOT NULL, digest TEXT NOT NULL, count INTEGER, total INTEGER)'
 OBJECT_DDL='''CREATE TABLE objects (ordinal INTEGER PRIMARY KEY, object_id TEXT NOT NULL UNIQUE, entry TEXT NOT NULL,
  mac TEXT NOT NULL, phase TEXT NOT NULL, slot_key TEXT, slot_identity TEXT)'''
+PLAN_DDL='CREATE TABLE plan (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value TEXT NOT NULL)'
 
 
 class ViewerNodeInputs:
@@ -60,12 +62,12 @@ class ViewerNodeInputs:
         finally:os.close(rootfd)
         with self._db(bootstrap=True) as db:
             objects=db.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
-            if not objects:db.execute(POLICY_DDL);db.execute(MANIFEST_DDL);db.execute(OBJECT_DDL)
+            if not objects:db.execute(POLICY_DDL);db.execute(MANIFEST_DDL);db.execute(OBJECT_DDL);db.execute(PLAN_DDL)
             self._schema(db);value=p.canonical_json(self.policy).decode()
             existing=db.execute('SELECT value,mac_key FROM policy WHERE singleton=1').fetchone()
             if existing and existing[0]!=value:raise InputHeld('input_policy_changed')
             if not existing:
-                if db.execute('SELECT 1 FROM manifest UNION ALL SELECT 1 FROM objects LIMIT 1').fetchone():
+                if db.execute('SELECT 1 FROM manifest UNION ALL SELECT 1 FROM objects UNION ALL SELECT 1 FROM plan LIMIT 1').fetchone():
                     raise InputHeld('input_policy_missing')
                 db.execute('INSERT INTO policy VALUES(1,?,?)',(value,secrets.token_hex(32)))
 
@@ -74,7 +76,7 @@ class ViewerNodeInputs:
         query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
-            for sql in (POLICY_DDL,MANIFEST_DDL,OBJECT_DDL):expected.execute(sql)
+            for sql in (POLICY_DDL,MANIFEST_DDL,OBJECT_DDL,PLAN_DDL):expected.execute(sql)
             if db.execute(query).fetchall()!=expected.execute(query).fetchall():raise InputHeld('input_schema_changed')
         finally:expected.close()
 
@@ -176,6 +178,25 @@ class ViewerNodeInputs:
         finally:response.close();watchdog.close()
 
     def _prefix(self):return '/ltds/worker/v1/viewer-claims/'+self.claim['jobId']
+
+    def fetch_plan(self):
+        """Fetch and persist claim-bound options; never dispatch an engine."""
+        with self._lock,self._gate():
+            _,raw=self._get(self._prefix()+'/plan',max_bytes=131072)
+            response=p.decode_submission(raw)
+            p._closed(response,('jobId','viewerGeneration','pipelineSha256','plan'),'Viewer plan response')
+            if (response['jobId']!=self.claim['jobId'] or type(response['viewerGeneration']) is not int
+                or response['viewerGeneration']!=self.claim['viewerGeneration']
+                or response['pipelineSha256']!=self.claim['pipelineSha256']):raise InputHeld('plan_identity_changed')
+            plan=response['plan'];p._closed(plan,('options','outputs'),'Viewer plan')
+            if direct_pipeline_digest(plan['options'],plan['outputs'])!=self.claim['pipelineSha256']:
+                raise InputHeld('plan_digest_changed')
+            encoded=p.canonical_json(plan).decode()
+            with self._db() as db:
+                saved=db.execute('SELECT value FROM plan WHERE singleton=1').fetchone()
+                if saved and saved[0]!=encoded:raise InputHeld('plan_replay_changed')
+                if not saved:db.execute('INSERT INTO plan VALUES(1,?)',(encoded,))
+            return plan
 
     def _verify_inventory_rows(self,db,manifest):
         key=bytes.fromhex(db.execute('SELECT mac_key FROM policy WHERE singleton=1').fetchone()[0])

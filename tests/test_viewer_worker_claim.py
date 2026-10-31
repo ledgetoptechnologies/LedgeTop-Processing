@@ -96,6 +96,14 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         except HTTPError as error:
             with error:return error.code,json.load(error)
 
+    def plan(self,claim_token,*,token=TOKEN_A):
+        request=Request(self.origin+ROUTE+'/'+self.job+'/plan',headers={'Authorization':'Bearer '+token,'X-Claim-Token':claim_token})
+        try:
+            with build_opener(ProxyHandler({}),HTTPSHandler(context=self.client)).open(request,timeout=3) as response:
+                return response.status,json.load(response)
+        except HTTPError as error:
+            with error:return error.code,json.load(error)
+
     def input_object(self,object_id,claim_token,*,token=TOKEN_A,job=None):
         request=Request(self.origin+ROUTE+'/'+(job or self.job)+'/objects/'+object_id,
             headers={'Authorization':'Bearer '+token,'X-Claim-Token':claim_token})
@@ -165,6 +173,28 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         self.assertEqual(self.attest(claim,budget=1001)[0],409)
         self.assertEqual(self.inventory(0,claim['claimToken'])[0],200)
 
+    def test_plan_requires_enrollment_and_remains_frozen(self):
+        expected=dict(options=[dict(name='alpha',value='é'),dict(name='beta',value=2)],outputs=['pointcloud','orthophoto'])
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET options=?,outputs=? WHERE uuid=?',
+                       (json.dumps(expected['options']),json.dumps(expected['outputs']),TASK))
+        _,claim=self.request();token=claim['claimToken']
+        self.assertEqual(self.plan(token)[0],409)
+        self.assertEqual(self.attest(claim)[0],200)
+        initial=self.plan(token);self.assertEqual(initial[0],200)
+        self.assertEqual(initial[1]['plan'],expected)
+        self.assertEqual(self.plan(token,token=TOKEN_B)[0],409)
+        self.assertEqual(self.plan('wrong')[0],409)
+        with self.queue._db() as db:db.execute('UPDATE viewer_tasks SET options=? WHERE uuid=?',('[{"name":"x","value":"y"}]',TASK))
+        self.assertEqual(self.plan(token),initial)
+        self.stop_server();self.queue.close();self.queue=None
+        self.start_queue();self.claims=ViewerWorkerClaims(self.queue,self.store,local_max_photos=1000,local_max_input_bytes=100000,node_environments=ENV_POLICY)
+        self.start_server();self.assertEqual(self.plan(token),initial)
+        with self.queue._db() as db:db.execute('UPDATE viewer_worker_plans SET plan=? WHERE job_id=?',('{"options":[],"outputs":[]}',self.job))
+        self.assertEqual(self.plan(token)[0],409)
+        with self.queue._db() as db:db.execute('DELETE FROM viewer_worker_plans WHERE job_id=?',(self.job,))
+        self.assertEqual(self.plan(token)[0],409)
+
     def test_inventory_replay_after_restart_and_frozen_metadata(self):
         status,claim=self.request();self.assertEqual(status,200)
         self.assertEqual(self.attest(claim)[0],200)
@@ -230,6 +260,7 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         with self.queue._db() as db:
             db.execute('DROP TABLE viewer_worker_claims')
             db.execute('DROP TABLE viewer_worker_inventory')
+            db.execute('DROP TABLE viewer_worker_plans')
         self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
         class Bomb:
             def __getattribute__(self,name):raise AssertionError('engine access forbidden')
@@ -238,6 +269,20 @@ class ViewerWorkerClaimTests(unittest.TestCase):
         service.tick()
         self.assertEqual(self.store.task(TASK)['phase'],'queued')
         self.assertEqual(self.queue.get(self.job)['status'],'queued')
+        self.stop_server();self.queue.close();self.queue=None
+        with self.assertRaisesRegex(RuntimeError,'configuration_required'):
+            make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state')))
+
+    def test_plan_only_marker_blocks_legacy_claim_tick_and_startup(self):
+        with self.queue._db() as db:
+            for table in ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments'):
+                db.execute('DROP TABLE '+table)
+        self.assertIsNone(self.queue.claim({'workerId':'bypass','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
+        class Bomb:
+            def __getattribute__(self,name):raise AssertionError('engine access forbidden')
+        service=ViewerService(self.queue,Config('x'*32,'','',1000,100000,viewer_enabled=True),store=self.store,
+                              engines={'cluster':Bomb(),'main':Bomb()},probe=lambda *a:self.fail('probe forbidden'))
+        service.tick();self.assertEqual(self.queue.get(self.job)['status'],'queued')
         self.stop_server();self.queue.close();self.queue=None
         with self.assertRaisesRegex(RuntimeError,'configuration_required'):
             make_handler(Config('x'*32,'','',1000,100000,prototype_state_dir=str(self.root/'state')))

@@ -136,6 +136,11 @@ class ReferenceWorkerAPI:
                 if self.viewer_claims is None:return self._error(404,'not_found')
                 token=self._header(headers,'X-Claim-Token')
                 return Response(200,self.viewer_claims.enroll(enrollment[1],protocol.decode_submission(body),identity,token))
+            plan=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/plan',path) if type(path) is str else None
+            if method=='GET' and plan:
+                if self.viewer_claims is None:return self._error(404,'not_found')
+                if body:return self._error(400,'invalid_request')
+                return Response(200,self.viewer_claims.plan(plan[1],identity,self._header(headers,'X-Claim-Token')))
             inventory=re.fullmatch(re.escape(PREFIX)+r'/viewer-claims/([a-f0-9-]{36})/inventory/(0|[1-9][0-9]{0,5})',path) if type(path) is str else None
             if method=='GET' and inventory:
                 if self.viewer_claims is None:return self._error(404,'not_found')

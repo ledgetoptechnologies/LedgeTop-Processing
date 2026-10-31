@@ -21,7 +21,7 @@ from .maintenance import Conflict
 from .viewer_tasks import PHOTO_SUFFIXES, VIEWER_PROFILE, canonical
 from .reference_binary import BinaryResponse
 from .direct_output_slot import _identity
-from .direct_outbox_contract import validate_binding
+from .direct_outbox_contract import validate_binding, direct_pipeline_digest
 from pathlib import Path
 
 
@@ -40,6 +40,7 @@ FILES_DDL = '''CREATE TABLE viewer_worker_inventory (
  PRIMARY KEY(job_id,ordinal), UNIQUE(job_id,object_id))'''
 ENROLL_DDL = '''CREATE TABLE viewer_worker_enrollments (
  job_id TEXT PRIMARY KEY, attestation TEXT NOT NULL, receipt TEXT NOT NULL)'''
+PLAN_DDL = '''CREATE TABLE viewer_worker_plans (job_id TEXT PRIMARY KEY, plan TEXT NOT NULL)'''
 PAGE_SIZE=100
 MAX_INPUT_READERS=2
 
@@ -89,16 +90,16 @@ class ViewerWorkerClaims:
         self.node_environments=MappingProxyType({node:frozenset(values) for node,values in node_environments.items()})
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments')").fetchall()
-            if not objects:db.execute(DDL);db.execute(FILES_DDL);db.execute(ENROLL_DDL)
+            objects=db.execute("SELECT type,name,sql FROM sqlite_master WHERE name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans')").fetchall()
+            if not objects:db.execute(DDL);db.execute(FILES_DDL);db.execute(ENROLL_DDL);db.execute(PLAN_DDL)
             self._schema(db)
 
     @staticmethod
     def _schema(db):
-        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments') ORDER BY type,name"
+        query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE tbl_name IN ('viewer_worker_claims','viewer_worker_inventory','viewer_worker_enrollments','viewer_worker_plans') ORDER BY type,name"
         expected=sqlite3.connect(':memory:')
         try:
-            expected.execute(DDL);expected.execute(FILES_DDL);expected.execute(ENROLL_DDL)
+            expected.execute(DDL);expected.execute(FILES_DDL);expected.execute(ENROLL_DDL);expected.execute(PLAN_DDL)
             if [tuple(row) for row in db.execute(query)] != [tuple(row) for row in expected.execute(query)]:
                 raise Conflict('Viewer claim schema changed')
         finally:expected.close()
@@ -141,12 +142,15 @@ class ViewerWorkerClaims:
         small=item['images_count']<=self.max_photos and item['input_bytes']<=self.max_bytes
         if identity['node_id']!=('cluster' if small else 'main'):raise Conflict('Viewer routing mismatch')
         settings=canonical({'options':item['options'],'outputs':item['outputs']}).encode()
+        if len(settings)>65536:raise Conflict('Viewer plan too large')
+        if direct_pipeline_digest(item['options'],item['outputs'])!=hashlib.sha256(settings).hexdigest():
+            raise Conflict('Viewer plan invalid')
         value=dict(schemaVersion=1,authorityId=self.queue.authority_id,jobId=job['id'],viewerTaskId=task['uuid'],viewerGeneration=task['generation'],
             environment=task['environment'],nodeId=identity['node_id'],workerId=identity['worker_id'],
             workerInstanceId=identity['worker_instance_id'],engineTaskId=engine_uuid,
             inputInventorySha256=p.digest(manifest),pipelineSha256=hashlib.sha256(settings).hexdigest(),
             imageCount=item['images_count'],inputBytes=item['input_bytes'],state='claimed_unenrolled')
-        return (value,manifest,source) if include_manifest else value
+        return (value,manifest,source,settings.decode()) if include_manifest else value
 
     def claim(self,payload,identity):
         p._closed(payload,('jobId','claimRequestId','environment'),'Viewer worker claim')
@@ -193,10 +197,11 @@ class ViewerWorkerClaims:
             if not head or head['id']!=job['id'] or job['status']!='queued':raise Conflict('Viewer queue head changed')
             if task['stage']!='queued' or task['phase'] not in ('queued','waiting_node') or any(task[k] is not None for k in ('node_id','engine_uuid','claim_token')):
                 raise Conflict('Viewer task is not unclaimed')
-            engine_uuid=str(uuid.uuid4());value,manifest,source=self._binding(db,job,task,identity,engine_uuid,include_manifest=True)
+            engine_uuid=str(uuid.uuid4());value,manifest,source,settings=self._binding(db,job,task,identity,engine_uuid,include_manifest=True)
             token=secrets.token_urlsafe(32);encoded=p.canonical_json(value).decode()
             db.execute('INSERT INTO viewer_worker_claims VALUES(?,?,?,?,?,?,?,?)',
                 (job['id'],payload['claimRequestId'],identity['node_id'],identity['worker_id'],identity['worker_instance_id'],job['environment'],encoded,token))
+            db.execute('INSERT INTO viewer_worker_plans VALUES(?,?)',(job['id'],settings))
             db.executemany('INSERT INTO viewer_worker_inventory VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(
                 (job['id'],index,p.digest(dict(jobId=job['id'],generation=task['generation'],ordinal=index,entry=entry)),
                  entry['name'],entry['bytes'],entry['sha256'],int(entry['isPhoto']),*source[index]) for index,entry in enumerate(manifest)))
@@ -236,6 +241,20 @@ class ViewerWorkerClaims:
             if not receipt or not hmac.compare_digest(receipt['receipt'],p.digest(json.loads(receipt['attestation']))):
                 raise Conflict('Viewer node enrollment unavailable')
         return saved,task
+
+    def plan(self,job_id,identity,claim_token):
+        p._uuid(job_id,'job ID')
+        with self.queue._db() as db:
+            db.execute('BEGIN');saved,_=self._authorize_inventory(db,job_id,identity,claim_token)
+            row=db.execute('SELECT plan FROM viewer_worker_plans WHERE job_id=?',(job_id,)).fetchone()
+            if not row or not isinstance(row['plan'],str) or len(row['plan'].encode())>65536:
+                raise Conflict('Viewer plan unavailable')
+            try:
+                value=json.loads(row['plan']);p._closed(value,('options','outputs'),'Viewer plan')
+                if canonical(value)!=row['plan'] or direct_pipeline_digest(value['options'],value['outputs'])!=saved['pipelineSha256']:
+                    raise ValueError()
+            except (ValueError,TypeError,RecursionError):raise Conflict('Viewer plan changed') from None
+            return dict(jobId=job_id,viewerGeneration=saved['viewerGeneration'],pipelineSha256=saved['pipelineSha256'],plan=value)
 
     def enroll(self,job_id,payload,identity,claim_token):
         p._uuid(job_id,'job ID');p._closed(payload,('binding','slotIdentity'),'node enrollment')
