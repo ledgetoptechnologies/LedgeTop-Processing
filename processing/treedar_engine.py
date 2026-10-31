@@ -112,7 +112,7 @@ def _write_new(path, payload):
     _sync_directory(path.parent)
 
 
-def _file(path, maximum, *, expected_bytes=None, expected_sha=None):
+def _file(path, maximum, *, expected_bytes=None, expected_sha=None, expected_snapshot=None):
     if any(item.is_symlink() for item in (path, *path.parents)):
         raise TreeDarHeld('owned_regular_file_required')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -120,6 +120,9 @@ def _file(path, maximum, *, expected_bytes=None, expected_sha=None):
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 <= before.st_size <= maximum:
             raise TreeDarHeld('file_budget_or_identity_changed')
+        snapshot = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink)
+        if expected_snapshot is not None and snapshot(before) != expected_snapshot:
+            raise TreeDarHeld('file_identity_changed_since_validation')
         digest = hashlib.sha256()
         count = 0
         while chunk := os.read(fd, min(1024**2, maximum - count + 1)):
@@ -129,7 +132,6 @@ def _file(path, maximum, *, expected_bytes=None, expected_sha=None):
             digest.update(chunk)
         os.fsync(fd)
         after, current = os.fstat(fd), path.lstat()
-        snapshot = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         if snapshot(before) != snapshot(after) or snapshot(after) != snapshot(current):
             raise TreeDarHeld('file_changed_during_verification')
         sha = digest.hexdigest()
@@ -161,10 +163,20 @@ def _read_result_metadata(path, maximum):
         snapshot=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_nlink)
         if len(data)!=before.st_size or snapshot(before)!=snapshot(after) or snapshot(after)!=snapshot(current):
             raise TreeDarHeld('result_metadata_changed_during_read')
+        os.lseek(fd,0,os.SEEK_SET)
+        repeat=hashlib.sha256()
+        remaining=len(data)
+        while remaining:
+            part=os.read(fd,min(65536,remaining))
+            if not part: raise TreeDarHeld('result_metadata_changed_during_read')
+            repeat.update(part);remaining-=len(part)
+        if (repeat.hexdigest()!=hashlib.sha256(data).hexdigest() or os.read(fd,1)
+                or snapshot(before)!=snapshot(os.fstat(fd)) or snapshot(before)!=snapshot(path.lstat())):
+            raise TreeDarHeld('result_metadata_changed_during_read')
         result=json.loads(data)
         if type(result) is not dict:
             raise TreeDarHeld('result_metadata_object_required')
-        return result
+        return result,dict(size=len(data),sha256=hashlib.sha256(data).hexdigest(),snapshot=snapshot(after))
     finally:
         os.close(fd)
 
@@ -552,8 +564,9 @@ def _inside():
             for _, window in raster.block_windows(1):
                 if not np.isfinite(raster.read(1, window=window)).all():
                     return 1
-    summary = _read_result_metadata(run / 'summary.json', per_file)
-    native_manifest = _read_result_metadata(run / 'manifest.json', per_file)
+    summary,summary_binding = _read_result_metadata(run / 'summary.json', per_file)
+    native_manifest,manifest_binding = _read_result_metadata(run / 'manifest.json', per_file)
+    metadata_bindings={'summary.json':summary_binding,'manifest.json':manifest_binding}
     if (summary['n_points_used'] != admission['pointCount'] or summary['version'] != __version__
             or native_manifest['command'] != 'pipeline' or native_manifest['treedar_version'] != __version__):
         return 1
@@ -562,7 +575,10 @@ def _inside():
     for path in sorted(files):
         if path.name not in ROLES and path.name != 'manifest.json':
             return 1
-        size, sha = _file(path, per_file)
+        binding=metadata_bindings.get(path.name)
+        size, sha = _file(path, per_file, expected_bytes=binding['size'] if binding else None,
+                          expected_sha=binding['sha256'] if binding else None,
+                          expected_snapshot=binding['snapshot'] if binding else None)
         total += size
         if total > task['outputBudget']:
             return 1
@@ -571,6 +587,11 @@ def _inside():
             role=ROLES[path.name][0] if path.name in ROLES else 'engine_manifest',
             byteSize=size, sha256=sha, relativePath=relative))
     _sync_directory(run)
+    # Bind proof metadata to the exact file bytes and inode validated above.
+    # This assumes external writers remain excluded through later consumption.
+    for name,binding in metadata_bindings.items():
+        _file(run / name,per_file,expected_bytes=binding['size'],expected_sha=binding['sha256'],
+              expected_snapshot=binding['snapshot'])
     _write_new(output / 'proof.json', dict(schemaVersion=1, job=job, engineVersion=__version__, admission=admission, objects=objects))
     return 0
 
