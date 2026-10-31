@@ -407,6 +407,16 @@ review, while browser/mobile and installed acceptance remain open. Combined
 sequential ODM-to-TreeDar final delivery and the selected smaller real-data trial
 are still pending; TreeDar/Gaussian capabilities remain disabled.
 
+For a worker paired with a broker known to support v1 byte ranges, the private
+worker configuration may opt in using `brokerRangeMaxBytes`, an integer between
+1 and 16 MiB inclusive. It limits each requested range; set it no higher than
+the actual broker's response ceiling. Omit the key to retain legacy single-response
+behavior. This setting does not discover or advertise broker capabilities and
+must not be enabled without validating the paired broker. Ranges still share the
+v1 grant's expiry and request/byte budgets; partial objects restart from zero.
+It does not remove the existing grant and request-count limitations or qualify
+large datasets. No deployment is implied by this setting.
+
 ## Coordinated ownership
 
 The existing **Viewer** chat owns the storage broker, Viewer adapter, durable

@@ -27,7 +27,7 @@ from processing.reference_failure import FailureOutbox
 from processing.reference_http import create_reference_http_server
 from processing.reference_result_api import ReferenceResultAPI
 from processing.reference_results import ReferenceResults
-from processing.reference_transfer import BrokerClient
+from processing.reference_transfer import BrokerClient, MAX_RANGE_BYTES
 from processing.reference_tls import verified_client_context
 from processing.scratch_cleanup import ScratchCleanupExecutor
 from processing.scratch_policy import ScratchLedger
@@ -45,7 +45,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting'))
+                      'executionRouting','brokerRangeMaxBytes'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -333,6 +333,10 @@ def load_config(path):
             raise ValueError('configuration fields differ')
         if 'schemaVersion' in config and (type(config['schemaVersion']) is not int or config['schemaVersion'] != 1):
             raise ValueError('unsupported configuration version')
+        if ('brokerRangeMaxBytes' in config and
+                (type(config['brokerRangeMaxBytes']) is not int or
+                 not 1 <= config['brokerRangeMaxBytes'] <= MAX_RANGE_BYTES)):
+            raise ValueError('invalid broker range limit')
         _execution_routing(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
@@ -437,7 +441,11 @@ def _build_worker(config,owner,resources):
         engine_id=config['engineId'], node_id=config['nodeId'], authority_id=config['authorityId'],
         coordinator_origin=config['gateCoordinatorOrigin'], gate_generation=config['gateGeneration'],
         worker_id=config['workerId'], engine_version=config['engineVersion'])
-    broker = BrokerClient(config['brokerOrigin'], ssl_context=client_tls)
+    # Range support must be coordinated with the actual broker. Absence keeps
+    # the existing single-response v1 behavior and makes no capability claim.
+    broker = BrokerClient(config['brokerOrigin'], ssl_context=client_tls,
+                          enable_ranges='brokerRangeMaxBytes' in config,
+                          max_response_bytes=config.get('brokerRangeMaxBytes', MAX_RANGE_BYTES))
     router = provenance = None
     if routing is not None:
         from processing.reference_execution import ExecutionRouter
