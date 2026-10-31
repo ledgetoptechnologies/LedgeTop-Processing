@@ -9,6 +9,12 @@ PROCESSING_BASE=60ae84f7572f611b03a340d17ceb17d82ff84721
 HARNESS_BASE=d9f44b555f7851ea87f5391afc5f75af1cdf5dac
 VIEWER_IMAGE=viewer-gcp-validation-faa3fd8bca374cb9ba721eea97a4674a:latest
 PYTHON_IMAGE=python:3.12-slim
+BRIDGE_MODE=${BRIDGE_MODE:-reconcile}
+case "$BRIDGE_MODE" in
+    reconcile) SERVER_SCRIPT=viewer_bridge_server.py; CLIENT_SCRIPT=viewer_bridge_client.cjs; CLIENT_WAIT=45s;;
+    full) SERVER_SCRIPT=viewer_full_bridge_server.py; CLIENT_SCRIPT=viewer_full_bridge_client.cjs; CLIENT_WAIT=75s;;
+    *) printf 'BRIDGE_MODE must be reconcile or full\n' >&2; exit 1;;
+esac
 RUN_ID=$(python3 -c 'import secrets; print(secrets.token_hex(12))')
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-viewer-bridge-${RUN_ID}-XXXXXX")
 SERVER_NAME="viewer-bridge-server-$RUN_ID"
@@ -16,12 +22,12 @@ CLIENT_NAME="viewer-bridge-client-$RUN_ID"
 SERVER_ID= CLIENT_ID=
 SERVER_ATTEMPTED=0 CLIENT_ATTEMPTED=0
 printf 'Rehearsal run ID: %s\nEvidence directory: %s\nServer name: %s\nClient name: %s\n' "$RUN_ID" "$RUN_DIR" "$SERVER_NAME" "$CLIENT_NAME"
-python3 - "$RUN_DIR" "$RUN_ID" "$SERVER_NAME" "$CLIENT_NAME" "$VIEWER_TREE" "$PROCESSING_BASE" "$HARNESS_BASE" "$PYTHON_IMAGE" "$VIEWER_IMAGE" <<'PY'
+python3 - "$RUN_DIR" "$RUN_ID" "$SERVER_NAME" "$CLIENT_NAME" "$VIEWER_TREE" "$PROCESSING_BASE" "$HARNESS_BASE" "$PYTHON_IMAGE" "$VIEWER_IMAGE" "$BRIDGE_MODE" <<'PY'
 import json,os,sys
-root,run,server,client,viewer_tree,processing_base,harness_base,python_image,viewer_image=sys.argv[1:]
+root,run,server,client,viewer_tree,processing_base,harness_base,python_image,viewer_image,bridge_mode=sys.argv[1:]
 data=json.dumps(dict(runId=run,label='org.openai.codex.bridge',serverName=server,clientName=client,
                      viewerTree=viewer_tree,processingBase=processing_base,harnessBase=harness_base,
-                     pythonImage=python_image,viewerImage=viewer_image),sort_keys=True).encode()
+                     pythonImage=python_image,viewerImage=viewer_image,bridgeMode=bridge_mode),sort_keys=True).encode()
 fd=os.open(os.path.join(root,'run-identity.json'),os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 try:
     if os.write(fd,data)!=len(data):raise OSError('short evidence write')
@@ -65,6 +71,9 @@ trap 'exit 143' TERM
 git -C "$PROCESSING" merge-base --is-ancestor "$PROCESSING_BASE" HEAD
 git -C "$PROCESSING" merge-base --is-ancestor "$HARNESS_BASE" HEAD
 git -C "$PROCESSING" diff --quiet "$HARNESS_BASE" HEAD -- tests/viewer_bridge_client.cjs tests/viewer_bridge_server.py
+if [ "$BRIDGE_MODE" = full ]; then
+    git -C "$PROCESSING" ls-files --error-unmatch tests/viewer_full_bridge_client.cjs tests/viewer_full_bridge_server.py >/dev/null
+fi
 git -C "$PROCESSING" diff --quiet "$PROCESSING_BASE" HEAD -- processing ops \
     tests/test_viewer_completion_projection.py tests/test_viewer_spool_provider.py \
     tests/test_viewer_archive_spool.py tests/test_viewer_result_metadata.py \
@@ -90,7 +99,7 @@ SERVER_ID=$(timeout 30s docker run -d --pull never --name "$SERVER_NAME" --label
     --network none --cpus 0.5 --memory 384m --pids-limit 64 --user 10001:10001 --read-only \
     --tmpfs /tmp:rw,nosuid,nodev,size=128m --mount "type=bind,src=$PROCESSING,dst=/src,readonly" \
     --mount "type=bind,src=$RUN_DIR/exchange,dst=/exchange" -w /src -e PYTHONPATH=/src -e PYTHONDONTWRITEBYTECODE=1 \
-    -e BRIDGE_READY=/exchange/ready.json -e BRIDGE_STOP=/exchange/stop "$PYTHON_IMAGE_ID" python tests/viewer_bridge_server.py)
+    -e BRIDGE_READY=/exchange/ready.json -e BRIDGE_STOP=/exchange/stop "$PYTHON_IMAGE_ID" python "tests/$SERVER_SCRIPT")
 printf '%s\n' "$SERVER_ID" > "$RUN_DIR/server.id"
 owned "$SERVER_ID"
 i=0
@@ -107,10 +116,10 @@ CLIENT_ID=$(timeout 30s docker run -d --pull never --name "$CLIENT_NAME" --label
     --tmpfs /tmp:rw,nosuid,nodev,size=2g --mount "type=bind,src=$RUN_DIR/export,dst=/viewer,readonly" \
     --mount "type=bind,src=$PROCESSING,dst=/processing,readonly" --mount "type=bind,src=$RUN_DIR/exchange,dst=/exchange,readonly" \
     -e NODE_PATH=/src/apps/viewer/node_modules -e VIEWER_SOURCE_ROOT=/tmp/viewer -e BRIDGE_READY=/exchange/ready.json \
-    --entrypoint sh "$VIEWER_IMAGE_ID" -c 'mkdir -p /tmp/viewer/apps /tmp/viewer/packages && cp -a /viewer/apps/viewer /tmp/viewer/apps/ && cp -a /viewer/packages/shared /tmp/viewer/packages/ && ln -s /src/apps/viewer/node_modules /tmp/viewer/apps/viewer/node_modules && exec node /processing/tests/viewer_bridge_client.cjs')
+    --entrypoint sh "$VIEWER_IMAGE_ID" -c 'mkdir -p /tmp/viewer/apps /tmp/viewer/packages && cp -a /viewer/apps/viewer /tmp/viewer/apps/ && cp -a /viewer/packages/shared /tmp/viewer/packages/ && ln -s /src/apps/viewer/node_modules /tmp/viewer/apps/viewer/node_modules && exec node "/processing/tests/$1"' sh "$CLIENT_SCRIPT")
 printf '%s\n' "$CLIENT_ID" > "$RUN_DIR/client.id"
 owned "$CLIENT_ID"
-code=$(timeout 45s docker wait "$CLIENT_ID")
+code=$(timeout "$CLIENT_WAIT" docker wait "$CLIENT_ID")
 docker_short logs "$CLIENT_ID"
 [ "$code" = 0 ]
 touch "$RUN_DIR/exchange/stop"
