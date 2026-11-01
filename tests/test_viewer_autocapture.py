@@ -2,6 +2,7 @@
 import json
 import errno
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sqlite3
@@ -175,6 +176,7 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.duplicate_length = False
         self.conflicting_transfer = False
         self.engine_http_status = 200
+        self.response_prefix_bytes = 0
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -192,9 +194,13 @@ class ViewerAutoCaptureTests(unittest.TestCase):
                 if owner.conflicting_transfer:
                     self.send_header('Transfer-Encoding','chunked')
                 self.end_headers()
+                prefix = owner.engine_response[:owner.response_prefix_bytes]
+                if prefix:
+                    self.wfile.write(prefix)
+                    self.wfile.flush()
                 owner.ready.set()
                 if owner.release.wait(15):
-                    try: self.wfile.write(owner.engine_response)
+                    try: self.wfile.write(owner.engine_response[len(prefix):])
                     except OSError: pass
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -220,15 +226,20 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.lease.close()
         self.fixture.temporary.cleanup()
 
+    @unittest.skipUnless(hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'), 'Linux pidfd required')
     def test_real_killed_capture_preserves_partial_and_reports_inspection(self):
         self.release.clear()
+        self.engine_response = b'S' * (1024 ** 2) + self.engine_response
+        self.response_prefix_bytes = 1024 ** 2
         children = []
+        pidfds = []
         errors = []
         real_popen = subprocess.Popen
 
         def start_child(*args, **kwargs):
             child = real_popen(*args, **kwargs)
             children.append(child)
+            pidfds.append(os.pidfd_open(child.pid))
             return child
 
         def capture():
@@ -244,13 +255,14 @@ class ViewerAutoCaptureTests(unittest.TestCase):
             try:
                 self.assertTrue(self.ready.wait(10), 'child did not contact synthetic engine')
                 deadline = time.monotonic() + 10
-                while not partial.exists():
+                prefix = self.engine_response[:self.response_prefix_bytes]
+                while not partial.exists() or not partial.read_bytes().startswith(prefix):
                     if time.monotonic() >= deadline:
-                        self.fail('child did not create archive partial')
+                        self.fail('child did not persist synthetic response prefix')
                     time.sleep(.02)
                 self.assertEqual(len(children), 1)
                 before = partial.read_bytes()
-                os.kill(children[0].pid, 9)
+                signal.pidfd_send_signal(pidfds[0], signal.SIGKILL)
                 thread.join(10)
                 self.assertFalse(thread.is_alive(), 'parent did not reap killed capture child')
                 self.assertEqual(children[0].returncode, -9)
@@ -265,6 +277,9 @@ class ViewerAutoCaptureTests(unittest.TestCase):
                 if thread.is_alive():
                     self.service._stop.set()
                     thread.join(10)
+                for pidfd in pidfds:
+                    os.close(pidfd)
+                self.assertFalse(thread.is_alive(), 'capture thread survived cleanup')
 
     def test_manual_and_automatic_capture_serialize_for_same_task(self):
         entered=threading.Event();release=threading.Event();auto_done=threading.Event();errors=[]
