@@ -132,7 +132,7 @@ class ViewerInputSpaceTests(unittest.TestCase):
         with self.q._db() as db:
             db.executemany('INSERT INTO viewer_files(uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)',rows)
         start=time.monotonic()
-        with self.q._db() as db:store._check_input_recovery(db,store._row(db,self.identifier))
+        store.startup_intake_census()
         first=time.monotonic()-start
         start=time.monotonic()
         with self.q._db() as db:store._check_input_recovery(db,store._row(db,self.identifier))
@@ -406,6 +406,50 @@ class InputGuardConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'not qualified'):runtime_config.from_environment()
         with patch.dict(os.environ,{**env,'PROCESSING_AUTHORITY_LEASE_DIR':''},clear=True):
             with self.assertRaisesRegex(ValueError,'authority lease'):runtime_config.from_environment()
+
+@unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'POSIX fallocate required')
+class IntakeRuntimeStartupTests(unittest.TestCase):
+    def setUp(self):
+        self.root=Path(tempfile.mkdtemp(prefix='lt-intake-runtime-')).resolve()
+        self.addCleanup(lambda:print('retained synthetic runtime root:',self.root,flush=True))
+        self.state=self.root/'state';self.leases=self.root/'leases';self.leases.mkdir()
+        queue=Queue(self.state,viewer_enabled=True)
+        TaskStore(queue,self.state/'viewer-tasks')
+        from processing import intake_offline_migration
+        with patch.object(intake_offline_migration,'QUALIFIED',True):
+            with queue._db() as db:intake_offline_migration.install_empty_offline(db)
+        queue.close()
+    def settings(self,enabled=True):
+        return Config('synthetic','http://127.0.0.1:1','http://127.0.0.1:2',1000,20*1024**3,
+            prototype_state_dir=str(self.state),viewer_enabled=True,viewer_token='v'*32,
+            authority_lease_dir=str(self.leases),viewer_input_space_guard=enabled,
+            viewer_input_free_floor=0,viewer_intake_journal=enabled)
+    def qualify(self):
+        from contextlib import ExitStack
+        from processing import viewer_tasks,intake_offline_migration
+        stack=ExitStack()
+        for module,name in ((runtime_config,'VIEWER_INPUT_SPACE_GUARD_QUALIFIED'),
+                            (runtime_config,'VIEWER_INTAKE_JOURNAL_QUALIFIED'),
+                            (viewer_tasks,'INTAKE_JOURNAL_QUALIFIED'),(intake_offline_migration,'QUALIFIED')):
+            stack.enter_context(patch.object(module,name,True))
+        return stack
+    def test_disabled_runtime_rejects_migrated_database(self):
+        with self.assertRaisesRegex(RuntimeError,'intake_journal_configuration_mismatch'):
+            make_handler(self.settings(False))
+        probe=Queue(self.state,viewer_enabled=True);probe.close()
+    def test_actual_startup_holds_unfinished_intake_and_releases_owned_locks(self):
+        from processing import authority_lease
+        with self.qualify():
+            handler=make_handler(self.settings())
+            queue=handler.prototype_queue;store=handler.viewer_service.store
+            identifier=str(uuid.uuid4());store.initialize(identifier,'synthetic',[],None,'production')
+            with patch('pathlib.Path.unlink',side_effect=OSError('synthetic failure')):
+                with self.assertRaises(OSError):store.upload(identifier,'a.jpg',io.BytesIO(b'abc'),3)
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            with self.assertRaises(InputRecoveryRequired):make_handler(self.settings())
+            probe=Queue(self.state,viewer_enabled=True);probe.close()
+            lease=authority_lease.acquire(self.leases,self.state);lease.close()
+            self.assertEqual([p.read_bytes() for p in self.root.rglob('input-*')],[b'abc'])
 
 class LargeRoutingTests(unittest.TestCase):
     def test_ten_thousand_photos_route_main_but_config_limit_remains_20_gib(self):

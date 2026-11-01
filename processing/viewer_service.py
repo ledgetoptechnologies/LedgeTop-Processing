@@ -196,8 +196,15 @@ class ViewerService:
         if type(input_guard) is not bool or (input_guard and runtime_config.VIEWER_INPUT_SPACE_GUARD_QUALIFIED is not True):
             raise RuntimeError('input space guard not qualified')
         input_floor=getattr(config,'viewer_input_free_floor',None) if input_guard else None
+        intake_journal=getattr(config,'viewer_intake_journal',False)
+        if type(intake_journal) is not bool or (intake_journal and runtime_config.VIEWER_INTAKE_JOURNAL_QUALIFIED is not True):
+            raise RuntimeError('intake journal not qualified')
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
-                                       config.viewer_max_input_bytes,input_free_floor=input_floor)
+                                       config.viewer_max_input_bytes,input_free_floor=input_floor,
+                                       intake_journal=intake_journal)
+        if intake_journal:
+            if not getattr(self.store,'intake_journal',False):raise RuntimeError('intake journal store differs')
+            self.store.startup_intake_census()
         if input_guard and self.store.input_free_floor!=input_floor:
             raise RuntimeError('input space guard store differs')
         self._durable_archive_claims = getattr(config, 'viewer_durable_archive_claims', False)

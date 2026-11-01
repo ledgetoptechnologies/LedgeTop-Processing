@@ -285,6 +285,15 @@ class TaskStore:
         if self.intake_journal:
             self._intake_reconciled.add((row['uuid'],row['generation']))
 
+    def startup_intake_census(self):
+        """Bounded first-use checks, before accepting Viewer requests."""
+        if not self.intake_journal:raise InputRecoveryRequired('intake journal required')
+        with self._lock,self.queue._db() as db:
+            rows=db.execute('SELECT * FROM viewer_tasks ORDER BY uuid LIMIT 1001').fetchall()
+            if len(rows)>1000:raise InputRecoveryRequired('task census exceeds bound')
+            for row in rows:
+                self._check_input_recovery(db,row)
+
     @staticmethod
     def _job(db, row):
         if not row['job_id']:
