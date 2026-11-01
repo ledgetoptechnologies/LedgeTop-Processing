@@ -20,10 +20,13 @@ active or unresolved without asserting that its owner has failed or exposing
 claim material. There is no claim resolver.
 
 Each claim binds the task incarnation, node, engine, environment, relative task
-directory, original archive path and capture-or-restore operation. Schema checks
+directory, original archive path and capture-or-restore operation. A restore
+claim also binds a SHA-256 digest of the canonicalized, validated receipt; the
+receipt is re-read and its digest checked before release. Schema checks
 reject earlier differently shaped prototype tables without changing their data;
-no automatic migration is provided. A claim does not bind a writer epoch or the
-receipt bytes and is therefore insufficient by itself to authorize recovery.
+no automatic migration is provided. Capture claims do not bind receipt data;
+no claim binds a writer epoch. Even a receipt-bound claim is therefore
+insufficient by itself to authorize recovery.
 
 Filesystem publication and the database claim update are separate operations.
 A crash or failed database transaction can therefore leave a published archive

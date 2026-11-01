@@ -580,6 +580,11 @@ class ViewerService:
         return {'version': 1, 'task': task['uuid'], 'generation': task['generation'],
                 'job': task['job_id'], 'node': task['node_id'], 'engine': task['engine_uuid']}
 
+    @staticmethod
+    def _archive_receipt_digest(receipt):
+        return hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(',', ':'),
+                                         allow_nan=False).encode('ascii')).hexdigest()
+
     def _recover_metadata_link(self, path):
         """Finish unlinking one task-owned temp link after interrupted publish."""
         info=path.lstat()
@@ -929,13 +934,16 @@ class ViewerService:
                 except FileNotFoundError:
                     if not self._durable_archive_claims:
                         return self._restore_recorded_archive(task,path,receipt)
-                    restore_claim = self.store.claim_archive(task, restore=True)
+                    restore_claim = self.store.claim_archive(task, restore=True,
+                        receipt_sha256=self._archive_receipt_digest(receipt))
                     stream = None
                     try:
                         stream, size = self._restore_recorded_archive(task,path,receipt)
                         stream.close()
-                        stream = self._verify_archive(path, receipt)
-                        self.store.finish_archive_restore(task, restore_claim, stream)
+                        current_receipt = self._archive_receipt(task, receipt_path)
+                        stream = self._verify_archive(path, current_receipt)
+                        self.store.finish_archive_restore(task, restore_claim, stream,
+                                                          self._archive_receipt_digest(current_receipt))
                         result = stream; stream = None
                         return result, size
                     finally:

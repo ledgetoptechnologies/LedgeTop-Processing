@@ -689,6 +689,27 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(path.read_bytes(), self.engine_response)
         self.assertEqual(receipt.read_bytes(), receipt_before)
 
+    def test_durable_restore_holds_if_receipt_changes_before_finish(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        path = Path(task['archive_path'])
+        receipt_path = path.with_suffix('.zip.receipt')
+        path.unlink()
+        original = self.service._restore_recorded_archive
+        def change_after_restore(*args, **kwargs):
+            result = original(*args, **kwargs)
+            receipt = json.loads(receipt_path.read_text())
+            receipt['sha256'] = '0' * 64
+            receipt_path.write_text(json.dumps(receipt))
+            return result
+        with patch.object(self.service, '_restore_recorded_archive', side_effect=change_after_restore):
+            with self.assertRaises(Conflict): self.service.download(self.identifier)
+        self.assertTrue(self.service.store.archive_claim_held(task))
+        self.assertEqual(path.read_bytes(), self.engine_response)
+
     def test_durable_claim_restore_mismatched_result_remains_held(self):
         self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
@@ -944,12 +965,34 @@ finally:s.close();q.authority_lease.close();q.close()
         self.service._durable_archive_claims = True
         self.service._archive_once(self.identifier)
         task = self.fixture.task(self.identifier)
-        token = self.service.store.claim_archive(task, restore=True)
+        receipt = self.service._archive_receipt(task, Path(task['archive_path']).with_suffix('.zip.receipt'))
+        digest = self.service._archive_receipt_digest(receipt)
+        token = self.service.store.claim_archive(task, restore=True, receipt_sha256=digest)
         with self.queue._db() as db:
             db.execute("UPDATE viewer_archive_claims_v1 SET operation='capture' WHERE uuid=?", (self.identifier,))
         with Path(task['archive_path']).open('rb') as stream:
-            with self.assertRaises(Conflict): self.service.store.finish_archive_restore(task, token, stream)
+            with self.assertRaises(Conflict): self.service.store.finish_archive_restore(task, token, stream, digest)
         self.assertTrue(self.service.store.archive_claim_held(task))
+
+    def test_durable_restore_claim_binds_receipt_digest(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        path = Path(task['archive_path'])
+        receipt = self.service._archive_receipt(task, path.with_suffix('.zip.receipt'))
+        digest = self.service._archive_receipt_digest(receipt)
+        token = self.service.store.claim_archive(task, restore=True, receipt_sha256=digest)
+        with self.queue._db() as db:
+            row = db.execute('SELECT receipt_sha256,token_hash FROM viewer_archive_claims_v1').fetchone()
+            self.assertEqual(row['receipt_sha256'], digest)
+            self.assertNotEqual(row['token_hash'], token)
+        with path.open('rb') as stream:
+            with self.assertRaises(Conflict):
+                self.service.store.finish_archive_restore(task, token, stream, '0' * 64)
+        self.assertTrue(self.service.store.archive_claim_held(task))
+        self.assertEqual(path.read_bytes(), self.engine_response)
 
     def test_archive_inspection_cannot_be_downgraded_by_other_store(self):
         store = self.service.store

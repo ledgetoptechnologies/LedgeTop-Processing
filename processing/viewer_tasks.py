@@ -687,7 +687,7 @@ class TaskStore:
     _ARCHIVE_CLAIM_DDL = ('CREATE TABLE viewer_archive_claims_v1 ('
         'uuid TEXT NOT NULL, generation INTEGER NOT NULL, job_id TEXT NOT NULL, '
         'node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL, environment TEXT NOT NULL, '
-        'directory TEXT NOT NULL, archive_path TEXT, operation TEXT NOT NULL '
+        'directory TEXT NOT NULL, archive_path TEXT, receipt_sha256 TEXT, operation TEXT NOT NULL '
         "CHECK(operation IN ('capture','restore')), "
         'token_hash TEXT NOT NULL, PRIMARY KEY(uuid,generation))')
 
@@ -716,9 +716,11 @@ class TaskStore:
             return bool(db.execute('SELECT 1 FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
                                    (task['uuid'], task['generation'])).fetchone())
 
-    def claim_archive(self, task, *, restore=False):
+    def claim_archive(self, task, *, restore=False, receipt_sha256=None):
         if type(restore) is not bool:
             raise ValueError('explicit archive claim type required')
+        if (restore and (type(receipt_sha256) is not str or not re.fullmatch('[a-f0-9]{64}', receipt_sha256))) or (not restore and receipt_sha256 is not None):
+            raise ValueError('restore receipt digest required')
         token = uuid_module.uuid4().hex + uuid_module.uuid4().hex
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -733,9 +735,9 @@ class TaskStore:
                     or job is None or job['status'] != 'succeeded'):
                 raise Conflict('archive task changed')
             try:
-                db.execute('INSERT INTO viewer_archive_claims_v1 VALUES (?,?,?,?,?,?,?,?,?,?)',
+                db.execute('INSERT INTO viewer_archive_claims_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                     (task['uuid'], task['generation'], task['job_id'], row['node_id'], row['engine_uuid'],
-                     row['environment'], row['directory'], row['archive_path'], 'restore' if restore else 'capture',
+                     row['environment'], row['directory'], row['archive_path'], receipt_sha256, 'restore' if restore else 'capture',
                      hashlib.sha256(token.encode()).hexdigest()))
             except sqlite3.IntegrityError:
                 raise ArchiveClaimHeld('archive requires inspection') from None
@@ -748,7 +750,7 @@ class TaskStore:
                                                        'engine_uuid', 'environment', 'directory', 'archive_path'))
                 and hmac.compare_digest(claim['token_hash'], hashlib.sha256(token.encode()).hexdigest()))
 
-    def finish_archive_restore(self, task, token, stream):
+    def finish_archive_restore(self, task, token, stream, receipt_sha256):
         """Release a restore claim only after its verified output is published."""
         path = Path(task['archive_path'])
         with self._lock, self.queue._db() as db:
@@ -762,7 +764,8 @@ class TaskStore:
             claim = db.execute('SELECT * FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
                                (task['uuid'], row['generation'])).fetchone()
             if (job is None or job['status'] != 'succeeded'
-                    or not self._archive_claim_matches(claim, row, token, 'restore')):
+                    or not self._archive_claim_matches(claim, row, token, 'restore')
+                    or type(receipt_sha256) is not str or claim['receipt_sha256'] != receipt_sha256):
                 raise Conflict('archive restore claim changed')
             opened, current = os.fstat(stream.fileno()), path.lstat()
             if (path.is_symlink() or not stat.S_ISREG(current.st_mode)
