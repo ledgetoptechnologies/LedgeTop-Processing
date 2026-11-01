@@ -4,11 +4,13 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from processing.app import CoordinatorService,make_handler
 from processing.config import Config
+import processing.viewer_http as viewer_http
+import processing.viewer_service as viewer_service
 from processing.synthetic_engine import SyntheticEngine,handler_for
 
 def main():
     viewer=os.environ['VIEWER_SOURCE'];root=tempfile.TemporaryDirectory(prefix='native-viewer-fixture-')
-    engines=[];servers=[];threads=[];running={};guard=threading.RLock();overlap=[];removals=[]
+    engines=[];servers=[];threads=[];running={};guard=threading.RLock();overlap=[];removals=[];inits=[];uploads=[]
     archive=io.BytesIO()
     with zipfile.ZipFile(archive,'w') as z:
         for name,content in [('odm_texturing/odm_textured_model_geo.glb','glb'),('odm_texturing/odm_textured_model_geo.obj','mtllib model.mtl\nv 0 0 0\n'),('odm_texturing/model.mtl','newmtl surface\nmap_Kd texture.jpg\n'),('odm_texturing/texture.jpg','texture'),('entwine_pointcloud/ept.json','{}'),('3d_tiles/model/tileset.json','{}')]:z.writestr(name,content)
@@ -29,9 +31,19 @@ def main():
         for engine in (Engine(1000,3600),Engine(None,3600)):
             engines.append(engine);server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(engine,'synthetic-node-token-nnnnnnnn'))
             thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02});servers.append(server);thread.start();threads.append(thread)
-        cfg=Config(api_token='synthetic-api-token-aaaaaaaa',local_node_url='http://127.0.0.1:'+str(servers[0].server_port),main_node_url='http://127.0.0.1:'+str(servers[1].server_port),local_max_photos=1000,local_max_input_bytes=20*1024**3,prototype_state_dir=str(Path(root.name)/'coordinator'),prototype_node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,viewer_token='synthetic-production-token-pppppppp',viewer_staging_token='synthetic-staging-token-ssssssss',local_node_token='synthetic-node-token-nnnnnnnn',main_node_token='synthetic-node-token-nnnnnnnn')
+        # Test-only limits are applied to the actual advertisement and parser.
+        viewer_http.MAX_UPLOAD_BYTES=400;viewer_service.MAX_UPLOAD_BYTES=400
+        cfg=Config(api_token='synthetic-api-token-aaaaaaaa',local_node_url='http://127.0.0.1:'+str(servers[0].server_port),main_node_url='http://127.0.0.1:'+str(servers[1].server_port),local_max_photos=1000,local_max_input_bytes=20*1024**3,prototype_state_dir=str(Path(root.name)/'coordinator'),prototype_node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,viewer_max_input_bytes=30,viewer_token='synthetic-production-token-pppppppp',viewer_staging_token='synthetic-staging-token-ssssssss',local_node_token='synthetic-node-token-nnnnnnnn',main_node_token='synthetic-node-token-nnnnnnnn')
         def start(port=0):
-            handler=make_handler(cfg);server=ThreadingHTTPServer(('127.0.0.1',port),handler);stop=threading.Event();service=CoordinatorService(server,handler);exits=[]
+            handler=make_handler(cfg)
+            class Measured(handler):
+                def do_POST(self):
+                    path=self.path.split('?',1)[0]
+                    with guard:
+                        if path=='/task/new/init':inits.append(self.headers.get('set-uuid'))
+                        if path.startswith('/task/new/upload/'):uploads.append((path.rsplit('/',1)[-1],int(self.headers['Content-Length'])))
+                    return super().do_POST()
+            server=ThreadingHTTPServer(('127.0.0.1',port),Measured);stop=threading.Event();service=CoordinatorService(server,handler);exits=[]
             thread=threading.Thread(target=lambda:exits.append(service.run(stop)));thread.start();running.update(handler=handler,server=server,thread=thread,stop=stop,exits=exits)
             until=time.monotonic()+10
             while not service.healthy():
@@ -73,6 +85,10 @@ def main():
                             t=task(identifier);engine=engines[0 if t['node_id']=='cluster' else 1]
                             assert t['job']['status']=='succeeded' and engine.tasks[t['engine_uuid']]['code']==40
                             assert Path(t['archive_path']).read_bytes()==data
+                    elif op=='assert-no-init':assert parts[1] not in inits
+                    elif op=='upload-evidence':
+                        t=task(parts[1]);body=json.dumps({'lengths':[n for uid,n in uploads if uid==parts[1]],'names':[x['name'] for x in t['files']],'images':t['images_count']}).encode()
+                        self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
                     else:raise RuntimeError('unknown fixture operation')
                     self.send_response(200);self.send_header('Content-Length','2');self.end_headers();self.wfile.write(b'{}')
                 except Exception as exc:
