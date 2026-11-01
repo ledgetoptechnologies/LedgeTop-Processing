@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from processing.reference_driver import DriverHeld, ReferenceDriver
 
@@ -23,6 +23,19 @@ class DriverInspectionTests(unittest.TestCase):
         driver._background=Mock(side_effect=DriverHeld('reference_inspection_protocol_error'))
         driver._step=Mock(return_value={'state':'idle'})
         self.assertEqual(driver.step(),{'state':'held','reason':'reference_inspection_protocol_error'})
+
+    def test_process_uncertainty_blocks_foreground_and_preparation(self):
+        driver=object.__new__(ReferenceDriver)
+        driver._state_owner=None;driver._lock=threading.Lock();driver._combined_policy_initial=None
+        driver._background=Mock(return_value={'state':'held','reason':'control_child_reaping_uncertain'})
+        driver._step=Mock(return_value={'state':'processing'})
+        self.assertEqual(driver.step(),{'state':'held','reason':'control_child_reaping_uncertain'})
+        driver._step.assert_not_called()
+        driver._background.reset_mock()
+        with patch('processing.reference_control_subprocess._PROCESS_HELD',True):
+            self.assertEqual(driver.step(),{'state':'held','reason':'control_child_reaping_uncertain'})
+        driver._background.assert_not_called()
+        driver._step.assert_not_called()
 
     def test_actual_background_relay_reports_job_and_preserves_checkpoint(self):
         db=sqlite3.connect(':memory:');db.row_factory=sqlite3.Row

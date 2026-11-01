@@ -579,6 +579,9 @@ class ReferenceDriver:
         if not self._lock.acquire(blocking=False):
             return {'state': 'busy'}
         try:
+            from .reference_control_subprocess import process_control_held
+            if process_control_held():
+                return {'state':'held','reason':'control_child_reaping_uncertain'}
             if self._state_owner is not None:
                 try:self._state_owner.check(self.path.parent)
                 except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
@@ -595,6 +598,9 @@ class ReferenceDriver:
                                   if str(error) in _INSPECTION_HOLDS else {'state': 'background_retry'})
                 except Exception:
                     background = {'state': 'background_retry'}
+            if (background.get('reason') == 'control_child_reaping_uncertain'
+                    or process_control_held()):
+                return {'state':'held','reason':'control_child_reaping_uncertain'}
             result = self._step()
             if background['state'] == 'held':
                 return background if result['state'] == 'idle' else {**result, 'background': background}

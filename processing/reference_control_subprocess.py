@@ -53,6 +53,11 @@ def _stop_and_reap(child):
         _PROCESS_HELD = True
         raise ControlTransportHeld('control_child_reaping_uncertain') from None
 
+def process_control_held():
+    """Conservative in-process latch check; never clears uncertain state."""
+    return os.getpid() != _PROCESS_PID or _PROCESS_HELD
+
+
 def unreaped_child_status():
     """Return sanitized evidence of the retained handle, without clearing the latch."""
     if os.getpid() != _PROCESS_PID:
