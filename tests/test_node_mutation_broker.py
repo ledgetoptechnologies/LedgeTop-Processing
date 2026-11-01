@@ -121,6 +121,43 @@ class NodeMutationBrokerTests(unittest.TestCase):
         init=self.grant();self.broker.mutate(init,b.sign_grant(init,self.secret),self.body)
         self.owner_store.update(self.task,phase='upload_pending')
 
+    def test_signed_grant_evidence_verifier_requires_exact_mac_and_canonical_bytes(self):
+        grant=self.grant();raw=b._json(grant).decode('ascii');signature=b.sign_grant(grant,self.secret)
+        self.assertEqual(b.verify_grant_evidence(raw,signature,self.secret),grant)
+        for altered,mac,key in ((raw,'0'*64,self.secret),(' '+raw,signature,self.secret),
+                                (raw,signature,b'wrong-test-key-'*3),
+                                (raw[:-1]+',"operationId":"'+grant['operationId']+'"}',signature,self.secret)):
+            with self.subTest(altered=altered[:20]):
+                with self.assertRaises(b.BrokerHeld):b.verify_grant_evidence(altered,mac,key)
+
+    def test_evidence_rejects_insert_or_replace_with_recursive_triggers_off_and_on(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret)
+        self.broker.mutate(grant,signature,self.body)
+        op=grant['operationId']
+        for flag in ('OFF','ON'):
+            with self.subTest(recursive_triggers=flag):
+                self.broker.db.execute('PRAGMA recursive_triggers='+flag)
+                node=self.broker.db.execute('SELECT grant_json,signature FROM node_grants WHERE operation_id=?',(op,)).fetchone()
+                observation=self.broker.db.execute('SELECT grant_hash,reply_json FROM engine_observations WHERE operation_id=?',(op,)).fetchone()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.broker.db.execute('INSERT INTO node_grants VALUES(?,?,?)',(None,'{}','0'*64))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.broker.db.execute('INSERT INTO engine_observations VALUES(?,?,?)',(None,'0'*64,'{}'))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.broker.db.execute('INSERT OR REPLACE INTO node_grants VALUES(?,?,?)',(op,'{}','0'*64))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    self.broker.db.execute('INSERT OR REPLACE INTO engine_observations VALUES(?,?,?)',(op,'0'*64,'{}'))
+                self.assertEqual(tuple(self.broker.db.execute('SELECT grant_json,signature FROM node_grants WHERE operation_id=?',(op,)).fetchone()),tuple(node))
+                self.assertEqual(tuple(self.broker.db.execute('SELECT grant_hash,reply_json FROM engine_observations WHERE operation_id=?',(op,)).fetchone()),tuple(observation))
+                with self.owner_queue._db() as db:
+                    db.execute('PRAGMA recursive_triggers='+flag)
+                    coordinator=db.execute('SELECT grant_json,signature FROM broker_grant_evidence WHERE operation_id=?',(op,)).fetchone()
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute('INSERT INTO broker_grant_evidence VALUES(?,?,?)',(None,'{}','0'*64))
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute('INSERT OR REPLACE INTO broker_grant_evidence VALUES(?,?,?)',(op,'{}','0'*64))
+                    self.assertEqual(tuple(db.execute('SELECT grant_json,signature FROM broker_grant_evidence WHERE operation_id=?',(op,)).fetchone()),tuple(coordinator))
+
     def test_unsigned_coordinator_prepare_cannot_create_intent(self):
         grant=self.grant()
         with self.assertRaises(b.BrokerHeld):

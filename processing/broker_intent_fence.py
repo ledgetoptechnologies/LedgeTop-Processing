@@ -5,9 +5,10 @@ from .transfer_fence import JOBS_DDL
 _JOBS_SCHEMA = "(SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs') IS '" + JOBS_DDL.replace("'", "''") + "'"
 
 DDL = "CREATE TABLE broker_intents (operation_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, grant_hash TEXT NOT NULL, state TEXT NOT NULL)"
-GRANT_DDL = "CREATE TABLE broker_grant_evidence (operation_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, signature TEXT NOT NULL)"
+GRANT_DDL = "CREATE TABLE broker_grant_evidence (operation_id TEXT PRIMARY KEY NOT NULL, grant_json TEXT NOT NULL, signature TEXT NOT NULL)"
 MARKER_DDL = "CREATE TABLE broker_intent_required (singleton INTEGER PRIMARY KEY CHECK(singleton=1), required INTEGER NOT NULL CHECK(required=1))"
 TRIGGERS = {
+    'broker_grant_insert_duplicate': "CREATE TRIGGER broker_grant_insert_duplicate BEFORE INSERT ON broker_grant_evidence WHEN EXISTS (SELECT 1 FROM broker_grant_evidence WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'broker grant evidence exists'); END",
     'broker_grant_update': "CREATE TRIGGER broker_grant_update BEFORE UPDATE ON broker_grant_evidence BEGIN SELECT RAISE(ABORT,'broker grant evidence immutable'); END",
     'broker_grant_delete': "CREATE TRIGGER broker_grant_delete BEFORE DELETE ON broker_grant_evidence BEGIN SELECT RAISE(ABORT,'broker grant evidence immutable'); END",
     'broker_job_update': "CREATE TRIGGER broker_job_update BEFORE UPDATE ON jobs WHEN (EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete' AND (job_id=OLD.id OR job_id=NEW.id)) AND NOT (" + _JOBS_SCHEMA + " AND OLD.status IS 'running' AND NEW.status IS 'held' AND NEW.held_reason IS 'coordinator_restart' AND NEW.id IS OLD.id AND NEW.seq IS OLD.seq AND NEW.request_id IS OLD.request_id AND NEW.environment IS OLD.environment AND NEW.profile IS OLD.profile AND NEW.worker_id IS OLD.worker_id AND NEW.node_id IS OLD.node_id AND NEW.claim_hash IS OLD.claim_hash AND NEW.result IS OLD.result AND NEW.created_at IS OLD.created_at)) OR (NEW.status IS 'running' AND OLD.status IS NOT 'running' AND EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete')) BEGIN SELECT RAISE(ABORT,'broker intent held'); END",

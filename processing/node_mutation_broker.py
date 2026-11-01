@@ -39,10 +39,12 @@ _DDL = {
     'binding': 'CREATE TABLE binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), digest TEXT NOT NULL)',
     'reservation': 'CREATE TABLE reservation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL)',
     'operations': 'CREATE TABLE operations (id TEXT PRIMARY KEY, operation TEXT NOT NULL, file_key TEXT NOT NULL, grant_hash TEXT NOT NULL, state TEXT NOT NULL, reply TEXT, UNIQUE(operation,file_key))',
-    'node_grants': 'CREATE TABLE node_grants (operation_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, signature TEXT NOT NULL)',
-    'engine_observations': 'CREATE TABLE engine_observations (operation_id TEXT PRIMARY KEY, grant_hash TEXT NOT NULL, reply_json TEXT NOT NULL)',
+    'node_grants': 'CREATE TABLE node_grants (operation_id TEXT PRIMARY KEY NOT NULL, grant_json TEXT NOT NULL, signature TEXT NOT NULL)',
+    'engine_observations': 'CREATE TABLE engine_observations (operation_id TEXT PRIMARY KEY NOT NULL, grant_hash TEXT NOT NULL, reply_json TEXT NOT NULL)',
 }
 _NODE_TRIGGERS = {
+    'node_grant_insert_duplicate': "CREATE TRIGGER node_grant_insert_duplicate BEFORE INSERT ON node_grants WHEN EXISTS (SELECT 1 FROM node_grants WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'node grant evidence exists'); END",
+    'engine_observation_insert_duplicate': "CREATE TRIGGER engine_observation_insert_duplicate BEFORE INSERT ON engine_observations WHEN EXISTS (SELECT 1 FROM engine_observations WHERE operation_id=NEW.operation_id) BEGIN SELECT RAISE(ABORT,'engine observation exists'); END",
     'node_grant_update': "CREATE TRIGGER node_grant_update BEFORE UPDATE ON node_grants BEGIN SELECT RAISE(ABORT,'node grant evidence immutable'); END",
     'node_grant_delete': "CREATE TRIGGER node_grant_delete BEFORE DELETE ON node_grants BEGIN SELECT RAISE(ABORT,'node grant evidence immutable'); END",
     'engine_observation_update': "CREATE TRIGGER engine_observation_update BEFORE UPDATE ON engine_observations BEGIN SELECT RAISE(ABORT,'engine observation immutable'); END",
@@ -182,6 +184,36 @@ def _uuid(value):
 def sign_grant(grant, secret):
     if type(secret) is not bytes or len(secret) < 32: raise BrokerHeld('invalid signing key')
     return hmac.new(secret, b'ledgetop-node-mutation-v1\0' + _json(grant), hashlib.sha256).hexdigest()
+
+
+def verify_grant_evidence(grant_json, signature, secret):
+    """Authenticate canonical public grant bytes; never authorize recovery.
+
+    Callers must separately qualify the signing key, complete node/coordinator
+    identities, epoch, reservation and engine state. No claim token is needed.
+    """
+    if (type(grant_json) is not str or not grant_json.isascii() or len(grant_json)>16384
+            or type(signature) is not str or not re.fullmatch('[a-f0-9]{64}',signature)):
+        raise BrokerHeld('invalid signed grant evidence')
+    def unique(pairs):
+        output={}
+        for key,value in pairs:
+            if key in output:raise ValueError('duplicate grant field')
+            output[key]=value
+        return output
+    try:
+        grant=json.loads(grant_json,object_pairs_hook=unique,
+                         parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        if type(grant) is not dict:raise ValueError()
+        operation=grant.get('operation')
+        expected=_UPLOAD_FIELDS if operation=='upload' else _FIELDS
+        if (operation not in ('init','upload','commit') or set(grant)!=expected
+                or not _uuid(grant.get('operationId')) or _json(grant).decode('ascii')!=grant_json
+                or not hmac.compare_digest(sign_grant(grant,secret),signature)):
+            raise ValueError()
+        return grant
+    except (ValueError,TypeError,AttributeError,RecursionError,BrokerHeld):
+        raise BrokerHeld('signed grant evidence authentication failed') from None
 
 
 def _sender_confirmation(grant, secret):
