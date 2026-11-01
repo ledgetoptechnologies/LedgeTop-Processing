@@ -14,6 +14,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -166,6 +167,27 @@ class Queue(Maintenance):
     def node_profiles(self, node_id):
         return sorted(profile for profile in self.allowed_profiles
                       if profile != PROFILE or node_id in self.treedar_node_ids)
+
+    @contextmanager
+    def pin_transfer(self, deadline):
+        """Keep this process's coordinator lease live without holding its mutex."""
+        if os.getpid() != self._creator_pid:
+            raise RuntimeError('coordinator process changed')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._lifecycle_lock.acquire(timeout=remaining):
+            raise RuntimeError('coordinator transfer pin deadline exceeded')
+        try:
+            if self._lock.closed:
+                raise RuntimeError('coordinator ownership closed')
+            self._database_users += 1
+        finally:
+            self._lifecycle_lock.release()
+        try:
+            yield
+        finally:
+            if os.getpid() == self._creator_pid:
+                with self._lifecycle_lock:
+                    self._database_users -= 1
 
     def _node_public(self, row):
         return {**super()._node_public(row), "allowedProfiles": self.node_profiles(row['id'])}
@@ -332,6 +354,24 @@ class Queue(Maintenance):
         db.execute("UPDATE jobs SET status=?,result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                    (payload["status"], result, identifier))
         return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
+
+    def hold_started_transfer(self, identifier, token):
+        """Hold a matching unfinished upload without modifying its evidence."""
+        if type(token) is not str or not 1 <= len(token) <= 128: return False
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
+            if not table: return False
+            from .transfer_fence import attest
+            attest(db)
+            row = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+            started = db.execute("SELECT 1 FROM engine_ingress_uploads WHERE job_id=? AND state='started'", (identifier,)).fetchone()
+            if not row or not started or not row['claim_hash'] or not hmac.compare_digest(
+                    hashlib.sha256(token.encode()).hexdigest(), row['claim_hash']): return False
+            if row['status'] == 'running':
+                db.execute("UPDATE jobs SET status='held',held_reason='transfer_uncertain',updated_at=CURRENT_TIMESTAMP WHERE id=?", (identifier,))
+                return True
+            return row['status'] == 'held'
 
     def operator(self, identifier, action, payload):
         """A separate human/operator credential is required by the HTTP layer.

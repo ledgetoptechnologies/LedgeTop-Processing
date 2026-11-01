@@ -77,6 +77,48 @@ def sync_directory(path):
 
 
 class TaskStore:
+    def prepare_guarded_engine_upload(self, job_id, claim_token, name_key, upload_id, *, expected_generation=None):
+        """Record exact DB-owned file identity; unwired, no physical fencing."""
+        from . import engine_upload_contract as contract
+        if contract.QUALIFIED is not True:
+            raise Conflict('guarded file upload not qualified')
+        checked_uuid(job_id);checked_uuid(upload_id)
+        if (type(claim_token) is not str or not 32<=len(claim_token)<=128
+            or type(name_key) is not str or self._filename(name_key)!=name_key
+            or (expected_generation is not None and (type(expected_generation) is not int or expected_generation<1))):
+            raise Conflict('exact upload identity required')
+        with self._lock,self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            job=db.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+            task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job_id,)).fetchone()
+            if (job is None or task is None or job['status']!='running' or job['worker_id']!='viewer-dispatch'
+                or db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE job_id=?',(job_id,)).fetchone()[0]!=1
+                or job['profile']!=VIEWER_PROFILE or not job['claim_hash']
+                or not hmac.compare_digest(hashlib.sha256(claim_token.encode()).hexdigest(),job['claim_hash'])
+                or task['claim_token']!=claim_token or task['stage']!='running' or task['phase']!='upload_pending'
+                or task['environment']!=job['environment'] or task['node_id']!=job['node_id']
+                or (expected_generation is not None and task['generation']!=expected_generation)
+                or task['removed'] or type(task['generation']) is not int or task['generation']<1):
+                raise Conflict('active task claim required')
+            checked_uuid(task['uuid']);checked_uuid(task['engine_uuid'])
+            file=db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',(task['uuid'],name_key)).fetchone()
+            if (file is None or self._filename(file['name'])!=name_key or type(file['bytes']) is not int
+                or file['bytes']<=0 or type(file['sha256']) is not str or not re.fullmatch('[0-9a-f]{64}',file['sha256'])
+                or type(file['path']) is not str or not re.fullmatch('input-[0-9a-f]{32}',file['path'])):
+                raise Conflict('stored input identity unavailable')
+            self._directory(task)
+            schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_engine_upload_intents'").fetchone()
+            if schema is None:db.execute(contract.DDL)
+            elif schema[0]!=contract.DDL:raise Conflict('file intent schema changed')
+            if (db.execute('SELECT 1 FROM viewer_engine_upload_intents WHERE upload_id=? OR (job_id=? AND state!=?)',(upload_id,job_id,'complete')).fetchone()
+                or db.execute('SELECT 1 FROM viewer_engine_upload_intents WHERE task_uuid=? AND generation=? AND name_key=?',(task['uuid'],task['generation'],name_key)).fetchone()
+                or db.execute('SELECT COUNT(*) FROM viewer_engine_upload_intents').fetchone()[0]>=100000):
+                raise Conflict('file upload intent requires inspection')
+            db.execute("INSERT INTO viewer_engine_upload_intents VALUES(?,?,?,?,?,?,?,?,?,?,?,'prepared')",
+                       (upload_id,job_id,task['uuid'],task['generation'],task['engine_uuid'],job['claim_hash'],
+                        file['name_key'],file['name'],file['path'],file['bytes'],file['sha256']))
+            return {'state':'prepared'}
+
     def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
             raise ValueError('positive input limit required')

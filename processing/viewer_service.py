@@ -169,7 +169,13 @@ class NativeEngine:
 
 
 class ViewerService:
-    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node):
+    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, guarded_engines=None):
+        if guarded_engines is not None:
+            from . import guarded_native_engine, engine_upload_contract
+            if guarded_native_engine.QUALIFIED is not True or engine_upload_contract.QUALIFIED is not True:
+                raise Conflict('guarded dispatcher not qualified')
+            if engines is not None or type(guarded_engines) is not dict or set(guarded_engines)!={'cluster','main'}:
+                raise Conflict('exact guarded engine mapping required')
         self.queue, self.config = queue, config
         self._archive_registry = getattr(config, 'viewer_archive_registry', False)
         if type(self._archive_registry) is not bool:
@@ -199,8 +205,15 @@ class ViewerService:
                         raise RuntimeError('durable archive claims configuration required')
         if self._archive_registry:
             self.store.enable_archive_registry()
-        self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
-                                  'main': NativeEngine(config.main_node_url, config.main_node_token)}
+        if guarded_engines is not None:
+            from .guarded_native_engine import GuardedNativeEngine
+            self.engines={node:GuardedNativeEngine(self.store,guard) for node,guard in guarded_engines.items()}
+            if (any(engine.guard.binding.node_id!=node for node,engine in self.engines.items())
+                or len({engine.guard.binding.engine_id for engine in self.engines.values()})!=2):
+                raise Conflict('guarded node identity differs')
+        else:
+            self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
+                                      'main': NativeEngine(config.main_node_url, config.main_node_token)}
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -1005,6 +1018,8 @@ class ViewerService:
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])
+        if task.get('claim_token') and self.queue.hold_started_transfer(task['job_id'], task['claim_token']):
+            return
         if job and (job['status'] == 'running' or
                     (job['status'] == 'held' and job['heldReason'] == 'coordinator_restart')):
             self.queue.operator(task['job_id'], 'hold', {'note': reason})
