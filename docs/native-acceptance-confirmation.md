@@ -13,6 +13,10 @@ outbox and retry the identical receipt; a missing or failed response does not
 prove whether an earlier attempt committed. A conflicting response is not a
 confirmation. This confirmation identifies a coordinator metadata tombstone;
 it is not independent proof that Viewer stored files or that cleanup is safe.
+Before either confirming a replay or relaying receipts to a worker, the store
+revalidates each persisted receipt's canonical payload, digest and job binding.
+This detects inconsistent rows but is not protection against a writer able to
+change both the payload and digest; durable writer fencing remains necessary.
 
 The additional fields are backwards-compatible for consumers that tolerate
 unknown JSON fields. Strict consumers must update before using this candidate.

@@ -573,6 +573,23 @@ class ReferenceStore:
                 raise Conflict("operator-held worker results require explicit resolution")
             return self._seal_result(db, row, result, allow_recovery=True)
 
+    @staticmethod
+    def _validated_acceptances(db, row, result):
+        receipts = []
+        for item in db.execute("SELECT receipt_id,digest,receipt_json FROM reference_acceptances WHERE job_id=?", (row['job_id'],)):
+            try:
+                if result is None:
+                    raise ValueError('receipt without result')
+                value = protocol.validate_acceptance(json.loads(item['receipt_json']),
+                    result_manifest=result, input_manifest_sha256=row['manifest_sha'])
+                if (value['receiptId'] != item['receipt_id'] or _json(value) != item['receipt_json']
+                        or protocol.receipt_tombstone_digest(value) != item['digest']):
+                    raise ValueError('stored acceptance identity changed')
+            except (ValueError, TypeError, KeyError):
+                raise Conflict('stored acceptance requires inspection') from None
+            receipts.append(value)
+        return receipts
+
     def accept(self, job_id, receipt):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -592,14 +609,16 @@ class ReferenceStore:
                 for existing in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_terminal_acceptances'):
                     if identities & {existing['receipt_id'], existing['storage_receipt_id']}:
                         raise Conflict('acceptance identity belongs to terminal metadata')
-            old = db.execute("SELECT job_id,digest FROM reference_acceptances WHERE receipt_id=?", (checked["receiptId"],)).fetchone()
+            old = db.execute("SELECT job_id,digest,receipt_json FROM reference_acceptances WHERE receipt_id=?", (checked["receiptId"],)).fetchone()
             if old and (old["job_id"], old["digest"]) != (job_id, receipt_digest):
                 raise Conflict("receipt ID already belongs to a different acceptance")
-            accepted, receipts = set(), []
-            for item in db.execute("SELECT receipt_json FROM reference_acceptances WHERE job_id=?", (job_id,)):
-                value = json.loads(item[0])
-                receipts.append(value)
-                accepted.update(value["acceptedObjectIds"])
+            if old and old['receipt_json'] != encoded:
+                # The digest column alone is not proof of the stored payload.
+                # Refuse to confirm a modified/noncanonical row; retain it for
+                # inspection without changing acceptance or cleanup state.
+                raise Conflict('stored acceptance requires inspection')
+            receipts = self._validated_acceptances(db, row, result)
+            accepted = {identifier for value in receipts for identifier in value['acceptedObjectIds']}
             if not old:
                 # The worker relay is bounded to MAX_OBJECTS receipts. Require
                 # each new identity to add coverage so no client can create
@@ -655,8 +674,16 @@ class ReferenceStore:
         """PRIVATE worker relay; metadata receipts grant no unverified deletion."""
         with self.queue._db() as db:
             row = self._row(db, job_id)
-            receipts = [json.loads(item[0]) for item in db.execute(
-                'SELECT receipt_json FROM reference_acceptances WHERE job_id=? ORDER BY receipt_id', (job_id,))]
+            result = json.loads(row['result_json']) if row['result_json'] else None
+            receipts = sorted(self._validated_acceptances(db, row, result),key=lambda value:value['receiptId'])
+            relay = json.dumps({'receipts': receipts, 'fullyAccepted': False},
+                ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode('utf-8')
+            if len(receipts) > protocol.MAX_OBJECTS or len(relay) > protocol.MAX_BODY_BYTES:
+                raise Conflict('stored acceptance relay requires inspection')
+            if row['phase'] == 'completed' and result is not None:
+                accepted = {identifier for value in receipts for identifier in value['acceptedObjectIds']}
+                if accepted != {obj['id'] for obj in result['objects']}:
+                    raise Conflict('stored acceptance coverage requires inspection')
             return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed'}
 
     def pending_outbox(self, *, now=None, limit=100):
