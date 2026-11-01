@@ -188,6 +188,22 @@ def _recovery_report(report, node_id, engine_id, authority_id):
                 or operation['id'] in seen_ids or operation['operation'] in seen_kinds):
             raise SessionHeld('invalid node operations')
         seen_ids.add(operation['id']);seen_kinds.add(operation['operation'])
+    # Incomplete intermediate writes are possible after a crash. Report them
+    # as held rather than inferring ownership or a completed operation.
+    if (reservation is None)!=(stored is None):
+        raise SessionHeld('inconsistent node reservation')
+    if stored is None:
+        if operations:raise SessionHeld('operation without node reservation')
+    else:
+        job=reservation['job']
+        if (job is None or job['id']!=stored[4] or job['workerId']!='node-broker'
+                or reservation['receiptId']!=uuid.UUID(stored[4]).hex or not operations):
+            raise SessionHeld('inconsistent node reservation')
+    by_kind={operation['operation']:operation['state'] for operation in operations}
+    if 'commit' in by_kind and by_kind.get('init')!='complete':
+        raise SessionHeld('inconsistent node operations')
+    if reservation is not None and reservation['completionDigest'] is not None and by_kind.get('commit')!='complete':
+        raise SessionHeld('inconsistent node completion')
     return report
 
 

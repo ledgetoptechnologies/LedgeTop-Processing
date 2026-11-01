@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 from processing.node_authority_session import (RemoteAuthoritySession, SessionHeld, serve_coordinator,
@@ -130,6 +131,32 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
                 request_node_recovery(channels['client'],node_id=self.node,engine_id=self.engine,
                                       authority_id=self.authority,peer_sha256='0'*64)
         thread.join(5);self.assertFalse(thread.is_alive())
+
+    def test_recovery_report_rejects_inconsistent_gate_and_journal(self):
+        from processing.node_authority_session import _recovery_report
+        from processing.node_mutation_broker import inspect_prior_node_state
+        empty=inspect_prior_node_state(self.engine)
+        init={'id':str(uuid.uuid4()),'operation':'init','state':'complete'}
+        commit={'id':str(uuid.uuid4()),'operation':'commit','state':'started'}
+        task_id=str(uuid.uuid4())
+        stored=[self.authority,self.node,self.engine,self.epoch,self.job,task_id,'production',1]
+        gate={'receiptId':uuid.UUID(self.job).hex,'job':{'id':self.job,'workerId':'node-broker',
+              'nodeId':self.node,'authorityId':self.authority},'completionDigest':None}
+        good=dict(empty,gateReservation=gate,journalReservation=stored,operations=[init,commit])
+        self.assertEqual(_recovery_report(good,self.node,self.engine,self.authority),good)
+        bad=[]
+        bad.append(dict(empty,operations=[init]))
+        bad.append(dict(empty,gateReservation=gate))
+        bad.append(dict(empty,journalReservation=stored,operations=[init]))
+        bad.append(dict(empty,gateReservation=gate,journalReservation=stored,operations=[]))
+        wrong_gate=copy.deepcopy(gate);wrong_gate['job']['id']=str(uuid.uuid4())
+        bad.append(dict(empty,gateReservation=wrong_gate,journalReservation=stored,operations=[init]))
+        bad.append(dict(empty,gateReservation=gate,journalReservation=stored,operations=[commit]))
+        started=dict(init,state='started')
+        bad.append(dict(empty,gateReservation=gate,journalReservation=stored,operations=[started,commit]))
+        for report in bad:
+            with self.subTest(report=report):
+                with self.assertRaises(SessionHeld):_recovery_report(report,self.node,self.engine,self.authority)
 
     def test_recovery_rejects_bad_expected_identity_before_network(self):
         channel=Mock()
