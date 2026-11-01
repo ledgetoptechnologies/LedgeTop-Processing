@@ -36,11 +36,14 @@ Neither boundary is provided here. The existing qualification flag stays false.
 This inactive integration is initialization-only. Before forwarding, the TLS
 coordinator handler verifies the exact Viewer claim and commits a coordinator
 `started` intent. After a node response the node checks session authority,
-records its local completion and requests coordinator completion. Loss at any
-point keeps the coordinator intent started, including loss after the node has
-completed; a restart holds that job and blocks further claims. Exact replay is
-accepted only within the still-valid authority session. No automatic
-reconciliation or epoch adoption is implemented.
+records its local completion and requests coordinator completion. Loss before
+coordinator completion leaves the coordinator intent started, including if the
+node has completed; a restart holds that job and blocks further claims. If the
+coordinator commits completion but its acknowledgement is lost, both intents are
+complete although the caller sees a session failure. An exact retry through a
+fresh valid session in the same coordinator epoch replays the stored node result
+without another engine request. There is no automatic reconciliation or epoch
+adoption after a coordinator restart.
 
 The mTLS peer is trusted: a completion request is an assertion by that peer, not
 independent proof that the intended node has a durable receipt. Node certificate

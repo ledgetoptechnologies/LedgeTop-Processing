@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
+from processing import node_authority_session as authority_session
 from processing.node_authority_session import RemoteAuthoritySession, SessionHeld, serve_coordinator
 from processing.node_mutation_broker import BrokerHeld, LocalCoordinatorAuthority, NodeMutationBroker, issue_init_grant, sign_grant
 from processing.node_gate import NodeGate
@@ -34,6 +35,59 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
         issue_init_grant(self.owner_queue,**kwargs)
         with self.owner_queue._db() as db:db.execute('DROP TABLE coordinator_authority_lease')
         with self.assertRaises(BrokerHeld):issue_init_grant(self.owner_queue,**kwargs)
+
+    def test_lost_completion_ack_leaves_both_complete_and_fresh_session_replays(self):
+        key=self.root/'lost-ack.key';cert=self.root/'lost-ack.crt'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=10)
+        pin=hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cert,key);server_context.load_verify_locations(cafile=str(cert));server_context.verify_mode=ssl.CERT_REQUIRED
+        client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
+        resources=[]; errors=[]
+        def open_session():
+            client_raw,server_raw=socket.socketpair();client_raw.settimeout(3);server_raw.settimeout(3)
+            record={'client_raw':client_raw,'server_raw':server_raw,'remote':None,'thread':None}
+            resources.append(record)
+            def serve():
+                try:
+                    channel=server_context.wrap_socket(server_raw,server_side=True)
+                    serve_coordinator(channel,queue=self.owner_queue,witness=LocalCoordinatorAuthority(self.owner_queue),secret=self.secret,peer_sha256=pin,session_seconds=20,idle_seconds=12)
+                except Exception as exc:errors.append(type(exc).__name__)
+            thread=threading.Thread(target=serve);record['thread']=thread;thread.start()
+            client=client_context.wrap_socket(client_raw,server_hostname='localhost')
+            remote=RemoteAuthoritySession(client,authority=self.authority,epoch=self.epoch,claim_token=self.owner_claim['claimToken'],peer_sha256=pin,timeout_seconds=3)
+            record['remote']=remote
+            return remote
+        def cleanup():
+            for record in resources:
+                if record['remote'] is not None:record['remote'].close()
+                else:record['client_raw'].close()
+                record['server_raw'].close()
+                if record['thread'] is not None and record['thread'].ident is not None:
+                    record['thread'].join(5);self.assertFalse(record['thread'].is_alive())
+        self.addCleanup(cleanup)
+        first=open_session();self.broker.close()
+        broker=NodeMutationBroker(self.root/'gate'/'mutation-broker',**dict(self.config,authority_witness=first));self.addCleanup(broker.close)
+        grant=self.grant();signature=sign_grant(grant,self.secret)
+        original=authority_session._write;lost=[]
+        def drop_ack(sock,value,deadline):
+            if sock.server_side and value.get('sequence')==3:
+                lost.append(True);sock.shutdown(socket.SHUT_RDWR);raise OSError('synthetic lost completion acknowledgement')
+            return original(sock,value,deadline)
+        with unittest.mock.patch.object(authority_session,'_write',side_effect=drop_ack):
+            with self.assertRaises(SessionHeld):broker.mutate(grant,signature,self.body)
+        self.assertEqual(lost,[True]);self.assertEqual(len(self.calls),1)
+        self.assertEqual(broker.db.execute('SELECT state FROM operations').fetchone()[0],'complete')
+        with self.owner_queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()[0],'complete')
+        broker.close();first.close();resources[0]['thread'].join(5);self.assertFalse(resources[0]['thread'].is_alive())
+        second=open_session()
+        replay=NodeMutationBroker(self.root/'gate'/'mutation-broker',**dict(self.config,authority_witness=second));self.addCleanup(replay.close)
+        self.assertEqual(replay.mutate(grant,signature,self.body)['uuid'],self.task)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(errors,['OSError'])
 
     def test_remote_init_confirms_durable_intent_and_exact_replay(self):
         key=self.root/'success.key';cert=self.root/'success.crt'
