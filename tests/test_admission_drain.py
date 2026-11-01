@@ -1,5 +1,8 @@
 import json
 import socket
+import subprocess
+import sys
+import signal
 import http.client
 import io
 import os
@@ -8,8 +11,9 @@ import threading
 import time
 import unittest
 import uuid
+from pathlib import Path
 from http.server import ThreadingHTTPServer
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from dataclasses import replace
 from unittest.mock import patch
@@ -149,6 +153,71 @@ class AdmissionTests(unittest.TestCase):
         task=service.store.task(identifier)
         self.assertEqual(task['job']['status'],'queued');self.assertIsNone(task['node_id'])
         self.assertIsNone(self.request('/v1/prototype/claim',claim,API)[1]['job'])
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'separate POSIX coordinator process')
+    def test_closed_nonempty_state_survives_actual_coordinator_restarts(self):
+        service=self.handler.viewer_service;identifier=str(uuid.uuid4());photo=b'synthetic-photo-data'
+        with patch.object(service,'_check_options',return_value=[]):
+            service.initialize(identifier,'synthetic',[],None,'production')
+            service.upload(identifier,'photo.jpg',io.BytesIO(photo),len(photo))
+            service.commit(identifier)
+        task=service.store.task(identifier)
+        image_path=next(p for p in Path(task['directory']).rglob('*') if p.is_file() and p.read_bytes()==photo)
+        generic=json.dumps(dict(requestId='restart-generic',environment='staging',profile='treedar-synthetic-v1')).encode()
+        status,created=self.request('/v1/prototype/jobs',generic);self.assertEqual(status,201)
+        generic_job=created['job']['id']
+        self.assertEqual(self.request('/v1/prototype/admission-drain',self.operation(True),OP)[0],200)
+        state=self.handler.prototype_queue.admission_drain.status()
+        expected_job=task['job']['id']
+        self.stop()
+        env={key:os.environ[key] for key in ('PATH','PYTHONDONTWRITEBYTECODE') if key in os.environ}
+        env.update(PROCESSING_API_TOKEN=API,PROCESSING_PROTOTYPE_OPERATOR_TOKEN=OP,
+            PROCESSING_PROTOTYPE_STATE_DIR=self.temp.name,PROCESSING_ADMISSION_DRAIN_ENABLED='1',
+            PROCESSING_ADMISSION_START_CLOSED='1',PROCESSING_VIEWER_ENABLED='1',
+            PROCESSING_VIEWER_TOKEN=VIEW,PROCESSING_VIEWER_STAGING_TOKEN=STAGE,
+            PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_TREEDAR_NODE_IDS='main',
+            LOCAL_NODE_URL='http://127.0.0.1:1',MAIN_NODE_URL='http://127.0.0.1:2',
+            PROCESSING_BIND_HOST='127.0.0.1')
+        try:
+            for _ in range(2):
+                with socket.socket() as probe:
+                    probe.bind(('127.0.0.1',0));env['PROCESSING_PORT']=str(probe.getsockname()[1])
+                child=subprocess.Popen([sys.executable,'-c',
+                    'import processing.config as c;c.ADMISSION_DRAIN_QUALIFIED=True;from processing.app import main;raise SystemExit(main())'],
+                    env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                try:
+                    self.origin='http://127.0.0.1:'+env['PROCESSING_PORT']
+                    deadline=time.monotonic()+5
+                    while True:
+                        try:
+                            status,gate=self.request('/v1/prototype/admission-drain',token=OP)
+                            break
+                        except (OSError, URLError):
+                            if child.poll() is not None or time.monotonic()>=deadline:raise
+                            time.sleep(.03)
+                    self.assertEqual(status,200);self.assertEqual(gate,state)
+                    self.assertEqual(self.request('/v1/prototype/jobs',generic)[0],503)
+                    for token in (VIEW,STAGE):
+                        self.assertEqual(self.request('/task/new/init?token='+token,b'')[0],503)
+                    claim=json.dumps({'workerId':'worker','nodeId':'main','profiles':['treedar-synthetic-v1']}).encode()
+                    self.assertIsNone(self.request('/v1/prototype/claim',claim,API)[1]['job'])
+                    jobs=self.request('/v1/prototype/jobs')[1]['jobs']
+                    self.assertEqual(len(jobs),2)
+                    self.assertEqual({j['id'] for j in jobs},{expected_job,generic_job})
+                    self.assertTrue(all(j['status']=='queued' for j in jobs))
+                    self.assertEqual(next(j for j in jobs if j['id']==expected_job)['status'],'queued')
+                    self.assertEqual(image_path.read_bytes(),photo)
+                finally:
+                    if child.poll() is None:child.send_signal(signal.SIGTERM)
+                    try:child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill();child.wait(timeout=5)
+                self.assertEqual(child.returncode,0)
+        finally:
+            self.config=replace(self.config,admission_start_closed=True);self.start()
+        task=self.handler.viewer_service.store.task(identifier)
+        self.assertEqual(task['job']['id'],expected_job);self.assertEqual(task['job']['status'],'queued')
+        self.assertEqual(image_path.read_bytes(),photo)
 
     def test_refused_start_releases_acquired_authority_lease(self):
         self.stop()
