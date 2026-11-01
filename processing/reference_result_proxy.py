@@ -8,7 +8,7 @@ The worker endpoint owns the upstream read pin until that response closes.
 import hashlib
 import ssl
 from types import MappingProxyType
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
 
@@ -20,6 +20,10 @@ RESULT_PREFIX = "/ltds/worker/v1/jobs/"
 
 class ResultProxyError(ValueError):
     """Secret-free configuration, identity, admission or stream failure."""
+
+
+class ResultProxyUnavailable(ResultProxyError):
+    """A specifically identified transient result-read failure."""
 
 
 def _origin(value):
@@ -190,8 +194,17 @@ class ResultProxy:
             try:
                 response = self._open(request, timeout=self.timeout)
             except HTTPError as error:
+                status = error.code
                 error.close()
+                if status in (429, 502, 503, 504):
+                    raise ResultProxyUnavailable("worker result temporarily unavailable") from None
                 raise ResultProxyError("worker rejected result read") from None
+            except URLError as error:
+                if isinstance(error.reason, (ConnectionRefusedError, ConnectionResetError, TimeoutError)):
+                    raise ResultProxyUnavailable("worker connection temporarily unavailable") from None
+                raise ResultProxyError("worker result connection failed") from None
+            except (ConnectionRefusedError, ConnectionResetError, TimeoutError):
+                raise ResultProxyUnavailable("worker connection temporarily unavailable") from None
             if response.status != 200 or response.geturl() != url:
                 raise ResultProxyError("unexpected worker result response")
             if (response.headers.get("X-Result-Sha256") != obj["sha256"]
@@ -207,7 +220,7 @@ class ResultProxy:
                 raise ResultProxyError("worker result content type mismatch")
             return ResultProxyStream(response, lease, byte_size=obj["byteSize"], sha256=obj["sha256"],
                 manifest_sha256=manifest["resultManifestSha256"], content_type=content_type)
-        except Exception:
+        except Exception as error:
             if response is not None:
                 try:
                     response.close()
@@ -218,4 +231,6 @@ class ResultProxy:
                     lease.__exit__(None, None, None)
                 except Exception:
                     pass
-            raise ResultProxyError("worker result read unavailable") from None
+            if isinstance(error, ResultProxyUnavailable):
+                raise ResultProxyUnavailable("worker result temporarily unavailable") from None
+            raise ResultProxyError("worker result read failed") from None

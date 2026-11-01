@@ -19,7 +19,7 @@ from .options import catalog
 from .reference_api import ReferenceAPI, Response
 from .reference_control import ReferenceControlAPI
 from .reference_http import create_reference_http_server
-from .reference_result_proxy import ResultProxy
+from .reference_result_proxy import ResultProxy, ResultProxyError, ResultProxyUnavailable
 from .reference_store import ReferenceStore
 from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
@@ -286,8 +286,10 @@ class ReferenceRuntime:
 
     @contextmanager
     def _admit_read(self, binding):
-        if binding["byteSize"] > self.settings.stream_budget["maxObjectBytes"] or not self._streams.acquire(blocking=False):
-            raise RuntimeConfigurationError("result stream capacity unavailable")
+        if binding["byteSize"] > self.settings.stream_budget["maxObjectBytes"]:
+            raise ResultProxyError("result exceeds configured stream limit")
+        if not self._streams.acquire(blocking=False):
+            raise ResultProxyUnavailable("result stream capacity temporarily unavailable")
         try:
             yield
         finally:

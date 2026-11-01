@@ -13,7 +13,7 @@ from types import MappingProxyType
 from .maintenance import Conflict
 from .admission_drain import AdmissionClosed
 from . import reference_protocol as protocol
-from .reference_result_proxy import ResultProxyError
+from .reference_result_proxy import ResultProxyError, ResultProxyUnavailable
 
 
 @dataclass(frozen=True)
@@ -179,11 +179,13 @@ class ReferenceAPI:
             return self._error(405, "method_not_allowed")
         except AdmissionClosed:
             return self._error(503, 'admission_draining')
-        except ResultProxyError:
+        except ResultProxyUnavailable:
             # An assigned worker may be offline or its read budget unavailable.
             # Keep this distinct from malformed client input so consumers can
             # retry without treating a transient result outage as a bad request.
             return self._error(503, 'result_read_unavailable')
+        except ResultProxyError:
+            return self._error(502, 'result_read_failed')
         except (protocol.ProtocolError, ValueError, TypeError):
             return self._error(400, "invalid_request")
         except Conflict:
