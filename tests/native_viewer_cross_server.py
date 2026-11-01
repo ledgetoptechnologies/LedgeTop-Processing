@@ -8,7 +8,7 @@ from processing.synthetic_engine import SyntheticEngine,handler_for
 
 def main():
     viewer=os.environ['VIEWER_SOURCE'];root=tempfile.TemporaryDirectory(prefix='native-viewer-fixture-')
-    engines=[];servers=[];threads=[];running={};guard=threading.RLock();overlap=[]
+    engines=[];servers=[];threads=[];running={};guard=threading.RLock();overlap=[];removals=[]
     archive=io.BytesIO()
     with zipfile.ZipFile(archive,'w') as z:
         for name,content in [('odm_texturing/odm_textured_model_geo.glb','glb'),('odm_texturing/odm_textured_model_geo.obj','mtllib model.mtl\nv 0 0 0\n'),('odm_texturing/model.mtl','newmtl surface\nmap_Kd texture.jpg\n'),('odm_texturing/texture.jpg','texture'),('entwine_pointcloud/ept.json','{}'),('3d_tiles/model/tileset.json','{}')]:z.writestr(name,content)
@@ -19,6 +19,7 @@ def main():
                 if any(t['code']==20 for e in engines for t in e.tasks.values()):overlap.append(identifier);raise RuntimeError('overlap')
                 return super().commit(identifier)
         def download(self,identifier):return io.BytesIO(data),len(data)
+        def remove(self,identifier):removals.append(identifier);raise RuntimeError('fixture forbids engine deletion')
     try:
         # Fail before creating coordinator or engines if the pinned source or
         # fixture image cannot load the real Viewer worker dependencies.
@@ -66,6 +67,12 @@ def main():
                         wait(lambda:task(parts[1])['phase']=='processing')
                         if parts[2]!='none':assert task(parts[2])['job']['status']=='queued'
                         assert not overlap
+                    elif op=='assert-retained':
+                        assert not removals and not overlap and sum(e.commits for e in engines)==3
+                        for identifier in parts[1:]:
+                            t=task(identifier);engine=engines[0 if t['node_id']=='cluster' else 1]
+                            assert t['job']['status']=='succeeded' and engine.tasks[t['engine_uuid']]['code']==40
+                            assert Path(t['archive_path']).read_bytes()==data
                     else:raise RuntimeError('unknown fixture operation')
                     self.send_response(200);self.send_header('Content-Length','2');self.end_headers();self.wfile.write(b'{}')
                 except Exception as exc:

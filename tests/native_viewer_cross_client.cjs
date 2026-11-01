@@ -28,13 +28,20 @@ async function main(){
   assert.equal(await processOne(deps,'fixture-second'),true);assert.equal(await processOne(deps,'fixture-third'),true);
   await controlCall('/assert-queued/'+first.providerTaskId+'/'+second.providerTaskId+'/'+third.providerTaskId);
   await controlCall('/coordinator-stop');
-  await sleep(5100);await processOne(deps,'fixture-offline');
+  await sleep(5100);
+  const offlineJob=db.prepare("SELECT id,error_code,attempt_count FROM processing_jobs WHERE job_type='reconcile' AND status='pending' AND available_at<=? ORDER BY created_at LIMIT 1").get(new Date().toISOString());
+  assert.ok(offlineJob,'expected a due reconcile job');assert.equal(offlineJob.error_code,null);assert.equal(await processOne(deps,'fixture-offline'),true);
+  const retry=db.prepare('SELECT status,error_code,attempt_count FROM processing_jobs WHERE id=?').get(offlineJob.id);
+  assert.equal(retry.status,'pending');assert.equal(retry.error_code,'provider_observation_unavailable');assert.equal(retry.attempt_count,offlineJob.attempt_count+1);
   await controlCall('/coordinator-start');await controlCall('/finish/'+first.providerTaskId);
   await controlCall('/expect-next/'+third.providerTaskId+'/'+second.providerTaskId);
   await controlCall('/finish/'+third.providerTaskId);await controlCall('/expect-next/'+second.providerTaskId+'/none');await controlCall('/finish/'+second.providerTaskId);
   const deadline=Date.now()+60000;
   while(Date.now()<deadline){await processOne(deps,'fixture-reconcile');const missing=db.prepare("SELECT error_message FROM processing_jobs WHERE error_code='ERR_MODULE_NOT_FOUND' LIMIT 1").get();if(missing)throw Error('synthetic module resolution: '+missing.error_message);if([first,second,third].every(a=>processing.getAttempt(a.id).status==='derivatives'))break;await sleep(200)}
   for(const a of [first,second,third]){const attempt=processing.getAttempt(a.id);if(attempt.status!=='derivatives'){const jobs=db.prepare('SELECT job_type,status,error_code,attempt_count FROM processing_jobs WHERE attempt_id=? ORDER BY created_at').all(a.id);throw Error('synthetic ingestion incomplete: '+JSON.stringify({status:attempt.status,errorCode:attempt.errorCode,jobs}))}assert.equal(db.prepare('SELECT COUNT(*) AS n FROM model_outputs WHERE attempt_id=?').get(a.id).n,1)}
+  assert.equal(db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(offlineJob.id).status,'complete');
+  assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(config.datasetsMount,'source','image.jpg'))).digest('hex'),hash);
+  await controlCall('/assert-retained/'+first.providerTaskId+'/'+second.providerTaskId+'/'+third.providerTaskId);
   console.log(JSON.stringify({synthetic:true,attempts:3,resultsPerAttempt:1}));
  }finally{db.close()}
 }
