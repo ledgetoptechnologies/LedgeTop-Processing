@@ -219,6 +219,78 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertEqual(download.call_count,3)
         self.assertFalse(any(call[0]=='initialize' for call in self.transport.calls))
 
+    def test_completed_worker_bytes_survive_coordinator_outage_and_worker_reopen(self):
+        from processing.reference_results import ReferenceResults, ResultAuthorization
+        now = [time.time()]
+        self.outbox.clock = lambda: now[0]
+        self.outbox.random = lambda: 0.0
+        job = self.submit()
+        self.advance(job, 'executing')
+        # The coordinator transport is unavailable while the local engine
+        # finishes. Actual result bytes are copied into the worker-owned ledger.
+        self.driver._request = lambda *args, **kwargs: (_ for _ in ()).throw(OSError('synthetic coordinator offline'))
+        self.driver.sender._open = lambda *args, **kwargs: (_ for _ in ()).throw(OSError('synthetic coordinator offline'))
+        outcome = self.driver.step()
+        self.assertEqual(outcome['state'], 'delivering')
+        with self.driver._db() as db:
+            row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        data = json.loads(row['data'])
+        outbox_id = data['outboxId']
+        reservation = data['reservation']['reservationId']
+        archive = self.scratch / 'jobs' / reservation / 'all.zip'
+        expected = self.transport.archive
+        self.assertEqual(archive.read_bytes(), expected)
+        self.assertEqual(self.driver.step()['deliveryState'], 'retry_scheduled')
+        pending = self.outbox.get(outbox_id)
+        self.assertEqual(pending['state'], 'pending')
+        self.assertGreater(pending['next_at'], now[0])
+        self.assertEqual(archive.read_bytes(), expected)
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        # Reopen the real journals/ledger and driver with the same files, not
+        # a second engine execution. The fake clock advances to the due time.
+        now[0] = pending['next_at'] + 1
+        self.ledger = ScratchLedger(self.root / 'ledger.sqlite', self.scratch,
+            capacity_probe=lambda _: 10**9, safety_floor_bytes=1024, cleanup_grace_seconds=0)
+        self.outbox = WorkerOutbox(self.root / 'outbox.sqlite', clock=lambda: now[0], random_source=lambda: 0.0)
+        self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger, outbox=self.outbox,
+            engine=self.native, engine_id='engine', node_id='cluster', authority_id=self.queue.authority_id,
+            coordinator_origin=self.gate_origin, gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+        self.driver = self.make_driver()
+        # Coordinator persists the exact metadata but the reply is lost.
+        # Retry must reconcile by resending the same outbox identity.
+        def committed_reply_lost(request, timeout):
+            response = self.sender_open(request, timeout)
+            response.close()
+            raise OSError('synthetic lost coordinator response')
+        self.driver.sender._open = committed_reply_lost
+        lost = self.driver.step()
+        self.assertEqual(lost['deliveryState'], 'retry_scheduled')
+        pending_again = self.outbox.get(outbox_id)
+        self.assertEqual(pending_again['state'], 'pending')
+        self.assertEqual(archive.read_bytes(), expected)
+        now[0] = pending_again['next_at'] + 1
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_acceptance')
+        delivered = self.outbox.get(outbox_id)
+        self.assertEqual(delivered['state'], 'acknowledged')
+        self.assertEqual(archive.read_bytes(), expected)
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        self.assertEqual(sum(c[0] == 'initialize' for c in self.transport.calls), 1)
+        self.assertEqual(sum(c[0] == 'commit' for c in self.transport.calls), 1)
+        self.assertEqual(sum(c[0] == 'download' for c in self.transport.calls), 1)
+        results = ReferenceResults(self.worker)
+        manifest = results.metadata(job['jobId'])
+        obj = manifest['objects'][0]
+        authorization = ResultAuthorization(node_id='cluster', worker_id='worker', job_id=job['jobId'],
+            generation=job['generation'], environment=job['environment'],
+            result_manifest_sha256=manifest['resultManifestSha256'], object_ids=(obj['id'],), share_approved=True)
+        stream = results.open(job['jobId'], generation=job['generation'], object_id=obj['id'],
+            result_manifest_sha256=manifest['resultManifestSha256'], object_sha256=obj['sha256'],
+            authorization=authorization)
+        self.assertEqual(b''.join(stream.chunks()), expected)
+        self.assertEqual(hashlib.sha256(expected).hexdigest(), obj['sha256'])
+        self.assertTrue(archive.exists())
+
     def test_arbitrary_images_production_and_next_job_before_viewer_acceptance(self):
         first = self.submit(environment='production', contents=(b'not-abc-one', b'another-photo'))
         self.advance(first, 'awaiting_acceptance')
