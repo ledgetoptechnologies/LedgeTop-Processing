@@ -555,7 +555,11 @@ class LoopbackNodeODM:
         if local_engine_identity(deadline)!=self.engine_id:raise BrokerHeld('local engine changed')
         local_backend_identity(self.pin,deadline)
         transport=SimpleNamespace(binding=SimpleNamespace(backend_port=self.pin.backend_port,backend_secret=self.token))
-        status,raw=EngineIngressGuard._exchange(transport,'GET','/task/'+task_id+'/info',b'',{},deadline,omit_empty_token=True)
+        try:
+            status,raw=EngineIngressGuard._exchange(transport,'GET','/task/'+task_id+'/info',b'',{},deadline,omit_empty_token=True)
+        except Exception:
+            # Never surface transport details, including the backend token or URL.
+            raise BrokerHeld('engine task status unavailable') from None
         if status!=200 or len(raw)>65536:raise BrokerHeld('engine task status unavailable')
         try:
             value=decode_submission(raw)

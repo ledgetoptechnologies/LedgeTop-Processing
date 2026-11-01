@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 import tempfile
 import threading
+import traceback
 import time
 import unittest
 import uuid
@@ -466,14 +467,25 @@ os._exit(27)
         for status,payload in invalid:
             self.task_info_status=status;self.task_info_payload=payload
             with self.subTest(status=status,prefix=payload[:20]):
-                with self.assertRaises((b.BrokerHeld,AdmissionError)):
+                with self.assertRaises(b.BrokerHeld):
                     self.broker.inspect_held_evidence(grant,signature,nonce)
         self.task_info_status=200;self.task_info_payload=None;self.task_info_delay=.2
-        with self.assertRaises((b.BrokerHeld,AdmissionError)):
+        with self.assertRaises(b.BrokerHeld):
             self.broker.inspect_held_evidence(grant,signature,nonce,timeout_seconds=.05)
         self.assertEqual(len(self.calls),1)
         self.assertEqual(self.broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
         with NodeGate(self.engine) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
+
+    def test_task_query_sanitizes_transport_exception(self):
+        secret = 'synthetic-secret-do-not-leak'
+        task = str(uuid.uuid4())
+        with patch.object(b, 'local_engine_identity', return_value=self.adapter.engine_id), \
+             patch.object(b, 'local_backend_identity'), \
+             patch.object(b.EngineIngressGuard, '_exchange', side_effect=AdmissionError('token='+secret)):
+            with self.assertRaises(b.BrokerHeld) as caught:
+                self.adapter.inspect_task(task, time.monotonic()+1)
+        self.assertEqual(str(caught.exception), 'engine task status unavailable')
+        self.assertNotIn(secret, ''.join(traceback.format_exception(caught.exception)))
 
     def test_match_missing_engine_observation_remains_unverified(self):
         from processing.authority_lease import acquire
