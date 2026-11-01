@@ -198,6 +198,29 @@ class WorkerOutbox:
                 payloadSha256=row["digest"], claimToken=token, leaseExpires=now + lease_seconds,
                 attempt=row["attempts"] + 1)
 
+    def claim_for_binding(self, *, job_id, generation, environment, pipeline_digest, lease_seconds=60):
+        """Claim only this exact immutable job binding, without touching other jobs."""
+        _id(job_id); _int(generation, 1); _sha(pipeline_digest); _int(lease_seconds, 1)
+        if environment not in ('production', 'staging'):
+            raise ValueError('invalid environment')
+        with self._transaction() as db:
+            now = self._now(db)
+            row = db.execute('SELECT * FROM completions WHERE job=? AND generation=?', (job_id, generation)).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row['payload'])
+            if row['environment'] != environment or payload['pipelineDigest'] != pipeline_digest:
+                raise OutboxConflict('job binding changed')
+            if not ((row['state'] == 'pending' and row['next_at'] <= now) or
+                    (row['state'] == 'sending' and row['lease_until'] <= now)):
+                return None
+            token = secrets.token_hex(32)
+            _int(row['attempts'] + 1, 1)
+            db.execute("UPDATE completions SET state='sending',attempts=attempts+1,claim_token=?,lease_until=? WHERE id=?",
+                       (token, now + lease_seconds, row['id']))
+            return dict(outboxId=row['id'], payload=payload, payloadSha256=row['digest'], claimToken=token,
+                        leaseExpires=now + lease_seconds, attempt=row['attempts'] + 1)
+
     def failed_attempt(self, outbox_id, claim_token):
         """Keep the immutable payload; schedule bounded exponential equal jitter."""
         with self._transaction() as db:
