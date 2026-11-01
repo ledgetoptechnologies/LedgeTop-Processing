@@ -9,6 +9,9 @@ from .viewer_tasks import INTAKE_JOURNAL_DDL, INTAKE_INDEX_DDL
 
 QUALIFIED = False
 AUTHORIZE = 'viewer_intake_writer_v1'
+SNAPSHOT_FILES_DDL = ("CREATE TABLE viewer_intake_snapshot_files_v1 (uuid TEXT NOT NULL, generation INTEGER NOT NULL, "
+    "name_key TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL, "
+    "sha256 TEXT NOT NULL, is_photo INTEGER NOT NULL, PRIMARY KEY(uuid,generation,name_key))")
 
 TRIGGERS = {}
 for table in ('viewer_tasks','viewer_files'):
@@ -45,27 +48,51 @@ TRIGGERS['viewer_intake_guard_incarnation_insert_v1']=(
     "OR NOT EXISTS(SELECT 1 FROM viewer_tasks t WHERE t.uuid=NEW.uuid AND t.generation=NEW.generation "
     f"AND NEW.job_id IS t.job_id AND NOT ({_task_differences})) "
     "OR (SELECT COUNT(*) FROM json_each(NEW.files)) IS NOT (SELECT COUNT(*) FROM viewer_files WHERE uuid=NEW.uuid) "
-    "OR EXISTS(SELECT 1 FROM viewer_files f WHERE f.uuid=NEW.uuid AND NOT EXISTS(SELECT 1 FROM json_each(NEW.files) j "
-    f"WHERE NOT ({_file_differences}))) "
+    "OR (SELECT COUNT(DISTINCT json_extract(value,'$.name_key')) FROM json_each(NEW.files)) "
+    "IS NOT (SELECT COUNT(*) FROM viewer_files WHERE uuid=NEW.uuid) "
+    "OR EXISTS(SELECT 1 FROM json_each(NEW.files) j WHERE NOT EXISTS(SELECT 1 FROM viewer_files f "
+    "WHERE f.uuid=NEW.uuid AND f.name_key=json_extract(j.value,'$.name_key') "
+    f"AND NOT ({_file_differences}))) "
     "BEGIN SELECT RAISE(ABORT, 'invalid intake snapshot'); END")
+TRIGGERS['viewer_intake_snapshot_populate_v1']=(
+    'CREATE TRIGGER viewer_intake_snapshot_populate_v1 AFTER INSERT ON viewer_incarnations '
+    'BEGIN INSERT INTO viewer_intake_snapshot_files_v1(uuid,generation,name_key,name,path,bytes,sha256,is_photo) '
+    'SELECT uuid,NEW.generation,name_key,name,path,bytes,sha256,is_photo FROM viewer_files WHERE uuid=NEW.uuid; END')
+_snapshot_file_match=' AND '.join(f"s.{c} IS f.{c}" for c in _FILE_SNAPSHOT_COLUMNS)
+TRIGGERS['viewer_intake_snapshot_file_insert_v1']=(
+    'CREATE TRIGGER viewer_intake_snapshot_file_insert_v1 BEFORE INSERT ON viewer_intake_snapshot_files_v1 '
+    f"WHEN {AUTHORIZE}() IS NOT 1 OR EXISTS(SELECT 1 FROM viewer_intake_snapshot_files_v1 WHERE uuid=NEW.uuid AND generation=NEW.generation AND name_key=NEW.name_key) "
+    "OR NOT EXISTS(SELECT 1 FROM viewer_incarnations i JOIN viewer_files f ON f.uuid=i.uuid "
+    "WHERE i.uuid=NEW.uuid AND i.generation=NEW.generation AND f.name_key=NEW.name_key "
+    + ''.join(f'AND NEW.{c} IS f.{c} ' for c in _FILE_SNAPSHOT_COLUMNS) + ') '
+    "BEGIN SELECT RAISE(ABORT, 'invalid intake snapshot file'); END")
+for action in ('UPDATE','DELETE'):
+    name=f'viewer_intake_snapshot_file_{action.lower()}_v1'
+    TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE {action} ON viewer_intake_snapshot_files_v1 '
+                    "BEGIN SELECT RAISE(ABORT, 'intake snapshot file immutable'); END")
+
 for action in ('UPDATE','DELETE'):
     name=f'viewer_intake_guard_incarnation_{action.lower()}_v1'
     TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE {action} ON viewer_incarnations '
                     "BEGIN SELECT RAISE(ABORT, 'intake snapshot immutable'); END")
 
-_prior_file_mismatch=' OR '.join(f"(json_type(j.value, '$.{c}') IS NULL OR json_extract(j.value, '$.{c}') IS NOT OLD.{c})" for c in _FILE_SNAPSHOT_COLUMNS)
+_prior_file_mismatch=' OR '.join(f's.{c} IS NOT OLD.{c}' for c in _FILE_SNAPSHOT_COLUMNS)
 TRIGGERS['viewer_intake_guard_file_delete_snapshot_v1']=(
     'CREATE TRIGGER viewer_intake_guard_file_delete_snapshot_v1 BEFORE DELETE ON viewer_files '
-    "WHEN NOT EXISTS(SELECT 1 FROM viewer_tasks t JOIN viewer_incarnations i ON i.uuid=t.uuid AND i.generation=t.generation "
-    "JOIN json_each(i.files) j WHERE t.uuid=OLD.uuid "
+    "WHEN NOT EXISTS(SELECT 1 FROM viewer_tasks t JOIN viewer_intake_snapshot_files_v1 s "
+    "ON s.uuid=t.uuid AND s.generation=t.generation AND s.name_key=OLD.name_key WHERE t.uuid=OLD.uuid "
     f"AND NOT ({_prior_file_mismatch})) "
     "BEGIN SELECT RAISE(ABORT, 'matching intake snapshot required'); END")
 for action in ('INSERT','UPDATE'):
     name=f'viewer_intake_guard_file_{action.lower()}_snapshot_v1'
+    identity = 't.uuid IN (NEW.uuid,OLD.uuid)' if action=='UPDATE' else 't.uuid=NEW.uuid'
     TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE {action} ON viewer_files '
                     "WHEN EXISTS(SELECT 1 FROM viewer_tasks t JOIN viewer_incarnations i "
-                    "ON i.uuid=t.uuid AND i.generation=t.generation WHERE t.uuid=NEW.uuid) "
+                    f"ON i.uuid=t.uuid AND i.generation=t.generation WHERE {identity}) "
                     "BEGIN SELECT RAISE(ABORT, 'snapshotted intake immutable'); END")
+TRIGGERS['viewer_intake_guard_task_uuid_v1']=(
+    'CREATE TRIGGER viewer_intake_guard_task_uuid_v1 BEFORE UPDATE ON viewer_tasks '
+    "WHEN NEW.uuid IS NOT OLD.uuid BEGIN SELECT RAISE(ABORT, 'intake UUID immutable'); END")
 _old_task_diff=' OR '.join(f"(json_type(i.metadata, '$.{c}') IS NULL OR json_extract(i.metadata, '$.{c}') IS NOT OLD.{c})" for c in _TASK_SNAPSHOT_COLUMNS)
 
 TRIGGERS['viewer_intake_guard_generation_v1']=(
@@ -110,7 +137,8 @@ def _schema(db, kind, name):
     return result[0] if result else None
 
 def attest(db):
-    expected=[('table','viewer_intake_journal_v1',INTAKE_JOURNAL_DDL),
+    expected=[('table','viewer_intake_snapshot_files_v1',SNAPSHOT_FILES_DDL),
+              ('table','viewer_intake_journal_v1',INTAKE_JOURNAL_DDL),
               ('index','viewer_intake_unfinished_v1',INTAKE_INDEX_DDL)]
     expected += [('trigger',name,sql) for name,sql in TRIGGERS.items()]
     if any(_schema(db,kind,name)!=sql for kind,name,sql in expected):
@@ -133,7 +161,7 @@ def install_empty_offline(db):
                 raise MigrationUnavailable('empty Viewer state required')
         if db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'viewer_intake_%' LIMIT 1").fetchone():
             raise MigrationUnavailable('existing intake schema requires inspection')
-        db.execute(INTAKE_JOURNAL_DDL);db.execute(INTAKE_INDEX_DDL)
+        db.execute(INTAKE_JOURNAL_DDL);db.execute(INTAKE_INDEX_DDL);db.execute(SNAPSHOT_FILES_DDL)
         for sql in TRIGGERS.values():db.execute(sql)
         attest(db)
         db.commit()

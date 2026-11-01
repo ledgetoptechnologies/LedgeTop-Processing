@@ -139,6 +139,13 @@ class ViewerInputSpaceTests(unittest.TestCase):
         cached=time.monotonic()-start
         print('synthetic 10000 input census seconds:',round(first,4),'cached:',round(cached,4),flush=True)
         self.assertIn((self.identifier,1),store._intake_reconciled)
+        store.remove(self.identifier)
+        start=time.monotonic();store.initialize(self.identifier,'next',[],None,'production')
+        elapsed=time.monotonic()-start
+        with self.q._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_intake_snapshot_files_v1 WHERE uuid=? AND generation=1',(self.identifier,)).fetchone()[0],10000)
+        print('synthetic 10000 file generation snapshot seconds:',round(elapsed,4),flush=True)
+        self.assertEqual((directory/('input-'+format(0,'032x'))).read_bytes(),b'x')
 
     def test_census_over_bound_fails_closed_preserving_files(self):
         from processing import viewer_tasks
@@ -200,6 +207,11 @@ class ViewerInputSpaceTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):db.execute(sql,(self.identifier,1,None,canonical(metadata),canonical(fake)))
             db.execute(sql,(self.identifier,1,None,canonical(metadata),canonical(files)))
             with self.assertRaises(sqlite3.IntegrityError):db.execute('UPDATE viewer_incarnations SET files=?',(canonical([]),))
+            with self.assertRaises(sqlite3.IntegrityError):db.execute("UPDATE viewer_files SET uuid='other' WHERE uuid=?",(self.identifier,))
+            with self.assertRaises(sqlite3.IntegrityError):db.execute("UPDATE viewer_tasks SET uuid='other' WHERE uuid=?",(self.identifier,))
+            for recursive in (0,1):
+                db.execute('PRAGMA recursive_triggers='+str(recursive))
+                with self.assertRaises(sqlite3.IntegrityError):db.execute('INSERT OR REPLACE INTO viewer_intake_snapshot_files_v1 SELECT * FROM viewer_intake_snapshot_files_v1 WHERE uuid=?',(self.identifier,))
             db.execute('DELETE FROM viewer_files WHERE uuid=?',(self.identifier,))
             for directory in (None,'not-canonical',self.identifier+'-2-xyz'):
                 with self.assertRaises(sqlite3.IntegrityError):
