@@ -125,6 +125,8 @@ class ReferenceDriverTests(unittest.TestCase):
         for method in ('initialize','upload','action','read','download'):
             patched = patch.object(self.native, method, side_effect=getattr(self.transport, method))
             patched.start()
+            if isinstance(self.temp, RetainedSyntheticRoot):
+                self.addCleanup(patched.stop)
             self.patches.append(patched)
         self.gate_origin = 'http://127.0.0.1:18080'
         with NodeGate('engine') as gate:
@@ -137,6 +139,8 @@ class ReferenceDriverTests(unittest.TestCase):
         self.contents = {}
         broker_patch = patch.object(self.broker, 'download_object', side_effect=self.download)
         broker_patch.start()
+        if isinstance(self.temp, RetainedSyntheticRoot):
+            self.addCleanup(broker_patch.stop)
         self.patches.append(broker_patch)
         self.driver = self.make_driver()
 
