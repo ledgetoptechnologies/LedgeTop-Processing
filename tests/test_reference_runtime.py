@@ -341,6 +341,37 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.snapshot["ready"] = False
         self.assertEqual(caps().status, 503)
 
+    def test_dynamic_runtime_holds_treedar_and_splats_despite_configured_node(self):
+        # A configured TreeDar node is not proof of a compatible Viewer result
+        # transport, provenance authority, or a qualified worker/retention path.
+        from processing import reference_protocol as protocol
+        queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        headers = {"Authorization": "Bearer " + self.value["viewerBearers"]["staging"]}
+        capabilities = runtime.api.handle("GET", "/ltds/v1/capabilities", headers, protected_transport=True)
+        self.assertEqual(capabilities.status, 200)
+        self.assertFalse(capabilities.body['engines']['treedar']['available'])
+        self.assertFalse(capabilities.body['engines']['gaussian_splat']['available'])
+        self.assertFalse(capabilities.body['engines']['gaussian_splat']['enabled'])
+        body = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
+        body['capabilityFingerprint'] = capabilities.body['capabilityFingerprint']
+        body['pipeline']['odm'].update(requested=False, options={}, optionsFingerprint=capabilities.body['engines']['odm']['optionsFingerprint'])
+        body['manifest']['objects'][0].update(kind='lidar', name='cloud.las')
+        body['manifest']['inputCounts'].update(images=0, lidarObjects=1)
+        body['manifest']['sha256'] = protocol.manifest_sha256(body['manifest'])
+        body['pipeline']['treedar'].update(requested=True, inputObjectIds=[body['manifest']['objects'][0]['id']], provenanceReceiptId='synthetic-provenance')
+        protocol.validate_submission(body, environment='staging', capability_fingerprint=body['capabilityFingerprint'],
+                                     options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],
+                                     available_engines=('treedar',), allowed_odm_options=set())
+        response = runtime.api.handle('POST', '/ltds/v1/jobs', headers, json.dumps(body).encode(), protected_transport=True)
+        self.assertEqual((response.status, response.body), (400, {'error': 'invalid_request'}))
+        body['pipeline']['gaussian_splat']['requested'] = True
+        response = runtime.api.handle('POST', '/ltds/v1/jobs', headers, json.dumps(body).encode(), protected_transport=True)
+        self.assertEqual((response.status, response.body), (400, {'error': 'invalid_request'}))
+        self.assertEqual(queue.list(), [])
+        runtime.close()
+
     def test_discovery_allowlist_uses_definitions_and_excludes_string_path_credentials(self):
         first = discovered_policy(self.snapshot, self.config)
         self.assertEqual(first[2], {"future-quality", "future-toggle"})
