@@ -17,3 +17,13 @@ retained. No production resources were accessed or modified.
 This does not exercise the Viewer facade, reference TLS listener, Docker stop
 timeout, old writers, physical network fencing, backup, rollback, or a real
 cutover. It does not qualify admission drain or prove power-loss durability.
+
+An additional independently lifecycle-reviewed `test_sigterm_viewer_owned`
+passed under the same unprivileged WSL environment. It enables the real
+Viewer facade, starts a partial authenticated reservation POST, sends SIGTERM,
+and verifies that the Queue lock stays held until the request returns 200 and
+the child exits zero. A reopened Queue contains the reserved UUID. Synthetic
+root `/tmp/lt-viewer-sigterm-fq5bxkgz` remains retained and the owned child
+was reaped. The entry marker precedes route and gate acquisition; this tests
+the in-flight reservation only and does not establish the admission barrier,
+uploads, downloads, reference listener, or any external writer fencing.
