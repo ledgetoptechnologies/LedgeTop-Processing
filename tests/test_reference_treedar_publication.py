@@ -116,6 +116,57 @@ class PublicationTests(unittest.TestCase):
         with NodeGate(self.host.policy.engine_id) as gate:self.assertIsNone(gate.snapshot()['reservation']['completionDigest'])
         with self.assertRaises(Exception):self.host.journal.final_result(self.job)
 
+    def test_spatial_receipt_requires_fresh_exact_issuer_and_retains_parent(self):
+        import io,time
+        from processing import reference_treedar_spatial_candidate as spatial
+        from processing.reference_transfer import BrokerClient, TransferObject, ValidatedGrant
+        from processing.reference_provenance import LidarProvenanceClient, ProvenanceUnavailable
+        h=self.host;stage=self.fixture.stage;job=h.store.get(self.job,private=True)
+        objects=tuple(TransferObject(item['id'],item['byteSize'],item['sha256']) for item in job['submission']['manifest']['objects'])
+        grant=ValidatedGrant(self.job,'parent-reservation',1,'staging',time.time()+120,objects,'synthetic-private-token')
+        wrapper=dict(schemaVersion=1,inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],provenance=self.fixture.receipt)
+        broker=BrokerClient('https://synthetic.invalid',ssl_context=ssl.create_default_context())
+        class Reply(io.BytesIO):
+            status=200
+            def __init__(self,raw,url):super().__init__(raw);self.url=url;self.headers={'Content-Type':'application/json','Content-Length':str(len(raw))}
+            def geturl(self):return self.url
+        calls=[];revoked=[False]
+        def opener(request,*,timeout):
+            calls.append(request.full_url)
+            if revoked[0]:
+                from urllib.error import HTTPError
+                raise HTTPError(request.full_url,403,'synthetic revoked',{},io.BytesIO())
+            return Reply(p.canonical_json(wrapper),request.full_url)
+        broker._open=opener
+        issuer=LidarProvenanceClient(broker,state_path=h.root/'spatial-issuer.sqlite',policy=stage.policy.admission)
+        stage.journal.verify_provenance=issuer.verify
+        wkt='synthetic-test-wkt-not-a-real-crs'
+        admission=dict(sourceKind='lidar',genuineAcquisition=True,crs='EPSG:32616',crsWkt=wkt,crsWktSha256=hashlib.sha256(wkt.encode()).hexdigest())
+        # The LAS and issuer are synthetic and the scientific validator is mocked;
+        # this test checks orchestration, exact re-reads and retention only.
+        before=self.fixture.actions()[:]
+        with patch.object(spatial,'QUALIFIED',True),patch.object(spatial,'validate_lidar',return_value=admission):
+            receipt=spatial.LocalSpatialReceipt(h.root/'spatial.sqlite',stage=stage,issuer=issuer,enabled=True)
+            value=receipt.qualify(self.fixture.intent,job,grant)
+            self.assertEqual(value['transport'],'held');self.assertFalse(value['parentSettled'])
+            self.assertEqual(value['record']['admission']['crsWkt'],wkt)
+            self.assertEqual(len(calls),2);self.assertEqual(receipt.qualify(self.fixture.intent,job,grant),value)
+            self.assertEqual(len(calls),4)
+            self.assertEqual(self.fixture.actions(),before);self.assert_retained()
+            with patch.object(spatial,'validate_lidar',return_value=dict(admission,crsWkt='changed')):
+                with self.assertRaises(spatial.SpatialHeld):receipt.qualify(self.fixture.intent,job,grant)
+            source=h.ledger.root/self.fixture.inputs.resolve(self.fixture.intent)['original-lidar']
+            source.write_bytes(b'abd')
+            try:
+                with self.assertRaises(Exception):receipt.qualify(self.fixture.intent,job,grant)
+            finally:source.write_bytes(b'abc')
+            def revoke_during_validation(*args,**kwargs):revoked[0]=True;return admission
+            with patch.object(spatial,'validate_lidar',side_effect=revoke_during_validation):
+                with self.assertRaises(ProvenanceUnavailable):receipt.qualify(self.fixture.intent,job,grant)
+            self.assertFalse(issuer.verify(self.fixture.receipt))
+            issuer.broker._open=lambda *args,**kwargs:None
+            with self.assertRaises(spatial.SpatialHeld):receipt.qualify(self.fixture.intent,job,grant)
+
     def test_actual_guard_full_publication_preserves_parent_and_native_sources(self):
         result=self.begin();self.assertEqual(result['phase'],'published');self.assertFalse(result['parentSettled']);self.assertEqual(result['receipt']['state'],'local_native_bundle_published')
         row=self.publication._copy(self.job);_,_,partial,final=self.publication._paths(row);self.assertFalse(partial.exists());self.assertTrue(final.exists());self.assertEqual(final.stat().st_nlink,1)
