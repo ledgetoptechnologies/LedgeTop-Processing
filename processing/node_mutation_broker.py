@@ -258,7 +258,7 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
         self._deadline = None
 
     @contextmanager
-    def hold(self, grant, timeout, *, create=False, body=None, signature=None, _allowed_upload=None, _allowed_commit=None):
+    def hold(self, grant, timeout, *, create=False, body=None, signature=None, _allowed_upload=None, _allowed_commit=None, _delivery=None):
         from .reference_store import PROFILE
         from .authority_lease import MARKER_DDL, LeaseUnavailable
         from .broker_intent_fence import attest, IntentFenceError
@@ -300,17 +300,19 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
                                 attest(db)
                             except IntentFenceError:
                                 raise BrokerHeld('broker intent fence unavailable') from None
-                            row = db.execute('''SELECT j.status,j.profile,j.environment AS queue_env,j.node_id AS queue_node,
+                            row = db.execute('''SELECT j.status,j.result AS queue_result,j.profile,j.environment AS queue_env,j.node_id AS queue_node,
                                 j.worker_id AS queue_worker,j.claim_hash,r.environment,r.node_id,r.generation,r.phase,
-                                r.manifest_sha,r.pipeline_digest,r.input_json,c.request_id,c.node_id AS claim_node,
+                                r.manifest_sha,r.pipeline_digest,r.input_json,r.result_json,c.request_id,c.node_id AS claim_node,
                                 c.worker_id AS claim_worker,c.instance_id,c.token
                                 FROM jobs j JOIN reference_jobs r ON r.job_id=j.id
                                 JOIN reference_claims c ON c.job_id=j.id WHERE j.id=?''', (grant['jobId'],)).fetchone()
                             active = db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
                             try:
                                 submission = json.loads(row['input_json']) if row else None
-                                valid = (row is not None and row['status'] == 'running' and row['profile'] == PROFILE
-                                    and row['phase'] == 'processing' and len(active) == 1 and active[0]['id'] == grant['jobId']
+                                phase_ok = (row is not None and ((row['status'] == 'running' and row['phase'] == 'processing'
+                                    and len(active) == 1 and active[0]['id'] == grant['jobId'] and _delivery is None)
+                                    or (_delivery is not None and row['status'] == 'succeeded' and row['phase'] in ('awaiting_acceptance','completed'))))
+                                valid = (row is not None and phase_ok and row['profile'] == PROFILE
                                     and grant['profile'] == 'reference-init-v1' and grant['operation'] == 'init'
                                     and grant['engineTaskId'] == grant['jobId']
                                     and grant['authorityId'] == self.authority and grant['coordinatorEpoch'] == self.epoch
@@ -330,6 +332,29 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
                                 valid = False
                             if not valid:
                                 raise BrokerHeld('exact active reference claim required')
+                            if _delivery is not None:
+                                if (type(_delivery) is not tuple or len(_delivery) != 2 or create
+                                        or _allowed_upload is not None or _allowed_commit is not None):
+                                    raise BrokerHeld('exact durable delivery required')
+                                outbox_id,result_sha = _delivery
+                                stored = db.execute('SELECT * FROM reference_worker_receipts WHERE outbox_id=?',(outbox_id,)).fetchone()
+                                try:
+                                    result = protocol.validate_result_manifest(json.loads(row['result_json']),job_id=grant['jobId'],
+                                        generation=grant['taskGeneration'],environment=grant['environment'],pipeline_digest=grant['pipelineDigest'])
+                                    binding = dict(jobId=grant['jobId'],generation=grant['taskGeneration'],environment=grant['environment'],
+                                        inputManifestSha256=grant['inputManifestSha256'],pipelineDigest=grant['pipelineDigest'],resultManifestSha256=result_sha)
+                                    payload = dict(**binding,resultManifest=result,terminalState='succeeded')
+                                    expected_receipt = dict(type='durable-result-receipt',durable=True,receiptId='delivery-'+outbox_id,
+                                        storageReceiptId='coordinator-'+outbox_id,outboxId=outbox_id,payloadSha256=protocol.digest(payload),
+                                        acceptedObjectIds=sorted(obj['id'] for obj in result['objects']),**binding)
+                                    valid_delivery = (result['resultManifestSha256'] == result_sha and protocol.digest(binding) == outbox_id
+                                        and json.loads(row['queue_result']) == {'resultManifestSha256':result_sha}
+                                        and stored is not None and stored['job_id'] == grant['jobId']
+                                        and stored['payload_sha'] == protocol.digest(payload)
+                                        and json.loads(stored['receipt_json']) == expected_receipt)
+                                except (KeyError,TypeError,ValueError):
+                                    valid_delivery = False
+                                if not valid_delivery:raise BrokerHeld('exact durable delivery required')
                             digest = hashlib.sha256(_json(grant)).hexdigest()
                             allowed = (grant['operationId'], grant['jobId'], digest)
                             if _allowed_commit is not None:
@@ -915,7 +940,7 @@ class NodeMutationBroker:
             state = gate.snapshot()
             expected = {'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
             identity = uuid.UUID(init_grant['jobId']).hex
-            job = {'id':init_grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
+            job = {'id':init_grant['jobId'],'workerId':init_grant['workerId'],'nodeId':self.node,'authorityId':self.authority}
             reservation = state['reservation']
             if (any(state[k] != value for k,value in expected.items()) or not reservation
                     or reservation['receiptId'] != identity or reservation['job'] != job
@@ -994,6 +1019,42 @@ class NodeMutationBroker:
         with self._execution_lock(deadline), self.witness.hold(init_grant, max(0, deadline-time.monotonic())), NodeGate(self.engine) as gate:
             return self._verify_reference_inventory_locked(init_grant, gate)
 
+    @contextmanager
+    def hold_verified_reference_commit_candidate(self, init_grant, signature, *, operation_id, delivery=None):
+        """Read-only exact commit proof for a held candidate worker."""
+        if type(self.witness) is not ReferenceCoordinatorAuthority or not _uuid(operation_id):
+            raise BrokerHeld('reference commit authority required')
+        self._authenticate(init_grant,signature,'init')
+        deadline = time.monotonic()+10
+        with self._execution_lock(deadline), self.witness.hold(init_grant,max(0,deadline-time.monotonic()),_delivery=delivery), NodeGate(self.engine) as gate:
+            self._verify_reference_inventory_locked(init_grant,gate,delivery=delivery)
+            db = self.witness._active_db
+            schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_commit_candidate'").fetchone()
+            if schema is None or schema[0] != _REFERENCE_COMMIT_DDL:
+                raise BrokerHeld('reference commit schema unavailable')
+            commit = db.execute('SELECT * FROM reference_broker_commit_candidate WHERE operation_id=?',(operation_id,)).fetchone()
+            if (commit is None or commit['job_id'] != init_grant['jobId']
+                    or commit['init_sha256'] != hashlib.sha256(_json(init_grant)).hexdigest()):
+                raise BrokerHeld('reference commit binding changed')
+            digest = hashlib.sha256(_json(list(commit))).hexdigest()
+            intent = db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(operation_id,)).fetchone()
+            proof = db.execute('SELECT grant_hash,response_sha256 FROM reference_broker_completion_candidate WHERE operation_id=?',(operation_id,)).fetchone()
+            local = self.db.execute('SELECT operation,grant_hash,state,reply FROM operations WHERE id=?',(operation_id,)).fetchone()
+            if (intent is None or tuple(intent) != (init_grant['jobId'],digest,'complete')
+                    or proof is None or proof['grant_hash'] != digest or local is None
+                    or (local['operation'],local['grant_hash'],local['state']) != ('commit',digest,'complete')):
+                raise BrokerHeld('reference commit completion unavailable')
+            try: reply = _reply(json.loads(local['reply']),init_grant['engineTaskId'])
+            except (ValueError,TypeError):raise BrokerHeld('reference commit reply changed') from None
+            if hashlib.sha256(_json(reply)).hexdigest() != proof['response_sha256']:
+                raise BrokerHeld('reference commit reply changed')
+            self.witness.check_deadline()
+            yield gate, reply
+
+    def verify_reference_commit_candidate(self, init_grant, signature, *, operation_id):
+        with self.hold_verified_reference_commit_candidate(init_grant,signature,operation_id=operation_id) as (_,reply):
+            return reply
+
     def commit_reference_candidate(self, init_grant, signature, *, operation_id, body, content_type, commit_signature):
         """Experimental image-only commit; no retries on uncertain outcome."""
         if type(self.witness) is not ReferenceCoordinatorAuthority:
@@ -1051,15 +1112,20 @@ class NodeMutationBroker:
                     raise BrokerHeld('reference commit intent changed')
                 return reply
 
-    def _verify_reference_inventory_locked(self, init_grant, gate):
+    def _verify_reference_inventory_locked(self, init_grant, gate, *, delivery=None):
         self._check_owner()
         state = gate.snapshot()
         reservation = state['reservation']
         expected = {'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
-        job = {'id':init_grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
+        job = {'id':init_grant['jobId'],'workerId':init_grant['workerId'],'nodeId':self.node,'authorityId':self.authority}
+        if delivery is None:
+            expected_completion = None
+        else:
+            from .node_gate import _digest as gate_digest
+            expected_completion = gate_digest(dict(status='succeeded',result={'resultManifestSha256':delivery[1]}))
         if (any(state[k] != value for k,value in expected.items()) or not reservation
                 or reservation['receiptId'] != uuid.UUID(init_grant['jobId']).hex
-                or reservation['job'] != job or reservation['completionDigest'] is not None):
+                or reservation['job'] != job or reservation['completionDigest'] != expected_completion):
             raise BrokerHeld('reference node gate changed')
         db = self.witness._active_db
         durable_identity = _json([init_grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
@@ -1202,7 +1268,7 @@ class NodeMutationBroker:
     def _execute(self, grant, file_key, forward, *, with_replay=False, body=None, signature=None):
         digest=hashlib.sha256(_json(grant)).hexdigest();identity=uuid.UUID(grant['jobId']).hex
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
-        job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
+        job={'id':grant['jobId'],'workerId':grant['workerId'] if type(self.witness) is ReferenceCoordinatorAuthority else 'node-broker','nodeId':self.node,'authorityId':self.authority}
         deadline = time.monotonic() + 10 if type(self.witness) is ReferenceCoordinatorAuthority else None
         with self._execution_lock(deadline), self.witness.hold(grant, max(0, deadline-time.monotonic()) if deadline is not None else 10, create=True,body=body,signature=signature), NodeGate(self.engine) as gate:
             self._check_owner()

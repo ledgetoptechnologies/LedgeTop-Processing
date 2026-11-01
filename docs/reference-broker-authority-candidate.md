@@ -2,7 +2,9 @@
 
 This is an isolated, disabled image-only init, upload and commit experiment. It
 is not a complete worker recovery protocol and must not be enabled or deployed.
-The daemon/worker runtime does not invoke this path. Mixed inputs including
+The daemon runtime does not invoke the separate, hard-disabled signed-plan
+worker entry. Its authority witness requires the coordinator and broker in the
+same process and cannot be used as cross-PC authority. Mixed inputs including
 auxiliary files, GCPs and LiDAR are unsupported; do not treat image-only
 inventory as a general input contract. Crash-recovery reconciliation and
 production release qualification remain unfinished. Uncertain external
@@ -24,5 +26,13 @@ tests.test_reference_broker_authority_candidate
 tests.test_reference_adapter_loopback_candidate`. They check claim identity,
 upload and commit evidence, failed forwarding, partial restore, response
 mismatch, lock contention, a mocked-forward process crash, and loopback HTTP.
-These tests do not establish power-loss durability, real NodeODM behavior, or a
-real worker-to-Viewer end-to-end handoff.
+The integrated synthetic worker test uses a real scratch ledger, outbox and
+coordinator delivery receiver, but mocks the NodeODM adapter and archive
+download and constructs the worker without its production constructor. It
+simulates a lost receipt and retains all synthetic source and result files.
+These tests do not establish power-loss durability, real NodeODM behavior,
+real Viewer custody, restart recovery, or a real end-to-end handoff. The
+offline schema preparation requires empty intent state; migration of nonempty
+or previously running systems remains unqualified. Poll and result publication
+hold the same-process authority through I/O and have a ten-second authority
+deadline; long archive transfers can therefore hold and require inspection.

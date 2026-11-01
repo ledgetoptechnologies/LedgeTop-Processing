@@ -1,5 +1,6 @@
 """Synthetic same-owner reference init witness; no production qualification."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import threading
 import time
 import unittest
 import uuid
+import zipfile
 from unittest.mock import MagicMock, patch
 
 from processing import node_mutation_broker as broker
@@ -508,6 +510,69 @@ class ReferenceBrokerAuthorityCandidateTests(unittest.TestCase):
                 with self.queue._db() as db:
                     state = db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(commit_id,)).fetchone()[0]
                     self.assertEqual(state,'complete' if corruption == 'commit_success' else 'started')
+                if corruption == 'commit_success':
+                    self.assertEqual(service.verify_reference_commit_candidate(grant,signature,operation_id=commit_id),response)
+                    from processing import reference_engine_worker as worker_module
+                    worker.worker_id = grant['workerId']
+                    worker.path = self.root / 'candidate-worker.sqlite3'
+                    worker.engine = MagicMock()
+                    worker.engine.read.return_value = {'uuid':grant['jobId'],'status':{'code':10}}
+                    with sqlite3.connect(worker.path) as worker_db:
+                        worker_db.execute('CREATE TABLE executions (job TEXT PRIMARY KEY, identity TEXT, receipt TEXT, phase TEXT, outbox_id TEXT, result TEXT)')
+                        worker_db.execute('INSERT INTO executions(job,identity,receipt,phase) VALUES(?,?,?,?)',(grant['jobId'],json.dumps({
+                            'job':{'jobId':grant['jobId']},'brokerProof':{'initGrant':grant,'initSignature':signature,
+                            'commitOperationId':commit_id}}),uuid.UUID(grant['jobId']).hex,'broker_processing_held'))
+                    with patch.object(worker_module,'BROKER_WORKER_CANDIDATE_QUALIFIED',True):
+                        self.assertEqual(worker.resume_broker_candidate(grant['jobId'],broker=service),'broker_processing')
+                        self.assertIsNone(worker.poll(grant['jobId'],broker=service))
+                        self.assertEqual(worker.engine.read.call_count,1)
+                        with self.queue._db() as db:
+                            db.execute("UPDATE jobs SET status='held',held_reason='synthetic_revocation' WHERE id=?",(grant['jobId'],))
+                        with self.assertRaises(broker.BrokerHeld):
+                            worker.poll(grant['jobId'],broker=service)
+                        self.assertEqual(worker.engine.read.call_count,1)
+                        with self.queue._db() as db:
+                            db.execute("UPDATE jobs SET status='running',held_reason=NULL WHERE id=?",(grant['jobId'],))
+                    with self.queue._db() as db:
+                        db.execute('UPDATE reference_broker_completion_candidate SET response_sha256=? WHERE operation_id=?',('0'*64,commit_id))
+                    with self.assertRaisesRegex(broker.BrokerHeld,'reference commit reply changed'):
+                        service.verify_reference_commit_candidate(grant,signature,operation_id=commit_id)
+                    with self.queue._db() as db:
+                        db.execute('UPDATE reference_broker_completion_candidate SET response_sha256=? WHERE operation_id=?',
+                                   (hashlib.sha256(broker._json(response)).hexdigest(),commit_id))
+                    from processing import reference_protocol as protocol
+                    from processing.reference_delivery import DeliveryReceiver
+                    result = dict(schemaVersion=1,jobId=grant['jobId'],generation=grant['taskGeneration'],
+                        environment=grant['environment'],pipelineDigest=grant['pipelineDigest'],engineVersions={'odm':'synthetic'},
+                        objects=[dict(id='odm-archive',role='odm_archive',byteSize=1,sha256=hashlib.sha256(b'x').hexdigest())])
+                    result['resultManifestSha256'] = protocol.digest(result)
+                    binding = dict(jobId=grant['jobId'],generation=grant['taskGeneration'],environment=grant['environment'],
+                        inputManifestSha256=grant['inputManifestSha256'],pipelineDigest=grant['pipelineDigest'],
+                        resultManifestSha256=result['resultManifestSha256'])
+                    payload = dict(**binding,resultManifest=result,terminalState='succeeded')
+                    outbox_id = protocol.digest(binding)
+                    envelope = dict(outboxId=outbox_id,payloadSha256=protocol.digest(payload),payload=payload)
+                    with worker._db() as worker_db:
+                        worker_db.execute("UPDATE executions SET outbox_id=?,result=?,phase='awaiting_delivery' WHERE job=?",
+                                          (outbox_id,json.dumps(result),grant['jobId']))
+                    worker.outbox = MagicMock()
+                    worker.outbox.get.return_value = {'state':'acknowledged'}
+                    with NodeGate('synthetic') as gate:
+                        gate.prepare_completion(uuid.UUID(grant['jobId']).hex,dict(status='succeeded',
+                            result={'resultManifestSha256':result['resultManifestSha256']}))
+                    with patch.object(worker_module,'BROKER_WORKER_CANDIDATE_QUALIFIED',True):
+                        with self.assertRaises(broker.BrokerHeld):
+                            worker.acknowledge_delivery(grant['jobId'],broker=service)
+                        receiver = DeliveryReceiver(self.store)
+                        durable = receiver.receive(envelope,node_id='cluster',worker_id='worker',worker_instance_id='instance',
+                            claim_request_id='claim-1',claim_token=self.claim['claimToken'])
+                        self.assertTrue(durable['durable'])
+                        worker.acknowledge_delivery(grant['jobId'],broker=service)
+                    with NodeGate('synthetic') as gate:
+                        self.assertIsNone(gate.snapshot()['reservation'])
+                else:
+                    with self.assertRaises(broker.BrokerHeld):
+                        service.verify_reference_commit_candidate(grant,signature,operation_id=commit_id)
                 local_commit = service.db.execute('SELECT state FROM operations WHERE id=?',(commit_id,)).fetchone()
                 self.assertEqual(local_commit['state'],'complete' if corruption == 'commit_success' else 'started')
             self.assertEqual(service._unreaped, [])
@@ -573,6 +638,124 @@ class ReferenceBrokerAuthorityCandidateTests(unittest.TestCase):
                 self.assertFalse(restarted._transfer_admission_clear(db))
                 self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(details['operation'],)).fetchone()[0],'started')
         finally: restarted.close()
+
+    def test_broker_pending_phases_never_poll_engine(self):
+        worker = object.__new__(ReferenceEngineWorker)
+        worker.engine_id = 'synthetic'
+        worker.engine = MagicMock()
+        fake_gate = MagicMock()
+        fake_gate.__enter__.return_value = fake_gate
+        with patch('processing.reference_engine_worker.NodeGate', return_value=fake_gate):
+            for phase in ('broker_commit_pending','broker_processing_held'):
+                worker._row = MagicMock(return_value={'outbox_id':None,'phase':phase})
+                with self.assertRaisesRegex(ValueError,'uncertain precommit'):
+                    worker.poll(str(uuid.uuid4()))
+        worker.engine.read.assert_not_called()
+
+    def test_actual_worker_signed_plan_starts_through_broker_only(self):
+        from processing import reference_engine_worker as worker_module
+        gate_root = self.root / 'gate'
+        with patch.object(broker, 'QUALIFIED', True), \
+             patch.object(worker_module,'BROKER_WORKER_CANDIDATE_QUALIFIED',True), \
+             patch('processing.node_gate.canonical_gate_path', return_value=gate_root), \
+             patch.object(broker, 'canonical_gate_path', return_value=gate_root):
+            with NodeGate('synthetic') as gate:
+                gate.provision('cluster','http://127.0.0.1:18080',self.queue.authority_id)
+            state = gate_root / 'mutation-broker'
+            state.mkdir(mode=0o700)
+            adapter = broker.LoopbackNodeODM('synthetic',BackendPin('a'*64,'sha256:'+'b'*64,12345),'')
+            secret = b'synthetic-signing-key-' * 2
+            service = broker.NodeMutationBroker(state,node_id='cluster',engine_id='synthetic',
+                authority_id=self.queue.authority_id,coordinator_epoch=self.queue.startup_id,
+                coordinator_origin='http://127.0.0.1:18080',gate_generation=1,secret=secret,
+                adapter=adapter,authority_witness=self.authority)
+            self.addCleanup(service.close)
+            worker = object.__new__(ReferenceEngineWorker)
+            worker.engine_id,worker.node_id,worker.authority_id = 'synthetic','cluster',self.queue.authority_id
+            worker.worker_id,worker.origin,worker.gate_generation = 'worker','http://127.0.0.1:18080',1
+            worker.allowed_options = frozenset({'pc-quality','projection'})
+            worker.path = self.root / 'actual-worker.sqlite3'
+            worker.engine = MagicMock()
+            worker.engine.read.return_value = {'uuid':self.job['jobId'],'status':{'code':10}}
+            from processing.scratch_policy import ScratchLedger
+            from processing.worker_outbox import WorkerOutbox
+            storage = self.root / 'worker-storage'
+            storage.mkdir(mode=0o700)
+            worker.ledger = ScratchLedger(self.root / 'scratch.sqlite3',storage,capacity_probe=lambda _:1000000,safety_floor_bytes=0)
+            worker.ledger.reserve(job_id=self.job['jobId'],generation=self.job['generation'],reservation_id='synthetic',
+                manifest_sha256=self.job['manifestSha256'],input_bytes=3,output_budget=4096,
+                environment='staging',ttl_seconds=3600,worker_ready=True)
+            directory = worker.ledger.ensure_job_directory('synthetic')
+            source = directory / 'input.jpg'
+            source.write_bytes(b'abc')
+            worker.ledger.record_allocated('synthetic',3)
+            worker.outbox = WorkerOutbox(self.root / 'outbox.sqlite3')
+            worker.version = 'synthetic'
+            with sqlite3.connect(worker.path) as db:
+                db.execute('CREATE TABLE executions (job TEXT PRIMARY KEY, identity TEXT, receipt TEXT, phase TEXT, result TEXT, outbox_id TEXT, archive_size INTEGER, archive_sha TEXT, part_dev TEXT, part_ino TEXT, archive_expected_size TEXT)')
+            job = self.store.get(self.job['jobId'],private=True)
+            body, content_type = worker_module._reference_broker_init_body(job)
+            grant = dict(self.grant(),bodySha256=hashlib.sha256(body).hexdigest(),contentType=content_type)
+            signature = broker.sign_grant(grant,secret)
+            upload_id,commit_id = str(uuid.uuid4()),str(uuid.uuid4())
+            plan = dict(initGrant=grant,initSignature=signature,initBody=body,
+                uploads=[dict(objectId='image-1',operationId=upload_id,signature=broker.sign_reference_issue(grant,'image-1',upload_id,secret))],
+                commit=dict(operationId=commit_id,body=b'',contentType='application/json',
+                            signature=broker.sign_reference_commit(grant,commit_id,b'','application/json',secret)))
+            def consume(upload,sock,**kwargs):
+                sock.settimeout(2)
+                chunks=[]
+                while data := sock.recv(1024):chunks.append(data)
+                self.assertEqual(b''.join(chunks),b'abc')
+                return {'success':True}
+            with patch.object(adapter,'exchange',return_value={'uuid':grant['jobId'],'success':True}) as mutate, \
+                 patch.object(adapter,'exchange_upload',side_effect=consume) as upload:
+                with self.assertRaisesRegex(ValueError,'initialization differs'):
+                    worker.start_broker_candidate(job,reservation_id='synthetic',input_paths={'image-1':'jobs/synthetic/input.jpg'},
+                        broker=service,plan=dict(plan,initBody=b'wrong'))
+                mutate.assert_not_called()
+                self.assertEqual(worker.start_broker_candidate(job,reservation_id='synthetic',input_paths={'image-1':'jobs/synthetic/input.jpg'},
+                    broker=service,plan=plan),'broker_processing_held')
+                self.assertEqual(mutate.call_count,2)
+                self.assertEqual(upload.call_count,1)
+                worker.engine.initialize.assert_not_called()
+                worker.engine.upload.assert_not_called()
+                worker.engine.action.assert_not_called()
+                self.assertEqual(worker.resume_broker_candidate(job['jobId'],broker=service),'broker_processing')
+                self.assertIsNone(worker.poll(job['jobId'],broker=service))
+                self.assertEqual(service._unreaped,[])
+                output = io.BytesIO()
+                with zipfile.ZipFile(output,'w') as archive:
+                    archive.writestr('synthetic.txt','synthetic output')
+                archive_bytes = output.getvalue()
+                def synthetic_download(row,reservation,part,budget):
+                    part.write_bytes(archive_bytes)
+                    worker.ledger.record_allocated(reservation,3+len(archive_bytes))
+                    return len(archive_bytes),hashlib.sha256(archive_bytes).hexdigest()
+                worker._download_archive = synthetic_download
+                worker.engine.read.return_value = {'uuid':grant['jobId'],'status':{'code':40}}
+                outbox_id = worker.poll(job['jobId'],broker=service)
+                claimed = worker.outbox.claim_next()
+                self.assertEqual(claimed['outboxId'],outbox_id)
+                from processing.reference_delivery import DeliveryReceiver
+                receiver = DeliveryReceiver(self.store)
+                envelope = {k:claimed[k] for k in ('outboxId','payloadSha256','payload')}
+                receipt = receiver.receive(envelope,node_id='cluster',worker_id='worker',worker_instance_id='instance',
+                    claim_request_id='claim-1',claim_token=self.claim['claimToken'])
+                from processing import reference_protocol as protocol
+                viewer_receipt = dict(schemaVersion=1,receiptId='synthetic-viewer-receipt',storageReceiptId='synthetic-viewer-storage',
+                    **{k:claimed['payload'][k] for k in ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')},
+                    acceptedObjectIds=['odm-archive'],acceptedAt='2026-11-01T00:00:00Z',validationVersion=protocol.VALIDATION_VERSION)
+                self.assertTrue(self.store.accept(job['jobId'],viewer_receipt)['fullyAccepted'])
+                # Simulate a lost ACK by replaying exactly before local acknowledgement.
+                self.assertEqual(receiver.receive(envelope,node_id='cluster',worker_id='worker',worker_instance_id='instance',
+                    claim_request_id='claim-1',claim_token=self.claim['claimToken']),receipt)
+                worker.outbox.acknowledge(outbox_id,receipt)
+                worker.acknowledge_delivery(job['jobId'],broker=service)
+                with NodeGate('synthetic') as gate:
+                    self.assertIsNone(gate.snapshot()['reservation'])
+                self.assertTrue((directory / 'all.zip').is_file())
+                self.assertTrue(source.is_file())
 
 
 if __name__ == '__main__':
