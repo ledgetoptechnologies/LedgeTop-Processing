@@ -44,6 +44,21 @@ def install_offline(db, *, enabled=False):
     except BaseException:
         db.rollback();raise
 
+def verify_existing_node_receipt(db, grant):
+    import json
+    from .node_mutation_broker import _json, _upload_receipt
+    attest(db)
+    digest=hashlib.sha256(_json(grant)).hexdigest()
+    row=db.execute('SELECT job_id,epoch,grant_hash,receipt_json,receipt_sha256 FROM broker_node_receipts WHERE operation_id=?',(grant['operationId'],)).fetchone()
+    proof=db.execute('SELECT job_id,epoch,grant_hash FROM broker_sender_evidence WHERE operation_id=?',(grant['operationId'],)).fetchone()
+    if row is None or proof is None or tuple(proof)!=(grant['jobId'],grant['coordinatorEpoch'],digest):
+        raise EvidenceError('completed upload receipt requires inspection')
+    try:
+        receipt=row['receipt_json'];payload=json.loads(receipt)
+        canonical,receipt_hash=_upload_receipt(grant,payload['reply'],digest)
+        if canonical!=receipt or tuple(row)!=(grant['jobId'],grant['coordinatorEpoch'],digest,receipt,receipt_hash):raise ValueError()
+    except (ValueError,TypeError,KeyError):raise EvidenceError('completed upload receipt differs') from None
+
 class DurableUploadEvidence:
     def __init__(self, queue):
         from .prototype import Queue
@@ -84,20 +99,27 @@ class DurableUploadEvidence:
             if canonical!=receipt:raise ValueError()
         except (ValueError,TypeError,KeyError):raise EvidenceError('node receipt differs') from None
         if grant['coordinatorEpoch']!=self.queue.startup_id:raise EvidenceError('coordinator epoch differs')
+        uncertain=False
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE');attest(db)
-            proof=db.execute('SELECT job_id,epoch,grant_hash FROM broker_sender_evidence WHERE operation_id=?',(grant['operationId'],)).fetchone()
-            if proof is None or tuple(proof)!=(grant['jobId'],grant['coordinatorEpoch'],digest):raise EvidenceError('sender evidence differs')
             intent=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()
             if intent is None or tuple(intent) not in ((grant['jobId'],digest,'started'),(grant['jobId'],digest,'complete')):
                 raise EvidenceError('node receipt intent differs')
             old=db.execute('SELECT job_id,epoch,grant_hash,receipt_json,receipt_sha256 FROM broker_node_receipts WHERE operation_id=?',(grant['operationId'],)).fetchone()
             expected=(grant['jobId'],grant['coordinatorEpoch'],digest,receipt,receipt_hash)
-            if old is None:db.execute('INSERT INTO broker_node_receipts VALUES(?,?,?,?,?,?)',(grant['operationId'],*expected))
-            elif tuple(old)!=expected:raise EvidenceError('node receipt changed')
-            if intent['state']=='started':
-                changed=db.execute("UPDATE broker_intents SET state='complete' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='started'",(grant['operationId'],grant['jobId'],digest)).rowcount
+            if old is None and intent['state']=='complete':
+                changed=db.execute("UPDATE broker_intents SET state='receipt_uncertain' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='complete'",(grant['operationId'],grant['jobId'],digest)).rowcount
                 if changed!=1:raise EvidenceError('node receipt intent changed')
+                uncertain=True
+            else:
+                proof=db.execute('SELECT job_id,epoch,grant_hash FROM broker_sender_evidence WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                if proof is None or tuple(proof)!=(grant['jobId'],grant['coordinatorEpoch'],digest):raise EvidenceError('sender evidence differs')
+                if old is None:db.execute('INSERT INTO broker_node_receipts VALUES(?,?,?,?,?,?)',(grant['operationId'],*expected))
+                elif tuple(old)!=expected:raise EvidenceError('node receipt changed')
+                if intent['state']=='started':
+                    changed=db.execute("UPDATE broker_intents SET state='complete' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='started'",(grant['operationId'],grant['jobId'],digest)).rowcount
+                    if changed!=1:raise EvidenceError('node receipt intent changed')
+        if uncertain:raise EvidenceError('completed upload has no durable receipt; inspection required')
 
     def wait_verified(self, grant, deadline):
         from .node_mutation_broker import _json

@@ -130,7 +130,7 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                         or (action=='sender_verified' and (public.get('operation')!='upload' or phase!='checked'))
                         or (action=='complete' and phase!=expected_completion)):
                     raise SessionHeld('session operation order changed')
-                with witness.hold(public,10,create=(action=='prepare')):
+                with witness.hold(public,10,create=(action=='prepare'),require_upload_receipt=(public.get('operation')=='upload')):
                     if action=='complete':
                         if public.get('operation')=='upload':upload_evidence.commit_node_receipt(public,request['receipt'])
                         else:

@@ -24,7 +24,7 @@ from processing.maintenance import Conflict
 from processing.viewer_tasks import TaskStore
 from processing.authority_lease import AuthorityLease, record_required
 from processing.broker_intent_fence import install_offline
-from processing.durable_upload_evidence import install_offline as install_evidence_offline
+from processing.durable_upload_evidence import install_offline as install_evidence_offline, DurableUploadEvidence, EvidenceError
 
 
 def attach_lease(queue, directory):
@@ -358,6 +358,52 @@ os._exit(27)
             with self.assertRaises(Conflict):restarted.operator(self.job,'resolve',{'note':'synthetic','workerStopped':True})
             with restarted._db() as db:
                 self.assertEqual(db.execute("SELECT state FROM broker_intents WHERE operation_id=?",(grant['operationId'],)).fetchone()[0],'started')
+        finally:restarted.close()
+
+    def _legacy_completed_upload_without_receipt(self, *, with_proof=True):
+        self.begin_upload()
+        grant,signature=b.issue_upload_grant(self.owner_queue,store=self.owner_store,job_id=self.job,
+            claim_token=self.owner_claim['claimToken'],engine_id=self.engine,gate_generation=1,
+            operation_id=str(uuid.uuid4()),file_key='synthetic.jpg',secret=self.secret)
+        digest=hashlib.sha256(b._json(grant)).hexdigest()
+        with self.owner_queue._db() as db:
+            db.execute("INSERT INTO broker_intents VALUES(?,?,?,'complete')",(grant['operationId'],self.job,digest))
+            if with_proof:db.execute('INSERT INTO broker_sender_evidence VALUES(?,?,?,?)',(grant['operationId'],self.job,self.epoch,digest))
+        receipt,_=b._upload_receipt(grant,{'success':True},digest)
+        return grant,receipt
+
+    def _assert_receipt_uncertain(self,grant):
+        with self.owner_queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()[0],'receipt_uncertain')
+            self.assertIsNone(db.execute('SELECT 1 FROM broker_node_receipts WHERE operation_id=?',(grant['operationId'],)).fetchone())
+            self.assertFalse(self.owner_queue._transfer_admission_clear(db))
+        self.assertIsNone(self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+
+    def test_completed_legacy_intent_without_receipt_cannot_backfill(self):
+        grant,receipt=self._legacy_completed_upload_without_receipt()
+        with self.assertRaises(EvidenceError):DurableUploadEvidence(self.owner_queue).commit_node_receipt(grant,receipt)
+        self._assert_receipt_uncertain(grant)
+        with self.assertRaises(EvidenceError):DurableUploadEvidence(self.owner_queue).commit_node_receipt(grant,receipt)
+        self._assert_receipt_uncertain(grant)
+
+    def test_completed_legacy_without_sender_proof_still_becomes_held(self):
+        grant,receipt=self._legacy_completed_upload_without_receipt(with_proof=False)
+        with self.assertRaises(EvidenceError):DurableUploadEvidence(self.owner_queue).commit_node_receipt(grant,receipt)
+        self._assert_receipt_uncertain(grant)
+
+    def test_replay_cannot_reopen_legacy_completed_upload_without_receipt(self):
+        grant,receipt=self._legacy_completed_upload_without_receipt()
+        witness=b.LocalCoordinatorAuthority(self.owner_queue)
+        with self.assertRaises(b.BrokerHeld):
+            with witness.hold(grant,3,create=True,require_upload_receipt=True):pass
+        self._assert_receipt_uncertain(grant)
+        self.broker.close();self.owner_lease.close();self.owner_queue.close()
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            self.assertEqual(restarted.get(self.job)['status'],'held')
+            self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+            with restarted._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()[0],'receipt_uncertain')
         finally:restarted.close()
 
     def test_lost_response_survives_broker_restart_without_replay(self):

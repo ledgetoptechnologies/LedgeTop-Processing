@@ -79,7 +79,7 @@ class LocalCoordinatorAuthority:
         except OSError:raise BrokerHeld('local coordinator lease unavailable') from None
 
     @contextmanager
-    def hold(self, grant, timeout, *, create=False, body=None, signature=None):
+    def hold(self, grant, timeout, *, create=False, body=None, signature=None, require_upload_receipt=False):
         from .prototype import VIEWER_PROFILE
         from .authority_lease import MARKER_DDL, LeaseUnavailable
         deadline=time.monotonic()+timeout
@@ -94,6 +94,7 @@ class LocalCoordinatorAuthority:
                     self._check()
                     if (grant['authorityId'],grant['coordinatorEpoch'])!=(self.authority,self.epoch):
                         raise BrokerHeld('local coordinator epoch differs')
+                    uncertain=False
                     with self.queue._db() as db:
                         db.execute('BEGIN IMMEDIATE')
                         schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone()
@@ -128,9 +129,17 @@ class LocalCoordinatorAuthority:
                             if row is None:
                                 db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(grant['operationId'],grant['jobId'],digest))
                             elif tuple(row)==(grant['jobId'],digest,'complete'):
-                                db.execute("UPDATE broker_intents SET state='started' WHERE operation_id=? AND state='complete'",(grant['operationId'],))
+                                if require_upload_receipt and grant.get('operation')=='upload':
+                                    from .durable_upload_evidence import verify_existing_node_receipt
+                                    try:verify_existing_node_receipt(db,grant)
+                                    except (ValueError,sqlite3.Error):
+                                        db.execute("UPDATE broker_intents SET state='receipt_uncertain' WHERE operation_id=? AND state='complete'",(grant['operationId'],))
+                                        uncertain=True
+                                if not uncertain:
+                                    db.execute("UPDATE broker_intents SET state='started' WHERE operation_id=? AND state='complete'",(grant['operationId'],))
                             elif tuple(row)!=(grant['jobId'],digest,'started'):
                                 raise BrokerHeld('broker intent identity changed')
+                    if uncertain:raise BrokerHeld('completed upload receipt requires inspection')
                     yield
                     self._check()
             except LeaseUnavailable:raise BrokerHeld('installed authority lease unavailable') from None

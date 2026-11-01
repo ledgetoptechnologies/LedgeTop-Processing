@@ -136,3 +136,10 @@ an earlier schema lacking the receipt table is refused, with no automatic
 upgrade or downgrade. The tests simulate TLS loss and orderly restarts using
 local synthetic peers. They do not prove real cross-host, power-loss, malicious
 node, old-writer or physical backend fencing behavior. The path remains disabled.
+
+A legacy completed upload intent without its matching coordinator receipt is
+not backfilled from a newly asserted receipt. The direct completion path and the
+remote replay preparation instead persist a `receipt_uncertain` hold, which
+blocks new admission and survives restart. A qualified reconciliation procedure
+for that legacy state is not implemented. This does not attest against an old
+or privileged writer bypassing the installed schema.
