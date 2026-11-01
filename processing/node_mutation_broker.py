@@ -234,12 +234,12 @@ def inspect_prior_node_state(engine_id):
         if (os.fstat(rootfd).st_dev,os.fstat(rootfd).st_ino)!=(rootstat.st_dev,rootstat.st_ino):raise BrokerHeld('node root changed')
         statefd=os.open('mutation-broker',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=rootfd)
         if (os.fstat(statefd).st_dev,os.fstat(statefd).st_ino)!=(brokerstat.st_dev,brokerstat.st_ino):raise BrokerHeld('node state changed')
-        lockfd=os.open('gate.lock',os.O_RDWR|os.O_NOFOLLOW,dir_fd=rootfd)
+        lockfd=os.open('gate.lock',os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=rootfd)
         lock=os.fstat(lockfd)
         if not stat.S_ISREG(lock.st_mode) or lock.st_uid!=os.geteuid() or lock.st_mode&0o077 or lock.st_nlink!=1:
             raise BrokerHeld('node lock requires inspection')
         fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        manifestfd=os.open('identity.json',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=statefd)
+        manifestfd=os.open('identity.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=statefd)
         info=os.fstat(manifestfd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_size>8192:
             raise BrokerHeld('node identity requires inspection')
@@ -258,12 +258,12 @@ def inspect_prior_node_state(engine_id):
             try:os.stat('node-broker.sqlite3'+suffix,dir_fd=statefd,follow_symlinks=False)
             except FileNotFoundError:continue
             raise BrokerHeld('node journal sidecar requires inspection')
-        journalfd=os.open('node-broker.sqlite3',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=statefd)
+        journalfd=os.open('node-broker.sqlite3',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=statefd)
         js=os.fstat(journalfd)
         if (not stat.S_ISREG(js.st_mode) or js.st_nlink!=1 or js.st_uid!=os.geteuid() or js.st_mode&0o077
                 or not 100<=js.st_size<=16*1024*1024 or manifest['journal']!=[js.st_dev,js.st_ino]):
             raise BrokerHeld('node journal changed')
-        gatefd=os.open('gate.json',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=rootfd)
+        gatefd=os.open('gate.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=rootfd)
         gs=os.fstat(gatefd)
         if not stat.S_ISREG(gs.st_mode) or gs.st_nlink!=1 or gs.st_uid!=os.geteuid() or gs.st_mode&0o077 or gs.st_size>16384:
             raise BrokerHeld('node gate state changed')
@@ -387,7 +387,7 @@ class NodeMutationBroker:
                   'gateRoot':[root.st_dev,root.st_ino], 'gateLock':[lock.st_dev,lock.st_ino],
                   'journal':[journal.st_dev,journal.st_ino]}
         path=self.root/'identity.json'; raw=_json(manifest)
-        flags=os.O_NOFOLLOW | (os.O_WRONLY|os.O_CREAT|os.O_EXCL if created else os.O_RDONLY)
+        flags=os.O_NOFOLLOW | os.O_NONBLOCK | (os.O_WRONLY|os.O_CREAT|os.O_EXCL if created else os.O_RDONLY)
         try:
             fd=os.open(path,flags,0o600)
             try:

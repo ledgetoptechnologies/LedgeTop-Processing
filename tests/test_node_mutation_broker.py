@@ -2,6 +2,7 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -114,6 +115,17 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine)
         after={p.name:(p.stat().st_size,p.stat().st_mtime_ns) for p in state.iterdir()}
         self.assertEqual(before,after)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'POSIX FIFO required')
+    def test_prior_inspection_refuses_fifo_without_blocking(self):
+        self.broker.close()
+        state=self.root/'gate'/'mutation-broker'
+        journal=state/'node-broker.sqlite3'
+        journal.rename(state/'retained-original.sqlite3')
+        os.mkfifo(journal,0o600)
+        started=time.monotonic()
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine)
+        self.assertLess(time.monotonic()-started,2)
 
     def test_prior_inspection_refuses_replaced_journal_symlink(self):
         self.broker.close()
