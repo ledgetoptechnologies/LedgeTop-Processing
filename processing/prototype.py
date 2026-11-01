@@ -160,11 +160,11 @@ class Queue(Maintenance):
                     db.execute('BEGIN IMMEDIATE')
                     self._assert_required_recovery_hold(db)
                 db.execute("""CREATE TABLE IF NOT EXISTS jobs (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-                    request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
-                    profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,
-                    claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+                request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
+                profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,
+                claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
                 if 'node_id' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
                     db.execute('ALTER TABLE jobs ADD COLUMN node_id TEXT')
                 if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
