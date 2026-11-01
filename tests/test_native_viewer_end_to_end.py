@@ -2,6 +2,7 @@
 import http.client
 import io
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 import threading
@@ -16,6 +17,12 @@ from processing.config import Config
 from processing.prototype import Queue
 from processing.synthetic_engine import SyntheticEngine, handler_for
 from tests.test_viewer_http import BOUNDARY, multipart
+
+
+@contextmanager
+def retained_synthetic_root():
+    # Do not recursively delete a synthetic fixture when ownership is uncertain.
+    yield tempfile.mkdtemp(prefix='lt-native-queue-http-')
 
 
 class NativeViewerEndToEnd(unittest.TestCase):
@@ -43,20 +50,26 @@ class NativeViewerEndToEnd(unittest.TestCase):
             def upload(self,identifier,filename,stream,length):
                 if self is main and not upload_entered.is_set():
                     upload_entered.set()
-                    if not upload_release.wait(90):raise RuntimeError('fixture upload timeout')
+                    if not upload_release.wait(15):raise RuntimeError('fixture upload timeout')
                 return super().upload(identifier,filename,stream,length)
 
-        local=Engine(1000,3600);main=Engine(None,3600);fleet.extend((local,main))
+        local=Engine(2,3600);main=Engine(None,3600);fleet.extend((local,main))
         servers=[];engine_threads=[];stages=[];capture_thread=None
-        with tempfile.TemporaryDirectory() as temporary:
+        with retained_synthetic_root() as temporary:
             try:
                 lease_dir=Path(temporary)/'leases';lease_dir.mkdir()
                 for engine in fleet:
-                    server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(engine,node_token))
+                    BaseHandler=handler_for(engine,node_token)
+                    class BoundedHandler(BaseHandler):
+                        def setup(self):
+                            super().setup();self.connection.settimeout(10)
+                    server=ThreadingHTTPServer(('127.0.0.1',0),BoundedHandler)
+                    server.daemon_threads=False;server.block_on_close=True
+                    servers.append(server)
                     thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02})
-                    servers.append(server);engine_threads.append(thread);thread.start()
+                    engine_threads.append(thread);thread.start()
                 config=Config(api_token=api,local_node_url='http://127.0.0.1:'+str(servers[0].server_port),
-                    main_node_url='http://127.0.0.1:'+str(servers[1].server_port),local_max_photos=1000,
+                    main_node_url='http://127.0.0.1:'+str(servers[1].server_port),local_max_photos=2,
                     local_max_input_bytes=20*1024**3,prototype_state_dir=str(Path(temporary)/'state'),
                     prototype_node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,
                     viewer_token=viewer,viewer_staging_token=staging,local_node_token=node_token,main_node_token=node_token,
@@ -72,7 +85,8 @@ class NativeViewerEndToEnd(unittest.TestCase):
                         thread=threading.Thread(target=lambda:exits.append(lifecycle.run(stop)));thread.start()
                     except BaseException:
                         if server is not None:server.server_close()
-                        handler.viewer_service.close();handler.prototype_queue.close();raise
+                        handler.viewer_service.close();handler.prototype_queue.close()
+                        handler.prototype_queue.authority_lease.close();raise
                     stages.append((stop,thread,exits))
                     deadline=time.monotonic()+8
                     while not lifecycle.healthy():
@@ -109,7 +123,7 @@ class NativeViewerEndToEnd(unittest.TestCase):
                     request(port,'POST','/task/new/commit/'+identifier,token,b'')
                     return identifier
 
-                def wait_task(handler,identifier,predicate,seconds=60):
+                def wait_task(handler,identifier,predicate,seconds=15):
                     end=time.monotonic()+seconds
                     while time.monotonic()<end:
                         task=handler.viewer_service.store.task(identifier)
@@ -125,7 +139,7 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 first=wait_task(handler,running,lambda task:task['job']['status']=='running' and task['phase']=='processing')
                 self.assertEqual(first['node_id'],'cluster')
                 waiting=submit(port,staging,1)
-                large=submit(port,viewer,1001)
+                large=submit(port,viewer,3)
                 self.assertEqual(handler.viewer_service.store.task(waiting)['job']['status'],'queued')
                 self.assertEqual(handler.viewer_service.store.task(large)['job']['status'],'queued')
                 self.assertEqual((local.commits,main.commits),(1,0));self.assertEqual(overlaps,[])
@@ -133,7 +147,7 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 stop();handler,port=start()
                 finish(local,first['engine_uuid'])
                 wait_task(handler,running,lambda task:task['job']['status']=='succeeded')
-                self.assertTrue(upload_entered.wait(30),'large job did not begin upload')
+                self.assertTrue(upload_entered.wait(15),'large job did not begin upload')
                 # Run the actual archive child while the later HTTP upload is blocked.
                 capture_errors=[]
                 def capture():
@@ -144,7 +158,7 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 self.assertEqual(capture_errors,[])
                 self.assertEqual(request(port,'GET','/task/'+running+'/download/all.zip',staging),result_bytes)
                 upload_release.set()
-                second=wait_task(handler,large,lambda task:task['job']['status']=='running' and task['phase']=='processing',seconds=100)
+                second=wait_task(handler,large,lambda task:task['job']['status']=='running' and task['phase']=='processing',seconds=15)
                 self.assertEqual(second['node_id'],'main')
                 self.assertEqual(handler.viewer_service.store.task(waiting)['job']['status'],'queued')
                 self.assertEqual((local.commits,main.commits),(1,1));self.assertEqual(overlaps,[])
@@ -162,8 +176,10 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 upload_release.set()
                 if capture_thread is not None:capture_thread.join(20)
                 for event,_,_ in stages:event.set()
-                for _,thread,_ in stages:thread.join(100)
-                for server in servers:server.shutdown();server.server_close()
+                for _,thread,_ in stages:thread.join(10)
+                for index,server in enumerate(servers):
+                    if index<len(engine_threads) and engine_threads[index].is_alive():server.shutdown()
+                    server.server_close()
                 for thread in engine_threads:thread.join(5)
                 if ((capture_thread is not None and capture_thread.is_alive()) or
                         any(thread.is_alive() for _,thread,_ in stages) or any(thread.is_alive() for thread in engine_threads)):
