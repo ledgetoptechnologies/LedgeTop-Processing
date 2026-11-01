@@ -238,6 +238,15 @@ class LocalCoordinatorCandidateTests(unittest.TestCase):
                         with self.assertRaisesRegex(CrossFsHeld,'identity changed'):
                             coordinator.observe(attempt_id='attempt',plans=plans)
                 finally:first.server_pin=old_pin
+                # Allocating within a hold preserves its immutable identity.
+                with ledger2._transaction() as db:
+                    second_reservation=db.execute('select id from reservations').fetchone()[0]
+                (host2/'synthetic-allocated-byte').write_bytes(b'x')
+                ledger2.record_allocated(second_reservation,1)
+                self.assertEqual(coordinator.observe(attempt_id='attempt',plans=plans)['state'],'observed_only')
+                ledger2.set_engine_state(second_reservation,'terminal',terminal_attested=True)
+                with self.assertRaises(CrossFsHeld):
+                    coordinator.observe(attempt_id='attempt',plans=plans)
                 for ledger in (self.ledger,ledger2):
                     with ledger._transaction() as db:self.assertEqual(db.execute('select count(*) from reservations').fetchone()[0],1)
         finally:

@@ -74,8 +74,9 @@ def serve_capacity_session(channel, *, authority, plans, client_pin, timeout_sec
     result=authority.acquire(**plan)
     authority._check()
     binding=json.loads(authority._binding_value)
+    hold_sha=authority.hold_evidence(attempt)
     _write(channel,{'attemptId':attempt,'authorityId':binding['authorityId'],'state':result['state'],
-                    'planSha256':hashlib.sha256(encoded).hexdigest(),'nonce':request['nonce']},deadline)
+                    'planSha256':hashlib.sha256(encoded).hexdigest(),'holdSha256':hold_sha,'nonce':request['nonce']},deadline)
 
 
 def request_capacity_session(channel, *, operation, attempt, plan, authority_id, server_pin, timeout_seconds=3):
@@ -91,5 +92,9 @@ def request_capacity_session(channel, *, operation, attempt, plan, authority_id,
     expected={'attemptId':attempt,'authorityId':authority_id,'state':'admitted',
               'planSha256':hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest(),
               'nonce':nonce}
-    if _read(channel,deadline)!=expected:raise CrossFsHeld('remote capacity receipt changed')
-    return {'state':'observed','receipt':expected}
+    received=_read(channel,deadline)
+    if (type(received) is not dict or set(received)!=set(expected)|{'holdSha256'}
+            or any(received.get(key)!=value for key,value in expected.items())
+            or type(received['holdSha256']) is not str or not re.fullmatch('[a-f0-9]{64}',received['holdSha256'])):
+        raise CrossFsHeld('remote capacity receipt changed')
+    return {'state':'observed','receipt':received}

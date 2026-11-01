@@ -6,6 +6,7 @@ Other users, old writers, mount races, and container administrators can bypass
 it. No external service, cleanup, engine attestation, or NAS protocol is wired.
 """
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -177,6 +178,41 @@ class LocalCapacityAuthority:
             result=self._gate.acquire(**kwargs)
             self._check()
             return result
+
+    def hold_evidence(self, attempt_id):
+        """Digest exact current cooperative holds; never a transfer grant."""
+        with self._mutex:
+            self._check()
+            with self._gate._db() as db:
+                attempt=db.execute('SELECT plan,state FROM attempts WHERE id=?',(attempt_id,)).fetchone()
+                parts=db.execute('SELECT device,ledger,bytes,reservation,state FROM parts WHERE attempt=? ORDER BY device',(attempt_id,)).fetchall()
+            if attempt is None or attempt[1]!='admitted':raise CrossFsHeld('cooperative hold unavailable')
+            plan=json.loads(attempt[0]);devices=plan.get('devices')
+            if type(devices) is not dict or len(parts)!=len(devices):raise CrossFsHeld('hold inventory changed')
+            evidence=[]
+            for device,label,amount,reservation,state in parts:
+                entry=devices.get(device)
+                if (type(entry) is not dict or state!='acquired' or entry.get('ledger')!=label
+                        or entry.get('bytes')!=amount or label not in self.ledgers):
+                    raise CrossFsHeld('hold component changed')
+                ledger=self.ledgers[label]
+                with ledger._transaction() as db:
+                    row=db.execute('SELECT settings,state,remaining,allocated FROM reservations WHERE id=?',(reservation,)).fetchone()
+                    if row is None or row['state'] not in ('uncertain','engine_started'):raise CrossFsHeld('cooperative hold unavailable')
+                    settings=json.loads(row['settings'])
+                    expected={'job_id':plan['job'],'generation':plan['generation'],'reservation_id':reservation,
+                        'manifest_sha256':plan['manifest'],'input_bytes':entry['inputBytes'],'output_budget':entry['outputBudget'],
+                        'environment':plan['environment'],'ttl_seconds':plan['ttl']}
+                    if settings!=expected or row['remaining']+row['allocated']!=amount:
+                        raise CrossFsHeld('cooperative hold identity changed')
+                    evidence.append({'device':device,'ledger':label,'reservation':reservation,
+                        'settingsSha256':hashlib.sha256(json.dumps(settings,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+                        'reservedBytes':amount,'state':'active',
+                        'mountIdentity':list(self._mount_pins[label][1]),'ledgerIdentity':self._ledger_bindings[label]})
+            self._check()
+            value={'attemptId':attempt_id,'authorityId':json.loads(self._binding_value)['authorityId'],
+                   'planSha256':hashlib.sha256(attempt[0].encode()).hexdigest(),'holds':evidence}
+            return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
     def __exit__(self,*args):
         with self._mutex:

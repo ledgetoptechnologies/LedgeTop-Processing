@@ -82,8 +82,13 @@ class CrossFsAdmission:
             raise CrossFsHeld('bounded attempt and demands required')
         by_device={}
         for demand in demands:
-            if (type(demand) is not dict or set(demand)!={'ledger','bytes'} or demand['ledger'] not in self.ledgers
-                    or type(demand['bytes']) is not int or not 0<demand['bytes']<=2**53-1):
+            if (type(demand) is not dict or demand.get('ledger') not in self.ledgers
+                    or set(demand) not in ({'ledger','bytes'},{'ledger','inputBytes','outputBudget'})):
+                raise CrossFsHeld('invalid capacity demand')
+            input_bytes=demand.get('inputBytes',demand.get('bytes'))
+            output_budget=demand.get('outputBudget',0)
+            if (type(input_bytes) is not int or type(output_budget) is not int
+                    or input_bytes<0 or output_budget<0 or not 0<input_bytes+output_budget<=2**53-1):
                 raise CrossFsHeld('invalid capacity demand')
             ledger=self.ledgers[demand['ledger']]
             st=os.stat(ledger.root,follow_symlinks=False)
@@ -93,8 +98,9 @@ class CrossFsAdmission:
             if existing and existing['identity']!=identity:
                 raise CrossFsHeld('same filesystem requires one canonical ledger')
             if not existing:
-                existing=by_device[device]={'identity':identity,'ledger':demand['ledger'],'bytes':0}
-            existing['bytes']+=demand['bytes']
+                existing=by_device[device]={'identity':identity,'ledger':demand['ledger'],'bytes':0,'inputBytes':0,'outputBudget':0}
+            existing['inputBytes']+=input_bytes;existing['outputBudget']+=output_budget
+            existing['bytes']+=input_bytes+output_budget
             if existing['bytes']>2**53-1:raise CrossFsHeld('capacity overflow')
         plan={'job':job_id,'generation':generation,'manifest':manifest_sha256,'environment':environment,
               'ttl':ttl_seconds,'devices':by_device}
@@ -127,7 +133,7 @@ class CrossFsAdmission:
             if part is None:raise CrossFsHeld('reservation journal incomplete')
             try:
                 ledger.reserve(job_id=job_id,generation=generation,reservation_id=part[0],
-                    manifest_sha256=manifest_sha256,input_bytes=entry['bytes'],output_budget=0,
+                    manifest_sha256=manifest_sha256,input_bytes=entry['inputBytes'],output_budget=entry['outputBudget'],
                     environment=environment,ttl_seconds=ttl_seconds,worker_ready=True)
                 # Conservative pin: never expire a recorded component while
                 # another filesystem is still being acquired. This is not an

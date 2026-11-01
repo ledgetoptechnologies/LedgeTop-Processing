@@ -134,7 +134,8 @@ class MultiHostCapacityJournal:
                 check_endpoint(name)
                 receipt=observed['receipt']
                 if (receipt.get('attemptId')!=attempt_id or receipt.get('authorityId')!=connector.authority_id
-                        or receipt.get('planSha256')!=plan_sha or receipt.get('state')!='admitted'):
+                        or receipt.get('planSha256')!=plan_sha or receipt.get('state')!='admitted'
+                        or type(receipt.get('holdSha256')) is not str or not re.fullmatch('[a-f0-9]{64}',receipt['holdSha256'])):
                     raise CrossFsHeld('remote receipt changed')
                 with self._db() as db:
                     db.execute('BEGIN IMMEDIATE')
@@ -144,12 +145,17 @@ class MultiHostCapacityJournal:
             else:
                 receipt=json.loads(row[0])
                 if (receipt.get('attemptId')!=attempt_id or receipt.get('authorityId')!=connector.authority_id
-                        or receipt.get('planSha256')!=plan_sha or receipt.get('state')!='admitted'):
+                        or receipt.get('planSha256')!=plan_sha or receipt.get('state')!='admitted'
+                        or type(receipt.get('holdSha256')) is not str or not re.fullmatch('[a-f0-9]{64}',receipt['holdSha256'])):
                     raise CrossFsHeld('stored remote receipt changed')
         for name in sorted(self.authorities):
             connector=check_endpoint(name)
-            connector.observe(operation='pin',attempt=attempt_id,plan=frozen[name])
+            pin=connector.observe(operation='pin',attempt=attempt_id,plan=frozen[name])
             check_endpoint(name)
+            with self._db() as db:
+                row=db.execute('SELECT receipt FROM multi_receipts WHERE attempt=? AND host=?',(attempt_id,name)).fetchone()
+            if row is None or pin['receipt']['holdSha256']!=json.loads(row[0]).get('holdSha256'):
+                raise CrossFsHeld('remote held generation changed')
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
             try:
