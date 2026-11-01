@@ -20,6 +20,9 @@ class DriverInspectionTests(unittest.TestCase):
         self.assertEqual(driver.step(),{'state':'held','reason':'stored_reference_inspection'})
         self.assertEqual(driver.step(),{'state':'processing','jobId':'synthetic',
             'background':{'state':'held','reason':'stored_reference_inspection'}})
+        driver._background=Mock(side_effect=DriverHeld('reference_inspection_protocol_error'))
+        driver._step=Mock(return_value={'state':'idle'})
+        self.assertEqual(driver.step(),{'state':'held','reason':'reference_inspection_protocol_error'})
 
     def test_actual_background_relay_reports_job_and_preserves_checkpoint(self):
         db=sqlite3.connect(':memory:');db.row_factory=sqlite3.Row
