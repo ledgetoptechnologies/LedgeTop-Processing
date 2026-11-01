@@ -8,10 +8,12 @@ administrators, direct backend connections, or arbitrary code in this process.
 
 Recovery prerequisite limitations: creation interrupted between journal and
 manifest leaves a manual, fail-closed recovery case; there is no migration of
-older journals. Inspection pins opened node files and rejects SQLite sidecars and WAL;
-it does not establish that a replaced ancestor path is still current or
-prevent arbitrary direct writers from changing files. Do not use this snapshot
-as a no-follow guarantee, admission barrier, or deployable recovery protocol.
+older journals. Inspection pins opened node files and rejects SQLite sidecars
+and WAL; it cannot establish that a replaced ancestor is still current or
+prevent arbitrary direct writers from changing files. A historical broker
+constructor is not read-only: NodeGate may create or chmod state, and SQLite
+read-write open may recover a hot journal or create sidecars.
+Do not use this snapshot as an admission barrier or deployable recovery protocol.
 """
 import hashlib
 import hmac
@@ -347,13 +349,13 @@ class NodeMutationBroker:
             # manifest matches this exact broker and node gate.
             with NodeGate(self.engine) as gate:self._identity_manifest(gate,False)
         self.db=sqlite3.connect(self.path, timeout=2, isolation_level=None, check_same_thread=False)
-        root_info=self.root.stat();db_info=self.path.lstat()
-        self._root_identity=(root_info.st_dev,root_info.st_ino)
-        self._database_identity=(db_info.st_dev,db_info.st_ino)
-        self.db.row_factory=sqlite3.Row
-        self.db.execute('PRAGMA synchronous=FULL')
-        self.db.execute('BEGIN IMMEDIATE')
         try:
+            root_info=self.root.stat();db_info=self.path.lstat()
+            self._root_identity=(root_info.st_dev,root_info.st_ino)
+            self._database_identity=(db_info.st_dev,db_info.st_ino)
+            self.db.row_factory=sqlite3.Row
+            self.db.execute('PRAGMA synchronous=FULL')
+            self.db.execute('BEGIN IMMEDIATE')
             for name, ddl in _DDL.items():
                 existing=self.db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
                 if existing is None:
@@ -369,11 +371,11 @@ class NodeMutationBroker:
                 self.db.execute('INSERT INTO binding VALUES(1,?)',(binding,))
             elif old['digest'] != binding:raise BrokerHeld('node broker binding changed')
             self.db.commit()
-        except BaseException:self.db.rollback();self.db.close();raise
-        try:
             with NodeGate(self.engine) as gate:self._identity_manifest(gate,not existed)
         except BaseException:
-            self.db.close()
+            try:
+                if self.db.in_transaction:self.db.rollback()
+            finally:self.db.close()
             raise
 
     def _identity_manifest(self, gate, created):

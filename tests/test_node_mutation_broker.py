@@ -137,6 +137,32 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine)
         self.assertTrue(original.exists())
 
+    def test_constructor_closes_connection_on_setup_failures(self):
+        import sqlite3
+        self.broker.close()
+        state=self.root/'gate'/'mutation-broker'
+        real_connect=sqlite3.connect;real_stat=Path.stat
+        for failpoint in ('stat','pragma','begin'):
+            with self.subTest(failpoint=failpoint):
+                opened=[]
+                class FaultConnection(sqlite3.Connection):
+                    def execute(self, sql, *args):
+                        if (failpoint=='pragma' and sql.startswith('PRAGMA synchronous')) or (failpoint=='begin' and sql=='BEGIN IMMEDIATE'):
+                            raise OSError('synthetic initialization failure')
+                        return super().execute(sql,*args)
+                def connect(*args,**kwargs):
+                    connection=real_connect(*args,**kwargs,factory=FaultConnection)
+                    opened.append(connection)
+                    return connection
+                def stat_call(path,*args,**kwargs):
+                    if failpoint=='stat' and opened and path==state:
+                        raise OSError('synthetic stat failure')
+                    return real_stat(path,*args,**kwargs)
+                with patch.object(b.sqlite3,'connect',side_effect=connect), patch.object(Path,'stat',stat_call):
+                    with self.assertRaises(OSError):b.NodeMutationBroker(state,**self.config)
+                self.assertEqual(len(opened),1)
+                with self.assertRaises(sqlite3.ProgrammingError):opened[0].execute('SELECT 1')
+
     def test_reopen_missing_binding_preserves_existing_journal(self):
         self.broker.db.execute('DELETE FROM binding')
         self.broker.close()
