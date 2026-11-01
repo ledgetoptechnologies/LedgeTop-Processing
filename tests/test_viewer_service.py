@@ -1404,16 +1404,33 @@ service._restore_recorded_archive({'directory':str(path.parent),'node_id':'clust
                          hashlib.sha256(handler.wfile.getvalue()).hexdigest())
         self.assertEqual(handler.wfile.getvalue(), self.engines['cluster'].archive)
 
-    def test_receipt_backed_stream_carries_exact_digest_but_legacy_does_not(self):
+    def test_receipt_backed_stream_and_markerless_ambiguity(self):
         identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
         stream, _ = self.service.download(identifier)
         with stream:
             self.assertEqual(stream.ledgetop_archive_sha256, hashlib.sha256(stream.read()).hexdigest())
         task = self.task(identifier)
+        # Removing both synthetic markers models the indistinguishable case;
+        # it does not prove this archive was written by a legacy version.
         Path(task['archive_path']).with_suffix('.zip.receipt').unlink()
+        Path(task['archive_path']).with_suffix('.zip.intent').unlink()
         stream, _ = self.service.download(identifier)
         with stream:
             self.assertFalse(hasattr(stream, 'ledgetop_archive_sha256'))
+
+    def test_missing_receipt_with_intent_holds_across_restart(self):
+        identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()
+        stream, _ = self.service.download(identifier)
+        stream.close()
+        task=self.task(identifier);path=Path(task['archive_path']);before=path.read_bytes()
+        receipt=path.with_suffix('.zip.receipt');intent=path.with_suffix('.zip.intent')
+        intent_before=intent.read_bytes();receipt.unlink()
+        self.service.close();self.queue.close();self.make_queue_service()
+        with patch.object(self.engines['cluster'],'download',side_effect=AssertionError('must not fetch')):
+            with self.assertRaisesRegex(Conflict,'archive receipt requires inspection'):
+                self.service.download(identifier)
+        self.assertEqual(path.read_bytes(),before);self.assertEqual(intent.read_bytes(),intent_before)
+        self.assertFalse(receipt.exists());self.assertEqual(self.task(identifier)['archive_path'],str(path))
 
     def test_archive_receipt_recovers_after_state_write_failure_and_restart(self):
         identifier = self.submit(); self.service.tick(); self.finish(identifier); self.service.tick()

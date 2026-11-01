@@ -822,6 +822,17 @@ class ViewerService:
                 except FileNotFoundError:
                     return self._restore_recorded_archive(task,path,receipt)
                 return self._verify_archive(path, receipt), receipt['bytes']
+            # A capture intent identifies the receipt-backed format. Losing
+            # its receipt must never silently downgrade it to legacy delivery.
+            # If both markers disappear, legacy and new formats are ambiguous.
+            try:
+                path.with_suffix('.zip.intent').lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise Conflict('archive metadata requires inspection') from None
+            else:
+                raise Conflict('archive receipt requires inspection')
             if path.is_symlink() or not path.is_file():
                 raise Conflict('retained archive unavailable')
             return path.open('rb'), path.stat().st_size

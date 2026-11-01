@@ -42,6 +42,11 @@ or end-to-end custody. **It cannot prevent engine cleanup while the coordinator
 is offline beyond the engine's retention period.** Existing engine 48-hour
 cleanup and unsafe restart behavior require their own qualified solution.
 
+When a recorded archive still has its capture intent but its receipt is
+missing, delivery holds for inspection instead of treating that file as a
+legacy unverified archive. If both intent and receipt disappear, the old and
+new formats cannot be distinguished; this safeguard cannot detect that case.
+
 Interrupted automatic transfers without a verified receipt are preserved and held for operator inspection; automatic retry will not remove or overwrite those partials. Failures before a partial is created can retry automatically. This limits availability until a separate safe recovery procedure exists.
 
 The task info response reports `ledgetopArchive` separately from processing success: `pending`, `inspection`, `recorded`, or `disabled`, with only fixed sanitized reasons. Pending/inspection state is persisted and survives coordinator restart. Recorded means an archive path was recorded; the file may now be missing or corrupt and Viewer has not necessarily acknowledged it. A sanitized process-local health signal indicates status persistence failures. Since that signal resets on restart and no complete durable reconciliation exists, enabled capture always reports inspection required with status_unverified_after_restart until such reconciliation is implemented; it never asserts healthy merely because the process restarted. A failed database can also make the API unavailable. Enabling capture alters the Viewer task table; the existing strict update and rollback census rejects this migration. Do not enable or deploy until the update and rollback controller is separately qualified for this schema.
