@@ -369,8 +369,14 @@ class ReferenceStore:
         """
         with self.queue._db() as db:
             db.execute('BEGIN')
-            return self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
+            observation = self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
                 worker_instance_id=worker_instance_id, claim_token=claim_token)
+            # Worker execution guards consume this public snapshot. Refuse a
+            # fresh executable observation if any transfer remains uncertain.
+            # This read transaction is not a lifetime fence on later actions.
+            if not self.queue._transfer_admission_clear(db):
+                raise Conflict('transfer requires independently fenced reconciliation')
+            return observation
 
     def _claim_snapshot(self, db, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
         """Same authenticated observation inside an existing transaction."""

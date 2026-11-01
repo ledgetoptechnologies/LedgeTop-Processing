@@ -260,9 +260,11 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(queue.get(job['jobId'])['status'],'held')
         with queue._db() as db: db.execute("DELETE FROM engine_ingress_uploads WHERE upload_id='unknown-upload'")
         resumed=call('POST','recover',protocol.canonical_json(request));self.assertEqual(resumed.status,200,resumed.body)
+        self.assertEqual(call('GET','claim-state').status,200)
         with queue._db() as db:
             db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
                        ('unknown-upload','unrelated-job','other-engine',1,'a'*64,'unknown'))
+        self.assertEqual(call('GET','claim-state').status,409)
         replay=call('POST','recover',protocol.canonical_json(request))
         self.assertEqual(replay.status,200);self.assertEqual(replay.body,resumed.body)
         self.assertEqual(queue.get(job['jobId'])['status'],'running');epoch=queue.startup_id
