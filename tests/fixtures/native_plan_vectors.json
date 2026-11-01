@@ -1,0 +1,20 @@
+{
+  "profile": "native-plan-v1-experiment",
+  "vectors": [
+    {
+      "name": "default_outputs",
+      "canonical": "{\"bindingId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"environment\":\"production\",\"expectedCatalogDigest\":\"fd9e8062c7044d572ed815e32d5b6ed188aa639a37e7d6eec9c9516c828fe1d6\",\"generation\":1,\"manifestSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"options\":[],\"outputs\":null,\"schemaVersion\":1,\"taskName\":\"Test 🌍\",\"taskUuid\":\"00000000-0000-4000-8000-000000000001\"}",
+      "planSha256": "ded4a69a9f23328575befec7fcf7dd8559814cfe743dd1cf6864bfa64f9059af"
+    },
+    {
+      "name": "empty_outputs",
+      "canonical": "{\"bindingId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"environment\":\"production\",\"expectedCatalogDigest\":\"fd9e8062c7044d572ed815e32d5b6ed188aa639a37e7d6eec9c9516c828fe1d6\",\"generation\":1,\"manifestSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"options\":[],\"outputs\":[],\"schemaVersion\":1,\"taskName\":\"Test 🌍\",\"taskUuid\":\"00000000-0000-4000-8000-000000000001\"}",
+      "planSha256": "c1af25ce3e8334d0f1c60c90872edb30fae7de4d787a7d721b30205cd539e2f4"
+    },
+    {
+      "name": "numeric_scalars",
+      "canonical": "{\"bindingId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"environment\":\"production\",\"expectedCatalogDigest\":\"fd9e8062c7044d572ed815e32d5b6ed188aa639a37e7d6eec9c9516c828fe1d6\",\"generation\":1,\"manifestSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"options\":[{\"name\":\"min\",\"value\":{\"bits\":\"0000000000000001\",\"type\":\"number\"}},{\"name\":\"one\",\"value\":{\"bits\":\"3ff0000000000000\",\"type\":\"number\"}},{\"name\":\"limit\",\"value\":{\"bits\":\"433fffffffffffff\",\"type\":\"number\"}}],\"outputs\":null,\"schemaVersion\":1,\"taskName\":\"Test 🌍\",\"taskUuid\":\"00000000-0000-4000-8000-000000000001\"}",
+      "planSha256": "10ddb5305a83406f3aa3f347f7ae668e0903a96b4d22480b47f56517871c8689"
+    }
+  ]
+}

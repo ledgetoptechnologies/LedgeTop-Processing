@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 ADMISSION_DRAIN_QUALIFIED = False
 ARCHIVE_REGISTRY_QUALIFIED = False
 NATIVE_MANIFEST_BINDING_QUALIFIED = False
+# Experimental plan metadata is never enabled by environment configuration.
+NATIVE_PLAN_BINDING_QUALIFIED = False
 
 
 @dataclass(frozen=True)
