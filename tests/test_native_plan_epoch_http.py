@@ -8,7 +8,6 @@ import uuid
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
-from urllib.parse import urlencode
 
 from processing import config, reference_protocol as ref,viewer_http
 from processing.native_plan_binding import NativePlanBindings
@@ -24,8 +23,8 @@ class EpochHTTP(Epoch):
     def raw(self,method,path,body=b'',cap=CAP,token=TOKEN):
         conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=5)
         try:
-            conn.request(method,path+'?'+urlencode({'token':token}),body=body,
-                         headers={'Content-Type':'application/json','X-LedgeTop-Capability':cap})
+            conn.request(method,path,body=body,
+                         headers={'Content-Type':'application/json','X-LedgeTop-Capability':cap,'X-LedgeTop-Environment-Token':token})
             response=conn.getresponse();data=response.read()
             return response.status,data,response.getheader('Cache-Control')
         finally:conn.close()
@@ -68,7 +67,7 @@ class EpochHTTP(Epoch):
         for path,cap,token in ((base+'/manifest',OTHER,TOKEN),(base+'/manifest',CAP,STAGING)):
             conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=3)
             try:
-                conn.putrequest('POST',path+'?'+urlencode({'token':token}));conn.putheader('Content-Type','application/json')
+                conn.putrequest('POST',path);conn.putheader('Content-Type','application/json');conn.putheader('X-LedgeTop-Environment-Token',token)
                 conn.putheader('Content-Length','10000');conn.putheader('X-LedgeTop-Capability',cap);conn.endheaders()
                 response=conn.getresponse();self.assertEqual(response.status,404);response.read()
             finally:conn.close()
@@ -81,11 +80,63 @@ class EpochHTTP(Epoch):
         with self.handler.prototype_queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM native_plan_epoch_revokes').fetchone()[0],0)
 
+    def test_header_only_auth_rejects_ambiguity_before_body(self):
+        identifier,operation,manifest,base,_=self.setup_http();path=base+'/manifest'
+        env='X-LedgeTop-Environment-Token';cap='X-LedgeTop-Capability'
+        cases=[('',[(cap,CAP)],401),('',[(env,TOKEN)],404),
+               ('',[(env,TOKEN),(env,TOKEN),(cap,CAP)],401),('',[(env,TOKEN),(cap,CAP),(cap,CAP)],400),
+               ('',[(env,TOKEN),('x-ledgetop-environment-token',TOKEN),(cap,CAP)],401),
+               ('',[(env,TOKEN),(cap,CAP),('x-ledgetop-capability',CAP)],400),
+               ('',[(env,'synthetic-invalid-token'),(cap,CAP)],401),
+               ('',[(env,TOKEN+','+TOKEN),(cap,CAP)],401),('',[(env,''),(cap,CAP)],401),
+               ('',[(env,TOKEN+' '),(cap,CAP)],401),('',[(env,TOKEN),(cap,CAP+','+CAP)],404),
+               ('?token='+TOKEN,[(env,TOKEN),(cap,CAP)],400),('?token='+TOKEN,[(cap,CAP)],400),
+               ('?other=x',[(env,TOKEN),(cap,CAP)],400),('?',[(env,TOKEN),(cap,CAP)],400)]
+        for query,headers,expected in cases:
+            with self.subTest(query=bool(query),expected=expected,header_count=len(headers)):
+                conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=3)
+                try:
+                    conn.putrequest('POST',path+query);conn.putheader('Content-Type','application/json');conn.putheader('Content-Length','10000')
+                    for name,value in headers:conn.putheader(name,value)
+                    conn.endheaders();response=conn.getresponse();data=response.read()
+                    self.assertEqual(response.status,expected);self.assertNotIn(TOKEN.encode(),data);self.assertNotIn(CAP.encode(),data)
+                finally:conn.close()
+        invalid=base.replace(identifier,'not-a-uuid')
+        self.assertEqual(self.raw('GET',invalid)[0],400)
+        self.assertEqual(self.raw('GET',invalid+'?token='+TOKEN)[0],400)
+        with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM native_manifest_bindings').fetchone()[0],0)
+
+    def test_folded_header_is_rejected_without_credential_echo_or_app_log(self):
+        import contextlib,io,socket
+        identifier,operation,manifest,base,_=self.setup_http();sink=io.StringIO()
+        sock=socket.create_connection(('127.0.0.1',self.server.server_port),timeout=3);sock.settimeout(3)
+        try:
+            request=('POST '+base+'/manifest HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n'
+                     +'Content-Length: 10000\r\nX-LedgeTop-Environment-Token: '+TOKEN+'\r\n folded\r\n'
+                     +'X-LedgeTop-Capability: '+CAP+'\r\nConnection: close\r\n\r\n').encode('ascii')
+            with contextlib.redirect_stderr(sink):
+                sock.sendall(request);response=http.client.HTTPResponse(sock);response.begin();body=response.read()
+            self.assertEqual(response.status,401);self.assertNotIn(TOKEN.encode(),body);self.assertNotIn(CAP.encode(),body)
+            self.assertNotIn(TOKEN,sink.getvalue());self.assertNotIn(CAP,sink.getvalue())
+        finally:sock.close()
+
+    def test_wrong_header_and_rejected_query_do_not_echo_or_log_tokens(self):
+        import contextlib,io
+        identifier,operation,manifest,base,_=self.setup_http();sink=io.StringIO();marker='synthetic-invalid-log-marker'
+        with contextlib.redirect_stderr(sink):
+            status,body,_=self.raw('GET',base);self.assertEqual(status,200)
+            self.assertNotIn(TOKEN.encode(),body);self.assertNotIn(CAP.encode(),body)
+            status,body,_=self.raw('GET',base,token=marker);self.assertEqual(status,401)
+            self.assertNotIn(marker.encode(),body)
+            status,body,_=self.raw('GET',base+'?token='+TOKEN);self.assertEqual(status,400)
+            self.assertNotIn(TOKEN.encode(),body)
+        self.assertNotIn(marker,sink.getvalue());self.assertNotIn(TOKEN,sink.getvalue());self.assertNotIn(CAP,sink.getvalue())
+
     def test_open_capability_syntax_rejected_before_body(self):
         identifier=str(uuid.uuid4());operation=str(uuid.uuid4());base=self.base(identifier,operation)
         conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=3)
         try:
-            conn.putrequest('POST',base+'/open?'+urlencode({'token':TOKEN}));conn.putheader('Content-Type','application/json')
+            conn.putrequest('POST',base+'/open');conn.putheader('Content-Type','application/json');conn.putheader('X-LedgeTop-Environment-Token',TOKEN)
             conn.putheader('Content-Length','10000');conn.putheader('X-LedgeTop-Capability','bad');conn.endheaders()
             response=conn.getresponse();self.assertEqual(response.status,400);response.read()
         finally:conn.close()
@@ -107,7 +158,7 @@ class EpochHTTP(Epoch):
     def test_manifest_trickle_times_out_without_binding(self):
         from tests.test_native_binding_deadline import trickle
         identifier,operation,manifest,base,_=self.setup_http();body=ref.canonical_json(manifest)
-        trickle(self,base+'/manifest',body)
+        trickle(self,base+'/manifest',body,epoch=True)
         with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM native_manifest_bindings').fetchone()[0],0)
         self.assertEqual(self.raw('POST',base+'/manifest',body)[0],200)
 
@@ -116,8 +167,8 @@ class EpochHTTP(Epoch):
         request={'schemaVersion':2,'requestId':str(uuid.uuid4()),'expectedManifestSha256':manifest['sha256'],
                  'expectedManifestBindingId':None,'expectedPlanSha256':None};body=ref.canonical_json(request)
         conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=3)
-        conn.request('POST',base+'/revoke?'+urlencode({'token':TOKEN}),body=body,
-                     headers={'Content-Type':'application/json','X-LedgeTop-Capability':CAP});conn.close()
+        conn.request('POST',base+'/revoke',body=body,
+                     headers={'Content-Type':'application/json','X-LedgeTop-Capability':CAP,'X-LedgeTop-Environment-Token':TOKEN});conn.close()
         deadline=time.monotonic()+5
         while True:
             code,data,_=self.raw('GET',base)
@@ -150,7 +201,7 @@ class EpochHTTP(Epoch):
         _,data,_=self.raw('POST',base+'/intent',body);digest=json.loads(data)['result']['planSha256']
         entered=threading.Event();release=threading.Event();results=[];actual=viewer_http._binding_body
         def wait_after_auth(handler,length):
-            if handler.path.startswith(base+'/accept?'):
+            if handler.path==base+'/accept':
                 entered.set()
                 if not release.wait(3):raise TimeoutError('fixture deadline')
             return actual(handler,length)
@@ -223,8 +274,8 @@ class Qualification(unittest.TestCase):
             conn=http.client.HTTPConnection(info['host'],info['port'],timeout=3)
             try:
                 identifier='00000000-0000-4000-8000-000000000001';operation='00000000-0000-4000-8000-000000000002'
-                path='/task/ledgetop/plan-epoch-v2/'+identifier+'/'+operation+'/1/1?'+urlencode({'token':TOKEN})
-                conn.request('GET',path,headers={'X-LedgeTop-Capability':CAP});response=conn.getresponse()
+                path='/task/ledgetop/plan-epoch-v2/'+identifier+'/'+operation+'/1/1'
+                conn.request('GET',path,headers={'X-LedgeTop-Capability':CAP,'X-LedgeTop-Environment-Token':TOKEN});response=conn.getresponse()
                 self.assertEqual(response.status,404);response.read()
             finally:conn.close()
             out,err=child.communicate('STOP\n',timeout=10);self.assertEqual(child.returncode,0,err[-1000:]);self.assertEqual(out,'')

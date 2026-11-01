@@ -16,7 +16,7 @@ from tests.test_native_plan_binding import template
 from tests.test_native_plan_http import PlanHTTP
 
 
-def trickle(test, path, body, *, on_started=None):
+def trickle(test, path, body, *, on_started=None, epoch=False):
     sock=socket.create_connection(('127.0.0.1',test.server.server_port),timeout=3)
     sock.settimeout(3);stop=threading.Event();entered=threading.Event();sent=[];errors=[]
     original=viewer_http._binding_body
@@ -32,7 +32,9 @@ def trickle(test, path, body, *, on_started=None):
         except BaseException as error:errors.append(error)
     worker=threading.Thread(target=sender);started=False
     try:
-        headers=('POST '+path+'?'+urlencode({'token':TOKEN})+' HTTP/1.1\r\nHost: localhost\r\n'
+        target=path if epoch else path+'?'+urlencode({'token':TOKEN})
+        env_header=('X-LedgeTop-Environment-Token: '+TOKEN+'\r\n') if epoch else ''
+        headers=('POST '+target+' HTTP/1.1\r\nHost: localhost\r\n'+env_header
                  +'Content-Type: application/json\r\nContent-Length: '+str(len(body))+'\r\n'
                  +'X-LedgeTop-Capability: '+CAP+'\r\nConnection: close\r\n\r\n').encode('ascii')
         with patch.object(viewer_http,'BINDING_BODY_DEADLINE_SECONDS',.35), patch.object(viewer_http,'_binding_body',side_effect=marked):

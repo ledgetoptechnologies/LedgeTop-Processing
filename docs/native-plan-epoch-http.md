@@ -9,9 +9,16 @@ old-writer, both-table-loss, non-quiescence and power-loss limitations remain.
 The prefix is `/task/ledgetop/plan-epoch-v2/{taskUuid}/{operationId}/1/1`.
 Task and operation IDs are canonical UUIDs; this candidate fixes generation
 and epoch at 1. The final two components are expectations, not proof that a
-client allocated the generation. Every request uses the existing environment
-token and `X-LedgeTop-Capability`. At fresh `/open`, no reservation exists:
-the server authenticates the shared environment bearer and validates only the
+client allocated the generation. Every request uses exactly one
+`X-LedgeTop-Environment-Token` and one `X-LedgeTop-Capability`; all query
+strings are rejected and there is no query-token fallback. The parsed
+environment token must contain visible ASCII excluding comma or spaces;
+duplicates, comma-combined values and controls are rejected. HTTP parsers may
+strip leading optional header whitespace before the application sees it.
+Legacy routes keep their existing query-token behavior. An existing configured
+token containing a comma may work on legacy routes but cannot authenticate this
+narrower v2 header profile. At fresh `/open`, no reservation exists: the server
+authenticates the shared environment bearer and validates only the
 new capability's syntax before reading the body. That does not authenticate a
 pre-existing capability, an individual user, engine ownership or allocation.
 An environment-token holder can create fresh retained enrollment history up to
@@ -27,7 +34,10 @@ Socket body reads have a 30-second monotonic deadline after prechecks; this is
 not an end-to-end deadline for authentication, storage, OS stalls or scheduling.
 GET has no body. Responses are bounded canonical UTF-8 JSON, no-store, without
 redirects. The application suppresses request-path logging; proxy and external
-logging must be separately configured not to expose query tokens.
+logging must be separately configured not to expose credentials, including a
+token mistakenly sent in a rejected URL. Read-only inspection found access
+logging disabled in the current .88/.89 node ingress configurations; it does
+not establish the behavior of every intermediary or future configuration.
 
 * POST `/open`: closed `{schemaVersion:2,operationKind:"plan_bind",manifestId,manifestSha256}`.
 * POST `/manifest`: exact canonical native input-manifest bytes.

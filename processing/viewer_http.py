@@ -276,14 +276,32 @@ class ViewerFacade:
             raise RequestError(401, 'unauthorized')
         return 'production' if production else 'staging'
 
+    def _epoch_environment(self, handler):
+        values=handler.headers.get_all('X-LedgeTop-Environment-Token',[])
+        if len(values)!=1:raise RequestError(401,'unauthorized')
+        token=values[0]
+        if (not isinstance(token,str) or not 1<=len(token)<=4096 or ',' in token
+                or any(ord(char)<33 or ord(char)>126 for char in token)):
+            raise RequestError(401,'unauthorized')
+        candidate=token.encode('ascii')
+        production=hmac.compare_digest(candidate,self.token.encode('utf-8'))
+        staging=bool(self.staging_token) and hmac.compare_digest(candidate,self.staging_token.encode('utf-8'))
+        if not production and not staging:raise RequestError(401,'unauthorized')
+        return 'production' if production else 'staging'
+
     def handle(self, handler):
         parsed = urlsplit(handler.path)
         path = parsed.path
         if path not in ('/info', '/options') and not path.startswith('/task/'):
             return False
         try:
-            query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
-            environment = self._environment(query)
+            epoch_path=(path=='/task/ledgetop/plan-epoch-v2' or path.startswith('/task/ledgetop/plan-epoch-v2/'))
+            if epoch_path:
+                if '?' in handler.path:raise RequestError(400,'invalid_query')
+                query={};environment=self._epoch_environment(handler)
+            else:
+                query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
+                environment = self._environment(query)
             output_route = re.fullmatch(r'/task/([^/]+)/output', path)
             allowed_query = {'token', 'line'} if output_route else {'token'}
             if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
