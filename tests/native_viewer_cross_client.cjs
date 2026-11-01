@@ -54,9 +54,9 @@ async function main(){
     const task=processing.createTask({projectId:project.id,datasetId:ds.id,displayName:key});return {attempt:processing.createAttempt({taskId:task.id,providerId:providers.production.id,options:{},createdBy:'fixture'}),entries,dir};
   }
   for(const [name,body,code] of [['bad#name.jpg','image','provider_filename_unsupported'],['unsupported.raw','image','provider_input_type_unsupported'],['large.jpg','x'.repeat(31),'provider_input_limit_exceeded']]){
-    const sample=await scenario([[name,body]]);assert.equal(await processOne(deps,'preflight-'+serial),true);
+    const sample=await scenario([[name,body]]),before=await controlCall('/stats');assert.equal(await processOne(deps,'preflight-'+serial),true);
     const after=processing.getAttempt(sample.attempt.id);assert.equal(after.status,'failed');assert.equal(after.errorCode,code);
-    await controlCall('/assert-no-init/'+sample.attempt.providerTaskId);assert.equal(fs.readFileSync(path.join(sample.dir,name),'utf8'),body);
+    await controlCall('/assert-no-init/'+sample.attempt.providerTaskId);assert.deepEqual(await controlCall('/stats'),before);assert.equal(fs.readFileSync(path.join(sample.dir,name),'utf8'),body);
   }
   const batch=await scenario([['image0.jpg','aaaaa'],['image1.jpg','bbbbb'],['image2.jpg','ccccc']]);let lost=false;
   const adapterFactory=(provider,_config,creds)=>new NodeOdmProvider({endpoint:provider.endpoint,token:creds.resolve(provider.id),providerType:'nodeodm',fetchImpl:async(url,init)=>{
@@ -69,6 +69,9 @@ async function main(){
   saved=processing.getAttemptSubmission(batch.attempt.id);assert.equal(saved.submissionPhase,'committed');assert.equal(saved.uploadedFileCount,3);
   evidence=await controlCall('/upload-evidence/'+batch.attempt.providerTaskId);
   assert.deepEqual(evidence.names,['image0.jpg','image1.jpg','image2.jpg']);assert.equal(evidence.images,3);
+  assert.deepEqual(evidence.hashes,batch.entries.map(entry=>entry.sha256));
+  assert.deepEqual(evidence.storedHashes,batch.entries.map(entry=>entry.sha256));
+  for(const entry of batch.entries)assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(batch.dir,entry.relativePath))).digest('hex'),entry.sha256);
   assert.deepEqual(evidence.lengths,[multipart.wireBytes(batch.entries.slice(0,2)),multipart.wireBytes(batch.entries.slice(2))]);
   await controlCall('/wait-running/'+batch.attempt.providerTaskId);await controlCall('/finish/'+batch.attempt.providerTaskId);
   console.log(JSON.stringify({synthetic:true,attempts:3,resultsPerAttempt:1}));

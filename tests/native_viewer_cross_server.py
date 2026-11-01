@@ -1,5 +1,5 @@
 """Network-none synthetic Viewer/native-coordinator rehearsal; fixture control only."""
-import io,json,os,subprocess,tempfile,threading,time,zipfile
+import hashlib,io,json,os,subprocess,tempfile,threading,time,zipfile
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from processing.app import CoordinatorService,make_handler
@@ -86,8 +86,11 @@ def main():
                             assert t['job']['status']=='succeeded' and engine.tasks[t['engine_uuid']]['code']==40
                             assert Path(t['archive_path']).read_bytes()==data
                     elif op=='assert-no-init':assert parts[1] not in inits
+                    elif op=='stats':
+                        body=json.dumps({'initCount':len(inits),'uploadCount':len(uploads)}).encode()
+                        self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
                     elif op=='upload-evidence':
-                        t=task(parts[1]);body=json.dumps({'lengths':[n for uid,n in uploads if uid==parts[1]],'names':[x['name'] for x in t['files']],'images':t['images_count']}).encode()
+                        t=task(parts[1]);body=json.dumps({'lengths':[n for uid,n in uploads if uid==parts[1]],'names':[x['name'] for x in t['files']],'hashes':[x['sha256'] for x in t['files']],'storedHashes':[hashlib.sha256(Path(x['path']).read_bytes()).hexdigest() for x in t['files']],'images':t['images_count']}).encode()
                         self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body);return
                     else:raise RuntimeError('unknown fixture operation')
                     self.send_response(200);self.send_header('Content-Length','2');self.end_headers();self.wfile.write(b'{}')
