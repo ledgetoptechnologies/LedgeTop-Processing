@@ -143,6 +143,7 @@ class ActualContentionTests(unittest.TestCase):
                     connection.request('POST',path,body=wire,headers=headers)
                     discarded_response = connection.getresponse()
                     self.assertEqual(discarded_response.status,200)
+                    discarded_response.close()
                 finally: connection.close()
                 connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
                 try:
