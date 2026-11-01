@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 ADMISSION_DRAIN_QUALIFIED = False
+ARCHIVE_REGISTRY_QUALIFIED = False
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class Config:
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     viewer_archive_autocapture: bool = False
     viewer_archive_free_floor: int = 20 * 1024 ** 3
+    viewer_archive_registry: bool = False
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
     admission_start_closed: bool = False
@@ -89,6 +91,11 @@ def from_environment() -> Config:
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
     autocapture = os.environ.get('PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE', '0')
+    registry = os.environ.get('PROCESSING_VIEWER_ARCHIVE_REGISTRY', '0')
+    if registry not in ('0','1'):
+        raise ValueError('invalid archive registry setting')
+    if registry == '1' and (not ARCHIVE_REGISTRY_QUALIFIED or viewer != '1' or not lease_dir):
+        raise ValueError('archive registry is not qualified for startup')
     if autocapture not in ('0', '1'):
         raise ValueError('PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE must be 0 or 1')
     if autocapture == '1':
@@ -151,6 +158,7 @@ def from_environment() -> Config:
         viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
                                               'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
         viewer_archive_autocapture=autocapture == '1',
+        viewer_archive_registry=registry == '1',
         viewer_archive_free_floor=_positive_int(os.environ.get('PROCESSING_VIEWER_ARCHIVE_FREE_FLOOR', str(20 * 1024 ** 3)),
                                                 'PROCESSING_VIEWER_ARCHIVE_FREE_FLOOR', 10 ** 15),
         prototype_observer_token=observer,

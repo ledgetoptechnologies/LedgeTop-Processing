@@ -23,6 +23,46 @@ from tests import test_viewer_service as fixtures
 
 
 class ViewerAutoCaptureConfigTests(unittest.TestCase):
+    def test_unqualified_direct_service_fails_before_store_construction(self):
+        with tempfile.TemporaryDirectory() as root:
+            config=SimpleNamespace(prototype_state_dir=root,viewer_archive_registry=True,viewer_max_input_bytes=100)
+            with patch('processing.viewer_service.TaskStore',side_effect=AssertionError('must not construct')) as store:
+                with self.assertRaisesRegex(RuntimeError,'archive registry is not qualified'):
+                    ViewerService(None,config)
+            store.assert_not_called();self.assertEqual(list(Path(root).iterdir()),[])
+
+    def test_direct_handler_configuration_cannot_bypass_qualification(self):
+        from processing.app import make_handler
+        from processing.config import Config
+        config=Config('p'*32,'','',1000,100000,viewer_enabled=True,
+                      authority_lease_dir='/synthetic',viewer_archive_registry=True)
+        with self.assertRaisesRegex(RuntimeError,'archive_registry_requires_authority'):
+            make_handler(config)
+
+    def test_registry_cannot_be_enabled_by_environment_without_qualification(self):
+        env={'PROCESSING_API_TOKEN':'p'*32,'PROCESSING_VIEWER_ARCHIVE_REGISTRY':'1'}
+        with patch.dict(os.environ,env,clear=True), \
+             self.assertRaisesRegex(ValueError,'archive registry is not qualified'):
+            from_environment()
+
+    def test_registry_marker_blocks_candidate_start_with_feature_disabled(self):
+        from processing.app import make_handler
+        from processing.config import Config
+        with tempfile.TemporaryDirectory() as root:
+            queue=Queue(root)
+            try:
+                with queue._db() as db:
+                    db.execute('CREATE TABLE viewer_archive_registry (synthetic TEXT)')
+                    db.execute("INSERT INTO viewer_archive_registry VALUES ('retained')")
+            finally:queue.close()
+            with self.assertRaisesRegex(RuntimeError,'archive_registry_configuration_required'):
+                make_handler(Config('p'*32,'','',1000,100000,prototype_state_dir=root))
+            queue=Queue(root)
+            try:
+                with queue._db() as db:
+                    self.assertEqual(db.execute('SELECT synthetic FROM viewer_archive_registry').fetchone()[0],'retained')
+            finally:queue.close()
+
     def test_default_off_and_explicit_enable_requires_authority_and_literal_nodes(self):
         env = {'PROCESSING_API_TOKEN': 'p' * 32}
         with patch.dict(os.environ, env, clear=True):
@@ -109,6 +149,10 @@ store.enable_archive_status()
 
 @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'posix_fallocate'), 'POSIX flock and allocation required')
 class ViewerAutoCaptureTests(unittest.TestCase):
+    def allow_registry_for_test(self):
+        qualification=patch('processing.config.ARCHIVE_REGISTRY_QUALIFIED',True)
+        qualification.start();self.addCleanup(qualification.stop)
+        self.fixture.config.viewer_archive_registry=True
     def setUp(self):
         self.fixture = fixtures.ViewerServiceTests('runTest')
         self.fixture.setUp()
@@ -200,6 +244,131 @@ class ViewerAutoCaptureTests(unittest.TestCase):
             # Only a fake child was used; clear its fixture-only sticky marker.
             self.service._archive_child_unreaped.clear()
             self.service._archive_uncertain_process=None
+
+    def test_registry_precedes_markers_and_marker_loss_holds_after_restart(self):
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        task=self.fixture.task(self.identifier);directory=Path(task['directory'])
+        with patch.object(self.service,'_publish_archive_metadata',side_effect=OSError('synthetic crash boundary')):
+            with self.assertRaises(OSError):self.service.download(self.identifier,automatic=True)
+        with self.queue._db() as db:
+            row=db.execute('SELECT uuid,generation,job_id,node_id,engine_uuid,environment FROM viewer_archive_registry').fetchone()
+        self.assertEqual(tuple(row),tuple(task[k] for k in ('uuid','generation','job_id','node_id','engine_uuid','environment')))
+        self.assertFalse((directory/'all.zip.intent').exists())
+        self.service._archive_once(self.identifier)
+        archive=Path(self.fixture.task(self.identifier)['archive_path']);before=archive.read_bytes()
+        archive.with_suffix('.zip.intent').unlink();archive.with_suffix('.zip.receipt').unlink()
+        self.service.close()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        with self.assertRaisesRegex(Conflict,'archive receipt requires inspection'):
+            self.service.download(self.identifier)
+        self.assertEqual(archive.read_bytes(),before)
+
+    def test_registry_holds_unclassified_historical_recorded_archive(self):
+        self.service._archive_once(self.identifier)
+        archive=Path(self.fixture.task(self.identifier)['archive_path']);before=archive.read_bytes()
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        with self.assertRaisesRegex(Conflict,'historical archive format requires inspection'):
+            self.service.download(self.identifier)
+        self.assertEqual(archive.read_bytes(),before)
+
+    def test_registry_commits_before_marker_even_if_process_is_killed(self):
+        import signal
+        self.allow_registry_for_test()
+        task=self.fixture.task(self.identifier);directory=Path(task['directory']);authority=self.queue.authority_id
+        self.service.close();self.queue.close();self.lease.close()
+        script=r'''
+import os,signal,sys
+from types import SimpleNamespace
+from unittest.mock import patch
+from processing.authority_lease import AuthorityLease
+from processing.prototype import Queue
+from processing.viewer_service import ViewerService
+import processing.config as runtime_config
+runtime_config.ARCHIVE_REGISTRY_QUALIFIED=True
+root,lease_dir,authority,identifier,origin=sys.argv[1:]
+q=Queue(root,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+q.authority_lease=AuthorityLease(lease_dir,authority)
+c=SimpleNamespace(prototype_state_dir=root,viewer_max_input_bytes=20*1024**3,viewer_max_archive_bytes=4*1024**2,viewer_archive_free_floor=1,viewer_archive_registry=True,local_node_url=origin,local_node_token='',main_node_url=origin,main_node_token='')
+s=ViewerService(q,c)
+with patch.object(s,'_publish_archive_metadata',side_effect=lambda *_:os.kill(os.getpid(),signal.SIGKILL)):
+ s.download(identifier,automatic=True)
+'''
+        try:
+            result=subprocess.run([sys.executable,'-c',script,str(self.root/'state'),str(self.lease_dir),authority,self.identifier,self.fixture.config.local_node_url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+            self.assertEqual(result.returncode,-signal.SIGKILL)
+        finally:
+            self.queue=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            self.lease=authority_lease.AuthorityLease(self.lease_dir,authority);self.queue.authority_lease=self.lease
+            self.fixture.config.viewer_archive_registry=True
+            self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        self.assertFalse((directory/'all.zip.intent').exists())
+        self.assertFalse((directory/'all.zip.partial').exists())
+        with self.queue._db() as db:
+            row=db.execute('SELECT uuid,generation,job_id,node_id,engine_uuid,environment FROM viewer_archive_registry').fetchone()
+        self.assertEqual(tuple(row),tuple(task[k] for k in ('uuid','generation','job_id','node_id','engine_uuid','environment')))
+        self.service._archive_once(self.identifier)
+        self.assertEqual(Path(self.service.store.task(self.identifier)['archive_path']).read_bytes(),self.engine_response)
+
+    def test_registry_refuses_old_identity_after_uuid_reincarnation(self):
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        old=self.service.store.task(self.identifier)
+        self.service.store.archive_registry_check(old,register=True)
+        self.service.remove(self.identifier)
+        with patch.object(self.service,'_check_options',return_value=[]):
+            self.service.initialize(self.identifier,'Synthetic survey',[],None,'production')
+        with self.assertRaises(Conflict):self.service.store.archive_registry_check(old,register=True)
+        with self.queue._db() as db:
+            rows=db.execute('SELECT generation,job_id FROM viewer_archive_registry').fetchall()
+        self.assertEqual([tuple(row) for row in rows],[(old['generation'],old['job_id'])])
+
+    def test_registry_concurrent_exact_registration_is_idempotent(self):
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        task=self.service.store.task(self.identifier);barrier=threading.Barrier(3);results=[];errors=[]
+        def register():
+            try:
+                barrier.wait(timeout=3);results.append(self.service.store.archive_registry_check(task,register=True))
+            except Exception as exc:errors.append(type(exc).__name__)
+        threads=[threading.Thread(target=register) for _ in range(2)]
+        for thread in threads:thread.start()
+        try:
+            barrier.wait(timeout=3)
+            for thread in threads:thread.join(timeout=3)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors,[]);self.assertEqual(results,[True,True])
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_registry').fetchone()[0],1)
+        finally:
+            barrier.abort()
+            for thread in threads:thread.join(timeout=3)
+
+    def test_registry_rejects_unrecognized_schema_without_mutation(self):
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_archive_registry (unexpected TEXT)')
+            db.execute("INSERT INTO viewer_archive_registry VALUES ('synthetic')")
+        self.allow_registry_for_test()
+        with self.assertRaisesRegex(Conflict,'schema requires inspection'):
+            ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT unexpected FROM viewer_archive_registry').fetchone()[0],'synthetic')
+
+    def test_registry_rejects_mismatched_terminal_job_without_insertion(self):
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        task=self.service.store.task(self.identifier)
+        with self.queue._db() as db:
+            original=db.execute('SELECT result FROM jobs WHERE id=?',(task['job_id'],)).fetchone()[0]
+            db.execute('UPDATE jobs SET result=? WHERE id=?',('{"engineTaskId":"wrong"}',task['job_id']))
+        try:
+            with patch('processing.viewer_service.subprocess.Popen',side_effect=AssertionError('must not launch')):
+                with self.assertRaisesRegex(Conflict,'job binding requires inspection'):
+                    self.service._archive_once(self.identifier)
+            with self.queue._db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_registry').fetchone()[0],0)
+        finally:
+            with self.queue._db() as db:db.execute('UPDATE jobs SET result=? WHERE id=?',(original,task['job_id']))
 
     def test_capture_persists_receipt_and_reuses_without_engine_mutation(self):
         self.service._archive_once(self.identifier)

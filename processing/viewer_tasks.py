@@ -587,6 +587,52 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='operator_resolved',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (row['uuid'],))
 
+    _ARCHIVE_REGISTRY_DDL = ('CREATE TABLE viewer_archive_registry ('
+        'uuid TEXT NOT NULL, generation INTEGER NOT NULL, job_id TEXT NOT NULL, '
+        'node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL, environment TEXT NOT NULL, '
+        'PRIMARY KEY(uuid,generation))')
+
+    def enable_archive_registry(self):
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
+            if row is None:
+                db.execute(self._ARCHIVE_REGISTRY_DDL)
+            elif row[0] != self._ARCHIVE_REGISTRY_DDL:
+                raise Conflict('archive registry schema requires inspection')
+
+    def archive_registry_check(self, task, *, register=False):
+        """Check exact current identity; commit intent before archive writes."""
+        fields=('uuid','generation','job_id','node_id','engine_uuid','environment')
+        identity=tuple(task[k] for k in fields)
+        if (any(value is None for value in identity) or type(identity[1]) is not int
+                or identity[1] < 1):
+            raise Conflict('archive registry identity requires inspection')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=self._row(db,task['uuid'])
+            if tuple(row[k] for k in fields) != identity:
+                raise Conflict('archive registry identity changed')
+            job=self._job(db,row)
+            expected={'engineTaskId':row['engine_uuid'],'nodeId':row['node_id'],
+                      'environment':row['environment'],'cancelled':False}
+            if (job is None or job['status']!='succeeded' or job['profile']!=VIEWER_PROFILE
+                    or job['node_id']!=row['node_id'] or job['environment']!=row['environment']
+                    or row['stage']!='succeeded' or row['phase']!='complete'
+                    or job['result']!=canonical(expected) or not row['claim_token'] or not job['claim_hash']
+                    or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(row['claim_token'].encode()).hexdigest())):
+                raise Conflict('archive registry job binding requires inspection')
+            prior=db.execute('SELECT uuid,generation,job_id,node_id,engine_uuid,environment FROM viewer_archive_registry WHERE uuid=? AND generation=?',identity[:2]).fetchone()
+            if prior is not None:
+                if tuple(prior) != identity:raise Conflict('archive registry identity changed')
+                return True
+            if not register:
+                return False
+            if row['archive_path'] is not None:
+                raise Conflict('historical archive format requires inspection')
+            db.execute('INSERT INTO viewer_archive_registry VALUES (?,?,?,?,?,?)',identity)
+            return True
+
     def enable_archive_status(self):
         # Both DDL statements and validation must commit as one transaction.
         with self._lock, self.queue._db() as db:

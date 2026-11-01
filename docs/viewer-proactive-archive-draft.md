@@ -47,6 +47,16 @@ missing, delivery holds for inspection instead of treating that file as a
 legacy unverified archive. If both intent and receipt disappear, the old and
 new formats cannot be distinguished; this safeguard cannot detect that case.
 
+An experimental archive-format registry is disabled and unqualified. When
+qualified and enabled, it records the exact task generation and terminal job
+binding in SQLite before either manual capture writes or an automatic capture
+child starts. Recorded historical archives without a registry entry hold for
+inspection: no automatic legacy classification or approval mechanism exists.
+Registry history has no qualified retirement or aggregate row/byte quota.
+Earlier binaries ignore the registry entirely; external writer exclusion,
+nonempty migration and rollback must be qualified before enabling it. The
+registry does not fence external writers or authenticate engine bytes.
+
 Interrupted automatic transfers without a verified receipt are preserved and held for operator inspection; automatic retry will not remove or overwrite those partials. Failures before a partial is created can retry automatically. This limits availability until a separate safe recovery procedure exists.
 
 The task info response reports `ledgetopArchive` separately from processing success: `pending`, `inspection`, `recorded`, or `disabled`, with only fixed sanitized reasons. Pending/inspection state is persisted and survives coordinator restart. Recorded means an archive path was recorded; the file may now be missing or corrupt and Viewer has not necessarily acknowledged it. A sanitized process-local health signal indicates status persistence failures. Since that signal resets on restart and no complete durable reconciliation exists, enabled capture always reports inspection required with status_unverified_after_restart until such reconciliation is implemented; it never asserts healthy merely because the process restarted. A failed database can also make the API unavailable. Enabling capture alters the Viewer task table; the existing strict update and rollback census rejects this migration. Do not enable or deploy until the update and rollback controller is separately qualified for this schema.

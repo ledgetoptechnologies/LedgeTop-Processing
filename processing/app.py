@@ -9,6 +9,7 @@ import sys
 import threading
 
 from .config import Config, from_environment
+from . import config as runtime_config
 from .policy import plan
 from .provider import probe_node
 from .prototype import Queue, Conflict
@@ -18,6 +19,10 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if (type(config.viewer_archive_registry) is not bool or
+        (config.viewer_archive_registry and (runtime_config.ARCHIVE_REGISTRY_QUALIFIED is not True
+          or not config.viewer_enabled or not config.authority_lease_dir))):
+        raise RuntimeError('archive_registry_requires_authority')
     if (type(config.admission_start_closed) is not bool or
         (config.admission_start_closed and
          (config.admission_drain_enabled is not True or not config.prototype_state_dir or
@@ -76,6 +81,14 @@ def make_handler(config: Config):
         if exists:
             queue.close()
             raise RuntimeError('admission_drain_configuration_required')
+    if queue is not None:
+        with queue._db() as db:
+            registry = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
+        if registry and not config.viewer_archive_registry:
+            try:queue.close()
+            finally:
+                if lease is not None:lease.close()
+            raise RuntimeError('archive_registry_configuration_required')
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService

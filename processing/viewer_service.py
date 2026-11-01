@@ -23,6 +23,7 @@ import uuid
 import zipfile
 
 from .maintenance import Conflict
+from . import config as runtime_config
 from .odx_smoke_worker import Client, SmokeError, strict_wire_json
 from .options import catalog, discover_node, _NoRedirect
 from .policy import plan
@@ -166,8 +167,24 @@ class NativeEngine:
 class ViewerService:
     def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node):
         self.queue, self.config = queue, config
+        self._archive_registry = getattr(config, 'viewer_archive_registry', False)
+        if type(self._archive_registry) is not bool:
+            raise ValueError('explicit archive registry setting required')
+        if self._archive_registry:
+            if runtime_config.ARCHIVE_REGISTRY_QUALIFIED is not True:
+                raise RuntimeError('archive registry is not qualified')
+            lease = getattr(queue, 'authority_lease', None)
+            if (queue is None or lease is None or getattr(lease, '_descriptor', None) is None
+                    or queue._lock.closed):
+                raise RuntimeError('archive registry requires coordinator authority')
+        if queue is not None and not self._archive_registry:
+            with queue._db() as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone():
+                    raise RuntimeError('archive registry configuration required')
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
+        if self._archive_registry:
+            self.store.enable_archive_registry()
         self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
                                   'main': NativeEngine(config.main_node_url, config.main_node_token)}
         self.probe = probe
@@ -216,6 +233,8 @@ class ViewerService:
             lease = getattr(self.queue, 'authority_lease', None)
             if lease is None or lease._descriptor is None or self.queue._lock.closed:
                 raise RuntimeError('archive capture requires coordinator authority')
+            if self._archive_registry:
+                self.store.archive_registry_check(task, register=True)
             node = task['node_id']
             if node not in ('cluster', 'main'):
                 raise Conflict('archive engine identity unavailable')
@@ -715,6 +734,12 @@ class ViewerService:
             if self._archive_child_unreaped.is_set():
                 raise Conflict('archive capture child termination uncertain')
             task = self.store.task(identifier)
+            if self._archive_registry:
+                lease=getattr(self.queue,'authority_lease',None)
+                if lease is None or lease._descriptor is None or self.queue._lock.closed:
+                    raise Conflict('archive registry authority unavailable')
+                if not self.store.archive_registry_check(task, register=not bool(task['archive_path'])):
+                    raise Conflict('historical archive format requires inspection')
             path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
             if not task['archive_path']:
                 partial = path.with_suffix('.zip.partial')
@@ -822,6 +847,8 @@ class ViewerService:
                 except FileNotFoundError:
                     return self._restore_recorded_archive(task,path,receipt)
                 return self._verify_archive(path, receipt), receipt['bytes']
+            if self._archive_registry:
+                raise Conflict('archive receipt requires inspection')
             # A capture intent identifies the receipt-backed format. Losing
             # its receipt must never silently downgrade it to legacy delivery.
             # If both markers disappear, legacy and new formats are ambiguous.
