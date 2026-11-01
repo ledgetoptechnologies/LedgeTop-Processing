@@ -323,6 +323,12 @@ class TaskStore:
                     raise InputRecoveryRequired('input ownership census exceeds bound')
             if db.execute('SELECT 1 FROM viewer_files f LEFT JOIN viewer_tasks t ON t.uuid=f.uuid WHERE t.uuid IS NULL LIMIT 1').fetchone():
                 raise InputRecoveryRequired('orphan input metadata needs inspection')
+            total_rows=db.execute('SELECT COUNT(*) FROM viewer_intake_totals_v1').fetchone()[0]
+            if total_rows!=len(rows):raise InputRecoveryRequired('input totals census differs')
+            for row in rows:
+                total,count=self._input_totals(db,row)
+                actual=db.execute('SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',(row['uuid'],)).fetchone()
+                if (count,total)!=(actual[0],actual[1]):raise InputRecoveryRequired('input totals census differs')
             rows_by_uuid={row['uuid']:row for row in rows}
             owners={}; directories=set()
             for row in rows:
@@ -440,6 +446,18 @@ class TaskStore:
             db.set_progress_handler(None,0)
             if time.monotonic()>=deadline:
                 raise InputRecoveryRequired('historical intake census exceeds bound')
+
+    def _input_totals(self, db, row):
+        if not self.intake_journal:
+            total=db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',(row['uuid'],)).fetchone()[0]
+            count=db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?',(row['uuid'],)).fetchone()[0]
+            return total,count
+        totals=db.execute('SELECT generation,files,bytes FROM viewer_intake_totals_v1 WHERE uuid=?',(row['uuid'],)).fetchone()
+        if (totals is None or type(totals['generation']) is not int or totals['generation']!=row['generation']
+                or type(totals['files']) is not int or not 0<=totals['files']<=100000
+                or type(totals['bytes']) is not int or totals['bytes']<0):
+            raise InputRecoveryRequired('input totals require inspection')
+        return totals['bytes'],totals['files']
 
     @staticmethod
     def _job(db, row):
@@ -653,10 +671,7 @@ class TaskStore:
                 self._check_input_recovery(db, row)
                 existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                       (identifier, key)).fetchone()
-                total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
-                                   (identifier,)).fetchone()[0]
-                count = db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?',
-                                   (identifier,)).fetchone()[0]
+                total,count = self._input_totals(db,row)
                 if existing is None and total + length > self.max_input_bytes:
                     raise InputLimitExceeded('task input ceiling exceeded')
                 if existing is None and count >= 100000:
@@ -763,8 +778,8 @@ class TaskStore:
                         if existing['sha256'] != value or existing['bytes'] != length:
                             raise Conflict('input basename already contains different bytes')
                         return {'success': True, 'uuid': identifier}
-                    total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
-                                       (identifier,)).fetchone()[0]
+                    total,count = self._input_totals(db,row)
+                    if self.intake_journal and count>=100000:raise InputLimitExceeded('task file count ceiling exceeded')
                     if total + length > self.max_input_bytes:
                         raise InputLimitExceeded('task input ceiling exceeded')
                     if journal_operation:

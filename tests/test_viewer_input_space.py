@@ -235,6 +235,39 @@ class ViewerInputSpaceTests(unittest.TestCase):
                 db.execute("UPDATE viewer_tasks SET generation=2,directory='changed' WHERE uuid=?",(self.identifier,))
         self.assertEqual([p.read_bytes() for p in self.root.rglob('input-*')],[b'first'])
 
+    def test_guarded_totals_match_replay_rollback_and_generation_reset(self):
+        import sqlite3
+        store=self.journal_store()
+        store.upload(self.identifier,'a.jpg',io.BytesIO(b'abc'),3)
+        store.upload(self.identifier,'a.jpg',io.BytesIO(b'abc'),3)
+        store.upload(self.identifier,'b.jpg',io.BytesIO(b'defgh'),5)
+        with self.q._db() as db:
+            totals=db.execute('SELECT generation,files,bytes FROM viewer_intake_totals_v1 WHERE uuid=?',(self.identifier,)).fetchone()
+            actual=db.execute('SELECT COUNT(*),SUM(bytes) FROM viewer_files WHERE uuid=?',(self.identifier,)).fetchone()
+            self.assertEqual(tuple(totals),(1,2,8));self.assertEqual(tuple(actual),(2,8))
+            with self.assertRaises(sqlite3.DatabaseError):db.execute('UPDATE viewer_intake_totals_v1 SET bytes=0')
+        with self.q._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT INTO viewer_files VALUES(?,?,?,?,?,?,?)',(self.identifier,'c.jpg','c.jpg','input-'+'b'*32,7,'a'*64,1))
+            self.assertEqual(tuple(db.execute('SELECT files,bytes FROM viewer_intake_totals_v1').fetchone()),(3,15))
+            db.rollback()
+        with self.q._db() as db:self.assertEqual(tuple(db.execute('SELECT files,bytes FROM viewer_intake_totals_v1').fetchone()),(2,8))
+        store.remove(self.identifier);store.initialize(self.identifier,'new',[],None,'production')
+        with self.q._db() as db:self.assertEqual(tuple(db.execute('SELECT generation,files,bytes FROM viewer_intake_totals_v1').fetchone()),(2,0,0))
+
+    def test_guarded_concurrent_upload_totals_are_exact(self):
+        store=self.journal_store();errors=[]
+        def upload(name,data):
+            try:store.upload(self.identifier,name,io.BytesIO(data),len(data))
+            except Exception as exc:errors.append(exc)
+        threads=[threading.Thread(target=upload,args=('a.jpg',b'abc')),threading.Thread(target=upload,args=('b.jpg',b'defgh'))]
+        for thread in threads:thread.start()
+        for thread in threads:thread.join(5);self.assertFalse(thread.is_alive())
+        self.assertEqual(errors,[])
+        with self.q._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT files,bytes FROM viewer_intake_totals_v1').fetchone()),(2,8))
+            self.assertEqual(tuple(db.execute('SELECT COUNT(*),SUM(bytes) FROM viewer_files WHERE uuid=?',(self.identifier,)).fetchone()),(2,8))
+
     def test_opt_in_journal_upload_and_exact_retry(self):
         store=self.journal_store();self.facade.service.store=store
         body=multipart([('images','a.jpg',b'first')]);req=self.request(body)
@@ -252,6 +285,7 @@ class ViewerInputSpaceTests(unittest.TestCase):
         self.assertEqual(req.status,503)
         with self.q._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_intake_journal_v1').fetchone()[0],'cleanup')
+            self.assertEqual(tuple(db.execute('SELECT files,bytes FROM viewer_intake_totals_v1').fetchone()),(1,5))
         self.assertEqual([p.read_bytes() for p in self.root.rglob('.incoming-*')],[b'first'])
         retry=self.request(body);self.assertTrue(self.facade.handle(retry))
         self.assertEqual(retry.status,503)
@@ -593,11 +627,31 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
     def test_startup_holds_orphan_viewer_files(self):
         with self.qualify():
             handler=make_handler(self.settings());queue=handler.prototype_queue
+            from processing import intake_offline_migration
             with queue._db() as db:
+                db.execute('DROP TRIGGER viewer_intake_totals_file_insert_v1')
                 db.execute('INSERT INTO viewer_files VALUES(?,?,?,?,?,?,?)',
                     (str(uuid.uuid4()),'x.jpg','x.jpg','input-'+'a'*32,1,'a'*64,1))
+                db.execute(intake_offline_migration.TRIGGERS['viewer_intake_totals_file_insert_v1'])
             handler.viewer_service.close();queue.close();queue.authority_lease.close()
             with self.assertRaisesRegex(InputRecoveryRequired,'orphan input metadata'):make_handler(self.settings())
+
+    def test_startup_detects_out_of_band_total_corruption(self):
+        import sqlite3
+        from processing import intake_offline_migration
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue;store=handler.viewer_service.store
+            identifier=str(uuid.uuid4());store.initialize(identifier,'synthetic',[],None,'production')
+            store.upload(identifier,'a.jpg',io.BytesIO(b'abc'),3)
+            path=Path(store.task(identifier)['files'][0]['path'])
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            raw=sqlite3.connect(self.state/'jobs.sqlite3')
+            try:
+                raw.create_function(intake_offline_migration.AUTHORIZE,0,lambda:1)
+                raw.execute('UPDATE viewer_intake_totals_v1 SET bytes=2');raw.commit()
+            finally:raw.close()
+            with self.assertRaisesRegex(InputRecoveryRequired,'totals census differs'):make_handler(self.settings())
+            self.assertEqual(path.read_bytes(),b'abc')
 
     def test_actual_startup_holds_orphan_directory(self):
         with self.qualify():

@@ -13,6 +13,10 @@ SNAPSHOT_FILES_DDL = ("CREATE TABLE viewer_intake_snapshot_files_v1 (uuid TEXT N
     "name_key TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL, "
     "sha256 TEXT NOT NULL, is_photo INTEGER NOT NULL, PRIMARY KEY(uuid,generation,name_key))")
 
+COUNTERS_DDL = ("CREATE TABLE viewer_intake_totals_v1 (uuid TEXT PRIMARY KEY NOT NULL, "
+    "generation INTEGER NOT NULL, files INTEGER NOT NULL CHECK(files>=0), "
+    "bytes INTEGER NOT NULL CHECK(bytes>=0))")
+
 TRIGGERS = {}
 for table in ('viewer_tasks','viewer_files'):
     for action in ('INSERT','UPDATE','DELETE'):
@@ -30,6 +34,38 @@ for table, predicate in (
     TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE INSERT ON {table} '
                     f'WHEN EXISTS(SELECT 1 FROM {table} WHERE {predicate}) '
                     "BEGIN SELECT RAISE(ABORT, 'existing intake identity'); END")
+
+for action in ('INSERT','UPDATE','DELETE'):
+    name=f'viewer_intake_totals_guard_{action.lower()}_v1'
+    TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE {action} ON viewer_intake_totals_v1 '
+                    f"WHEN {AUTHORIZE}() IS NOT 1 BEGIN SELECT RAISE(ABORT, 'intake totals authority required'); END")
+
+# Totals are trigger-maintained in the same transaction as their source rows.
+TRIGGERS['viewer_intake_totals_task_insert_v1']=(
+    'CREATE TRIGGER viewer_intake_totals_task_insert_v1 AFTER INSERT ON viewer_tasks '
+    'BEGIN INSERT INTO viewer_intake_totals_v1 VALUES(NEW.uuid,NEW.generation,0,0); END')
+TRIGGERS['viewer_intake_totals_task_delete_v1']=(
+    'CREATE TRIGGER viewer_intake_totals_task_delete_v1 BEFORE DELETE ON viewer_tasks '
+    "BEGIN SELECT RAISE(ABORT, 'intake totals task cannot be deleted'); END")
+TRIGGERS['viewer_intake_totals_generation_v1']=(
+    'CREATE TRIGGER viewer_intake_totals_generation_v1 AFTER UPDATE OF generation ON viewer_tasks '
+    "WHEN NEW.generation IS NOT OLD.generation BEGIN "
+    "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM viewer_intake_totals_v1 WHERE uuid=OLD.uuid AND generation=OLD.generation AND files=0 AND bytes=0) "
+    "THEN RAISE(ABORT, 'intake totals generation mismatch') END; "
+    "UPDATE viewer_intake_totals_v1 SET generation=NEW.generation WHERE uuid=OLD.uuid; END")
+TRIGGERS['viewer_intake_totals_file_insert_v1']=(
+    'CREATE TRIGGER viewer_intake_totals_file_insert_v1 AFTER INSERT ON viewer_files BEGIN '
+    "SELECT CASE WHEN typeof(NEW.bytes) IS NOT 'integer' OR NEW.bytes<=0 OR NOT EXISTS(SELECT 1 FROM viewer_intake_totals_v1 a JOIN viewer_tasks t ON t.uuid=a.uuid AND t.generation=a.generation WHERE a.uuid=NEW.uuid AND a.files<100000 AND a.bytes<=9223372036854775807-NEW.bytes) "
+    "THEN RAISE(ABORT, 'intake totals insert mismatch') END; "
+    "UPDATE viewer_intake_totals_v1 SET files=files+1,bytes=bytes+NEW.bytes WHERE uuid=NEW.uuid; END")
+TRIGGERS['viewer_intake_totals_file_delete_v1']=(
+    'CREATE TRIGGER viewer_intake_totals_file_delete_v1 AFTER DELETE ON viewer_files BEGIN '
+    "SELECT CASE WHEN typeof(OLD.bytes) IS NOT 'integer' OR OLD.bytes<=0 OR NOT EXISTS(SELECT 1 FROM viewer_intake_totals_v1 a JOIN viewer_tasks t ON t.uuid=a.uuid AND t.generation=a.generation WHERE a.uuid=OLD.uuid AND a.files>0 AND a.bytes>=OLD.bytes) "
+    "THEN RAISE(ABORT, 'intake totals delete mismatch') END; "
+    "UPDATE viewer_intake_totals_v1 SET files=files-1,bytes=bytes-OLD.bytes WHERE uuid=OLD.uuid; END")
+TRIGGERS['viewer_intake_totals_file_update_v1']=(
+    'CREATE TRIGGER viewer_intake_totals_file_update_v1 BEFORE UPDATE ON viewer_files '
+    "BEGIN SELECT RAISE(ABORT, 'intake input rows immutable'); END")
 
 # Bind the prior snapshot to actual rows before any input row is deleted.
 _TASK_SNAPSHOT_COLUMNS=('uuid','generation','directory','name','options','outputs','environment',
@@ -137,7 +173,8 @@ def _schema(db, kind, name):
     return result[0] if result else None
 
 def attest(db):
-    expected=[('table','viewer_intake_snapshot_files_v1',SNAPSHOT_FILES_DDL),
+    expected=[('table','viewer_intake_totals_v1',COUNTERS_DDL),
+              ('table','viewer_intake_snapshot_files_v1',SNAPSHOT_FILES_DDL),
               ('table','viewer_intake_journal_v1',INTAKE_JOURNAL_DDL),
               ('index','viewer_intake_unfinished_v1',INTAKE_INDEX_DDL)]
     expected += [('trigger',name,sql) for name,sql in TRIGGERS.items()]
@@ -161,7 +198,7 @@ def install_empty_offline(db):
                 raise MigrationUnavailable('empty Viewer state required')
         if db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'viewer_intake_%' LIMIT 1").fetchone():
             raise MigrationUnavailable('existing intake schema requires inspection')
-        db.execute(INTAKE_JOURNAL_DDL);db.execute(INTAKE_INDEX_DDL);db.execute(SNAPSHOT_FILES_DDL)
+        db.execute(INTAKE_JOURNAL_DDL);db.execute(INTAKE_INDEX_DDL);db.execute(SNAPSHOT_FILES_DDL);db.execute(COUNTERS_DDL)
         for sql in TRIGGERS.values():db.execute(sql)
         attest(db)
         db.commit()
@@ -174,3 +211,11 @@ def authorize_connection(db):
     if not QUALIFIED: raise MigrationUnavailable('intake migration not qualified')
     attest(db)
     db.create_function(AUTHORIZE,0,lambda:1)
+    # Runtime callers cannot modify totals directly, only exact attested triggers.
+    allowed={'viewer_intake_totals_task_insert_v1','viewer_intake_totals_generation_v1',
+             'viewer_intake_totals_file_insert_v1','viewer_intake_totals_file_delete_v1'}
+    def authorize(action,arg1,arg2,database,origin):
+        if action in (sqlite3.SQLITE_INSERT,sqlite3.SQLITE_UPDATE,sqlite3.SQLITE_DELETE) and arg1=='viewer_intake_totals_v1':
+            return sqlite3.SQLITE_OK if origin in allowed else sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    db.set_authorizer(authorize)
