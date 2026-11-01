@@ -94,7 +94,7 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                         or any(c not in '0123456789abcdef' for c in request['nonce'])):
                     raise SessionHeld('invalid challenge')
                 action=request['action']
-                if action not in ('prepare','check','complete'):raise SessionHeld('invalid challenge action')
+                if action not in ('prepare','check','sender_verified','complete'):raise SessionHeld('invalid challenge action')
                 grant=request['grant']
                 if type(grant) is not dict:raise SessionHeld('invalid grant')
                 try:body=base64.b64decode(request['body'],validate=True)
@@ -112,7 +112,7 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                     if observed!=public:raise SessionHeld('coordinator grant changed')
                 elif public.get('operation')=='upload':
                     if set(public)!=_UPLOAD_FIELDS or body:raise SessionHeld('remote upload binding invalid')
-                    if action=='complete':
+                    if action in ('sender_verified','complete'):
                         from .durable_upload_evidence import DurableUploadEvidence
                         if (type(upload_evidence) is not DurableUploadEvidence or upload_evidence.queue is not queue
                                 or not upload_evidence.wait_verified(public, min(end,time.monotonic()+3))):
@@ -124,12 +124,15 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                 else:raise SessionHeld('unknown operation')
                 # Claim token stays in the private authenticated session.
                 binding=(digest,hashlib.sha256(body).hexdigest())
-                if action!='prepare' and (active!=binding or (action=='complete' and phase!='checked')):
+                expected_completion='verified' if public.get('operation')=='upload' else 'checked'
+                if action!='prepare' and (active!=binding
+                        or (action=='sender_verified' and (public.get('operation')!='upload' or phase!='checked'))
+                        or (action=='complete' and phase!=expected_completion)):
                     raise SessionHeld('session operation order changed')
                 with witness.hold(public,10,create=(action=='prepare')):
                     if action=='complete':witness.completed(public)
                 active=binding
-                phase={'prepare':'prepared','check':'checked','complete':'complete'}[action]
+                phase={'prepare':'prepared','check':'checked','sender_verified':'verified','complete':'complete'}[action]
                 sequence+=1
                 _write(sock,{'sequence':sequence,'nonce':request['nonce'],'signature':signature},min(end,time.monotonic()+idle_seconds))
     finally:sock.close()
@@ -171,6 +174,13 @@ class RemoteAuthoritySession:
     def check(self):
         if self.current is None:raise SessionHeld('authority session not held')
         self._challenge(self.current[0],self.current[1],'check')
+
+    def sender_verified(self, grant):
+        if self.current is None or grant!=self.current[0] or grant.get('operation')!='upload':
+            raise SessionHeld('upload authority session not held')
+        self._challenge(self.current[0],self.current[1],'sender_verified')
+        from .node_mutation_broker import _json
+        return hashlib.sha256(_json(grant)).hexdigest()
 
     def completed(self, grant):
         if self.current is None or grant!=self.current[0]:raise SessionHeld('authority session not held')

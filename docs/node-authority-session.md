@@ -97,3 +97,23 @@ path. The evidence has no automatic expiry, deletion, epoch adoption, restart
 reconciliation, or qualified downgrade. No process kill during a real transfer,
 power failure, or actual remote-node deployment has been tested. This remains
 an inactive prototype, not a release or operational migration.
+
+## Experimental node upload receipt
+
+After the mTLS authority session confirms the exact coordinator-owned sender
+evidence, the node stores a canonical upload receipt in its own SQLite database
+in the same transaction that marks its operation complete. It includes the full
+grant, sender-evidence grant hash, and the observed successful engine reply.
+Replay checks the receipt content and hash against the exact grant and reply.
+The receipt records a node observation; it is not a claim that NodeODM has
+fsynced the input or that a later task execution will succeed. It is not a
+cryptographic attestation independent of the trusted node.
+
+The new node receipt table is created only for a fresh prototype node database.
+Existing databases missing it are refused; no automatic upgrade or downgrade is
+provided. If communication fails after the node transaction, the coordinator
+intent remains started and the job is held on restart even though the node
+receipt is retained. Automatic reconciliation, old-worker fencing, epoch
+adoption and independently verified remote receipt signatures are not provided.
+The tests simulate session loss and orderly reopen, not power failure or an
+actual cross-host node crash. This remains disabled.

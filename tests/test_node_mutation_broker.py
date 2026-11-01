@@ -372,6 +372,12 @@ os._exit(27)
         with self.broker.db:
             self.assertEqual(self.broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
 
+    def test_existing_node_database_without_receipt_schema_is_not_migrated(self):
+        self.broker.db.execute('DROP TABLE upload_receipts')
+        self.broker.close()
+        with self.assertRaises(b.BrokerHeld):
+            b.NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+
     def test_replaced_database_path_fails_before_engine_mutation(self):
         original=self.broker.path.with_name('retained-original.sqlite3')
         self.broker.path.rename(original)
@@ -489,6 +495,10 @@ os._exit(27)
         with self.assertRaises(b.BrokerHeld):
             self.broker.confirm_upload(upload,signature,b._sender_confirmation(upload,self.secret))
         self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'complete')
+        receipt=self.broker.db.execute('SELECT receipt_json FROM upload_receipts WHERE operation_id=?',(upload['operationId'],)).fetchone()[0]
+        self.broker.db.execute('UPDATE upload_receipts SET receipt_json=? WHERE operation_id=?',('{}',upload['operationId']))
+        with self.assertRaises(b.BrokerHeld):self.broker.lookup_upload(upload,signature)
+        self.broker.db.execute('UPDATE upload_receipts SET receipt_json=? WHERE operation_id=?',(receipt,upload['operationId']))
         self.broker.db.execute("UPDATE operations SET file_key='changed.jpg' WHERE operation='upload'")
         source,writer=socket.socketpair()
         try:

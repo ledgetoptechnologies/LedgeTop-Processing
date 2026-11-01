@@ -1,5 +1,6 @@
 """Synthetic mTLS stream with actual Queue, lease and node broker."""
 import hashlib
+import json
 import shutil
 import socket
 import sqlite3
@@ -10,6 +11,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
+from processing import node_mutation_broker as broker_module
 from processing import node_authority_session as authority_session
 from processing import remote_upload_transport as upload_transport
 from processing.node_authority_session import RemoteAuthoritySession, SessionHeld, serve_coordinator
@@ -192,6 +194,11 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
             self.assertEqual(results[0]['success'],True);self.assertEqual(len(self.calls),2)
             self.assertIn(b'\r\n\r\nx\r\n--',self.calls[-1][1])
             self.assertEqual(broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'complete')
+            receipt=broker.db.execute('SELECT receipt_json,receipt_sha256 FROM upload_receipts WHERE operation_id=?',(upload['operationId'],)).fetchone()
+            payload=json.loads(receipt['receipt_json']);self.assertEqual(payload['grant'],upload)
+            self.assertEqual(payload['senderEvidenceGrantHash'],hashlib.sha256(broker_module._json(upload)).hexdigest())
+            self.assertEqual(payload['meaning'],'node_observed_backend_success')
+            self.assertEqual(receipt['receipt_sha256'],hashlib.sha256(receipt['receipt_json'].encode('ascii')).hexdigest())
             with self.owner_queue._db() as db:self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(upload['operationId'],)).fetchone()[0],'complete')
             retry_client,retry_server=socket.socketpair();retry_client.settimeout(3);retry_server.settimeout(3)
             resources.extend([retry_client,retry_server])
@@ -214,6 +221,11 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
             for thread in threads:
                 thread.join(5);self.assertFalse(thread.is_alive())
         self.assertEqual(errors,[])
+        reopened=NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+        try:
+            row=reopened.db.execute('SELECT receipt_json FROM upload_receipts WHERE operation_id=?',(upload['operationId'],)).fetchone()
+            self.assertEqual(json.loads(row[0])['grant'],upload)
+        finally:reopened.close()
         with self.owner_queue._db() as db:
             with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM broker_sender_evidence')
         self.owner_lease.close();self.owner_queue.close()
@@ -225,6 +237,75 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
             self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
             with restarted._db() as db:db.execute('DROP TRIGGER broker_sender_evidence_update')
             with self.assertRaises(EvidenceError):recovered.wait_verified(upload,time.monotonic()+.1)
+        finally:restarted.close()
+
+    def test_lost_coordinator_completion_retains_durable_node_receipt_and_hold(self):
+        self.begin_upload()
+        upload,signature=issue_upload_grant(self.owner_queue,store=self.owner_store,job_id=self.job,
+            claim_token=self.owner_claim['claimToken'],engine_id=self.engine,gate_generation=1,
+            operation_id=str(__import__('uuid').uuid4()),file_key='synthetic.jpg',secret=self.secret)
+        key=self.root/'data.key';cert=self.root/'data.crt'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=10)
+        pin=hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cert,key);server_context.load_verify_locations(cafile=str(cert));server_context.verify_mode=ssl.CERT_REQUIRED
+        client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
+        authority_client,authority_server=socket.socketpair();data_client,data_server=socket.socketpair()
+        for channel in (authority_client,authority_server,data_client,data_server):channel.settimeout(3)
+        evidence=DurableUploadEvidence(self.owner_queue);errors=[];results=[];threads=[];resources=[]
+        def auth():
+            try:
+                channel=server_context.wrap_socket(authority_server,server_side=True);resources.append(channel)
+                serve_coordinator(channel,queue=self.owner_queue,witness=LocalCoordinatorAuthority(self.owner_queue),secret=self.secret,
+                    store=self.owner_store,upload_evidence=evidence,peer_sha256=pin,session_seconds=20,idle_seconds=12)
+            except Exception as error:errors.append(('authority',type(error).__name__))
+        authority_thread=threading.Thread(target=auth);threads.append(authority_thread);authority_thread.start()
+        remote=None;broker=None
+        try:
+            auth_tls=client_context.wrap_socket(authority_client,server_hostname='localhost');resources.append(auth_tls)
+            remote=RemoteAuthoritySession(auth_tls,authority=self.authority,epoch=self.epoch,
+                claim_token=self.owner_claim['claimToken'],peer_sha256=pin,timeout_seconds=3)
+            self.broker.close();broker=NodeMutationBroker(self.root/'gate'/'mutation-broker',**dict(self.config,authority_witness=remote))
+            def node():
+                try:
+                    channel=server_context.wrap_socket(data_server,server_side=True);resources.append(channel)
+                    results.append(receive_upload(channel,peer_sha256=pin,broker=broker,timeout=8))
+                except Exception as error:errors.append(('node',type(error).__name__))
+            node_thread=threading.Thread(target=node);threads.append(node_thread);node_thread.start()
+            data_tls=client_context.wrap_socket(data_client,server_hostname='localhost');resources.append(data_tls)
+            sender=RemoteUploadSender()
+            with unittest.mock.patch.object(remote,'completed',side_effect=SessionHeld('synthetic completion loss')):
+                with self.assertRaises((SessionHeld,OSError)):
+                    sender.send(data_tls,peer_sha256=pin,store=self.owner_store,claim_token=self.owner_claim['claimToken'],
+                        grant=upload,signature=signature,secret=self.secret,evidence=evidence,timeout=8)
+            node_thread.join(5);self.assertFalse(node_thread.is_alive());self.assertEqual(sender._unreaped,[])
+            self.assertEqual(broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'complete')
+            receipt=broker.db.execute('SELECT receipt_json FROM upload_receipts WHERE operation_id=?',(upload['operationId'],)).fetchone()
+            self.assertEqual(json.loads(receipt[0])['grant'],upload)
+            with self.owner_queue._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(upload['operationId'],)).fetchone()[0],'started')
+                self.assertIsNotNone(db.execute('SELECT 1 FROM broker_sender_evidence WHERE operation_id=?',(upload['operationId'],)).fetchone())
+        finally:
+            if broker is not None:broker.close()
+            if remote is not None:remote.close()
+            for channel in resources+[authority_client,authority_server,data_client,data_server]:
+                try:channel.close()
+                except OSError:pass
+            for thread in threads:
+                thread.join(5);self.assertFalse(thread.is_alive())
+        self.assertEqual(errors,[('node','SessionHeld')])
+        reopened=NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+        try:
+            row=reopened.db.execute('SELECT receipt_json FROM upload_receipts WHERE operation_id=?',(upload['operationId'],)).fetchone()
+            self.assertEqual(json.loads(row[0])['grant'],upload)
+        finally:reopened.close()
+        self.owner_lease.close();self.owner_queue.close()
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            self.assertEqual(restarted.get(self.job)['status'],'held')
+            self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+            with restarted._db() as db:self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(upload['operationId'],)).fetchone()[0],'started')
         finally:restarted.close()
 
     def test_interrupted_mtls_upload_retains_both_intents(self):
@@ -317,6 +398,7 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
             with self.owner_queue._db() as db:
                 self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(upload['operationId'],)).fetchone()[0],'started')
             self.assertEqual(len(self.calls),1)
+            self.assertEqual(self.broker.db.execute('SELECT COUNT(*) FROM upload_receipts').fetchone()[0],0)
         finally:
             if remote is not None:remote.close()
             else:client_raw.close()
