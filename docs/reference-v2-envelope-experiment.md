@@ -33,6 +33,16 @@ epoch anchor. The experiment does not implement protected storage, registry
 distribution, rotation, revocation propagation, time synchronization or an
 anti-rollback anchor. Exact operational ownership and recovery require review.
 
+The separately disabled registry loader verifies a root-signed, bounded,
+canonical key snapshot against caller-supplied root, epoch, minimum revision,
+clock and independent issuer/purpose/audience/operation policy. It rejects raw
+key aliases and clips leaf validity to the snapshot lifetime. The returned
+snapshot cannot learn later revocation: every use would require independently
+fresh authority. Supplying the same restored/stale values as context does not
+prevent rollback. Root enrollment, rotation, compromise recovery, current
+revision anchoring and synchronized revocation are unimplemented; no real
+trust is established by the public registry test vector.
+
 Cross-service state transitions and their crash holds are described in
 `reference-v2-paired-authority-state-draft.md`. Network admission requires that
 design's real independent fencing and durable ledger, not just this verifier.

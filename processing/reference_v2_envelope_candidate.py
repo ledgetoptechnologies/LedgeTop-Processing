@@ -36,21 +36,31 @@ class Key:
     not_before: int
     not_after: int
     revoked: bool = False
+    audience: str = ''
+    operation: str = ''
 
 class Registry:
     """Immutable caller-provided snapshot; freshness is not established here."""
-    def __init__(self,keys):
+    def __init__(self,keys,*,role_policy):
         if type(keys) not in (tuple,list) or not 1<=len(keys)<=128:raise EnvelopeHeld('invalid registry')
-        entries={}
+        if type(role_policy) not in (tuple,frozenset) or not 1<=len(role_policy)<=128:raise EnvelopeHeld('invalid role policy')
+        if any(type(role) is not tuple or len(role)!=4 or any(type(v) is not str or not ID.fullmatch(v) for v in role) for role in role_policy):
+            raise EnvelopeHeld('invalid role policy')
+        allowed=frozenset(role_policy)
+        entries={};public_keys=set()
         for key in keys:
             if (type(key) is not Key or not ID.fullmatch(key.issuer) or not ID.fullmatch(key.key_id)
                     or key.purpose not in DOMAINS or type(key.public_key) is not bytes or len(key.public_key)!=32
                     or type(key.not_before) is not int or type(key.not_after) is not int
-                    or not 0<=key.not_before<key.not_after<=2**53-1 or type(key.revoked) is not bool):
+                    or not 0<=key.not_before<key.not_after<=2**53-1 or type(key.revoked) is not bool
+                    or type(key.audience) is not str or not ID.fullmatch(key.audience)
+                    or type(key.operation) is not str or not ID.fullmatch(key.operation)):
                 raise EnvelopeHeld('invalid registry key')
             name=(key.issuer,key.key_id,key.purpose)
-            if name in entries:raise EnvelopeHeld('duplicate registry key')
+            if (key.issuer,key.purpose,key.audience,key.operation) not in allowed:raise EnvelopeHeld('key role not allowed')
+            if name in entries or key.public_key in public_keys:raise EnvelopeHeld('duplicate registry key')
             entries[name]=key
+            public_keys.add(key.public_key)
         self.entries=MappingProxyType(entries)
 
 def verify(raw, signature, *, payload_raw, expected_payload, registry, expected, now):
@@ -92,7 +102,8 @@ def verify(raw, signature, *, payload_raw, expected_payload, registry, expected,
                 or value['expiresAt']-value['issuedAt']>300):raise ValueError('time')
         if any(value.get(k)!=v or type(value.get(k)) is not type(v) for k,v in expected.items()):raise ValueError('scope')
         key=registry.entries.get((value['issuer'],value['keyId'],value['kind']))
-        if key is None or key.revoked or not key.not_before<=value['issuedAt']<=now<value['expiresAt']<=key.not_after:raise ValueError('key')
+        if (key is None or key.revoked or (key.audience,key.operation)!=(value['audience'],value['operation'])
+                or not key.not_before<=value['issuedAt']<=now<value['expiresAt']<=key.not_after):raise ValueError('key')
         sig=_bytes64(signature,64)
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
         Ed25519PublicKey.from_public_bytes(key.public_key).verify(sig,DOMAINS[value['kind']]+raw)
