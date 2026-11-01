@@ -699,10 +699,15 @@ finally:s.close();q.authority_lease.close();q.close()
         receipt = path.with_suffix('.zip.receipt')
         receipt_before = receipt.read_bytes()
         path.unlink()
-        self.service.engines['cluster'].archive = b'synthetic mismatched archive'
+        mismatched = bytearray(self.engine_response)
+        mismatched[10] ^= 1
+        self.service.engines['cluster'].archive = bytes(mismatched)
         with self.assertRaises(Conflict):
             self.service.download(self.identifier)
         self.assertFalse(path.exists())
+        retained = path.parent / '.all.zip.restore-pending'
+        self.assertTrue(retained.is_file())
+        self.assertEqual(retained.read_bytes(), bytes(mismatched))
         self.assertEqual(receipt.read_bytes(), receipt_before)
         self.assertTrue(self.service.store.archive_claim_held(task))
 
