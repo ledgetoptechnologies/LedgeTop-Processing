@@ -59,6 +59,9 @@ class LocalCoordinatorAuthority:
                 or getattr(queue,'authority_lease',None) is not self.authority_lease
                 or self.authority_lease.authority!=self.authority or self.authority_lease._descriptor is None):
             raise BrokerHeld('local coordinator authority unavailable')
+        from .authority_lease import LeaseUnavailable
+        try:self.authority_lease.check_held()
+        except LeaseUnavailable:raise BrokerHeld('installed authority lease unavailable') from None
         try:
             held=os.fstat(queue._lock.fileno());name=(queue.path.parent/'coordinator.lock').lstat()
             if ((held.st_dev,held.st_ino)!=self.lock_identity or (name.st_dev,name.st_ino)!=self.lock_identity
@@ -320,6 +323,7 @@ class NodeMutationBroker:
             except BaseException:self.db.rollback();raise
             reply=_reply(self.adapter.exchange(grant,body),grant['engineTaskId'])
             self._check_owner()
+            self.witness._check()
             raw=_json(reply)
             if len(raw)>4096:raise BrokerHeld('backend response exceeds bound')
             self.db.execute('BEGIN IMMEDIATE')

@@ -141,6 +141,19 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
         self.assertEqual(self.calls,[])
 
+    def test_changed_authority_lease_path_after_forward_retains_started_intent(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
+        def replace_after_response(*args):
+            result=original(*args)
+            self.owner_lease.path.rename(self.owner_lease.path.with_name('retained-original.lease'))
+            self.owner_lease.path.touch(mode=0o600)
+            return result
+        with patch.object(self.adapter,'exchange',side_effect=replace_after_response):
+            with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+
     def test_live_queue_rejects_valid_grant_after_task_phase_changes(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret)
         store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
