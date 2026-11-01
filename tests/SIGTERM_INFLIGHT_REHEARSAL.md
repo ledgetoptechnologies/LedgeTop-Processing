@@ -38,3 +38,15 @@ present on reopen. The child exited zero and was reaped; synthetic state at
 `/tmp/lt-main-sigterm-a_c_3ynn` remains retained. The marker precedes parsing
 and admission, and this covers no Viewer/reference listener, Docker shutdown,
 external fence, power loss, or deployment.
+
+The independently lifecycle-reviewed `test_sigterm_reference_tls_owned` passed
+under unprivileged WSL. It invokes `app.main()` with the actual ReferenceRuntime
+TLS listener and a synthetic certificate/configuration. Test-only wrappers
+select owned ephemeral ports and mark handler entry. A partial authenticated
+TLS POST to an unknown reference route remains in flight across SIGTERM, while
+the Queue lock remains held. Completing the body produces the expected 404;
+the process exits zero and Queue opens again. The owned child was reaped and
+synthetic state/certificates remain at `/tmp/lt-reference-tls-sigterm-giy3u8hu`.
+This is not evidence of a successful reference mutation, a streamed transfer,
+client-certificate authentication, admission fencing, Docker shutdown,
+external writer exclusion, or power-loss durability.
