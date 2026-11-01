@@ -14,6 +14,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -109,14 +110,19 @@ class Queue(Maintenance):
                       if profile != PROFILE or node_id in self.treedar_node_ids)
 
     @contextmanager
-    def pin_transfer(self):
+    def pin_transfer(self, deadline):
         """Keep this process's coordinator lease live without holding its mutex."""
         if os.getpid() != self._creator_pid:
             raise RuntimeError('coordinator process changed')
-        with self._lifecycle_lock:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._lifecycle_lock.acquire(timeout=remaining):
+            raise RuntimeError('coordinator transfer pin deadline exceeded')
+        try:
             if self._lock.closed:
                 raise RuntimeError('coordinator ownership closed')
             self._database_users += 1
+        finally:
+            self._lifecycle_lock.release()
         try:
             yield
         finally:

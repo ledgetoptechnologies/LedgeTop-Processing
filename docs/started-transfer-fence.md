@@ -2,18 +2,24 @@
 
 This is an offline migration and guarded-upload prerequisite experiment. It is
 not enabled or wired into production. The migration refuses an existing upload
-journal or an active job, installs the known upload schema and four attested
-SQLite triggers, and protects updates/deletes of the matching job and Viewer
-task while an upload journal row is `started`. This conservatively blocks
-operator hold and progress updates too. A killed upload leaves `started`, so a
-cooperating old transaction cannot accidentally terminalize the job. The
+journal or an active job, installs the known upload schema and six attested
+SQLite triggers, and protects inserts/updates/deletes of the matching job and
+Viewer task, including rebinding another task to the job, while an upload journal
+row is `started`. It permits only the exact running-to-coordinator-restart-held
+transition with job identity and claim unchanged; other operator holds and
+progress updates are conservatively blocked. A restarted coordinator can thus
+open and report the job held while retaining the started upload and shared slot.
+A killed upload leaves `started`, so a cooperating old transaction cannot
+accidentally terminalize the job. The
 migration requires an independent externally fenced idle coordinator; checking
 SQLite alone is not an external fence.
 
 `Queue.pin_transfer` retains the current process's coordinator lease while
 allowing other threads to acquire the lifecycle mutex. The bound upload path
 uses the pin and checks migration attestation, but still holds the old Queue
-lifecycle mutex and SQLite transaction for the actual network stream. No longer
+lifecycle mutex and SQLite transaction for the actual network stream. Pin
+acquisition consumes the existing operation deadline, although releasing the pin
+can wait for the lifecycle mutex. No longer
 upload deadline is enabled by this change. Releasing those locks requires
 pre/post transaction refactoring and independent tests before it is safe.
 

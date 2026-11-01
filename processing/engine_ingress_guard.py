@@ -511,10 +511,11 @@ class EngineIngressGuard:
             return result
 
     def stream_bound_upload(self, target, pairs, source, *, completion=None):
-        with self.queue.pin_transfer():
-            return self._stream_bound_upload(target, pairs, source, completion=completion)
+        deadline = time.monotonic() + self.binding.deadline_seconds
+        with self.queue.pin_transfer(deadline):
+            return self._stream_bound_upload(target, pairs, source, completion=completion, deadline=deadline)
 
-    def _stream_bound_upload(self, target, pairs, source, *, completion=None):
+    def _stream_bound_upload(self, target, pairs, source, *, completion=None, deadline):
         """Stream raw file bytes using a previously persisted TaskStore intent."""
         from . import engine_upload_contract as contract
         if contract.QUALIFIED is not True:
@@ -524,7 +525,6 @@ class EngineIngressGuard:
         upload_id=_identifier(headers.get('x-ledgetop-upload-id'))
         if action!='upload' or type(source) is not socket.socket:
             raise AdmissionError('bounded socket upload required')
-        deadline=time.monotonic()+self.binding.deadline_seconds
         with self._owned(headers,engine_uuid,action,deadline,bound_id=upload_id) as db:
             try:
                 job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()

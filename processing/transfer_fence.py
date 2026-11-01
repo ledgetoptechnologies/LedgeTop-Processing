@@ -9,9 +9,11 @@ import sqlite3
 from .engine_ingress_guard import STREAM_DDL
 
 TRIGGERS = {
-    'guard_started_job_update': "CREATE TRIGGER guard_started_job_update BEFORE UPDATE ON jobs WHEN EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE job_id=OLD.id AND state='started') BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
+    'guard_started_job_update': "CREATE TRIGGER guard_started_job_update BEFORE UPDATE ON jobs WHEN (EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE (job_id=OLD.id OR job_id=NEW.id) AND state='started')) AND NOT (OLD.status='running' AND NEW.status='held' AND NEW.held_reason='coordinator_restart' AND NEW.seq IS OLD.seq AND NEW.id IS OLD.id AND NEW.request_id IS OLD.request_id AND NEW.environment IS OLD.environment AND NEW.profile IS OLD.profile AND NEW.worker_id IS OLD.worker_id AND NEW.node_id IS OLD.node_id AND NEW.claim_hash IS OLD.claim_hash AND NEW.result IS OLD.result AND NEW.created_at IS OLD.created_at) BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
+    'guard_started_job_insert': "CREATE TRIGGER guard_started_job_insert BEFORE INSERT ON jobs WHEN EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE job_id=NEW.id AND state='started') BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
     'guard_started_job_delete': "CREATE TRIGGER guard_started_job_delete BEFORE DELETE ON jobs WHEN EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE job_id=OLD.id AND state='started') BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
-    'guard_started_task_update': "CREATE TRIGGER guard_started_task_update BEFORE UPDATE ON viewer_tasks WHEN EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE job_id=OLD.job_id AND state='started') BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
+    'guard_started_task_update': "CREATE TRIGGER guard_started_task_update BEFORE UPDATE ON viewer_tasks WHEN EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE (job_id=OLD.job_id OR job_id=NEW.job_id) AND state='started') BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
+    'guard_started_task_insert': "CREATE TRIGGER guard_started_task_insert BEFORE INSERT ON viewer_tasks WHEN EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE job_id=NEW.job_id AND state='started') BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
     'guard_started_task_delete': "CREATE TRIGGER guard_started_task_delete BEFORE DELETE ON viewer_tasks WHEN EXISTS (SELECT 1 FROM engine_ingress_uploads WHERE job_id=OLD.job_id AND state='started') BEGIN SELECT RAISE(ABORT,'started transfer held'); END",
 }
 
