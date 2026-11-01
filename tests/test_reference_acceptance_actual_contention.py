@@ -37,7 +37,7 @@ class MemoryQueue:
 
 
 class ActualContentionTests(unittest.TestCase):
-    def test_busy_acceptance_then_exact_replay_and_worker_relay(self):
+    def _exercise(self, viewer_dir=None):
         fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
         receipt, manifest = fixture['acceptance'], fixture['resultManifest']
         uri = 'file:actual-acceptance-' + uuid.uuid4().hex + '?mode=memory&cache=shared'
@@ -187,10 +187,13 @@ class ActualContentionTests(unittest.TestCase):
 
                 # Optional cross-repository qualification against an explicitly
                 # selected Viewer checkout; never modifies or launches Viewer.
-                viewer_dir = os.environ.get('LT_VIEWER_CANDIDATE_DIR')
                 if viewer_dir:
                     modules = [Path(viewer_dir) / 'nativeReferenceReceiptCandidate.js',
                                Path(viewer_dir) / 'nativeReferenceProtocolCandidate.js']
+                    git = lambda *args: subprocess.run(['git','-C',viewer_dir,*args],
+                        text=True,capture_output=True,timeout=10,check=True).stdout.strip()
+                    viewer_revision = git('rev-parse','HEAD')
+                    viewer_changes = git('status','--porcelain','--',*[str(file) for file in modules])
                     before = [hashlib.sha256(file.read_bytes()).hexdigest() for file in modules]
                     candidate_manifest = dict(manifest,jobId='job-2')
                     candidate_manifest['resultManifestSha256'] = p.digest({k:v for k,v in candidate_manifest.items() if k!='resultManifestSha256'})
@@ -206,6 +209,11 @@ process.stdout.write(db.prepare('SELECT acceptance_json FROM native_reference_ou
                         text=True,capture_output=True,timeout=10)
                     self.assertEqual(process.returncode,0,process.stderr[-2000:])
                     self.assertEqual(before,[hashlib.sha256(file.read_bytes()).hexdigest() for file in modules])
+                    self.assertEqual(viewer_revision,git('rev-parse','HEAD'))
+                    self.assertEqual(viewer_changes,git('status','--porcelain','--',*[str(file) for file in modules]))
+                    print('\nViewer revision:',viewer_revision,'module SHA256:',
+                        ', '.join(file.name+'='+digest for file,digest in zip(modules,before)),
+                        'module status:',viewer_changes or 'clean')
                     viewer_receipt = json.loads(process.stdout)
                     keeper.execute("INSERT INTO jobs(id,profile,status) VALUES ('job-2','reference-pipeline-v1','succeeded')")
                     keeper.execute('''INSERT INTO reference_jobs(job_id,generation,environment,input_json,manifest_sha,pipeline_digest,
@@ -249,6 +257,15 @@ process.stdout.write(db.prepare('SELECT acceptance_json FROM native_reference_ou
                     self.assertTrue(all(not handler.is_alive() for handler in handlers))
         finally:
             locker.rollback(); locker.close(); keeper.close()
+
+    def test_busy_acceptance_then_exact_replay_and_worker_relay(self):
+        self._exercise()
+
+    def test_viewer_candidate_receipt_cross_language(self):
+        viewer_dir = os.environ.get('LT_VIEWER_CANDIDATE_DIR')
+        if not viewer_dir:
+            self.skipTest('LT_VIEWER_CANDIDATE_DIR is not configured')
+        self._exercise(viewer_dir)
 
 
 if __name__ == '__main__': unittest.main()
