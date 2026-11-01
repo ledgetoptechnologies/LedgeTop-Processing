@@ -23,7 +23,7 @@ from contextlib import contextmanager
 
 from .engine_ingress_guard import (BackendPin, EngineIngressGuard, MAX_STREAM_BYTES, _file_multipart,
                                    local_backend_identity, local_engine_identity)
-from .node_gate import NodeGate, canonical_gate_path
+from .node_gate import GateError, NodeGate, canonical_gate_path
 from .reference_protocol import decode_submission
 
 QUALIFIED = False
@@ -583,6 +583,130 @@ class LoopbackNodeODM:
             file_prefix=prefix,file_suffix=suffix,forbidden=b'--'+boundary.encode('ascii'),omit_empty_token=True)
         if status!=200 or len(raw)>4096:raise BrokerHeld('backend response uncertain')
         return _upload_reply(decode_submission(raw))
+
+
+def inspect_prior_node_state(engine_id, operation_id, secret):
+    """Cooperative, local snapshot only; never adopts an epoch or permits work.
+
+    Requires the existing node gate and identity manifest. A busy, missing or
+    inconsistent node is unknown. This is not an authenticated network endpoint,
+    a continuing fence, or evidence against direct backend writers. No mTLS
+    endpoint is exposed: provisioned certificate identity is not yet bound.
+    """
+    if (not _uuid(operation_id) or type(secret) is not bytes or len(secret)<32):
+        raise BrokerHeld('invalid recovery evidence request')
+    if os.name == 'nt':raise BrokerHeld('local inspection requires POSIX locking')
+    import fcntl
+    root=canonical_gate_path(engine_id); state_root=root/'mutation-broker'
+    rootfd=None; statefd=None; lockfd=None; manifestfd=None; journalfd=None; gatefd=None; db=None
+    try:
+        rootstat=root.lstat(); brokerstat=state_root.lstat()
+        if (not stat.S_ISDIR(rootstat.st_mode) or not stat.S_ISDIR(brokerstat.st_mode)
+                or root.resolve()!=root.absolute() or state_root.resolve()!=state_root.absolute()
+                or rootstat.st_uid!=os.geteuid() or brokerstat.st_uid!=os.geteuid()
+                or rootstat.st_mode&0o077 or brokerstat.st_mode&0o077):
+            raise BrokerHeld('node state requires inspection')
+        rootfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        if (os.fstat(rootfd).st_dev,os.fstat(rootfd).st_ino)!=(rootstat.st_dev,rootstat.st_ino):raise BrokerHeld('node root changed')
+        statefd=os.open('mutation-broker',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=rootfd)
+        if (os.fstat(statefd).st_dev,os.fstat(statefd).st_ino)!=(brokerstat.st_dev,brokerstat.st_ino):raise BrokerHeld('node state changed')
+        lockfd=os.open('gate.lock',os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=rootfd)
+        lock=os.fstat(lockfd)
+        if not stat.S_ISREG(lock.st_mode) or lock.st_uid!=os.geteuid() or lock.st_mode&0o077 or lock.st_nlink!=1:
+            raise BrokerHeld('node lock requires inspection')
+        fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        manifestfd=os.open('identity.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=statefd)
+        info=os.fstat(manifestfd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_size>8192:
+            raise BrokerHeld('node identity requires inspection')
+        manifest=json.loads(os.read(manifestfd,8193))
+        fields={'version','nodeId','engineId','authorityId','coordinatorOrigin','generation','coordinatorEpoch','gateRoot','gateLock','journal'}
+        if (type(manifest) is not dict or set(manifest)!=fields or manifest['version']!=1
+                or manifest['engineId']!=engine_id or not _uuid(manifest['authorityId'])
+                or not _uuid(manifest['coordinatorEpoch']) or manifest['nodeId'] not in ('main','cluster')
+                or type(manifest['generation']) is not int or manifest['generation']<1
+                or manifest['gateRoot']!=[rootstat.st_dev,rootstat.st_ino]
+                or manifest['gateLock']!=[lock.st_dev,lock.st_ino]):
+            raise BrokerHeld('node identity changed')
+        # No recovery journals or WAL are interpreted from a pathname. Even a
+        # stale sidecar makes this snapshot unknown and requires inspection.
+        for suffix in ('-journal','-wal','-shm'):
+            try:os.stat('node-broker.sqlite3'+suffix,dir_fd=statefd,follow_symlinks=False)
+            except FileNotFoundError:continue
+            raise BrokerHeld('node journal sidecar requires inspection')
+        journalfd=os.open('node-broker.sqlite3',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=statefd)
+        js=os.fstat(journalfd)
+        if (not stat.S_ISREG(js.st_mode) or js.st_nlink!=1 or js.st_uid!=os.geteuid() or js.st_mode&0o077
+                or not 100<=js.st_size<=16*1024*1024 or manifest['journal']!=[js.st_dev,js.st_ino]):
+            raise BrokerHeld('node journal changed')
+        gatefd=os.open('gate.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=rootfd)
+        gs=os.fstat(gatefd)
+        if not stat.S_ISREG(gs.st_mode) or gs.st_nlink!=1 or gs.st_uid!=os.geteuid() or gs.st_mode&0o077 or gs.st_size>16384:
+            raise BrokerHeld('node gate state changed')
+        from .node_gate import _binding
+        state=decode_submission(os.read(gatefd,16385))
+        if (type(state) is not dict or set(state)!={'schema','engineId','nodeId','coordinatorOrigin','authorityId','generation','reservation'}
+                or type(state['schema']) is not int or state['schema']!=1
+                or any(state.get(k)!=v for k,v in _binding(state['nodeId'],state['coordinatorOrigin'],state['authorityId']).items())):
+            raise BrokerHeld('node gate identity changed')
+        for key in ('nodeId','engineId','authorityId','coordinatorOrigin','generation'):
+            if state.get(key)!=manifest[key]:raise BrokerHeld('node gate identity changed')
+        chunks=[];remaining=js.st_size
+        while remaining:
+            chunk=os.read(journalfd,min(remaining,65536))
+            if not chunk:raise BrokerHeld('node journal changed')
+            chunks.append(chunk);remaining-=len(chunk)
+        data=b''.join(chunks)
+        if data[:16]!=b'SQLite format 3\x00' or data[18:20]!=b'\x01\x01':
+            raise BrokerHeld('node journal mode requires inspection')
+        # Deserialize the pinned bytes in memory. SQLite never opens the node
+        # journal path or creates a rollback, WAL, or shared-memory file.
+        db=sqlite3.connect(':memory:',isolation_level=None)
+        db.deserialize(data);db.execute('PRAGMA query_only=ON');db.row_factory=sqlite3.Row
+        for name,ddl in _DDL.items():
+            row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
+            if row is None or row['sql']!=ddl:raise BrokerHeld('node journal schema changed')
+        for name,ddl in _NODE_TRIGGERS.items():
+            row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
+            if row is None or row['sql']!=ddl:raise BrokerHeld('node journal schema changed')
+        if {row['name'] for row in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}!=set(_NODE_TRIGGERS):
+            raise BrokerHeld('node journal schema changed')
+        binding=hashlib.sha256(_json([manifest[k] for k in ('nodeId','engineId','authorityId','coordinatorEpoch','coordinatorOrigin','generation')])).hexdigest()
+        row=db.execute('SELECT digest FROM binding WHERE singleton=1').fetchone()
+        if row is None or row['digest']!=binding:raise BrokerHeld('node journal binding changed')
+        reservation=db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+        op=db.execute('SELECT operation,file_key,grant_hash,state FROM operations WHERE id=?',(operation_id,)).fetchone()
+        evidence=db.execute('SELECT grant_json,signature FROM node_grants WHERE operation_id=?',(operation_id,)).fetchone()
+        observation=db.execute('SELECT grant_hash,reply_json FROM engine_observations WHERE operation_id=?',(operation_id,)).fetchone()
+        if reservation is None or op is None or evidence is None:raise BrokerHeld('node held evidence unavailable')
+        grant=verify_grant_evidence(evidence['grant_json'],evidence['signature'],secret)
+        digest=hashlib.sha256(_json(grant)).hexdigest()
+        expected=[grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]
+        job={'id':grant['jobId'],'workerId':'node-broker','nodeId':manifest['nodeId'],'authorityId':manifest['authorityId']}
+        held=state['reservation']
+        if (grant['operationId']!=operation_id or grant['operation']!='init'
+                or [grant[k] for k in ('nodeId','engineId','authorityId','coordinatorEpoch','gateGeneration')]
+                   !=[manifest[k] for k in ('nodeId','engineId','authorityId','coordinatorEpoch','generation')]
+                or reservation['identity']!=_json(expected).decode('ascii')
+                or tuple(op)!=('init','',digest,'started') or held is None
+                or held['receiptId']!=uuid.UUID(grant['jobId']).hex or held['job']!=job
+                or held['completionDigest'] is not None):
+            raise BrokerHeld('node held evidence differs')
+        reply=None
+        if observation is not None:
+            if observation['grant_hash']!=digest:raise BrokerHeld('node engine evidence differs')
+            reply=_reply(decode_submission(observation['reply_json'].encode('utf-8')),grant['engineTaskId'])
+        after=os.fstat(journalfd)
+        if (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)!=(js.st_dev,js.st_ino,js.st_size,js.st_mtime_ns):raise BrokerHeld('node journal changed')
+        return {'identity':manifest,'grant':grant,'operationState':'started',
+                'observationPresent':reply is not None,'authorizesRelease':False}
+    except BrokerHeld:raise
+    except (OSError,ValueError,TypeError,KeyError,sqlite3.Error,GateError):
+        raise BrokerHeld('node state unavailable') from None
+    finally:
+        if db is not None:db.close()
+        for fd in (gatefd,journalfd,manifestfd,lockfd,statefd,rootfd):
+            if fd is not None:os.close(fd)
 
 
 class NodeMutationBroker:

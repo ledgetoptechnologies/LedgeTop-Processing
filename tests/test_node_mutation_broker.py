@@ -476,6 +476,32 @@ os._exit(27)
         self.assertEqual(self.broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
         with NodeGate(self.engine) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
 
+    def test_prior_epoch_reader_preserves_signed_held_evidence(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
+        def lost(*args):original(*args);raise OSError('synthetic lost response')
+        with patch.object(self.adapter,'exchange',side_effect=lost):
+            with self.assertRaises(OSError):self.broker.mutate(grant,signature,self.body)
+        self.broker.close()
+        root=self.root/'gate';journal=root/'mutation-broker'/'node-broker.sqlite3'
+        rootstat=root.stat();lockstat=(root/'gate.lock').stat();jstat=journal.stat()
+        manifest={'version':1,'nodeId':self.node,'engineId':self.engine,'authorityId':self.authority,
+                  'coordinatorOrigin':self.origin,'generation':1,'coordinatorEpoch':self.epoch,
+                  'gateRoot':[rootstat.st_dev,rootstat.st_ino],'gateLock':[lockstat.st_dev,lockstat.st_ino],
+                  'journal':[jstat.st_dev,jstat.st_ino]}
+        identity=root/'mutation-broker'/'identity.json'
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine,grant['operationId'],self.secret)
+        identity.write_bytes(b._json(manifest));identity.chmod(0o600)
+        paths=[identity,journal,root/'gate.json'];before=[p.read_bytes() for p in paths]
+        report=b.inspect_prior_node_state(self.engine,grant['operationId'],self.secret)
+        self.assertEqual(report['grant'],grant);self.assertFalse(report['authorizesRelease'])
+        self.assertEqual(report['operationState'],'started')
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine,grant['operationId'],b'wrong-key-'*4)
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine,str(uuid.uuid4()),self.secret)
+        self.assertEqual(before,[p.read_bytes() for p in paths])
+        sidecar=Path(str(journal)+'-wal');sidecar.write_bytes(b'synthetic')
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine,grant['operationId'],self.secret)
+        self.assertEqual(before,[p.read_bytes() for p in paths])
+
     def test_task_query_sanitizes_transport_exception(self):
         secret = 'synthetic-secret-do-not-leak'
         task = str(uuid.uuid4())
