@@ -18,6 +18,11 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if (type(config.admission_start_closed) is not bool or
+        (config.admission_start_closed and
+         (config.admission_drain_enabled is not True or not config.prototype_state_dir or
+          not config.prototype_operator_token or config.reference_config_path))):
+        raise RuntimeError('closed_start_requires_admission_drain')
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
@@ -58,9 +63,11 @@ def make_handler(config: Config):
     if queue is not None and config.admission_drain_enabled:
         from .admission_drain import AdmissionDrain
         try:
-            queue.admission_drain = AdmissionDrain(queue)
-        except Exception:
-            queue.close()
+            queue.admission_drain = AdmissionDrain(queue, initial_closed=config.admission_start_closed)
+        except BaseException:
+            try:queue.close()
+            finally:
+                if lease is not None:lease.close()
             raise
     elif queue is not None:
         # Never silently bypass a previously enabled persistent barrier.

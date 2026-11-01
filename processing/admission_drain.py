@@ -13,7 +13,8 @@ class AdmissionDrain:
     _DDL = 'CREATE TABLE coordinator_admission (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL, closed INTEGER NOT NULL CHECK(closed IN (0,1)), generation INTEGER NOT NULL CHECK(generation>=0))'
     _OPS_DDL = 'CREATE TABLE coordinator_admission_operations (request_id TEXT PRIMARY KEY, authority_id TEXT NOT NULL, expected_generation INTEGER NOT NULL, expected_closed INTEGER NOT NULL, closed INTEGER NOT NULL, generation INTEGER NOT NULL)'
 
-    def __init__(self, queue):
+    def __init__(self, queue, *, initial_closed=False):
+        if type(initial_closed) is not bool:raise ValueError('explicit initial state required')
         self.queue = queue
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
@@ -26,11 +27,12 @@ class AdmissionDrain:
                 if operations is not None: raise AdmissionClosed()
                 db.execute(self._DDL)
                 db.execute(self._OPS_DDL)
-                db.execute('INSERT INTO coordinator_admission VALUES(1,?,0,0)', (queue.authority_id,))
+                db.execute('INSERT INTO coordinator_admission VALUES(1,?,?,0)', (queue.authority_id,int(initial_closed)))
             else:
                 if existing[0] != self._DDL or operations is None or operations[0] != self._OPS_DDL or db.execute('SELECT COUNT(*) FROM coordinator_admission').fetchone()[0] != 1:
                     raise AdmissionClosed()
-                self._closed(db)
+                closed=self._closed(db)
+                if initial_closed and not closed:raise AdmissionClosed()
 
     def _closed(self, db):
         row = db.execute('SELECT authority_id,closed,generation FROM coordinator_admission WHERE singleton=1').fetchone()

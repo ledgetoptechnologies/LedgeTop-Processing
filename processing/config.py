@@ -35,6 +35,7 @@ class Config:
     viewer_archive_free_floor: int = 20 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
+    admission_start_closed: bool = False
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
 
@@ -107,6 +108,9 @@ def from_environment() -> Config:
     admission = os.environ.get('PROCESSING_ADMISSION_DRAIN_ENABLED', '0')
     if admission not in ('0', '1') or (admission == '1' and (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not operator)):
         raise ValueError('admission drain requires persistent state and operator credential')
+    start_closed=os.environ.get('PROCESSING_ADMISSION_START_CLOSED','0')
+    if start_closed not in ('0','1') or (start_closed=='1' and admission!='1'):
+        raise ValueError('closed startup requires admission drain')
     if admission == '1' and ADMISSION_DRAIN_QUALIFIED is not True:
         raise ValueError('admission drain is not qualified for startup')
     if viewer not in ('0', '1'):
@@ -154,6 +158,7 @@ def from_environment() -> Config:
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         admission_drain_enabled=admission == '1',
+        admission_start_closed=start_closed == '1',
         authority_lease_dir=lease_dir,
         viewer_production_held=production_admission == 'held',
     )

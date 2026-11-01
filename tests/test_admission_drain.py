@@ -19,6 +19,7 @@ from processing.config import Config, from_environment
 API='synthetic-api-'+'a'*32
 OP='synthetic-operator-'+'b'*32
 VIEW='synthetic-viewer-'+'c'*32
+STAGE='synthetic-staging-'+'d'*32
 
 
 class AdmissionTests(unittest.TestCase):
@@ -67,6 +68,130 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.request('/v1/prototype/jobs',payload)[0],503)
         self.assertEqual(self.request(path,self.operation(False),OP)[0],200)
         self.assertEqual(self.request('/v1/prototype/jobs',payload)[0],200)
+
+    def test_fresh_closed_start_blocks_production_and_staging_submissions(self):
+        self.stop()
+        self.config=replace(self.config,prototype_state_dir=os.path.join(self.temp.name,'closed-start'),
+                            admission_start_closed=True,viewer_staging_token=STAGE)
+        self.start()
+        self.assertTrue(self.request('/v1/prototype/admission-drain',token=OP)[1]['closed'])
+        body=json.dumps(dict(requestId='synthetic-closed',environment='staging',profile='treedar-synthetic-v1')).encode()
+        self.assertEqual(self.request('/v1/prototype/jobs',body)[0],503)
+        for token in (VIEW,STAGE):
+            self.assertEqual(self.request('/task/53164287-7755-4c33-ac22-1c02e61959c9/download/all.zip?token='+token)[0],503)
+        for token in (VIEW,STAGE):
+            for suffix in ('/task/new/init','/task/new/upload/53164287-7755-4c33-ac22-1c02e61959c9',
+                           '/task/new/commit/53164287-7755-4c33-ac22-1c02e61959c9',
+                           '/task/ledgetop/reserve','/task/ledgetop/cancel','/task/cancel','/task/remove'):
+                with self.subTest(token=token==VIEW,suffix=suffix):
+                    self.assertEqual(self.request(suffix+'?token='+token,b'')[0],503)
+        self.stop();self.start()
+        self.assertTrue(self.request('/v1/prototype/admission-drain',token=OP)[1]['closed'])
+        self.assertEqual(self.request('/v1/prototype/jobs',body)[0],503)
+
+    def test_closed_start_only_operator_reopens_and_open_state_cannot_restart_closed(self):
+        self.stop()
+        self.config=replace(self.config,prototype_state_dir=os.path.join(self.temp.name,'explicit-reopen'),
+                            admission_start_closed=True,viewer_staging_token=STAGE)
+        self.start()
+        path='/v1/prototype/admission-drain';opening=self.operation(False)
+        self.assertEqual(self.request(path,opening,API)[0],401)
+        self.assertTrue(self.request(path,token=OP)[1]['closed'])
+        self.assertEqual(self.request(path,opening,OP)[0],200)
+        self.assertFalse(self.request(path,token=OP)[1]['closed'])
+        self.stop()
+        try:
+            from processing.admission_drain import AdmissionClosed
+            with self.assertRaises(AdmissionClosed):make_handler(self.config)
+        finally:
+            self.config=replace(self.config,admission_start_closed=False);self.start()
+        self.assertFalse(self.request(path,token=OP)[1]['closed'])
+
+    def test_closed_start_refuses_existing_open_without_reopening_or_changing_gate(self):
+        self.assertFalse(self.request('/v1/prototype/admission-drain',token=OP)[1]['closed'])
+        self.stop()
+        try:
+            from processing.admission_drain import AdmissionClosed
+            with self.assertRaises(AdmissionClosed):make_handler(replace(self.config,admission_start_closed=True))
+        finally:self.start()
+        self.assertFalse(self.request('/v1/prototype/admission-drain',token=OP)[1]['closed'])
+
+    def test_invalid_closed_start_requires_enabled_drain_before_opening_state(self):
+        state=os.path.join(self.temp.name,'must-not-create')
+        with self.assertRaisesRegex(RuntimeError,'closed_start_requires_admission_drain'):
+            make_handler(replace(self.config,prototype_state_dir=state,admission_drain_enabled=False,admission_start_closed=True))
+        self.assertFalse(os.path.exists(state))
+        for bad in (replace(self.config,prototype_state_dir='',admission_start_closed=True),
+                    replace(self.config,prototype_operator_token='',admission_start_closed=True),
+                    replace(self.config,reference_config_path='unqualified',admission_start_closed=True)):
+            with self.assertRaisesRegex(RuntimeError,'closed_start_requires_admission_drain'):make_handler(bad)
+        values={'PROCESSING_API_TOKEN':API,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OP,
+                'PROCESSING_PROTOTYPE_STATE_DIR':self.temp.name,'PROCESSING_ADMISSION_START_CLOSED':'1'}
+        with patch.dict(os.environ,values,clear=True),self.assertRaisesRegex(ValueError,'closed startup requires'):
+            from_environment()
+
+    def test_closed_restart_keeps_preexisting_viewer_and_generic_jobs_unclaimed(self):
+        service=self.handler.viewer_service;identifier=str(uuid.uuid4())
+        with patch.object(service,'_check_options',return_value=[]):
+            service.initialize(identifier,'synthetic',[],None,'production')
+            service.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic'),9)
+            service.commit(identifier)
+        body=json.dumps(dict(requestId='queued-generic',environment='staging',profile='treedar-synthetic-v1')).encode()
+        self.assertEqual(self.request('/v1/prototype/jobs',body)[0],201)
+        self.assertEqual(self.request('/v1/prototype/admission-drain',self.operation(True),OP)[0],200)
+        self.stop();self.config=replace(self.config,admission_start_closed=True);self.start()
+        claim=json.dumps({'workerId':'worker','nodeId':'main','profiles':['treedar-synthetic-v1']}).encode()
+        self.assertIsNone(self.request('/v1/prototype/claim',claim,API)[1]['job'])
+        service=self.handler.viewer_service
+        with patch.object(service,'probe',return_value={'ready':True,'maxImages':1000,'taskQueueCount':0}), \
+             patch.object(service,'_check_options',return_value=[]):
+            service.tick()
+        task=service.store.task(identifier)
+        self.assertEqual(task['job']['status'],'queued');self.assertIsNone(task['node_id'])
+        self.assertIsNone(self.request('/v1/prototype/claim',claim,API)[1]['job'])
+
+    def test_refused_start_releases_acquired_authority_lease(self):
+        self.stop()
+        class Lease:
+            closed=False
+            def close(self):self.closed=True
+        lease=Lease()
+        try:
+            from processing.admission_drain import AdmissionClosed
+            with patch('processing.authority_lease.acquire',return_value=lease), \
+                 patch('processing.authority_lease.record_required'):
+                with self.assertRaises(AdmissionClosed):
+                    make_handler(replace(self.config,admission_start_closed=True,authority_lease_dir='/synthetic'))
+            self.assertTrue(lease.closed)
+        finally:self.start()
+
+    def test_closed_start_environment_parses_only_under_existing_qualification(self):
+        values={'PROCESSING_API_TOKEN':API,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OP,
+                'PROCESSING_PROTOTYPE_STATE_DIR':self.temp.name,
+                'PROCESSING_ADMISSION_DRAIN_ENABLED':'1','PROCESSING_ADMISSION_START_CLOSED':'1'}
+        with patch.dict(os.environ,values,clear=True):
+            with self.assertRaisesRegex(ValueError,'not qualified'):from_environment()
+            with patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True):
+                configured=from_environment()
+                self.assertTrue(configured.admission_drain_enabled)
+                self.assertTrue(configured.admission_start_closed)
+
+    def test_concurrent_closed_initialization_stays_closed(self):
+        from processing.admission_drain import AdmissionDrain
+        from processing.prototype import Queue
+        root=os.path.join(self.temp.name,'parallel-gate');q=Queue(root)
+        try:
+            barrier=threading.Barrier(3);values=[];errors=[]
+            def initialize():
+                try:barrier.wait();values.append(AdmissionDrain(q,initial_closed=True).status())
+                except Exception as exc:errors.append(type(exc).__name__)
+            threads=[threading.Thread(target=initialize) for _ in range(2)]
+            for thread in threads:thread.start()
+            barrier.wait()
+            for thread in threads:thread.join(5)
+            self.assertFalse(any(thread.is_alive() for thread in threads));self.assertEqual(errors,[])
+            self.assertEqual(len(values),2);self.assertTrue(all(item['closed'] for item in values))
+        finally:q.close()
 
     def test_disabled_restart_does_not_silently_bypass_gate(self):
         self.request('/v1/prototype/admission-drain',self.operation(True),OP)
