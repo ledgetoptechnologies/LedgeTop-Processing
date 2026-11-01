@@ -29,6 +29,10 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(value,FIXTURE['manifest'])
         self.assertEqual({name:list(item) for name,item in bundle.NATIVE_FILES.items()},FIXTURE['nativeVocabulary'])
         self.assertEqual(bundle.manifest_sha256(value),value['manifestSha256'])
+        inner=p.canonical_json(value)
+        self.assertEqual(len(inner),4177)
+        self.assertEqual(hashlib.sha256(inner).hexdigest(),'f975b57b864886453e3e00cd76a896d2c3a9b04ec34282b5bdbd878fbdb58808')
+        self.assertEqual(value['manifestSha256'],'6e020c27c937f1cd9b177ccb69f4119644fbe40a217a092f778f6d7ce1e6065d')
         self.assertEqual(next(item['role'] for item in value['files'] if item['nativePath']=='chm.tif'),'canopy_height')
         value['files'][0]['role']='changed';self.assertNotEqual(value,FIXTURE['manifest'])
 

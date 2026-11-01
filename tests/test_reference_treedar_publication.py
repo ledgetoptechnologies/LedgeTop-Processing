@@ -93,7 +93,7 @@ class PublicationTests(unittest.TestCase):
             path=run/name;path.write_bytes(base64.b64decode(body));path.chmod(0o600);relative='run/'+name
             objects.append(dict(id='treedar-'+hashlib.sha256(relative.encode()).hexdigest()[:32],role=m.b.NATIVE_FILES[name][0],byteSize=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),relativePath=relative))
         parent=f.intent['parentBinding'];obj=f.intent['stage']['inputObjects'][0]
-        admission=dict(admissionVersion=p.TREEDAR_ADMISSION_VERSION,jobId=parent['jobId'],generation=1,environment='staging',objectId=obj['id'],objectSha256=obj['sha256'],byteSize=obj['byteSize'],sourceKind='lidar',provenanceReceiptId='original-source',genuineAcquisition=True,pointCount=10,groundPointCount=5,groundCoverage=1.0,crs='EPSG:32616',crsWktSha256='a'*64,pointCountAssurance='uncompressed_byte_layout_and_stream',verticalUnits='metre',verticalDatum='navd88',verticalDatumAssurance='authenticated_declaration_no_conversion',rasterGridCells=10)
+        admission=dict(admissionVersion=p.TREEDAR_ADMISSION_VERSION,jobId=parent['jobId'],generation=1,environment='staging',objectId=obj['id'],objectSha256=obj['sha256'],byteSize=obj['byteSize'],sourceKind='lidar',provenanceReceiptId='original-source',genuineAcquisition=True,pointCount=10,groundPointCount=5,groundCoverage=1.0,crs='EPSG:32616',crsWktSha256=hashlib.sha256(b'synthetic-wkt').hexdigest(),pointCountAssurance='uncompressed_byte_layout_and_stream',verticalUnits='metre',verticalDatum='navd88',verticalDatumAssurance='authenticated_declaration_no_conversion',rasterGridCells=10)
         proof=dict(schemaVersion=1,job={k:parent[k] for k in ('jobId','generation','environment','manifestSha256','pipelineDigest')},engineVersion='0.0.1',admission=admission,objects=sorted(objects,key=lambda v:v['relativePath']))
         (self.output/'proof.json').write_bytes(p.canonical_json(proof));(self.output/'proof.json').chmod(0o600)
         f.stage.tick(h.claim['jobId']);self.originals={str(x):x.read_bytes() for x in self.output.rglob('*') if x.is_file()}
@@ -212,6 +212,29 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(Exception):self.publication.preview_outer_manifest(self.job)
         self.assertEqual(self.fixture.actions(),['create','start'])
         self.assertEqual(self.host.reservation()['state'],'engine_started')
+
+    def test_spatial_preview_binds_native_archive_and_rejects_observation_drift(self):
+        from processing import reference_treedar_spatial_candidate as spatial
+        self.begin();job=self.host.store.get(self.job,private=True)
+        native=self.publication.preview_outer_manifest(self.job)
+        admission=dict(native['sourceEvidence']['admission'],crsWkt='synthetic-wkt')
+        observation=dict(record=dict(admission=admission),proofSha256='b'*64,transport='held',parentSettled=False)
+        observer=object.__new__(spatial.LocalSpatialReceipt);observer.stage=self.fixture.stage
+        with patch.object(spatial,'QUALIFIED',True),patch.object(spatial.LocalSpatialReceipt,'qualify',return_value=observation):
+            preview=self.publication.preview_spatial_candidate(job,object(),observer)
+            self.assertEqual(preview['archive'],native['archive'])
+            self.assertEqual(preview['inner'],native['inner'])
+            self.assertEqual(preview['spatial']['wkt'],'synthetic-wkt')
+            self.assertEqual(preview['state'],'preview_not_custody')
+            self.assertEqual(preview['transportRole'],'unassigned')
+            self.assert_retained()
+            for key,value in (('groundPointCount',4),('crs','EPSG:32615'),('verticalDatum','other')):
+                altered=copy.deepcopy(observation);altered['record']['admission'][key]=value
+                with patch.object(spatial.LocalSpatialReceipt,'qualify',return_value=altered):
+                    with self.assertRaises(m.PublicationHeld):self.publication.preview_spatial_candidate(job,object(),observer)
+            changed=copy.deepcopy(observation);changed['proofSha256']='c'*64
+            with patch.object(spatial.LocalSpatialReceipt,'qualify',side_effect=[observation,changed]):
+                with self.assertRaises(m.PublicationHeld):self.publication.preview_spatial_candidate(job,object(),observer)
 
     def test_readback_is_sql_only_and_not_fresh_authorization(self):
         self.begin();before=self.publication.path.read_bytes()

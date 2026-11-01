@@ -29,6 +29,19 @@ are not fenced. Any later consumer needs fresh validation under its own held
 authority and physical fence. Combined processing remains held; original inputs
 and outputs remain retained.
 
+The local publisher can correlate its already-verified native archive preview
+with two identical fresh spatial observations using the exact same stage.
+Every native admission field and the WKT hash must match. This yields only a
+separately identified local preview; the observations bracket rather than hold
+authority over publication, and it is neither a Viewer receipt nor a stage
+authorization. The preview path remains gated by the false qualification flag.
+The shared v1 bundle fixture's canonical inner manifest is 4,177 bytes with
+SHA-256 `f975b57b864886453e3e00cd76a896d2c3a9b04ec34282b5bdbd878fbdb58808`;
+its semantic digest excluding `manifestSha256` is
+`6e020c27c937f1cd9b177ccb69f4119644fbe40a217a092f778f6d7ce1e6065d`.
+Those do not stand in for the separate SHA-256 of the exact ZIP bytes. Bundle
+schema keys are ASCII; these vectors do not define Unicode-key sort order.
+
 A nonroot, network-none synthetic container test exercised actual parent
 journal/guard/ledger and the configured provenance client with a mocked issuer
 and mocked LAS validator. It checked repeated exact issuer reads, durable receipt
@@ -41,3 +54,6 @@ vertical declarations, invalid CRS and insufficient ground rejection. The
 receipt test still mocks LAS validation and issuer responses; the generated LAS
 does not demonstrate genuine acquisition or production image qualification.
 No production or client data was used and no endpoint was enabled.
+An additional synthetic native archive preview test passed with the spatial
+observer mocked; it covers admission and observation mismatches, not a live
+issuer or real TreeDar engine.
