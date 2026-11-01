@@ -19,6 +19,16 @@ from .options import catalog
 MAX_BODY = 8192
 
 
+def _release_failed_startup(error, service=None, queue=None, lease=None):
+    """Attempt every owned close without replacing the startup exception."""
+    for label, resource in (('viewer service',service),('queue',queue),('authority lease',lease)):
+        if resource is not None:
+            try:resource.close()
+            except BaseException as close_error:
+                if hasattr(error,'add_note'):
+                    error.add_note(label+' close failed: '+type(close_error).__name__)
+
+
 def make_handler(config: Config):
     if (type(config.viewer_input_space_guard) is not bool or
             (config.viewer_input_space_guard and (runtime_config.VIEWER_INPUT_SPACE_GUARD_QUALIFIED is not True
@@ -26,6 +36,10 @@ def make_handler(config: Config):
               or os.name!='posix' or not hasattr(os,'posix_fallocate')
               or type(config.viewer_input_free_floor) is not int or config.viewer_input_free_floor<0))):
         raise RuntimeError('viewer_input_space_guard_not_qualified')
+    if (type(config.viewer_intake_journal) is not bool or
+        (config.viewer_intake_journal and (runtime_config.VIEWER_INTAKE_JOURNAL_QUALIFIED is not True
+          or not config.viewer_input_space_guard or not config.viewer_enabled or not config.authority_lease_dir))):
+        raise RuntimeError('viewer_intake_journal_not_qualified')
     if (type(config.incremental_upload_census_required) is not bool or
             (config.incremental_upload_census_required and (runtime_config.INCREMENTAL_UPLOAD_CENSUS_QUALIFIED is not True
               or config.recovery_hold_required is not True or not config.authority_lease_dir or not config.prototype_state_dir))):
@@ -71,17 +85,28 @@ def make_handler(config: Config):
                       require_idle_existing=config.viewer_production_held,
                       recovery_hold_required=config.recovery_hold_required,
                       require_incremental_upload_census=config.incremental_upload_census_required) if config.prototype_state_dir else None
-    except BaseException:
-        if lease is not None:
-            lease.close()
+    except BaseException as error:
+        _release_failed_startup(error,lease=lease)
         raise
+    if queue is not None:
+        try:
+            with queue._db() as db:
+                intake_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_intake_journal_v1'").fetchone()
+            if bool(intake_exists) != config.viewer_intake_journal:
+                raise RuntimeError('intake_journal_configuration_mismatch')
+            if config.viewer_intake_journal:
+                queue._intake_guard_enabled=True
+                with queue._db():pass  # attests exact schema and all triggers
+        except BaseException as error:
+            _release_failed_startup(error,queue=queue,lease=lease)
+            raise
     if config.viewer_production_held and queue is None:
         raise RuntimeError('production_hold_idle_state_unavailable')
     if lease is not None:
         try:
             authority_lease.record_required(queue, lease)
-        except Exception:
-            queue.close()
+        except BaseException as error:
+            _release_failed_startup(error,queue=queue,lease=lease)
             raise
         queue.authority_lease = lease  # held, by this process, until it exits
     if queue is not None and config.admission_drain_enabled:
@@ -92,46 +117,48 @@ def make_handler(config: Config):
                 with queue._db() as db:
                     if not queue.admission_drain._recovery_held(db):
                         raise RuntimeError('required_recovery_hold_missing')
-        except BaseException:
-            try:queue.close()
-            finally:
-                if lease is not None:lease.close()
+        except BaseException as error:
+            _release_failed_startup(error,queue=queue,lease=lease)
             raise
     elif queue is not None:
         # Never silently bypass a previously enabled persistent barrier.
-        with queue._db() as db:
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
-        if exists:
-            queue.close()
-            raise RuntimeError('admission_drain_configuration_required')
+        try:
+            with queue._db() as db:
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
+            if exists:raise RuntimeError('admission_drain_configuration_required')
+        except BaseException as error:
+            _release_failed_startup(error,queue=queue,lease=lease)
+            raise
     if queue is not None:
-        with queue._db() as db:
-            registry = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
-        if registry and not config.viewer_archive_registry:
-            try:queue.close()
-            finally:
-                if lease is not None:lease.close()
-            raise RuntimeError('archive_registry_configuration_required')
+        try:
+            with queue._db() as db:
+                registry = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
+            if registry and not config.viewer_archive_registry:
+                raise RuntimeError('archive_registry_configuration_required')
+        except BaseException as error:
+            _release_failed_startup(error,queue=queue,lease=lease)
+            raise
     service = facade = None
     if config.viewer_enabled:
-        from .viewer_service import ViewerService
-        from .viewer_http import ViewerFacade
-        service = ViewerService(queue, config)
-        spool = Path(config.prototype_state_dir) / 'viewer-spool'
-        spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
-                              production_held=config.viewer_production_held,
-                              input_free_floor=config.viewer_input_free_floor if config.viewer_input_space_guard else None)
+        try:
+            from .viewer_service import ViewerService
+            from .viewer_http import ViewerFacade
+            service = ViewerService(queue, config)
+            spool = Path(config.prototype_state_dir) / 'viewer-spool'
+            spool.mkdir(mode=0o700, exist_ok=True)
+            facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
+                                  production_held=config.viewer_production_held,
+                                  input_free_floor=config.viewer_input_free_floor if config.viewer_input_space_guard else None)
+        except BaseException as error:
+            _release_failed_startup(error,service=service,queue=queue,lease=lease)
+            raise
     reference_runtime = None
     if reference_settings is not None:
-        from .reference_runtime import ReferenceRuntime
         try:
+            from .reference_runtime import ReferenceRuntime
             reference_runtime = ReferenceRuntime(queue, config, reference_settings, viewer_service=service)
-        except Exception:
-            if service:
-                service.close()
-            if queue:
-                queue.close()
+        except BaseException as error:
+            _release_failed_startup(error,service=service,queue=queue,lease=lease)
             raise
 
     class Handler(BaseHTTPRequestHandler):

@@ -17,6 +17,7 @@ import re
 import secrets
 import stat
 import threading
+import time
 import uuid as uuid_module
 import sqlite3
 
@@ -29,6 +30,30 @@ class OptionEvidenceConflict(Conflict):
 
 class ArchiveClaimHeld(Conflict):
     """An archive capture claim is already held by an unknown writer."""
+
+
+# Experimental opt-in only. Qualification requires a real old-writer fence.
+INTAKE_JOURNAL_QUALIFIED = False
+INTAKE_CENSUS_MAX_FILES = 100000
+INTAKE_CENSUS_MAX_ENTRIES = 200000
+HISTORY_CENSUS_MAX_GENERATIONS = 100000
+HISTORY_CENSUS_MAX_FILES = 1000000
+HISTORY_CENSUS_MAX_BYTES = 100 * 1024 ** 3
+HISTORY_CENSUS_SECONDS = 30
+MAX_TASK_FILES = 100000
+HISTORY_METADATA_MAX_BYTES = 256 * 1024
+HISTORY_FILES_JSON_MAX_BYTES = 64 * 1024 ** 2
+INTAKE_JOURNAL_DDL = """CREATE TABLE viewer_intake_journal_v1 (
+    operation TEXT PRIMARY KEY, uuid TEXT NOT NULL, generation INTEGER NOT NULL,
+    name_key TEXT NOT NULL, directory TEXT NOT NULL, temporary TEXT NOT NULL,
+    final TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT,
+    state TEXT NOT NULL CHECK(state IN ('prepared','sealed','cleanup','committed')),
+    UNIQUE(uuid,generation,name_key), UNIQUE(directory,temporary), UNIQUE(directory,final))"""
+
+INTAKE_INDEX_DDL = "CREATE INDEX viewer_intake_unfinished_v1 ON viewer_intake_journal_v1(uuid,generation) WHERE state!='committed'"
+
+class InputRecoveryRequired(Conflict):
+    """Input files and database metadata need offline inspection."""
 
 
 class InputLimitExceeded(ValueError):
@@ -53,6 +78,20 @@ TERMINAL = frozenset(('succeeded', 'failed', 'cancelled'))
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def _strict_history_json(value, maximum):
+    """Bound encoded size and reject duplicate keys before trusting history."""
+    if type(value) is not str or len(value.encode('utf-8'))>maximum:
+        raise ValueError('history JSON exceeds bound')
+    def unique(pairs):
+        result={}
+        for key,item in pairs:
+            if key in result:raise ValueError('duplicate history JSON key')
+            result[key]=item
+        return result
+    return json.loads(value,object_pairs_hook=unique,
+                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid number')))
 
 
 def checked_uuid(value):
@@ -119,7 +158,7 @@ class TaskStore:
                         file['name_key'],file['name'],file['path'],file['bytes'],file['sha256']))
             return {'state':'prepared'}
 
-    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3, *, input_free_floor=None):
+    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3, *, input_free_floor=None, intake_journal=False):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
             raise ValueError('positive input limit required')
         self.queue = queue
@@ -135,6 +174,18 @@ class TaskStore:
         if input_free_floor is not None and (type(input_free_floor) is not int or input_free_floor<0):
             raise ValueError('invalid input free-space floor')
         self.input_free_floor=input_free_floor
+        if type(intake_journal) is not bool or (intake_journal and
+                (not INTAKE_JOURNAL_QUALIFIED or input_free_floor is None
+                 or getattr(queue,'_intake_guard_enabled',False) is not True)):
+            raise ValueError('intake journal not qualified')
+        self.intake_journal=intake_journal
+        self._intake_reconciled=set()
+        if intake_journal:
+            with self.queue._db() as db:
+                schema=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_journal_v1' AND type='table'").fetchone()
+                index=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_unfinished_v1' AND type='index'").fetchone()
+                if schema is None or schema[0]!=INTAKE_JOURNAL_DDL or index is None or index[0]!=INTAKE_INDEX_DDL:
+                    raise InputRecoveryRequired('intake schema requires offline migration')
         self._lock = threading.RLock()
         self._archive_locks_lock = threading.Lock()
         self._archive_locks = {}
@@ -207,6 +258,207 @@ class TaskStore:
         if not directory.is_dir() or directory.is_symlink():
             raise Conflict('task directory unavailable')
         return directory
+
+    def _check_input_recovery(self, db, row):
+        # Prototype: never infer ownership or delete bytes. The authority lease
+        # must fence all other writers; this local scan alone is not a fence.
+        if self.input_free_floor is None:
+            return
+        if self.intake_journal:
+            schema=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_journal_v1' AND type='table'").fetchone()
+            index=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_unfinished_v1' AND type='index'").fetchone()
+            if schema is None or schema[0]!=INTAKE_JOURNAL_DDL or index is None or index[0]!=INTAKE_INDEX_DDL:
+                raise InputRecoveryRequired('intake schema changed')
+            if db.execute("SELECT 1 FROM viewer_intake_journal_v1 WHERE uuid=? AND generation=? AND state!='committed' LIMIT 1",(row['uuid'],row['generation'])).fetchone():
+                raise InputRecoveryRequired('intake journal needs inspection')
+            if (row['uuid'],row['generation']) in self._intake_reconciled:
+                return
+            if db.execute("SELECT COUNT(*) FROM (SELECT 1 FROM viewer_intake_journal_v1 WHERE uuid=? AND generation=? LIMIT ?)",
+                          (row['uuid'],row['generation'],INTAKE_CENSUS_MAX_FILES+1)).fetchone()[0]>INTAKE_CENSUS_MAX_FILES:
+                raise InputRecoveryRequired('intake census exceeds bound')
+            if db.execute("""SELECT 1 FROM viewer_intake_journal_v1 j
+                LEFT JOIN viewer_files f ON f.uuid=j.uuid AND f.name_key=j.name_key
+                WHERE j.uuid=? AND j.generation=? AND j.state='committed'
+                  AND (f.uuid IS NULL OR typeof(j.final)!='text' OR typeof(j.bytes)!='integer' OR typeof(j.sha256)!='text' OR typeof(f.path)!='text' OR typeof(f.bytes)!='integer' OR typeof(f.sha256)!='text' OR f.path IS NOT j.final OR f.bytes IS NOT j.bytes OR f.sha256 IS NOT j.sha256)
+                LIMIT 1""",(row['uuid'],row['generation'])).fetchone():
+                raise InputRecoveryRequired('committed intake metadata differs')
+        directory = self._directory(row)
+        registered = set()
+        for file in db.execute('SELECT path FROM viewer_files WHERE uuid=? LIMIT ?',
+                               (row['uuid'],INTAKE_CENSUS_MAX_FILES+1)):
+            name=file['path']
+            if (not isinstance(name,str) or not re.fullmatch(r'input-[0-9a-f]{32}',name)
+                    or name in registered or len(registered)>=INTAKE_CENSUS_MAX_FILES):
+                raise InputRecoveryRequired('input metadata needs inspection')
+            registered.add(name)
+        actual = set()
+        with os.scandir(directory) as entries:
+            for entry_count,entry in enumerate(entries,1):
+                if entry_count>INTAKE_CENSUS_MAX_ENTRIES:
+                    raise InputRecoveryRequired('input directory census exceeds bound')
+                if entry.name.startswith('.incoming-'):
+                    raise InputRecoveryRequired('interrupted input needs inspection')
+                if entry.name.startswith('input-'):
+                    if not entry.is_file(follow_symlinks=False):
+                        raise InputRecoveryRequired('input path needs inspection')
+                    actual.add(entry.name)
+        if actual != registered:
+            raise InputRecoveryRequired('input files need inspection')
+        if self.intake_journal:
+            self._intake_reconciled.add((row['uuid'],row['generation']))
+
+    def startup_intake_census(self):
+        """Bounded global and per-task checks, before accepting Viewer requests."""
+        if not self.intake_journal:raise InputRecoveryRequired('intake journal required')
+        with self._lock,self.queue._db() as db:
+            deadline=time.monotonic()+HISTORY_CENSUS_SECONDS
+            if time.monotonic()>=deadline:
+                raise InputRecoveryRequired('historical intake census exceeds bound')
+            # Interrupt SQLite VM work at instruction boundaries. This cannot
+            # interrupt a blocked filesystem syscall inside SQLite or os.read.
+            db.set_progress_handler(lambda: int(time.monotonic()>=deadline),1000)
+            rows=db.execute('SELECT * FROM viewer_tasks ORDER BY uuid LIMIT 1001').fetchall()
+            if len(rows)>1000:raise InputRecoveryRequired('task census exceeds bound')
+            for table in ('viewer_files','viewer_intake_snapshot_files_v1'):
+                if db.execute(f'SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT 1000001)').fetchone()[0]>1000000:
+                    raise InputRecoveryRequired('input ownership census exceeds bound')
+            if db.execute('SELECT 1 FROM viewer_files f LEFT JOIN viewer_tasks t ON t.uuid=f.uuid WHERE t.uuid IS NULL LIMIT 1').fetchone():
+                raise InputRecoveryRequired('orphan input metadata needs inspection')
+            total_rows=db.execute('SELECT COUNT(*) FROM viewer_intake_totals_v1').fetchone()[0]
+            if total_rows!=len(rows):raise InputRecoveryRequired('input totals census differs')
+            for row in rows:
+                total,count=self._input_totals(db,row)
+                actual=db.execute('SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',(row['uuid'],)).fetchone()
+                if (count,total)!=(actual[0],actual[1]):raise InputRecoveryRequired('input totals census differs')
+            rows_by_uuid={row['uuid']:row for row in rows}
+            owners={}; directories=set()
+            for row in rows:
+                identity=(row['uuid'],row['generation'])
+                if identity in owners or not isinstance(row['directory'],str) or row['directory'] in directories:
+                    raise InputRecoveryRequired('task identity needs inspection')
+                owners[identity]=row['directory'];directories.add(row['directory'])
+            historical_files=0;historical_bytes=0
+            history=db.execute('''SELECT uuid,generation,
+                CASE WHEN length(CAST(metadata AS BLOB))<=? THEN metadata END AS metadata,
+                CASE WHEN length(CAST(files AS BLOB))<=? THEN files END AS files
+                FROM viewer_incarnations LIMIT ?''',
+                (HISTORY_METADATA_MAX_BYTES,HISTORY_FILES_JSON_MAX_BYTES,HISTORY_CENSUS_MAX_GENERATIONS+1))
+            for count,entry in enumerate(history,1):
+                if count>HISTORY_CENSUS_MAX_GENERATIONS or time.monotonic()>deadline:
+                    raise InputRecoveryRequired('historical intake census exceeds bound')
+                try:
+                    from .intake_offline_migration import _TASK_SNAPSHOT_COLUMNS
+                    metadata=_strict_history_json(entry['metadata'],HISTORY_METADATA_MAX_BYTES)
+                    files=_strict_history_json(entry['files'],HISTORY_FILES_JSON_MAX_BYTES)
+                    if type(metadata) is not dict or set(metadata)!=set(_TASK_SNAPSHOT_COLUMNS):raise ValueError()
+                    for field in ('uuid','directory','name','options','outputs','environment','stage','phase','output_lines','created_at','updated_at'):
+                        if type(metadata[field]) is not str:raise ValueError()
+                    for field in ('job_id','node_id','engine_uuid','claim_token','error','archive_path'):
+                        if metadata[field] is not None and type(metadata[field]) is not str:raise ValueError()
+                    for field in ('generation','removed','option_evidence_required'):
+                        if type(metadata[field]) is not int:raise ValueError()
+                    if type(metadata['progress']) not in (int,float) or not math.isfinite(metadata['progress']):raise ValueError()
+                    identity=(entry['uuid'],entry['generation']);directory=metadata['directory']
+                    current=rows_by_uuid.get(identity[0])
+                    if (current is None or type(identity[1]) is not int or identity[1]<1
+                        or identity[1]>=current['generation'] or metadata['uuid']!=identity[0]
+                        or metadata['generation']!=identity[1] or type(directory) is not str
+                        or identity in owners or directory in directories or type(files) is not list):
+                        raise ValueError()
+                    base=identity[0]+'-'+str(identity[1])
+                    if not re.fullmatch(re.escape(base)+r'(?:-[0-9a-f]{16})?',directory):raise ValueError()
+                    folder=self.root/directory
+                    if folder.parent!=self.root or folder.resolve()!=folder or not folder.is_dir() or folder.is_symlink():raise ValueError()
+                except (KeyError,TypeError,ValueError,RecursionError,OSError):
+                    raise InputRecoveryRequired('incarnation identity needs inspection') from None
+                owners[identity]=directory;directories.add(directory)
+                recorded={}
+                for item in files:
+                    try:
+                        valid_filename=(type(item) is dict and type(item.get('name')) is str and self._filename(item['name'])==item.get('name_key'))
+                    except ValueError:valid_filename=False
+                    if (type(item) is not dict or set(item)!={'uuid','name_key','name','path','bytes','sha256','is_photo'}
+                        or item['uuid']!=identity[0] or type(item['name_key']) is not str
+                        or item['name_key'] in recorded or type(item['path']) is not str
+                        or not re.fullmatch(r'input-[0-9a-f]{32}',item['path'])
+                        or type(item['bytes']) is not int or item['bytes']<=0
+                        or type(item['sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}',item['sha256'])
+                        or not valid_filename
+                        or type(item['is_photo']) is not int or item['is_photo'] not in (0,1)
+                        or item['is_photo']!=int(Path(item['name']).suffix.lower() in PHOTO_SUFFIXES)):
+                        raise InputRecoveryRequired('historical input metadata needs inspection')
+                    recorded[item['name_key']]=item
+                    historical_files+=1;historical_bytes+=item['bytes']
+                    if historical_files>HISTORY_CENSUS_MAX_FILES or historical_bytes>HISTORY_CENSUS_MAX_BYTES or time.monotonic()>deadline:
+                        raise InputRecoveryRequired('historical intake census exceeds bound')
+                found_rows=0
+                for snapshot in db.execute('SELECT * FROM viewer_intake_snapshot_files_v1 WHERE uuid=? AND generation=?',identity):
+                    found_rows+=1;item=recorded.get(snapshot['name_key'])
+                    if item is None or any(snapshot[key] is None or type(snapshot[key]) is not type(item[key]) or snapshot[key]!=item[key]
+                                           for key in ('uuid','name_key','name','path','bytes','sha256','is_photo')):
+                        raise InputRecoveryRequired('historical input snapshot differs')
+                if found_rows!=len(recorded):raise InputRecoveryRequired('historical input snapshot missing')
+                expected={item['path'] for item in files}
+                if len(expected)!=len(files):raise InputRecoveryRequired('historical input paths differ')
+                observed=set()
+                with os.scandir(folder) as entries:
+                    for n,child in enumerate(entries,1):
+                        if n>INTAKE_CENSUS_MAX_ENTRIES or time.monotonic()>deadline:
+                            raise InputRecoveryRequired('historical intake census exceeds bound')
+                        if child.name.startswith('.incoming-'):raise InputRecoveryRequired('historical incoming file needs inspection')
+                        if child.name.startswith('input-'):
+                            if not child.is_file(follow_symlinks=False):raise InputRecoveryRequired('historical input path unsafe')
+                            observed.add(child.name)
+                if expected!=observed:raise InputRecoveryRequired('historical input paths differ')
+                for item in files:
+                    try:
+                        fd=os.open(folder/item['path'],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                        try:
+                            before=os.fstat(fd);digest=hashlib.sha256()
+                            if not stat.S_ISREG(before.st_mode) or before.st_size!=item['bytes']:raise ValueError()
+                            while True:
+                                if time.monotonic()>deadline:raise InputRecoveryRequired('historical intake census exceeds bound')
+                                chunk=os.read(fd,1024*1024)
+                                if not chunk:break
+                                digest.update(chunk)
+                            after=os.fstat(fd);named=(folder/item['path']).lstat()
+                            if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=
+                                (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+                                or (after.st_dev,after.st_ino)!=(named.st_dev,named.st_ino)
+                                or digest.hexdigest()!=item['sha256']):raise ValueError()
+                        finally:os.close(fd)
+                    except (OSError,ValueError):raise InputRecoveryRequired('historical input bytes need inspection') from None
+            if db.execute('SELECT 1 FROM viewer_intake_snapshot_files_v1 s LEFT JOIN viewer_incarnations i ON i.uuid=s.uuid AND i.generation=s.generation WHERE i.uuid IS NULL LIMIT 1').fetchone():
+                raise InputRecoveryRequired('orphan snapshot metadata needs inspection')
+            journal=db.execute('SELECT uuid,generation,directory FROM viewer_intake_journal_v1 LIMIT 1000001')
+            for count,entry in enumerate(journal,1):
+                if count>1000000:raise InputRecoveryRequired('intake journal census exceeds bound')
+                if owners.get((entry['uuid'],entry['generation']))!=entry['directory']:
+                    raise InputRecoveryRequired('orphan intake journal needs inspection')
+            found=set()
+            with os.scandir(self.root) as entries:
+                for count,entry in enumerate(entries,1):
+                    if count>101000:raise InputRecoveryRequired('task directory census exceeds bound')
+                    if not entry.is_dir(follow_symlinks=False) or entry.name not in directories:
+                        raise InputRecoveryRequired('orphan task directory needs inspection')
+                    found.add(entry.name)
+            if found!=directories:raise InputRecoveryRequired('task directory missing')
+            for row in rows:self._check_input_recovery(db,row)
+            db.set_progress_handler(None,0)
+            if time.monotonic()>=deadline:
+                raise InputRecoveryRequired('historical intake census exceeds bound')
+
+    def _input_totals(self, db, row):
+        if not self.intake_journal:
+            total=db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',(row['uuid'],)).fetchone()[0]
+            count=db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?',(row['uuid'],)).fetchone()[0]
+            return total,count
+        totals=db.execute('SELECT generation,files,bytes FROM viewer_intake_totals_v1 WHERE uuid=?',(row['uuid'],)).fetchone()
+        if (totals is None or type(totals['generation']) is not int or totals['generation']!=row['generation']
+                or type(totals['files']) is not int or not 0<=totals['files']<=100000
+                or type(totals['bytes']) is not int or totals['bytes']<0):
+            raise InputRecoveryRequired('input totals require inspection')
+        return totals['bytes'],totals['files']
 
     @staticmethod
     def _job(db, row):
@@ -361,6 +613,7 @@ class TaskStore:
                 raise Conflict('task history limit reached')
             generation = row['generation'] + 1 if row is not None else 1
             if row is not None:
+                if self.intake_journal:self._check_input_recovery(db,row)
                 old_files = [dict(item) for item in db.execute(
                     'SELECT * FROM viewer_files WHERE uuid=? ORDER BY rowid', (identifier,))]
                 db.execute('''INSERT INTO viewer_incarnations(uuid,generation,job_id,metadata,files)
@@ -376,10 +629,20 @@ class TaskStore:
             directory.mkdir(mode=0o700)
             sync_directory(self.root)
             db.execute('DELETE FROM viewer_files WHERE uuid=?', (identifier,))
-            db.execute('''INSERT OR REPLACE INTO viewer_tasks
-                (uuid,generation,directory,name,options,outputs,environment,option_evidence_required)
-                VALUES(?,?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
-                                          options_text, outputs_text, environment, int(evidence_text is not None)))
+            if row is not None and self.intake_journal:
+                changed=db.execute('''UPDATE viewer_tasks SET generation=?,directory=?,name=?,options=?,outputs=?,
+                    environment=?,option_evidence_required=?,stage='uploading',phase='uploading',job_id=NULL,
+                    node_id=NULL,engine_uuid=NULL,claim_token=NULL,error=NULL,progress=0,output_lines='[]',
+                    archive_path=NULL,removed=0,created_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                    WHERE uuid=? AND generation=? AND removed=1''',
+                    (generation,directory_name,name,options_text,outputs_text,environment,int(evidence_text is not None),
+                     identifier,row['generation'])).rowcount
+                if changed!=1:raise InputRecoveryRequired('task generation changed')
+            else:
+                db.execute('''INSERT OR REPLACE INTO viewer_tasks
+                    (uuid,generation,directory,name,options,outputs,environment,option_evidence_required)
+                    VALUES(?,?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
+                                              options_text, outputs_text, environment, int(evidence_text is not None)))
             if evidence_text is not None:
                 db.execute('INSERT INTO viewer_option_evidence(uuid,generation,definitions,sha256) VALUES(?,?,?,?)',
                     (identifier,generation,evidence_text,hashlib.sha256(evidence_text.encode()).hexdigest()))
@@ -406,18 +669,78 @@ class TaskStore:
                 if row['stage'] != 'uploading' or row['job_id']:
                     raise Conflict('task is no longer accepting uploads')
                 directory = self._directory(row)
+                self._check_input_recovery(db, row)
                 existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                       (identifier, key)).fetchone()
-                total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
-                                   (identifier,)).fetchone()[0]
-                count = db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?',
-                                   (identifier,)).fetchone()[0]
+                total,count = self._input_totals(db,row)
                 if existing is None and total + length > self.max_input_bytes:
                     raise InputLimitExceeded('task input ceiling exceeded')
-                if existing is None and count >= 100000:
+                if existing is None and count >= MAX_TASK_FILES:
                     raise ValueError('task file count ceiling exceeded')
+            if self.intake_journal and existing is not None:
+                # Never accept a replay solely from stale metadata. Without an
+                # exclusive writer fence this validation still cannot establish
+                # continuous file identity, so this remains disabled.
+                path=existing['path']
+                if not isinstance(path,str) or not re.fullmatch(r'input-[0-9a-f]{32}',path):
+                    raise InputRecoveryRequired('input path needs inspection')
+                try:
+                    fd=os.open(directory/path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
+                    try:
+                        before=os.fstat(fd)
+                        if not stat.S_ISREG(before.st_mode) or before.st_size!=existing['bytes']:
+                            raise InputRecoveryRequired('stored input needs inspection')
+                        saved_hash=hashlib.sha256()
+                        while True:
+                            chunk=os.read(fd,1024*1024)
+                            if not chunk:break
+                            saved_hash.update(chunk)
+                        after=os.fstat(fd); current=(directory/path).lstat()
+                        if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=
+                            (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+                            or (after.st_dev,after.st_ino)!=(current.st_dev,current.st_ino)
+                            or saved_hash.hexdigest()!=existing['sha256']):
+                            raise InputRecoveryRequired('stored input changed')
+                    finally:os.close(fd)
+                except OSError:
+                    raise InputRecoveryRequired('stored input unavailable') from None
+                if existing['bytes'] != length:
+                    raise Conflict('input basename already contains different bytes')
+                digest=hashlib.sha256(); remaining=length
+                while remaining:
+                    chunk=stream.read(min(1024*1024,remaining))
+                    if not isinstance(chunk,bytes) or not chunk or len(chunk)>remaining:
+                        raise ValueError('input stream length differs')
+                    digest.update(chunk);remaining-=len(chunk)
+                if stream.read(1):raise ValueError('input stream length differs')
+                with self.queue._db() as db:
+                    self._reservation(db,identifier,environment,capability)
+                    current=self._row(db,identifier)
+                    saved=db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',(identifier,key)).fetchone()
+                    if current['stage']!='uploading' or current['job_id'] or current['generation']!=row['generation'] or saved is None or saved['bytes']!=length or saved['sha256']!=digest.hexdigest():
+                        raise Conflict('input basename already contains different bytes')
+                return {'success':True,'uuid':identifier}
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
+            journal_operation = None
+            if self.intake_journal:
+                self._intake_reconciled.discard((identifier,row['generation']))
+                journal_operation = secrets.token_hex(16)
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    current=self._row(db, identifier)
+                    self._reservation(db,identifier,environment,capability)
+                    if current['stage']!='uploading' or current['job_id'] or current['generation']!=row['generation'] or current['directory']!=row['directory']:
+                        raise InputRecoveryRequired('task identity changed')
+                    # Existing committed names use the established digest retry path.
+                    previous=db.execute('SELECT 1 FROM viewer_files WHERE uuid=? AND name_key=?',(identifier,key)).fetchone()
+                    if previous is None:
+                        try:
+                            db.execute("INSERT INTO viewer_intake_journal_v1 VALUES(?,?,?,?,?,?,?,?,NULL,'prepared')",(journal_operation,identifier,row['generation'],key,row['directory'],temporary.name,final.name,length))
+                        except sqlite3.IntegrityError:
+                            raise InputRecoveryRequired('input identity requires inspection') from None
+                    else:
+                        journal_operation=None
             try:
                 descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 digest = hashlib.sha256()
@@ -438,6 +761,12 @@ class TaskStore:
                     output.flush()
                     os.fsync(output.fileno())
                 value = digest.hexdigest()
+                if journal_operation:
+                    sync_directory(directory)
+                    with self.queue._db() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        if db.execute("UPDATE viewer_intake_journal_v1 SET sha256=?,state='sealed' WHERE operation=? AND state='prepared'",(value,journal_operation)).rowcount!=1:
+                            raise InputRecoveryRequired('input intent changed')
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
                     self._reservation(db,identifier,environment,capability)
@@ -450,21 +779,39 @@ class TaskStore:
                         if existing['sha256'] != value or existing['bytes'] != length:
                             raise Conflict('input basename already contains different bytes')
                         return {'success': True, 'uuid': identifier}
-                    total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
-                                       (identifier,)).fetchone()[0]
+                    total,count = self._input_totals(db,row)
+                    if self.intake_journal and count>=MAX_TASK_FILES:raise InputLimitExceeded('task file count ceiling exceeded')
                     if total + length > self.max_input_bytes:
                         raise InputLimitExceeded('task input ceiling exceeded')
-                    os.replace(temporary, final)
+                    if journal_operation:
+                        # Hard link refuses an existing final path. The two names
+                        # identify the same bytes until the DB commit completes.
+                        os.link(temporary,final,follow_symlinks=False)
+                    else:
+                        os.replace(temporary, final)
                     sync_directory(directory)
                     db.execute('''INSERT INTO viewer_files
                         (uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)''',
                         (identifier, key, filename, final.name, length, value,
                          int(Path(filename).suffix.lower() in PHOTO_SUFFIXES)))
                     db.execute('UPDATE viewer_tasks SET updated_at=CURRENT_TIMESTAMP WHERE uuid=?', (identifier,))
+                    if journal_operation and db.execute("UPDATE viewer_intake_journal_v1 SET state='cleanup' WHERE operation=? AND state='sealed' AND sha256=?",(journal_operation,value)).rowcount!=1:
+                        raise InputRecoveryRequired('input intent changed')
+                if journal_operation:
+                    left=temporary.lstat();right=final.lstat()
+                    if (left.st_dev,left.st_ino)!=(right.st_dev,right.st_ino):
+                        raise InputRecoveryRequired('input publication changed')
+                    temporary.unlink()
+                    sync_directory(directory)
+                    with self.queue._db() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        if db.execute("UPDATE viewer_intake_journal_v1 SET state='committed' WHERE operation=? AND state='cleanup' AND sha256=?",(journal_operation,value)).rowcount!=1:
+                            raise InputRecoveryRequired('input cleanup intent changed')
+                    self._intake_reconciled.add((identifier,row['generation']))
                 return {'success': True, 'uuid': identifier}
             finally:
                 # Only this invocation's randomly named, explicitly owned tmp file.
-                if temporary.exists():
+                if journal_operation is None and temporary.exists():
                     temporary.unlink()
 
     @staticmethod
@@ -485,6 +832,7 @@ class TaskStore:
                 return {'success': True, 'uuid': identifier}
             if row['stage'] != 'uploading':
                 raise Conflict('task cannot be committed')
+            self._check_input_recovery(db, row)
             if not db.execute('SELECT 1 FROM viewer_files WHERE uuid=? AND is_photo=1 LIMIT 1',
                               (identifier,)).fetchone():
                 raise ValueError('at least one photo required')
@@ -1031,6 +1379,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier, removed=True)
+            if self.intake_journal:self._check_input_recovery(db,row)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
                 raise Conflict('active engine task cannot be removed')
