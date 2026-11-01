@@ -94,4 +94,3 @@ class SigtermInflightOwned(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 print('owned child exit unverified; PID:',proc.pid,flush=True)
                 raise
-
