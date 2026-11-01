@@ -221,6 +221,156 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertEqual(download.call_count,3)
         self.assertFalse(any(call[0]=='initialize' for call in self.transport.calls))
 
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX transfer journal required')
+    def test_transfer_journal_reconciles_after_ledger_before_checkpoint(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        with patch.object(journal, 'QUALIFIED', True), DaemonStateLock(self.root) as owner:
+            def build():
+                driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+                    'https://coordinator.invalid:9443', TOKEN, state_path=self.root/'journal-driver.sqlite', ssl_context=self.context,
+                    output_budget=1024*1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
+                    worker_instance_id='instance', state_owner=owner, transfer_journal=True)
+                driver._request=self.request; driver.sender._open=self.sender_open
+                return driver
+            self.driver=build(); job=self.submit(); self.advance(job,'fetching')
+            with patch.object(journal, 'charged', side_effect=RuntimeError('synthetic process interruption')):
+                self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_journal_object').fetchone()[0], 'verified')
+            self.driver=build()
+            self.assertEqual(self.driver.step()['state'], 'fetching')
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_journal_object').fetchone()[0], 'charged')
+                self.assertEqual(db.execute('SELECT verified_bytes FROM transfer_journal_binding').fetchone()[0], len(b'arbitrary-photo-data'))
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX transfer journal required')
+    def test_transfer_journal_rejects_replaced_file_before_checkpoint(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        with patch.object(journal, 'QUALIFIED', True), DaemonStateLock(self.root) as owner:
+            self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+                'https://coordinator.invalid:9443', TOKEN, state_path=self.root/'journal-driver.sqlite', ssl_context=self.context,
+                output_budget=1024*1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
+                worker_instance_id='instance', state_owner=owner, transfer_journal=True)
+            self.driver._request=self.request; self.driver.sender._open=self.sender_open
+            job=self.submit(); self.advance(job,'fetching')
+            original=self.worker._file
+            def replace_after_check(reservation, relative, size, digest):
+                result=original(reservation,relative,size,digest)
+                target=self.ledger.root/relative
+                replacement=target.with_suffix('.replacement');replacement.write_bytes(b'X'*size)
+                os.replace(replacement,target)
+                return result
+            with patch.object(self.worker,'_file',side_effect=replace_after_check):
+                self.assertEqual(self.driver.step()['state'],'held')
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_journal_object').fetchone()[0],'pending')
+                self.assertEqual(db.execute('SELECT verified_bytes FROM transfer_journal_binding').fetchone()[0],0)
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX transfer journal required')
+    def test_transfer_journal_holds_missing_receipt_for_saved_path(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        with patch.object(journal, 'QUALIFIED', True), DaemonStateLock(self.root) as owner:
+            self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+                'https://coordinator.invalid:9443', TOKEN, state_path=self.root/'journal-driver.sqlite', ssl_context=self.context,
+                output_budget=1024*1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
+                worker_instance_id='instance', state_owner=owner, transfer_journal=True)
+            self.driver._request=self.request; self.driver.sender._open=self.sender_open
+            job=self.submit(contents=(b'first',b'second')); self.advance(job,'fetching')
+            self.assertEqual(self.driver.step()['state'],'fetching')
+            with self.driver._db() as db: db.execute('DELETE FROM transfer_journal_object')
+            self.assertEqual(self.driver.step(),{'state':'held','reason':'transfer_checkpoint_changed'})
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX transfer journal required')
+    def test_transfer_journal_holds_changed_ledger_allocation(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        with patch.object(journal, 'QUALIFIED', True), DaemonStateLock(self.root) as owner:
+            self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+                'https://coordinator.invalid:9443', TOKEN, state_path=self.root/'journal-driver.sqlite', ssl_context=self.context,
+                output_budget=1024*1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
+                worker_instance_id='instance', state_owner=owner, transfer_journal=True)
+            self.driver._request=self.request; self.driver.sender._open=self.sender_open
+            job=self.submit(); self.advance(job,'fetching')
+            original=self.ledger.record_allocated
+            def changed(reservation, amount):
+                original(reservation,amount)
+                with self.ledger._transaction() as db:
+                    db.execute('UPDATE reservations SET allocated=allocated-1 WHERE id=?',(reservation,))
+            with patch.object(self.ledger,'record_allocated',side_effect=changed):
+                self.assertEqual(self.driver.step(),{'state':'held','reason':'transfer_ledger_changed'})
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_journal_object').fetchone()[0],'verified')
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX transfer journal required')
+    def test_transfer_journal_records_intent_before_unavailable_download(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        with patch.object(journal, 'QUALIFIED', True), DaemonStateLock(self.root) as owner:
+            self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+                'https://coordinator.invalid:9443', TOKEN, state_path=self.root/'journal-driver.sqlite', ssl_context=self.context,
+                output_budget=1024*1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
+                worker_instance_id='instance', state_owner=owner, transfer_journal=True)
+            self.driver._request=self.request; self.driver.sender._open=self.sender_open
+            job=self.submit(); self.advance(job,'fetching')
+            with patch.object(self.broker,'download_object',side_effect=TransferResponseUnavailable('synthetic')):
+                self.assertEqual(self.driver.step(),{'state':'retry_wait','reason':'broker_response_unavailable'})
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_journal_object').fetchone()[0],'pending')
+                self.assertEqual(db.execute('SELECT verified_bytes FROM transfer_journal_binding').fetchone()[0],0)
+            self.assertFalse(any(call[0]=='initialize' for call in self.transport.calls))
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX normalized journal required')
+    def test_normalized_transfer_rebuild_after_charged_before_cursor(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        with patch.object(journal, 'QUALIFIED', True), patch.object(journal,'NORMALIZED_QUALIFIED',True), DaemonStateLock(self.root) as owner:
+            def build():
+                driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
+                    'https://coordinator.invalid:9443', TOKEN, state_path=self.root/'normalized-driver.sqlite', ssl_context=self.context,
+                    output_budget=1024*1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
+                    worker_instance_id='instance', state_owner=owner, transfer_journal=True, normalized_transfer=True)
+                driver._request=self.request; driver.sender._open=self.sender_open
+                return driver
+            self.driver=build(); job=self.submit(contents=(b'first',b'second')); self.advance(job,'fetching')
+            original_save=self.driver._save
+            def interrupt(job_id,stage,data):
+                if stage=='fetching' and data.get('inputCursor')==1: raise RuntimeError('synthetic interruption')
+                return original_save(job_id,stage,data)
+            with patch.object(self.driver,'_save',side_effect=interrupt), patch.object(self.broker,'download_object',wraps=self.download) as download:
+                self.assertEqual(self.driver.step()['state'],'retry_wait')
+                self.assertEqual(download.call_count,1)
+                self.driver=build()
+                self.assertEqual(self.driver.step()['state'],'fetching')
+                self.assertEqual(download.call_count,1)
+                self.assertEqual(self.driver.step()['state'],'fetching')
+                self.assertEqual(download.call_count,2)
+                self.assertEqual(self.driver.step()['state'],'processing_pending')
+            with self.driver._db() as db:
+                states=db.execute('SELECT state FROM transfer_journal_object ORDER BY object_id').fetchall()
+                self.assertEqual([row[0] for row in states],['charged','charged'])
+            self.transport.code=30
+            self.advance(job,'failure_delivering')
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX normalized journal required')
+    def test_normalized_transfer_returns_synthetic_result(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        with patch.object(journal,'QUALIFIED',True), patch.object(journal,'NORMALIZED_QUALIFIED',True), DaemonStateLock(self.root) as owner:
+            self.driver=ReferenceDriver(self.worker,self.ledger,self.outbox,self.broker,
+                'https://coordinator.invalid:9443',TOKEN,state_path=self.root/'normalized-driver.sqlite',ssl_context=self.context,
+                output_budget=1024*1024,transfer_ttl=240,safety_floor=1024,failure_outbox=self.failures,
+                worker_instance_id='instance',state_owner=owner,transfer_journal=True,normalized_transfer=True)
+            self.driver._request=self.request;self.driver.sender._open=self.sender_open
+            job=self.submit(contents=(b'first',b'second'))
+            self.advance(job,'awaiting_acceptance')
+            self.assertEqual(self.store.get(job['jobId'])['phase'],'awaiting_acceptance')
+            self.assertEqual(len([call for call in self.transport.calls if call[0]=='upload']),2)
+            with self.driver._db() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM transfer_journal_object WHERE state='charged'").fetchone()[0],2)
+
     def test_acceptance_retry_rotation_survives_clock_rewind_and_restart(self):
         data=json.dumps({'claim':{'claimToken':'synthetic'}})
         with self.driver._db() as db:

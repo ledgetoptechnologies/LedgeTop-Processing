@@ -45,11 +45,21 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting','brokerRangeMaxBytes','referenceRemoteBroker'))
+                      'executionRouting','brokerRangeMaxBytes','referenceRemoteBroker','normalizedTransferCandidate'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
 REFERENCE_REMOTE_DAEMON_QUALIFIED = False
+
+
+def _normalized_transfer_policy(config):
+    if 'normalizedTransferCandidate' not in config:
+        return False
+    from processing import reference_transfer_journal_candidate as journal
+    if (config['normalizedTransferCandidate'] is not True or journal.QUALIFIED is not True
+            or journal.NORMALIZED_QUALIFIED is not True or 'referenceRemoteBroker' not in config):
+        raise ValueError('normalized transfer candidate is not qualified')
+    return True
 
 
 def _reference_remote_broker_policy(config):
@@ -367,6 +377,7 @@ def load_config(path):
             raise ValueError('invalid broker range limit')
         _execution_routing(config)
         _reference_remote_broker_policy(config)
+        _normalized_transfer_policy(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
                 raise ValueError('absolute private directories required')
@@ -443,6 +454,7 @@ def build_worker(config):
 def _build_worker(config,owner,resources):
     """Construct under the factory's mandatory state-root ownership capability."""
     remote_config=_reference_remote_broker_policy(config)
+    normalized_transfer=_normalized_transfer_policy(config)
     routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
@@ -550,6 +562,7 @@ def _build_worker(config,owner,resources):
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
         execution_router=router, provenance_client=provenance,state_owner=owner,remote_reference=remote_runtime,
+        transfer_journal=normalized_transfer, normalized_transfer=normalized_transfer,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)

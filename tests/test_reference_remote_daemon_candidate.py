@@ -33,7 +33,7 @@ from processing.viewer_tasks import TaskStore
 
 @unittest.skipUnless(os.name=='posix','owned POSIX fixture required')
 class RemoteDaemonCandidateTests(unittest.TestCase):
-    def _run_daemon_photo(self,terminal_code,*,disconnect=False,paged=False):
+    def _run_daemon_photo(self,terminal_code,*,disconnect=False,paged=False,normalized=False,fetch_crash=False):
         root=Path(tempfile.mkdtemp(prefix='lt-remote-daemon-e2e-')).resolve();root.chmod(0o700)
         print('retained synthetic remote daemon root:',root,flush=True)
         for name in ('state','scratch','leases','xdg'):(root/name).mkdir(mode=0o700)
@@ -60,7 +60,11 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
             if terminal_code!=40:
                 with sqlite3.connect(engine.path) as engine_db:
                     engine_db.execute(f"CREATE TRIGGER synthetic_terminal AFTER UPDATE OF committed ON tasks WHEN NEW.committed=1 BEGIN UPDATE tasks SET status={terminal_code} WHERE uuid=NEW.uuid; END")
-            queue=Queue(root/'queue',reference_enabled=True);store=ReferenceStore(queue)
+            queue=Queue(root/'queue',reference_enabled=True)
+            if normalized:
+                from processing import reference_claim_observation_cache_candidate as observation_cache
+                cache_patch=patch.object(observation_cache,'QUALIFIED',True);cache_patch.start()
+            store=ReferenceStore(queue,claim_observation_cache=normalized)
             TaskStore(queue,root/'legacy-viewer')
             lease=AuthorityLease(root/'leases',queue.authority_id);queue.authority_lease=lease;record_required(queue,lease)
             with queue._db() as db:
@@ -95,12 +99,14 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
             tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(server_cert,server_key)
             control=create_reference_http_server(api,'127.0.0.1',0,ssl_context=tls)
             control_thread=threading.Thread(target=control.serve_forever,kwargs={'poll_interval':0.05});control_thread.start();threads.append(control_thread)
+            fetch_calls=[]
             class Fetch(BaseHTTPRequestHandler):
                 def log_message(self,*args):pass
                 def do_GET(self):
                     self.connection.settimeout(2)
                     if self.headers.get('Authorization')!='Bearer '+fetch_token:
                         self.send_error(403);return
+                    fetch_calls.append(self.path)
                     self.send_response(200);self.send_header('Content-Length','3');self.end_headers();self.wfile.write(b'abc')
             fetch=ThreadingHTTPServer(('127.0.0.1',0),Fetch);fetch.daemon_threads=False;fetch.block_on_close=True
             fetch.socket=tls.wrap_socket(fetch.socket,server_side=True)
@@ -136,16 +142,22 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                     caFile=str(server_cert),clientCertFile=str(node_cert),clientKeyFile=str(node_key),nodeMutationSecretHex=secret.hex(),
                     backendContainerId='a'*64,backendImageId='sha256:'+'b'*64,backendPort=int(engine.origin.rsplit(':',1)[1])))
             if paged:config['referenceRemoteBroker']['paged']=True
+            if normalized:config['normalizedTransferCandidate']=True
             config_path=root/'worker.json';config_path.write_text(json.dumps(config),encoding='utf-8');config_path.chmod(0o600)
             raw=copy.deepcopy(fixture['submission']);raw['submissionId']=str(uuid.uuid4())
             obj=dict(id='image-'+raw['submissionId'],name='test.jpg',byteSize=3,sha256=hashlib.sha256(b'abc').hexdigest(),kind='image',mediaType='image/jpeg')
             raw['manifest'].update(objects=[obj],objectCount=1,totalBytes=3,inputCounts=dict(images=1,lidarObjects=0,points=0))
             raw['manifest']['sha256']=manifest_sha256(raw['manifest'])
             job=store.submit(validate_submission(raw,environment='staging',capability_fingerprint=raw['capabilityFingerprint']))[0]
-            bootstrap="import sys; import ops.reference_worker_daemon as d; import processing.node_mutation_broker as b; import processing.node_reference_authority_session as s; import processing.reference_engine_worker as w; d.REFERENCE_REMOTE_DAEMON_QUALIFIED=True; b.QUALIFIED=True; s.REFERENCE_REMOTE_QUALIFIED=True; s.REFERENCE_PAGING_QUALIFIED=True; w.BROKER_WORKER_CANDIDATE_QUALIFIED=True; b.local_engine_identity=lambda deadline:'synthetic-engine'; b.local_backend_identity=lambda pin,deadline:None; sys.argv=['reference_worker_daemon','--odm-only','--config',sys.argv[1]]; raise SystemExit(d.main())"
+            bootstrap="import sys; import ops.reference_worker_daemon as d; import processing.node_mutation_broker as b; import processing.node_reference_authority_session as s; import processing.reference_engine_worker as w; import processing.reference_transfer_journal_candidate as j; j.QUALIFIED=True; j.NORMALIZED_QUALIFIED=True; d.REFERENCE_REMOTE_DAEMON_QUALIFIED=True; b.QUALIFIED=True; s.REFERENCE_REMOTE_QUALIFIED=True; s.REFERENCE_PAGING_QUALIFIED=True; w.BROKER_WORKER_CANDIDATE_QUALIFIED=True; b.local_engine_identity=lambda deadline:'synthetic-engine'; b.local_backend_identity=lambda pin,deadline:None; sys.argv=['reference_worker_daemon','--odm-only','--config',sys.argv[1]]; raise SystemExit(d.main())"
+            marker=root/'synthetic-fetch-crash.marker'
+            if fetch_crash:
+                hook='''import os,time\nimport processing.reference_driver as rd\noriginal_save=rd.ReferenceDriver._save\ndef crash_before_cursor(self,job,stage,data):\n    marker=os.environ['LT_SYNTHETIC_FETCH_CRASH_MARKER']\n    if stage=='fetching' and data.get('inputCursor')==1 and not os.path.exists(marker):\n        fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)\n        try:\n            os.write(fd,b'charged-before-cursor');os.fsync(fd)\n        finally:os.close(fd)\n        while True:time.sleep(0.1)\n    return original_save(self,job,stage,data)\nrd.ReferenceDriver._save=crash_before_cursor\n'''
+                bootstrap='exec('+repr(hook)+'); '+bootstrap
+            child_env=dict(os.environ,LT_SYNTHETIC_FETCH_CRASH_MARKER=str(marker))
             log=open(root/'daemon.log','wb')
             with patch.object(authority,'REFERENCE_REMOTE_QUALIFIED',True), patch.object(authority,'REFERENCE_PAGING_QUALIFIED',paged), patch.object(plans,'REFERENCE_PLAN_QUALIFIED',True):
-                process=subprocess.Popen([os.environ.get('PYTHON','python3'),'-c',bootstrap,str(config_path)],stdout=log,stderr=log,env=dict(os.environ))
+                process=subprocess.Popen([os.environ.get('PYTHON','python3'),'-c',bootstrap,str(config_path)],stdout=log,stderr=log,env=child_env)
                 until=time.monotonic()+35;granted=False;released=False;restarted=False
                 while time.monotonic()<until:
                     if process.poll() is not None:raise AssertionError('synthetic daemon exited '+str(process.returncode))
@@ -153,6 +165,15 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                     if state['phase']=='awaiting_transfer' and not granted:
                         store.receive_transfer_grant(job['jobId'],dict(state['transferRequest'],jobId=job['jobId'],
                             environment='staging',objectIds=[obj['id']],token=fetch_token));granted=True
+                    if fetch_crash and marker.exists() and not restarted:
+                        process.kill();self.assertEqual(process.wait(timeout=5),-signal.SIGKILL)
+                        with sqlite3.connect('file:'+str(root/'state'/'driver.sqlite')+'?mode=ro',uri=True,timeout=1) as db:
+                            self.assertEqual(db.execute('SELECT state FROM transfer_journal_object').fetchone()[0],'charged')
+                            saved=json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?',(job['jobId'],)).fetchone()[0])
+                            self.assertEqual(saved['inputCursor'],0)
+                        self.assertEqual(len(fetch_calls),1)
+                        process=subprocess.Popen([os.environ.get('PYTHON','python3'),'-c',bootstrap,str(config_path)],stdout=log,stderr=log,env=child_env)
+                        restarted=True
                     if disconnect and lost_receipt.is_set() and not restarted:
                         outbox_path=root/'state'/'outbox.sqlite'
                         with sqlite3.connect('file:'+str(outbox_path)+'?mode=ro',uri=True,timeout=1) as outbox_db:
@@ -178,6 +199,9 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                     self.assertEqual(len(first_receipts),1)
                     self.assertTrue(replayed_receipts)
                     self.assertEqual(replayed_receipts[0],first_receipts[0])
+                if fetch_crash:
+                    self.assertTrue(restarted)
+                    self.assertEqual(len(fetch_calls),1)
                 self.assertEqual(engine.counts(),{'initialize':1,'upload':1,'commit':1,'download':1 if terminal_code==40 else 0})
                 inputs=[path for path in (root/'scratch').rglob('*.input') if path.is_file()]
                 archives=[path for path in (root/'scratch').rglob('all.zip') if path.is_file()]
@@ -216,12 +240,15 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
             for thread in threads:attempt(lambda thread=thread:thread.join(5))
             if lease is not None:attempt(lease.close)
             if queue is not None:attempt(queue.close)
+            if normalized and 'cache_patch' in locals():attempt(cache_patch.stop)
             if log is not None:attempt(log.close)
             if old_xdg is None:os.environ.pop('XDG_STATE_HOME',None)
             else:os.environ['XDG_STATE_HOME']=old_xdg
             if cleanup_errors:self.fail('synthetic cleanup failed: '+','.join(cleanup_errors))
         self.assertTrue(all(not thread.is_alive() for thread in threads))
 
+    def test_actual_daemon_photo_success_normalized(self):self._run_daemon_photo(40,paged=True,normalized=True)
+    def test_actual_daemon_kill_before_normalized_cursor(self):self._run_daemon_photo(40,paged=True,normalized=True,fetch_crash=True)
     def test_actual_daemon_photo_success_paged(self):self._run_daemon_photo(40,paged=True)
     def test_actual_daemon_photo_success(self):self._run_daemon_photo(40)
     def test_actual_daemon_photo_failure(self):self._run_daemon_photo(30)

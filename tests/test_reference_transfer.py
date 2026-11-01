@@ -61,6 +61,17 @@ class ReferenceTransferTests(unittest.TestCase):
         self.job["submission"]["manifest"]["objects"][0]["sha256"] = "0" * 64
         self.assertEqual(grant.objects[0].sha256, hashlib.sha256(b"abc").hexdigest())
 
+    def test_large_grant_has_detached_immutable_index(self):
+        objects = tuple(TransferObject(f'image-{i:05}', 3, hashlib.sha256(b'abc').hexdigest()) for i in range(10000))
+        grant = ValidatedGrant('job-1', 'reservation-1', 1, 'staging', 1000, objects, 'secret')
+        self.assertEqual(len(grant._objects_by_id), 10000)
+        for obj in objects:
+            self.assertIs(grant._objects_by_id[obj.id], obj)
+        with self.assertRaises(TypeError):
+            grant._objects_by_id['other'] = objects[0]
+        with self.assertRaises(TransferError):
+            ValidatedGrant('job-1', 'reservation-1', 1, 'staging', 1000, (objects[0], objects[0]), 'secret')
+
     def test_retry_allowance_is_bounded_separately_from_final_input_bytes(self):
         for budget in (3, 4, 9):
             self.raw['byteBudget'] = self.job['transferRequest']['byteBudget'] = budget
@@ -138,6 +149,36 @@ class ReferenceTransferTests(unittest.TestCase):
         client=BrokerClient('https://broker.example',opener=opener,clock=lambda:self.now,max_response_bytes=4)
         self.assertEqual(client.download_object(grant,'image-1',self.root/'input.jpg').read_bytes(),b'abcdefghij')
         self.assertEqual(calls,[None])
+
+    def test_ranged_object_over_default_ceiling_streams_and_checks_full_digest(self):
+        size = 16 * 1024 * 1024 + 1
+        digest = hashlib.sha256()
+        block = b'x' * (1024 * 1024)
+        for _ in range(16): digest.update(block)
+        digest.update(b'x')
+        grant = ValidatedGrant('job-1', 'reservation-1', 1, 'staging', 1000,
+            (TransferObject('image-1', size, digest.hexdigest()),), 'private-token')
+        calls = []
+        class Stream:
+            def __init__(self, request, start, end):
+                self.remaining = end - start + 1
+                self.status = 206
+                self.url = request.full_url
+                self.headers = {'Content-Length':str(self.remaining), 'Content-Range':f'bytes {start}-{end}/{size}'}
+            def geturl(self): return self.url
+            def read(self, count):
+                amount = min(count, self.remaining)
+                self.remaining -= amount
+                return b'x' * amount
+            def close(self): pass
+        def opener(request, *, timeout):
+            header = request.get_header('Range'); calls.append(header)
+            start, end = map(int, header.removeprefix('bytes=').split('-'))
+            return Stream(request, start, end)
+        client = BrokerClient('https://broker.example', opener=opener, clock=lambda:self.now, enable_ranges=True)
+        target = client.download_object(grant, 'image-1', self.root/'large.input')
+        self.assertEqual(target.stat().st_size, size)
+        self.assertEqual(calls, ['bytes=0-16777215', 'bytes=16777216-16777216'])
 
     def test_ranged_object_validates_and_publishes_one_complete_file(self):
         grant,calls,client=self.ranged_fixture()

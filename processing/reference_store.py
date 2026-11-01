@@ -46,7 +46,11 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None):
+                 main_node_id=None, claim_observation_cache=False):
+        from . import reference_claim_observation_cache_candidate as claim_cache
+        if type(claim_observation_cache) is not bool or (claim_observation_cache and claim_cache.QUALIFIED is not True):
+            raise ValueError('claim observation cache is not qualified')
+        self._claim_observation_cache = claim_observation_cache
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
@@ -107,6 +111,12 @@ class ReferenceStore:
             """)
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
+            cached = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_claim_observation_cache'").fetchone()
+            if claim_observation_cache:
+                if cached: claim_cache.attest(db)
+                else: claim_cache.install(db, enabled=True)
+            elif cached:
+                raise ValueError('claim observation cache cannot be silently disabled')
 
     def _row(self, db, job_id):
         has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
@@ -363,6 +373,14 @@ class ReferenceStore:
                 worker_instance_id=worker_instance_id, claim_token=claim_token)
 
     def _claim_snapshot(self, db, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
+        if self._claim_observation_cache:
+            from .reference_claim_observation_cache_candidate import snapshot
+            return snapshot(self, db, job_id, node_id=node_id, worker_id=worker_id,
+                worker_instance_id=worker_instance_id, claim_token=claim_token)
+        return self._claim_snapshot_uncached(db, job_id, node_id=node_id, worker_id=worker_id,
+            worker_instance_id=worker_instance_id, claim_token=claim_token)
+
+    def _claim_snapshot_uncached(self, db, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
         """Same authenticated observation inside an existing transaction."""
         self.queue._known_node(node_id)
         protocol._uuid(job_id, 'jobId')

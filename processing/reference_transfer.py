@@ -13,6 +13,7 @@ import secrets
 import ssl
 import stat
 import time
+from types import MappingProxyType
 from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
@@ -58,6 +59,15 @@ class ValidatedGrant:
     expires: float
     objects: tuple
     token: str = field(repr=False)
+    _objects_by_id: object = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if type(self.objects) is not tuple or any(type(obj) is not TransferObject for obj in self.objects):
+            raise TransferError('immutable transfer objects required')
+        indexed = {obj.id: obj for obj in self.objects}
+        if len(indexed) != len(self.objects):
+            raise TransferError('duplicate transfer object')
+        object.__setattr__(self, '_objects_by_id', MappingProxyType(indexed))
 
 
 def validate_grant(grant, *, job, clock=time.time):
@@ -157,7 +167,9 @@ class BrokerClient:
         """
         if not isinstance(grant, ValidatedGrant):
             raise TransferError("validated transfer grant required")
-        obj = next((obj for obj in grant.objects if obj.id == object_id), None)
+        if type(object_id) is not str:
+            raise TransferError('object is outside grant')
+        obj = grant._objects_by_id.get(object_id)
         if obj is None:
             raise TransferError("object is outside grant")
         if grant.expires <= _now(self.clock):

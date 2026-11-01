@@ -25,7 +25,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld, WorkerEngineTerminal
 from .reference_sender import ReferenceSender
-from .reference_transfer import BrokerClient, TransferResponseUnavailable, validate_grant
+from .reference_transfer import BrokerClient, TransferResponseUnavailable, validate_grant, _now
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
@@ -123,7 +123,21 @@ class ReferenceDriver:
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
                  execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
-                 remote_reference=None):
+                 remote_reference=None, transfer_journal=False, normalized_transfer=False):
+        from . import reference_transfer_journal_candidate as transfer_journal_module
+        if (type(normalized_transfer) is not bool or (normalized_transfer and
+                (not transfer_journal or transfer_journal_module.NORMALIZED_QUALIFIED is not True))):
+            raise ValueError('normalized transfer is not qualified')
+        self._normalized_transfer = normalized_transfer
+        self._normalized_cache = {}
+        if type(transfer_journal) is not bool or (transfer_journal and
+                (transfer_journal_module.QUALIFIED is not True or state_owner is None or os.name != 'posix')):
+            raise ValueError('owned qualified transfer journal required')
+        if transfer_journal:
+            from ops.reference_worker_daemon import DaemonStateLock
+            if type(state_owner) is not DaemonStateLock:
+                raise ValueError('exact transfer journal process owner required')
+        self._transfer_journal = transfer_journal
         if remote_reference is not None:
             from .node_reference_runtime_candidate import RemoteReferenceRuntime
             if (type(remote_reference) is not RemoteReferenceRuntime or execution_router is not None or combined_policy is not None
@@ -205,6 +219,7 @@ class ReferenceDriver:
                 raise ValueError('owned regular worker journal required')
             if os.name != 'nt':
                 os.fchmod(descriptor, 0o600)
+            self._driver_identity = (observed.st_dev, observed.st_ino)
         finally:
             os.close(descriptor)
         self._open = build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=ssl_context)).open
@@ -213,6 +228,13 @@ class ReferenceDriver:
             db.execute('''CREATE TABLE IF NOT EXISTS driver_jobs (
               created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
               claim_request TEXT UNIQUE NOT NULL, stage TEXT NOT NULL, data TEXT NOT NULL)''')
+            if self._transfer_journal:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='transfer_journal_binding'").fetchone() is None:
+                    if db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
+                        raise ValueError('transfer journal requires a new empty driver state')
+                    transfer_journal_module.install(db, enabled=True)
+            elif db.execute("SELECT 1 FROM sqlite_master WHERE name='transfer_journal_binding'").fetchone():
+                raise ValueError('transfer journal cannot be silently disabled')
             db.execute('CREATE TABLE IF NOT EXISTS readiness_tasks (uuid TEXT PRIMARY KEY)')
             if 'background_checked' not in {row['name'] for row in db.execute('PRAGMA table_info(driver_jobs)')}:
                 db.execute('ALTER TABLE driver_jobs ADD COLUMN background_checked REAL NOT NULL DEFAULT 0')
@@ -224,6 +246,10 @@ class ReferenceDriver:
                 optionPolicy='discovered-numeric-bool-v1',
                 outputBudget=output_budget, transferTtl=transfer_ttl, safetyFloor=safety_floor,
                 environments=sorted(self.allowed_environments))
+            if self._transfer_journal:
+                settings['transferJournal'] = 'reference-object-journal-v1'
+            if self._normalized_transfer:
+                settings['normalizedTransfer'] = 'reference-input-cursor-v1'
             if execution_router is not None:
                 settings['executionRouting'] = dict(mode='per-job-v1', path=str(execution_router.path),
                     provenancePath=str(provenance_client.path) if provenance_client is not None else None)
@@ -299,6 +325,10 @@ class ReferenceDriver:
     @contextmanager
     def _db(self):
         self._storage()
+        if self._normalized_transfer:
+            current = self.path.lstat()
+            if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != self._driver_identity:
+                raise DriverHeld('normalized_driver_database_changed')
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA synchronous=FULL')
@@ -311,6 +341,10 @@ class ReferenceDriver:
                 db.execute('BEGIN IMMEDIATE')
                 yield db
                 self._storage()
+                if self._normalized_transfer:
+                    current = self.path.lstat()
+                    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != self._driver_identity:
+                        raise DriverHeld('normalized_driver_database_changed')
         finally:
             db.close()
 
@@ -328,7 +362,14 @@ class ReferenceDriver:
         with self._db() as db:
             old = db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
             waiting = ('awaiting_acceptance','awaiting_failure_acceptance')
-            encoded = p.canonical_json(data).decode()
+            saved = dict(data)
+            if self._normalized_transfer and stage == 'fetching' and 'claim' in saved:
+                from . import reference_transfer_journal_candidate as tj
+                claim, grant = saved.pop('claim'), saved.pop('grant')
+                saved['privateInputDigest'] = tj.save_private(db, job=job_id, claim=claim, grant=grant)
+                saved['inputCursor'] = 0
+                saved.pop('inputPaths', None)
+            encoded = p.canonical_json(saved).decode()
             if old is not None and stage in waiting and old['stage'] not in waiting:
                 # New entries join the back of the durable acceptance queue.
                 order = self._next_background_order(db)
@@ -787,7 +828,27 @@ class ReferenceDriver:
             data['claim'] = claim
             self._save(job_id, 'claimed', data)
             return {'state': 'claimed', 'jobId': job_id}
-        claim = data['claim']
+        normalized_grant = None
+        if self._normalized_transfer and stage == 'fetching':
+            from . import reference_transfer_journal_candidate as tj
+            digest = data.get('privateInputDigest')
+            with self._db() as db:
+                row = db.execute('SELECT digest FROM transfer_journal_private WHERE job=?', (job_id,)).fetchone()
+                if row is None or row['digest'] != digest:
+                    raise DriverHeld('private_transfer_input_changed')
+                cached = self._normalized_cache.get(job_id)
+                if cached is None:
+                    private_claim, private_grant = tj.load_private(db, job=job_id, expected_digest=digest)
+                    validated = validate_grant(private_grant, job=private_claim, clock=self.clock)
+                    cached = (digest, private_claim, private_grant, validated)
+                    self._normalized_cache[job_id] = cached
+                if cached[0] != digest:
+                    raise DriverHeld('private_transfer_input_changed')
+            claim, normalized_grant = cached[1], cached[3]
+            if claim['jobId'] != job_id or normalized_grant.expires <= _now(self.clock):
+                raise DriverHeld('private_transfer_claim_expired_or_changed')
+        else:
+            claim = data['claim']
         token = claim['claimToken']
         suffix = '/jobs/' + job_id
         if stage in ('claimed', 'reservation_pending'):
@@ -826,16 +887,55 @@ class ReferenceDriver:
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
         if stage == 'fetching':
-            grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+            grant = normalized_grant if self._normalized_transfer else validate_grant(data['grant'], job=claim, clock=self.clock)
             reservation = data['reservation']['reservationId']
+            if self._normalized_transfer and reservation != grant.reservation_id:
+                raise DriverHeld('transfer_reservation_changed')
             directory = self.ledger.ensure_job_directory(reservation)
             paths = dict(data.get('inputPaths', {}))
-            for obj in claim['submission']['manifest']['objects']:
+            objects_in_order = claim['submission']['manifest']['objects']
+            if self._normalized_transfer:
+                cursor = data.get('inputCursor')
+                if type(cursor) is not int or not 0 <= cursor <= len(objects_in_order) or paths:
+                    raise DriverHeld('transfer_cursor_changed')
+                status, observed = self._request('GET', suffix + '/claim-state', claim_token=token)
+                if status != 200:
+                    raise DriverHeld('transfer_claim_unavailable')
+                expected_claim = dict(authorityId=self.worker.authority_id, jobId=job_id,
+                    generation=claim['generation'], environment=claim['environment'], nodeId=self.node_id,
+                    workerId=self.worker_id, workerInstanceId=self.worker_instance_id,
+                    claimTokenSha256=hashlib.sha256(token.encode()).hexdigest(),
+                    manifestSha256=claim['manifestSha256'], pipelineDigest=claim['pipelineDigest'],
+                    status='running', executionPhase='fetching', heldReason=None)
+                if type(observed) is not dict or any(observed.get(key) != value for key,value in expected_claim.items()):
+                    raise DriverHeld('transfer_claim_changed')
+            if self._transfer_journal and paths:
+                objects = {item['id']: item for item in claim['submission']['manifest']['objects']}
+                with self._db() as db:
+                    rows = {row['object_id']: row for row in db.execute(
+                        'SELECT object_id,identity,state FROM transfer_journal_object WHERE job=?', (job_id,))}
+                    for object_id, relative_path in paths.items():
+                        item = objects.get(object_id)
+                        expected_path = 'jobs/' + reservation + '/' + object_id + '.input'
+                        if item is None or relative_path != expected_path or object_id not in rows:
+                            raise DriverHeld('transfer_checkpoint_changed')
+                        expected = p.canonical_json(dict(objectId=object_id, size=item['byteSize'],
+                            sha256=item['sha256'], path=expected_path)).decode()
+                        if rows[object_id]['identity'] != expected or rows[object_id]['state'] != 'charged':
+                            raise DriverHeld('transfer_checkpoint_changed')
+            for obj in (objects_in_order[cursor:cursor+1] if self._normalized_transfer else objects_in_order):
                 if obj['id'] in paths:
                     continue
                 relative = 'jobs/' + reservation + '/' + obj['id'] + '.input'
                 self.ledger._owned_path(reservation, relative)
                 target = self.ledger.root / relative
+                if self._transfer_journal:
+                    from . import reference_transfer_journal_candidate as tj
+                    directory_stat = directory.stat()
+                    with self._db() as db:
+                        tj.bind(db, job=job_id, generation=claim['generation'], manifest_sha=claim['manifestSha256'],
+                            reservation=reservation, directory_device=directory_stat.st_dev, directory_inode=directory_stat.st_ino)
+                        tj.pending(db, job=job_id, object_id=obj['id'], size=obj['byteSize'], sha256=obj['sha256'], path=relative)
                 if os.path.lexists(target):
                     self.worker._file(reservation, relative, obj['byteSize'], obj['sha256'])
                 else:
@@ -850,11 +950,74 @@ class ReferenceDriver:
                         # Attempt and budget remain consumed/uncertain; retain the
                         # existing cap and grant semantics. No automatic renewal.
                         raise DriverWait('broker_response_unavailable') from None
+                if self._transfer_journal:
+                    self.worker._file(reservation, relative, obj['byteSize'], obj['sha256'])
+                    current = directory.stat()
+                    if (current.st_dev, current.st_ino) != (directory_stat.st_dev, directory_stat.st_ino):
+                        raise DriverHeld('transfer_directory_changed')
+                    if os.name != 'nt':
+                        descriptor = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                        try:
+                            pinned = os.fstat(descriptor)
+                            if (not stat.S_ISREG(pinned.st_mode) or pinned.st_nlink != 1
+                                    or pinned.st_uid != os.geteuid()):
+                                raise DriverHeld('transfer_file_changed')
+                            digest = hashlib.sha256()
+                            while chunk := os.read(descriptor, 1024 * 1024): digest.update(chunk)
+                            observed = os.fstat(descriptor)
+                            current_path = target.lstat()
+                            if ((observed.st_dev, observed.st_ino, observed.st_size) != (pinned.st_dev, pinned.st_ino, obj['byteSize'])
+                                    or (current_path.st_dev, current_path.st_ino) != (pinned.st_dev, pinned.st_ino)
+                                    or digest.hexdigest() != obj['sha256']):
+                                raise DriverHeld('transfer_file_changed')
+                            os.fsync(descriptor)
+                        finally: os.close(descriptor)
+                        descriptor = os.open(directory, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+                        try:
+                            pinned_directory = os.fstat(descriptor)
+                            if (pinned_directory.st_dev, pinned_directory.st_ino) != (directory_stat.st_dev, directory_stat.st_ino):
+                                raise DriverHeld('transfer_directory_changed')
+                            os.fsync(descriptor)
+                        finally: os.close(descriptor)
+                    identity = p.canonical_json(dict(objectId=obj['id'], size=obj['byteSize'], sha256=obj['sha256'], path=relative)).decode()
+                    with self._db() as db:
+                        allocated = tj.verified(db, job=job_id, object_id=obj['id'], identity=identity)
+                    self.ledger.record_allocated(reservation, allocated)
+                    with self.ledger._transaction() as ledger_db:
+                        ledger_row = self.ledger._reservation(ledger_db, reservation)
+                        ledger_settings = json.loads(ledger_row['settings'])
+                        if ((ledger_row['job'], ledger_row['generation'], ledger_row['environment'],
+                             ledger_settings['manifest_sha256'], ledger_row['allocated']) !=
+                                (job_id, claim['generation'], claim['environment'], claim['manifestSha256'], allocated)):
+                            raise DriverHeld('transfer_ledger_changed')
+                        with self._db() as db:
+                            tj.charged(db, job=job_id, object_id=obj['id'], identity=identity, observed_allocated=ledger_row['allocated'])
                 paths[obj['id']] = relative
-                data['inputPaths'] = paths
-                self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
+                if self._normalized_transfer:
+                    data['inputCursor'] = cursor + 1
+                    data.get('fetchAttempts', {}).pop(obj['id'], None)
+                else:
+                    data['inputPaths'] = paths
+                if not self._transfer_journal:
+                    self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
                 self._save(job_id, 'fetching', data)
                 return {'state': 'fetching', 'jobId': job_id}
+            if self._normalized_transfer:
+                with self._db() as db:
+                    rows = {row['object_id']: row for row in db.execute(
+                        'SELECT object_id,identity,state FROM transfer_journal_object WHERE job=?', (job_id,))}
+                    if len(rows) != len(objects_in_order): raise DriverHeld('transfer_checkpoint_changed')
+                    for item in objects_in_order:
+                        relative = 'jobs/' + reservation + '/' + item['id'] + '.input'
+                        expected = p.canonical_json(dict(objectId=item['id'],size=item['byteSize'],sha256=item['sha256'],path=relative)).decode()
+                        row = rows.get(item['id'])
+                        if row is None or row['identity'] != expected or row['state'] != 'charged':
+                            raise DriverHeld('transfer_checkpoint_changed')
+                        paths[item['id']] = relative
+                data['claim'], data['grant'] = cached[1], cached[2]
+                data.pop('privateInputDigest', None)
+                data.pop('inputCursor', None)
+                self._normalized_cache.pop(job_id, None)
             self.ledger.record_allocated(reservation, claim['submission']['manifest']['totalBytes'])
             data['inputPaths'] = paths
             self._save(job_id, 'processing_pending', data)
