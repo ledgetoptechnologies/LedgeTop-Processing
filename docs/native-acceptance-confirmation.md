@@ -28,7 +28,9 @@ terminal metadata acceptance path applies the same global collision-state
 check, and validates stored terminal receipts and failure metadata before a
 private relay. These checks preserve suspect rows and return the same inspection
 status; they do not authorize artifact cleanup for terminal failures.
-The worker driver recognizes the exact sanitized inspection body on HTTP 409,
+The reference listener emits `X-LedgeTop-Reference-Inspection: 1` only for its
+own sanitized stored-state HTTP 409. The worker driver recognizes that header
+on its authenticated coordinator connection without reading the response body,
 reports a held background job (also alongside active foreground work), and
 keeps its acceptance checkpoint. Other 409 responses retain their existing
 pending/conflict behavior. This is a status observation, not an independently

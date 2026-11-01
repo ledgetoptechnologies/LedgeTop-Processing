@@ -75,6 +75,11 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(encoded)))
                 self.send_header("Connection", "close")
+                # The worker recognizes this fixed header without waiting on a
+                # potentially slow response body. It is emitted only from our
+                # own sanitized stored-state inspection response.
+                if response.status == 409 and response.body == {'error':'stored_reference_inspection'}:
+                    self.send_header('X-LedgeTop-Reference-Inspection','1')
                 self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(encoded)

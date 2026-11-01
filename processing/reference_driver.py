@@ -315,17 +315,9 @@ class ReferenceDriver:
             response = self._open(request, timeout=10)
         except HTTPError as error:
             status = error.code
-            inspection = False
             try:
-                if status == 409:
-                    raw = error.read(4097)
-                    if len(raw) <= 4096:
-                        try:
-                            inspection = p.decode_submission(raw) == {'error': 'stored_reference_inspection'}
-                        except (ValueError, TypeError):
-                            pass
-            except Exception:
-                raise DriverWait('coordinator_unavailable') from None
+                markers = error.headers.get_all('X-LedgeTop-Reference-Inspection', []) if error.headers else []
+                inspection = status == 409 and markers == ['1']
             finally:
                 error.close()
             if inspection:
