@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -141,7 +142,7 @@ class Binding(ManifestBindingHTTP):
                 for thread in threads: thread.join(5); self.assertFalse(thread.is_alive())
                 self.assertEqual(sorted(x[0] for x in outcomes),['hold','ok'])
                 expected=next(x[1] for x in outcomes if x[0]=='ok')
-            self.stop();self.start();binding=self.construct()
+            self.stop();self.config=replace(self.config,viewer_plan_binding=True);self.start();binding=self.construct()
             with patch.object(self.handler.viewer_service,'_catalog',side_effect=RuntimeError('offline')):
                 self.assertEqual(binding.status(identifier,'production',CAP),expected)
             second=str(uuid.uuid4()); second_plan=self.plan_for(second)
@@ -212,8 +213,8 @@ os._exit(0)
         child=subprocess.run([os.sys.executable,'-c',code,str(self.state),str(self.leases),identifier,body.hex()],
                              capture_output=True,text=True,timeout=15,check=False)
         self.assertEqual(child.returncode,0,child.stderr[-2000:])
-        self.start()
         with patch.object(config,'NATIVE_PLAN_BINDING_QUALIFIED',True):
+            self.config=replace(self.config,viewer_plan_binding=True);self.start()
             binding=self.construct()
             with patch.object(self.handler.viewer_service,'_catalog',side_effect=RuntimeError('offline')):
                 receipt=binding.status(identifier,'production',CAP)

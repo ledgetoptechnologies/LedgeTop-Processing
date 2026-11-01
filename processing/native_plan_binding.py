@@ -176,7 +176,7 @@ class NativePlanBindings:
 
     @staticmethod
     def _receipt(plan, digest, catalog):
-        return {'protocol':'native-plan-v1-experiment', 'taskUuid':plan['taskUuid'], 'environment':plan['environment'],
+        return {'protocol':'native-plan-v1-experiment', 'version':1, 'taskUuid':plan['taskUuid'], 'environment':plan['environment'],
                 'generation':1, 'bindingId':plan['bindingId'], 'manifestSha256':plan['manifestSha256'],
                 'planSha256':digest, 'catalogDigest':catalog, 'state':'identity_bound',
                 'engineEvidence':{'state':'unavailable'}, 'effectiveOptions':{'state':'unavailable'},
@@ -234,7 +234,8 @@ class NativePlanBindings:
                        (identifier,self.queue.authority_id,environment,reservation['capability_hash'],manifest['bindingId'],body,digest,observed_bytes,observed))
             return self._receipt(plan, digest, observed)
 
-    def status(self, identifier, environment, capability):
+    def status(self, identifier, environment, capability, *, allow_options=True):
+        if type(allow_options) is not bool: raise ValueError('invalid plan status policy')
         with self.store._lock, self.queue._db() as db:
             db.execute('BEGIN')
             reservation, manifest = self._manifest_locked(db, identifier, environment, capability)
@@ -243,6 +244,7 @@ class NativePlanBindings:
             body = bytes(row['plan_bytes'])
             try: plan = validate(body)
             except (ValueError, TypeError, KeyError, OverflowError): raise Conflict('native plan binding changed') from None
+            if not allow_options and plan['options']: raise Conflict('option negotiation not qualified')
             if (plan['taskUuid'] != identifier or plan['environment'] != environment
                     or plan['bindingId'] != manifest['bindingId'] or plan['manifestSha256'] != manifest['manifestSha256']):
                 raise Conflict('native plan binding changed')

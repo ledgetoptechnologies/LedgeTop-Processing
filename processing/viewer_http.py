@@ -177,13 +177,20 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, manifest_binding=None):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, manifest_binding=None, plan_binding=None):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
             raise ValueError('production hold must be a boolean')
+        if plan_binding is not None:
+            from . import config
+            from .native_plan_binding import NativePlanBindings
+            if (config.NATIVE_PLAN_BINDING_QUALIFIED is not True or not isinstance(plan_binding,NativePlanBindings)
+                    or plan_binding.service is not service or plan_binding.manifest is not manifest_binding):
+                raise ValueError('native plan binding not qualified')
         self.service, self.token, self.staging_token = service, token, staging_token
         self.manifest_binding=manifest_binding
+        self.plan_binding=plan_binding
         # Cutover hold: production may read but never mutate until reopened by
         # restarting without the hold. Staging is unaffected.
         self.production_held = production_held
@@ -250,7 +257,8 @@ class ViewerFacade:
                 guarded = (path in ('/task/ledgetop/reserve', '/task/ledgetop/cancel',
                                     '/task/new/init', '/task/cancel', '/task/remove') or
                     re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path) or
-                    re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path))
+                    re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path) or
+                    re.fullmatch(r'/task/ledgetop/task-plan/[^/]+',path))
                 gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
                 if guarded and gate is not None:
                     from .admission_drain import AdmissionClosed
@@ -312,6 +320,11 @@ class ViewerFacade:
             identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)
             if capability is None:raise RequestError(404,'not_found')
             value=self.manifest_binding.status(identifier,environment,capability)
+        elif re.fullmatch(r'/task/ledgetop/task-plan/[^/]+',path):
+            if self.plan_binding is None:raise RequestError(404,'not_found')
+            identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)
+            if capability is None:raise RequestError(404,'not_found')
+            value=self.plan_binding.status(identifier,environment,capability,allow_options=False)
         else:
             route = re.fullmatch(r'/task/([^/]+)/(info|output|download/all\.zip)', path)
             if not route:
@@ -376,6 +389,19 @@ class ViewerFacade:
         self._reply(handler, 200, value)
 
     def _post(self, handler, path, environment):
+        if re.fullmatch(r'/task/ledgetop/task-plan/[^/]+',path):
+            if self.plan_binding is None:raise RequestError(404,'not_found')
+            identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)
+            if capability is None:raise RequestError(404,'not_found')
+            self.manifest_binding.status(identifier,environment,capability)
+            from .native_plan_binding import MAX_PLAN_BYTES,validate
+            length=_length(handler,MAX_PLAN_BYTES)
+            if (handler.headers.get_all('Content-Encoding',[]) or len(handler.headers.get_all('Content-Type',[]))!=1
+                    or handler.headers.get_content_type()!='application/json'):raise RequestError(415,'json_required')
+            body=handler.rfile.read(length)
+            if len(body)!=length:raise RequestError(400,'truncated_body')
+            if validate(body)['options']:raise Conflict('option negotiation not qualified')
+            self._reply(handler,200,self.plan_binding.bind(identifier,environment,capability,body));return
         if re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path):
             if self.manifest_binding is None:raise RequestError(404,'not_found')
             identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)

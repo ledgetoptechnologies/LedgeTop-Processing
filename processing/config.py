@@ -39,6 +39,8 @@ class Config:
     viewer_archive_free_floor: int = 20 * 1024 ** 3
     viewer_archive_registry: bool = False
     viewer_manifest_binding: bool = False
+    # Test-only constructor setting; deliberately unavailable via environment.
+    viewer_plan_binding: bool = False
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
     admission_start_closed: bool = False
@@ -97,6 +99,8 @@ def from_environment() -> Config:
     autocapture = os.environ.get('PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE', '0')
     registry = os.environ.get('PROCESSING_VIEWER_ARCHIVE_REGISTRY', '0')
     manifest_binding=os.environ.get('PROCESSING_VIEWER_MANIFEST_BINDING','0')
+    if os.environ.get('PROCESSING_VIEWER_PLAN_BINDING','0') != '0':
+        raise ValueError('native plan HTTP binding is test-only')
     if manifest_binding not in ('0','1') or (manifest_binding=='1' and (NATIVE_MANIFEST_BINDING_QUALIFIED is not True or viewer!='1' or not lease_dir)):
         raise ValueError('native manifest binding is not qualified for startup')
     if registry not in ('0','1'):

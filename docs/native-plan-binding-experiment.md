@@ -1,12 +1,23 @@
 # Disabled native plan-binding experiment
 
-`NativePlanBindings` is an internal, unwired experiment. Its literal qualification
-flag defaults to false; neither environment configuration nor an HTTP route
-enables it. It binds proposed canonical plan bytes to an already authenticated
+`NativePlanBindings` is an unqualified experiment. Its literal qualification
+flag defaults to false; environment configuration cannot enable it. An
+unadvertised HTTP route is exercised by test configuration and a patched flag.
+It binds proposed canonical plan bytes to an already authenticated
 manifest binding and stores a separate SQLite record. It does not reserve disk,
 accept objects, admit a job or allow dispatch. Its receipt explicitly reports
 `engineEvidence: {state: unavailable}`, `capacityReady: false` and
 `dispatchReady: false`.
+
+In the qualified test fixture only, POST `/task/ledgetop/task-plan/{uuid}` accepts
+at most 65536 canonical JSON bytes after verifying the environment token and
+existing manifest-bound task capability. GET on the same path returns the
+persisted versioned receipt. Both reject mismatched, unknown or cancelled
+authority; exact POST replay and GET use persisted evidence without rediscovery.
+The response is cache-disabled. HTTP rejects nonempty option lists even if an
+internal experiment previously recorded one: no authenticated catalog-digest
+issuance or version-domain qualification is present. No capability is advertised.
+The existing socket idle timeout does not impose a total body deadline.
 
 The internal experiment accepts a conservative strict subset of bool, int,
 float, enum and string options against the exact coordinator-selected catalog
@@ -23,8 +34,10 @@ and empty outputs are retained in the proposed plan bytes.
 
 This is a provisional internal profile, not a frozen wire agreement. Its
 unkeyed digests do not protect against a writer able to alter both data and
-digests. Existing binaries do not recognize its table, and this draft does not
-install a startup guard for that table: external old-writer exclusion, migration,
+digests. Existing binaries do not recognize its table. Cooperating current
+startup refuses a disabled plan binding when its table exists, after queue
+construction; this is not a pre-write census or old-binary fence. External
+old-writer exclusion, migration,
 rollback and durable history retirement remain unqualified. The existing
 manifest binding blocks legacy operations only in cooperating current code.
 
