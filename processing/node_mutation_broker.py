@@ -273,6 +273,43 @@ def inspect_coordinator_held_grant(queue, witness, operation_id, secret, *, time
     except LeaseUnavailable:raise BrokerHeld('coordinator lease unavailable') from None
 
 
+def match_coordinator_node_evidence(queue, witness, operation_id, envelope, nonce, secret):
+    """Match a nonce-bound shared-key report to actual held coordinator state.
+
+    This inactive diagnostic does not authenticate a physical node, establish
+    a continuously held gate, check engine task state or authorize release.
+    It is not a network protocol. The caller must generate a fresh nonce.
+    """
+    if (type(nonce) is not str or not re.fullmatch('[a-f0-9]{64}',nonce)
+            or type(envelope) is not dict or set(envelope)!={'report','mac'}
+            or type(envelope['report']) is not dict or type(envelope['mac']) is not str
+            or not re.fullmatch('[a-f0-9]{64}',envelope['mac'])
+            or type(secret) is not bytes or len(secret)<32):
+        raise BrokerHeld('node evidence unavailable')
+    report=envelope['report']
+    fields={'nonce','grant','grantSignature','operationState','reservationId','observation','engineTaskState','nodeOrigin'}
+    if set(report)!=fields or report['nonce']!=nonce:raise BrokerHeld('node evidence differs')
+    try:
+        raw_report=_json(report)
+        if len(raw_report)>32768:raise ValueError('oversized report')
+        mac=hmac.new(secret,b'ledgetop-node-held-evidence-v1\0'+raw_report,hashlib.sha256).hexdigest()
+    except (ValueError,TypeError,RecursionError):raise BrokerHeld('node evidence differs') from None
+    if not hmac.compare_digest(mac,envelope['mac']):raise BrokerHeld('node evidence authentication failed')
+    coordinator=inspect_coordinator_held_grant(queue,witness,operation_id,secret)
+    grant=verify_grant_evidence(_json(report['grant']).decode('ascii'),report['grantSignature'],secret)
+    if (grant!=coordinator['grant'] or report['operationState']!='started'
+            or report['engineTaskState']!='unverified' or report['nodeOrigin']!='shared-key-only'
+            or report['reservationId']!=uuid.UUID(grant['jobId']).hex):
+        raise BrokerHeld('node and coordinator evidence differ')
+    observation=report['observation']
+    if observation is not None:
+        if grant['operation']!='init':raise BrokerHeld('unsupported node observation')
+        _reply(observation,grant['engineTaskId'])
+    return {'operationId':operation_id,'coordinatorState':'held','nodeState':'reported-held',
+            'engineTaskState':'unverified','nodeIdentity':'not-independently-authenticated',
+            'observationPresent':observation is not None,'authorizesRelease':False}
+
+
 def _sender_confirmation(grant, secret):
     return hmac.new(secret, b'ledgetop-node-upload-verified-v1\0' + _json(grant), hashlib.sha256).hexdigest()
 
@@ -597,6 +634,74 @@ class NodeMutationBroker:
                     or root.st_mode&0o077 or database.st_mode&0o077 or database.st_nlink!=1):
                 raise BrokerHeld('node broker state changed')
         except OSError:raise BrokerHeld('node broker state unavailable') from None
+
+    def inspect_held_evidence(self, grant, signature, nonce, *, timeout_seconds=3):
+        """Observe this live old-epoch broker and held gate without mutation.
+
+        Requires its own node-local daemon probes; a shared-key MAC is not
+        independent node identity or a fence. Engine task state is not queried.
+        """
+        if (type(nonce) is not str or not re.fullmatch('[a-f0-9]{64}',nonce)
+                or type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=5):
+            raise BrokerHeld('node evidence unavailable')
+        self._authenticate(grant,signature,'init')
+        deadline=time.monotonic()+timeout_seconds
+        if not self._mutex.acquire(timeout=timeout_seconds):raise BrokerHeld('node broker busy')
+        try:
+            with NodeGate(self.engine) as gate:
+                self._check_owner()
+                def check_gate():
+                    opened=os.fstat(gate._stream.fileno());named=(gate.root/'gate.lock').lstat()
+                    if (not stat.S_ISREG(named.st_mode) or named.st_nlink!=1
+                            or (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino)):
+                        raise BrokerHeld('node gate lock changed')
+                check_gate()
+                if local_engine_identity(deadline)!=self.engine:raise BrokerHeld('local engine changed')
+                local_backend_identity(self.adapter.pin,deadline)
+                state=gate.snapshot();reservation=state['reservation']
+                expected={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
+                identity=uuid.UUID(grant['jobId']).hex
+                job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
+                if (any(state[k]!=v for k,v in expected.items()) or reservation is None
+                        or reservation['receiptId']!=identity or reservation['job']!=job
+                        or reservation['completionDigest'] is not None):
+                    raise BrokerHeld('held node reservation differs')
+                self.db.execute('BEGIN')
+                try:
+                    for name,ddl in _DDL.items():
+                        row=self.db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
+                        if row is None or row['sql']!=ddl:raise BrokerHeld('node evidence schema changed')
+                    for name,ddl in _NODE_TRIGGERS.items():
+                        row=self.db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
+                        if row is None or row['sql']!=ddl:raise BrokerHeld('node evidence fence changed')
+                    names={row['name'] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+                    if names!=set(_NODE_TRIGGERS):raise BrokerHeld('unexpected node evidence trigger')
+                    raw=_json(grant).decode('ascii');digest=hashlib.sha256(raw.encode('ascii')).hexdigest()
+                    binding=hashlib.sha256(_json([self.node,self.engine,self.authority,self.epoch,self.origin,self.generation])).hexdigest()
+                    old=self.db.execute('SELECT digest FROM binding WHERE singleton=1').fetchone()
+                    stored=self.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+                    op=self.db.execute('SELECT operation,file_key,grant_hash,state FROM operations WHERE id=?',(grant['operationId'],)).fetchone()
+                    evidence=self.db.execute('SELECT grant_json,signature FROM node_grants WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                    observation=self.db.execute('SELECT grant_hash,reply_json FROM engine_observations WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                    durable=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
+                    if (old is None or old['digest']!=binding or stored is None or stored['identity']!=durable
+                            or op is None or tuple(op)!=('init','',digest,'started')
+                            or evidence is None or tuple(evidence)!=(raw,signature)):
+                        raise BrokerHeld('held node evidence differs')
+                    reply=None
+                    if observation is not None:
+                        if observation['grant_hash']!=digest:raise BrokerHeld('engine observation differs')
+                        reply=_reply(json.loads(observation['reply_json']),grant['engineTaskId'])
+                    self.db.commit()
+                except BaseException:self.db.rollback();raise
+                self._check_owner();check_gate()
+                if local_engine_identity(deadline)!=self.engine:raise BrokerHeld('local engine changed')
+                local_backend_identity(self.adapter.pin,deadline)
+                report={'nonce':nonce,'grant':grant,'grantSignature':signature,'operationState':'started',
+                        'reservationId':identity,'observation':reply,'engineTaskState':'unverified','nodeOrigin':'shared-key-only'}
+                mac=hmac.new(self.secret,b'ledgetop-node-held-evidence-v1\0'+_json(report),hashlib.sha256).hexdigest()
+                return {'report':report,'mac':mac}
+        finally:self._mutex.release()
 
     def close(self):
         with self._mutex:

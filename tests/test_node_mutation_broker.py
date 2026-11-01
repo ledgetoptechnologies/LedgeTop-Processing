@@ -404,6 +404,59 @@ os._exit(27)
                 self.assertEqual(db.execute("SELECT state FROM broker_intents WHERE operation_id=?",(grant['operationId'],)).fetchone()[0],'started')
         finally:restarted.close()
 
+    def test_match_node_and_new_coordinator_evidence_without_release(self):
+        from processing.authority_lease import acquire
+        grant=self.grant();signature=b.sign_grant(grant,self.secret);checks=[]
+        original=self.broker.witness._check
+        def lose_authority_after_forward():
+            checks.append(True)
+            if len(checks)==2:raise b.BrokerHeld('synthetic lost authority')
+            return original()
+        with patch.object(self.broker.witness,'_check',side_effect=lose_authority_after_forward):
+            with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.assertEqual(len(self.calls),1)
+        nonce='a'*64
+        node=self.broker.inspect_held_evidence(grant,signature,nonce)
+        self.assertEqual(node['report']['operationState'],'started')
+        self.assertEqual(node['report']['observation']['uuid'],grant['engineTaskId'])
+        self.owner_lease.close();self.owner_queue.close()
+        lease=acquire(self.root/'owner-lease',self.root/'owner-queue')
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            restarted.authority_lease=lease;witness=b.LocalCoordinatorAuthority(restarted)
+            result=b.match_coordinator_node_evidence(restarted,witness,grant['operationId'],node,nonce,self.secret)
+            self.assertTrue(result['observationPresent']);self.assertFalse(result['authorizesRelease'])
+            self.assertEqual(result['nodeIdentity'],'not-independently-authenticated')
+            self.assertEqual(result['engineTaskState'],'unverified')
+            self.assertEqual(restarted.get(self.job)['status'],'held')
+            tampered=json.loads(json.dumps(node));tampered['report']['reservationId']='0'*32
+            with self.assertRaises(b.BrokerHeld):
+                b.match_coordinator_node_evidence(restarted,witness,grant['operationId'],tampered,nonce,self.secret)
+            with self.assertRaises(b.BrokerHeld):
+                b.match_coordinator_node_evidence(restarted,witness,grant['operationId'],node,'b'*64,self.secret)
+            with self.assertRaises(b.BrokerHeld):
+                b.match_coordinator_node_evidence(restarted,witness,grant['operationId'],node,nonce,b'wrong-synthetic-key-'*3)
+            self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+        finally:restarted.close();lease.close()
+
+    def test_match_missing_engine_observation_remains_unverified(self):
+        from processing.authority_lease import acquire
+        grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
+        def lost(*args):original(*args);raise OSError('synthetic lost response')
+        with patch.object(self.adapter,'exchange',side_effect=lost):
+            with self.assertRaises(OSError):self.broker.mutate(grant,signature,self.body)
+        nonce='c'*64;node=self.broker.inspect_held_evidence(grant,signature,nonce)
+        self.assertIsNone(node['report']['observation'])
+        self.owner_lease.close();self.owner_queue.close()
+        lease=acquire(self.root/'owner-lease',self.root/'owner-queue')
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            restarted.authority_lease=lease;witness=b.LocalCoordinatorAuthority(restarted)
+            result=b.match_coordinator_node_evidence(restarted,witness,grant['operationId'],node,nonce,self.secret)
+            self.assertFalse(result['observationPresent']);self.assertFalse(result['authorizesRelease'])
+            self.assertEqual(result['engineTaskState'],'unverified');self.assertEqual(len(self.calls),1)
+        finally:restarted.close();lease.close()
+
     def test_coordinator_restart_inspects_authenticated_grant_without_release(self):
         from processing.authority_lease import acquire
         grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
