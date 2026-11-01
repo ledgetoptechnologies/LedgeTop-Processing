@@ -22,7 +22,8 @@ import zipfile
 
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
-from .options import catalog, discover_node, _NoRedirect
+from .options import catalog, discover_node, _NoRedirect, _contains_secret
+from .gateway import gateway_headers, node_arguments
 from .policy import plan
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
@@ -35,9 +36,11 @@ class EngineUnavailable(OSError):
 
 
 class NativeEngine:
-    def __init__(self, origin, token=''):
+    def __init__(self, origin, token='', gateway_secret=''):
         self.origin, self.token = origin, token
-        self.client = Client(origin)
+        self.gateway_secret = gateway_secret
+        self.gateway_headers = gateway_headers(origin, gateway_secret)
+        self.client = Client(origin, gateway_secret=gateway_secret, reject_response_secrets=(token,))
 
     def route(self, route, **query):
         if self.token:
@@ -46,7 +49,7 @@ class NativeEngine:
 
     def read(self, route, *, missing=False, limit=4 * 1024 ** 2, **query):
         try:
-            request = Request(self.origin + self.route(route, **query))
+            request = Request(self.origin + self.route(route, **query), headers=self.gateway_headers)
             with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=5) as response:
                 if 'json' not in response.headers.get('Content-Type', ''):
                     raise ValueError()
@@ -54,6 +57,9 @@ class NativeEngine:
                 if len(raw) > limit:
                     raise ValueError()
                 value = json.loads(raw)
+                if any(secret and _contains_secret(value, secret)
+                       for secret in (self.token, self.gateway_secret)):
+                    raise ValueError()
                 if isinstance(value, dict) and 'error' in value:
                     raise ValueError()
                 return value
@@ -87,6 +93,8 @@ class NativeEngine:
             file=path, prefix=prefix, suffix=f'\r\n--{boundary}--\r\n'.encode(),
             expected_hash=item['sha256'], timeout=120)
         result = json.loads(raw)
+        if any(secret and _contains_secret(result, secret) for secret in (self.token, self.gateway_secret)):
+            raise SmokeError('engine response contains credential')
         if not isinstance(result, dict) or result.get('success') is not True or 'error' in result:
             raise SmokeError('engine upload acknowledgment uncertain')
 
@@ -99,14 +107,17 @@ class NativeEngine:
             raw = self.client.request('POST', self.route(route), body=urlencode({'uuid': identifier}).encode(),
                                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
             result = json.loads(raw)
+        if any(secret and _contains_secret(result, secret) for secret in (self.token, self.gateway_secret)):
+            raise SmokeError('engine response contains credential')
         if (not isinstance(result, dict) or 'error' in result or result.get('success') is False
                 or ('uuid' in result and result['uuid'] != identifier)):
             raise SmokeError('engine mutation acknowledgment uncertain')
         return result
 
     def download(self, identifier):
-        return build_opener(ProxyHandler({}), _NoRedirect()).open(
-            self.origin + self.route('/task/' + identifier + '/download/all.zip'), timeout=60)
+        request = Request(self.origin + self.route('/task/' + identifier + '/download/all.zip'),
+                          headers=self.gateway_headers)
+        return build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=60)
 
 
 class ViewerService:
@@ -114,8 +125,8 @@ class ViewerService:
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
-        self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
-                                  'main': NativeEngine(config.main_node_url, config.main_node_token)}
+        self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token, getattr(config, 'local_gateway_secret', '')),
+                                  'main': NativeEngine(config.main_node_url, config.main_node_token, getattr(config, 'main_gateway_secret', ''))}
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -124,8 +135,8 @@ class ViewerService:
         self._downloads = {}
 
     def _catalog(self):
-        return catalog([('local', self.config.local_node_url, self.config.local_node_token),
-                        ('main', self.config.main_node_url, self.config.main_node_token)])
+        return catalog([node_arguments('local', self.config.local_node_url, self.config.local_node_token, getattr(self.config, 'local_gateway_secret', '')),
+                        node_arguments('main', self.config.main_node_url, self.config.main_node_token, getattr(self.config, 'main_gateway_secret', ''))])
 
     def options(self):
         current = self._catalog()
@@ -146,12 +157,12 @@ class ViewerService:
 
     def _selected_options(self, node_id):
         if node_id == 'cluster':
-            role, origin, token = 'local', self.config.local_node_url, self.config.local_node_token
+            role, origin, token, secret = 'local', self.config.local_node_url, self.config.local_node_token, getattr(self.config, 'local_gateway_secret', '')
         elif node_id == 'main':
-            role, origin, token = 'main', self.config.main_node_url, self.config.main_node_token
+            role, origin, token, secret = 'main', self.config.main_node_url, self.config.main_node_token, getattr(self.config, 'main_gateway_secret', '')
         else:
             raise Conflict('unknown selected node')
-        snapshot = discover_node(role, origin, token)
+        snapshot = discover_node(role, origin, token, secret) if secret else discover_node(role, origin, token)
         if not snapshot['available']:
             raise Conflict('selected engine options unavailable')
         return snapshot['options']
@@ -635,10 +646,10 @@ class ViewerService:
                 return
             task = self.store.task_for_job(queued[0]['id'])
             nodes = {}
-            for node, role, origin, token in (
-                    ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
-                    ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
-                nodes[node] = {**self.probe(role, origin, token),
+            for node, role, origin, token, secret in (
+                    ('cluster', 'local', self.config.local_node_url, self.config.local_node_token, getattr(self.config, 'local_gateway_secret', '')),
+                    ('main', 'main', self.config.main_node_url, self.config.main_node_token, getattr(self.config, 'main_gateway_secret', ''))):
+                nodes[node] = {**(self.probe(role, origin, token, secret) if secret else self.probe(role, origin, token)),
                                'state': self.queue.get_node(node)['state']}
             decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
                             self.config.local_max_photos, self.config.local_max_input_bytes)

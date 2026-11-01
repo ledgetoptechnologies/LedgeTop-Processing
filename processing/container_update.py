@@ -86,7 +86,13 @@ class ComposeNode:
         token = getattr(args,'node_token',os.environ.get('NODEODX_API_TOKEN',''))
         if type(token) is not str or len(token)>4096 or not all(0x21<=ord(c)<=0x7e for c in token):
             raise UpdateError('invalid private engine credential')
-        self.node = Client(loopback(args.node_origin), token, node=True)
+        gateway_secret = os.environ.get('NODE_GATEWAY_SECRET', '')
+        from .config import GATEWAY_CLIENT_QUALIFIED
+        if gateway_secret and GATEWAY_CLIENT_QUALIFIED is not True:
+            raise UpdateError('gateway client profile not qualified')
+        if gateway_secret and gateway_secret == token:
+            raise UpdateError('gateway credential must be separate')
+        self.node = Client(loopback(args.node_origin), token, node=True, gateway_secret=gateway_secret)
 
     def docker(self, command, *, timeout=30):
         try:

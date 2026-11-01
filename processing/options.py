@@ -13,6 +13,7 @@ import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from .gateway import gateway_headers
 
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z')
@@ -46,9 +47,10 @@ def _origin(value):
     return value.rstrip('/')
 
 
-def _get_json(origin, route, token, limit):
+def _get_json(origin, route, token, limit, gateway_secret=''):
     query = '?' + urlencode({'token': token}) if token else ''
-    request = Request(origin + route + query, headers={'Accept': 'application/json'})
+    headers = {'Accept': 'application/json', **gateway_headers(origin, gateway_secret)}
+    request = Request(origin + route + query, headers=headers)
     opener = build_opener(ProxyHandler({}), _NoRedirect())
     with opener.open(request, timeout=3) as response:
         media_type = response.headers.get_content_type().lower()
@@ -103,7 +105,7 @@ def _contains_secret(value, token):
     return False
 
 
-def discover_node(role, origin, token=''):
+def discover_node(role, origin, token='', gateway_secret=''):
     """Fetch a fresh snapshot; errors contain no URL, credential or server body."""
     if role not in ROLES:
         raise ValueError('unknown configured node role')
@@ -118,9 +120,9 @@ def discover_node(role, origin, token=''):
         if (not isinstance(token, str) or len(token) > 4096
                 or any(ord(char) < 33 or ord(char) > 126 for char in token)):
             raise ValueError('invalid configured credential')
-        info = _validate_info(_get_json(origin, '/info', token, MAX_INFO))
-        options = _validate_options(_get_json(origin, '/options', token, MAX_OPTIONS))
-        if _contains_secret([info, options], token):
+        info = _validate_info(_get_json(origin, '/info', token, MAX_INFO, gateway_secret))
+        options = _validate_options(_get_json(origin, '/options', token, MAX_OPTIONS, gateway_secret))
+        if any(_contains_secret([info, options], secret) for secret in (token, gateway_secret)):
             raise ValueError('credential reflected by upstream')
         option_hash = _sha(sorted(options, key=lambda option: option['name']))
         return {**unavailable, **info, 'available': True, 'reason': None,
@@ -139,12 +141,12 @@ def catalog(nodes):
     """Exact-definition intersection across every configured node, never a cache.
 
     ``nodes`` contains at most the unique fixed roles local/main, each as
-    (role, configured_origin, optional_token). Unconfigured roles are reported
+    (role, configured_origin, optional_token[, optional_gateway_secret]). Unconfigured roles are reported
     but do not constrain the intersection. Any configured unavailable node closes
     the fleet catalog; healthy per-node snapshots remain available for inspection.
     """
     nodes = list(nodes)
-    if (not 1 <= len(nodes) <= 2 or any(not isinstance(node, (tuple, list)) or len(node) != 3 for node in nodes)
+    if (not 1 <= len(nodes) <= 2 or any(not isinstance(node, (tuple, list)) or len(node) not in (3, 4) for node in nodes)
             or any(node[0] not in ROLES for node in nodes)
             or len({node[0] for node in nodes}) != len(nodes)):
         raise ValueError('catalog requires unique fixed local/main node configurations')

@@ -5,6 +5,8 @@ import re
 from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
+from .gateway import gateway_headers
+from .options import _contains_secret
 
 REQUIRED_VIEWER_OUTPUTS = frozenset(("pc-ept", "gltf", "3d-tiles"))
 
@@ -14,10 +16,10 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _get_json(origin: str, route: str, max_bytes: int, token: str = ''):
+def _get_json(origin: str, route: str, max_bytes: int, token: str = '', gateway_secret: str = ''):
     if token:
         route += '?' + urlencode({'token': token})
-    request = Request(f"{origin}{route}", headers={"Accept": "application/json"})
+    request = Request(f"{origin}{route}", headers={"Accept": "application/json", **gateway_headers(origin, gateway_secret)})
     with build_opener(ProxyHandler({}), _NoRedirect).open(request, timeout=3) as response:
         if "json" not in response.headers.get("Content-Type", "").lower():
             raise ValueError("unexpected content type")
@@ -56,12 +58,14 @@ def _viewer_type(info: dict) -> str | None:
     return None
 
 
-def probe_node(role: str, origin: str, token: str = '') -> dict:
+def probe_node(role: str, origin: str, token: str = '', gateway_secret: str = '') -> dict:
     if not origin:
         return {"role": role, "configured": False, "ready": False, "reason": "not_configured"}
     try:
-        info = _get_json(origin, "/info", 65536, token)
-        options = _get_json(origin, "/options", 262144, token)
+        info = _get_json(origin, "/info", 65536, token, gateway_secret)
+        options = _get_json(origin, "/options", 262144, token, gateway_secret)
+        if any(_contains_secret([info, options], secret) for secret in (token, gateway_secret)):
+            raise ValueError('credential reflected by upstream')
         if not isinstance(options, list):
             raise ValueError("options must be an array")
         option_names = {item.get("name") for item in options if isinstance(item, dict) and isinstance(item.get("name"), str)}

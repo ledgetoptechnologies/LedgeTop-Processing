@@ -16,6 +16,7 @@ import threading
 
 from . import reference_protocol as p
 from .options import catalog
+from .gateway import node_arguments
 from .reference_api import ReferenceAPI, Response
 from .reference_control import ReferenceControlAPI
 from .reference_http import create_reference_http_server
@@ -101,7 +102,8 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError("reference workers must exactly cover configured queue nodes")
         legacy = {secret for secret in (config.api_token, config.prototype_operator_token,
             config.prototype_observer_token, config.viewer_token, config.viewer_staging_token,
-            config.local_node_token, config.main_node_token) if secret}
+            config.local_node_token, config.main_node_token,
+            getattr(config, 'local_gateway_secret', ''), getattr(config, 'main_gateway_secret', '')) if secret}
         credentials = []
         for token in viewers.values():
             credentials.append(token)
@@ -271,8 +273,8 @@ class ReferenceRuntime:
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
                 recovery_bindings=recovery)
             discover = discover or (lambda: catalog([
-                ("local", config.local_node_url, config.local_node_token),
-                ("main", config.main_node_url, config.main_node_token)]))
+                node_arguments("local", config.local_node_url, config.local_node_token, getattr(config, 'local_gateway_secret', '')),
+                node_arguments("main", config.main_node_url, config.main_node_token, getattr(config, 'main_gateway_secret', ''))]))
             staged=None
             if settings.staged_ack_bearers is not None:
                 if not STAGED_ACK_SCHEMA_QUALIFIED:
@@ -285,7 +287,8 @@ class ReferenceRuntime:
                 existing.update(worker[key] for worker in settings.workers.values() for key in ('bearer','resultBearer'))
                 existing.update(secret for secret in (config.api_token,config.prototype_operator_token,
                     config.prototype_observer_token,config.viewer_token,config.viewer_staging_token,
-                    config.local_node_token,config.main_node_token) if secret)
+                    config.local_node_token,config.main_node_token,
+                    getattr(config, 'local_gateway_secret', ''),getattr(config, 'main_gateway_secret', '')) if secret)
                 if staged_tokens & existing or not {binding['environment'] for binding in settings.staged_ack_bearers.values()} <= set(settings.viewer_bearers.values()):
                     raise RuntimeConfigurationError('staged credential scope or separation changed')
                 staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers)

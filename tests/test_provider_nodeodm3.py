@@ -22,11 +22,17 @@ class NodeODM3ProviderTests(unittest.TestCase):
         self.info = copy.deepcopy(INFO)
         self.options = copy.deepcopy(OPTIONS)
         self.paths = []
+        self.gateway = None
+        self.gateway_headers = []
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 u = urlsplit(self.path)
+                owner.gateway_headers.append(self.headers.get('X-LedgeTop-Gateway'))
+                if owner.gateway is not None and self.headers.get('X-LedgeTop-Gateway') != owner.gateway:
+                    self.send_error(401)
+                    return
                 if parse_qs(u.query) != {'token': [TOKEN]}:
                     self.send_error(401)
                     return
@@ -86,6 +92,19 @@ class NodeODM3ProviderTests(unittest.TestCase):
         self.options.pop()
         self.assertEqual(self.probe()['reason'], 'viewer_outputs_missing')
         self.assertEqual(self.route(self.probe())['decision'], 'wait')
+
+    def test_gateway_header_is_used_and_reflected_credential_fails_closed(self):
+        gateway = 'SyntheticGatewayKey_' + 'c' * 32
+        self.gateway = gateway
+        result = probe_node('local', self.origin, TOKEN, gateway)
+        self.assertTrue(result['ready'])
+        self.assertEqual(self.gateway_headers, [gateway, gateway])
+        self.assertNotIn(gateway, json.dumps(result))
+        self.info['engineVersion'] = gateway
+        result = probe_node('local', self.origin, TOKEN, gateway)
+        self.assertFalse(result['ready'])
+        self.assertNotIn(gateway, json.dumps(result))
+        self.assertFalse(probe_node('local', self.origin, TOKEN, gateway + '\n')['ready'])
 
     def test_unknown_engine_or_inconsistent_version_stays_unready(self):
         for engine, version in [('unknown', '3.6.2'), ('odx', '3.6.2'), ('ODM', '3.6.2'),

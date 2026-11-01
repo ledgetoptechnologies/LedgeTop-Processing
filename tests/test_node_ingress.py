@@ -20,6 +20,8 @@ class IngressConfigurationTests(unittest.TestCase):
     def ingress(self, **changes):
         self.config.update(changes)
         (self.root / 'gateway.json').write_text(json.dumps(self.config))
+        if os.name != 'nt':
+            (self.root / 'gateway.json').chmod(0o600)
         return Ingress(self.root)
 
     def test_restricted_config_allows_exact_peers_and_loopback_then_denies_all(self):
@@ -38,6 +40,56 @@ class IngressConfigurationTests(unittest.TestCase):
         text = configuration(13005, 13004, False)
         self.assertNotIn('allow ', text)
         self.assertNotIn('deny all;', text)
+
+    def test_tls_profile_renders_auth_on_closed_and_open_without_secret(self):
+        for closed in (True, False):
+            text = configuration(13005, 13004, closed, ['192.168.50.89'], True)
+            self.assertIn('listen 0.0.0.0:13005 ssl;', text)
+            self.assertIn('ssl_certificate /config/gateway.crt;', text)
+            self.assertIn('ssl_certificate_key /config/gateway.key;', text)
+            self.assertIn('include /config/gateway-auth.conf;', text)
+            self.assertIn('access_log off;', text)
+            self.assertIn('error_log /dev/null crit;', text)
+            if closed:
+                self.assertIn('return 503;', text)
+                self.assertNotIn('proxy_pass', text)
+            else:
+                self.assertIn('proxy_set_header X-LedgeTop-Gateway "";', text)
+                self.assertIn('proxy_pass http://127.0.0.1:13004;', text)
+
+    def test_tls_profile_requires_qualification_before_reading_credentials(self):
+        with self.assertRaisesRegex(GateError, 'not qualified'):
+            self.ingress(gatewayAuthEnabled=True, gatewaySecret='a' * 48)
+        with self.assertRaisesRegex(GateError, 'invalid gateway'):
+            self.ingress(gatewayAuthEnabled='true')
+
+    def test_gateway_probe_uses_verified_https_header_only_for_gateway(self):
+        secret = 'SyntheticGatewayKey_' + 'a' * 32
+        with patch('ops.node_ingress.GATEWAY_AUTH_QUALIFIED', True), \
+                patch.object(Ingress, '_tls_files'), \
+                patch('ops.node_ingress.ssl.create_default_context'):
+            gate = self.ingress(gatewayAuthEnabled=True, gatewaySecret=secret, backendToken='native-token')
+        response = MagicMock(status=200)
+        response.read.return_value = b'{"engine":"odx"}'
+        gateway_opener = MagicMock()
+        gateway_opener.open.return_value.__enter__.return_value = response
+        gate.gateway_opener = gateway_opener
+        self.assertEqual(gate.http(13005), (200, {'engine': 'odx'}))
+        request = gateway_opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, 'https://127.0.0.1:13005/info?token=native-token')
+        self.assertEqual(request.get_header('X-ledgetop-gateway'), secret)
+        self.assertNotIn(secret, request.full_url)
+        backend_opener = MagicMock()
+        backend_opener.open.return_value.__enter__.return_value = response
+        gate.opener = backend_opener
+        gate.http(13004)
+        backend_opener.open.assert_called_once_with('http://127.0.0.1:13004/info?token=native-token', timeout=3)
+
+    def test_gateway_secret_must_differ_from_native_token(self):
+        secret = 'SyntheticGatewayKey_' + 'b' * 32
+        with patch('ops.node_ingress.GATEWAY_AUTH_QUALIFIED', True), \
+                self.assertRaisesRegex(GateError, 'must differ'):
+            self.ingress(gatewayAuthEnabled=True, gatewaySecret=secret, backendToken=secret)
 
     def test_canonical_loopback_is_not_duplicated_and_closed_gate_stays_closed(self):
         text = configuration(13005, 13004, True, ['127.0.0.1', '::1'])
@@ -112,6 +164,66 @@ class IngressTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_tls_profile_persists_auth_across_close_and_open(self):
+        secret = 'SyntheticGatewayKey_' + 'c' * 32
+        self.gate.gateway_auth = True
+        self.gate.config.update(gatewaySecret=secret, backendToken='native-token')
+        (self.root / 'gateway.json').write_text('{}')
+        (self.root / 'gateway.json').chmod(0o600)
+        info = {'engine': 'odx', 'engineVersion': '3.8.5', 'version': '2.4.0'}
+        with patch('ops.node_ingress.GATEWAY_AUTH_QUALIFIED', True), \
+                patch.object(self.gate, '_tls_files'), \
+                patch.object(self.gate, 'inspect', return_value=self.item), \
+                patch.object(self.gate, 'workers', side_effect=[{101}, {102}, {102}, {103}]), \
+                patch.object(self.gate, 'docker'), \
+                patch.object(self.gate, 'backend', return_value=info), \
+                patch.object(self.gate, 'http', side_effect=[(503, None), (200, info)]):
+            self.assertEqual(self.gate.change(True)['state'], 'closed')
+            closed = (self.root / 'public-config/nginx.conf').read_text()
+            self.assertIn('include /config/gateway-auth.conf;', closed)
+            self.assertNotIn(secret, closed)
+            self.assertEqual(self.gate.change(False, self.image)['state'], 'open')
+        opened = (self.root / 'public-config/nginx.conf').read_text()
+        private = self.root / 'public-config/gateway-auth.conf'
+        self.assertIn('include /config/gateway-auth.conf;', opened)
+        self.assertIn('proxy_set_header X-LedgeTop-Gateway "";', opened)
+        self.assertNotIn(secret, opened)
+        self.assertIn(secret, private.read_text())
+        self.assertEqual(private.stat().st_mode & 0o777, 0o600)
+
+    def test_invalid_gateway_secret_does_not_write_state(self):
+        self.gate.gateway_auth = True
+        self.gate.config['gatewaySecret'] = 'invalid; return 200;'
+        with patch('ops.node_ingress.GATEWAY_AUTH_QUALIFIED', True), \
+                patch.object(self.gate, '_tls_files'), self.assertRaises(GateError):
+            self.gate.change(True)
+        self.assertFalse((self.root / 'state.json').exists())
+
+    def test_tls_material_rejects_group_readable_key_and_untrusted_directory(self):
+        directory = self.root / 'public-config'
+        for name in ('gateway.crt', 'gateway.key', 'gateway-ca.crt'):
+            path = directory / name
+            path.write_text('synthetic')
+            path.chmod(0o600 if name == 'gateway.key' else 0o644)
+        self.gate._tls_files()
+        (directory / 'gateway.key').chmod(0o640)
+        with self.assertRaisesRegex(GateError, 'trust material unavailable'):
+            self.gate._tls_files()
+        (directory / 'gateway.key').chmod(0o600)
+        directory.chmod(0o777)
+        with self.assertRaisesRegex(GateError, 'trust material unavailable'):
+            self.gate._tls_files()
+
+    def test_gateway_json_must_be_private_before_state_change(self):
+        self.gate.gateway_auth = True
+        self.gate.config['gatewaySecret'] = 'SyntheticGatewayKey_' + 'd' * 32
+        (self.root / 'gateway.json').write_text('{}')
+        (self.root / 'gateway.json').chmod(0o644)
+        with patch('ops.node_ingress.GATEWAY_AUTH_QUALIFIED', True), \
+                patch.object(self.gate, '_tls_files'), self.assertRaises(GateError):
+            self.gate.change(True)
+        self.assertFalse((self.root / 'state.json').exists())
 
     def test_busy_old_connection_prevents_close_attestation_and_reopen(self):
         with patch.object(self.gate, 'inspect', return_value=self.item), \

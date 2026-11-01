@@ -41,7 +41,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting'))
+                      'executionRouting','engineGatewaySecret'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -343,6 +343,14 @@ def load_config(path):
         token = config['engineToken']
         if type(token) is not str or len(token) > 4096 or not all(0x21 <= ord(c) <= 0x7e for c in token):
             raise ValueError('invalid engine credential')
+        from processing.gateway import gateway_headers
+        gateway_secret = config.setdefault('engineGatewaySecret', '')
+        gateway_headers(config['engineOrigin'], gateway_secret)
+        from processing.config import GATEWAY_CLIENT_QUALIFIED
+        if gateway_secret and GATEWAY_CLIENT_QUALIFIED is not True:
+            raise ValueError('gateway client profile not qualified')
+        if gateway_secret and gateway_secret in (token, config['workerBearer'], config['resultReadBearer']):
+            raise ValueError('gateway credential must be separate')
         version = config['engineVersion']
         if type(version) is not str or not 1 <= len(version) <= 128 or not all(0x21 <= ord(c) <= 0x7e for c in version):
             raise ValueError('explicit actual engine version pin required')
@@ -405,7 +413,7 @@ def _build_worker(config,owner,resources):
             or parsed.username is not None or parsed.password is not None or parsed.path not in ('','/')
             or parsed.query or parsed.fragment or parsed.port == 0):
         raise ValueError('fixed literal loopback engine origin required')
-    engine = NativeEngine(config['engineOrigin'], config['engineToken'])
+    engine = NativeEngine(config['engineOrigin'], config['engineToken'], config.get('engineGatewaySecret', ''))
     info = engine.read('/info')
     if type(info) is not dict or info.get('engineVersion') != config['engineVersion']:
         raise ValueError('actual engine version differs from configured pin')

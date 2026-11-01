@@ -4,8 +4,11 @@ from dataclasses import dataclass, field
 import os
 import re
 from urllib.parse import urlsplit
+from .gateway import gateway_headers
 
 ADMISSION_DRAIN_QUALIFIED = False
+# No gateway server, restart boundary or credential lifecycle has been qualified.
+GATEWAY_CLIENT_QUALIFIED = False
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,8 @@ class Config:
     prototype_observer_token: str = ""
     local_node_token: str = field(default="", repr=False)
     main_node_token: str = field(default="", repr=False)
+    local_gateway_secret: str = field(default="", repr=False)
+    main_gateway_secret: str = field(default="", repr=False)
     treedar_node_ids: tuple[str, ...] | None = None
     viewer_enabled: bool = False
     viewer_token: str = field(default='', repr=False)
@@ -112,6 +117,18 @@ def from_environment() -> Config:
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
+    gateway_secrets = tuple(os.environ.get(name, '') for name in
+                            ('LOCAL_NODE_GATEWAY_SECRET', 'MAIN_NODE_GATEWAY_SECRET'))
+    if any(gateway_secrets) and GATEWAY_CLIENT_QUALIFIED is not True:
+        raise ValueError('gateway client profile not qualified')
+    node_origins = tuple(_node_origin(os.environ.get(name, '')) for name in
+                         ('LOCAL_NODE_URL', 'MAIN_NODE_URL'))
+    for origin, secret in zip(node_origins, gateway_secrets):
+        gateway_headers(origin, secret)
+    all_other_secrets = (token, operator, observer, viewer_token, viewer_staging, *node_tokens)
+    if any(secret and secret in all_other_secrets for secret in gateway_secrets) or (
+            gateway_secrets[0] and gateway_secrets[0] == gateway_secrets[1]):
+        raise ValueError('gateway credentials must be separate from all other credentials')
     return Config(
         api_token=token,
         local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
@@ -134,6 +151,8 @@ def from_environment() -> Config:
         prototype_observer_token=observer,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
+        local_gateway_secret=gateway_secrets[0],
+        main_gateway_secret=gateway_secrets[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         admission_drain_enabled=admission == '1',
         authority_lease_dir=lease_dir,

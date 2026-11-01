@@ -13,11 +13,15 @@ from .policy import plan
 from .provider import probe_node
 from .prototype import Queue, Conflict
 from .options import catalog
+from .gateway import node_arguments
 
 MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    from .config import GATEWAY_CLIENT_QUALIFIED
+    if (getattr(config, 'local_gateway_secret', '') or getattr(config, 'main_gateway_secret', '')) and GATEWAY_CLIENT_QUALIFIED is not True:
+        raise RuntimeError('gateway client profile not qualified')
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
@@ -130,8 +134,8 @@ def make_handler(config: Config):
             return True
 
         def _nodes(self) -> tuple[dict, dict]:
-            return (probe_node("local", config.local_node_url, config.local_node_token),
-                    probe_node("main", config.main_node_url, config.main_node_token))
+            return (probe_node(*node_arguments("local", config.local_node_url, config.local_node_token, getattr(config, 'local_gateway_secret', ''))),
+                    probe_node(*node_arguments("main", config.main_node_url, config.main_node_token, getattr(config, 'main_gateway_secret', ''))))
 
         def do_GET(self):
             if facade and facade.handle(self):
@@ -190,8 +194,8 @@ def make_handler(config: Config):
             elif self.path == '/v1/options':
                 if self._authorized(observer=True):
                     snapshot = catalog([
-                        ('local', config.local_node_url, config.local_node_token),
-                        ('main', config.main_node_url, config.main_node_token)])
+                        node_arguments('local', config.local_node_url, config.local_node_token, getattr(config, 'local_gateway_secret', '')),
+                        node_arguments('main', config.main_node_url, config.main_node_token, getattr(config, 'main_gateway_secret', ''))])
                     self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
                         'viewerNativeApiEnabled': config.viewer_enabled,
                         'viewerProviderReady': config.viewer_enabled and snapshot['ready'],

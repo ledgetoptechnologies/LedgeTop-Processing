@@ -22,12 +22,19 @@ class Engine:
         self.token = 'private-token-keep-out-of-results'
         self.mode = 'normal'
         self.requests = []
+        self.gateway = None
+        self.gateway_headers = []
         engine = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 parsed = urlsplit(self.path)
                 engine.requests.append((parsed.path, parse_qs(parsed.query)))
+                engine.gateway_headers.append(self.headers.get('X-LedgeTop-Gateway'))
+                if engine.gateway is not None and self.headers.get('X-LedgeTop-Gateway') != engine.gateway:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
                 if parse_qs(parsed.query).get('token') != [engine.token]:
                     self.send_response(401)
                     self.end_headers()
@@ -59,11 +66,15 @@ class Engine:
 
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.origin = f'http://127.0.0.1:{self.server.server_port}'
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
 
     def close(self):
         self.server.shutdown()
         self.server.server_close()
+        self.thread.join(2)
+        if self.thread.is_alive():
+            raise RuntimeError('owned test server did not stop')
 
 
 class OptionsTests(unittest.TestCase):
@@ -115,6 +126,37 @@ class OptionsTests(unittest.TestCase):
         rejected = self.discover()
         self.assertFalse(rejected['available'])
         self.assertNotIn(self.engine.token, json.dumps(rejected))
+
+    def test_gateway_header_is_separate_from_query_and_reflection_is_not_returned(self):
+        gateway = 'SyntheticGatewayKey_' + 'a' * 32
+        self.engine.gateway = gateway
+        result = discover_node('local', self.engine.origin, self.engine.token, gateway)
+        self.assertTrue(result['available'])
+        self.assertEqual(self.engine.gateway_headers, [gateway, gateway])
+        self.assertTrue(all(query == {'token': [self.engine.token]} for _, query in self.engine.requests))
+        self.assertNotIn(gateway, json.dumps(result))
+        self.engine.options[0]['metadata'] = {'secret': gateway}
+        result = discover_node('local', self.engine.origin, self.engine.token, gateway)
+        self.assertFalse(result['available'])
+        self.assertNotIn(gateway, json.dumps(result))
+        self.assertFalse(discover_node('local', self.engine.origin, self.engine.token, gateway + '\n')['available'])
+
+    def test_catalog_accepts_gateway_per_node_without_returning_it(self):
+        gateway = 'SyntheticGatewayKey_' + 'b' * 32
+        self.engine.gateway = gateway
+        result = catalog([('local', self.engine.origin, self.engine.token, gateway), ('main', '', '', '')])
+        self.assertTrue(result['ready'])
+        self.assertNotIn(gateway, json.dumps(result))
+
+    def test_gateway_header_is_not_forwarded_on_redirect(self):
+        gateway = 'SyntheticGatewayKey_' + 'd' * 32
+        self.engine.gateway = gateway
+        self.engine.mode = 'redirect'
+        result = discover_node('local', self.engine.origin, self.engine.token, gateway)
+        self.assertFalse(result['available'])
+        self.assertEqual([path for path, _ in self.engine.requests], ['/info'])
+        self.assertEqual(self.engine.gateway_headers, [gateway])
+        self.assertNotIn(gateway, json.dumps(result))
 
     def test_heterogeneous_fleet_returns_only_exact_common_definitions(self):
         other = Engine()

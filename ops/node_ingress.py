@@ -11,11 +11,16 @@ import json
 import os
 from pathlib import Path
 import re
+import ssl
+import stat
 import subprocess
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler
+from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler, HTTPSHandler, Request
+
+# This profile is not qualified for host deployment or runtime use.
+GATEWAY_AUTH_QUALIFIED = False
 
 
 class GateError(Exception):
@@ -65,20 +70,46 @@ def _allowed_clients(values):
     return result
 
 
-def configuration(listen, backend, closed, allowed_clients=()):
+def _gateway_secret(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', value):
+        raise GateError('invalid private gateway credential')
+    return value
+
+
+def _private_file(path):
+    try:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (hasattr(os, 'geteuid') and info.st_uid != os.geteuid())
+                or (os.name != 'nt' and stat.S_IMODE(info.st_mode) & 0o077)):
+            raise ValueError()
+        return info
+    except (OSError, ValueError):
+        raise GateError('private gateway material unavailable') from None
+
+
+def configuration(listen, backend, closed, allowed_clients=(), gateway_auth=False):
     if any(type(p) is not int or not 1024 <= p <= 65535 for p in (listen, backend)) or listen == backend:
         raise GateError('invalid fixed ingress ports')
     allowed = _allowed_clients(allowed_clients)
+    if type(gateway_auth) is not bool:
+        raise GateError('invalid gateway authentication profile')
     # Empty preserves the legacy unrestricted gate. Restricted gates use the
     # actual peer address; neither X-Forwarded-For nor any other header is trusted.
     access = ''
     if allowed:
         addresses = dict.fromkeys(('127.0.0.1', '::1', *allowed))
         access = '\n        '.join(f'allow {address};' for address in addresses) + '\n        deny all;'
+    auth = 'include /config/gateway-auth.conf;' if gateway_auth else ''
+    upstream_auth = 'proxy_set_header X-LedgeTop-Gateway "";' if gateway_auth else ''
+    tls = ('ssl_certificate /config/gateway.crt;\n        '
+           'ssl_certificate_key /config/gateway.key;') if gateway_auth else ''
+    listen_tls = ' ssl' if gateway_auth else ''
     route = 'return 503;' if closed else f'''
         proxy_pass http://127.0.0.1:{backend};
         proxy_http_version 1.1;
         proxy_set_header Connection "";
+        {upstream_auth}
         proxy_request_buffering off;
         proxy_buffering off;
         proxy_read_timeout 3600s;
@@ -97,11 +128,12 @@ http {{
     scgi_temp_path /tmp/scgi;
     client_max_body_size 0;
     server {{
-        listen 0.0.0.0:{listen};
-        listen [::]:{listen} ipv6only=on;
+        listen 0.0.0.0:{listen}{listen_tls};
+        listen [::]:{listen}{listen_tls} ipv6only=on;
+        {tls}
         {access}
         add_header Cache-Control no-store always;
-        location / {{ {route} }}
+        location / {{ {auth} {route} }}
     }}
 }}
 '''
@@ -121,8 +153,13 @@ class Ingress:
                 raise GateError('invalid owned container identity')
         if not re.fullmatch(r'sha256:[a-f0-9]{64}', self.config['proxyImage']):
             raise GateError('immutable gateway image required')
+        self.gateway_auth = self.config.get('gatewayAuthEnabled', False)
+        if type(self.gateway_auth) is not bool:
+            raise GateError('invalid gateway authentication profile')
+        if self.gateway_auth and GATEWAY_AUTH_QUALIFIED is not True:
+            raise GateError('gateway authentication profile not qualified')
         configuration(self.config['listenPort'], self.config['backendPort'], True,
-                      self.config.get('allowedClients', ()))
+                      self.config.get('allowedClients', ()), self.gateway_auth)
         if self.config.get('backendEngine', 'odx') not in ('odm', 'odx'):
             raise GateError('explicit ODM-family backend engine required')
         token = self.config.get('backendToken', '')
@@ -130,6 +167,36 @@ class Ingress:
                 or any(ord(character) < 33 or ord(character) > 126 for character in token)):
             raise GateError('invalid private backend credential')
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
+        if self.gateway_auth:
+            secret = _gateway_secret(self.config.get('gatewaySecret'))
+            if token and secret == token:
+                raise GateError('gateway credential must differ from backend credential')
+            _private_file(root / 'gateway.json')
+            self._tls_files()
+            try:
+                context = ssl.create_default_context(cafile=str(root / 'public-config' / 'gateway-ca.crt'))
+            except (OSError, ssl.SSLError, ValueError):
+                raise GateError('gateway trust material unavailable') from None
+            self.gateway_opener = build_opener(ProxyHandler({}), NoRedirect(), HTTPSHandler(context=context))
+
+    def _tls_files(self):
+        """Fixed, owned and non-symlink material; never inspect or print its bytes."""
+        base = self.root / 'public-config'
+        try:
+            base_info = base.lstat()
+            if (base.resolve(strict=True) != base or not stat.S_ISDIR(base_info.st_mode)
+                    or (hasattr(os, 'geteuid') and base_info.st_uid != os.geteuid())
+                    or stat.S_IMODE(base_info.st_mode) & 0o022):
+                raise ValueError()
+            for name in ('gateway.crt', 'gateway.key', 'gateway-ca.crt'):
+                path = base / name
+                info = path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                        (hasattr(os, 'geteuid') and info.st_uid != os.geteuid()) or
+                        (stat.S_IMODE(info.st_mode) & (0o077 if name == 'gateway.key' else 0o022))):
+                    raise ValueError()
+        except (OSError, ValueError):
+            raise GateError('gateway trust material unavailable') from None
 
     def docker(self, args):
         try:
@@ -181,7 +248,14 @@ class Ingress:
         try:
             token = self.config.get('backendToken', '')
             query = '?' + urlencode({'token': token}) if token else ''
-            with self.opener.open(f'http://127.0.0.1:{port}/info' + query, timeout=3) as response:
+            if getattr(self, 'gateway_auth', False) and port == self.config['listenPort']:
+                request = Request(f'https://127.0.0.1:{port}/info' + query,
+                                  headers={'X-LedgeTop-Gateway': self.config['gatewaySecret']})
+                opener = self.gateway_opener
+            else:
+                request = f'http://127.0.0.1:{port}/info' + query
+                opener = self.opener
+            with opener.open(request, timeout=3) as response:
                 raw = response.read(65537)
                 if len(raw) > 65536:
                     raise GateError('oversized health response')
@@ -206,6 +280,17 @@ class Ingress:
         return info
 
     def change(self, closed, expected=None, seconds=60):
+        gateway_auth = getattr(self, 'gateway_auth', False)
+        if type(gateway_auth) is not bool:
+            raise GateError('invalid gateway authentication profile')
+        if gateway_auth:
+            if GATEWAY_AUTH_QUALIFIED is not True:
+                raise GateError('gateway authentication profile not qualified')
+            self._tls_files()
+            secret = _gateway_secret(self.config.get('gatewaySecret'))
+            if self.config.get('backendToken') and secret == self.config['backendToken']:
+                raise GateError('gateway credential must differ from backend credential')
+            _private_file(self.root / 'gateway.json')
         item = self.inspect()
         if not closed:
             state = json.loads((self.root / 'state.json').read_text())
@@ -216,9 +301,16 @@ class Ingress:
         state = {'state': 'closing' if closed else 'opening', 'containerId': item['Id'],
                  'oldWorkers': sorted(old_workers), 'expectedBackendImage': expected}
         save(self.root / 'state.json', state)
+        if gateway_auth:
+            # Fixed include location and strict token alphabet prevent nginx
+            # syntax injection; the credential is never put in public nginx.conf.
+            save(self.root / 'public-config/gateway-auth.conf',
+                 'if ($http_x_ledgetop_gateway != "' + secret + '") { return 401; }\n',
+                 mode=0o600)
+            _private_file(self.root / 'public-config/gateway-auth.conf')
         save(self.root / 'public-config/nginx.conf',
              configuration(self.config['listenPort'], self.config['backendPort'], closed,
-                           self.config.get('allowedClients', ())), mode=0o644)
+                           self.config.get('allowedClients', ()), gateway_auth), mode=0o644)
         self.docker(['exec', item['Id'], 'nginx', '-t', '-c', '/config/nginx.conf'])
         self.docker(['kill', '--signal', 'HUP', item['Id']])
         deadline = time.monotonic() + seconds

@@ -20,6 +20,8 @@ import time
 from urllib.parse import urlencode, urlsplit
 import uuid
 import zipfile
+from .gateway import gateway_headers
+from .options import _contains_secret
 
 
 PROFILE = 'odx-photo-smoke-v1'
@@ -57,11 +59,20 @@ def exact_origin(value):
 class Client:
     """Direct HTTP connections: no redirects, proxies, request logging or retries."""
 
-    def __init__(self, origin, token='', node=False):
+    def __init__(self, origin, token='', node=False, gateway_secret='', reject_response_secrets=()):
         self.origin = exact_origin(origin)
         self.parsed = urlsplit(self.origin)
         self.token = token
         self.node = node
+        self._gateway_secret = gateway_secret
+        self._gateway_headers = gateway_headers(self.origin, gateway_secret)
+        if (not isinstance(reject_response_secrets, tuple) or
+                any(not isinstance(item, str) for item in reject_response_secrets)):
+            raise SmokeError('invalid response redaction configuration')
+        self._response_secrets = tuple(item.encode('utf-8') for item in
+                                       (token, gateway_secret, *reject_response_secrets) if item)
+        self._response_secret_text = tuple(item for item in
+                                           (token, gateway_secret, *reject_response_secrets) if item)
         if '\r' in token or '\n' in token:
             raise SmokeError('invalid credential')
 
@@ -70,6 +81,10 @@ class Client:
         connection = None
         try:
             headers = dict(headers or {})
+            if self._gateway_headers:
+                if any(str(key).lower() == 'x-ledgetop-gateway' for key in headers):
+                    raise SmokeError('gateway header override refused')
+                headers.update(self._gateway_headers)
             if self.token:
                 if self.node:
                     route += '?' + urlencode({'token': self.token})
@@ -111,6 +126,8 @@ class Client:
             result = response.read(limit + 1)
             if len(result) > limit:
                 raise SmokeError('HTTP response exceeds limit')
+            if any(secret in result for secret in self._response_secrets):
+                raise SmokeError('engine response contains credential')
             return result
         except SmokeError:
             raise
@@ -139,6 +156,8 @@ class Client:
         raw = self.request(method, route, body, headers, timeout=timeout)
         try:
             value = json.loads(raw)
+            if any(_contains_secret(value, secret) for secret in self._response_secret_text):
+                raise ValueError()
             if isinstance(value, dict) and 'error' in value:
                 raise ValueError()
             if not isinstance(value, (dict, list)):
@@ -406,7 +425,14 @@ def run(args):
         if receipt_path.exists():
             raise SmokeError('work already contains a receipt; never repeat an uncertain claim')
         files, digest = read_manifest(args.manifest, photos)
-        node = Client(node_origin, os.environ.get('NODEODX_API_TOKEN', ''), node=True)
+        node_token = os.environ.get('NODEODX_API_TOKEN', '')
+        gateway_secret = os.environ.get('NODE_GATEWAY_SECRET', '')
+        from .config import GATEWAY_CLIENT_QUALIFIED
+        if gateway_secret and GATEWAY_CLIENT_QUALIFIED is not True:
+            raise SmokeError('gateway client profile not qualified')
+        if gateway_secret and gateway_secret in (api_token, node_token):
+            raise SmokeError('gateway credential must be separate')
+        node = Client(node_origin, node_token, node=True, gateway_secret=gateway_secret)
         engine = node.json('GET', '/info')
         options = node.json('GET', '/options')
         if (not isinstance(engine, dict) or engine.get('engine') != 'odx'

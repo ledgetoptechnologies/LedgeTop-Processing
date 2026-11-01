@@ -63,6 +63,19 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
     def tree_settings(self):
         return dict(imageId='sha256:'+'b'*64,sourceRoot=str(self.source),sourceSha256=source_digest(self.source),engineVersion='0.0.1')
 
+    def test_gateway_credential_config_is_separate_and_loopback_scoped(self):
+        self.config['engineGatewaySecret'] = 'G' * 40
+        with self.assertRaises(ValueError): self.load()
+        with patch('processing.config.GATEWAY_CLIENT_QUALIFIED', True):
+            self.assertEqual(self.load()['engineGatewaySecret'], 'G' * 40)
+            for other in ('engineToken', 'workerBearer', 'resultReadBearer'):
+                changed = dict(self.config, **{other: 'G' * 40})
+                with self.subTest(other=other), self.assertRaises(ValueError) as error:
+                    self.load(changed)
+                self.assertNotIn('G' * 40, str(error.exception))
+            changed = dict(self.config, engineOrigin='http://192.168.50.88:3004')
+            with self.assertRaises(ValueError): self.load(changed)
+
     def route(self, tree=True):
         self.config['executionRouting']=dict(schemaVersion=1,mode='per-job-v1',treedar=self.tree_settings() if tree else None)
 
