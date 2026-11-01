@@ -201,8 +201,7 @@ class Maintenance:
             self._cas(row, payload, plan=True)
             if row["state"] != "draining" or self._now() < utc_stamp(row["not_before"])[0]:
                 raise Conflict("node is not ready for its update")
-            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held')", (identifier,)).fetchone():
-                raise Conflict("node still owns running or held work")
+            self._require_unoccupied_node(db, identifier)
             token = secrets.token_urlsafe(32)
             db.execute("""UPDATE nodes SET state='updating',revision=revision+1,update_hash=?,
                 finish_status=NULL WHERE id=?""", (hashlib.sha256(token.encode()).hexdigest(), identifier))
@@ -264,9 +263,25 @@ class Maintenance:
             self._cas(row, payload, plan=True)
             if row["state"] not in ("held", "failed"):
                 raise Conflict("only held or failed maintenance can be resumed")
-            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held')", (identifier,)).fetchone():
-                raise Conflict("node still owns running or held work")
+            self._require_unoccupied_node(db, identifier)
             result = json.dumps({"operatorAction": "resume", "note": payload["note"], "workerStopped": True, 'healthy': True})
             db.execute("""UPDATE nodes SET state='active',revision=revision+1,result=?,
                 update_hash=NULL,finish_status=NULL WHERE id=?""", (result, identifier))
             return self._node_public(self._node(db, identifier))
+
+    def _require_unoccupied_node(self, db, identifier):
+        """Reject maintenance whenever an active job's ownership is uncertain."""
+        active = db.execute("SELECT id,profile,node_id FROM jobs WHERE status IN ('running','held')").fetchall()
+        has_viewer = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_tasks'").fetchone()
+        for job in active:
+            node = job['node_id']
+            if node is None or not db.execute('SELECT 1 FROM nodes WHERE id=?', (node,)).fetchone():
+                raise Conflict('active job node ownership unknown')
+            if job['profile'] == 'odm-viewer-v1':
+                if not has_viewer:
+                    raise Conflict('active Viewer ownership unknown')
+                tasks = db.execute('SELECT node_id,removed FROM viewer_tasks WHERE job_id=?', (job['id'],)).fetchall()
+                if len(tasks) != 1 or tasks[0]['removed'] or tasks[0]['node_id'] != node:
+                    raise Conflict('active Viewer ownership inconsistent')
+            if node == identifier:
+                raise Conflict('node still owns running or held work')

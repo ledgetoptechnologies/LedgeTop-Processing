@@ -161,7 +161,7 @@ class MaintenanceTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.begin()
 
-    def test_legacy_running_job_migrates_to_held_cluster(self):
+    def test_legacy_running_job_migrates_to_held_without_guessing_node(self):
         with tempfile.TemporaryDirectory() as root:
             with sqlite3.connect(root + '/jobs.sqlite3') as db:
                 db.execute('''CREATE TABLE jobs (
@@ -174,10 +174,94 @@ class MaintenanceTests(unittest.TestCase):
             db.close()
             queue = Queue(root)
             try:
-                self.assertEqual(queue.get('legacy')['nodeId'], 'cluster')
+                self.assertIsNone(queue.get('legacy')['nodeId'])
                 self.assertEqual(queue.get('legacy')['status'], 'held')
             finally:
                 queue.close()
+
+    def test_unknown_active_node_blocks_both_updates_and_global_claim(self):
+        self.schedule('cluster'); self.schedule('main')
+        self.submit()
+        with self.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES('held','held','staging',?,'held',NULL)", (PROFILE,))
+        self.assertIsNone(self.queue.claim({'workerId':'worker', 'nodeId':'main'}))
+        for node in ('cluster','main'):
+            with self.subTest(node=node), self.assertRaisesRegex(Conflict, 'ownership unknown'):
+                self.begin(node)
+        self.queue.close()
+        self.queue = Queue(self.root.name, node_ids=('cluster','main'), clock=lambda: self.now)
+        self.assertIsNone(self.queue.get('held')['nodeId'])
+
+    def test_inconsistent_viewer_node_blocks_both_updates(self):
+        self.schedule('cluster'); self.schedule('main')
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_tasks(job_id TEXT, node_id TEXT, removed INTEGER)')
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES('held','held','staging','odm-viewer-v1','held','main')")
+            db.execute("INSERT INTO viewer_tasks VALUES('held','cluster',0)")
+        for node in ('cluster','main'):
+            with self.subTest(node=node), self.assertRaisesRegex(Conflict, 'ownership inconsistent'):
+                self.begin(node)
+
+    def test_consistent_viewer_job_blocks_own_node_only(self):
+        self.schedule('cluster'); self.schedule('main')
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_tasks(job_id TEXT, node_id TEXT, removed INTEGER)')
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES('held','held','staging','odm-viewer-v1','held','main')")
+            db.execute("INSERT INTO viewer_tasks VALUES('held','main',0)")
+        with self.assertRaisesRegex(Conflict, 'still owns'):
+            self.begin('main')
+        self.assertEqual(self.begin('cluster')['node']['state'], 'updating')
+
+    def test_missing_removed_and_duplicate_viewer_owner_block(self):
+        self.schedule('cluster')
+        with self.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES('held','held','staging','odm-viewer-v1','held','main')")
+        with self.assertRaisesRegex(Conflict, 'Viewer ownership unknown'):
+            self.begin('cluster')
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_tasks(job_id TEXT, node_id TEXT, removed INTEGER)')
+        with self.assertRaisesRegex(Conflict, 'ownership inconsistent'):
+            self.begin('cluster')
+        with self.queue._db() as db:
+            db.execute("INSERT INTO viewer_tasks VALUES('held','main',1)")
+        with self.assertRaisesRegex(Conflict, 'ownership inconsistent'):
+            self.begin('cluster')
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_tasks SET removed=0")
+            db.execute("INSERT INTO viewer_tasks VALUES('held','main',0)")
+        with self.assertRaisesRegex(Conflict, 'ownership inconsistent'):
+            self.begin('cluster')
+
+    def test_unknown_owner_blocks_resuming_failed_maintenance(self):
+        self.schedule('cluster')
+        claim = self.begin('cluster')
+        failed = self.finish(claim, status='failed', result={'healthy': False})
+        with self.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES('held','held','staging',?,'held',NULL)", (PROFILE,))
+        with self.assertRaisesRegex(Conflict, 'ownership unknown'):
+            self.queue.resume_node('cluster', {'expectedRevision': failed['revision'],
+                'planId': failed['planId'], 'note': 'inspected', 'workerStopped': True, 'healthy': True})
+
+    def test_actual_viewer_schema_mismatched_owner_holds_maintenance(self):
+        import io
+        import uuid
+        from pathlib import Path
+        from processing.viewer_tasks import TaskStore
+        self.queue.close()
+        self.queue = Queue(self.root.name, node_ids=('cluster','main'), clock=lambda: self.now, viewer_enabled=True)
+        store = TaskStore(self.queue, Path(self.root.name) / 'viewer-tasks')
+        identifier = str(uuid.uuid4())
+        store.initialize(identifier, 'Synthetic', [], None, 'production')
+        store.upload(identifier, 'photo.jpg', io.BytesIO(b'photo'), 5)
+        store.commit(identifier)
+        with self.queue._db() as db:
+            job = db.execute('SELECT job_id FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()[0]
+            db.execute("UPDATE jobs SET status='held',node_id='main' WHERE id=?", (job,))
+            db.execute("UPDATE viewer_tasks SET stage='held',phase='held',node_id='cluster' WHERE uuid=?", (identifier,))
+        self.schedule('cluster'); self.schedule('main')
+        for node in ('cluster','main'):
+            with self.subTest(node=node), self.assertRaisesRegex(Conflict, 'ownership inconsistent'):
+                self.begin(node)
 
     def test_operator_resume_cannot_clear_held_job(self):
         self.schedule()
