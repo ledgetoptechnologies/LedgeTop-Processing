@@ -17,7 +17,11 @@ authority; exact POST replay and GET use persisted evidence without rediscovery.
 The response is cache-disabled. HTTP rejects nonempty option lists even if an
 internal experiment previously recorded one: no authenticated catalog-digest
 issuance or version-domain qualification is present. No capability is advertised.
-The existing socket idle timeout does not impose a total body deadline.
+The manifest and plan body readers apply a 30-second monotonic socket-read
+deadline after authorization and framing checks. A slow sender cannot renew it
+by trickling bytes. It does not bound time spent in authentication, database or
+filesystem operations, operating-system stalls, or scheduling, and is not an
+end-to-end request deadline. Other routes keep their existing behavior.
 
 The internal experiment accepts a conservative strict subset of bool, int,
 float, enum and string options against the exact coordinator-selected catalog

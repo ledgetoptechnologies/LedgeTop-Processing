@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from urllib.parse import parse_qs, unquote, urlsplit
 import uuid as uuid_module
 
@@ -26,6 +27,7 @@ MAX_FORM_BYTES = 64 * 1024
 MAX_PART_HEADERS = 16 * 1024
 MAX_PARTS = 64
 CHUNK = 64 * 1024
+BINDING_BODY_DEADLINE_SECONDS = 30.0
 BOUNDARY = re.compile(r"[0-9A-Za-z'()+_,./:=?-]{1,70}\Z")
 
 
@@ -174,6 +176,32 @@ def _length(handler, maximum, *, allow_empty=False):
     if length == 0 and not allow_empty:
         raise RequestError(400, 'empty_body')
     return length
+
+
+def _binding_body(handler, length):
+    """Read one bounded binding body with a monotonic socket-read deadline.
+
+    BufferedReader.read1 performs at most one underlying read per iteration,
+    so a peer cannot extend the deadline by trickling bytes within an idle
+    timeout. The handler owns the socket throughout; no watchdog thread can
+    outlive it. This does not bound scheduler, database or filesystem stalls.
+    """
+    deadline = time.monotonic() + BINDING_BODY_DEADLINE_SECONDS
+    previous = handler.connection.gettimeout()
+    body = bytearray()
+    try:
+        while len(body) < length:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise RequestError(408, 'body_deadline_exceeded')
+            handler.connection.settimeout(min(previous,remaining) if previous is not None else remaining)
+            try: chunk = handler.rfile.read1(min(CHUNK,length-len(body)))
+            except TimeoutError: raise RequestError(408, 'body_deadline_exceeded') from None
+            if not chunk: raise RequestError(400, 'truncated_body')
+            body.extend(chunk)
+        if time.monotonic() >= deadline: raise RequestError(408, 'body_deadline_exceeded')
+        return bytes(body)
+    finally:
+        handler.connection.settimeout(previous)
 
 
 class ViewerFacade:
@@ -398,8 +426,7 @@ class ViewerFacade:
             length=_length(handler,MAX_PLAN_BYTES)
             if (handler.headers.get_all('Content-Encoding',[]) or len(handler.headers.get_all('Content-Type',[]))!=1
                     or handler.headers.get_content_type()!='application/json'):raise RequestError(415,'json_required')
-            body=handler.rfile.read(length)
-            if len(body)!=length:raise RequestError(400,'truncated_body')
+            body=_binding_body(handler,length)
             if validate(body)['options']:raise Conflict('option negotiation not qualified')
             self._reply(handler,200,self.plan_binding.bind(identifier,environment,capability,body));return
         if re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path):
@@ -410,8 +437,7 @@ class ViewerFacade:
             from .reference_protocol import MAX_BODY_BYTES
             length=_length(handler,MAX_BODY_BYTES)
             if handler.headers.get_content_type()!='application/json':raise RequestError(415,'json_required')
-            body=handler.rfile.read(length)
-            if len(body)!=length:raise RequestError(400,'truncated_body')
+            body=_binding_body(handler,length)
             self._reply(handler,200,self.manifest_binding.bind(identifier,environment,capability,body));return
         if path in ('/info', '/options'):
             raise RequestError(405, 'method_not_allowed')
