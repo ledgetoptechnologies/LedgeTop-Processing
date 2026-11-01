@@ -110,7 +110,7 @@ class LoopbackNodeODM:
         route = '/task/new/init' if grant['operation'] == 'init' else '/task/new/commit/' + grant['engineTaskId']
         transport=SimpleNamespace(binding=SimpleNamespace(backend_port=self.pin.backend_port,backend_secret=self.token))
         status,raw=EngineIngressGuard._exchange(transport,'POST',route,body,
-            {'content-type': grant['contentType'], 'set-uuid': grant['engineTaskId']},deadline)
+            {'content-type': grant['contentType'], 'set-uuid': grant['engineTaskId']},deadline,omit_empty_token=True)
         if status!=200 or len(raw)>4096:raise BrokerHeld('backend response uncertain')
         value = decode_submission(raw)
         return _reply(value,grant['engineTaskId'])

@@ -33,8 +33,20 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with NodeGate(self.engine) as gate:gate.provision(self.node,self.origin,self.authority)
         state=path/'mutation-broker';state.mkdir(mode=0o700)
         owner=self
+        class OwnedHTTPServer(ThreadingHTTPServer):
+            def __init__(self,*args):
+                self.handler_threads=[]
+                super().__init__(*args)
+            def process_request(self,request,address):
+                worker=threading.Thread(target=self.process_request_thread,args=(request,address))
+                self.handler_threads.append(worker)
+                try:worker.start()
+                except BaseException:
+                    self.handler_threads.remove(worker);self.shutdown_request(request);raise
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*_):pass
+            def setup(self):
+                super().setup();self.connection.settimeout(2)
             def do_POST(self):
                 owner.calls.append((self.path,self.rfile.read(int(self.headers['Content-Length']))))
                 value=json.dumps({'uuid':self.headers['set-uuid'],'success':True}).encode()
@@ -45,13 +57,18 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     except (BrokenPipeError,ConnectionResetError):pass
                     finally:owner.drip_done.set()
                 else:self.wfile.write(value)
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        self.server=OwnedHTTPServer(('127.0.0.1',0),Handler)
         self.addCleanup(self.server.server_close)
-        self.thread=threading.Thread(target=self.server.serve_forever);self.thread.start()
+        self.thread=threading.Thread(target=self.server.serve_forever)
         def stop_server():
+            if self.thread.ident is None:return
             self.server.shutdown();self.thread.join(5)
             self.assertFalse(self.thread.is_alive())
+            for handler in self.server.handler_threads:
+                handler.join(5)
+                self.assertFalse(handler.is_alive())
         self.addCleanup(stop_server)
+        self.thread.start()
         self.adapter=b.LoopbackNodeODM(self.engine,BackendPin('a'*64,'sha256:'+'b'*64,self.server.server_port),'')
         self.config=dict(node_id=self.node,engine_id=self.engine,authority_id=self.authority,coordinator_epoch=self.epoch,
                          coordinator_origin=self.origin,gate_generation=1,secret=self.secret,adapter=self.adapter)
@@ -71,6 +88,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,'0'*64,self.body)
         reply=self.broker.mutate(grant,signature,self.body)
         self.assertEqual(reply['uuid'],self.task);self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.calls[0][0],'/task/new/init')
         self.assertEqual(self.broker.mutate(grant,signature,self.body),reply);self.assertEqual(len(self.calls),1)
         changed=dict(grant,operationId=str(uuid.uuid4()),engineTaskId=str(uuid.uuid4()))
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(changed,b.sign_grant(changed,self.secret),self.body)
@@ -81,6 +99,12 @@ class NodeMutationBrokerTests(unittest.TestCase):
         commit=self.grant(operation='commit')
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(commit,b.sign_grant(commit,self.secret),self.body)
         self.assertEqual(len(self.calls),1)
+
+    def test_nonempty_node_token_is_query_encoded(self):
+        self.adapter.token='a+b'
+        grant=self.grant()
+        self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
+        self.assertEqual(self.calls[0][0],'/task/new/init?token=a%2Bb')
 
     def test_lost_response_survives_broker_restart_without_replay(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange

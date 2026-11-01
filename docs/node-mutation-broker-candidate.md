@@ -17,6 +17,8 @@ qualified handover, reservation reconciliation, grant issuance ledger,
 transport authentication, clock policy or cross-host epoch fencing exists.
 The loopback adapter uses one absolute deadline across identity checks and the
 socket exchange; this does not qualify an end-to-end cross-host request timeout.
+The adapter preserves the existing NodeODM client's request convention: it
+omits the token query for an empty token and URL-encodes a nonempty token.
 Docker administrators, local processes, other containers and direct engine
 access can bypass these cooperative checks. A broker that already forwarded
 init can remain held indefinitely. Database and filesystem ownership are not

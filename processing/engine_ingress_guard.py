@@ -687,7 +687,7 @@ class EngineIngressGuard:
         except (GateError, sqlite3.Error, RuntimeError):
             raise AdmissionError('physical gate refused completion') from None
 
-    def _exchange(self, method, target, body, headers, deadline, *, source=None, source_length=None, expected_sha=None, file_prefix=b'', file_suffix=b'', forbidden=None):
+    def _exchange(self, method, target, body, headers, deadline, *, source=None, source_length=None, expected_sha=None, file_prefix=b'', file_suffix=b'', forbidden=None, omit_empty_token=False):
         """One nonblocking fixed-loopback exchange; no retries or redirects."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         source_timeout = source.gettimeout() if source is not None else None
@@ -705,7 +705,7 @@ class EngineIngressGuard:
             if code:
                 wait(True)
                 if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR): raise AdmissionError('upstream unavailable')
-            route = target + '?' + urlencode({'token': self.binding.backend_secret})
+            route = target if omit_empty_token and not self.binding.backend_secret else target + '?' + urlencode({'token': self.binding.backend_secret})
             request = (f'{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n'
                        f'Content-Length: {source_length+len(file_prefix)+len(file_suffix) if source is not None else len(body)}\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in headers.items())
                        + '\r\n').encode('ascii') + body
