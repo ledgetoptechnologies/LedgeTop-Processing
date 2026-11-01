@@ -583,13 +583,20 @@ class ReferenceStore:
             old = db.execute("SELECT job_id,digest FROM reference_acceptances WHERE receipt_id=?", (checked["receiptId"],)).fetchone()
             if old and (old["job_id"], old["digest"]) != (job_id, receipt_digest):
                 raise Conflict("receipt ID already belongs to a different acceptance")
-            if not old:
-                self._quota(db, len(encoded.encode("utf-8")))
-                db.execute("INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)",
-                           (checked["receiptId"], job_id, receipt_digest, encoded))
             accepted = set()
             for item in db.execute("SELECT receipt_json FROM reference_acceptances WHERE job_id=?", (job_id,)):
                 accepted.update(json.loads(item[0])["acceptedObjectIds"])
+            if not old:
+                # The worker relay is bounded to MAX_OBJECTS receipts. Require
+                # each new identity to add coverage so no client can create
+                # more receipts than there are result objects; exact replay
+                # of an existing identity remains idempotent.
+                if not set(checked['acceptedObjectIds']) - accepted:
+                    raise Conflict('new acceptance must cover an unaccepted object')
+                self._quota(db, len(encoded.encode("utf-8")))
+                db.execute("INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)",
+                           (checked["receiptId"], job_id, receipt_digest, encoded))
+                accepted.update(checked['acceptedObjectIds'])
             fully = accepted == {obj["id"] for obj in result["objects"]}
             if fully:
                 db.execute("UPDATE reference_jobs SET phase='completed',updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
