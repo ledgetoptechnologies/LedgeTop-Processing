@@ -134,7 +134,7 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
                     function={'init':session.serve_reference_init,'upload':session.serve_reference_upload,
                               'commit':session.serve_reference_commit,'proof':session.serve_reference_proof,
                               'reconcile':session.serve_reference_reconcile}[kind]
-                    function(channel,witness=self.authority,secret=secret,peer_sha256='0'*64 if mode=='wrong_client_pin' else client_pin,timeout_seconds=3)
+                    function(channel,witness=self.authority,secret=secret,peer_sha256='0'*64 if mode=='wrong_client_pin' else client_pin,timeout_seconds=10 if mode.startswith('paged_') else 3, **({'paged':True} if mode.startswith('paged_') and kind in ('commit','proof') else {}))
                 except Exception as exc:errors.append(type(exc).__name__)
             thread=threading.Thread(target=serve);record['thread']=thread;thread.start()
             channel=client_context.wrap_socket(client_raw,server_hostname='localhost')
@@ -143,7 +143,7 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
                  'commit':session.RemoteReferenceCommitAuthority,'proof':session.RemoteReferenceProofAuthority,
                  'reconcile':session.RemoteReferenceReconcileAuthority}[kind]
             return cls(channel,authority=self.queue.authority_id,epoch=self.queue.startup_id,
-                       peer_sha256='0'*64 if mode=='wrong_server_pin' else server_pin,timeout_seconds=3)
+                       peer_sha256='0'*64 if mode=='wrong_server_pin' else server_pin,timeout_seconds=10 if mode.startswith('paged_') else 3, **({'paged':True,'page_secret':secret} if mode.startswith('paged_') and kind in ('commit','proof') else {}))
         def close_all():
             for record in resources:
                 for key in ('channel','serverChannel','client','server'):
@@ -156,7 +156,7 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
             self.assertFalse(any(record['thread'] is not None and record['thread'].is_alive() for record in resources))
         self.addCleanup(close_all)
         gate_root=self.root/'gate'
-        with patch.object(session,'REFERENCE_REMOTE_QUALIFIED',True), patch.object(broker,'QUALIFIED',True), \
+        with patch.object(session,'REFERENCE_REMOTE_QUALIFIED',True), patch.object(session,'REFERENCE_PAGING_QUALIFIED',True), patch.object(broker,'QUALIFIED',True), \
              patch('processing.node_gate.canonical_gate_path',return_value=gate_root), \
              patch.object(broker,'canonical_gate_path',return_value=gate_root):
             with NodeGate('synthetic') as gate:gate.provision('cluster','http://127.0.0.1:18080',self.queue.authority_id)
@@ -172,6 +172,18 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
                 coordinator_epoch=self.queue.startup_id,coordinator_origin='http://127.0.0.1:18080',gate_generation=1,
                 secret=secret,adapter=adapter,authority_witness=remote)
             self.addCleanup(service.close)
+            if mode.startswith('paged_'):
+                from processing.reference_protocol import manifest_sha256
+                count=int(mode.split('_')[1])
+                with self.queue._db() as db:
+                    row=db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?',(self.job['jobId'],)).fetchone()
+                    submission=json.loads(row[0]);manifest=submission['manifest'];first=manifest['objects'][0]
+                    manifest['objects']=[first]+[dict(first,id='synthetic-%05d'%i,name='synthetic-%05d.jpg'%i) for i in range(1,count)]
+                    manifest['objectCount']=count;manifest['totalBytes']=sum(o['byteSize'] for o in manifest['objects'])
+                    manifest['inputCounts']['images']=count;manifest['sha256']=manifest_sha256(manifest)
+                    submission['manifestSha256']=manifest['sha256'];self.job['manifestSha256']=manifest['sha256']
+                    db.execute('UPDATE reference_jobs SET input_json=?,manifest_sha=? WHERE job_id=?',
+                               (json.dumps(submission),manifest['sha256'],self.job['jobId']))
             grant=self.grant();signature=broker.sign_grant(grant,secret)
             with patch.object(adapter,'exchange',return_value={'uuid':grant['jobId'],'success':True}) as init:
                 if mode=='wrong_client_pin':
@@ -207,6 +219,22 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
                     issue_signature=broker.sign_reference_issue(grant,'image-1',operation,secret),expected_issue=expected,
                     remote=remote_upload,worker=worker,reservation_id='synthetic',relative_path='input.jpg')
                 self.assertEqual(upload.call_count,1);self.assertEqual(receipt['state'],'complete')
+            if mode.startswith('paged_'):
+                manifest=self.store.get(grant['jobId'],private=True)['submission']['manifest']
+                scope=hashlib.sha256(broker._json(grant)).hexdigest()
+                service.db.execute('BEGIN IMMEDIATE')
+                with self.queue._db() as db:
+                    for obj in manifest['objects'][1:]:
+                        op=str(uuid.uuid4())
+                        issue=(op,grant['jobId'],grant['taskGeneration'],grant['inputManifestSha256'],obj['id'],obj['name'],obj['byteSize'],obj['sha256'],grant['claimTokenSha256'],grant['operationId'])
+                        digest=hashlib.sha256(broker._json(list(issue))).hexdigest()
+                        receipt=dict(objectId=obj['id'],fileName=obj['name'],fileBytes=obj['byteSize'],sha256=obj['sha256'],operationId=op,state='complete',scopeSha256=scope)
+                        receipt['signature']=broker._reference_receipt_signature(receipt,secret)
+                        db.execute('INSERT INTO reference_broker_upload_issue_candidate VALUES(?,?,?,?,?,?,?,?,?,?)',issue)
+                        db.execute("INSERT INTO broker_intents VALUES(?,?,?,'complete')",(op,grant['jobId'],digest))
+                        db.execute('INSERT INTO reference_broker_upload_receipt_candidate VALUES(?,?,?)',(op,digest,broker._json(receipt).decode()))
+                        service.db.execute("INSERT INTO operations VALUES(?,'upload',?,?,'complete',?)",(op,obj['name'],digest,broker._json({'success':True}).decode()))
+                service.db.commit()
             remote_commit=connect('commit')
             commit_id=str(uuid.uuid4())
             manifest=self.store.get(grant['jobId'],private=True)['submission']['manifest']
@@ -225,12 +253,26 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
                 try:os.fsync(directory)
                 finally:os.close(directory)
                 os._exit(77)
-            with patch.object(session,'MAX_FRAME',128 if mode=='oversize' else session.MAX_FRAME), \
+            from processing import reference_paged_wire as page_wire
+            real_send=page_wire.send_duplex_pages
+            def page_send(sock,context,records,**kwargs):
+                if mode.endswith('_tamper') and context['operation']=='commit':
+                    records=[dict(item) for item in records];records[0]['issueSha256']='0'*64
+                return real_send(sock,context,records,**kwargs)
+            real_write=page_wire._write
+            def page_write(sock,frame,deadline):
+                if type(frame) is dict and frame.get('type')=='page':
+                    if mode.endswith('_drop'):raise session.SessionHeld('synthetic dropped page')
+                    if mode.endswith('_reorder'):frame=dict(frame,sequence=frame['sequence']+1)
+                return real_write(sock,frame,deadline)
+            negative=mode.endswith(('_tamper','_drop','_reorder'))
+            with patch.object(page_wire,'_write',side_effect=page_write), patch.object(page_wire,'send_duplex_pages',side_effect=page_send), \
+                 patch.object(session,'MAX_FRAME',128 if mode=='oversize' else session.MAX_FRAME), \
                  patch.object(adapter,'exchange',return_value={'uuid':grant['jobId'],'success':True},
                               side_effect=lost if mode=='loss' else crash_after_remote_forward if mode=='crash' else None) as commit:
                 kwargs=dict(operation_id=commit_id,body=b'',content_type='application/json',
                     commit_signature=broker.sign_reference_commit(grant,commit_id,b'','application/json',secret),manifest=manifest)
-                if mode in ('success','crash','proof_loss','premature','failure30','failure50'):
+                if (mode.startswith('paged_') and not negative) or mode in ('success','crash','proof_loss','premature','failure30','failure50'):
                     result=service.commit_remote_reference_candidate(grant,signature,remote=remote_commit,**kwargs)
                     self.assertEqual(result['uuid'],grant['jobId']);self.assertEqual(commit.call_count,1)
                 else:
@@ -244,7 +286,7 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
                         with self.assertRaises((session.SessionHeld,broker.BrokerHeld,OSError)):
                             service.commit_remote_reference_candidate(grant,signature,remote=retry,**kwargs)
                         self.assertEqual(commit.call_count,1)
-            if mode in ('success','proof_loss'):
+            if (mode.startswith('paged_') and not negative) or mode in ('success','proof_loss'):
                 proof_remote=connect('proof')
                 if mode=='proof_loss':
                     with self.assertRaisesRegex(RuntimeError,'synthetic proof disconnect'):
@@ -399,19 +441,24 @@ class ReferenceMTLSCandidateTests(ReferenceBrokerAuthorityCandidateTests):
                 with self.queue._db() as db:
                     self.assertEqual(db.execute('SELECT COUNT(*) FROM broker_intents').fetchone()[0],before)
             close_all()
-            if mode in ('success','premature'):self.assertEqual(errors,[])
+            if (mode.startswith('paged_') and not negative) or mode in ('success','premature'):self.assertEqual(errors,[])
             with self.queue._db() as db:
                 self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(operation,)).fetchone()[0],'complete')
                 self.assertEqual(db.execute('SELECT 1 FROM reference_broker_upload_receipt_candidate WHERE operation_id=?',(operation,)).fetchone() is not None,mode!='missing')
                 commit_row=db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(commit_id,)).fetchone()
-                self.assertEqual(commit_row[0] if commit_row else None,{'success':'complete','premature':'complete','failure30':'complete','failure50':'complete','proof_loss':'complete','loss':'started','missing':None,'oversize':None}[mode])
-                if mode in ('loss','proof_loss'):self.assertFalse(self.queue._transfer_admission_clear(db))
+                self.assertEqual(commit_row[0] if commit_row else None,{'paged_1000_tamper':'started','paged_1000_drop':'started','paged_1000_reorder':'started','paged_1000':'complete','paged_10000':'complete','success':'complete','premature':'complete','failure30':'complete','failure50':'complete','proof_loss':'complete','loss':'started','missing':None,'oversize':None}[mode])
+                if negative or mode in ('loss','proof_loss'):self.assertFalse(self.queue._transfer_admission_clear(db))
             local=service.db.execute('SELECT state FROM operations WHERE id=?',(commit_id,)).fetchone()
-            self.assertEqual(local['state'] if local else None,{'success':'complete','premature':'complete','failure30':'complete','failure50':'complete','proof_loss':'complete','loss':'started','missing':None,'oversize':None}[mode])
-            if mode in ('success','proof_loss'):
+            self.assertEqual(local['state'] if local else None,{'paged_1000_tamper':None,'paged_1000_drop':None,'paged_1000_reorder':None,'paged_1000':'complete','paged_10000':'complete','success':'complete','premature':'complete','failure30':'complete','failure50':'complete','proof_loss':'complete','loss':'started','missing':None,'oversize':None}[mode])
+            if (mode.startswith('paged_') and not negative) or mode in ('success','proof_loss'):
                 local_proof=service.db.execute("SELECT state FROM operations WHERE operation='proof'").fetchone()
                 self.assertEqual(local_proof['state'],'started' if mode=='proof_loss' else 'complete')
 
+    def test_remote_paged_seeded_1000_drop(self):self._remote_broker_flow('paged_1000_drop')
+    def test_remote_paged_seeded_1000_reorder(self):self._remote_broker_flow('paged_1000_reorder')
+    def test_remote_paged_seeded_1000_tamper(self):self._remote_broker_flow('paged_1000_tamper')
+    def test_remote_paged_seeded_1000(self):self._remote_broker_flow('paged_1000')
+    def test_remote_paged_seeded_10000(self):self._remote_broker_flow('paged_10000')
     def test_remote_broker_init_and_upload(self):self._remote_broker_flow('success')
     def test_remote_commit_missing_receipt_holds(self):self._remote_broker_flow('missing')
     def test_remote_commit_lost_response_cannot_replay(self):self._remote_broker_flow('loss')

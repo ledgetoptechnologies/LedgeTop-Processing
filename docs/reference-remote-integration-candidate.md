@@ -19,9 +19,31 @@ over canonical length-prefixed records. The node must
 verify every page, unique object and local journal entry against that same
 commit/claim identity before forwarding; incomplete, repeated, reordered or
 changed pages must hold the started intent. A final digest alone cannot replace
-the local per-object verification. The current coordinator also queries the
-database per object and repeats the check under a ten-second authority window;
-large-job scaling and a measured bounded query strategy are unfinished.
+the local per-object verification. The coordinator now uses a joined inventory query and repeats verification
+under a ten-second authority window. Large-job behavior on the actual hardware
+and complete transfer performance remain unqualified.
+
+A separately disabled paging candidate now sends plan, commit and proof
+inventories in bounded authenticated pages. A synthetic one-photo daemon test
+passed, as did actual mTLS broker commit and proof tests with 1,000 and 10,000
+seeded, signed inventory/journal records (0.675 s and 2.116 s for the full
+fixtures on the test host). Those fixtures sent one synthetic upload and mocked
+the engine; they do not establish 10,000-photo transfer, storage, deadline
+behavior on the real PCs, or production performance. Interruption and tampering
+still require verification. Legacy unpaged inventory
+records in this candidate also include objectId, so older and newer candidate
+peers fail closed when mixed. A future deployment requires a coordinated paired
+coordinator/node version rollout or explicitly negotiated compatibility; rolling
+mixed versions are not qualified. The existing 100 KiB warning above remains
+applicable to the default unpaged path.
+
+The submission and driver control bodies still have 4 MiB limits, the object
+limit is 10,000 including non-image objects, and transfer defaults do not enable
+ranges and limit a single response to 16 MiB. Serial per-object transfer,
+transfer expiry, scratch/backend/Viewer disk accounting and repeated manifest
+work remain unqualified for a 50 GB dataset. Paging alone does not remove these
+limits. Authority sessions remain capped at ten seconds and filesystem I/O is
+not a hard-bounded operation.
 
 Other remaining qualification includes nonempty state migration, separate-PC
 and real NodeODM tests, authenticated result/Viewer handoff, crash recovery,

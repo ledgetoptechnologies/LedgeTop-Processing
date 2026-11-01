@@ -24,23 +24,31 @@ from .node_mutation_broker import (ReferenceCoordinatorAuthority, _REFERENCE_INI
                                    sign_grant, sign_reference_issue, sign_reference_commit, sign_reference_proof)
 
 REFERENCE_REMOTE_QUALIFIED = False
+REFERENCE_PAGING_QUALIFIED = False
+
+
+def _page_context(grant,operation,operation_id,nonce,count):
+    return dict(protocol='ledgetop-reference-pages-v1',operation=operation,authorityId=grant['authorityId'],
+        coordinatorEpoch=grant['coordinatorEpoch'],jobId=grant['jobId'],manifestSha256=grant['inputManifestSha256'],
+        grantSha256=hashlib.sha256(_json(grant)).hexdigest(),operationId=operation_id,nonce=nonce,count=count)
 
 
 class RemoteReferenceSessionFactory:
     """Disabled per-operation pinned mTLS connector; owns every opened socket."""
-    def __init__(self,*,host,port,authority,epoch,peer_sha256,ca_file,cert_file,key_file,timeout_seconds=5):
+    def __init__(self,*,host,port,authority,epoch,peer_sha256,ca_file,cert_file,key_file,timeout_seconds=5,paged=False,page_secret=None):
         if REFERENCE_REMOTE_QUALIFIED is not True:
             raise SessionHeld('reference remote authority unavailable')
         try: address=ipaddress.ip_address(host)
         except ValueError:raise SessionHeld('literal reference authority address required') from None
-        if (type(port) is not int or not 1<=port<=65535 or type(peer_sha256) is not str
+        if (type(paged) is not bool or (paged and (REFERENCE_PAGING_QUALIFIED is not True or type(page_secret) is not bytes or len(page_secret)<32))
+                or type(port) is not int or not 1<=port<=65535 or type(peer_sha256) is not str
                 or not re.fullmatch('[a-f0-9]{64}',peer_sha256) or type(timeout_seconds) not in (int,float)
                 or not 0<timeout_seconds<=10):
             raise SessionHeld('invalid reference session factory')
         context=ssl.create_default_context(cafile=str(ca_file))
         context.load_cert_chain(str(cert_file),str(key_file))
         self.host,self.port,self.authority,self.epoch=str(address),port,authority,epoch
-        self.pin,self.timeout,self.context=peer_sha256,timeout_seconds,context
+        self.pin,self.timeout,self.context,self.paged,self.page_secret=peer_sha256,timeout_seconds,context,paged,page_secret
 
     def open(self,kind):
         classes={'init':RemoteReferenceInitAuthority,'upload':RemoteReferenceUploadAuthority,
@@ -54,9 +62,11 @@ class RemoteReferenceSessionFactory:
             raw.settimeout(max(0,deadline-time.monotonic()))
             channel=self.context.wrap_socket(raw,server_hostname=self.host)
             _peer(channel,self.pin,False)
-            _write(channel,{'operation':kind},deadline)
-            return classes[kind](channel,authority=self.authority,epoch=self.epoch,
-                                 peer_sha256=self.pin,timeout_seconds=max(0,deadline-time.monotonic()))
+            paged=self.paged and kind in ('plan','commit','proof')
+            _write(channel,{'operation':kind,'paged':True} if paged else {'operation':kind},deadline)
+            kwargs=dict(authority=self.authority,epoch=self.epoch,peer_sha256=self.pin,timeout_seconds=max(0,deadline-time.monotonic()))
+            if paged:kwargs.update(paged=True,page_secret=self.page_secret)
+            return classes[kind](channel,**kwargs)
         except BaseException:
             if channel is not None:channel.close()
             else:raw.close()
@@ -70,14 +80,19 @@ def serve_reference_operation(sock,*,witness,secret,peer_sha256,timeout_seconds=
         _peer(sock,peer_sha256,True)
         deadline=time.monotonic()+timeout_seconds
         first=_read(sock,deadline)
-        if type(first) is not dict or set(first)!={'operation'}:
+        if type(first) is not dict or set(first) not in ({'operation'},{'operation','paged'}):
             raise SessionHeld('invalid reference operation')
+        paged='paged' in first
+        if paged and (first['paged'] is not True or REFERENCE_PAGING_QUALIFIED is not True
+                or first['operation'] not in ('plan','commit','proof')):
+            raise SessionHeld('paged reference operation unavailable')
         functions={'init':serve_reference_init,'upload':serve_reference_upload,'commit':serve_reference_commit,
                    'plan':serve_reference_plan,'proof':serve_reference_proof,'reconcile':serve_reference_reconcile}
         function=functions.get(first['operation'])
         if function is None:raise SessionHeld('reference operation unavailable')
-        function(sock,witness=witness,secret=secret,peer_sha256=peer_sha256,
-                 timeout_seconds=max(0,deadline-time.monotonic()))
+        kwargs=dict(witness=witness,secret=secret,peer_sha256=peer_sha256,timeout_seconds=max(0,deadline-time.monotonic()))
+        if paged:kwargs['paged']=True
+        function(sock,**kwargs)
     finally:sock.close()
 
 
@@ -118,7 +133,7 @@ def serve_reference_init(sock, *, witness, secret, peer_sha256, timeout_seconds=
         sock.close()
 
 
-def serve_reference_plan(sock, *, witness, secret, peer_sha256, timeout_seconds=10):
+def serve_reference_plan(sock, *, witness, secret, peer_sha256, timeout_seconds=10, paged=False):
     """Disabled pinned peer can request only its exact active claim plan."""
     from .node_reference_plan import issue_reference_plan
     try:
@@ -141,19 +156,27 @@ def serve_reference_plan(sock, *, witness, secret, peer_sha256, timeout_seconds=
         plan=issue_reference_plan(witness,job,claim_token=request['claimToken'],worker_id=request['workerId'],
             worker_instance_id=request['workerInstanceId'],claim_request_id=request['claimRequestId'],secret=secret,
             timeout=max(0,deadline-time.monotonic()))
-        response={'nonce':request['nonce'],'plan':plan}
-        if len(_json(response))>MAX_FRAME:raise SessionHeld('reference plan exceeds frame bound')
-        _write(sock,response,deadline)
+        if paged:
+            from .reference_paged_wire import send_duplex_pages
+            records=sorted(plan['uploads'],key=lambda item:item['objectId'])
+            context=_page_context(plan['initGrant'],'plan',plan['initGrant']['operationId'],request['nonce'],len(records))
+            header={k:v for k,v in plan.items() if k!='uploads'}
+            _write(sock,{'nonce':request['nonce'],'plan':header,'pageContext':context},deadline)
+            send_duplex_pages(sock,context,records,count=len(records),deadline=deadline,secret=secret)
+        else:
+            response={'nonce':request['nonce'],'plan':plan}
+            if len(_json(response))>MAX_FRAME:raise SessionHeld('reference plan exceeds frame bound')
+            _write(sock,response,deadline)
     finally:sock.close()
 
 
 class RemoteReferencePlanClient:
     """One pinned plan request; secret claim is sent only on mTLS."""
-    def __init__(self,sock,*,authority,epoch,peer_sha256,timeout_seconds=10):
+    def __init__(self,sock,*,authority,epoch,peer_sha256,timeout_seconds=10,paged=False,page_secret=None):
         if REFERENCE_REMOTE_QUALIFIED is not True:raise SessionHeld('reference remote authority unavailable')
         _peer(sock,peer_sha256,False)
         self.sock,self.authority,self.epoch,self.timeout=sock,authority,epoch,timeout_seconds
-        self.pid,self.used=os.getpid(),False
+        self.pid,self.used,self.paged,self.page_secret=os.getpid(),False,paged,page_secret
 
     def fetch(self,*,job_id,claim_token,worker_id,worker_instance_id,claim_request_id):
         if self.pid!=os.getpid() or self.used:raise SessionHeld('reference plan session unavailable')
@@ -162,7 +185,8 @@ class RemoteReferencePlanClient:
             _write(self.sock,dict(jobId=job_id,claimToken=claim_token,workerId=worker_id,
                 workerInstanceId=worker_instance_id,claimRequestId=claim_request_id,nonce=nonce),deadline)
             response=_read(self.sock,deadline)
-            if type(response) is not dict or set(response)!={'nonce','plan'} or response['nonce']!=nonce or type(response['plan']) is not dict:
+            expected={'nonce','plan','pageContext'} if self.paged else {'nonce','plan'}
+            if type(response) is not dict or set(response)!=expected or response['nonce']!=nonce or type(response['plan']) is not dict:
                 raise SessionHeld('reference plan response changed')
             grant=response['plan'].get('initGrant')
             if (type(grant) is not dict or grant.get('authorityId')!=self.authority or grant.get('coordinatorEpoch')!=self.epoch
@@ -170,7 +194,16 @@ class RemoteReferencePlanClient:
                     or grant.get('workerInstanceId')!=worker_instance_id or grant.get('claimRequestId')!=claim_request_id
                     or grant.get('claimTokenSha256')!=hashlib.sha256(claim_token.encode('ascii')).hexdigest()):
                 raise SessionHeld('reference plan binding changed')
-            return response['plan']
+            plan=response['plan']
+            if self.paged:
+                from .reference_paged_wire import receive_duplex_pages
+                context=response['pageContext']
+                if (type(context) is not dict or type(context.get('count')) is not int or not 0<context['count']<=10000
+                        or context!=_page_context(grant,'plan',grant['operationId'],nonce,context['count'])):
+                    raise SessionHeld('reference plan page context changed')
+                records=receive_duplex_pages(self.sock,context,count=context['count'],deadline=deadline,secret=self.page_secret)
+                plan=dict(plan,uploads=[__import__('json').loads(item) for item in records])
+            return plan
         finally:self.sock.close()
 
 
@@ -330,20 +363,25 @@ def _coordinator_commit_inventory(db,grant,secret):
     if init is None or tuple(init)!=(grant['jobId'],init_hash,'complete') or proof is None or proof['grant_hash']!=init_hash:
         raise SessionHeld('remote reference init proof changed')
     submission=__import__('json').loads(db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?',(grant['jobId'],)).fetchone()[0])
-    rows=db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE job_id=? AND generation=?',
+    rows=db.execute('''SELECT u.*,i.job_id AS intent_job,i.grant_hash AS intent_hash,i.state AS intent_state,
+        r.issue_sha256 AS receipt_issue,r.receipt_json AS receipt_json
+        FROM reference_broker_upload_issue_candidate u
+        LEFT JOIN broker_intents i ON i.operation_id=u.operation_id
+        LEFT JOIN reference_broker_upload_receipt_candidate r ON r.operation_id=u.operation_id
+        WHERE u.job_id=? AND u.generation=? ORDER BY u.object_id''',
                     (grant['jobId'],grant['taskGeneration'])).fetchall()
     issues={};receipts=[];local_proofs=[]
     for issue in rows:
         if (issue['manifest_sha']!=grant['inputManifestSha256'] or issue['claim_sha']!=grant['claimTokenSha256']
                 or issue['init_operation_id']!=grant['operationId'] or issue['object_id'] in issues):
             raise SessionHeld('remote reference issue changed')
-        digest=hashlib.sha256(_json(list(issue))).hexdigest()
-        intent=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(issue['operation_id'],)).fetchone()
-        receipt=db.execute('SELECT issue_sha256,receipt_json FROM reference_broker_upload_receipt_candidate WHERE operation_id=?',(issue['operation_id'],)).fetchone()
-        if (intent is None or tuple(intent)!=(grant['jobId'],digest,'complete') or receipt is None or receipt['issue_sha256']!=digest):
+        fields=('operation_id','job_id','generation','manifest_sha','object_id','file_name','file_bytes','file_sha','claim_sha','init_operation_id')
+        digest=hashlib.sha256(_json([issue[k] for k in fields])).hexdigest()
+        if ((issue['intent_job'],issue['intent_hash'],issue['intent_state'])!=(grant['jobId'],digest,'complete')
+                or issue['receipt_issue']!=digest or issue['receipt_json'] is None):
             raise SessionHeld('remote reference upload proof unavailable')
-        issues[issue['object_id']]=issue['operation_id'];receipts.append(__import__('json').loads(receipt['receipt_json']))
-        local_proofs.append(dict(operationId=issue['operation_id'],fileName=issue['file_name'],issueSha256=digest))
+        issues[issue['object_id']]=issue['operation_id'];receipts.append(__import__('json').loads(issue['receipt_json']))
+        local_proofs.append(dict(objectId=issue['object_id'],operationId=issue['operation_id'],fileName=issue['file_name'],issueSha256=digest))
     _reference_verified_image_only_uploads(submission['manifest'],grant['inputManifestSha256'],receipts,
                                             init_grant=grant,issues=issues,secret=secret)
     return dict(initReplySha256=proof['response_sha256'],uploads=local_proofs)
@@ -363,7 +401,7 @@ def _coordinator_complete_commit_proof(db,grant,commit_id,secret):
     return dict(inventory=inventory,commitIntentSha256=digest,commitReplySha256=proof['response_sha256'])
 
 
-def serve_reference_proof(sock, *, witness, secret, peer_sha256, timeout_seconds=10):
+def serve_reference_proof(sock, *, witness, secret, peer_sha256, timeout_seconds=10, paged=False):
     """Fence one remote poll or exact durable delivery acknowledgement."""
     try:
         if (REFERENCE_REMOTE_QUALIFIED is not True or type(witness) is not ReferenceCoordinatorAuthority
@@ -391,8 +429,12 @@ def serve_reference_proof(sock, *, witness, secret, peer_sha256, timeout_seconds
             schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_proof_candidate'").fetchone()
             if schema is None or schema[0]!=_REFERENCE_PROOF_DDL:raise SessionHeld('remote proof schema unavailable')
             evidence=_coordinator_complete_commit_proof(db,grant,commit_id,secret)
-            if len(_json({'state':'held','nonce':nonce,'intentSha256':allowed[2],'evidence':evidence}))>MAX_FRAME:
+            if not paged and len(_json({'state':'held','nonce':nonce,'intentSha256':allowed[2],'evidence':evidence}))>MAX_FRAME:
                 raise SessionHeld('remote proof inventory exceeds frame bound')
+            if paged:
+                from .reference_paged_wire import STAGED_BYTES
+                if sum(len(_json(item)) for item in evidence['inventory']['uploads'])>STAGED_BYTES:
+                    raise SessionHeld('remote proof inventory exceeds staging bound')
             if db.execute('SELECT COUNT(*) FROM reference_broker_proof_candidate').fetchone()[0]>=100000:
                 raise SessionHeld('remote proof capacity reached')
             try:
@@ -401,7 +443,13 @@ def serve_reference_proof(sock, *, witness, secret, peer_sha256, timeout_seconds
             except sqlite3.IntegrityError:raise SessionHeld('remote proof requires inspection') from None
         with witness.hold(grant,max(0,deadline-time.monotonic()),_delivery=delivery_tuple,_failure_delivery=failure_tuple,_remote_fenced=True,_allowed_proof=allowed):
             db=witness._active_db;evidence=_coordinator_complete_commit_proof(db,grant,commit_id,secret)
-            _write(sock,{'state':'held','nonce':nonce,'intentSha256':allowed[2],'evidence':evidence},deadline)
+            if paged:
+                from .reference_paged_wire import send_duplex_pages
+                records=evidence['inventory']['uploads'];context=_page_context(grant,'proof',op,nonce,len(records))
+                header=dict(evidence,inventory={'initReplySha256':evidence['inventory']['initReplySha256']})
+                _write(sock,{'state':'held','nonce':nonce,'intentSha256':allowed[2],'evidence':header,'pageContext':context},deadline)
+                send_duplex_pages(sock,context,records,count=len(records),deadline=deadline,secret=secret)
+            else:_write(sock,{'state':'held','nonce':nonce,'intentSha256':allowed[2],'evidence':evidence},deadline)
             finish=_read(sock,deadline)
             if finish!={'nonce':nonce,'state':'finished'}:raise SessionHeld('remote proof completion changed')
             if db.execute("UPDATE broker_intents SET state='complete' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='started'",allowed).rowcount!=1:
@@ -412,11 +460,11 @@ def serve_reference_proof(sock, *, witness, secret, peer_sha256, timeout_seconds
 
 class RemoteReferenceProofAuthority:
     """One fenced remote proof use; local gate/journal verification is required."""
-    def __init__(self,sock,*,authority,epoch,peer_sha256,timeout_seconds=10):
+    def __init__(self,sock,*,authority,epoch,peer_sha256,timeout_seconds=10,paged=False,page_secret=None):
         if REFERENCE_REMOTE_QUALIFIED is not True:raise SessionHeld('reference remote authority unavailable')
         _peer(sock,peer_sha256,False)
         self.sock,self.authority,self.epoch,self.timeout=sock,authority,epoch,timeout_seconds
-        self.pid,self.used,self.active=os.getpid(),False,None
+        self.pid,self.used,self.active,self.paged,self.page_secret=os.getpid(),False,None,paged,page_secret
 
     @contextmanager
     def hold(self,grant,signature,*,commit_operation_id,operation_id,delivery,proof_signature):
@@ -426,9 +474,20 @@ class RemoteReferenceProofAuthority:
             _write(self.sock,dict(grant=grant,signature=signature,commitOperationId=commit_operation_id,operationId=operation_id,
                 delivery=delivery,proofSignature=proof_signature,nonce=nonce),deadline)
             held=_read(self.sock,deadline)
-            if (type(held) is not dict or set(held)!={'state','nonce','intentSha256','evidence'} or held['state']!='held'
+            expected={'state','nonce','intentSha256','evidence','pageContext'} if self.paged else {'state','nonce','intentSha256','evidence'}
+            if (type(held) is not dict or set(held)!=expected or held['state']!='held'
                     or held['nonce']!=nonce or type(held['intentSha256']) is not str or not re.fullmatch('[a-f0-9]{64}',held['intentSha256'])
                     or type(held['evidence']) is not dict):raise SessionHeld('remote proof held response changed')
+            if self.paged:
+                from .reference_paged_wire import receive_duplex_pages
+                context=held['pageContext']
+                if (type(context) is not dict or type(context.get('count')) is not int or not 0<context['count']<=10000
+                        or context!=_page_context(grant,'proof',operation_id,nonce,context['count'])):
+                    raise SessionHeld('remote proof page context changed')
+                records=receive_duplex_pages(self.sock,context,count=context['count'],deadline=deadline,secret=self.page_secret)
+                evidence=held['evidence'];inventory=evidence.get('inventory')
+                if type(inventory) is not dict or set(inventory)!={'initReplySha256'}:raise SessionHeld('remote proof page header changed')
+                held=dict(held,evidence=dict(evidence,inventory=dict(inventory,uploads=[__import__('json').loads(x) for x in records])))
             self.active=(nonce,held['intentSha256'],deadline)
             yield held
             if self.active is not None:raise SessionHeld('remote proof completion not acknowledged')
@@ -513,7 +572,7 @@ class RemoteReferenceReconcileAuthority:
         self.active=None
 
 
-def serve_reference_commit(sock, *, witness, secret, peer_sha256, timeout_seconds=10):
+def serve_reference_commit(sock, *, witness, secret, peer_sha256, timeout_seconds=10, paged=False):
     """Coordinator half of one photo-only remote commit; no retry on loss."""
     try:
         if (REFERENCE_REMOTE_QUALIFIED is not True or type(witness) is not ReferenceCoordinatorAuthority
@@ -542,8 +601,12 @@ def serve_reference_commit(sock, *, witness, secret, peer_sha256, timeout_second
             inventory=_coordinator_commit_inventory(db,grant,secret)
             # Refuse oversized response before creating an irreversible started
             # commit intent; multipart inventory transport is not qualified.
-            if len(_json({'state':'held','nonce':nonce,'intentSha256':allowed[2],'inventory':inventory}))>MAX_FRAME:
+            if not paged and len(_json({'state':'held','nonce':nonce,'intentSha256':allowed[2],'inventory':inventory}))>MAX_FRAME:
                 raise SessionHeld('remote commit inventory exceeds frame bound')
+            if paged:
+                from .reference_paged_wire import STAGED_BYTES
+                if sum(len(_json(item)) for item in inventory['uploads'])>STAGED_BYTES:
+                    raise SessionHeld('remote commit inventory exceeds staging bound')
             try:
                 db.execute('INSERT INTO reference_broker_commit_candidate VALUES(?,?,?,?,?)',commit)
                 db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",allowed)
@@ -551,7 +614,13 @@ def serve_reference_commit(sock, *, witness, secret, peer_sha256, timeout_second
         with witness.hold(grant,max(0,deadline-time.monotonic()),_allowed_commit=allowed,_remote_fenced=True):
             db=witness._active_db
             inventory=_coordinator_commit_inventory(db,grant,secret)
-            _write(sock,{'state':'held','nonce':nonce,'intentSha256':allowed[2],'inventory':inventory},deadline)
+            if paged:
+                from .reference_paged_wire import send_duplex_pages
+                records=inventory['uploads'];context=_page_context(grant,'commit',operation,nonce,len(records))
+                header={'initReplySha256':inventory['initReplySha256']}
+                _write(sock,{'state':'held','nonce':nonce,'intentSha256':allowed[2],'inventory':header,'pageContext':context},deadline)
+                send_duplex_pages(sock,context,records,count=len(records),deadline=deadline,secret=secret)
+            else:_write(sock,{'state':'held','nonce':nonce,'intentSha256':allowed[2],'inventory':inventory},deadline)
             finish=_read(sock,deadline)
             if type(finish) is not dict or set(finish)!={'nonce','reply'} or finish['nonce']!=nonce:
                 raise SessionHeld('remote commit completion changed')
@@ -567,12 +636,12 @@ def serve_reference_commit(sock, *, witness, secret, peer_sha256, timeout_second
 
 class RemoteReferenceCommitAuthority:
     """One photo-only commit authority; caller must verify local inventory."""
-    def __init__(self,sock,*,authority,epoch,peer_sha256,timeout_seconds=10):
+    def __init__(self,sock,*,authority,epoch,peer_sha256,timeout_seconds=10,paged=False,page_secret=None):
         if REFERENCE_REMOTE_QUALIFIED is not True or type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=10:
             raise SessionHeld('reference remote authority unavailable')
         _peer(sock,peer_sha256,False)
         self.sock,self.authority,self.epoch,self.timeout=sock,authority,epoch,timeout_seconds
-        self.pid,self.used,self.active=os.getpid(),False,None
+        self.pid,self.used,self.active,self.paged,self.page_secret=os.getpid(),False,None,paged,page_secret
 
     @contextmanager
     def hold(self,grant,signature,*,operation_id,body,content_type,commit_signature):
@@ -583,10 +652,21 @@ class RemoteReferenceCommitAuthority:
             _write(self.sock,dict(grant=grant,signature=signature,operationId=operation_id,
                 body=base64.b64encode(body).decode(),contentType=content_type,commitSignature=commit_signature,nonce=nonce),deadline)
             held=_read(self.sock,deadline)
-            if (type(held) is not dict or set(held)!={'state','nonce','intentSha256','inventory'}
+            expected={'state','nonce','intentSha256','inventory','pageContext'} if self.paged else {'state','nonce','intentSha256','inventory'}
+            if (type(held) is not dict or set(held)!=expected
                     or held['state']!='held' or held['nonce']!=nonce or type(held['inventory']) is not dict
                     or type(held['intentSha256']) is not str or not re.fullmatch('[a-f0-9]{64}',held['intentSha256'])):
                 raise SessionHeld('remote commit held proof changed')
+            if self.paged:
+                from .reference_paged_wire import receive_duplex_pages
+                context=held['pageContext']
+                if (type(context) is not dict or type(context.get('count')) is not int or not 0<context['count']<=10000
+                        or context!=_page_context(grant,'commit',operation_id,nonce,context['count'])):
+                    raise SessionHeld('remote commit page context changed')
+                records=receive_duplex_pages(self.sock,context,count=context['count'],deadline=deadline,secret=self.page_secret)
+                inventory=held['inventory']
+                if set(inventory)!={'initReplySha256'}:raise SessionHeld('remote commit page header changed')
+                held=dict(held,inventory=dict(inventory,uploads=[__import__('json').loads(x) for x in records]))
             self.active=(nonce,held['intentSha256'],deadline)
             yield held
             if self.active is not None:raise SessionHeld('remote commit completion not acknowledged')

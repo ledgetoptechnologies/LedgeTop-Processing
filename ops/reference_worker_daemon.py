@@ -62,7 +62,9 @@ def _reference_remote_broker_policy(config):
             raise ValueError('remote reference broker daemon route is not qualified')
         value=config['referenceRemoteBroker']
         p._closed(value,('host','port','epoch','peerSha256','caFile','clientCertFile','clientKeyFile',
-                        'nodeMutationSecretHex','backendContainerId','backendImageId','backendPort'),'remote reference broker')
+                        'nodeMutationSecretHex','backendContainerId','backendImageId','backendPort') + (('paged',) if 'paged' in value else ()),'remote reference broker')
+        if 'paged' in value and (type(value['paged']) is not bool or (value['paged'] and node_reference_authority_session.REFERENCE_PAGING_QUALIFIED is not True)):
+            raise ValueError('paged remote reference broker is not qualified')
         ipaddress.ip_address(value['host']);p._uuid(value['epoch'],'coordinator epoch');p._hash(value['peerSha256'],'peer fingerprint')
         if (type(value['port']) is not int or not 1<=value['port']<=65535
                 or type(value['nodeMutationSecretHex']) is not str or not re.fullmatch('[a-f0-9]{64}',value['nodeMutationSecretHex'])):
@@ -481,7 +483,8 @@ def _build_worker(config,owner,resources):
             raise ValueError('remote backend port differs')
         factory=RemoteReferenceSessionFactory(host=remote_config['host'],port=remote_config['port'],authority=config['authorityId'],
             epoch=remote_config['epoch'],peer_sha256=remote_config['peerSha256'],ca_file=remote_config['caFile'],
-            cert_file=remote_config['clientCertFile'],key_file=remote_config['clientKeyFile'])
+            cert_file=remote_config['clientCertFile'],key_file=remote_config['clientKeyFile'],
+            paged=remote_config.get('paged',False),page_secret=bytes.fromhex(remote_config['nodeMutationSecretHex']) if remote_config.get('paged',False) else None)
         adapter=LoopbackNodeODM(config['engineId'],BackendPin(remote_config['backendContainerId'],
             remote_config['backendImageId'],remote_config['backendPort']),config['engineToken'])
         node_broker=NodeMutationBroker(canonical_gate_path(config['engineId'])/'mutation-broker',node_id=config['nodeId'],

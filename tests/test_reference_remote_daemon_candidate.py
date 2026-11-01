@@ -33,7 +33,7 @@ from processing.viewer_tasks import TaskStore
 
 @unittest.skipUnless(os.name=='posix','owned POSIX fixture required')
 class RemoteDaemonCandidateTests(unittest.TestCase):
-    def _run_daemon_photo(self,terminal_code,*,disconnect=False):
+    def _run_daemon_photo(self,terminal_code,*,disconnect=False,paged=False):
         root=Path(tempfile.mkdtemp(prefix='lt-remote-daemon-e2e-')).resolve();root.chmod(0o700)
         print('retained synthetic remote daemon root:',root,flush=True)
         for name in ('state','scratch','leases','xdg'):(root/name).mkdir(mode=0o700)
@@ -135,15 +135,16 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                 referenceRemoteBroker=dict(host='127.0.0.1',port=remote_port,epoch=queue.startup_id,peerSha256=server_pin,
                     caFile=str(server_cert),clientCertFile=str(node_cert),clientKeyFile=str(node_key),nodeMutationSecretHex=secret.hex(),
                     backendContainerId='a'*64,backendImageId='sha256:'+'b'*64,backendPort=int(engine.origin.rsplit(':',1)[1])))
+            if paged:config['referenceRemoteBroker']['paged']=True
             config_path=root/'worker.json';config_path.write_text(json.dumps(config),encoding='utf-8');config_path.chmod(0o600)
             raw=copy.deepcopy(fixture['submission']);raw['submissionId']=str(uuid.uuid4())
             obj=dict(id='image-'+raw['submissionId'],name='test.jpg',byteSize=3,sha256=hashlib.sha256(b'abc').hexdigest(),kind='image',mediaType='image/jpeg')
             raw['manifest'].update(objects=[obj],objectCount=1,totalBytes=3,inputCounts=dict(images=1,lidarObjects=0,points=0))
             raw['manifest']['sha256']=manifest_sha256(raw['manifest'])
             job=store.submit(validate_submission(raw,environment='staging',capability_fingerprint=raw['capabilityFingerprint']))[0]
-            bootstrap="import sys; import ops.reference_worker_daemon as d; import processing.node_mutation_broker as b; import processing.node_reference_authority_session as s; import processing.reference_engine_worker as w; d.REFERENCE_REMOTE_DAEMON_QUALIFIED=True; b.QUALIFIED=True; s.REFERENCE_REMOTE_QUALIFIED=True; w.BROKER_WORKER_CANDIDATE_QUALIFIED=True; b.local_engine_identity=lambda deadline:'synthetic-engine'; b.local_backend_identity=lambda pin,deadline:None; sys.argv=['reference_worker_daemon','--odm-only','--config',sys.argv[1]]; raise SystemExit(d.main())"
+            bootstrap="import sys; import ops.reference_worker_daemon as d; import processing.node_mutation_broker as b; import processing.node_reference_authority_session as s; import processing.reference_engine_worker as w; d.REFERENCE_REMOTE_DAEMON_QUALIFIED=True; b.QUALIFIED=True; s.REFERENCE_REMOTE_QUALIFIED=True; s.REFERENCE_PAGING_QUALIFIED=True; w.BROKER_WORKER_CANDIDATE_QUALIFIED=True; b.local_engine_identity=lambda deadline:'synthetic-engine'; b.local_backend_identity=lambda pin,deadline:None; sys.argv=['reference_worker_daemon','--odm-only','--config',sys.argv[1]]; raise SystemExit(d.main())"
             log=open(root/'daemon.log','wb')
-            with patch.object(authority,'REFERENCE_REMOTE_QUALIFIED',True), patch.object(plans,'REFERENCE_PLAN_QUALIFIED',True):
+            with patch.object(authority,'REFERENCE_REMOTE_QUALIFIED',True), patch.object(authority,'REFERENCE_PAGING_QUALIFIED',paged), patch.object(plans,'REFERENCE_PLAN_QUALIFIED',True):
                 process=subprocess.Popen([os.environ.get('PYTHON','python3'),'-c',bootstrap,str(config_path)],stdout=log,stderr=log,env=dict(os.environ))
                 until=time.monotonic()+35;granted=False;released=False;restarted=False
                 while time.monotonic()<until:
@@ -221,6 +222,7 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
             if cleanup_errors:self.fail('synthetic cleanup failed: '+','.join(cleanup_errors))
         self.assertTrue(all(not thread.is_alive() for thread in threads))
 
+    def test_actual_daemon_photo_success_paged(self):self._run_daemon_photo(40,paged=True)
     def test_actual_daemon_photo_success(self):self._run_daemon_photo(40)
     def test_actual_daemon_photo_failure(self):self._run_daemon_photo(30)
     def test_actual_daemon_photo_cancelled(self):self._run_daemon_photo(50)

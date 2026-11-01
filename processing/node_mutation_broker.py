@@ -1257,9 +1257,10 @@ class NodeMutationBroker:
                     or initial['grant_hash']!=hashlib.sha256(_json(init_grant)).hexdigest()):raise BrokerHeld('remote proof init changed')
             if hashlib.sha256(_json(_reply(json.loads(initial['reply']),init_grant['engineTaskId']))).hexdigest()!=evidence['inventory']['initReplySha256']:
                 raise BrokerHeld('remote proof init response changed')
-            names={obj['name'] for obj in objects};seen=set()
+            names={obj['name'] for obj in objects};object_names={obj['id']:obj['name'] for obj in objects};seen=set()
             for item in evidence['inventory']['uploads']:
-                if (type(item) is not dict or set(item)!={'operationId','fileName','issueSha256'}
+                if (type(item) is not dict or set(item)!={'objectId','operationId','fileName','issueSha256'}
+                        or object_names.get(item['objectId'])!=item['fileName']
                         or item['fileName'] not in names or item['fileName'] in seen or not _uuid(item['operationId'])):
                     raise BrokerHeld('remote proof inventory changed')
                 row=self.db.execute('SELECT operation,file_key,grant_hash,state,reply FROM operations WHERE id=?',(item['operationId'],)).fetchone()
@@ -1359,9 +1360,10 @@ class NodeMutationBroker:
             try:init_reply=_reply(json.loads(init['reply']),init_grant['engineTaskId'])
             except (ValueError,TypeError):raise BrokerHeld('reference local init changed') from None
             if hashlib.sha256(_json(init_reply)).hexdigest()!=inventory['initReplySha256']:raise BrokerHeld('reference local init proof changed')
-            names={obj['name'] for obj in objects};seen=set()
+            names={obj['name'] for obj in objects};object_names={obj['id']:obj['name'] for obj in objects};seen=set()
             for proof in inventory['uploads']:
-                if (type(proof) is not dict or set(proof)!={'operationId','fileName','issueSha256'}
+                if (type(proof) is not dict or set(proof)!={'objectId','operationId','fileName','issueSha256'}
+                        or object_names.get(proof['objectId'])!=proof['fileName']
                         or proof['fileName'] not in names or proof['fileName'] in seen or not _uuid(proof['operationId'])
                         or type(proof['issueSha256']) is not str or not re.fullmatch('[a-f0-9]{64}',proof['issueSha256'])):
                     raise BrokerHeld('remote commit inventory changed')
