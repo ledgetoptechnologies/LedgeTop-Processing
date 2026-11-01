@@ -196,6 +196,8 @@ class ClaimRecoveryService:
                 if old['job_id']!=job_id or old['request_sha256']!=digest or old['request_json']!=encoded:raise Conflict('recovery request differs')
                 # Historical read only: never clear a later restart/operator hold.
                 return self._receipt(old,state['claim'])
+            if not self.queue._transfer_admission_clear(db):
+                raise Conflict('transfer requires independently fenced reconciliation')
             if not state['eligible'] or request['coordinatorEpoch']!=self._epoch or request['expectedNodeRevision']!=state['node']['revision']:
                 raise Conflict('recovery startup or maintenance state changed')
             occupied=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()

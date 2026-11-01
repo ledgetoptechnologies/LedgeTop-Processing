@@ -1007,6 +1007,39 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertIsNone(self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
         self.assertEqual(self.task(identifier)['job']['status'], 'queued')
 
+    def test_new_claim_refuses_attested_unknown_transfer_state(self):
+        from processing.transfer_fence import install_offline
+        identifier = self.submit()
+        with self.queue._db() as db:
+            install_offline(db, enabled=True)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('orphan-upload', 'orphan-job', 'orphan-engine', 1, 'a' * 64, 'unknown'))
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+
+    def test_completion_refuses_attested_unknown_transfer_state(self):
+        from processing.transfer_fence import install_offline
+        first, second = self.submit(), self.submit()
+        with self.queue._db() as db: install_offline(db, enabled=True)
+        claim = self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]})
+        with self.queue._db() as db:
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('orphan-upload', 'orphan-job', 'orphan-engine', 1, 'a' * 64, 'unknown'))
+        with self.assertRaises(Conflict):
+            self.queue.complete(claim['id'], {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}})
+        self.assertEqual(self.task(first)['job']['status'], 'running')
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+
+    def test_new_claim_refuses_nullable_corrupt_transfer_state(self):
+        identifier = self.submit()
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE engine_ingress_uploads (upload_id TEXT, job_id TEXT, engine_uuid TEXT, '
+                       'byte_count INTEGER, sha256 TEXT, state TEXT)')
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('orphan-upload', 'orphan-job', 'orphan-engine', 1, 'a' * 64, None))
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+
     def test_new_claim_refuses_nonempty_unqualified_journal(self):
         from processing.engine_ingress_guard import STREAM_DDL
         identifier = self.submit()

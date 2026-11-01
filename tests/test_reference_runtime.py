@@ -231,6 +231,10 @@ class ReferenceRuntimeTests(unittest.TestCase):
     @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
     def test_configured_recovery_routes_resume_original_claim_and_same_epoch_reassembly_does_not_rehold(self):
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        from processing.viewer_tasks import TaskStore
+        from processing.transfer_fence import install_offline
+        TaskStore(queue, self.root/'state'/'viewer-tasks')
+        with queue._db() as db: install_offline(db, enabled=True)
         self.value=self.recovery_config(queue.authority_id);self.write_config();runtime=self.runtime(queue)
         fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
         from processing import reference_protocol as protocol
@@ -248,7 +252,19 @@ class ReferenceRuntimeTests(unittest.TestCase):
         binding=state['physicalBinding'];parent={key:state['claim'][key] for key in ('jobId','generation','environment','nodeId','workerId','workerInstanceId','authorityId','claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest')}
         parent.update(engineId=binding['engine_id'],coordinatorOrigin=binding['coordinator_origin'],gateGeneration=binding['gate_generation'],outputBudget=binding['output_budget'],inputBytes=state['reservation']['inputBytes'],reservationId=state['reservation']['reservationId'],gateReceiptId='a'*32)
         request=dict(schemaVersion=1,requestId=str(uuid.uuid4()),coordinatorEpoch=state['coordinatorEpoch'],expectedNodeRevision=state['node']['revision'],parentBinding=parent,transferRequestSha256=state['reservation']['transferRequestSha256'],workerEvidenceSha256='e'*64)
+        with queue._db() as db:
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('unknown-upload','unrelated-job','other-engine',1,'a'*64,'unknown'))
+        rejected=call('POST','recover',protocol.canonical_json(request))
+        self.assertNotEqual(rejected.status,200)
+        self.assertEqual(queue.get(job['jobId'])['status'],'held')
+        with queue._db() as db: db.execute("DELETE FROM engine_ingress_uploads WHERE upload_id='unknown-upload'")
         resumed=call('POST','recover',protocol.canonical_json(request));self.assertEqual(resumed.status,200,resumed.body)
+        with queue._db() as db:
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('unknown-upload','unrelated-job','other-engine',1,'a'*64,'unknown'))
+        replay=call('POST','recover',protocol.canonical_json(request))
+        self.assertEqual(replay.status,200);self.assertEqual(replay.body,resumed.body)
         self.assertEqual(queue.get(job['jobId'])['status'],'running');epoch=queue.startup_id
         second=self.runtime(queue);self.assertEqual(queue.startup_id,epoch);self.assertEqual(queue.get(job['jobId'])['status'],'running')
         receipt=second.api.handle('GET',prefix+'recovery-receipts/'+request['requestId'],headers,protected_transport=True)

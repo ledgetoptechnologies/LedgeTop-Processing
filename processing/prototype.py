@@ -396,7 +396,7 @@ class Queue(Maintenance):
             return False
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone():
             return True
-        return not bool(db.execute("SELECT 1 FROM engine_ingress_uploads WHERE state='started' LIMIT 1").fetchone())
+        return not bool(db.execute("SELECT 1 FROM engine_ingress_uploads WHERE state IS NOT 'complete' LIMIT 1").fetchone())
 
     def hold_unqualified_transfer(self, identifier, token):
         """Preserve the execution slot without changing transfer evidence."""
