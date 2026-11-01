@@ -17,6 +17,13 @@ Before either confirming a replay or relaying receipts to a worker, the store
 revalidates each persisted receipt's canonical payload, digest and job binding.
 This detects inconsistent rows but is not protection against a writer able to
 change both the payload and digest; durable writer fencing remains necessary.
+Malformed or inconsistent stored result/receipt metadata is reported as the
+sanitized HTTP 409 `stored_reference_inspection` on the public and private
+reference adapters, without modifying the affected records. Receipt identities
+are globally reserved across success and terminal outcomes, so accepting a new
+success receipt inspects those global collision records: one corrupt foreign
+row can hold new success acknowledgements across environments until inspected.
+The private worker relay examines the requested job's receipt rows only.
 
 The additional fields are backwards-compatible for consumers that tolerate
 unknown JSON fields. Strict consumers must update before using this candidate.

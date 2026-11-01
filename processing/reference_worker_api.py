@@ -15,6 +15,7 @@ from .maintenance import Conflict
 from .reference_api import Response
 from .reference_transfer import validate_grant
 from .reference_sqlite import is_sqlite_contention
+from .reference_store import StoredReferenceCorrupt
 
 
 PREFIX = "/ltds/worker/v1"
@@ -208,6 +209,8 @@ class ReferenceWorkerAPI:
                     return Response(200, self.terminal.accepted(match[1], job['environment']))
                 return Response(200, self._grant(match[1], identity, claim_token))
             return self._error(404, "not_found")
+        except StoredReferenceCorrupt:
+            return self._error(409, 'stored_reference_inspection')
         except Conflict:
             return self._error(409, "worker_conflict")
         except (ValueError, TypeError):

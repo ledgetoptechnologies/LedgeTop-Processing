@@ -187,6 +187,32 @@ class ActualContentionTests(unittest.TestCase):
                 self.assertEqual(len(applied['acceptedObjectIds']),2)
                 self.assertTrue(node.apply_viewer_acceptance('job-1',relayed['receipts'])['fullyAccepted'])
                 self.assertEqual(ledger_db.execute('SELECT COUNT(*) FROM receipts').fetchone()[0],2)
+
+                # A malformed foreign row blocks the global identity collision
+                # scan; worker retrieval of this healthy job remains isolated.
+                keeper.execute('INSERT INTO reference_acceptances VALUES (?,?,?,?)',
+                    ('foreign','another-job','0'*64,'{'))
+                keeper.commit()
+                held=public.handle('POST',path,headers,body,protected_transport=True)
+                self.assertEqual((held.status,held.body),(409,{'error':'stored_reference_inspection'}))
+                self.assertEqual(worker.handle('GET',worker_path,worker_headers,protected_transport=True).status,200)
+                self.assertEqual(keeper.execute("SELECT receipt_json FROM reference_acceptances WHERE receipt_id='foreign'").fetchone()[0],'{')
+                # A malformed receipt belonging to this job also holds its
+                # worker relay, without deleting or changing either row.
+                keeper.execute('INSERT INTO reference_acceptances VALUES (?,?,?,?)',
+                    ('bad-local','job-1','0'*64,'{'))
+                keeper.commit()
+                held=worker.handle('GET',worker_path,worker_headers,protected_transport=True)
+                self.assertEqual((held.status,held.body),(409,{'error':'stored_reference_inspection'}))
+                self.assertEqual(keeper.execute("SELECT receipt_json FROM reference_acceptances WHERE receipt_id='bad-local'").fetchone()[0],'{')
+                # Malformed stored result metadata is a server-side hold on
+                # both routes, never reported as malformed client input.
+                keeper.execute("UPDATE reference_jobs SET result_json='{' WHERE job_id='job-1'")
+                keeper.commit()
+                for response in (public.handle('POST',path,headers,body,protected_transport=True),
+                                 worker.handle('GET',worker_path,worker_headers,protected_transport=True)):
+                    self.assertEqual((response.status,response.body),(409,{'error':'stored_reference_inspection'}))
+                self.assertEqual(keeper.execute("SELECT result_json FROM reference_jobs WHERE job_id='job-1'").fetchone()[0],'{')
             finally:
                 locker.rollback()
                 if ledger_db is not None: ledger_db.close()
