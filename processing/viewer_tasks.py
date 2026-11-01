@@ -761,8 +761,10 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            claim_schema = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
+            if claim_schema and 'archive_path' in fields and (expected_archive_task is None or expected_archive_claim is None):
+                raise Conflict('archive claim required')
             if expected_archive_task is not None:
-                claim_schema = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
                 if claim_schema and expected_archive_claim is None:
                     raise Conflict('archive claim required')
                 task=expected_archive_task
@@ -776,6 +778,8 @@ class TaskStore:
                 if row['archive_path'] not in (None,str(Path(fields['archive_path']).absolute())):
                     raise Conflict('competing archive publication')
                 if expected_archive_claim is not None:
+                    if row['removed'] or ('archive_state' in row.keys() and row['archive_state'] != 'pending'):
+                        raise Conflict('archive task requires inspection')
                     claim = db.execute('SELECT token_hash,job_id FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
                                        (identifier, row['generation'])).fetchone()
                     if (claim is None or claim['job_id'] != row['job_id'] or not hmac.compare_digest(

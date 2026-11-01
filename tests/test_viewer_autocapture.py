@@ -700,6 +700,51 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(archive.read_bytes(), original_archive)
         self.assertEqual(receipt.read_bytes(), original_receipt)
 
+    def test_durable_claim_publication_rejects_cross_store_inspection_hold(self):
+        self.service.store.install_archive_claim_schema()
+        self.service.store.enable_archive_status()
+        task = self.fixture.task(self.identifier)
+        claim = self.service.store.claim_archive(task)
+        other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
+        archive = Path(task['directory']) / 'all.zip'
+        archive.write_bytes(self.engine_response)
+        self.assertTrue(other.set_archive_status(self.identifier, task['generation'], task['job_id'],
+                                                 'inspection', 'partial_requires_inspection'))
+        with self.assertRaises(Conflict):
+            self.service.store.update(self.identifier, expected_archive_task=task,
+                                      expected_archive_claim=claim, archive_path=str(archive))
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_claims_v1').fetchone()[0], 1)
+        self.assertIsNone(other.task(self.identifier)['archive_path'])
+        self.assertEqual(archive.read_bytes(), self.engine_response)
+
+    def test_durable_claim_publication_rejects_cross_store_remove(self):
+        self.service.store.install_archive_claim_schema()
+        task = self.fixture.task(self.identifier)
+        claim = self.service.store.claim_archive(task)
+        other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
+        archive = Path(task['directory']) / 'all.zip'
+        archive.write_bytes(self.engine_response)
+        other.remove(self.identifier)
+        with self.assertRaises((Conflict, KeyError)):
+            self.service.store.update(self.identifier, expected_archive_task=task,
+                                      expected_archive_claim=claim, archive_path=str(archive))
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_claims_v1').fetchone()[0], 1)
+            self.assertIsNone(db.execute('SELECT archive_path FROM viewer_tasks WHERE uuid=?', (self.identifier,)).fetchone()[0])
+        self.assertEqual(archive.read_bytes(), self.engine_response)
+
+    def test_durable_claim_blocks_generic_archive_path_update(self):
+        self.service.store.install_archive_claim_schema()
+        task = self.fixture.task(self.identifier)
+        archive = Path(task['directory']) / 'all.zip'
+        archive.write_bytes(self.engine_response)
+        other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
+        for value in (str(archive), None):
+            with self.subTest(value=value), self.assertRaises(Conflict):
+                other.update(self.identifier, archive_path=value)
+        self.assertIsNone(other.task(self.identifier)['archive_path'])
+
     def test_unknown_length_and_low_space_preserve_partial_and_engine(self):
         self.include_length = False
         with self.assertRaises(Exception): self.service._archive_once(self.identifier)
