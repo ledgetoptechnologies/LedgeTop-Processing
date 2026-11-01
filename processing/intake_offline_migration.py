@@ -28,14 +28,58 @@ for table, predicate in (
                     f'WHEN EXISTS(SELECT 1 FROM {table} WHERE {predicate}) '
                     "BEGIN SELECT RAISE(ABORT, 'existing intake identity'); END")
 
+# Bind the prior snapshot to actual rows before any input row is deleted.
+_TASK_SNAPSHOT_COLUMNS=('uuid','generation','directory','name','options','outputs','environment',
+    'stage','phase','job_id','node_id','engine_uuid','claim_token','error','progress',
+    'output_lines','archive_path','removed','created_at','updated_at','option_evidence_required')
+_FILE_SNAPSHOT_COLUMNS=('uuid','name_key','name','path','bytes','sha256','is_photo')
+_task_differences=' OR '.join(f"(json_type(NEW.metadata, '$.{c}') IS NULL OR json_extract(NEW.metadata, '$.{c}') IS NOT t.{c})" for c in _TASK_SNAPSHOT_COLUMNS)
+_file_differences=' OR '.join(f"(json_type(j.value, '$.{c}') IS NULL OR json_extract(j.value, '$.{c}') IS NOT f.{c})" for c in _FILE_SNAPSHOT_COLUMNS)
+TRIGGERS['viewer_intake_guard_incarnation_insert_v1']=(
+    'CREATE TRIGGER viewer_intake_guard_incarnation_insert_v1 BEFORE INSERT ON viewer_incarnations '
+    f"WHEN {AUTHORIZE}() IS NOT 1 OR EXISTS(SELECT 1 FROM viewer_incarnations WHERE uuid=NEW.uuid AND generation=NEW.generation) "
+    "OR json_valid(NEW.metadata) IS NOT 1 OR json_valid(NEW.files) IS NOT 1 "
+    "OR json_type(NEW.metadata) IS NOT 'object' OR json_type(NEW.files) IS NOT 'array' "
+    f"OR (SELECT COUNT(*) FROM json_each(NEW.metadata)) IS NOT {len(_TASK_SNAPSHOT_COLUMNS)} "
+    f"OR EXISTS(SELECT 1 FROM json_each(NEW.files) j WHERE json_type(j.value) IS NOT 'object' OR (SELECT COUNT(*) FROM json_each(j.value)) IS NOT {len(_FILE_SNAPSHOT_COLUMNS)}) "
+    "OR NOT EXISTS(SELECT 1 FROM viewer_tasks t WHERE t.uuid=NEW.uuid AND t.generation=NEW.generation "
+    f"AND NEW.job_id IS t.job_id AND NOT ({_task_differences})) "
+    "OR (SELECT COUNT(*) FROM json_each(NEW.files)) IS NOT (SELECT COUNT(*) FROM viewer_files WHERE uuid=NEW.uuid) "
+    "OR EXISTS(SELECT 1 FROM viewer_files f WHERE f.uuid=NEW.uuid AND NOT EXISTS(SELECT 1 FROM json_each(NEW.files) j "
+    f"WHERE NOT ({_file_differences}))) "
+    "BEGIN SELECT RAISE(ABORT, 'invalid intake snapshot'); END")
+for action in ('UPDATE','DELETE'):
+    name=f'viewer_intake_guard_incarnation_{action.lower()}_v1'
+    TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE {action} ON viewer_incarnations '
+                    "BEGIN SELECT RAISE(ABORT, 'intake snapshot immutable'); END")
+
+_prior_file_mismatch=' OR '.join(f"(json_type(j.value, '$.{c}') IS NULL OR json_extract(j.value, '$.{c}') IS NOT OLD.{c})" for c in _FILE_SNAPSHOT_COLUMNS)
+TRIGGERS['viewer_intake_guard_file_delete_snapshot_v1']=(
+    'CREATE TRIGGER viewer_intake_guard_file_delete_snapshot_v1 BEFORE DELETE ON viewer_files '
+    "WHEN NOT EXISTS(SELECT 1 FROM viewer_tasks t JOIN viewer_incarnations i ON i.uuid=t.uuid AND i.generation=t.generation "
+    "JOIN json_each(i.files) j WHERE t.uuid=OLD.uuid "
+    f"AND NOT ({_prior_file_mismatch})) "
+    "BEGIN SELECT RAISE(ABORT, 'matching intake snapshot required'); END")
+for action in ('INSERT','UPDATE'):
+    name=f'viewer_intake_guard_file_{action.lower()}_snapshot_v1'
+    TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE {action} ON viewer_files '
+                    "WHEN EXISTS(SELECT 1 FROM viewer_tasks t JOIN viewer_incarnations i "
+                    "ON i.uuid=t.uuid AND i.generation=t.generation WHERE t.uuid=NEW.uuid) "
+                    "BEGIN SELECT RAISE(ABORT, 'snapshotted intake immutable'); END")
+_old_task_diff=' OR '.join(f"(json_type(i.metadata, '$.{c}') IS NULL OR json_extract(i.metadata, '$.{c}') IS NOT OLD.{c})" for c in _TASK_SNAPSHOT_COLUMNS)
+
 TRIGGERS['viewer_intake_guard_generation_v1']=(
     'CREATE TRIGGER viewer_intake_guard_generation_v1 BEFORE UPDATE ON viewer_tasks '
     'WHEN (NEW.generation IS NOT OLD.generation OR NEW.directory IS NOT OLD.directory) AND ('
     "OLD.removed IS NOT 1 OR NEW.removed IS NOT 0 OR typeof(OLD.generation) IS NOT 'integer' "
-    "OR NEW.generation IS NOT OLD.generation+1 OR NEW.directory IS OLD.directory "
+    "OR NEW.generation IS NOT OLD.generation+1 OR typeof(NEW.directory) IS NOT 'text' "
+    "OR NOT (NEW.directory=NEW.uuid||'-'||NEW.generation OR (length(NEW.directory)=length(NEW.uuid||'-'||NEW.generation)+17 "
+    "AND substr(NEW.directory,1,length(NEW.uuid||'-'||NEW.generation)+1)=NEW.uuid||'-'||NEW.generation||'-' "
+    "AND substr(NEW.directory,-16) NOT GLOB '*[^0-9a-f]*')) "
+    "OR EXISTS(SELECT 1 FROM viewer_tasks WHERE uuid IS NOT OLD.uuid AND directory=NEW.directory) "
     "OR NEW.environment IS NOT OLD.environment OR NEW.stage IS NOT 'uploading' OR NEW.job_id IS NOT NULL "
     "OR EXISTS(SELECT 1 FROM viewer_files WHERE uuid=OLD.uuid) "
-    "OR NOT EXISTS(SELECT 1 FROM viewer_incarnations WHERE uuid=OLD.uuid AND generation=OLD.generation) "
+    f"OR NOT EXISTS(SELECT 1 FROM viewer_incarnations i WHERE i.uuid=OLD.uuid AND i.generation=OLD.generation AND i.job_id IS OLD.job_id AND NOT ({_old_task_diff})) "
     "OR EXISTS(SELECT 1 FROM viewer_intake_journal_v1 WHERE uuid=OLD.uuid AND generation=OLD.generation AND state!='committed')) "
     "BEGIN SELECT RAISE(ABORT, 'invalid intake generation'); END")
 

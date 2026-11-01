@@ -181,6 +181,32 @@ class ViewerInputSpaceTests(unittest.TestCase):
         self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
         self.assertEqual(old_path.read_bytes(),b'first-generation')
 
+    def test_authorized_sql_rejects_forged_snapshot_and_invalid_directory(self):
+        import sqlite3
+        from processing.viewer_tasks import canonical
+        store=self.journal_store();self.facade.service.store=store
+        req=self.request(multipart([('images','a.jpg',b'first')]))
+        self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
+        original=Path(store.task(self.identifier)['files'][0]['path'])
+        store.remove(self.identifier)
+        with self.q._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=store._row(db,self.identifier,removed=True)
+            metadata=dict(row);files=[dict(item) for item in db.execute('SELECT * FROM viewer_files WHERE uuid=?',(self.identifier,))]
+            altered=dict(metadata);altered['name']='forged'
+            sql='INSERT INTO viewer_incarnations(uuid,generation,job_id,metadata,files) VALUES(?,?,?,?,?)'
+            with self.assertRaises(sqlite3.IntegrityError):db.execute(sql,(self.identifier,1,None,canonical(altered),canonical(files)))
+            fake=[{**files[0],'sha256':'0'*64}]
+            with self.assertRaises(sqlite3.IntegrityError):db.execute(sql,(self.identifier,1,None,canonical(metadata),canonical(fake)))
+            db.execute(sql,(self.identifier,1,None,canonical(metadata),canonical(files)))
+            with self.assertRaises(sqlite3.IntegrityError):db.execute('UPDATE viewer_incarnations SET files=?',(canonical([]),))
+            db.execute('DELETE FROM viewer_files WHERE uuid=?',(self.identifier,))
+            for directory in (None,'not-canonical',self.identifier+'-2-xyz'):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute("UPDATE viewer_tasks SET generation=2,directory=?,removed=0,stage='uploading' WHERE uuid=?",(directory,self.identifier))
+            db.rollback()
+        self.assertEqual(original.read_bytes(),b'first')
+
     def test_guarded_unfinished_generation_cannot_be_removed_or_reset(self):
         import sqlite3
         store=self.journal_store();self.facade.service.store=store
