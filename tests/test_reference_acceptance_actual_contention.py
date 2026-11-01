@@ -1,9 +1,12 @@
 """Real API/store transactions against independent in-memory SQLite connections."""
 from contextlib import contextmanager
 import json
+import hashlib
 import http.client
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import threading
 import unittest
 import uuid
@@ -181,6 +184,58 @@ class ActualContentionTests(unittest.TestCase):
                 self.assertEqual(len(applied['acceptedObjectIds']),2)
                 self.assertTrue(node.apply_viewer_acceptance('job-1',relayed['receipts'])['fullyAccepted'])
                 self.assertEqual(ledger_db.execute('SELECT COUNT(*) FROM receipts').fetchone()[0],2)
+
+                # Optional cross-repository qualification against an explicitly
+                # selected Viewer checkout; never modifies or launches Viewer.
+                viewer_dir = os.environ.get('LT_VIEWER_CANDIDATE_DIR')
+                if viewer_dir:
+                    modules = [Path(viewer_dir) / 'nativeReferenceReceiptCandidate.js',
+                               Path(viewer_dir) / 'nativeReferenceProtocolCandidate.js']
+                    before = [hashlib.sha256(file.read_bytes()).hexdigest() for file in modules]
+                    candidate_manifest = dict(manifest,jobId='job-2')
+                    candidate_manifest['resultManifestSha256'] = p.digest({k:v for k,v in candidate_manifest.items() if k!='resultManifestSha256'})
+                    script = '''const fs=require('node:fs'),{DatabaseSync}=require('node:sqlite'),crypto=require('node:crypto');
+const m=require(process.argv[1]),x=JSON.parse(fs.readFileSync(0,'utf8')),db=new DatabaseSync(':memory:');
+db.exec('CREATE TABLE processing_tasks(id TEXT PRIMARY KEY, active_attempt_id TEXT); CREATE TABLE processing_attempts(id TEXT PRIMARY KEY, task_id TEXT);');
+const a=crypto.randomUUID(); db.prepare('INSERT INTO processing_tasks VALUES(?,?)').run('task',a);db.prepare('INSERT INTO processing_attempts VALUES(?,?)').run(a,'task');
+m.install(db,true);m.bind(db,{attemptId:a,bindingId:crypto.randomUUID(),jobId:x.manifest.jobId,generation:1,environment:'staging',inputManifestSha256:x.input,pipelineDigest:x.manifest.pipelineDigest},{authorizeBinding:()=>true});
+m.holdReceipt(db,{attemptId:a,storageReceiptId:crypto.randomUUID(),receiptId:crypto.randomUUID(),manifest:x.manifest,objects:x.manifest.objects.map(o=>({id:o.id,byteSize:o.byteSize,sha256:o.sha256})),acceptedAt:'2026-11-01T00:00:00.000Z'},{authorizeReceipt:()=>true,verifyDurableStorage:()=>true});
+process.stdout.write(db.prepare('SELECT acceptance_json FROM native_reference_outbox_candidate WHERE attempt_id=?').get(a).acceptance_json);db.close();'''
+                    process = subprocess.run(['node','-e',script,str(modules[0])],
+                        input=json.dumps({'manifest':candidate_manifest,'input':receipt['inputManifestSha256']}),
+                        text=True,capture_output=True,timeout=10)
+                    self.assertEqual(process.returncode,0,process.stderr[-2000:])
+                    self.assertEqual(before,[hashlib.sha256(file.read_bytes()).hexdigest() for file in modules])
+                    viewer_receipt = json.loads(process.stdout)
+                    keeper.execute("INSERT INTO jobs(id,profile,status) VALUES ('job-2','reference-pipeline-v1','succeeded')")
+                    keeper.execute('''INSERT INTO reference_jobs(job_id,generation,environment,input_json,manifest_sha,pipeline_digest,
+                        phase,node_id,result_json) VALUES (?,?,?,?,?,?,?,?,?)''', ('job-2',1,'staging','{}',receipt['inputManifestSha256'],
+                        receipt['pipelineDigest'],'awaiting_acceptance','node',json.dumps(candidate_manifest)))
+                    keeper.execute("INSERT INTO reference_claims VALUES ('request-2','job-2','node','worker','instance','claim')")
+                    keeper.commit()
+                    viewer_path = '/ltds/v1/jobs/job-2/acceptance'
+                    for expected_created in (True,False):
+                        connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
+                        try:
+                            connection.request('POST',viewer_path,body=process.stdout.encode(),headers=headers)
+                            response = connection.getresponse()
+                            self.assertEqual(response.status,200)
+                            accepted = json.loads(response.read())
+                            self.assertEqual((accepted['created'],accepted['fullyAccepted']), (expected_created,True))
+                            self.assertEqual(set(accepted['acceptedObjectIds']),set(viewer_receipt['acceptedObjectIds']))
+                        finally: connection.close()
+                    _, viewer_relay = driver._request('GET','/jobs/job-2/acceptance',claim_token='claim')
+                    self.assertEqual(viewer_relay['receipts'],[viewer_receipt])
+                    identity2 = dict(identity,job_id='job-2',result_manifest_sha256=candidate_manifest['resultManifestSha256'])
+                    ledger_db.execute('INSERT INTO results VALUES (?,?)',('reservation-2',json.dumps(identity2)))
+                    ledger_db.executemany('INSERT INTO objects VALUES (?,?,NULL)',
+                        [('reservation-2',obj['id']) for obj in candidate_manifest['objects']])
+                    ledger_db.commit()
+                    node._row = lambda _: {'result':json.dumps(candidate_manifest),'outbox_id':'outbox-2',
+                        'identity':json.dumps({'job':{'generation':1,'environment':'staging',
+                          'pipelineDigest':receipt['pipelineDigest'],'manifestSha256':receipt['inputManifestSha256']},
+                          'reservation':'reservation-2'})}
+                    self.assertTrue(node.apply_viewer_acceptance('job-2',viewer_relay['receipts'])['fullyAccepted'])
             finally:
                 locker.rollback()
                 if ledger_db is not None: ledger_db.close()
