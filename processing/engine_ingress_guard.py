@@ -130,6 +130,43 @@ class Binding:
             raise AdmissionError('three distinct private credentials required')
 
 
+@dataclass(frozen=True)
+class BackendPin:
+    """Installer-selected local container identity; not remote authority proof."""
+    container_id: str
+    image_id: str
+    backend_port: int
+
+    def __post_init__(self):
+        if (type(self.container_id) is not str or not re.fullmatch(r'[0-9a-f]{64}', self.container_id)
+                or type(self.image_id) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}', self.image_id)
+                or type(self.backend_port) is not int or not 1024 <= self.backend_port <= 65535):
+            raise AdmissionError('exact local backend identity required')
+
+
+def local_backend_identity(pin, deadline):
+    """Inspect only the exact local container on the local Unix Docker daemon."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0: raise AdmissionError('bounded backend probe deadline exceeded')
+    environment = {key: value for key, value in os.environ.items()
+                   if key.upper() not in ('DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH')}
+    try:
+        result = subprocess.run(['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock',
+            'inspect', pin.container_id], capture_output=True, text=True,
+            timeout=min(2, remaining), env=environment)
+        if result.returncode or len(result.stdout) > 1024 * 1024: raise ValueError()
+        items = json.loads(result.stdout)
+        if type(items) is not list or len(items) != 1: raise ValueError()
+        item = items[0]
+        if (item['Id'] != pin.container_id or item['Image'] != pin.image_id
+                or item['State']['Running'] is not True
+                or item['NetworkSettings']['Ports']['3000/tcp'] != [
+                    {'HostIp': '127.0.0.1', 'HostPort': str(pin.backend_port)}]):
+            raise ValueError()
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        raise AdmissionError('local backend identity unavailable') from None
+
+
 def _headers(pairs):
     result = {}
     if not isinstance(pairs, (list, tuple)) or len(pairs) > 32:
@@ -181,13 +218,22 @@ def local_engine_identity(deadline):
 
 
 class EngineIngressGuard:
-    def __init__(self, queue, binding, *, owner_pin, engine_probe=local_engine_identity):
+    def __init__(self, queue, binding, *, owner_pin, backend_pin=None,
+                 engine_probe=local_engine_identity, backend_probe=local_backend_identity):
         self.queue, self.binding = queue, binding
         self.engine_probe = engine_probe
+        self.backend_pin, self.backend_probe = backend_pin, backend_probe
         self.owner_pin = owner_pin
         if (type(owner_pin) is not OwnerPin or OwnerPin.capture(queue) != owner_pin
                 or queue.authority_id != binding.authority_id):
             raise AdmissionError('coordinator authority mismatch')
+
+    def _check_backend(self, deadline):
+        if type(self.backend_pin) is not BackendPin or self.backend_pin.backend_port != self.binding.backend_port:
+            raise AdmissionError('exact local backend pin required')
+        if self.engine_probe(deadline) != self.binding.engine_id:
+            raise AdmissionError('physical Engine identity changed')
+        self.backend_probe(self.backend_pin, deadline)
 
     def _mutation(self, method, target, headers):
         if method != 'POST' or not isinstance(target, str):
@@ -229,8 +275,7 @@ class EngineIngressGuard:
             raise AdmissionError('original claim required')
         try:
             with _queue_lifecycle(self.queue, deadline), NodeGate(binding.engine_id) as gate:
-                if self.engine_probe(deadline) != binding.engine_id:
-                    raise AdmissionError('physical Engine identity changed')
+                self._check_backend(deadline)
                 state = gate.snapshot()
                 expected = {'engineId': binding.engine_id, 'nodeId': binding.node_id,
                     'authorityId': self.queue.authority_id,
@@ -333,8 +378,9 @@ class EngineIngressGuard:
                             or current_gate['reservation'] is None or current_gate['reservation']['receiptId']!=receipt_id
                             or current_gate['reservation']['job']!=identity
                             or journal is None or tuple(journal)!=(job_id,engine_uuid,byte_count,sha,'started')
-                            or self.engine_probe(deadline)!=binding.engine_id):
+                            ):
                             raise AdmissionError('exact active coordinator claim required')
+                        self._check_backend(deadline)
                         if bound_id is not None:
                             current_schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_engine_upload_intents'").fetchone()
                             if current_schema is None or current_schema[0]!=file_contract.DDL:
@@ -359,7 +405,9 @@ class EngineIngressGuard:
         with self._owned(headers, engine_uuid, action, deadline):
             forwarded = {'Content-Type': content_type}
             if action == 'init': forwarded['Set-UUID'] = engine_uuid
-            return self._exchange(method, target, body, forwarded, deadline)
+            result = self._exchange(method, target, body, forwarded, deadline)
+            self._check_backend(deadline)
+            return result
 
     def stream_upload(self, target, pairs, source, byte_count, sha256, content_type):
         """One socket-backed upload, guarded and journaled; caller owns source.
@@ -381,6 +429,7 @@ class EngineIngressGuard:
         with self._owned(headers,engine_uuid,action,deadline,(upload_id,byte_count,sha256)) as db:
             result=self._exchange('POST',target,b'',{'Content-Type':content_type},deadline,
                                   source=source,source_length=byte_count,expected_sha=sha256)
+            self._check_backend(deadline)
             if result[0] != 200:
                 raise AdmissionError('upstream upload unconfirmed; retain reservation')
             try:
@@ -419,6 +468,7 @@ class EngineIngressGuard:
                 result=self._exchange('POST',target,b'',{'Content-Type':'multipart/form-data; boundary='+boundary},deadline,
                                       source=source,source_length=record['bytes'],expected_sha=record['sha256'],
                                       file_prefix=prefix,file_suffix=suffix,forbidden=b'--'+boundary.encode('ascii'))
+                self._check_backend(deadline)
                 try:
                     from .reference_protocol import decode_submission
                     response=decode_submission(result[1])
@@ -443,7 +493,11 @@ class EngineIngressGuard:
         if method != 'GET' or not (target in ('/info', '/options', '/task/list')
                 or re.fullmatch(r'/task/' + UUID + r'/(info|output)', target or '')):
             raise AdmissionError('unrecognized management read refused')
-        return self._exchange(method, target, b'', {}, time.monotonic() + self.binding.deadline_seconds)
+        deadline = time.monotonic() + self.binding.deadline_seconds
+        self._check_backend(deadline)
+        result = self._exchange(method, target, b'', {}, deadline)
+        self._check_backend(deadline)
+        return result
 
     def completed(self, pairs):
         """Validate exact success, but REFUSE automatic physical release.
@@ -460,8 +514,7 @@ class EngineIngressGuard:
         deadline = time.monotonic() + self.binding.deadline_seconds
         try:
             with _queue_lifecycle(self.queue, deadline), NodeGate(self.binding.engine_id) as gate:
-                if self.engine_probe(deadline) != self.binding.engine_id:
-                    raise AdmissionError('physical Engine identity changed')
+                self._check_backend(deadline)
                 state = gate.snapshot()
                 if (state['nodeId'] != self.binding.node_id or state['authorityId'] != self.queue.authority_id
                         or state['coordinatorOrigin'] != self.binding.coordinator_origin

@@ -10,7 +10,7 @@ import threading
 import uuid
 from unittest.mock import patch
 
-from processing.engine_ingress_guard import Binding, EngineIngressGuard, OwnerPin
+from processing.engine_ingress_guard import BackendPin, Binding, EngineIngressGuard, OwnerPin
 from processing.node_gate import NodeGate
 from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_tasks import TaskStore
@@ -25,7 +25,7 @@ with patch('processing.node_gate.canonical_gate_path',return_value=root/'gate'):
     binding=Binding('synthetic-engine','cluster',queue.authority_id,'http://127.0.0.1:18080',1,port,
                     'coordinator-'+'a'*40,'management-'+'b'*40,'backend-'+'c'*40,deadline_seconds=10)
     with NodeGate(binding.engine_id) as gate:gate.provision('cluster',binding.coordinator_origin,queue.authority_id)
-    guard=EngineIngressGuard(queue,binding,owner_pin=OwnerPin.capture(queue),engine_probe=lambda _:binding.engine_id)
+    guard=EngineIngressGuard(queue,binding,owner_pin=OwnerPin.capture(queue),backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,binding.backend_port),backend_probe=lambda *_:None,engine_probe=lambda _:binding.engine_id)
     headers=[('Authorization','Bearer '+binding.coordinator_secret),('X-LedgeTop-Job',claim['id']),
              ('X-LedgeTop-Claim',claim['claimToken']),('Set-UUID',engine)]
     guard.mutate('POST','/task/new/init',headers,b'{}');store.update(task,phase='upload_pending')

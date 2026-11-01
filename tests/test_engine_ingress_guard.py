@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from processing.engine_ingress_guard import AdmissionError, Binding, EngineIngressGuard, OwnerPin
+from processing.engine_ingress_guard import AdmissionError, BackendPin, Binding, EngineIngressGuard, OwnerPin
 from processing.node_gate import NodeGate
 from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_tasks import TaskStore
@@ -76,7 +76,7 @@ class GuardTests(unittest.TestCase):
             gate.provision('cluster', self.binding.coordinator_origin, self.queue.authority_id)
         self.owner_pin = OwnerPin.capture(self.queue)
         self.guard = EngineIngressGuard(self.queue, self.binding, owner_pin=self.owner_pin,
-                                       engine_probe=lambda _: self.binding.engine_id)
+                                       backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,self.binding.backend_port), backend_probe=lambda *_:None, engine_probe=lambda _: self.binding.engine_id)
 
     def tearDown(self):
         self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=2)
@@ -191,7 +191,7 @@ class GuardTests(unittest.TestCase):
         self.slow = True
         self.guard = EngineIngressGuard(self.queue, replace(self.binding,deadline_seconds=.12),
                                        owner_pin=self.owner_pin,
-                                       engine_probe=lambda _:self.binding.engine_id)
+                                       backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,self.binding.backend_port), backend_probe=lambda *_:None, engine_probe=lambda _:self.binding.engine_id)
         start=time.monotonic()
         with self.assertRaises(AdmissionError): self.init()
         self.assertLess(time.monotonic()-start,.8)
@@ -205,7 +205,7 @@ class GuardTests(unittest.TestCase):
             clone.authority_id = self.queue.authority_id
             with self.assertRaises(AdmissionError):
                 EngineIngressGuard(clone, self.binding, owner_pin=self.owner_pin,
-                                   engine_probe=lambda _:self.binding.engine_id)
+                                   backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,self.binding.backend_port), backend_probe=lambda *_:None, engine_probe=lambda _:self.binding.engine_id)
         finally: clone.close()
         self.assertFalse(self.calls)
 
@@ -228,7 +228,7 @@ class GuardTests(unittest.TestCase):
         import sqlite3
         from dataclasses import replace
         self.guard=EngineIngressGuard(self.queue,replace(self.binding,deadline_seconds=.12),
-            owner_pin=self.owner_pin,engine_probe=lambda _:self.binding.engine_id)
+            owner_pin=self.owner_pin,backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,self.binding.backend_port), backend_probe=lambda *_:None, engine_probe=lambda _:self.binding.engine_id)
         db=sqlite3.connect(self.queue.path);db.execute('BEGIN IMMEDIATE')
         start=time.monotonic()
         try:
@@ -239,7 +239,7 @@ class GuardTests(unittest.TestCase):
     def test_competing_lifecycle_mutex_obeys_deadline_before_host_gate(self):
         from dataclasses import replace
         self.guard=EngineIngressGuard(self.queue,replace(self.binding,deadline_seconds=.12),
-            owner_pin=self.owner_pin,engine_probe=lambda _:self.binding.engine_id)
+            owner_pin=self.owner_pin,backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,self.binding.backend_port), backend_probe=lambda *_:None, engine_probe=lambda _:self.binding.engine_id)
         ready=threading.Event();release=threading.Event()
         def hold():
             with self.queue._lifecycle_lock:
@@ -383,7 +383,7 @@ class GuardTests(unittest.TestCase):
     def test_slow_trickle_hits_absolute_deadline_and_holds(self):
         from dataclasses import replace
         self.init();self.store.update(self.task,phase='upload_pending')
-        self.guard=EngineIngressGuard(self.queue,replace(self.binding,deadline_seconds=.15),owner_pin=self.owner_pin,engine_probe=lambda _:self.binding.engine_id)
+        self.guard=EngineIngressGuard(self.queue,replace(self.binding,deadline_seconds=.15),owner_pin=self.owner_pin,backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,self.binding.backend_port), backend_probe=lambda *_:None, engine_probe=lambda _:self.binding.engine_id)
         source,writer=socket.socketpair();stop=threading.Event()
         def feed():
             while not stop.wait(.035):

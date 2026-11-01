@@ -18,7 +18,7 @@ from unittest.mock import patch
 import uuid
 
 from processing import engine_upload_contract,guarded_native_engine
-from processing.engine_ingress_guard import Binding,EngineIngressGuard,OwnerPin
+from processing.engine_ingress_guard import BackendPin,Binding,EngineIngressGuard,OwnerPin
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.node_gate import NodeGate
@@ -83,7 +83,7 @@ class GuardedDispatchTests(unittest.TestCase):
             root=self.root/('gate-'+binding.engine_id)
             if not (root/'gate.json').exists():
                 with NodeGate(binding.engine_id) as gate:gate.provision(node,binding.coordinator_origin,self.queue.authority_id)
-            guards[node]=EngineIngressGuard(self.queue,binding,owner_pin=pin,engine_probe=lambda _,eid=binding.engine_id:eid)
+            guards[node]=EngineIngressGuard(self.queue,binding,owner_pin=pin,backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,binding.backend_port), backend_probe=lambda *_:None,engine_probe=lambda _,eid=binding.engine_id:eid)
         self.service=ViewerService(self.queue,self.config,store=store,guarded_engines=guards,
                                    probe=lambda *args:{'ready':True,'maxImages':None,'taskQueueCount':0})
         self.service._catalog=lambda:{'ready':True,'commonOptions':[]}

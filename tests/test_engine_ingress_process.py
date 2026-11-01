@@ -17,7 +17,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from processing.engine_ingress_guard import AdmissionError, Binding, EngineIngressGuard, OwnerPin
+from processing.engine_ingress_guard import AdmissionError, BackendPin, Binding, EngineIngressGuard, OwnerPin
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
 
@@ -84,7 +84,7 @@ class GuardProcessLoss(unittest.TestCase):
                                     self.assertEqual(tuple(state),('held','coordinator_restart'))
                                 binding=Binding('synthetic-engine','cluster',queue.authority_id,'http://127.0.0.1:18080',1,server.server_port,
                                     'coordinator-'+'a'*40,'management-'+'b'*40,'backend-'+'c'*40)
-                                guard=EngineIngressGuard(queue,binding,owner_pin=OwnerPin.capture(queue),engine_probe=lambda _:binding.engine_id)
+                                guard=EngineIngressGuard(queue,binding,owner_pin=OwnerPin.capture(queue),backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,binding.backend_port),backend_probe=lambda *_:None,engine_probe=lambda _:binding.engine_id)
                                 source,writer=socket.socketpair();writer.sendall(b'abc');before=len(calls)
                                 try:
                                     headers=[('Authorization','Bearer '+binding.coordinator_secret),('X-LedgeTop-Job',info['job']),
