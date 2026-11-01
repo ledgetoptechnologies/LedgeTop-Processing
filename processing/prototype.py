@@ -87,11 +87,13 @@ def _require_idle_state(path):
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 require_idle_existing=False):
+                 require_idle_existing=False, recovery_hold_required=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
             raise ValueError("node_ids must be unique configured slugs including cluster")
+        if type(recovery_hold_required) is not bool:raise ValueError("explicit recovery hold policy required")
+        self.recovery_hold_required = recovery_hold_required
         self._creator_pid = os.getpid()
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
@@ -387,17 +389,16 @@ class Queue(Maintenance):
             db.execute('BEGIN')
             return self._has_attested_started_transfer(db, identifier)
 
-    @classmethod
-    def _transfer_admission_clear(cls, db):
+    def _transfer_admission_clear(self, db):
         """Fail closed on a recovery hold or unresolved started transfer.
 
         Checked inside the caller's SQLite transaction even if no optional
         AdmissionDrain object is installed. It does not fence external writers.
         """
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('coordinator_recovery_hold','coordinator_recovery_guard') LIMIT 1").fetchone():
+        if self.recovery_hold_required or db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('coordinator_recovery_hold','coordinator_recovery_guard') LIMIT 1").fetchone():
             return False
         try:
-            cls._has_attested_started_transfer(db, None)
+            self._has_attested_started_transfer(db, None)
         except TransferJournalUnqualified:
             return False
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone():

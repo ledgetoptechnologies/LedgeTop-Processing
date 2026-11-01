@@ -7,6 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 ADMISSION_DRAIN_QUALIFIED = False
+RECOVERY_HOLD_QUALIFIED = False
 ARCHIVE_REGISTRY_QUALIFIED = False
 
 
@@ -38,6 +39,7 @@ class Config:
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
     admission_start_closed: bool = False
+    recovery_hold_required: bool = False
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
 
@@ -115,6 +117,11 @@ def from_environment() -> Config:
     admission = os.environ.get('PROCESSING_ADMISSION_DRAIN_ENABLED', '0')
     if admission not in ('0', '1') or (admission == '1' and (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not operator)):
         raise ValueError('admission drain requires persistent state and operator credential')
+    recovery_hold=os.environ.get('PROCESSING_RECOVERY_HOLD_REQUIRED','0')
+    if recovery_hold not in ('0','1') or (recovery_hold=='1' and admission!='1'):
+        raise ValueError('required recovery hold requires admission drain')
+    if recovery_hold=='1' and RECOVERY_HOLD_QUALIFIED is not True:
+        raise ValueError('recovery hold is not qualified for startup')
     start_closed=os.environ.get('PROCESSING_ADMISSION_START_CLOSED','0')
     if start_closed not in ('0','1') or (start_closed=='1' and admission!='1'):
         raise ValueError('closed startup requires admission drain')
@@ -167,6 +174,7 @@ def from_environment() -> Config:
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         admission_drain_enabled=admission == '1',
         admission_start_closed=start_closed == '1',
+        recovery_hold_required=recovery_hold == '1',
         authority_lease_dir=lease_dir,
         viewer_production_held=production_admission == 'held',
     )

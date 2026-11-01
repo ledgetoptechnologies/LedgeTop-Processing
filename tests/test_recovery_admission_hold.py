@@ -96,6 +96,37 @@ class RecoveryAdmissionHoldTests(unittest.TestCase):
                                 expected_closed=True,expected_authority=q.authority_id)
         finally:q.close()
 
+    def test_required_hold_refuses_missing_both_on_runtime_and_restart(self):
+        from processing.app import make_handler
+        from processing.config import Config
+        root=tempfile.mkdtemp(prefix='lt-required-hold-')
+        print('retained synthetic recovery hold root:',root,flush=True)
+        q=Queue(root)
+        try:
+            job,_=q.submit({'requestId':'history','environment':'production','profile':PROFILE})
+            AdmissionDrain(q).arm_recovery_hold()
+        finally:q.close()
+        config=Config('synthetic-api-'+'a'*32,'http://127.0.0.1:1','http://127.0.0.1:2',1000,100000,
+                      prototype_state_dir=root,prototype_operator_token='synthetic-op-'+'b'*32,
+                      admission_drain_enabled=True,recovery_hold_required=True)
+        with self.assertRaisesRegex(RuntimeError,'recovery_hold_not_qualified'):make_handler(config)
+        with patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True), patch('processing.config.RECOVERY_HOLD_QUALIFIED',True):
+            handler=make_handler(config);q=handler.prototype_queue
+            try:
+                with q._db() as db:
+                    db.execute('DROP TABLE coordinator_recovery_hold')
+                    db.execute('DROP TABLE coordinator_recovery_guard')
+                del q.admission_drain
+                self.assertIsNone(q.claim({'workerId':'synthetic','nodeId':'cluster'}))
+                self.assertEqual(q.get(job['id'])['status'],'queued')
+            finally:q.close()
+            with self.assertRaisesRegex(RuntimeError,'required_recovery_hold_missing'):make_handler(config)
+        q=Queue(root,recovery_hold_required=True)
+        try:
+            self.assertIsNone(q.claim({'workerId':'synthetic','nodeId':'cluster'}))
+            self.assertEqual(q.get(job['id'])['status'],'queued')
+        finally:q.close()
+
     def test_hold_blocks_actual_reference_claim(self):
         from processing.reference_api import ReferenceAPI
         from processing.reference_store import ReferenceStore
