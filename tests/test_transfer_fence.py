@@ -9,6 +9,7 @@ import unittest
 import uuid
 
 from processing.prototype import Queue, VIEWER_PROFILE
+from processing.maintenance import Conflict
 from processing.viewer_tasks import TaskStore
 from processing.transfer_fence import install_offline, attest, TransferFenceError, JOBS_DDL
 
@@ -55,7 +56,7 @@ class TransferFenceTests(unittest.TestCase):
             queue = Queue(root / 'queue', viewer_enabled=True)
             self.assertEqual(queue.get(claim['id'])['status'], 'held')
             self.assertEqual(queue.get(claim['id'])['heldReason'], 'coordinator_restart')
-            with self.assertRaises(sqlite3.IntegrityError):
+            with self.assertRaises(Conflict):
                 queue.complete(claim['id'], {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}})
         finally:
             if not queue._lock.closed: queue.close()

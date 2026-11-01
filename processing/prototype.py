@@ -308,6 +308,8 @@ class Queue(Maintenance):
                 return None
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
                 return None
+            if not self._transfer_admission_clear(db):
+                return None
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
@@ -355,6 +357,8 @@ class Queue(Maintenance):
             raise Conflict("terminal completion differs")
         if row["status"] != "running" and not (row['status'] == 'held' and row['held_reason'] == 'coordinator_restart'):
             raise Conflict("job is held for operator inspection; completion cannot release it")
+        if not self._transfer_admission_clear(db):
+            raise Conflict('transfer requires independently fenced reconciliation')
         db.execute("UPDATE jobs SET status=?,result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                    (payload["status"], result, identifier))
         return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
@@ -382,6 +386,17 @@ class Queue(Maintenance):
         with self._db() as db:
             db.execute('BEGIN')
             return self._has_attested_started_transfer(db, identifier)
+
+    @classmethod
+    def _transfer_admission_clear(cls, db):
+        """Do not admit new work while any started transfer is unresolved."""
+        try:
+            cls._has_attested_started_transfer(db, None)
+        except TransferJournalUnqualified:
+            return False
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone():
+            return True
+        return not bool(db.execute("SELECT 1 FROM engine_ingress_uploads WHERE state='started' LIMIT 1").fetchone())
 
     def hold_unqualified_transfer(self, identifier, token):
         """Preserve the execution slot without changing transfer evidence."""
@@ -441,11 +456,7 @@ class Queue(Maintenance):
             if action == 'resolve':
                 if row['held_reason'] == 'transfer_uncertain':
                     raise Conflict('transfer requires independently fenced reconciliation')
-                try:
-                    started = self._has_attested_started_transfer(db, identifier)
-                except TransferJournalUnqualified:
-                    raise Conflict('transfer journal requires independently fenced reconciliation') from None
-                if started:
+                if not self._transfer_admission_clear(db):
                     raise Conflict('transfer requires independently fenced reconciliation')
             if action == "hold" and (row["status"] == "running" or
                                      (row["status"] == "held" and row['held_reason'] == 'coordinator_restart')):

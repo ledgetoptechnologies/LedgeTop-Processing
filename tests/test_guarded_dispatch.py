@@ -137,7 +137,7 @@ class GuardedDispatchTests(unittest.TestCase):
             with self.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE')
                 self.assertEqual(db.execute("SELECT state FROM engine_ingress_uploads").fetchone()[0],'started')
-            with self.assertRaises(sqlite3.IntegrityError):
+            with self.assertRaises(Conflict):
                 self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':{}})
             with self.assertRaises(sqlite3.IntegrityError):self.service.store.update(identifier,phase='processing')
             with self.assertRaises(RuntimeError):self.queue.close()

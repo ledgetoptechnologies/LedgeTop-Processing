@@ -938,6 +938,117 @@ class ViewerServiceTests(unittest.TestCase):
                                             'profiles': [VIEWER_PROFILE]}))
         self.assertEqual(self.task(second)['job']['status'], 'queued')
 
+    def assert_completion_blocked_by_started_transfer(self, restart_held):
+        from processing.transfer_fence import install_offline
+        first, second = self.submit(), self.submit()
+        with self.queue._db() as db: install_offline(db, enabled=True)
+        claim = self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]})
+        self.assertEqual(claim['id'], self.task(first)['job_id'])
+        with self.queue._db() as db:
+            if restart_held:
+                db.execute("UPDATE jobs SET status='held',held_reason='coordinator_restart' WHERE id=?", (claim['id'],))
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('synthetic-upload', claim['id'], 'synthetic-engine', 1, 'a' * 64, 'started'))
+        with self.assertRaises(Conflict):
+            self.queue.complete(claim['id'], {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}})
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic-next', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+        self.assertEqual(self.task(first)['job']['status'], 'held' if restart_held else 'running')
+
+    def test_running_completion_cannot_release_started_transfer(self):
+        self.assert_completion_blocked_by_started_transfer(False)
+
+    def test_restart_held_completion_cannot_release_started_transfer(self):
+        self.assert_completion_blocked_by_started_transfer(True)
+
+    def test_empty_legacy_completion_and_terminal_replay_remain_compatible(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        first = self.submit()
+        claim = self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]})
+        with self.queue._db() as db: db.execute(STREAM_DDL)
+        payload = {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}}
+        self.assertEqual(self.queue.complete(claim['id'], payload)['status'], 'succeeded')
+        with self.queue._db() as db:
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('unrelated', 'other-job', 'other-engine', 1, 'a' * 64, 'complete'))
+        self.assertEqual(self.queue.complete(claim['id'], payload)['status'], 'succeeded')
+        self.assertEqual(self.task(first)['job']['status'], 'succeeded')
+
+    def assert_completion_blocked_by_unqualified_journal(self, malformed):
+        from processing.engine_ingress_guard import STREAM_DDL
+        first, second = self.submit(), self.submit()
+        claim = self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]})
+        with self.queue._db() as db:
+            if malformed:
+                db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
+            else:
+                db.execute(STREAM_DDL)
+                db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                           ('unrelated', 'other-job', 'other-engine', 1, 'a' * 64, 'complete'))
+        with self.assertRaises(Conflict):
+            self.queue.complete(claim['id'], {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}})
+        self.assertEqual(self.task(first)['job']['status'], 'running')
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic-next', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+
+    def test_completion_cannot_release_slot_with_unqualified_legacy_journal(self):
+        self.assert_completion_blocked_by_unqualified_journal(False)
+
+    def test_completion_cannot_release_slot_with_corrupt_journal(self):
+        self.assert_completion_blocked_by_unqualified_journal(True)
+
+    def test_new_claim_refuses_orphan_attested_started_transfer(self):
+        from processing.transfer_fence import install_offline
+        identifier = self.submit()
+        with self.queue._db() as db:
+            install_offline(db, enabled=True)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('orphan-upload', 'orphan-job', 'orphan-engine', 1, 'a' * 64, 'started'))
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+
+    def test_new_claim_refuses_nonempty_unqualified_journal(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        identifier = self.submit()
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('old-upload', 'old-job', 'old-engine', 1, 'a' * 64, 'complete'))
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+
+    def test_new_claim_allows_attested_completed_transfer(self):
+        from processing.transfer_fence import install_offline
+        identifier = self.submit()
+        with self.queue._db() as db:
+            install_offline(db, enabled=True)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('old-upload', 'old-job', 'old-engine', 1, 'a' * 64, 'complete'))
+        claim = self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]})
+        self.assertEqual(claim['id'], self.task(identifier)['job_id'])
+
+    def test_new_claim_allows_empty_legacy_journal(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        identifier = self.submit()
+        with self.queue._db() as db: db.execute(STREAM_DDL)
+        claim = self.queue.claim({'workerId': 'synthetic', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]})
+        self.assertEqual(claim['id'], self.task(identifier)['job_id'])
+
+    def test_viewer_completion_transaction_retains_slot_for_unqualified_journal(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        first, second = self.submit(), self.submit()
+        self.service.tick()
+        self.assertEqual(self.task(first)['phase'], 'processing')
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('old-upload', 'old-job', 'old-engine', 1, 'a' * 64, 'complete'))
+        self.finish(first)
+        with self.assertRaises(Conflict): self.service.tick()
+        self.assertEqual((self.task(first)['job']['status'], self.task(first)['phase']), ('running', 'processing'))
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic-next', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
+
     def test_corrupt_trigger_preventing_hold_keeps_slot_and_sets_dispatch_warning(self):
         import time
         identifier = self.submit()

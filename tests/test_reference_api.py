@@ -74,6 +74,43 @@ class ReferenceAPITests(unittest.TestCase):
         self.assertEqual(response.body, self.fixture["capabilities"])
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
+    def test_reference_claim_refuses_orphan_attested_started_transfer(self):
+        from processing.transfer_fence import install_offline
+        from processing.viewer_tasks import TaskStore
+        job = self.submit()
+        TaskStore(self.queue, Path(self.directory.name) / 'viewer-tasks')
+        with self.queue._db() as db:
+            install_offline(db, enabled=True)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('orphan-upload', 'orphan-job', 'orphan-engine', 1, 'a' * 64, 'started'))
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+                                 worker_instance_id='instance', claim_request_id='claim-1')
+        self.assertIsNone(claim)
+
+    def test_reference_claim_refuses_nonempty_unqualified_journal(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        job = self.submit()
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('old-upload', 'old-job', 'old-engine', 1, 'a' * 64, 'complete'))
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+                                 worker_instance_id='instance', claim_request_id='claim-1')
+        self.assertIsNone(claim)
+
+    def test_reference_existing_claim_replay_survives_unqualified_journal(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        job = self.submit()
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance', claim_request_id='claim-1')
+        original = self.store.claim(job['jobId'], **binding)
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('old-upload', 'old-job', 'old-engine', 1, 'a' * 64, 'complete'))
+        replay = self.store.claim(job['jobId'], **binding)
+        self.assertEqual(replay['claimToken'], original['claimToken'])
+        self.assertIsNone(self.store.claim(job['jobId'], **dict(binding, claim_request_id='new-claim')))
+
     def test_pending_and_closed_drain_allow_only_exact_existing_claim_replay(self):
         from processing.admission_drain import AdmissionDrain
         self.queue.admission_drain=AdmissionDrain(self.queue)
