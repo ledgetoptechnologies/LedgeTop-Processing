@@ -176,6 +176,7 @@ class ViewerService:
                 raise Conflict('guarded dispatcher not qualified')
             if engines is not None or type(guarded_engines) is not dict or set(guarded_engines)!={'cluster','main'}:
                 raise Conflict('exact guarded engine mapping required')
+        self._guarded_engines_enabled = guarded_engines is not None
         self.queue, self.config = queue, config
         self._archive_registry = getattr(config, 'viewer_archive_registry', False)
         if type(self._archive_registry) is not bool:
@@ -1018,7 +1019,8 @@ class ViewerService:
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])
-        if task.get('claim_token') and self.queue.hold_started_transfer(task['job_id'], task['claim_token']):
+        if (self._guarded_engines_enabled and task.get('claim_token')
+                and self.queue.hold_started_transfer(task['job_id'], task['claim_token'])):
             return
         if job and (job['status'] == 'running' or
                     (job['status'] == 'held' and job['heldReason'] == 'coordinator_restart')):

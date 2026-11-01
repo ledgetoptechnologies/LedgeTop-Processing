@@ -834,6 +834,22 @@ class ViewerServiceTests(unittest.TestCase):
                                                          'workerStopped': True})
                 self.engines['cluster'].fail = None
 
+    def test_unguarded_submission_failure_holds_with_legacy_upload_journal(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        identifier = self.submit()
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='guard_started_job_update'").fetchone())
+        self.engines['cluster'].fail = 'initialize'
+        with patch.object(self.queue, 'hold_started_transfer', wraps=self.queue.hold_started_transfer) as guarded_hold:
+            self.service.tick()
+            guarded_hold.assert_not_called()
+        task = self.task(identifier)
+        self.assertEqual((task['job']['status'], task['phase']), ('held', 'held'))
+        self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+        self.service.tick()
+        self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+
     def test_contradictory_native_init_ack_holds_photo_job_without_upload(self):
         from processing.viewer_service import NativeEngine
         identifier=self.submit()
