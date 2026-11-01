@@ -126,11 +126,15 @@ class LocalCoordinatorAuthority:
                             raise BrokerHeld('local current task required')
                         if create:
                             from .upload_intent_census import register, CensusError
-                            try:register(db,grant,digest,remote=require_upload_receipt)
-                            except CensusError:raise BrokerHeld('upload intent classification unavailable') from None
                             row=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()
                             if row is None:
                                 db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(grant['operationId'],grant['jobId'],digest))
+                                try:register(db,grant,digest,remote=require_upload_receipt,new=True)
+                                except CensusError:raise BrokerHeld('upload intent classification unavailable') from None
+                            else:
+                                try:register(db,grant,digest,remote=require_upload_receipt)
+                                except CensusError:raise BrokerHeld('upload intent classification unavailable') from None
+                            if row is None:pass
                             elif tuple(row)==(grant['jobId'],digest,'complete'):
                                 if require_upload_receipt and grant.get('operation')=='upload':
                                     from .durable_upload_evidence import verify_existing_node_receipt

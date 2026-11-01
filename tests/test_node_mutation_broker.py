@@ -100,6 +100,11 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.owner_queue._db() as db: install_offline(db,enabled=True)
         with self.owner_queue._db() as db: install_evidence_offline(db,enabled=True)
         b.install_upload_issuer_schema(self.owner_queue)
+        if getattr(self,'_enable_incremental_test',False):
+            from processing.upload_intent_census import install_offline as install_census
+            from processing.incremental_upload_census import install_offline as install_incremental
+            with self.owner_queue._db() as db:install_census(db,enabled=True)
+            with self.owner_queue._db() as db:install_incremental(db,enabled=True)
         store.initialize(self.task,'Synthetic',[],None,'production')
         store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)
         claim=self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]})

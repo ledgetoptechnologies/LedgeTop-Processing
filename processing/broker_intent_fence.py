@@ -40,7 +40,7 @@ def clear(db, allowed=None):
         return not bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='broker_intent_required'").fetchone())
     try: attest(db)
     except IntentFenceError: return False
-    rows=db.execute("SELECT operation_id,job_id,grant_hash,state FROM broker_intents WHERE state IS NOT 'complete'").fetchall()
+    rows=db.execute("SELECT operation_id,job_id,grant_hash,state FROM broker_intents WHERE state IS NOT 'complete' LIMIT 2").fetchall()
     return not rows or (allowed is not None and len(rows)==1 and tuple(rows[0])==(*allowed,'started'))
 
 def install_offline(db, *, enabled=False):

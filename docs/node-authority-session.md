@@ -190,3 +190,39 @@ this repeatedly during a 10,000-photo job could be very slow. The cap can also
 stop later datasets. This bounded implementation is not suitable for production
 workloads until an independently reviewed indexed summary and retention design
 are available. Old or privileged writers are not fenced by this setting.
+
+## Experimental incremental invariant
+
+A separate explicit offline migration audits existing classified completed
+intents in bounded batches, quarantines ambiguous or invalid completions, and
+installs an exact trigger set, marker and partial index for unresolved intents.
+Once enabled, future transitions to complete are checked by SQLite triggers:
+remote uploads require the matching canonical receipt and sender evidence,
+while the known init and local types use their own classifications. The trigger
+set refuses replacement or deletion of classifications, intents, evidence and
+receipts in ways that could bypass the invariant. Admission attests the schema
+and uses the unresolved partial index instead of scanning completed history.
+`require_incremental_upload_census=True` makes missing incremental schema a
+startup and admission failure. Existing bounded or legacy modes remain unchanged.
+
+Queue connections register the SQLite validation functions used by the
+triggers. A nonqualified old SQLite connection lacking those functions cannot
+write protected transitions. This is an application compatibility fence, not a
+security boundary: trusted in-process code can register equivalent functions,
+and an old or privileged writer can remove schema or modify the database. All
+old writers must be independently stopped/fenced during migration and runtime.
+There is no automatic downgrade, production service configuration, online
+migration, or recovery for quarantined entries. Remote receipts remain
+trusted-node assertions and do not prove NodeODM fsync.
+
+Synthetic local testing audited 10,000 remote receipts offline in about 1.1
+seconds and an indexed admission then took about 0.001 seconds on the development
+environment; this is not a production benchmark. Tests also cover larger than
+the previous 12,000-row ceiling, trigger/schema tampering, old connections,
+and a synthetic mTLS upload and replay. This remains inactive pending independent
+review and actual cross-host, failure and migration qualification.
+
+The incremental index covers the broker-intent census only. The separate
+legacy `engine_ingress_uploads` admission checks may still scan their own
+history and require separate performance assessment. The offline audit refuses
+null or empty operation keys rather than skipping them during pagination.

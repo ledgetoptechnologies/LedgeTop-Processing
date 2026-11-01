@@ -73,31 +73,43 @@ def _bad_completed(db):
             except (ValueError,TypeError,KeyError,IndexError):bad.append(row['operation_id'])
     return bad
 
-def clear(db, *, required=False):
-    if not is_enabled(db):return not required
+def incremental_enabled(db):
+    from .incremental_upload_census import is_enabled
+    return is_enabled(db)
+
+def clear(db, *, required=False, require_incremental=False):
+    if not is_enabled(db):return not (required or require_incremental)
     try:
+        if incremental_enabled(db):
+            from .incremental_upload_census import attest as attest_incremental
+            attest_incremental(db);return True
+        if require_incremental:return False
         attest(db);_bound(db)
         if db.execute('SELECT 1 FROM upload_intent_kinds k LEFT JOIN broker_intents i ON i.operation_id=k.operation_id WHERE i.operation_id IS NULL LIMIT 1').fetchone():return False
         return not _bad_completed(db)
     except (ValueError,TypeError,KeyError,IndexError,sqlite3.Error):return False
 
-def startup_census(db, *, required=False):
+def startup_census(db, *, required=False, require_incremental=False):
     if not is_enabled(db):
-        if required:raise CensusError('required upload census unavailable')
+        if required or require_incremental:raise CensusError('required upload census unavailable')
         return
+    if incremental_enabled(db):
+        from .incremental_upload_census import attest as attest_incremental
+        attest_incremental(db);return
+    if require_incremental:raise CensusError('required incremental census unavailable')
     attest(db);_bound(db)
     for operation_id in _bad_completed(db):
         db.execute("UPDATE broker_intents SET state='receipt_uncertain' WHERE operation_id=? AND state='complete'",(operation_id,))
 
-def register(db, grant, digest, *, remote):
+def register(db, grant, digest, *, remote, new=False):
     if not is_enabled(db):return
     attest(db)
     kind='init' if grant['operation']=='init' else ('upload_remote' if remote else 'upload_local')
     row=db.execute('SELECT job_id,grant_hash,kind FROM upload_intent_kinds WHERE operation_id=?',(grant['operationId'],)).fetchone()
     expected=(grant['jobId'],digest,kind)
     if row is None:
-        if db.execute('SELECT 1 FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone():raise CensusError('unclassified intent requires inspection')
-        _bound(db,need_headroom=True)
+        if not new:raise CensusError('unclassified intent requires inspection')
+        if not incremental_enabled(db):_bound(db,need_headroom=True)
         db.execute('INSERT INTO upload_intent_kinds VALUES(?,?,?,?)',(grant['operationId'],*expected))
     elif tuple(row)!=expected:raise CensusError('upload intent classification changed')
 
