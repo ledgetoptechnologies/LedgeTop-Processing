@@ -54,3 +54,19 @@ forwarded work cannot be cancelled or fenced physically by this protocol.
 The synthetic EOF test restarts the coordinator after an orderly shutdown; it
 does not simulate power failure, an actual node process crash, or a network
 partition with a still-running backend. This integration is not deployment ready.
+
+## Upload authority groundwork (inactive)
+
+The authenticated session can now revalidate an already issued upload grant
+against the active coordinator task, exact stored file record and source
+directory scope. A prepare challenge commits the same durable coordinator
+intent used by init; a check revalidates it. Upload completion challenges are
+explicitly refused, and the node broker still rejects remote upload forwarding.
+No file bytes cross the session. This intentionally prevents a peer possessing
+the signing key from asserting sender completion without coordinator-owned
+descriptor evidence.
+
+A working remote upload still requires an authenticated bounded data channel,
+exact binding between it and this intent, coordinator-owned sender completion
+evidence, a tested lost-response protocol, and independently bound node/engine
+identity. The current HMAC by itself is not such evidence.

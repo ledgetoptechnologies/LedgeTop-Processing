@@ -62,16 +62,16 @@ def _read(sock, deadline):
     except (ValueError,UnicodeError,RecursionError):raise SessionHeld('invalid session frame') from None
 
 
-def serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds=60, idle_seconds=15):
+def serve_coordinator(sock, *, queue, witness, secret, peer_sha256, store=None, session_seconds=60, idle_seconds=15):
     """Serve one node connection; no listener, reconnect or authority adoption."""
     try:
         return _serve_coordinator(sock,queue=queue,witness=witness,secret=secret,peer_sha256=peer_sha256,
-                                  session_seconds=session_seconds,idle_seconds=idle_seconds)
+                                  session_seconds=session_seconds,idle_seconds=idle_seconds,store=store)
     finally:sock.close()
 
 
-def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds, idle_seconds):
-    from .node_mutation_broker import LocalCoordinatorAuthority, issue_init_grant
+def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds, idle_seconds, store):
+    from .node_mutation_broker import LocalCoordinatorAuthority, LocalUploadSender, issue_init_grant, sign_grant, _UPLOAD_FIELDS
     if (type(witness) is not LocalCoordinatorAuthority or witness.queue is not queue
             or type(session_seconds) not in (int,float) or not 12<=session_seconds<=60
             or type(idle_seconds) not in (int,float) or not 12<=idle_seconds<=30
@@ -100,12 +100,20 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                 from .node_mutation_broker import _json
                 digest=hashlib.sha256(_json(public)).hexdigest()
                 allowed=(grant.get('operationId'),grant.get('jobId'),digest)
-                observed,signature=issue_init_grant(queue,job_id=grant.get('jobId'),
-                    claim_token=grant.get('claimToken',''),engine_id=grant.get('engineId'),
-                    gate_generation=grant.get('gateGeneration'),operation_id=grant.get('operationId'),
-                    body=body,content_type=grant.get('contentType'),secret=secret,_authority_required=True,_broker_allowed=allowed)
-                # Claim token is session-only and is never part of the signed grant.
-                if observed!=public:raise SessionHeld('coordinator grant changed')
+                if public.get('operation')=='init':
+                    observed,signature=issue_init_grant(queue,job_id=grant.get('jobId'),
+                        claim_token=grant.get('claimToken',''),engine_id=grant.get('engineId'),
+                        gate_generation=grant.get('gateGeneration'),operation_id=grant.get('operationId'),
+                        body=body,content_type=grant.get('contentType'),secret=secret,_authority_required=True,_broker_allowed=allowed)
+                    if observed!=public:raise SessionHeld('coordinator grant changed')
+                elif public.get('operation')=='upload':
+                    if set(public)!=_UPLOAD_FIELDS or body or action=='complete':raise SessionHeld('remote upload completion not qualified')
+                    item=LocalUploadSender._issued_item(store,public,grant.get('claimToken',''))
+                    if (item['name']!=public.get('fileName') or item['bytes']!=public.get('fileBytes')
+                            or item['sha256']!=public.get('bodySha256')):raise SessionHeld('coordinator upload changed')
+                    signature=sign_grant(public,secret)
+                else:raise SessionHeld('unknown operation')
+                # Claim token stays in the private authenticated session.
                 binding=(digest,hashlib.sha256(body).hexdigest())
                 if action!='prepare' and (active!=binding or (action=='complete' and phase!='checked')):
                     raise SessionHeld('session operation order changed')

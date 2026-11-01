@@ -97,6 +97,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
         self.owner_store=store
         with self.owner_queue._db() as db: install_offline(db,enabled=True)
+        b.install_upload_issuer_schema(self.owner_queue)
         store.initialize(self.task,'Synthetic',[],None,'production')
         store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)
         claim=self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]})

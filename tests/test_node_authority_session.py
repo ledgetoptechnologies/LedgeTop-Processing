@@ -11,7 +11,7 @@ from unittest.mock import Mock
 
 from processing import node_authority_session as authority_session
 from processing.node_authority_session import RemoteAuthoritySession, SessionHeld, serve_coordinator
-from processing.node_mutation_broker import BrokerHeld, LocalCoordinatorAuthority, NodeMutationBroker, issue_init_grant, sign_grant
+from processing.node_mutation_broker import BrokerHeld, LocalCoordinatorAuthority, NodeMutationBroker, issue_init_grant, issue_upload_grant, sign_grant
 from processing.node_gate import NodeGate
 from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_tasks import TaskStore
@@ -88,6 +88,46 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
         self.assertEqual(replay.mutate(grant,signature,self.body)['uuid'],self.task)
         self.assertEqual(len(self.calls),1)
         self.assertEqual(errors,['OSError'])
+
+    def test_remote_upload_challenge_holds_intent_and_refuses_completion(self):
+        self.begin_upload()
+        upload,signature=issue_upload_grant(self.owner_queue,store=self.owner_store,job_id=self.job,
+            claim_token=self.owner_claim['claimToken'],engine_id=self.engine,gate_generation=1,
+            operation_id=str(__import__('uuid').uuid4()),file_key='synthetic.jpg',secret=self.secret)
+        key=self.root/'upload.key';cert=self.root/'upload.crt'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=10)
+        pin=hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cert,key);server_context.load_verify_locations(cafile=str(cert));server_context.verify_mode=ssl.CERT_REQUIRED
+        client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
+        client_raw,server_raw=socket.socketpair();client_raw.settimeout(3);server_raw.settimeout(3)
+        errors=[]
+        def serve():
+            try:
+                channel=server_context.wrap_socket(server_raw,server_side=True)
+                serve_coordinator(channel,queue=self.owner_queue,witness=LocalCoordinatorAuthority(self.owner_queue),secret=self.secret,
+                    store=self.owner_store,peer_sha256=pin,session_seconds=20,idle_seconds=12)
+            except Exception as error:errors.append(type(error).__name__)
+        thread=threading.Thread(target=serve);thread.start();remote=None
+        try:
+            client=client_context.wrap_socket(client_raw,server_hostname='localhost')
+            remote=RemoteAuthoritySession(client,authority=self.authority,epoch=self.epoch,
+                claim_token=self.owner_claim['claimToken'],peer_sha256=pin,timeout_seconds=3)
+            with remote.hold(upload,3,body=b'',signature=signature):
+                remote.check()
+                with self.owner_queue._db() as db:
+                    self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(upload['operationId'],)).fetchone()[0],'started')
+                with self.assertRaises(SessionHeld):remote.completed(upload)
+            with self.owner_queue._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(upload['operationId'],)).fetchone()[0],'started')
+            self.assertEqual(len(self.calls),1)
+        finally:
+            if remote is not None:remote.close()
+            else:client_raw.close()
+            server_raw.close();thread.join(5);self.assertFalse(thread.is_alive())
+        self.assertEqual(errors,['SessionHeld'])
 
     def test_remote_init_confirms_durable_intent_and_exact_replay(self):
         key=self.root/'success.key';cert=self.root/'success.crt'
