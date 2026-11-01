@@ -105,6 +105,16 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     operationId=str(uuid.uuid4()),operation=operation,bodySha256=hashlib.sha256(body).hexdigest(),
                     contentType='application/octet-stream')
 
+    def test_reopen_missing_binding_preserves_existing_journal(self):
+        self.broker.db.execute('DELETE FROM binding')
+        self.broker.close()
+        with self.assertRaises(b.BrokerHeld):
+            b.NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+        import sqlite3
+        db=sqlite3.connect((self.root/'gate'/'mutation-broker'/'node-broker.sqlite3').as_uri()+'?mode=ro',uri=True)
+        try:self.assertEqual(db.execute('SELECT COUNT(*) FROM binding').fetchone()[0],0)
+        finally:db.close()
+
     def test_prior_epoch_inspection_preserves_uncertain_state_and_refuses_identity_change(self):
         self.broker.close()
         report=b.inspect_prior_node_state(self.engine)

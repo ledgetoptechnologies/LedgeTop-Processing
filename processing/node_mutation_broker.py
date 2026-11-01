@@ -5,6 +5,13 @@ bound to an exact physical node and task. A same-process Queue authority witness
 is required; remote brokers are deliberately unsupported. Lost responses retain
 started intents. This cooperative prototype does not fence local root, Docker
 administrators, direct backend connections, or arbitrary code in this process.
+
+Recovery prerequisite limitations: creation interrupted between journal and
+manifest leaves a manual, fail-closed recovery case; there is no migration of
+older journals. Inspection uses pathname-based SQLite and gate state reads,
+which do not pin all parent/file paths against replacement or ABA. SQLite
+read-only WAL access may create shared-memory files. Do not use this snapshot
+as a no-follow guarantee, admission barrier, or deployable recovery protocol.
 """
 import hashlib
 import hmac
@@ -314,6 +321,10 @@ class NodeMutationBroker:
             directory=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
             try:os.fsync(directory)
             finally:os.close(directory)
+        if existed:
+            # Do not open a historical journal for writing until its existing
+            # manifest matches this exact broker and node gate.
+            with NodeGate(self.engine) as gate:self._identity_manifest(gate,False)
         self.db=sqlite3.connect(self.path, timeout=2, isolation_level=None, check_same_thread=False)
         root_info=self.root.stat();db_info=self.path.lstat()
         self._root_identity=(root_info.st_dev,root_info.st_ino)
@@ -332,7 +343,9 @@ class NodeMutationBroker:
                 raise BrokerHeld('unexpected node broker trigger')
             binding=hashlib.sha256(_json([node_id,engine_id,authority_id,coordinator_epoch,coordinator_origin,gate_generation])).hexdigest()
             old=self.db.execute('SELECT digest FROM binding WHERE singleton=1').fetchone()
-            if old is None:self.db.execute('INSERT INTO binding VALUES(1,?)',(binding,))
+            if old is None:
+                if existed:raise BrokerHeld('existing node broker binding missing')
+                self.db.execute('INSERT INTO binding VALUES(1,?)',(binding,))
             elif old['digest'] != binding:raise BrokerHeld('node broker binding changed')
             self.db.commit()
         except BaseException:self.db.rollback();self.db.close();raise
