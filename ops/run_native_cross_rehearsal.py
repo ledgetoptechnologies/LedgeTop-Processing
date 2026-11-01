@@ -3,8 +3,8 @@ import argparse,hashlib,json,os,secrets,subprocess,sys,tempfile,threading,time
 from pathlib import Path
 
 PROCESSING_BASE='42da801be55b686e43a78e35b88d32de89f8c5b4'
-FIXTURE_COMMIT='85c7a37ef36c431b1b69bd7b7d12bbcb4800f1a3'
-VIEWER_COMMIT_PIN='3fd097cadeeb1f3ac6fb2354a031798252c731f2'
+FIXTURE_COMMIT='ae496a2e5487de00850892348fab97a86ffaab8b'
+VIEWER_COMMIT_PIN=None  # Await corrected owner-confirmed and independently reviewed commit.
 IMAGE='sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668'
 LABEL='org.openai.codex.native-cross'
 MAX_ARCHIVE_BYTES=536870912
