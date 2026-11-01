@@ -1,5 +1,7 @@
 """Synthetic mTLS stream with actual Queue, lease and node broker."""
 import hashlib
+import json
+import sqlite3
 import shutil
 import socket
 import ssl
@@ -180,8 +182,16 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
             self.assertTrue(done.wait(5));thread.join(2);self.assertFalse(thread.is_alive())
             self.assertEqual(errors,[]);self.assertEqual(len(self.calls),1)
             self.assertEqual(broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
+            node_grant=broker.db.execute('SELECT grant_json,signature FROM node_grants WHERE operation_id=?',(grant['operationId'],)).fetchone()
+            self.assertEqual(json.loads(node_grant['grant_json']),grant);self.assertEqual(node_grant['signature'],signature)
+            observation=broker.db.execute('SELECT reply_json FROM engine_observations WHERE operation_id=?',(grant['operationId'],)).fetchone()
+            self.assertEqual(json.loads(observation['reply_json'])['uuid'],grant['engineTaskId'])
+            with self.assertRaises(sqlite3.IntegrityError):broker.db.execute('DELETE FROM engine_observations')
             with self.owner_queue._db() as db:
                 self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()[0],'started')
+                evidence=db.execute('SELECT grant_json,signature FROM broker_grant_evidence WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                self.assertEqual(json.loads(evidence['grant_json']),grant);self.assertEqual(evidence['signature'],signature)
+                with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM broker_grant_evidence')
             with NodeGate(self.engine) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
             with self.assertRaises(SessionHeld):broker.mutate(grant,signature,self.body)
             self.assertEqual(len(self.calls),1)
@@ -189,6 +199,12 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
             remote.close();thread.join(5)
             self.assertFalse(thread.is_alive())
         broker.close();self.owner_lease.close();self.owner_queue.close()
+        observed=sqlite3.connect(broker.path.as_uri()+'?mode=ro',uri=True)
+        try:
+            self.assertEqual(observed.execute('SELECT state FROM operations').fetchone()[0],'started')
+            self.assertEqual(json.loads(observed.execute('SELECT grant_json FROM node_grants').fetchone()[0]),grant)
+            self.assertEqual(json.loads(observed.execute('SELECT reply_json FROM engine_observations').fetchone()[0])['uuid'],grant['engineTaskId'])
+        finally:observed.close()
         restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
         try:
             self.assertEqual(restarted.get(self.job)['status'],'held')

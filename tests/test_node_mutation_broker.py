@@ -121,6 +121,16 @@ class NodeMutationBrokerTests(unittest.TestCase):
         init=self.grant();self.broker.mutate(init,b.sign_grant(init,self.secret),self.body)
         self.owner_store.update(self.task,phase='upload_pending')
 
+    def test_unsigned_coordinator_prepare_cannot_create_intent(self):
+        grant=self.grant()
+        with self.assertRaises(b.BrokerHeld):
+            with b.LocalCoordinatorAuthority(self.owner_queue).hold(grant,3,create=True):
+                self.fail('unsigned grant was accepted')
+        with self.owner_queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM broker_intents').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM broker_grant_evidence').fetchone()[0],0)
+        self.assertEqual(self.calls,[])
+
     def test_signed_local_init_replays_and_binds_job_task_epoch(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret)
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,'0'*64,self.body)
@@ -368,6 +378,9 @@ os._exit(27)
         self.assertEqual(len(self.calls),1)
         with self.broker.db:
             self.assertEqual(self.broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
+            self.assertIsNone(self.broker.db.execute('SELECT 1 FROM engine_observations').fetchone())
+            stored=self.broker.db.execute('SELECT grant_json,signature FROM node_grants').fetchone()
+            self.assertEqual(json.loads(stored['grant_json']),grant);self.assertEqual(stored['signature'],signature)
 
     def test_replaced_database_path_fails_before_engine_mutation(self):
         original=self.broker.path.with_name('retained-original.sqlite3')

@@ -39,6 +39,14 @@ _DDL = {
     'binding': 'CREATE TABLE binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), digest TEXT NOT NULL)',
     'reservation': 'CREATE TABLE reservation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL)',
     'operations': 'CREATE TABLE operations (id TEXT PRIMARY KEY, operation TEXT NOT NULL, file_key TEXT NOT NULL, grant_hash TEXT NOT NULL, state TEXT NOT NULL, reply TEXT, UNIQUE(operation,file_key))',
+    'node_grants': 'CREATE TABLE node_grants (operation_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, signature TEXT NOT NULL)',
+    'engine_observations': 'CREATE TABLE engine_observations (operation_id TEXT PRIMARY KEY, grant_hash TEXT NOT NULL, reply_json TEXT NOT NULL)',
+}
+_NODE_TRIGGERS = {
+    'node_grant_update': "CREATE TRIGGER node_grant_update BEFORE UPDATE ON node_grants BEGIN SELECT RAISE(ABORT,'node grant evidence immutable'); END",
+    'node_grant_delete': "CREATE TRIGGER node_grant_delete BEFORE DELETE ON node_grants BEGIN SELECT RAISE(ABORT,'node grant evidence immutable'); END",
+    'engine_observation_update': "CREATE TRIGGER engine_observation_update BEFORE UPDATE ON engine_observations BEGIN SELECT RAISE(ABORT,'engine observation immutable'); END",
+    'engine_observation_delete': "CREATE TRIGGER engine_observation_delete BEFORE DELETE ON engine_observations BEGIN SELECT RAISE(ABORT,'engine observation immutable'); END",
 }
 
 
@@ -123,6 +131,19 @@ class LocalCoordinatorAuthority:
                                 or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
                             raise BrokerHeld('local current task required')
                         if create:
+                            # Preserve the exact signed public grant atomically
+                            # with the started intent, before node forwarding.
+                            # This is evidence only, never authority to release.
+                            raw=_json(grant)
+                            if len(raw)>16384 or type(signature) is not str or not re.fullmatch('[a-f0-9]{64}',signature):
+                                raise BrokerHeld('signed broker grant evidence required')
+                            evidence=db.execute('SELECT grant_json,signature FROM broker_grant_evidence WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                            if evidence is None:
+                                if db.execute('SELECT 1 FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone():
+                                    raise BrokerHeld('prior broker grant evidence missing')
+                                db.execute('INSERT INTO broker_grant_evidence VALUES(?,?,?)',(grant['operationId'],raw.decode('ascii'),signature))
+                            elif tuple(evidence)!=(raw.decode('ascii'),signature):
+                                raise BrokerHeld('broker grant evidence changed')
                             row=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()
                             if row is None:
                                 db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(grant['operationId'],grant['jobId'],digest))
@@ -461,8 +482,14 @@ class NodeMutationBroker:
                     if existed:raise BrokerHeld('incomplete node broker schema')
                     self.db.execute(ddl)
                 elif existing['sql']!=ddl:raise BrokerHeld('node broker schema changed')
-            if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' LIMIT 1").fetchone():
-                raise BrokerHeld('unexpected node broker trigger')
+            for name,ddl in _NODE_TRIGGERS.items():
+                existing=self.db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
+                if existing is None:
+                    if existed:raise BrokerHeld('incomplete node evidence fence')
+                    self.db.execute(ddl)
+                elif existing['sql']!=ddl:raise BrokerHeld('node evidence fence changed')
+            names={row['name'] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+            if names!=set(_NODE_TRIGGERS):raise BrokerHeld('unexpected node broker trigger')
             binding=hashlib.sha256(_json([node_id,engine_id,authority_id,coordinator_epoch,coordinator_origin,gate_generation])).hexdigest()
             old=self.db.execute('SELECT digest FROM binding WHERE singleton=1').fetchone()
             if old is None:self.db.execute('INSERT INTO binding VALUES(1,?)',(binding,))
@@ -563,7 +590,7 @@ class NodeMutationBroker:
         if type(source) is not socket.socket:raise BrokerHeld('dedicated socket required')
         try:
             file_key=self._validate_upload(grant,signature)
-            return self._execute(grant,file_key,lambda:self.adapter.exchange_upload(grant,source),with_replay=_with_replay)
+            return self._execute(grant,file_key,lambda:self.adapter.exchange_upload(grant,source),with_replay=_with_replay,signature=signature)
         finally:source.close()
 
     def confirm_upload(self, grant, signature, confirmation):
@@ -619,6 +646,14 @@ class NodeMutationBroker:
                     self.db.execute('INSERT INTO reservation VALUES(1,?)',(durable_identity,))
                 elif stored['identity']!=durable_identity:raise BrokerHeld('durable reservation changed')
                 old=self.db.execute('SELECT * FROM operations WHERE id=?',(grant['operationId'],)).fetchone()
+                raw_grant=_json(grant).decode('ascii')
+                if len(raw_grant)>16384 or type(signature) is not str or not re.fullmatch('[a-f0-9]{64}',signature):
+                    raise BrokerHeld('signed node grant evidence required')
+                evidence=self.db.execute('SELECT grant_json,signature FROM node_grants WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                if evidence is None:
+                    if old is not None:raise BrokerHeld('prior node grant evidence missing')
+                    self.db.execute('INSERT INTO node_grants VALUES(?,?,?)',(grant['operationId'],raw_grant,signature))
+                elif tuple(evidence)!=(raw_grant,signature):raise BrokerHeld('node grant evidence changed')
                 if old:
                     if (old['grant_hash']!=digest or old['operation']!=grant['operation']
                             or old['file_key']!=file_key or old['state']!='complete'):
@@ -641,6 +676,17 @@ class NodeMutationBroker:
             reply=forward()
             reply=_upload_reply(reply) if grant['operation']=='upload' else _reply(reply,grant['engineTaskId'])
             self._check_owner()
+            # A received response is evidence, not permission to release. The
+            # operation remains started until the witness also confirms it.
+            observed=_json(reply).decode('ascii')
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                old_observation=self.db.execute('SELECT grant_hash,reply_json FROM engine_observations WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                if old_observation is None:
+                    self.db.execute('INSERT INTO engine_observations VALUES(?,?,?)',(grant['operationId'],digest,observed))
+                elif tuple(old_observation)!=(digest,observed):raise BrokerHeld('engine observation changed')
+                self.db.commit()
+            except BaseException:self.db.rollback();raise
             if isinstance(self.witness,LocalCoordinatorAuthority):self.witness._check()
             else:self.witness.check()
             raw=_json(reply)

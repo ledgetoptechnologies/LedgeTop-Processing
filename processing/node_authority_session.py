@@ -109,7 +109,7 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                 binding=(digest,hashlib.sha256(body).hexdigest())
                 if action!='prepare' and (active!=binding or (action=='complete' and phase!='checked')):
                     raise SessionHeld('session operation order changed')
-                with witness.hold(public,10,create=(action=='prepare')):
+                with witness.hold(public,10,create=(action=='prepare'),signature=signature):
                     if action=='complete':witness.completed(public)
                 active=binding
                 phase={'prepare':'prepared','check':'checked','complete':'complete'}[action]
