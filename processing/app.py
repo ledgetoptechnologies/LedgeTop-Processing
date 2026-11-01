@@ -3,6 +3,7 @@
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import signal
 import sys
@@ -19,6 +20,12 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if (type(config.viewer_input_space_guard) is not bool or
+            (config.viewer_input_space_guard and (runtime_config.VIEWER_INPUT_SPACE_GUARD_QUALIFIED is not True
+              or not config.viewer_enabled or not config.authority_lease_dir or not config.prototype_state_dir
+              or os.name!='posix' or not hasattr(os,'posix_fallocate')
+              or type(config.viewer_input_free_floor) is not int or config.viewer_input_free_floor<0))):
+        raise RuntimeError('viewer_input_space_guard_not_qualified')
     if (type(config.incremental_upload_census_required) is not bool or
             (config.incremental_upload_census_required and (runtime_config.INCREMENTAL_UPLOAD_CENSUS_QUALIFIED is not True
               or config.recovery_hold_required is not True or not config.authority_lease_dir or not config.prototype_state_dir))):
@@ -113,7 +120,8 @@ def make_handler(config: Config):
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
         facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
-                              production_held=config.viewer_production_held)
+                              production_held=config.viewer_production_held,
+                              input_free_floor=config.viewer_input_free_floor if config.viewer_input_space_guard else None)
     reference_runtime = None
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime

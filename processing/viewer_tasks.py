@@ -119,7 +119,7 @@ class TaskStore:
                         file['name_key'],file['name'],file['path'],file['bytes'],file['sha256']))
             return {'state':'prepared'}
 
-    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3):
+    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3, *, input_free_floor=None):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
             raise ValueError('positive input limit required')
         self.queue = queue
@@ -132,6 +132,9 @@ class TaskStore:
         if os.name != 'nt' and self.root.stat().st_mode & 0o077:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
+        if input_free_floor is not None and (type(input_free_floor) is not int or input_free_floor<0):
+            raise ValueError('invalid input free-space floor')
+        self.input_free_floor=input_free_floor
         self._lock = threading.RLock()
         self._archive_locks_lock = threading.Lock()
         self._archive_locks = {}
@@ -419,6 +422,9 @@ class TaskStore:
                 descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 digest = hashlib.sha256()
                 with os.fdopen(descriptor, 'wb') as output:
+                    if self.input_free_floor is not None:
+                        from .input_space import reserve_input
+                        reserve_input(output.fileno(),length,self.input_free_floor)
                     remaining = length
                     while remaining:
                         chunk = stream.read(min(1024 * 1024, remaining))

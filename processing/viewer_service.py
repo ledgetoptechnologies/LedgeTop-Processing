@@ -192,8 +192,14 @@ class ViewerService:
             with queue._db() as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone():
                     raise RuntimeError('archive registry configuration required')
+        input_guard=getattr(config,'viewer_input_space_guard',False)
+        if type(input_guard) is not bool or (input_guard and runtime_config.VIEWER_INPUT_SPACE_GUARD_QUALIFIED is not True):
+            raise RuntimeError('input space guard not qualified')
+        input_floor=getattr(config,'viewer_input_free_floor',None) if input_guard else None
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
-                                       config.viewer_max_input_bytes)
+                                       config.viewer_max_input_bytes,input_free_floor=input_floor)
+        if input_guard and self.store.input_free_floor!=input_floor:
+            raise RuntimeError('input space guard store differs')
         self._durable_archive_claims = getattr(config, 'viewer_durable_archive_claims', False)
         if type(self._durable_archive_claims) is not bool:
             raise ValueError('explicit durable archive claims setting required')

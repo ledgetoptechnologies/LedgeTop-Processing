@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 ADMISSION_DRAIN_QUALIFIED = False
 RECOVERY_HOLD_QUALIFIED = False
 INCREMENTAL_UPLOAD_CENSUS_QUALIFIED = False
+VIEWER_INPUT_SPACE_GUARD_QUALIFIED = False
 ARCHIVE_REGISTRY_QUALIFIED = False
 
 
@@ -44,6 +45,8 @@ class Config:
     incremental_upload_census_required: bool = False
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
+    viewer_input_space_guard: bool = False
+    viewer_input_free_floor: int = 20 * 1024 ** 3
 
 
 def _node_origin(value: str) -> str:
@@ -94,6 +97,11 @@ def from_environment() -> Config:
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
+    input_guard=os.environ.get('PROCESSING_VIEWER_INPUT_SPACE_GUARD','0')
+    if input_guard not in ('0','1') or (input_guard=='1' and (viewer!='1' or not lease_dir or os.name!='posix' or not hasattr(os,'posix_fallocate'))):
+        raise ValueError('input space guard requires POSIX Viewer and authority lease')
+    if input_guard=='1' and VIEWER_INPUT_SPACE_GUARD_QUALIFIED is not True:
+        raise ValueError('input space guard is not qualified for startup')
     autocapture = os.environ.get('PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE', '0')
     registry = os.environ.get('PROCESSING_VIEWER_ARCHIVE_REGISTRY', '0')
     if registry not in ('0','1'):
@@ -169,6 +177,9 @@ def from_environment() -> Config:
         viewer_staging_token=viewer_staging,
         viewer_max_input_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_INPUT_BYTES', str(20 * 1024 ** 3)),
                                             'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
+        viewer_input_space_guard=input_guard == '1',
+        viewer_input_free_floor=_positive_int(os.environ.get('PROCESSING_VIEWER_INPUT_FREE_FLOOR', str(20 * 1024 ** 3)),
+                                              'PROCESSING_VIEWER_INPUT_FREE_FLOOR', 10 ** 15),
         viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
                                               'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
         viewer_archive_autocapture=autocapture == '1',

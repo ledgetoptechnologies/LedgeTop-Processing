@@ -19,6 +19,7 @@ import uuid as uuid_module
 
 from .maintenance import Conflict
 from .viewer_tasks import InputLimitExceeded
+from .input_space import InputSpaceUnavailable, reserve_input
 from .viewer_limits import MAX_UPLOAD_BYTES
 
 
@@ -118,7 +119,7 @@ def _copy_part(body, boundary, output):
             raise RequestError(400, 'truncated_multipart')
 
 
-def _multipart(stream, length, content_type, temp_dir=None):
+def _multipart(stream, length, content_type, temp_dir=None, *, input_free_floor=None):
     message = BytesHeaderParser(policy=email_policy).parsebytes(
         b'Content-Type: ' + content_type.encode('ascii') + b'\r\n\r\n')
     boundary = message.get_boundary()
@@ -151,7 +152,10 @@ def _multipart(stream, length, content_type, temp_dir=None):
         # unsafe basename. Preserve the decoded parameter exactly for validation.
         filename = headers.get_param('filename', header='Content-Disposition')
         with tempfile.TemporaryFile(mode='w+b', dir=temp_dir) as output:
+            if input_free_floor is not None:
+                reserve_input(output.fileno(),body.remaining+len(body.buffer),input_free_floor)
             size, final = _copy_part(body, boundary, output)
+            if input_free_floor is not None:output.truncate(size)
             output.seek(0)
             yield name, filename, output, size
         if final:
@@ -177,7 +181,7 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, input_free_floor=None):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
@@ -186,6 +190,11 @@ class ViewerFacade:
         # Cutover hold: production may read but never mutate until reopened by
         # restarting without the hold. Staging is unaffected.
         self.production_held = production_held
+        if input_free_floor is not None and (type(input_free_floor) is not int or input_free_floor<0):
+            raise ValueError('invalid input free-space floor')
+        self.input_free_floor=input_free_floor
+        if input_free_floor is not None and getattr(getattr(service,'store',None),'input_free_floor',None)!=input_free_floor:
+            raise ValueError('input space guard store differs')
         if temp_dir is not None:
             directory = Path(temp_dir)
             if (directory.is_symlink() or not directory.is_dir()
@@ -269,6 +278,9 @@ class ViewerFacade:
         except Conflict:
             handler.close_connection = True
             self._reply(handler, 409, {'error': 'conflict'})
+        except InputSpaceUnavailable:
+            handler.close_connection = True
+            self._reply(handler, 503, {'error': 'insufficient_input_space'})
         except InputLimitExceeded:
             handler.close_connection = True
             self._reply(handler, 413, {'error': 'task_input_limit_exceeded'})
@@ -405,7 +417,7 @@ class ViewerFacade:
             identifier = task_uuid(unquote(upload[1]))
             self._authorize(identifier, environment, handler)
             count, seen = 0, set()
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
+            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir, input_free_floor=self.input_free_floor):
                 if name != 'images':
                     raise RequestError(400, 'invalid_upload_form')
                 filename = safe_filename(filename)
