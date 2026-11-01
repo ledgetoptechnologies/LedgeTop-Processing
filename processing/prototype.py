@@ -456,6 +456,7 @@ class Queue(Maintenance):
 
         This is an observation, not a claim, gate override, or reconciliation.
         """
+        from .transfer_fence import TransferFenceError
         try:
             with self._db() as db:
                 db.execute('BEGIN')
@@ -464,7 +465,7 @@ class Queue(Maintenance):
                 except TransferJournalUnqualified:
                     return True
                 return False
-        except sqlite3.Error:
+        except (sqlite3.Error, OSError, RuntimeError, TransferFenceError):
             # Inspection itself failed; never imply the journal is qualified.
             return True
 

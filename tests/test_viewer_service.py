@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -873,6 +874,24 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(queued)['ledgetopHoldReason'],
                          'transfer_journal_inspection_required')
         self.assertEqual(self.task(queued)['job']['status'], 'queued')
+
+    def test_journal_inspection_operational_errors_are_sanitized(self):
+        from processing.transfer_fence import TransferFenceError
+        identifier = self.submit()
+        for error in (sqlite3.OperationalError('private database path'),
+                      OSError('private mount path'), RuntimeError('private owner state'),
+                      TransferFenceError('private fence evidence')):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(self.queue, '_has_attested_started_transfer', side_effect=error):
+                    info = self.service.info(identifier)
+                self.assertEqual(info['ledgetopHoldReason'], 'transfer_journal_inspection_required')
+                self.assertNotIn('private', repr(info))
+                self.assertEqual(info['status']['code'], 10)
+        with patch.object(self.queue, '_db', side_effect=RuntimeError('private closed owner')):
+            self.assertTrue(self.queue.transfer_journal_inspection_required())
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertFalse(self.engines['cluster'].calls)
+        self.assertFalse(self.engines['main'].calls)
 
     def test_unrelated_completed_legacy_journal_keeps_submission_visibly_held(self):
         from processing.engine_ingress_guard import STREAM_DDL
