@@ -18,9 +18,11 @@ async function main(){
   const providers={};for(const env of ['staging','production'])providers[env]=processing.upsertProvider({authEnvKey:NO_AUTH_MARKER,type:'nodeodm',displayName:'fixture-'+env,endpoint:`http://127.0.0.1:${port}`,enabled:true});
   const credentials={resolve:id=>id===providers.production.id?'synthetic-production-token-pppppppp':'synthetic-staging-token-ssssssss'};
   const deps={processing,repository,storage,config,providerCredentials:credentials};
-  const controlCall=async(pathname)=>{const r=await fetch(`http://127.0.0.1:${control}${pathname}`);assert.equal(r.status,200);return r.json()};
+  const controlCall=async(pathname)=>{const r=await fetch(`http://127.0.0.1:${control}${pathname}`),body=await r.json();if(r.status!==200)throw Error(`fixture control ${pathname.split('/')[1]}: ${JSON.stringify(body)}`);return body};
   async function create(name,env){const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:name});return processing.createAttempt({taskId:task.id,providerId:providers[env].id,options:{},createdBy:'fixture'})}
   const first=await create('first','staging');assert.equal(await processOne(deps,'fixture-first'),true);
+  const initial=processing.getAttempt(first.id),submission=processing.getAttemptSubmission(first.id);
+  if(initial.status!=='queued_upstream')throw Error('first synthetic submission: '+JSON.stringify({status:initial.status,errorCode:initial.errorCode,errorMessage:initial.errorMessage,phase:submission.submissionPhase}));
   await controlCall('/wait-running/'+first.providerTaskId);
   const second=await create('waiting','staging'),third=await create('production','production');
   assert.equal(await processOne(deps,'fixture-second'),true);assert.equal(await processOne(deps,'fixture-third'),true);
