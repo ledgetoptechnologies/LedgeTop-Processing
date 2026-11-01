@@ -24,12 +24,14 @@ blocking Viewer submission, status, result and acceptance routes and worker
 discovery, claim, result, failure, phase, reservation, recovery and receipt
 relay routes. A deliberately synthetic preexisting valid claim gives successful
 worker receipt and claim-state responses with the guard patched off, and 409
-with it on. A separately prepared ready result and valid acceptance likewise
-succeeds only with the guard patched off. These patches exist only in isolated
-tests. Worker terminal-acceptance and transfer-grant HTTP tests do not yet have
-otherwise-ready positive controls; they must not be read as proof of those
-complete data paths. The concurrent create-vs-v1 test uses one Queue owner and
-does not prove independent process or host exclusion.
+with it on. Separately prepared ready result, failure, and transfer-grant
+states use otherwise valid requests: v1 acceptance and grant succeed only
+with the guard patched off; with it enabled they are denied. The worker
+terminal-acceptance and transfer-grant relays likewise succeed in the patched
+positive control and are denied after the guard is restored. Independent
+unbound v1 terminal and transfer-grant HTTP tests also pass. These patches
+exist only in isolated tests. The concurrent create-vs-v1 test uses one Queue
+owner and does not prove independent process or host exclusion.
 
 The scoped candidate, HTTP, reference protocol/store/worker/delivery/failure/
 recovery and Queue suites ran 156 tests on Windows (136 passed, 20 platform

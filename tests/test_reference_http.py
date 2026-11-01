@@ -226,6 +226,34 @@ class ReferenceHTTPTests(unittest.TestCase):
         status = int(headers.split(b" ", 2)[1])
         return status, json.loads(body), headers
 
+    def synthetic_bound_claim(self):
+        """Set up an otherwise valid claim, patching only the test guard."""
+        from processing import reference_owned_binding_candidate as candidate, reference_protocol as protocol
+        body=self.fixture['submission']
+        submission=protocol.validate_submission(body,environment='staging',
+            capability_fingerprint=body['capabilityFingerprint'],
+            options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],allowed_odm_options=set())
+        with patch.object(candidate,'QUALIFIED',True):
+            candidate.install_empty_candidate(self.store,synthetic_pipeline_digest=submission['pipelineDigest'],
+                synthetic_principal_id=str(uuid.uuid4()),synthetic_environment='staging',synthetic_credential=b'S'*32)
+            result=candidate.submit_bound_candidate(self.store,submission,binding_id=str(uuid.uuid4()),
+                attempt_id=str(uuid.uuid4()),credential=b'S'*32)
+        job=result['binding']
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            claim=self.store.claim(job['jobId'],node_id='cluster',worker_id='worker',
+                worker_instance_id='instance',claim_request_id='synthetic-claim')
+        self.assertIsNotNone(claim)
+        return job,claim
+
+    def worker_claim_get(self,job_id,suffix,claim_token):
+        connection=http.client.HTTPConnection(*self.server.server_address,timeout=2)
+        try:
+            connection.request('GET','/ltds/worker/v1/jobs/'+job_id+'/'+suffix,
+                headers={'Authorization':'Bearer '+WORKER,'X-Claim-Token':claim_token})
+            response=connection.getresponse();body=response.read()
+            return response.status,json.loads(body)
+        finally:connection.close()
+
     def test_real_http_auth_capability_submit_status_replay_and_cross_environment(self):
         self.assertEqual(self.request("GET", "/ltds/v1/capabilities", token=None)[0], 401)
         status, capabilities, headers = self.request("GET", "/ltds/v1/capabilities")
@@ -439,6 +467,58 @@ class ReferenceHTTPTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],1)
         with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
             self.store.acceptance_receipts(job_id)
+
+    def test_bound_v1_transfer_grant_and_worker_read_denied_when_ready(self):
+        from processing.maintenance import Conflict
+        job,claim=self.synthetic_bound_claim();job_id=job['jobId']
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            self.store.reserve(job_id,self.fixture['transferRequest'],node_id='cluster')
+        grant=copy.deepcopy(self.fixture['transferGrant']);grant['jobId']=job_id
+        route='/ltds/v1/jobs/'+job_id+'/transfer-grants'
+        self.assertEqual(self.request('POST',route,grant)[0],404)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.receive_transfer_grant(job_id,grant)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_transfer_grants').fetchone()[0],0)
+        # Positive control: this exact grant is otherwise valid and can be
+        # read by the valid worker claim when the guard is patched only here.
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            status,ack,_=self.request('POST',route,grant)
+            self.assertEqual(status,200);self.assertTrue(ack['accepted'])
+            self.assertEqual(self.worker_claim_get(job_id,'transfer-grant',claim['claimToken'])[0],200)
+        self.assertEqual(self.worker_claim_get(job_id,'transfer-grant',claim['claimToken'])[0],409)
+
+    def test_bound_v1_terminal_acceptance_and_worker_relay_denied_when_ready(self):
+        from processing.maintenance import Conflict
+        job,claim=self.synthetic_bound_claim();job_id=job['jobId']
+        failure=make_failure(job_id=job_id,generation=job['generation'],environment='staging',
+            input_manifest_sha256=job['inputManifestSha256'],pipeline_digest=job['pipelineDigest'],
+            terminal_state='cancelled',error_code='confirmed_engine_cancelled')
+        payload=dict(failure=failure,engineTerminal=True)
+        keys=('jobId','generation','environment','inputManifestSha256','pipelineDigest','terminalState','failureSha256')
+        delivery=dict(outboxId=digest({key:failure[key] for key in keys}),payloadSha256=digest(payload),payload=payload)
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            status,_,_=self.request('POST','/ltds/worker/v1/terminal-outcomes',
+                dict(claimRequestId='synthetic-claim',claimToken=claim['claimToken'],delivery=delivery),token=WORKER)
+            self.assertEqual(status,200)
+        receipt=dict(schemaVersion=1,receiptId='terminal-receipt',storageReceiptId='terminal-storage',
+            jobId=job_id,generation=job['generation'],environment='staging',
+            inputManifestSha256=job['inputManifestSha256'],pipelineDigest=job['pipelineDigest'],
+            failureSha256=failure['failureSha256'],acceptedAt='2026-10-27T00:00:00.000Z',
+            validationVersion='ltds-reference-v1')
+        route='/ltds/v1/jobs/'+job_id+'/terminal-acceptance'
+        self.assertEqual(self.request('POST',route,receipt)[0],404)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.api.viewer.terminal.accept(job_id,receipt,'staging')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_terminal_acceptances').fetchone()[0],0)
+        # Positive control: otherwise valid failure and exact receipt succeed
+        # only while the guard is explicitly patched within this test.
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            status,accepted,_=self.request('POST',route,receipt)
+            self.assertEqual(status,200);self.assertTrue(accepted['terminalAccepted'])
+            self.assertEqual(self.worker_claim_get(job_id,'terminal-acceptance',claim['claimToken'])[0],200)
+        self.assertEqual(self.worker_claim_get(job_id,'terminal-acceptance',claim['claimToken'])[0],409)
 
     def test_bound_create_and_v1_submit_serialize_without_rebinding(self):
         from processing import reference_owned_binding_candidate as candidate, reference_protocol as protocol
