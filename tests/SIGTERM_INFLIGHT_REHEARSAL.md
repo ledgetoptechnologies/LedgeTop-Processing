@@ -50,3 +50,22 @@ synthetic state/certificates remain at `/tmp/lt-reference-tls-sigterm-giy3u8hu`.
 This is not evidence of a successful reference mutation, a streamed transfer,
 client-certificate authentication, admission fencing, Docker shutdown,
 external writer exclusion, or power-loss durability.
+
+The independently lifecycle-reviewed `test_sigterm_reference_claim_owned`
+rehearses an actual authenticated reference-worker claim over TLS. A
+synthetic reference job is persisted before the owned `app.main()` process
+starts. A partial claim POST enters its real listener; after SIGTERM the Queue
+lock stays held until the request completes with 200, and the process exits
+zero. On Queue reopen, the claim row is intact and the job is held with
+`coordinator_restart`. This is a fail-closed hold, not automatic resumption.
+
+The first run at `/tmp/lt-reference-claim-sigterm-chq1sp4h` failed because
+the test incorrectly expected a running job after reopen. Read-only inspection
+confirmed the expected restart hold and intact claim. After correcting that
+assertion, the test passed 1/1 under unprivileged WSL; its retained root is
+`/tmp/lt-reference-claim-sigterm-hzj3nxuv`. Both synthetic roots include
+private synthetic credentials/claim tokens and must remain private. Owned
+processes exited and were reaped. Test-only listener wrappers select owned
+ephemeral ports and mark request entry; that marker precedes admission.
+There is no claim of real processing, Viewer delivery, full stream handling,
+admission closure, Docker behavior, external fencing, or power-loss safety.
