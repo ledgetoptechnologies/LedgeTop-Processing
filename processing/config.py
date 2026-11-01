@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 ADMISSION_DRAIN_QUALIFIED = False
 ARCHIVE_REGISTRY_QUALIFIED = False
+NATIVE_MANIFEST_BINDING_QUALIFIED = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class Config:
     viewer_archive_autocapture: bool = False
     viewer_archive_free_floor: int = 20 * 1024 ** 3
     viewer_archive_registry: bool = False
+    viewer_manifest_binding: bool = False
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
     admission_start_closed: bool = False
@@ -92,6 +94,9 @@ def from_environment() -> Config:
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
     autocapture = os.environ.get('PROCESSING_VIEWER_ARCHIVE_AUTOCAPTURE', '0')
     registry = os.environ.get('PROCESSING_VIEWER_ARCHIVE_REGISTRY', '0')
+    manifest_binding=os.environ.get('PROCESSING_VIEWER_MANIFEST_BINDING','0')
+    if manifest_binding not in ('0','1') or (manifest_binding=='1' and (NATIVE_MANIFEST_BINDING_QUALIFIED is not True or viewer!='1' or not lease_dir)):
+        raise ValueError('native manifest binding is not qualified for startup')
     if registry not in ('0','1'):
         raise ValueError('invalid archive registry setting')
     if registry == '1' and (not ARCHIVE_REGISTRY_QUALIFIED or viewer != '1' or not lease_dir):
@@ -159,6 +164,7 @@ def from_environment() -> Config:
                                               'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
         viewer_archive_autocapture=autocapture == '1',
         viewer_archive_registry=registry == '1',
+        viewer_manifest_binding=manifest_binding == '1',
         viewer_archive_free_floor=_positive_int(os.environ.get('PROCESSING_VIEWER_ARCHIVE_FREE_FLOOR', str(20 * 1024 ** 3)),
                                                 'PROCESSING_VIEWER_ARCHIVE_FREE_FLOOR', 10 ** 15),
         prototype_observer_token=observer,

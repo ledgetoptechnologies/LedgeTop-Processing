@@ -177,12 +177,13 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, manifest_binding=None):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
             raise ValueError('production hold must be a boolean')
         self.service, self.token, self.staging_token = service, token, staging_token
+        self.manifest_binding=manifest_binding
         # Cutover hold: production may read but never mutate until reopened by
         # restarting without the hold. Staging is unaffected.
         self.production_held = production_held
@@ -248,7 +249,8 @@ class ViewerFacade:
                     raise RequestError(503, 'production_admission_held')
                 guarded = (path in ('/task/ledgetop/reserve', '/task/ledgetop/cancel',
                                     '/task/new/init', '/task/cancel', '/task/remove') or
-                    re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path))
+                    re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path) or
+                    re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path))
                 gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
                 if guarded and gate is not None:
                     from .admission_drain import AdmissionClosed
@@ -305,6 +307,11 @@ class ViewerFacade:
             value = self.service.capabilities()
         elif path == '/options':
             value = self.service.options()
+        elif re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path):
+            if self.manifest_binding is None:raise RequestError(404,'not_found')
+            identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)
+            if capability is None:raise RequestError(404,'not_found')
+            value=self.manifest_binding.status(identifier,environment,capability)
         else:
             route = re.fullmatch(r'/task/([^/]+)/(info|output|download/all\.zip)', path)
             if not route:
@@ -369,6 +376,17 @@ class ViewerFacade:
         self._reply(handler, 200, value)
 
     def _post(self, handler, path, environment):
+        if re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path):
+            if self.manifest_binding is None:raise RequestError(404,'not_found')
+            identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)
+            if capability is None:raise RequestError(404,'not_found')
+            self.service.store.authorize_reservation(identifier,environment,capability)
+            from .reference_protocol import MAX_BODY_BYTES
+            length=_length(handler,MAX_BODY_BYTES)
+            if handler.headers.get_content_type()!='application/json':raise RequestError(415,'json_required')
+            body=handler.rfile.read(length)
+            if len(body)!=length:raise RequestError(400,'truncated_body')
+            self._reply(handler,200,self.manifest_binding.bind(identifier,environment,capability,body));return
         if path in ('/info', '/options'):
             raise RequestError(405, 'method_not_allowed')
         if path in ('/task/ledgetop/reserve','/task/ledgetop/cancel'):

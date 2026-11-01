@@ -440,6 +440,7 @@ class ViewerService:
         return selected
 
     def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
+        self.store.reject_manifest_legacy(identifier,environment,capability)
         if capability is not None:
             replay = self.store.initialize(identifier, name, options, outputs, environment, capability, replay_only=True)
             if replay is not None: return replay

@@ -19,6 +19,10 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if (type(config.viewer_manifest_binding) is not bool or
+        (config.viewer_manifest_binding and (runtime_config.NATIVE_MANIFEST_BINDING_QUALIFIED is not True
+          or not config.viewer_enabled or not config.authority_lease_dir))):
+        raise RuntimeError('native_manifest_binding_not_qualified')
     if config.admission_drain_enabled and runtime_config.ADMISSION_DRAIN_QUALIFIED is not True:
         raise RuntimeError('admission_drain_not_qualified')
     if (type(config.viewer_archive_registry) is not bool or
@@ -86,6 +90,12 @@ def make_handler(config: Config):
     if queue is not None:
         with queue._db() as db:
             registry = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
+            binding = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_manifest_bindings'").fetchone()
+        if binding and not config.viewer_manifest_binding:
+            try:queue.close()
+            finally:
+                if lease is not None:lease.close()
+            raise RuntimeError('native_manifest_binding_configuration_required')
         if registry and not config.viewer_archive_registry:
             try:queue.close()
             finally:
@@ -96,9 +106,20 @@ def make_handler(config: Config):
         from .viewer_service import ViewerService
         from .viewer_http import ViewerFacade
         service = ViewerService(queue, config)
+        binding=None
+        if config.viewer_manifest_binding:
+            from .native_manifest_binding import NativeManifestBindings
+            try:binding=NativeManifestBindings(service.store)
+            except BaseException:
+                try:service.close()
+                finally:
+                    try:queue.close()
+                    finally:
+                        if lease is not None:lease.close()
+                raise
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
+        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool, manifest_binding=binding,
                               production_held=config.viewer_production_held)
     reference_runtime = None
     if reference_settings is not None:

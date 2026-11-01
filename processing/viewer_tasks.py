@@ -211,6 +211,12 @@ class TaskStore:
     def authorize_reservation(self,identifier,environment,capability):
         with self.queue._db() as db:self._reservation(db,identifier,environment,capability,allow_cancelled=True)
 
+    def reject_manifest_legacy(self,identifier,environment,capability):
+        with self.queue._db() as db:
+            self._reservation(db,identifier,environment,capability)
+            from .native_manifest_binding import blocks_legacy
+            blocks_legacy(db,identifier)
+
     def cancel_reservation(self, identifier, environment, capability):
         with self._lock,self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -271,6 +277,8 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             reserved=self._reservation(db,identifier,environment,capability)
+            from .native_manifest_binding import blocks_legacy
+            blocks_legacy(db,identifier)
             row = db.execute('SELECT * FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()
             # A read-only exact replay is permitted only for an authenticated
             # reservation. Legacy UUIDs always pass through current catalog checks.
@@ -350,6 +358,8 @@ class TaskStore:
         with self._lock:
             with self.queue._db() as db:
                 self._reservation(db,identifier,environment,capability)
+                from .native_manifest_binding import blocks_legacy
+                blocks_legacy(db,identifier)
                 row = self._row(db, identifier)
                 if row['stage'] != 'uploading' or row['job_id']:
                     raise Conflict('task is no longer accepting uploads')
@@ -422,6 +432,8 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,environment,capability)
+            from .native_manifest_binding import blocks_legacy
+            blocks_legacy(db,identifier)
             row = self._row(db, identifier)
             if row['job_id']:
                 if row['stage'] == 'cancelled':
