@@ -18,6 +18,16 @@ for table in ('viewer_tasks','viewer_files'):
                         f'WHEN {AUTHORIZE}() IS NOT 1 BEGIN SELECT RAISE(ABORT, '
                         "'viewer intake writer required'); END")
 
+# INSERT OR REPLACE must not bypass DELETE triggers when recursive_triggers is off.
+for table, predicate in (
+    ('viewer_tasks', 'uuid=NEW.uuid'),
+    ('viewer_files', 'uuid=NEW.uuid AND name_key=NEW.name_key'),
+):
+    name=f'viewer_intake_guard_{table}_replace_v1'
+    TRIGGERS[name]=(f'CREATE TRIGGER {name} BEFORE INSERT ON {table} '
+                    f'WHEN EXISTS(SELECT 1 FROM {table} WHERE {predicate}) '
+                    "BEGIN SELECT RAISE(ABORT, 'existing intake identity'); END")
+
 TRIGGERS['viewer_intake_guard_insert_v1']=(
     'CREATE TRIGGER viewer_intake_guard_insert_v1 BEFORE INSERT ON viewer_intake_journal_v1 '
     f"WHEN {AUTHORIZE}() IS NOT 1 OR NEW.state IS NOT 'prepared' OR NEW.sha256 IS NOT NULL "

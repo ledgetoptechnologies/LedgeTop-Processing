@@ -107,12 +107,17 @@ class ViewerInputSpaceTests(unittest.TestCase):
             with patch('processing.input_space.os.posix_fallocate',side_effect=OSError(errno.ENOSPC,'synthetic')):
                 with self.assertRaises(InputSpaceUnavailable):input_space.reserve_input(output.fileno(),1,0)
     def journal_store(self):
-        from processing import viewer_tasks
-        with self.q._db() as db:
-            db.execute(viewer_tasks.INTAKE_JOURNAL_DDL)
-            db.execute(viewer_tasks.INTAKE_INDEX_DDL)
-        with patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True):
-            return TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
+        from processing import viewer_tasks, intake_offline_migration
+        first=patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True);first.start();self.addCleanup(first.stop)
+        second=patch.object(intake_offline_migration,'QUALIFIED',True);second.start();self.addCleanup(second.stop)
+        self.q=Queue(self.root/'journal-queue');self.addCleanup(self.q.close)
+        directory=self.root/'journal-queue'/'viewer-tasks'
+        TaskStore(self.q,directory,input_free_floor=0)
+        with self.q._db() as db:intake_offline_migration.install_empty_offline(db)
+        self.q._intake_guard_enabled=True
+        store=TaskStore(self.q,directory,input_free_floor=0,intake_journal=True)
+        store.initialize(self.identifier,'synthetic',[],None,'production')
+        return store
 
     def test_ten_thousand_synthetic_files_first_census_and_cached_check(self):
         import time
@@ -144,6 +149,20 @@ class ViewerInputSpaceTests(unittest.TestCase):
             with self.q._db() as db:
                 with self.assertRaises(InputRecoveryRequired):store._check_input_recovery(db,store._row(db,self.identifier))
         self.assertEqual(len(list(directory.glob('input-*'))),3)
+
+    def test_actual_queue_rejects_existing_replace_with_recursive_modes(self):
+        import sqlite3
+        store=self.journal_store();self.facade.service.store=store
+        req=self.request(multipart([('images','a.jpg',b'original')]))
+        self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
+        for recursive in (0,1):
+            with self.q._db() as db:
+                db.execute('PRAGMA recursive_triggers='+str(recursive))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute('INSERT OR REPLACE INTO viewer_tasks SELECT * FROM viewer_tasks WHERE uuid=?',(self.identifier,))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute('INSERT OR REPLACE INTO viewer_files SELECT * FROM viewer_files WHERE uuid=?',(self.identifier,))
+        self.assertEqual(Path(store.task(self.identifier)['files'][0]['path']).read_bytes(),b'original')
 
     def test_opt_in_journal_upload_and_exact_retry(self):
         store=self.journal_store();self.facade.service.store=store
@@ -192,10 +211,10 @@ class ViewerInputSpaceTests(unittest.TestCase):
         store=self.journal_store();self.facade.service.store=store
         req=self.request(multipart([('images','a.jpg',b'first')]))
         self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
-        with self.q._db() as db:db.execute("UPDATE viewer_intake_journal_v1 SET sha256=NULL")
-        with patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True):
-            restarted=TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
-        with self.assertRaises(InputRecoveryRequired):restarted.commit(self.identifier)
+        from processing import intake_offline_migration
+        with self.q._db() as db:db.execute('DROP TRIGGER viewer_intake_guard_update_v1')
+        with self.assertRaises(intake_offline_migration.MigrationUnavailable):
+            with self.q._db():pass
 
     def test_final_collision_preserves_both_files_and_holds(self):
         store=self.journal_store();self.facade.service.store=store
@@ -234,7 +253,7 @@ class ViewerInputSpaceTests(unittest.TestCase):
         with self.q._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_intake_journal_v1').fetchone()[0],'sealed')
         with patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True):
-            restarted=TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
+            restarted=TaskStore(self.q,self.root/'journal-queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
         self.facade.service.store=restarted
         retry=self.request(multipart([('images','a.jpg',b'payload')]))
         self.assertTrue(self.facade.handle(retry));self.assertEqual(retry.status,503)

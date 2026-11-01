@@ -153,7 +153,8 @@ class TaskStore:
             raise ValueError('invalid input free-space floor')
         self.input_free_floor=input_free_floor
         if type(intake_journal) is not bool or (intake_journal and
-                (not INTAKE_JOURNAL_QUALIFIED or input_free_floor is None)):
+                (not INTAKE_JOURNAL_QUALIFIED or input_free_floor is None
+                 or getattr(queue,'_intake_guard_enabled',False) is not True)):
             raise ValueError('intake journal not qualified')
         self.intake_journal=intake_journal
         self._intake_reconciled=set()

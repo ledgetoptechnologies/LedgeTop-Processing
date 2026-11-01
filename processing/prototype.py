@@ -269,7 +269,14 @@ class Queue(Maintenance):
                 raise RuntimeError('coordinator ownership closed')
             db = sqlite3.connect(self.path, timeout=10)
             from .incremental_upload_census import configure as configure_upload_census
-            configure_upload_census(db)
+            try:
+                configure_upload_census(db)
+                if getattr(self, '_intake_guard_enabled', False):
+                    from .intake_offline_migration import authorize_connection
+                    authorize_connection(db)
+            except BaseException:
+                db.close()
+                raise
             db.row_factory = sqlite3.Row
             self._database_users += 1
             try:
