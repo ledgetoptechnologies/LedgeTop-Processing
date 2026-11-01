@@ -530,13 +530,12 @@ class NodeMutationBroker:
 
     def lookup_upload(self, grant, signature):
         """Return exact completed replay without creating a producer or writer."""
-        if type(self.witness) is not LocalCoordinatorAuthority:raise BrokerHeld('remote upload not qualified')
         file_key=self._validate_upload(grant,signature)
         identity=uuid.UUID(grant['jobId']).hex
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
         digest=hashlib.sha256(_json(grant)).hexdigest()
-        with self._mutex, self.witness.hold(grant,10), NodeGate(self.engine) as gate:
+        with self._mutex, self.witness.hold(grant,10,body=b'',signature=signature), NodeGate(self.engine) as gate:
             self._check_owner();state=gate.snapshot();reservation=state['reservation']
             if (any(state[k]!=v for k,v in {'nodeId':self.node,'coordinatorOrigin':self.origin,
                     'authorityId':self.authority,'generation':self.generation}.items()) or not reservation
@@ -554,20 +553,21 @@ class NodeMutationBroker:
                     self.db.commit();return None
                 if (row['operation']!='upload' or row['file_key']!=file_key or row['grant_hash']!=digest
                         or row['state']!='complete'):raise BrokerHeld('operation requires inspection')
-                reply=_upload_reply(json.loads(row['reply']));self.db.commit();return reply
+                reply=_upload_reply(json.loads(row['reply']));self.db.commit()
+                if not isinstance(self.witness,LocalCoordinatorAuthority):
+                    self.witness.check();self.witness.completed(grant)
+                return reply
             except BaseException:self.db.rollback();raise
 
     def upload(self, grant, signature, source, *, _with_replay=False):
         """Consume and close one dedicated socket carrying exactly one file."""
-        if type(self.witness) is not LocalCoordinatorAuthority:raise BrokerHeld('remote upload not qualified')
         if type(source) is not socket.socket:raise BrokerHeld('dedicated socket required')
         try:
             file_key=self._validate_upload(grant,signature)
-            return self._execute(grant,file_key,lambda:self.adapter.exchange_upload(grant,source),with_replay=_with_replay)
+            return self._execute(grant,file_key,lambda:self.adapter.exchange_upload(grant,source),with_replay=_with_replay,body=b'',signature=signature)
         finally:source.close()
 
     def confirm_upload(self, grant, signature, confirmation):
-        if type(self.witness) is not LocalCoordinatorAuthority:raise BrokerHeld('remote upload not qualified')
         file_key=self._validate_upload(grant,signature)
         if (type(confirmation) is not str or not re.fullmatch('[a-f0-9]{64}',confirmation)
                 or not hmac.compare_digest(_sender_confirmation(grant,self.secret),confirmation)):
@@ -576,7 +576,7 @@ class NodeMutationBroker:
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
         digest=hashlib.sha256(_json(grant)).hexdigest()
-        with self._mutex, self.witness.hold(grant,10), NodeGate(self.engine) as gate:
+        with self._mutex, self.witness.hold(grant,10,body=b'',signature=signature), NodeGate(self.engine) as gate:
             self._check_owner();state=gate.snapshot();reservation=state['reservation']
             if (any(state[k]!=v for k,v in {'nodeId':self.node,'coordinatorOrigin':self.origin,
                     'authorityId':self.authority,'generation':self.generation}.items()) or not reservation
@@ -590,11 +590,14 @@ class NodeMutationBroker:
                                     (grant['operationId'],'upload')).fetchone()
                 if row is None or row['grant_hash']!=digest or row['file_key']!=file_key:raise BrokerHeld('upload identity changed')
                 if row['state']=='complete':
-                    self.db.commit();self.witness.completed(grant);return
+                    self.db.commit()
+                    if not isinstance(self.witness,LocalCoordinatorAuthority):self.witness.check()
+                    self.witness.completed(grant);return
                 if row['state']!='awaiting_sender':raise BrokerHeld('upload confirmation unavailable')
                 self.db.execute("UPDATE operations SET state='complete' WHERE id=? AND state='awaiting_sender'",(grant['operationId'],))
                 self.db.commit()
             except BaseException:self.db.rollback();raise
+            if not isinstance(self.witness,LocalCoordinatorAuthority):self.witness.check()
             self.witness.completed(grant)
 
     def _execute(self, grant, file_key, forward, *, with_replay=False, body=None, signature=None):

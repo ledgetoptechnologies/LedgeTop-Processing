@@ -62,15 +62,15 @@ def _read(sock, deadline):
     except (ValueError,UnicodeError,RecursionError):raise SessionHeld('invalid session frame') from None
 
 
-def serve_coordinator(sock, *, queue, witness, secret, peer_sha256, store=None, session_seconds=60, idle_seconds=15):
+def serve_coordinator(sock, *, queue, witness, secret, peer_sha256, store=None, upload_evidence=None, session_seconds=60, idle_seconds=15):
     """Serve one node connection; no listener, reconnect or authority adoption."""
     try:
         return _serve_coordinator(sock,queue=queue,witness=witness,secret=secret,peer_sha256=peer_sha256,
-                                  session_seconds=session_seconds,idle_seconds=idle_seconds,store=store)
+                                  session_seconds=session_seconds,idle_seconds=idle_seconds,store=store,upload_evidence=upload_evidence)
     finally:sock.close()
 
 
-def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds, idle_seconds, store):
+def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds, idle_seconds, store, upload_evidence):
     from .node_mutation_broker import LocalCoordinatorAuthority, LocalUploadSender, issue_init_grant, sign_grant, _UPLOAD_FIELDS
     if (type(witness) is not LocalCoordinatorAuthority or witness.queue is not queue
             or type(session_seconds) not in (int,float) or not 12<=session_seconds<=60
@@ -107,7 +107,11 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                         body=body,content_type=grant.get('contentType'),secret=secret,_authority_required=True,_broker_allowed=allowed)
                     if observed!=public:raise SessionHeld('coordinator grant changed')
                 elif public.get('operation')=='upload':
-                    if set(public)!=_UPLOAD_FIELDS or body or action=='complete':raise SessionHeld('remote upload completion not qualified')
+                    if set(public)!=_UPLOAD_FIELDS or body:raise SessionHeld('remote upload binding invalid')
+                    if action=='complete':
+                        from .remote_upload_transport import UploadEvidence
+                        if type(upload_evidence) is not UploadEvidence or not upload_evidence.wait_verified(public, min(end,time.monotonic()+3)):
+                            raise SessionHeld('coordinator sender evidence unavailable')
                     item=LocalUploadSender._issued_item(store,public,grant.get('claimToken',''))
                     if (item['name']!=public.get('fileName') or item['bytes']!=public.get('fileBytes')
                             or item['sha256']!=public.get('bodySha256')):raise SessionHeld('coordinator upload changed')

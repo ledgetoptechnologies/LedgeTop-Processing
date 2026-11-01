@@ -55,18 +55,23 @@ The synthetic EOF test restarts the coordinator after an orderly shutdown; it
 does not simulate power failure, an actual node process crash, or a network
 partition with a still-running backend. This integration is not deployment ready.
 
-## Upload authority groundwork (inactive)
+## Experimental remote upload data path (inactive)
 
-The authenticated session can now revalidate an already issued upload grant
-against the active coordinator task, exact stored file record and source
-directory scope. A prepare challenge commits the same durable coordinator
-intent used by init; a check revalidates it. Upload completion challenges are
-explicitly refused, and the node broker still rejects remote upload forwarding.
-No file bytes cross the session. This intentionally prevents a peer possessing
-the signing key from asserting sender completion without coordinator-owned
-descriptor evidence.
+An mTLS authority session revalidates the issued upload against the coordinator's
+exact task, stored file and source-directory scope. A separate, already
+established mTLS stream carries an authenticated operation header and bounded
+file bytes from the coordinator's descriptor sender to the node broker. Its
+coordinator-owned in-memory evidence is recorded only after sender verification;
+the authority session requires that evidence before accepting completion. The
+node commits its own completion before requesting coordinator completion.
+Synthetic tests cover successful upload, interrupted data and an exact completed
+replay without another NodeODM call. Interrupted work remains held for inspection.
 
-A working remote upload still requires an authenticated bounded data channel,
-exact binding between it and this intent, coordinator-owned sender completion
-evidence, a tested lost-response protocol, and independently bound node/engine
-identity. The current HMAC by itself is not such evidence.
+Evidence is transient and trusted in-process; it is not an independently signed
+node receipt. The TLS completion request is a trusted-node assertion, and engine
+identity is not bound to trusted coordinator configuration. No listeners, TLS
+credential provisioning, durable receipt reconciliation, epoch adoption or
+physical backend fence are supplied. Lost evidence or a crash can conservatively
+hold work. Tests use one process and synthetic loopback peers with mocked Docker
+identity; they do not establish a real cross-host deployment, partition or
+power-loss safety. This code stays disabled and requires independent review.
