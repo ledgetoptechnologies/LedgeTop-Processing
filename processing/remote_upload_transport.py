@@ -33,10 +33,21 @@ class UploadEvidence:
 
 class RemoteUploadSender:
     """Read an exact stored descriptor and send over an already authenticated TLS stream."""
-    def __init__(self):self._unreaped=[]
+    def __init__(self):
+        self._unreaped=[];self._send_lock=threading.Lock()
     def send(self, channel, *, peer_sha256, store, claim_token, grant, signature, secret, evidence, timeout=10):
+        try:
+            if not self._send_lock.acquire(blocking=False):raise SessionHeld('upload sender busy')
+            try:
+                return self._send(channel,peer_sha256=peer_sha256,store=store,claim_token=claim_token,
+                    grant=grant,signature=signature,secret=secret,evidence=evidence,timeout=timeout)
+            finally:self._send_lock.release()
+        finally:channel.close()
+
+    def _send(self, channel, *, peer_sha256, store, claim_token, grant, signature, secret, evidence, timeout=10):
         from .durable_upload_evidence import DurableUploadEvidence
-        if type(evidence) not in (UploadEvidence,DurableUploadEvidence) or self._unreaped or not 0<timeout<=900:
+        if (type(evidence) is not DurableUploadEvidence or getattr(store,'queue',None) is not evidence.queue
+                or self._unreaped or not 0<timeout<=900):
             raise SessionHeld('owned upload sender required')
         _peer(channel,peer_sha256,False)
         if sign_grant(grant,secret)!=signature:raise SessionHeld('upload signature invalid')
@@ -58,15 +69,12 @@ class RemoteUploadSender:
             completion.verify(deadline)
             if LocalUploadSender._issued_item(store,grant,claim_token)!=item:
                 raise SessionHeld('source identity changed')
-            if type(evidence) is DurableUploadEvidence:
-                evidence._record_verified(grant,completion=completion,owner=self,store=store,claim_token=claim_token,item=item,deadline=deadline)
-            else:evidence._record_verified(grant)
+            evidence._record_verified(grant,completion=completion,owner=self,store=store,claim_token=claim_token,item=item,deadline=deadline)
             response=_read(channel,deadline)
             if type(response) is not dict or response!={'success':True}:raise SessionHeld('node response uncertain')
             return response
         finally:
             if completion is not None:completion.stop()
-            channel.close()
 
 
 def receive_upload(channel, *, peer_sha256, broker, timeout=10):

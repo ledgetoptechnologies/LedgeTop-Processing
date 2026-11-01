@@ -82,8 +82,9 @@ An additional explicit offline migration can install an append-only coordinator
 sender-evidence table. The coordinator's descriptor sender writes an exact
 operation, job, epoch and grant digest after all declared bytes are sent, the
 owned sender reports success, the source record is revalidated, and the matching
-coordinator intent is still started. The mTLS authority session can consult this
-evidence before accepting node completion. The synthetic test verifies that the
+coordinator intent is still started. The mTLS authority session requires this evidence from its own Queue before
+accepting node completion. Each sender rejects overlapping calls and closes its
+owned channel on every exit. The synthetic test verifies that the
 evidence survives an orderly coordinator restart, remains readable only with
 the qualified schema and immutable triggers, and that the restarted job remains
 held. A truncated stream writes no such evidence.

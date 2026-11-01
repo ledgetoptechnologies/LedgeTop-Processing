@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock
 
 from processing import node_authority_session as authority_session
+from processing import remote_upload_transport as upload_transport
 from processing.node_authority_session import RemoteAuthoritySession, SessionHeld, serve_coordinator
 from processing.node_mutation_broker import BrokerHeld, LocalCoordinatorAuthority, NodeMutationBroker, issue_init_grant, issue_upload_grant, sign_grant
 from processing.node_gate import NodeGate
@@ -23,6 +24,63 @@ from tests.test_node_mutation_broker import NodeMutationBrokerTests
 
 @unittest.skipUnless(shutil.which('openssl'), 'synthetic openssl fixture required')
 class NodeAuthoritySessionTests(NodeMutationBrokerTests):
+    def test_mismatched_evidence_queue_refuses_and_closes_session(self):
+        channel=Mock();evidence=DurableUploadEvidence.__new__(DurableUploadEvidence);evidence.queue=object()
+        with self.assertRaises(SessionHeld):
+            serve_coordinator(channel,queue=self.owner_queue,witness=LocalCoordinatorAuthority(self.owner_queue),
+                secret=self.secret,peer_sha256='0'*64,upload_evidence=evidence)
+        channel.close.assert_called_once_with()
+
+    def test_sender_closes_owned_channel_on_early_validation_failure(self):
+        evidence=DurableUploadEvidence(self.owner_queue);sender=RemoteUploadSender();grant=self.grant()
+        args=dict(peer_sha256='0'*64,store=self.owner_store,claim_token=self.owner_claim['claimToken'],
+                  grant=grant,signature='invalid',secret=self.secret,evidence=evidence)
+        client,peer=socket.socketpair()
+        try:
+            with self.assertRaises(SessionHeld):sender.send(client,**args)
+            self.assertEqual(client.fileno(),-1)
+        finally:peer.close()
+        client,peer=socket.socketpair()
+        try:
+            with unittest.mock.patch.object(upload_transport,'_peer'):
+                with self.assertRaises(SessionHeld):sender.send(client,**args)
+            self.assertEqual(client.fileno(),-1)
+        finally:peer.close()
+        client,peer=socket.socketpair()
+        try:
+            with unittest.mock.patch.object(upload_transport,'_peer'):
+                with self.assertRaises(BrokerHeld):sender.send(client,**dict(args,signature=sign_grant(grant,self.secret)))
+            self.assertEqual(client.fileno(),-1)
+        finally:peer.close()
+        client,peer=socket.socketpair();wrong=DurableUploadEvidence.__new__(DurableUploadEvidence);wrong.queue=object()
+        try:
+            with self.assertRaises(SessionHeld):sender.send(client,**dict(args,evidence=wrong))
+            self.assertEqual(client.fileno(),-1)
+        finally:peer.close()
+
+    def test_sender_refuses_concurrent_calls_and_closes_both_owned_channels(self):
+        evidence=DurableUploadEvidence(self.owner_queue);sender=RemoteUploadSender();grant=self.grant()
+        args=dict(peer_sha256='0'*64,store=self.owner_store,claim_token=self.owner_claim['claimToken'],
+                  grant=grant,signature='invalid',secret=self.secret,evidence=evidence)
+        first,peer1=socket.socketpair();second,peer2=socket.socketpair();entered=threading.Event();release=threading.Event();errors=[]
+        def pause(*_):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('synthetic timeout')
+        def run():
+            try:sender.send(first,**args)
+            except Exception as exc:errors.append(type(exc))
+        thread=threading.Thread(target=run)
+        try:
+            with unittest.mock.patch.object(upload_transport,'_peer',side_effect=pause):
+                thread.start()
+                try:
+                    self.assertTrue(entered.wait(3))
+                    with self.assertRaises(SessionHeld):sender.send(second,**args)
+                    self.assertEqual(second.fileno(),-1)
+                finally:release.set();thread.join(5)
+            self.assertFalse(thread.is_alive());self.assertEqual(errors,[SessionHeld]);self.assertEqual(first.fileno(),-1)
+        finally:release.set();peer1.close();peer2.close()
+
     def test_invalid_server_binding_closes_owned_socket(self):
         channel=Mock()
         with self.assertRaises(SessionHeld):

@@ -77,6 +77,10 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
             or type(idle_seconds) not in (int,float) or not 12<=idle_seconds<=30
             or idle_seconds>session_seconds):
         raise SessionHeld('bounded coordinator session required')
+    if upload_evidence is not None:
+        from .durable_upload_evidence import DurableUploadEvidence
+        if type(upload_evidence) is not DurableUploadEvidence or upload_evidence.queue is not queue:
+            raise SessionHeld('sender evidence queue differs')
     _peer(sock,peer_sha256,True);end=time.monotonic()+session_seconds;sequence=0;active=None;phase=None
     try:
         with queue.pin_transfer(end):
@@ -109,9 +113,9 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                 elif public.get('operation')=='upload':
                     if set(public)!=_UPLOAD_FIELDS or body:raise SessionHeld('remote upload binding invalid')
                     if action=='complete':
-                        from .remote_upload_transport import UploadEvidence
                         from .durable_upload_evidence import DurableUploadEvidence
-                        if type(upload_evidence) not in (UploadEvidence,DurableUploadEvidence) or not upload_evidence.wait_verified(public, min(end,time.monotonic()+3)):
+                        if (type(upload_evidence) is not DurableUploadEvidence or upload_evidence.queue is not queue
+                                or not upload_evidence.wait_verified(public, min(end,time.monotonic()+3))):
                             raise SessionHeld('coordinator sender evidence unavailable')
                     item=LocalUploadSender._issued_item(store,public,grant.get('claimToken',''))
                     if (item['name']!=public.get('fileName') or item['bytes']!=public.get('fileBytes')
