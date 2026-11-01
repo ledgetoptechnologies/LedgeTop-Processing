@@ -223,9 +223,8 @@ class ViewerService:
 
     def _archive_once_locked(self, identifier, expected_identity=None):
         """Run file capture in a reaped child that inherits coordinator flocks."""
-        with self._lock:
-            with self._downloads_lock:
-                lock = self._downloads.setdefault(identifier, threading.Lock())
+        with self._downloads_lock:
+            lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
             if self._stop.is_set():
                 return
@@ -292,9 +291,8 @@ class ViewerService:
                 if (path.is_symlink() or not stat.S_ISREG(current.st_mode) or current.st_size != receipt['bytes']
                         or (os.name != 'nt' and current.st_uid != os.geteuid())):
                     raise Conflict('captured archive identity changed')
-                # update() verifies the path still belongs to this current
-                # generation; no Viewer acknowledgement or deletion occurs.
-                self.store.update(identifier, archive_path=str(path))
+                # Bind publication to the captured incarnation in the same DB transaction.
+                self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
             finally:
                 try:
                     if process.stdin and not process.stdin.closed:
@@ -768,7 +766,7 @@ class ViewerService:
                             # archive_path was persisted, recover only that same
                             # content from the retained engine result.
                             stream, size = self._restore_recorded_archive(task, path, receipt, automatic=automatic)
-                            self.store.update(identifier, archive_path=str(path))
+                            self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
                             return stream, size
                         current = path.lstat(); opened = os.fstat(stream.fileno())
                         if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
@@ -787,7 +785,7 @@ class ViewerService:
                             else:
                                 partial.unlink()
                         sync_directory(path.parent)
-                        self.store.update(identifier, archive_path=str(path))
+                        self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
                         return stream, receipt['bytes']
                     except BaseException:
                         if stream is not None: stream.close()
@@ -842,7 +840,7 @@ class ViewerService:
                 os.link(partial, path)
                 partial.unlink()
                 sync_directory(path.parent)
-                self.store.update(identifier, archive_path=str(path))
+                self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
                 return self._verify_archive(path, receipt), receipt['bytes']
             receipt_path = path.with_suffix('.zip.receipt')
             if receipt_path.exists() or receipt_path.is_symlink():

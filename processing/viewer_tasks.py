@@ -675,7 +675,7 @@ class TaskStore:
             return db.execute("UPDATE viewer_tasks SET archive_state=?,archive_reason=? WHERE uuid=? AND generation=? AND job_id=? AND removed=0 AND archive_path IS NULL",
                               (state, reason, identifier, generation, job_id)).rowcount == 1
 
-    def update(self, identifier, **fields):
+    def update(self, identifier, *, expected_archive_task=None, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path', 'archive_state', 'archive_reason'}
         if not fields or not set(fields) <= allowed:
@@ -714,6 +714,17 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            if expected_archive_task is not None:
+                task=expected_archive_task
+                if (set(fields)!={'archive_path'} or task['uuid']!=identifier or
+                        any(row[key]!=task[key] for key in ('generation','job_id','engine_uuid','node_id','environment'))
+                        or self._directory(row)!=Path(task['directory'])):
+                    raise Conflict('archive task identity changed')
+                job=self._job(db,row)
+                if not job or job['status']!='succeeded':
+                    raise Conflict('archive task no longer complete')
+                if row['archive_path'] not in (None,str(Path(fields['archive_path']).absolute())):
+                    raise Conflict('competing archive publication')
             if row['engine_uuid'] and fields.get('engine_uuid', row['engine_uuid']) != row['engine_uuid']:
                 raise Conflict('engine task identity is immutable')
             if fields.get('engine_uuid') and db.execute(

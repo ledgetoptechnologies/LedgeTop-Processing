@@ -21,8 +21,8 @@ class _CaptureStore:
             raise ValueError('capture identity changed')
         return self.value.copy()
 
-    def update(self, identifier, **fields):
-        if identifier != self.value['uuid'] or set(fields) != {'archive_path'}:
+    def update(self, identifier, *, expected_archive_task=None, **fields):
+        if identifier != self.value['uuid'] or set(fields) != {'archive_path'} or expected_archive_task != self.value:
             raise ValueError('capture update invalid')
         self.value.update(fields)
 

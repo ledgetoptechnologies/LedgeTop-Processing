@@ -13,6 +13,7 @@ from http.server import ThreadingHTTPServer
 
 from processing.app import CoordinatorService, make_handler
 from processing.config import Config
+from processing.prototype import Queue
 from processing.synthetic_engine import SyntheticEngine, handler_for
 from tests.test_viewer_http import BOUNDARY, multipart
 
@@ -46,9 +47,10 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 return super().upload(identifier,filename,stream,length)
 
         local=Engine(1000,3600);main=Engine(None,3600);fleet.extend((local,main))
-        servers=[];engine_threads=[];stages=[]
+        servers=[];engine_threads=[];stages=[];capture_thread=None
         with tempfile.TemporaryDirectory() as temporary:
             try:
+                lease_dir=Path(temporary)/'leases';lease_dir.mkdir()
                 for engine in fleet:
                     server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(engine,node_token))
                     thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02})
@@ -57,7 +59,10 @@ class NativeViewerEndToEnd(unittest.TestCase):
                     main_node_url='http://127.0.0.1:'+str(servers[1].server_port),local_max_photos=1000,
                     local_max_input_bytes=20*1024**3,prototype_state_dir=str(Path(temporary)/'state'),
                     prototype_node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,
-                    viewer_token=viewer,viewer_staging_token=staging,local_node_token=node_token,main_node_token=node_token)
+                    viewer_token=viewer,viewer_staging_token=staging,local_node_token=node_token,main_node_token=node_token,
+                    authority_lease_dir=str(lease_dir),viewer_archive_free_floor=1)
+                seeded=Queue(config.prototype_state_dir,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+                seeded.close()
 
                 def start():
                     handler=make_handler(config);server=None
@@ -78,6 +83,10 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 def stop():
                     event,thread,exits=stages[-1];event.set();thread.join(10)
                     self.assertFalse(thread.is_alive());self.assertEqual(exits,[0])
+                    # This in-process fixture explicitly closes the lease that
+                    # a real coordinator process releases on process exit.
+                    self.assertTrue(handler.prototype_queue._lock.closed)
+                    handler.prototype_queue.authority_lease.close()
 
                 def request(port,method,path,token,body=None,headers=None):
                     connection=http.client.HTTPConnection('127.0.0.1',port,timeout=10)
@@ -125,7 +134,14 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 finish(local,first['engine_uuid'])
                 wait_task(handler,running,lambda task:task['job']['status']=='succeeded')
                 self.assertTrue(upload_entered.wait(30),'large job did not begin upload')
-                # Result delivery must progress while another job is uploading.
+                # Run the actual archive child while the later HTTP upload is blocked.
+                capture_errors=[]
+                def capture():
+                    try:handler.viewer_service._archive_once(running)
+                    except Exception as error:capture_errors.append(error)
+                capture_thread=threading.Thread(target=capture);capture_thread.start();capture_thread.join(15)
+                self.assertFalse(capture_thread.is_alive(),'archive child blocked behind upload')
+                self.assertEqual(capture_errors,[])
                 self.assertEqual(request(port,'GET','/task/'+running+'/download/all.zip',staging),result_bytes)
                 upload_release.set()
                 second=wait_task(handler,large,lambda task:task['job']['status']=='running' and task['phase']=='processing',seconds=100)
@@ -144,9 +160,11 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 stop()
             finally:
                 upload_release.set()
+                if capture_thread is not None:capture_thread.join(20)
                 for event,_,_ in stages:event.set()
                 for _,thread,_ in stages:thread.join(100)
                 for server in servers:server.shutdown();server.server_close()
                 for thread in engine_threads:thread.join(5)
-                if any(thread.is_alive() for _,thread,_ in stages) or any(thread.is_alive() for thread in engine_threads):
+                if ((capture_thread is not None and capture_thread.is_alive()) or
+                        any(thread.is_alive() for _,thread,_ in stages) or any(thread.is_alive() for thread in engine_threads)):
                     raise AssertionError('synthetic workflow thread did not exit')

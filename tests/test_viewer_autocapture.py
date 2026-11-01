@@ -247,6 +247,52 @@ class ViewerAutoCaptureTests(unittest.TestCase):
             self.assertFalse(first.is_alive());self.assertFalse(second.is_alive())
             self.assertEqual(errors,[]);spawn.assert_not_called()
 
+    def test_auto_child_captures_while_later_upload_is_blocked(self):
+        later=self.fixture.submit();entered=threading.Event();release=threading.Event();errors=[]
+        engine=self.fixture.engines['cluster'];original=engine.upload
+        def upload(*args):
+            entered.set()
+            if not release.wait(15):raise RuntimeError('fixture upload timed out')
+            return original(*args)
+        def run(call):
+            try:call()
+            except Exception as error:errors.append(error)
+        dispatch=threading.Thread(target=run,args=(self.service.tick,))
+        capture=threading.Thread(target=run,args=(lambda:self.service._archive_once(self.identifier),))
+        with patch.object(engine,'upload',side_effect=upload):
+            try:
+                dispatch.start();self.assertTrue(entered.wait(5));capture.start()
+                capture.join(10);self.assertFalse(capture.is_alive(),'capture blocked behind upload')
+                self.assertEqual(errors,[])
+                archived=self.fixture.task(self.identifier)
+                self.assertEqual(Path(archived['archive_path']).read_bytes(),self.engine_response)
+                self.assertEqual(self.fixture.task(later)['job']['status'],'running')
+            finally:
+                release.set();dispatch.join(15)
+                if capture.ident is not None:capture.join(15)
+            self.assertFalse(dispatch.is_alive());self.assertFalse(capture.is_alive());self.assertEqual(errors,[])
+
+    def test_old_capture_cannot_publish_to_recreated_task(self):
+        old=self.fixture.task(self.identifier);errors=[]
+        self.release.clear()
+        def capture():
+            try:self.service._archive_once(self.identifier)
+            except Exception as error:errors.append(error)
+        thread=threading.Thread(target=capture)
+        try:
+            thread.start();self.assertTrue(self.ready.wait(5))
+            self.service.remove(self.identifier)
+            self.service.initialize(self.identifier,'Synthetic survey',fixtures.REQUEST_OPTIONS,None,'production')
+            replacement=self.fixture.task(self.identifier)
+            self.assertNotEqual(old['generation'],replacement['generation'])
+        finally:
+            self.release.set();thread.join(15)
+        self.assertFalse(thread.is_alive());self.assertEqual(len(errors),1)
+        self.assertIsInstance(errors[0],Conflict)
+        self.assertIsNone(self.fixture.task(self.identifier)['archive_path'])
+        self.assertEqual((Path(old['directory'])/'all.zip').read_bytes(),self.engine_response)
+        self.assertTrue((Path(old['directory'])/'all.zip.receipt').is_file())
+
     def test_unreaped_capture_child_prevents_clean_shutdown(self):
         class Input:
             closed=False
@@ -646,7 +692,8 @@ finally:s.close();q.authority_lease.close();q.close()
         self.engine_http_status=200;deadline=time.monotonic()+10
         while True:
             current=self.fixture.task(self.identifier);node=current['node_id'];engine_id=current['engine_uuid']
-            if node is not None and engine_id in self.fixture.engines[node].tasks:break
+            if (node is not None and engine_id in self.fixture.engines[node].tasks
+                    and current['phase']=='processing' and current['job']['status']=='running'):break
             if time.monotonic()>=deadline:self.fail('replacement did not dispatch')
             time.sleep(.02)
         self.fixture.finish(self.identifier)
