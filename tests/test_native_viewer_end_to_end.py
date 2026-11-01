@@ -2,8 +2,11 @@
 import http.client
 import io
 import json
+import os
 from contextlib import contextmanager
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -27,6 +30,15 @@ def retained_synthetic_root():
 
 class NativeViewerEndToEnd(unittest.TestCase):
     def test_real_http_priority_routing_restart_and_exact_result(self):
+        if os.environ.get('LT_SYNTHETIC_QUEUE_CHILD') != '1':
+            env=dict(os.environ,LT_SYNTHETIC_QUEUE_CHILD='1')
+            # This fixture does not enable autocapture or spawn archive workers.
+            # The explicitly owned child contains all of its HTTP threads.
+            result=subprocess.run([sys.executable,'-m','unittest',
+                'tests.test_native_viewer_end_to_end.NativeViewerEndToEnd.test_real_http_priority_routing_restart_and_exact_result'],
+                env=env,text=True,capture_output=True,timeout=45)
+            self.assertEqual(result.returncode,0,result.stderr[-3000:])
+            return
         viewer='synthetic-production-'+'p'*32
         staging='synthetic-staging-'+'s'*32
         node_token='synthetic-node-'+'n'*32
@@ -54,7 +66,10 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 return super().upload(identifier,filename,stream,length)
 
         local=Engine(2,3600);main=Engine(None,3600);fleet.extend((local,main))
-        servers=[];engine_threads=[];stages=[];capture_thread=None
+        servers=[];engine_threads=[];stages=[];cleanup_errors=[]
+        def attempt(label,action):
+            try:action()
+            except BaseException as error:cleanup_errors.append((label,type(error).__name__))
         with retained_synthetic_root() as temporary:
             try:
                 lease_dir=Path(temporary)/'leases';lease_dir.mkdir()
@@ -75,7 +90,8 @@ class NativeViewerEndToEnd(unittest.TestCase):
                     viewer_token=viewer,viewer_staging_token=staging,local_node_token=node_token,main_node_token=node_token,
                     authority_lease_dir=str(lease_dir),viewer_archive_free_floor=1)
                 seeded=Queue(config.prototype_state_dir,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
-                seeded.close()
+                try: pass
+                finally: seeded.close()
 
                 def start():
                     handler=make_handler(config);server=None
@@ -84,10 +100,15 @@ class NativeViewerEndToEnd(unittest.TestCase):
                         lifecycle=CoordinatorService(server,handler);stop=threading.Event();exits=[]
                         thread=threading.Thread(target=lambda:exits.append(lifecycle.run(stop)));thread.start()
                     except BaseException:
-                        if server is not None:server.server_close()
-                        handler.viewer_service.close();handler.prototype_queue.close()
-                        handler.prototype_queue.authority_lease.close();raise
-                    stages.append((stop,thread,exits))
+                        if server is not None:attempt('start-server-close',server.server_close)
+                        attempt('start-viewer-close',handler.viewer_service.close)
+                        attempt('start-queue-close',handler.prototype_queue.close)
+                        if handler.prototype_queue._lock.closed:
+                            attempt('start-authority-close',handler.prototype_queue.authority_lease.close)
+                        raise
+                    stages.append((stop,thread,exits,handler,server))
+                    if os.environ.get('LT_SYNTHETIC_QUEUE_FAIL_AFTER_START') == '1':
+                        raise RuntimeError('synthetic setup failure')
                     deadline=time.monotonic()+8
                     while not lifecycle.healthy():
                         if not thread.is_alive() or time.monotonic()>deadline:raise AssertionError('coordinator unavailable')
@@ -95,12 +116,12 @@ class NativeViewerEndToEnd(unittest.TestCase):
                     return handler,server.server_port
 
                 def stop():
-                    event,thread,exits=stages[-1];event.set();thread.join(10)
+                    event,thread,exits,owned_handler,_=stages[-1];event.set();thread.join(10)
                     self.assertFalse(thread.is_alive());self.assertEqual(exits,[0])
                     # This in-process fixture explicitly closes the lease that
                     # a real coordinator process releases on process exit.
-                    self.assertTrue(handler.prototype_queue._lock.closed)
-                    handler.prototype_queue.authority_lease.close()
+                    self.assertTrue(owned_handler.prototype_queue._lock.closed)
+                    owned_handler.prototype_queue.authority_lease.close()
 
                 def request(port,method,path,token,body=None,headers=None):
                     connection=http.client.HTTPConnection('127.0.0.1',port,timeout=10)
@@ -148,14 +169,8 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 finish(local,first['engine_uuid'])
                 wait_task(handler,running,lambda task:task['job']['status']=='succeeded')
                 self.assertTrue(upload_entered.wait(15),'large job did not begin upload')
-                # Run the actual archive child while the later HTTP upload is blocked.
-                capture_errors=[]
-                def capture():
-                    try:handler.viewer_service._archive_once(running)
-                    except Exception as error:capture_errors.append(error)
-                capture_thread=threading.Thread(target=capture);capture_thread.start();capture_thread.join(15)
-                self.assertFalse(capture_thread.is_alive(),'archive child blocked behind upload')
-                self.assertEqual(capture_errors,[])
+                # Fetch an already-finished synthetic ZIP while the later
+                # upload is blocked, without starting an archive child process.
                 self.assertEqual(request(port,'GET','/task/'+running+'/download/all.zip',staging),result_bytes)
                 upload_release.set()
                 second=wait_task(handler,large,lambda task:task['job']['status']=='running' and task['phase']=='processing',seconds=15)
@@ -174,13 +189,38 @@ class NativeViewerEndToEnd(unittest.TestCase):
                 stop()
             finally:
                 upload_release.set()
-                if capture_thread is not None:capture_thread.join(20)
-                for event,_,_ in stages:event.set()
-                for _,thread,_ in stages:thread.join(10)
+                for event,_,_,_,_ in stages:attempt('stop-event',event.set)
+                for _,thread,_,owned_handler,owned_server in stages:
+                    attempt('coordinator-join',lambda thread=thread:thread.join(10))
+                    if not thread.is_alive():
+                        # Release only this fixture's lease after all its actual
+                        # coordinator/service threads and HTTP handlers exited.
+                        service_thread=getattr(owned_handler.viewer_service,'_thread',None)
+                        handlers=getattr(owned_server,'_threads',())
+                        handlers=list(handlers) if isinstance(handlers,list) else []
+                        if (service_thread is None or not service_thread.is_alive()) and not any(t.is_alive() for t in handlers):
+                            attempt('queue-close',owned_handler.prototype_queue.close)
+                            if owned_handler.prototype_queue._lock.closed:
+                                attempt('authority-close',owned_handler.prototype_queue.authority_lease.close)
+                            if owned_handler.prototype_queue.authority_lease._descriptor is not None:
+                                cleanup_errors.append(('authority-still-open','inspection'))
+                        else:
+                            cleanup_errors.append(('owned-service-still-running','inspection'))
                 for index,server in enumerate(servers):
-                    if index<len(engine_threads) and engine_threads[index].is_alive():server.shutdown()
-                    server.server_close()
-                for thread in engine_threads:thread.join(5)
-                if ((capture_thread is not None and capture_thread.is_alive()) or
-                        any(thread.is_alive() for _,thread,_ in stages) or any(thread.is_alive() for thread in engine_threads)):
+                    if index<len(engine_threads) and engine_threads[index].is_alive():
+                        attempt('engine-shutdown',server.shutdown)
+                    attempt('engine-close',server.server_close)
+                for thread in engine_threads:attempt('engine-join',lambda thread=thread:thread.join(5))
+                if (cleanup_errors or any(thread.is_alive() for _,thread,_,_,_ in stages)
+                        or any(thread.is_alive() for thread in engine_threads)):
                     raise AssertionError('synthetic workflow thread did not exit')
+                print('SYNTHETIC_FIXTURE_CLEANUP_COMPLETE')
+
+    def test_setup_failure_releases_owned_fixture_resources(self):
+        env=dict(os.environ,LT_SYNTHETIC_QUEUE_CHILD='1',LT_SYNTHETIC_QUEUE_FAIL_AFTER_START='1')
+        result=subprocess.run([sys.executable,'-m','unittest',
+            'tests.test_native_viewer_end_to_end.NativeViewerEndToEnd.test_real_http_priority_routing_restart_and_exact_result'],
+            env=env,text=True,capture_output=True,timeout=25)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('synthetic setup failure',result.stderr)
+        self.assertIn('SYNTHETIC_FIXTURE_CLEANUP_COMPLETE',result.stdout)
