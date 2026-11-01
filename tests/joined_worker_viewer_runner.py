@@ -15,6 +15,7 @@ fixture_commit='a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba'
 derivative_fixture_commit='1138871548dacde30ff6f6edb8626816095f1e2e'
 ingest_fixture_commit='86243ade36958c107bacca9e0488525fa54e19c5'
 volume_sender_commit='1fbea012cb3564f87db96231cec20453e2dc678a'
+runtime_fixture_commit='147d015deadf1579d99b703e6562953b9847330d'
 fixture_hashes={
     'worker_process_outage_fixture.py':'50b68420d6a20e9171f505274c27000fc7a0253c6793605f1d13275581700549',
     'worker_process_outage_engine.py':'f7f3fbc6f3ff0af14c1ef4fad1c6343e4500a09681636e627e028c5e0035903e',
@@ -26,6 +27,9 @@ fixture_hashes={
     'joined_ingest_sender.js':'257a8c75acfdd204694dba6ef145d8a745f61ee7d2d982c8f6de5d45307b4ca4',
     'joined_ingest_supervisor.py':'4236057021d15f4e085a0601d28526c544b9fcfa77ef4cc4b48e21d62db468c2',
     'joined_ingest_watchdog.py':'62535d8618a1f9bbebfb217e8bc07dd3716e1324d0ad4b8ed687d1aebf2b5a05',
+    'joined_runtime_coordinator.py':'9adce99a53c9231874154786975314312736b7fa4b7d1f5d4bcfcf4bd1759884',
+    'joined_runtime_supervisor.py':'12702dd3cf7d634599f4e42d554513c8b92e4cb5694c0bc49b4c8d425ef030b5',
+    'joined_runtime_watchdog.py':'a06345588a0ac45a96e6453bade9e335390bd8f759862ad717ac7d810e9e8888',
 }
 run_id=os.environ['LT_SYNTHETIC_RUN_ID'];root=Path(os.environ['LT_SYNTHETIC_ROOT']).resolve()
 if len(run_id)!=32 or any(c not in '0123456789abcdef' for c in run_id) or not root.is_dir():raise ValueError('invalid run identity')
@@ -79,13 +83,15 @@ try:
     if ingest_oid!=ingest_fixture_commit:raise RuntimeError('invalid ingest fixture commit')
     sender_oid=cmd('git','rev-parse',volume_sender_commit+'^{commit}').decode().strip()
     if sender_oid!=volume_sender_commit:raise RuntimeError('invalid volume sender commit')
-    print('COMMITS',processing_commit,viewer_commit,'FIXTURE_COMMIT',fixture_oid,'DERIVATIVE_FIXTURE_COMMIT',derivative_oid,'INGEST_FIXTURE_COMMIT',ingest_oid,'VOLUME_SENDER_COMMIT',sender_oid,'RUN_ID',run_id,'ROOT',root,flush=True)
+    runtime_oid=cmd('git','rev-parse',runtime_fixture_commit+'^{commit}').decode().strip()
+    if runtime_oid!=runtime_fixture_commit:raise RuntimeError('invalid runtime fixture commit')
+    print('COMMITS',processing_commit,viewer_commit,'FIXTURE_COMMIT',fixture_oid,'DERIVATIVE_FIXTURE_COMMIT',derivative_oid,'INGEST_FIXTURE_COMMIT',ingest_oid,'VOLUME_SENDER_COMMIT',sender_oid,'RUNTIME_FIXTURE_COMMIT',runtime_oid,'RUN_ID',run_id,'ROOT',root,flush=True)
     for repo,commit,name in ((source,processing_commit,'processing'),(viewer,viewer_commit,'viewer')):
         target=root/name;target.mkdir();archive=root/(name+'.tar')
         with archive.open('wb') as output:cmd('git','-C',str(repo),'archive','--format=tar',commit,timeout=30,stdout=output)
         with tarfile.open(archive) as tar:tar.extractall(target,filter='data')
     for name,expected in fixture_hashes.items():
-        oid=sender_oid if name=='joined_ingest_sender.js' else ingest_oid if name.startswith('joined_ingest_') else fixture_oid
+        oid=runtime_oid if name.startswith('joined_runtime_') else sender_oid if name=='joined_ingest_sender.js' else ingest_oid if name.startswith('joined_ingest_') else fixture_oid
         data=cmd('git','show',oid+':tests/'+name)
         # Git normalized these files at commit time. Reconstruct the exact
         # reviewed/passing Windows snapshot bytes, then verify their digest.
@@ -139,7 +145,7 @@ try:
            '--mount',f'type=bind,src={retained},dst=/retained']
     p=create('python','--network','none',*common,*binds,'--workdir','/processing',
              '--env','SYNTHETIC_RETAINED_DIR=/retained',images['python:3.12-slim'],
-            'python','-u','-m','tests.joined_ingest_watchdog')
+            'python','-u','-m','tests.joined_runtime_watchdog')
     docker('start',p)
     marker=retained/'joined-root.json';deadline=time.monotonic()+100
     while time.monotonic()<deadline:
@@ -181,7 +187,9 @@ try:
         time.sleep(.2)
     else:raise RuntimeError('python cleanup timeout')
     plog=logs('python');print('PYTHON_LOG_BEGIN\n'+plog+'\nPYTHON_LOG_END',flush=True)
-    if ps['ExitCode']!=0 or 'WORKER_VIEWER_JOINED_ASSERTIONS_COMPLETE' not in plog or 'INNER_PROCESS_GROUP_CHECK_PASSED' not in plog:
+    if (ps['ExitCode']!=0 or 'WORKER_VIEWER_JOINED_ASSERTIONS_COMPLETE' not in plog
+            or 'INNER_PROCESS_GROUP_CHECK_PASSED' not in plog
+            or 'ACTUAL_RUNTIME_UNAUTHENTICATED_REQUEST_DENIED' not in plog):
         raise RuntimeError('joined coordinator assertions incomplete')
     print('BOTH_CONTAINER_EXITS_VERIFIED',p,v,flush=True)
 finally:
