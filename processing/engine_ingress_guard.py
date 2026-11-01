@@ -341,6 +341,9 @@ class EngineIngressGuard:
                 with self.queue._db() as db:
                     if OwnerPin.capture(self.queue) != self.owner_pin:
                         raise AdmissionError('canonical owner lease changed')
+                    if bound_id is not None:
+                        from .transfer_fence import attest
+                        attest(db)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0: raise AdmissionError('deadline exceeded')
                     db.execute('PRAGMA busy_timeout=' + str(max(1, int(remaining * 1000))))
@@ -505,6 +508,10 @@ class EngineIngressGuard:
             return result
 
     def stream_bound_upload(self, target, pairs, source, *, completion=None):
+        with self.queue.pin_transfer():
+            return self._stream_bound_upload(target, pairs, source, completion=completion)
+
+    def _stream_bound_upload(self, target, pairs, source, *, completion=None):
         """Stream raw file bytes using a previously persisted TaskStore intent."""
         from . import engine_upload_contract as contract
         if contract.QUALIFIED is not True:

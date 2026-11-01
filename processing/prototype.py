@@ -108,6 +108,22 @@ class Queue(Maintenance):
         return sorted(profile for profile in self.allowed_profiles
                       if profile != PROFILE or node_id in self.treedar_node_ids)
 
+    @contextmanager
+    def pin_transfer(self):
+        """Keep this process's coordinator lease live without holding its mutex."""
+        if os.getpid() != self._creator_pid:
+            raise RuntimeError('coordinator process changed')
+        with self._lifecycle_lock:
+            if self._lock.closed:
+                raise RuntimeError('coordinator ownership closed')
+            self._database_users += 1
+        try:
+            yield
+        finally:
+            if os.getpid() == self._creator_pid:
+                with self._lifecycle_lock:
+                    self._database_users -= 1
+
     def _node_public(self, row):
         return {**super()._node_public(row), "allowedProfiles": self.node_profiles(row['id'])}
 
