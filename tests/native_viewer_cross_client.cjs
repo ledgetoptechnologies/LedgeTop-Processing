@@ -33,7 +33,7 @@ async function main(){
   await controlCall('/expect-next/'+third.providerTaskId+'/'+second.providerTaskId);
   await controlCall('/finish/'+third.providerTaskId);await controlCall('/expect-next/'+second.providerTaskId+'/none');await controlCall('/finish/'+second.providerTaskId);
   const deadline=Date.now()+60000;
-  while(Date.now()<deadline){await processOne(deps,'fixture-reconcile');if([first,second,third].every(a=>processing.getAttempt(a.id).status==='derivatives'))break;await sleep(200)}
+  while(Date.now()<deadline){await processOne(deps,'fixture-reconcile');const missing=db.prepare("SELECT error_message FROM processing_jobs WHERE error_code='ERR_MODULE_NOT_FOUND' LIMIT 1").get();if(missing)throw Error('synthetic module resolution: '+missing.error_message);if([first,second,third].every(a=>processing.getAttempt(a.id).status==='derivatives'))break;await sleep(200)}
   for(const a of [first,second,third]){const attempt=processing.getAttempt(a.id);if(attempt.status!=='derivatives'){const jobs=db.prepare('SELECT job_type,status,error_code,attempt_count FROM processing_jobs WHERE attempt_id=? ORDER BY created_at').all(a.id);throw Error('synthetic ingestion incomplete: '+JSON.stringify({status:attempt.status,errorCode:attempt.errorCode,jobs}))}assert.equal(db.prepare('SELECT COUNT(*) AS n FROM model_outputs WHERE attempt_id=?').get(a.id).n,1)}
   console.log(JSON.stringify({synthetic:true,attempts:3,resultsPerAttempt:1}));
  }finally{db.close()}
