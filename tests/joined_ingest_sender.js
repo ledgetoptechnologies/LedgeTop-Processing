@@ -64,6 +64,7 @@ async function main(){
       freeBytes:String(capacity.bsize*capacity.bavail),freeInodes:String(capacity.ffree),
       requestedBytes:String(32*1024*1024+64*1024*1024),requestedInodes:'1000000',floorInodes:'1024'}));
     const storage=new StorageManager(config);storage.initialize();
+    console.log('SYNTHETIC_MODELS_RESERVE_BYTES',String(storage.space('models').reserve));
     const ingest=await ingestHeld({db,job,processing,repository,storage,config,root:resultRoot,
       maxBytes:8*1024*1024,maxDiskBytes:32*1024*1024,authorizeBinding:()=>true,authorizeIngest:()=>true,enabled:true});
     assert.equal(ingest.state,'ingested_without_producer_proof');
