@@ -29,7 +29,7 @@ from .options import catalog, discover_node, _NoRedirect
 from .policy import plan
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
-from .viewer_tasks import TaskStore, sync_directory
+from .viewer_tasks import ArchiveClaimHeld, TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
 
 
@@ -428,7 +428,7 @@ class ViewerService:
                     except ArchiveIdentityChanged:
                         # The new incarnation has not been attempted; discover it anew.
                         self._archive_retry.pop(identifier, None)
-                    except ArchiveInspectionHeld:
+                    except (ArchiveInspectionHeld, ArchiveClaimHeld):
                         # Do not downgrade an inspection hold to a retryable error.
                         self._archive_retry.pop(identifier, None)
                     except Exception as exc:

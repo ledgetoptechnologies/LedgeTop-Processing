@@ -27,6 +27,10 @@ class OptionEvidenceConflict(Conflict):
     """A task's admission evidence cannot be trusted."""
 
 
+class ArchiveClaimHeld(Conflict):
+    """An archive capture claim is already held by an unknown writer."""
+
+
 class InputLimitExceeded(ValueError):
     """A task's configured cumulative input-byte allowance was exceeded."""
 
@@ -711,7 +715,7 @@ class TaskStore:
                 db.execute('INSERT INTO viewer_archive_claims_v1 VALUES (?,?,?,?)',
                     (task['uuid'], task['generation'], task['job_id'], hashlib.sha256(token.encode()).hexdigest()))
             except sqlite3.IntegrityError:
-                raise Conflict('archive requires inspection') from None
+                raise ArchiveClaimHeld('archive requires inspection') from None
         return token
 
     def set_archive_status(self, identifier, generation, job_id, state, reason):
@@ -719,7 +723,7 @@ class TaskStore:
             raise ValueError('invalid archive status')
         with self.archive_lock(identifier), self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            return db.execute("UPDATE viewer_tasks SET archive_state=?,archive_reason=? WHERE uuid=? AND generation=? AND job_id=? AND removed=0 AND archive_path IS NULL",
+            return db.execute("UPDATE viewer_tasks SET archive_state=?,archive_reason=? WHERE uuid=? AND generation=? AND job_id=? AND removed=0 AND archive_path IS NULL AND archive_state='pending'",
                               (state, reason, identifier, generation, job_id)).rowcount == 1
 
     def update(self, identifier, *, expected_archive_task=None, expected_archive_claim=None, **fields):
@@ -761,6 +765,9 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            if ('archive_state' in row.keys() and row['archive_state'] == 'inspection'
+                    and ('archive_state' in fields or 'archive_reason' in fields)):
+                raise Conflict('archive requires inspection')
             claim_schema = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
             if claim_schema and 'archive_path' in fields and (expected_archive_task is None or expected_archive_claim is None):
                 raise Conflict('archive claim required')
