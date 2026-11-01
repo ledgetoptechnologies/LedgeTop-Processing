@@ -90,6 +90,17 @@ Passing snapshot fixture SHA-256:
 
 Passing image IDs: Python `sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159`;
 Node `sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c`.
+
+The subsequent reproducibility change archives Processing source from its exact
+`4020f922990bca17598390868a8d378e80615154` commit and reads fixture blobs from
+`a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba`. It reconstructs the previously
+tested line endings and checks the six fixture hashes above. The host runner
+and outer Windows watchdog themselves are not pinned by an independent launcher;
+their current working-tree SHA-256 values are respectively
+`bf5cd180e2d2f0e3927307acd729ec1f89df2bcc0c2a0f6628522751a8925580` and
+`3f94ac0f07e400d991aea430f25566bce8f8bc2a442f84812584cb4784ac3908`.
+The runner resolves local image tags to immutable IDs and reports them, but does
+not require the two IDs from the prior passing run. This change was not rerun.
 Viewer module SHA-256 values, in the runner's order:
 
 * Consumer: `6cad93cd4f7abc24e5d17814a135d121f69e5e6b42c27d694f6fee2c1deb185e`

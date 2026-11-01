@@ -11,6 +11,15 @@ source=Path(__file__).resolve().parents[1]
 viewer=Path(r'C:\Projects\viewer-download-retention-20261031')
 viewer_commit='dd81a07464a988b9fe23d08b2b6a082580464aa9'
 processing_commit_expected='4020f922990bca17598390868a8d378e80615154'
+fixture_commit='a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba'
+fixture_hashes={
+    'worker_process_outage_fixture.py':'50b68420d6a20e9171f505274c27000fc7a0253c6793605f1d13275581700549',
+    'worker_process_outage_engine.py':'f7f3fbc6f3ff0af14c1ef4fad1c6343e4500a09681636e627e028c5e0035903e',
+    'joined_worker_viewer_coordinator.py':'8a79a07be92ef4eb637ecb131e6bad086e69832dd38608cd76c41c5999b4a432',
+    'joined_worker_viewer_supervisor.py':'6ddda9b59f07019e0a13fa893f27c7cdd2055b5c50a830c16ca85492f5bfa19a',
+    'joined_worker_viewer_watchdog.py':'8ae1289fdd548c873657beba4569d3623d8179498c84dcfcb083469f5cb7157a',
+    'joined_worker_viewer_sender.js':'dc9c7e374e4664d3ffeaf6037d8d0dd134f0ec4715e10a8d7424c5cdb63cfa2c',
+}
 run_id=os.environ['LT_SYNTHETIC_RUN_ID'];root=Path(os.environ['LT_SYNTHETIC_ROOT']).resolve()
 if len(run_id)!=32 or any(c not in '0123456789abcdef' for c in run_id) or not root.is_dir():raise ValueError('invalid run identity')
 label='ledgetop.synthetic.rehearsal'
@@ -52,17 +61,26 @@ def stop(role):
     print('OWNED_CONTAINER_EXIT',role,owned[role],status['ExitCode'],flush=True)
 
 try:
-    processing_commit=cmd('git','rev-parse','HEAD').decode().strip()
+    processing_commit=cmd('git','rev-parse',processing_commit_expected+'^{commit}').decode().strip()
     if processing_commit!=processing_commit_expected:raise RuntimeError('unexpected Processing commit')
-    print('COMMITS',processing_commit,viewer_commit,'RUN_ID',run_id,'ROOT',root,flush=True)
+    fixture_oid=cmd('git','rev-parse',fixture_commit+'^{commit}').decode().strip()
+    if fixture_oid!=fixture_commit:raise RuntimeError('invalid fixture commit')
+    print('COMMITS',processing_commit,viewer_commit,'FIXTURE_COMMIT',fixture_oid,'RUN_ID',run_id,'ROOT',root,flush=True)
     for repo,commit,name in ((source,processing_commit,'processing'),(viewer,viewer_commit,'viewer')):
         target=root/name;target.mkdir();archive=root/(name+'.tar')
         with archive.open('wb') as output:cmd('git','-C',str(repo),'archive','--format=tar',commit,timeout=30,stdout=output)
         with tarfile.open(archive) as tar:tar.extractall(target,filter='data')
-    fixtures=('worker_process_outage_fixture.py','worker_process_outage_engine.py','joined_worker_viewer_coordinator.py',
-              'joined_worker_viewer_supervisor.py','joined_worker_viewer_watchdog.py','joined_worker_viewer_sender.js')
-    for name in fixtures:
-        data=(source/'tests'/name).read_bytes();target=root/'processing'/'tests'/name;target.write_bytes(data)
+    for name,expected in fixture_hashes.items():
+        data=cmd('git','show',fixture_oid+':tests/'+name)
+        # Git normalized these files at commit time. Reconstruct the exact
+        # reviewed/passing Windows snapshot bytes, then verify their digest.
+        if name in ('worker_process_outage_fixture.py','worker_process_outage_engine.py'):
+            data=data.replace(b'\n',b'\r\n')
+        elif name=='joined_worker_viewer_watchdog.py':
+            if not data.endswith(b'\n'):raise RuntimeError('unexpected fixture line ending')
+            data=data[:-1]+b'\r\n'
+        if hashlib.sha256(data).hexdigest()!=expected:raise RuntimeError('fixture committed hash mismatch')
+        target=root/'processing'/'tests'/name;target.write_bytes(data)
         digest=hashlib.sha256(data).hexdigest()
         if hashlib.sha256(target.read_bytes()).hexdigest()!=digest:raise RuntimeError('fixture copy mismatch')
         print('FIXTURE_SHA256',name,digest,flush=True)
