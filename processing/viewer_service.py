@@ -159,6 +159,9 @@ class ViewerService:
         self._archive_cursor = 0
         self._archive_retry = {}
         self._archive_status_persistence_failed = False
+        self._archive_child_unreaped = threading.Event()
+        self._archive_child_lock = threading.Lock()
+        self._archive_uncertain_process = None
 
     def _reserve_archive(self, output, size):
         """Reserve output bytes; the free-space floor is a point-in-time check."""
@@ -170,6 +173,13 @@ class ViewerService:
         os.posix_fallocate(output.fileno(), 0, size)
 
     def _archive_once(self, identifier, expected_identity=None):
+        """Serialize capture children and refuse after uncertain termination."""
+        with self._archive_child_lock:
+            if self._archive_child_unreaped.is_set():
+                raise RuntimeError('archive capture child termination uncertain')
+            return self._archive_once_locked(identifier,expected_identity=expected_identity)
+
+    def _archive_once_locked(self, identifier, expected_identity=None):
         """Run file capture in a reaped child that inherits coordinator flocks."""
         with self._lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
@@ -241,12 +251,21 @@ class ViewerService:
                 # generation; no Viewer acknowledgement or deletion occurs.
                 self.store.update(identifier, archive_path=str(path))
             finally:
-                if process.stdin and not process.stdin.closed:
-                    process.stdin.close()
-                if process.poll() is None:
-                    process.kill()
-                    try: process.wait(timeout=5)
-                    except subprocess.TimeoutExpired: pass
+                try:
+                    if process.stdin and not process.stdin.closed:
+                        process.stdin.close()
+                finally:
+                    try:
+                        if process.poll() is None:
+                            try: process.kill()
+                            except ProcessLookupError: pass
+                            process.wait(timeout=5)
+                    except Exception:
+                        # This child may still hold inherited coordinator locks
+                        # and write state. Never report a clean shutdown.
+                        self._archive_uncertain_process = process
+                        self._archive_child_unreaped.set()
+                        raise RuntimeError('archive capture child termination uncertain') from None
 
     def _archive_run(self):
         while not self._stop.is_set():
@@ -284,6 +303,11 @@ class ViewerService:
                     # The new incarnation has not been attempted; discover it anew.
                     self._archive_retry.pop(identifier, None)
                 except Exception as exc:
+                    if self._archive_child_unreaped.is_set():
+                        # Never launch a second writer when an earlier child
+                        # may still own the coordinator's inherited locks.
+                        self._archive_status_persistence_failed = True
+                        return
                     if identity is None:
                         # No trustworthy task identity can be associated with this failure.
                         # Preserve bounded retry for an unavailable metadata store.
@@ -641,12 +665,16 @@ class ViewerService:
             # Failed or uncertain restores are retained for inspection.
 
     def download(self, identifier, *, automatic=False):
+        if self._archive_child_unreaped.is_set():
+            raise Conflict('archive capture child termination uncertain')
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
         with self._lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
+            if self._archive_child_unreaped.is_set():
+                raise Conflict('archive capture child termination uncertain')
             task = self.store.task(identifier)
             path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
             if not task['archive_path']:
@@ -984,3 +1012,5 @@ class ViewerService:
             self._archive_thread.join(timeout=10)
             if self._archive_thread.is_alive():
                 raise RuntimeError('archive capture did not stop')
+        if self._archive_child_unreaped.is_set():
+            raise RuntimeError('archive capture child termination uncertain')

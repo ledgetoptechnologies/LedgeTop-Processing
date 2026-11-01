@@ -161,6 +161,39 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.lease.close()
         self.fixture.temporary.cleanup()
 
+    def test_unreaped_capture_child_prevents_clean_shutdown(self):
+        class Input:
+            closed=False
+            def fileno(self):return 42
+            def close(self):self.closed=True
+        class Child:
+            def __init__(self):self.stdin=Input();self.killed=False
+            def poll(self):return None
+            def kill(self):self.killed=True
+            def wait(self,timeout):raise subprocess.TimeoutExpired('synthetic-child',timeout)
+        child=Child()
+        try:
+            with patch('processing.viewer_service.subprocess.Popen',return_value=child), \
+                 patch('processing.viewer_service.os.set_blocking',side_effect=OSError('synthetic input failure')):
+                with self.assertRaisesRegex(RuntimeError,'child termination uncertain'):
+                    self.service._archive_once(self.identifier)
+            self.assertTrue(child.killed)
+            self.assertIs(self.service._archive_uncertain_process,child)
+            with self.assertRaisesRegex(Conflict,'child termination uncertain'):
+                self.service.download(self.identifier)
+            self.assertEqual(self.requests,0)
+            self.assertFalse((Path(self.fixture.task(self.identifier)['directory'])/'all.zip.partial').exists())
+            with patch('processing.viewer_service.subprocess.Popen',side_effect=AssertionError('must not spawn')):
+                with self.assertRaisesRegex(RuntimeError,'child termination uncertain'):
+                    self.service._archive_once(self.identifier)
+            with self.assertRaisesRegex(RuntimeError,'child termination uncertain'):
+                self.service.close()
+            self.assertIsNone(self.fixture.task(self.identifier)['archive_path'])
+        finally:
+            # Only a fake child was used; clear its fixture-only sticky marker.
+            self.service._archive_child_unreaped.clear()
+            self.service._archive_uncertain_process=None
+
     def test_capture_persists_receipt_and_reuses_without_engine_mutation(self):
         self.service._archive_once(self.identifier)
         task = self.fixture.task(self.identifier)
