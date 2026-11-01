@@ -152,6 +152,30 @@ and Viewer container
 `a9751bdf2245fdc9de506c4d2ccd63c4f1b788d990f92b56ac72bb8a1781e95b`
 both exited 0; inner process group exited 0, outer Windows Job active count 0,
 and no ownership uncertainty was reported. Both containers and root remain.
+
+The latest synthetic run pins Viewer #402
+`c6f7027b9cf7fbf2ccc7cf3374d8416384185317` and the same Processing source
+`4020f922990bca17598390868a8d378e80615154` and fixture blobs
+`a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba`. The Viewer changes since the last
+passing head alter `processingRepository.js` derivative handling only; neither
+the candidate sender nor this fixture changed. This test does not call that
+repository path or exercise derivative recovery. Independent review preceded
+the run. Run `4680617fa08941aeb5704a0c31011389` passed; six fixture hashes,
+nine exercised Viewer module hashes and both local image IDs matched the prior
+passing run documented below. The actual worker finished while the separate
+coordinator was offline, the coordinator restarted, and the Viewer candidate
+staged the actual proxy stream and sent the matching persisted acceptance.
+
+Retained root:
+`C:\Users\fstor\AppData\Local\Temp\ledgetop-acceptance-outer-bk5dp_ep`.
+Exact labeled Python container
+`22c504252cfacb27e1a740480495ea6494d2ea39836cd429720af1af6abb5708`
+and Viewer container
+`a390c5c13ef08dff0e11e142187fc38bcf63e1dd6299097f6bb72ed08f44504b`
+both exited 0; inner process group exited 0, outer Windows Job active count 0,
+and no ownership uncertainty was reported. Containers and root remain retained.
+Node emitted the same IP-address TLS server-name deprecation warning. This did
+not test the derivative path, publication, real ODM or host power loss.
 Viewer module SHA-256 values, in the runner's order:
 
 * Consumer: `6cad93cd4f7abc24e5d17814a135d121f69e5e6b42c27d694f6fee2c1deb185e`
