@@ -44,7 +44,8 @@ class NativePlanEpochs:
         self.manifest._authority();ref._uuid(operation,'operationId');ref._uuid(identifier,'taskUuid');ref._environment(environment)
         row=db.execute('SELECT * FROM native_plan_epochs WHERE operation_id=?',(operation,)).fetchone()
         reservation=self.store._reservation(db,identifier,environment,capability,allow_cancelled=closed)
-        if (row is None or reservation is None or row['uuid']!=identifier or row['environment']!=environment
+        if row is None or reservation is None:raise KeyError('unknown epoch')
+        if (row['uuid']!=identifier or row['environment']!=environment
                 or row['authority']!=self.queue.authority_id or row['capability_hash']!=reservation['capability_hash']
                 or row['generation']!=1 or row['epoch']!=1 or row['state'] not in ('open','closed_without_bind','bound_then_closed')
                 or (row['state']=='open') != (reservation['state']=='reserved')):
@@ -62,6 +63,13 @@ class NativePlanEpochs:
             raise Conflict('native plan epoch history changed')
         if row['state']!='open' and not closed:raise Conflict('native plan epoch closed')
         return row,reservation
+
+    def authorize(self,operation,identifier,environment,capability,*,allow_closed=False):
+        """Pre-body identity check; each mutation rechecks inside its transaction."""
+        if type(allow_closed) is not bool:raise ValueError('invalid epoch authorization policy')
+        with self.store._lock,self.queue._db() as db:
+            db.execute('BEGIN');row,reservation=self._identity(db,operation,identifier,environment,capability,closed=allow_closed)
+            self._history(db,row,reservation)
 
     def _history(self,db,row,reservation):
         """Recheck linked actual manifest/plan rows before reporting history."""

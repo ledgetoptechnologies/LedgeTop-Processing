@@ -160,7 +160,7 @@ def make_handler(config: Config):
                 raise
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool, manifest_binding=binding, plan_binding=plan_binding,
+        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool, manifest_binding=binding, plan_binding=plan_binding, plan_epoch=plan_epoch,
                               production_held=config.viewer_production_held)
     reference_runtime = None
     if reference_settings is not None:

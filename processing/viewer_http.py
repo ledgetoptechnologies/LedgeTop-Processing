@@ -29,6 +29,7 @@ MAX_PARTS = 64
 CHUNK = 64 * 1024
 BINDING_BODY_DEADLINE_SECONDS = 30.0
 BOUNDARY = re.compile(r"[0-9A-Za-z'()+_,./:=?-]{1,70}\Z")
+EPOCH_PATH = re.compile(r'/task/ledgetop/plan-epoch-v2/([^/]+)/([^/]+)/1/1(?:/(open|manifest|intent|accept|revoke))?\Z')
 
 
 class RequestError(Exception):
@@ -205,7 +206,7 @@ def _binding_body(handler, length):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, manifest_binding=None, plan_binding=None):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, manifest_binding=None, plan_binding=None, plan_epoch=None):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
@@ -216,9 +217,16 @@ class ViewerFacade:
             if (config.NATIVE_PLAN_BINDING_QUALIFIED is not True or not isinstance(plan_binding,NativePlanBindings)
                     or plan_binding.service is not service or plan_binding.manifest is not manifest_binding):
                 raise ValueError('native plan binding not qualified')
+        if plan_epoch is not None:
+            from . import config
+            from .native_plan_epoch import NativePlanEpochs
+            if (config.NATIVE_PLAN_EPOCH_QUALIFIED is not True or not isinstance(plan_epoch,NativePlanEpochs)
+                    or plan_epoch.service is not service or plan_epoch.manifest is not manifest_binding or plan_epoch.plan is not plan_binding):
+                raise ValueError('native plan epoch not qualified')
         self.service, self.token, self.staging_token = service, token, staging_token
         self.manifest_binding=manifest_binding
         self.plan_binding=plan_binding
+        self.plan_epoch=plan_epoch
         # Cutover hold: production may read but never mutate until reopened by
         # restarting without the hold. Staging is unaffected.
         self.production_held = production_held
@@ -239,6 +247,22 @@ class ViewerFacade:
         handler.send_header('Cache-Control', 'no-store')
         handler.end_headers()
         handler.wfile.write(raw)
+
+    @staticmethod
+    def _epoch_reply(handler,identifier,operation,environment,result):
+        from . import reference_protocol as ref
+        raw=ref.canonical_json({'protocol':'native-plan-epoch-v2-experiment','version':2,'taskUuid':identifier,
+                                'operationId':operation,'environment':environment,'generation':1,'epoch':1,'result':result})
+        if len(raw)>65536:raise ValueError('epoch response exceeds limit')
+        handler.send_response(200);handler.send_header('Content-Type','application/json')
+        handler.send_header('Content-Length',str(len(raw)));handler.send_header('Cache-Control','no-store')
+        handler.end_headers();handler.wfile.write(raw)
+
+    @staticmethod
+    def _epoch_identity(match):
+        from . import reference_protocol as ref
+        identifier=task_uuid(unquote(match[1]));operation=ref._uuid(unquote(match[2]),'operationId')
+        return identifier,operation
 
     def _environment(self, query):
         tokens = query.get('token', [])
@@ -286,7 +310,7 @@ class ViewerFacade:
                                     '/task/new/init', '/task/cancel', '/task/remove') or
                     re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path) or
                     re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path) or
-                    re.fullmatch(r'/task/ledgetop/task-plan/[^/]+',path))
+                    re.fullmatch(r'/task/ledgetop/task-plan/[^/]+',path) or EPOCH_PATH.fullmatch(path))
                 gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
                 if guarded and gate is not None:
                     from .admission_drain import AdmissionClosed
@@ -343,6 +367,13 @@ class ViewerFacade:
             value = self.service.capabilities()
         elif path == '/options':
             value = self.service.options()
+        elif EPOCH_PATH.fullmatch(path):
+            match=EPOCH_PATH.fullmatch(path)
+            if self.plan_epoch is None or match[3] is not None:raise RequestError(404,'not_found')
+            identifier,operation=self._epoch_identity(match);capability=self._capability(handler)
+            if capability is None:raise RequestError(404,'not_found')
+            value=self.plan_epoch.status(operation,identifier,environment,capability)
+            self._epoch_reply(handler,identifier,operation,environment,value);return
         elif re.fullmatch(r'/task/ledgetop/input-manifest/[^/]+',path):
             if self.manifest_binding is None:raise RequestError(404,'not_found')
             identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)
@@ -417,6 +448,37 @@ class ViewerFacade:
         self._reply(handler, 200, value)
 
     def _post(self, handler, path, environment):
+        match=EPOCH_PATH.fullmatch(path)
+        if match:
+            if self.plan_epoch is None or match[3] is None:raise RequestError(404,'not_found')
+            from . import reference_protocol as ref
+            from .native_plan_binding import MAX_PLAN_BYTES
+            identifier,operation=self._epoch_identity(match);action=match[3];capability=self._capability(handler)
+            if capability is None:raise RequestError(404,'not_found')
+            if action=='open':
+                try:self.service.store._capability_hash(identifier,environment,capability)
+                except ValueError:raise RequestError(400,'invalid_capability') from None
+            else:self.plan_epoch.authorize(operation,identifier,environment,capability,allow_closed=action=='revoke')
+            maximum=ref.MAX_BODY_BYTES if action=='manifest' else MAX_PLAN_BYTES if action in ('intent','accept') else 8192
+            length=_length(handler,maximum)
+            if (handler.headers.get_all('Content-Encoding',[]) or len(handler.headers.get_all('Content-Type',[]))!=1
+                    or handler.headers.get_content_type()!='application/json'):raise RequestError(415,'json_required')
+            body=_binding_body(handler,length)
+            if action in ('open','revoke'):
+                value=ref.decode_submission(body)
+                if ref.canonical_json(value)!=body:raise ValueError('noncanonical epoch request')
+                if action=='open':
+                    ref._closed(value,('schemaVersion','operationKind','manifestId','manifestSha256'),'epoch open')
+                    if type(value['schemaVersion']) is not int or value['schemaVersion']!=2 or value['operationKind']!='plan_bind':raise ValueError('invalid epoch request')
+                    result=self.plan_epoch.open(operation,identifier,environment,capability,value['manifestId'],value['manifestSha256'])
+                else:
+                    ref._closed(value,('schemaVersion','requestId','expectedManifestSha256','expectedManifestBindingId','expectedPlanSha256'),'epoch revoke')
+                    if type(value['schemaVersion']) is not int or value['schemaVersion']!=2:raise ValueError('invalid epoch request')
+                    result=self.plan_epoch.revoke(operation,identifier,environment,capability,value['requestId'],value['expectedManifestSha256'],value['expectedManifestBindingId'],value['expectedPlanSha256'])
+            elif action=='manifest':result=self.plan_epoch.bind_manifest(operation,identifier,environment,capability,body)
+            elif action=='intent':result=self.plan_epoch.plan_intent(operation,identifier,environment,capability,body)
+            else:result=self.plan_epoch.accept(operation,identifier,environment,capability,body)
+            self._epoch_reply(handler,identifier,operation,environment,result);return
         if re.fullmatch(r'/task/ledgetop/task-plan/[^/]+',path):
             if self.plan_binding is None:raise RequestError(404,'not_found')
             identifier=task_uuid(unquote(path.rsplit('/',1)[-1]));capability=self._capability(handler)

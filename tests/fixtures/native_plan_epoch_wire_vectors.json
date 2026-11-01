@@ -1,0 +1,15 @@
+{
+  "profile": "native-plan-epoch-v2-experiment",
+  "vectors": [
+    {
+      "name": "open_unbound_wrapper",
+      "canonical": "{\"environment\":\"production\",\"epoch\":1,\"generation\":1,\"operationId\":\"00000000-0000-4000-8000-000000000002\",\"protocol\":\"native-plan-epoch-v2-experiment\",\"result\":{\"environment\":\"production\",\"epoch\":1,\"generation\":1,\"manifestId\":\"attempt_1\",\"manifestReceipt\":null,\"manifestSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"operationId\":\"00000000-0000-4000-8000-000000000002\",\"operationKind\":\"plan_bind\",\"planIntentPresent\":false,\"planIntentSha256\":null,\"planReceipt\":null,\"state\":\"open_unbound\",\"taskUuid\":\"00000000-0000-4000-8000-000000000001\"},\"taskUuid\":\"00000000-0000-4000-8000-000000000001\",\"version\":2}",
+      "sha256": "b7070fa35cec21fde148e9dc1e3d46bcb7d6810a79a36348f79bf409b75a4596"
+    },
+    {
+      "name": "unicode_plan_request",
+      "canonical": "{\"bindingId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"environment\":\"production\",\"expectedCatalogDigest\":\"fd9e8062c7044d572ed815e32d5b6ed188aa639a37e7d6eec9c9516c828fe1d6\",\"generation\":1,\"manifestSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"options\":[],\"outputs\":[],\"schemaVersion\":1,\"taskName\":\"Test 🌍\",\"taskUuid\":\"00000000-0000-4000-8000-000000000001\"}",
+      "sha256": "1718d25ac94ed47e5d91193c700653e5439152a40d96dc204cc00c40d69987e5"
+    }
+  ]
+}
