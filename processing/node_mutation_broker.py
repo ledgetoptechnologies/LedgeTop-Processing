@@ -30,7 +30,7 @@ _FIELDS = {'authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineT
 _UPLOAD_FIELDS = _FIELDS | {'fileName','fileBytes'}
 _ISSUER_DDL = ('CREATE TABLE node_broker_upload_issues ('
     'operation_id TEXT PRIMARY KEY, task_uuid TEXT NOT NULL, generation INTEGER NOT NULL, '
-    'file_key TEXT NOT NULL, grant_hash TEXT NOT NULL, UNIQUE(task_uuid,generation,file_key))')
+    'file_key TEXT NOT NULL, file_path TEXT NOT NULL, grant_hash TEXT NOT NULL, UNIQUE(task_uuid,generation,file_key))')
 _DDL = {
     'binding': 'CREATE TABLE binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), digest TEXT NOT NULL)',
     'reservation': 'CREATE TABLE reservation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL)',
@@ -152,6 +152,7 @@ def issue_upload_grant(queue, *, job_id, claim_token, engine_id, gate_generation
                 or task['node_id']!=job['node_id'] or task['environment']!=job['environment']
                 or task['claim_token']!=claim_token or not _uuid(task['engine_uuid']) or file is None
                 or TaskStore._filename(file['name'])!=file_key or file['is_photo']!=1 or type(file['bytes']) is not int
+                or type(file['path']) is not str or not re.fullmatch('input-[0-9a-f]{32}',file['path'])
                 or not 0<file['bytes']<=MAX_STREAM_BYTES-4096 or type(file['sha256']) is not str
                 or not re.fullmatch('[a-f0-9]{64}',file['sha256'])):raise BrokerHeld('exact stored upload required')
         grant=dict(authorityId=queue.authority_id,nodeId=job['node_id'],engineId=engine_id,
@@ -166,9 +167,9 @@ def issue_upload_grant(queue, *, job_id, claim_token, engine_id, gate_generation
                 raise BrokerHeld('upload issuer capacity reached')
             if db.execute('SELECT 1 FROM node_broker_upload_issues WHERE task_uuid=? AND generation=? AND file_key=?',
                           (task['uuid'],task['generation'],file_key)).fetchone():raise BrokerHeld('file issue already exists')
-            db.execute('INSERT INTO node_broker_upload_issues VALUES(?,?,?,?,?)',
-                       (operation_id,task['uuid'],task['generation'],file_key,digest))
-        elif (existing['task_uuid'],existing['generation'],existing['file_key'],existing['grant_hash']) != (task['uuid'],task['generation'],file_key,digest):
+            db.execute('INSERT INTO node_broker_upload_issues VALUES(?,?,?,?,?,?)',
+                       (operation_id,task['uuid'],task['generation'],file_key,file['path'],digest))
+        elif (existing['task_uuid'],existing['generation'],existing['file_key'],existing['file_path'],existing['grant_hash']) != (task['uuid'],task['generation'],file_key,file['path'],digest):
             raise BrokerHeld('upload issue changed')
         return grant,sign_grant(grant,secret)
 
@@ -177,19 +178,65 @@ class LocalUploadSender:
     """Owned descriptor sender for same-process integration tests, not RPC."""
     def __init__(self):self._unreaped=[]
 
-    def send(self, broker, grant, signature, item, *, secret, deadline_seconds=10):
+    @staticmethod
+    def _issued_item(store, grant, claim_token):
+        from .prototype import Queue, VIEWER_PROFILE
+        from .viewer_tasks import TaskStore
+        if (type(store) is not TaskStore or type(store.queue) is not Queue
+                or store.queue._creator_pid!=os.getpid() or store.queue._lock.closed
+                or type(claim_token) is not str or not 1<=len(claim_token)<=128):
+            raise BrokerHeld('actual coordinator store required')
+        queue=store.queue
+        try:file_key=TaskStore._filename(grant['fileName'])
+        except (ValueError,KeyError,TypeError):raise BrokerHeld('invalid stored file identity') from None
+        with store._lock, queue._db() as db:
+            db.execute('BEGIN')
+            schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='node_broker_upload_issues'").fetchone()
+            if schema is None or schema['sql']!=_ISSUER_DDL:raise BrokerHeld('upload issuer schema changed')
+            job=db.execute('SELECT * FROM jobs WHERE id=?',(grant['jobId'],)).fetchone()
+            rows=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(grant['jobId'],)).fetchall()
+            if (job is None or len(rows)!=1 or job['status']!='running' or job['profile']!=VIEWER_PROFILE
+                    or job['worker_id']!='viewer-dispatch' or job['node_id']!=grant['nodeId']
+                    or job['environment']!=grant['environment'] or grant['authorityId']!=queue.authority_id
+                    or grant['coordinatorEpoch']!=queue.startup_id or not job['claim_hash']
+                    or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(claim_token.encode()).hexdigest())
+                    or not queue._transfer_admission_clear(db)):raise BrokerHeld('active coordinator claim required')
+            row=rows[0]
+            if (row['removed'] or row['stage']!='running' or row['phase']!='upload_pending'
+                    or row['generation']!=grant['taskGeneration'] or row['engine_uuid']!=grant['engineTaskId']
+                    or row['node_id']!=job['node_id'] or row['environment']!=job['environment']
+                    or row['claim_token']!=claim_token):raise BrokerHeld('Viewer upload binding changed')
+            issued=db.execute('SELECT * FROM node_broker_upload_issues WHERE operation_id=?',(grant['operationId'],)).fetchone()
+            digest=hashlib.sha256(_json(grant)).hexdigest()
+            if (issued is None or (issued['task_uuid'],issued['generation'],issued['file_key'],issued['grant_hash'])
+                    != (row['uuid'],row['generation'],file_key,digest)):
+                raise BrokerHeld('durable upload issue changed')
+            task=store._task(db,row)
+            files=[item for item in task['files'] if item['name_key']==file_key]
+            if (len(files)!=1 or files[0]['name']!=grant['fileName'] or files[0]['bytes']!=grant['fileBytes']
+                    or files[0]['sha256']!=grant['bodySha256'] or not files[0]['is_photo']
+                    or Path(files[0]['path']).name!=issued['file_path']):
+                raise BrokerHeld('exact stored input required')
+            return files[0]
+
+    def send(self, broker, grant, signature, *, store, claim_token, secret, deadline_seconds=10):
         from .guarded_native_engine import start_guarded_sender
         if (QUALIFIED is not True or type(broker) is not NodeMutationBroker or self._unreaped
-                or type(item) is not dict or item.get('name')!=grant.get('fileName')
-                or item.get('bytes')!=grant.get('fileBytes') or item.get('sha256')!=grant.get('bodySha256')
+                or type(grant) is not dict
                 or type(secret) is not bytes or not hmac.compare_digest(sign_grant(grant,secret),signature)
                 or type(deadline_seconds) not in (int,float) or not 0<deadline_seconds<=900):
             raise BrokerHeld('exact owned upload sender required')
+        item=self._issued_item(store,grant,claim_token)
+        prior=broker.lookup_upload(grant,signature)
+        if prior is not None:
+            return prior
         deadline=time.monotonic()+deadline_seconds
         completion=start_guarded_sender(item,grant['operationId'],deadline,self)
         try:
             result=broker.upload(grant,signature,completion.source)
             completion.verify(deadline)
+            if self._issued_item(store,grant,claim_token)!=item:
+                raise BrokerHeld('stored input identity changed')
             broker.confirm_upload(grant,signature,_sender_confirmation(grant,secret))
             return result
         finally:completion.stop()
@@ -334,25 +381,53 @@ class NodeMutationBroker:
         if grant['operation']=='commit':raise BrokerHeld('upload stage not qualified')
         return self._execute(grant,'',lambda:self.adapter.exchange(grant,body))
 
+    def _validate_upload(self, grant, signature):
+        from .viewer_tasks import TaskStore
+        self._authenticate(grant,signature,'upload')
+        if (type(grant['fileBytes']) is not int or not 0<grant['fileBytes']<=MAX_STREAM_BYTES-4096
+                or grant['contentType']!='application/octet-stream'):
+            raise BrokerHeld('invalid bounded upload')
+        try:return TaskStore._filename(grant['fileName'])
+        except ValueError:raise BrokerHeld('invalid upload filename') from None
+
+    def lookup_upload(self, grant, signature):
+        """Return exact completed replay without creating a producer or writer."""
+        file_key=self._validate_upload(grant,signature)
+        identity=uuid.UUID(grant['jobId']).hex
+        job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
+        durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
+        digest=hashlib.sha256(_json(grant)).hexdigest()
+        with self._mutex, NodeGate(self.engine) as gate:
+            self._check_owner();state=gate.snapshot();reservation=state['reservation']
+            if (any(state[k]!=v for k,v in {'nodeId':self.node,'coordinatorOrigin':self.origin,
+                    'authorityId':self.authority,'generation':self.generation}.items()) or not reservation
+                    or reservation['receiptId']!=identity or reservation['job']!=job
+                    or reservation['completionDigest'] is not None):raise BrokerHeld('node ownership changed')
+            self.db.execute('BEGIN')
+            try:
+                current=self.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+                if current is None or current['identity']!=durable_identity:raise BrokerHeld('durable reservation changed')
+                row=self.db.execute('SELECT * FROM operations WHERE id=?',(grant['operationId'],)).fetchone()
+                if row is None:
+                    if (self.db.execute("SELECT 1 FROM operations WHERE state!='complete' LIMIT 1").fetchone()
+                            or self.db.execute("SELECT 1 FROM operations WHERE operation='upload' AND file_key=?",(file_key,)).fetchone()):
+                        raise BrokerHeld('operation requires inspection')
+                    self.db.commit();return None
+                if (row['operation']!='upload' or row['file_key']!=file_key or row['grant_hash']!=digest
+                        or row['state']!='complete'):raise BrokerHeld('operation requires inspection')
+                reply=_upload_reply(json.loads(row['reply']));self.db.commit();return reply
+            except BaseException:self.db.rollback();raise
+
     def upload(self, grant, signature, source):
         """Consume and close one dedicated socket carrying exactly one file."""
         if type(source) is not socket.socket:raise BrokerHeld('dedicated socket required')
         try:
-            from .viewer_tasks import TaskStore
-            self._authenticate(grant,signature,'upload')
-            if (type(grant['fileBytes']) is not int or not 0<grant['fileBytes']<=MAX_STREAM_BYTES-4096
-                    or grant['contentType']!='application/octet-stream'):
-                raise BrokerHeld('invalid bounded upload')
-            try:file_key=TaskStore._filename(grant['fileName'])
-            except ValueError:raise BrokerHeld('invalid upload filename') from None
+            file_key=self._validate_upload(grant,signature)
             return self._execute(grant,file_key,lambda:self.adapter.exchange_upload(grant,source))
         finally:source.close()
 
     def confirm_upload(self, grant, signature, confirmation):
-        self._authenticate(grant,signature,'upload')
-        from .viewer_tasks import TaskStore
-        try:file_key=TaskStore._filename(grant['fileName'])
-        except ValueError:raise BrokerHeld('invalid upload filename') from None
+        file_key=self._validate_upload(grant,signature)
         if (type(confirmation) is not str or not re.fullmatch('[a-f0-9]{64}',confirmation)
                 or not hmac.compare_digest(_sender_confirmation(grant,self.secret),confirmation)):
             raise BrokerHeld('sender confirmation required')

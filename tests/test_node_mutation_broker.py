@@ -183,11 +183,15 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
         item=dict(name='photo.jpg',bytes=len(payload),sha256=upload['bodySha256'],path=str(path))
         sender=b.LocalUploadSender()
-        with patch.object(SenderCompletion,'verify',side_effect=SmokeError('synthetic sender verification failure')):
-            with self.assertRaises(SmokeError):sender.send(self.broker,upload,b.sign_grant(upload,self.secret),item,secret=self.secret)
+        with patch.object(SenderCompletion,'verify',side_effect=SmokeError('synthetic sender verification failure')), \
+             patch.object(b.LocalUploadSender,'_issued_item',return_value=item):
+            with self.assertRaises(SmokeError):sender.send(self.broker,upload,b.sign_grant(upload,self.secret),store=object(),claim_token='synthetic',secret=self.secret)
         self.assertEqual(sender._unreaped,[])
         self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'awaiting_sender')
         self.assertEqual(path.read_bytes(),payload)
+        with patch.object(b.LocalUploadSender,'_issued_item',return_value=item), \
+             patch('processing.guarded_native_engine.start_guarded_sender',side_effect=AssertionError('uncertain replay started producer')):
+            with self.assertRaises(b.BrokerHeld):sender.send(self.broker,upload,b.sign_grant(upload,self.secret),store=object(),claim_token='synthetic',secret=self.secret)
 
     def test_mismatched_stream_stays_started_without_retry(self):
         init=self.grant();self.broker.mutate(init,b.sign_grant(init,self.secret),self.body)
@@ -302,11 +306,22 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     upload,upload_signature=b.issue_upload_grant(queue,job_id=claim['id'],claim_token=claim['claimToken'],
                         engine_id=self.engine,gate_generation=1,operation_id=upload_id,file_key='synthetic.jpg',secret=self.secret)
                     sender=b.LocalUploadSender()
-                    self.assertTrue(sender.send(remote,upload,upload_signature,store.task(self.task)['files'][0],secret=self.secret)['success'])
+                    stored=store.task(self.task)['files'][0]
+                    original=Path(stored['path']);alternate=original.parent/('input-'+uuid.uuid4().hex)
+                    alternate.write_bytes(original.read_bytes());alternate.chmod(0o600)
+                    with queue._db() as db:db.execute('UPDATE viewer_files SET path=? WHERE uuid=?',(alternate.name,self.task))
+                    with self.assertRaises(b.BrokerHeld):
+                        sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
+                    self.assertEqual(len(self.calls),1)
+                    with queue._db() as db:db.execute('UPDATE viewer_files SET path=? WHERE uuid=?',(original.name,self.task))
+                    self.assertTrue(sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
                     self.assertEqual(sender._unreaped,[])
                     self.assertEqual(len(self.calls),2)
                     self.assertIn(b'filename="synthetic.jpg"',self.calls[1][1])
                     self.assertIn(b'\r\n\r\nx\r\n',self.calls[1][1])
+                    with patch('processing.guarded_native_engine.start_guarded_sender',side_effect=AssertionError('replay started producer')):
+                        self.assertTrue(sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
+                    self.assertEqual(len(self.calls),2)
                     replay,replay_signature=b.issue_upload_grant(queue,job_id=claim['id'],claim_token=claim['claimToken'],
                         engine_id=self.engine,gate_generation=1,operation_id=upload_id,file_key='synthetic.jpg',secret=self.secret)
                     self.assertEqual((replay,replay_signature),(upload,upload_signature))

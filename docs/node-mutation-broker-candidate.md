@@ -11,11 +11,16 @@ authority, epoch, job, engine task, environment, generation, operation and
 body digest. Its NodeGate reservation and SQLite started intent survive an
 uncertain response; exact completed replay does not repeat the mutation.
 For uploads, an explicit offline issuer schema journals the operation ID and
-binds the grant to the stored filename, length and SHA-256. The node streams a
+binds the grant to the stored filename, length and SHA-256; its private issuer
+journal also pins the Viewer-relative file path. The sender re-reads that
+Queue/TaskStore binding before opening the file and after its descriptor check.
+Exact completed replay checks node state before starting a producer. The node streams a
 dedicated socket into deterministic multipart while checking the same length and
 digest. The node retains an `awaiting_sender` hold after backend acceptance
 until the local descriptor sender completes its own identity check and the
-coordinator signs a separate confirmation. An interrupted or unconfirmed upload
+coordinator signs a separate confirmation. This HMAC is an assertion by the
+trusted signer, not independent proof that descriptor verification happened;
+any holder of that key could produce it. An interrupted or unconfirmed upload
 is held and never resent automatically. This confirmation is only exercised in
 one process; it is not yet an authenticated or durable cross-host protocol.
 
