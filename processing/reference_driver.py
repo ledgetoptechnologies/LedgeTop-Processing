@@ -4,7 +4,7 @@ ODM is the default; an explicit router binds supported engines per claimed job.
 Engine mutations remain physically fenced. Delivery, Viewer acceptance and
 optional exact-object cleanup continue after slot release.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import json
 import hashlib
@@ -148,6 +148,10 @@ class ReferenceDriver:
                     or provenance_client.origin != broker.origin or tree is None
                     or tree.controller.verifier != provenance_client.verify):
                 raise ValueError('provenance client execution binding differs')
+        self._managed_capacity_gate=getattr(worker,'_managed_capacity_gate',None)
+        if self._managed_capacity_gate is not None and (execution_router is not None or provenance_client is not None or combined_policy is not None
+                or cleanup_executor is not None or engine_cleanup is not None):
+            raise ValueError('managed capacity currently supports ODM without automatic cleanup')
         self.execution_router, self.provenance_client = execution_router, provenance_client
         for value in (output_budget, transfer_ttl):
             p._integer(value, 'driver budget')
@@ -220,6 +224,8 @@ class ReferenceDriver:
             if execution_router is not None:
                 settings['executionRouting'] = dict(mode='per-job-v1', path=str(execution_router.path),
                     provenancePath=str(provenance_client.path) if provenance_client is not None else None)
+            if self._managed_capacity_gate is not None:
+                settings['managedCapacityAuthority']=json.loads(self._managed_capacity_gate.authority._binding_value)['authorityId']
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
@@ -409,6 +415,12 @@ class ReferenceDriver:
 
     def _apply_acceptance(self, job_id, receipts):
         source = self.execution_router if self.execution_router is not None else self.worker
+        if self._managed_capacity_gate is not None:
+            with self._db() as db:
+                row=db.execute('select data from driver_jobs where job=?',(job_id,)).fetchone()
+            if row is None:raise DriverHeld('managed_capacity_permit_unavailable')
+            data=json.loads(row[0])
+            return source.apply_viewer_acceptance(job_id,receipts,capacity_permit=data.get('capacityPermit'))
         return source.apply_viewer_acceptance(job_id, receipts)
 
     def _bind_claim(self, claim, data):
@@ -566,7 +578,13 @@ class ReferenceDriver:
                         # Persist exact success proof even if grace, pins or a
                         # newer task defer removal. Failure ACKs accept no data.
                         self.engine_cleanup.remove(row['job'], viewer_receipts=relayed['receipts'])
-                    self._save(row['job'], 'completed', data)
+                    if kind=='terminal-acceptance' and self._managed_capacity_gate is not None:
+                        verify=lambda:self._managed_failure_exact(row['job'],data,require_ack=True)
+                        guard=self._managed_capacity_gate.hold_terminal(claim,data.get('capacityPermit'),
+                            reservation_id=data['reservation']['reservationId'],before=verify,after=verify)
+                        with guard:self._save(row['job'],'completed',data)
+                    else:
+                        self._save(row['job'], 'completed', data)
                     observed = {'state': 'completed', 'jobId': row['job']}
         if self.engine_cleanup is not None:
             self.engine_cleanup.reconcile_one()
@@ -616,45 +634,118 @@ class ReferenceDriver:
             completionDigest=p.digest(completion))
         return state.get('lastAcknowledgment') == expected
 
+    def _managed_failure_exact(self, job_id, data, *, allow_unprepared=False, require_ack=False):
+        """Verify exact retained local failure, terminal ledger and node binding."""
+        try:
+            claim=data['claim'];failure=data['failure'];outbox_id=data['failureOutboxId']
+            if failure!=make_failure(job_id=job_id,generation=claim['generation'],environment=claim['environment'],
+                    input_manifest_sha256=claim['manifestSha256'],pipeline_digest=claim['pipelineDigest'],
+                    terminal_state=failure['terminalState'],error_code=failure['errorCode']):return False
+            from .reference_failure import BINDING as FAILURE_BINDING
+            if p.digest({key:failure[key] for key in FAILURE_BINDING})!=outbox_id:return False
+            item=self.failure_outbox.get(outbox_id)
+            if item['payload']!={'failure':failure,'engineTerminal':True}:return False
+            reservation=data['reservation']['reservationId']
+            with self.ledger._transaction() as db:
+                row=self.ledger._reservation(db,reservation);settings=json.loads(row['settings'])
+                if ((row['job'],row['generation'],row['environment'],row['state'],settings['manifest_sha256'])
+                        !=(job_id,claim['generation'],claim['environment'],'terminal',claim['manifestSha256'])):return False
+            local=self.worker._row(job_id);identity=json.loads(local['identity'])
+            if (identity.get('reservation')!=reservation or identity.get('job',{}).get('jobId')!=job_id
+                    or identity.get('job',{}).get('generation')!=claim['generation']
+                    or identity.get('job',{}).get('manifestSha256')!=claim['manifestSha256']
+                    or identity.get('job',{}).get('environment')!=claim['environment']
+                    or identity.get('job',{}).get('pipelineDigest')!=claim['pipelineDigest']):return False
+            expected_job=dict(id=job_id,workerId=self.worker_id,nodeId=self.node_id,authorityId=self.worker.authority_id)
+            expected=p.digest(self._failure_completion(failure))
+            with NodeGate(self.worker.engine_id) as gate:
+                state=gate.snapshot();current=state.get('reservation')
+                if current and current.get('receiptId')==local['receipt'] and current.get('job')==expected_job:
+                    return (not require_ack and (current.get('completionDigest')==expected or
+                            (allow_unprepared and current.get('completionDigest') is None)))
+                tombstone=dict(receiptId=local['receipt'],job=expected_job,completionDigest=expected,
+                               generation=self.worker.gate_generation,kind='completion')
+                if item['state']!='acknowledged':return False
+                if current is None and state.get('lastAcknowledgment')==tombstone:return True
+                return self._managed_capacity_gate.release_verified(claim,data.get('capacityPermit'),
+                    self._managed_failure_release_binding(job_id,data))
+        except Exception:
+            return False
+
+    def _managed_failure_release_binding(self, job_id, data):
+        claim=data['claim'];failure=data['failure'];item=self.failure_outbox.get(data['failureOutboxId'])
+        if item['state']!='acknowledged' or not item['receipt']:
+            raise DriverHeld('managed_failure_receipt_unavailable')
+        local=self.worker._row(job_id)
+        return dict(jobId=job_id,generation=claim['generation'],environment=claim['environment'],
+            manifestSha256=claim['manifestSha256'],pipelineDigest=claim['pipelineDigest'],
+            failureSha256=failure['failureSha256'],terminalState=failure['terminalState'],errorCode=failure['errorCode'],
+            reservationId=data['reservation']['reservationId'],nodeId=self.node_id,workerId=self.worker_id,
+            authorityId=self.worker.authority_id,gateGeneration=self.worker.gate_generation,
+            gateReceiptId=local['receipt'],outboxId=data['failureOutboxId'],coordinatorReceiptSha256=p.digest(item['receipt']))
+
     def _deliver_failure(self, job_id, request_id, data):
-        tree = self._kind(job_id) == 'treedar'
-        adapter = self._adapter(job_id)
-        if not tree:
-            self._prepare_failure(job_id, data)
-        completion = self.failure_outbox.get(data['failureOutboxId'])
-        if completion['state'] != 'acknowledged':
-            delivery = self.failure_outbox.claim_next()
-            if delivery is None:
-                return {'state': 'failure_delivering', 'jobId': job_id}
-            try:
-                failure = delivery['payload']['failure']
-                binding = self._claim_binding(failure)
-                status, receipt = self._request('POST', '/terminal-outcomes', dict(**binding,
-                    delivery={key: delivery[key] for key in ('outboxId','payloadSha256','payload')}))
-                if status != 200:
-                    raise DriverWait('terminal_receipt_unavailable')
-                self.failure_outbox.acknowledge(delivery['outboxId'], receipt)
-            except Exception:
+        if self._managed_capacity_gate is not None:
+            verify=lambda:self._managed_failure_exact(job_id,data,allow_unprepared=True)
+            guard=self._managed_capacity_gate.hold_terminal(data['claim'],data.get('capacityPermit'),
+                reservation_id=data['reservation']['reservationId'],before=verify,after=verify)
+        else:guard=nullcontext()
+        with guard:
+            tree = self._kind(job_id) == 'treedar'
+            adapter = self._adapter(job_id)
+            if not tree:
+                self._prepare_failure(job_id, data)
+            completion = self.failure_outbox.get(data['failureOutboxId'])
+            if completion['state'] != 'acknowledged':
+                delivery = self.failure_outbox.claim_next()
+                if delivery is None:
+                    return {'state': 'failure_delivering', 'jobId': job_id}
                 try:
-                    self.failure_outbox.failed_attempt(delivery['outboxId'], delivery['claimToken'])
+                    failure = delivery['payload']['failure']
+                    binding = self._claim_binding(failure)
+                    status, receipt = self._request('POST', '/terminal-outcomes', dict(**binding,
+                        delivery={key: delivery[key] for key in ('outboxId','payloadSha256','payload')}))
+                    if status != 200:
+                        raise DriverWait('terminal_receipt_unavailable')
+                    self.failure_outbox.acknowledge(delivery['outboxId'], receipt)
                 except Exception:
-                    pass
-                return {'state': 'failure_delivering', 'jobId': job_id}
-        if tree:
-            adapter.acknowledge_delivery(job_id)
+                    try:
+                        self.failure_outbox.failed_attempt(delivery['outboxId'], delivery['claimToken'])
+                    except Exception:
+                        pass
+                    return {'state': 'failure_delivering', 'jobId': job_id}
+            # claim_next may have acknowledged a different job.
+            if self.failure_outbox.get(data['failureOutboxId'])['state']!='acknowledged':
+                return {'state':'failure_delivering','jobId':job_id}
+            if tree:
+                adapter.acknowledge_delivery(job_id)
+                self._save(job_id, 'awaiting_failure_acceptance', data)
+                return {'state': 'awaiting_failure_acceptance', 'jobId': job_id}
+            if self._managed_capacity_gate is not None:
+                before=lambda:self._managed_failure_exact(job_id,data,allow_unprepared=True)
+                after=lambda:self._managed_failure_exact(job_id,data,require_ack=True)
+                release_guard=self._managed_capacity_gate.hold_terminal(data['claim'],data.get('capacityPermit'),
+                    reservation_id=data['reservation']['reservationId'],before=before,after=after,
+                    release_binding=self._managed_failure_release_binding(job_id,data))
+            else:release_guard=nullcontext()
+            with release_guard:
+                local = self.worker._row(job_id)
+                if local['phase'] != 'failure_delivered':
+                    with NodeGate(self.worker.engine_id) as gate:
+                        completion = self._failure_completion(data['failure'])
+                        ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
+                            authorityId=self.worker.authority_id, **completion)
+                        if not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
+                            gate.acknowledge(local['receipt'], ack)
+                self.worker._phase(job_id, 'failure_delivered')
             self._save(job_id, 'awaiting_failure_acceptance', data)
             return {'state': 'awaiting_failure_acceptance', 'jobId': job_id}
-        local = self.worker._row(job_id)
-        if local['phase'] != 'failure_delivered':
-            with NodeGate(self.worker.engine_id) as gate:
-                completion = self._failure_completion(data['failure'])
-                ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
-                    authorityId=self.worker.authority_id, **completion)
-                if not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
-                    gate.acknowledge(local['receipt'], ack)
-        self.worker._phase(job_id, 'failure_delivered')
-        self._save(job_id, 'awaiting_failure_acceptance', data)
-        return {'state': 'awaiting_failure_acceptance', 'jobId': job_id}
+
+    def _fetch_capacity_managed(self, claim, data, grant, object_id, target, reservation):
+        guard=(self._managed_capacity_gate.hold(claim,data.get('capacityPermit'),reservation_id=reservation)
+               if self._managed_capacity_gate is not None else nullcontext())
+        with guard:
+            return self.broker.download_object(grant,object_id,target)
 
     def _step(self):
         with self._db() as db:
@@ -712,7 +803,23 @@ class ReferenceDriver:
         suffix = '/jobs/' + job_id
         if stage in ('claimed', 'reservation_pending'):
             if stage == 'claimed':
-                reservation = 'driver-' + secrets.token_hex(16)
+                if self._managed_capacity_gate is not None:
+                    gate=self._managed_capacity_gate
+                    attempt='capacity-'+hashlib.sha256(p.canonical_json([job_id,claim['generation'],claim['manifestSha256'],self.worker_instance_id])).hexdigest()[:32]
+                    if 'capacityAttempt' in data and data['capacityAttempt']!=attempt:
+                        raise DriverHeld('managed_capacity_attempt_changed')
+                    data['capacityAttempt']=attempt
+                    self._save(job_id,'claimed',data)  # intent precedes capacity mutation
+                    gate.authority.acquire(attempt_id=attempt,job_id=job_id,generation=claim['generation'],
+                        manifest_sha256=claim['manifestSha256'],environment=claim['environment'],ttl_seconds=self.transfer_ttl,
+                        demands=[{'ledger':gate._ledger_name,'inputBytes':claim['submission']['manifest']['totalBytes'],'outputBudget':self.output_budget}])
+                    with gate.authority._gate._db() as db:
+                        part=db.execute('select reservation from parts where attempt=? and ledger=?',(attempt,gate._ledger_name)).fetchone()
+                    if part is None:raise DriverHeld('managed_capacity_reservation_missing')
+                    reservation=part[0]
+                    data['capacityPermit']=gate.issue(attempt,pipeline_digest=claim['pipelineDigest'])
+                else:
+                    reservation = 'driver-' + secrets.token_hex(16)
                 data['reservation'] = dict(reservationId=reservation, generation=claim['generation'],
                     expiresAt=datetime.fromtimestamp(self.clock() + self.transfer_ttl, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
                     manifestSha256=claim['manifestSha256'], byteBudget=min(p.MAX_SAFE_INTEGER, 3 * claim['submission']['manifest']['totalBytes']), nonce=secrets.token_hex(16))
@@ -765,7 +872,7 @@ class ReferenceDriver:
                         raise DriverHeld('worker_fetch_attempt_budget_exhausted')
                     data['fetchAttempts'][obj['id']] = attempts + 1
                     self._save(job_id, stage, data)
-                    self.broker.download_object(grant, obj['id'], target)
+                    self._fetch_capacity_managed(claim,data,grant,obj['id'],target,reservation)
                 paths[obj['id']] = relative
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
@@ -808,6 +915,8 @@ class ReferenceDriver:
                 arguments = dict(reservation_id=data['reservation']['reservationId'], input_paths=data['inputPaths'])
                 if self._kind(job_id) == 'treedar':
                     arguments['provenance'] = data['provenance']
+                if self._managed_capacity_gate is not None:
+                    arguments['capacity_permit']=data.get('capacityPermit')
                 adapter.start(fresh, **arguments)
             self._save(job_id, 'executing', data)
             return {'state': 'executing', 'jobId': job_id}
@@ -822,10 +931,15 @@ class ReferenceDriver:
                     raise DriverWait('engine_terminal_identity_unavailable')
                 code = terminal['status'].get('code')
                 if type(code) is int and code in (30, 50):
-                    self._seal_failure(job_id, data, code)
+                    guard=(self._managed_capacity_gate.hold(data['claim'],data.get('capacityPermit'),
+                        reservation_id=data['reservation']['reservationId'],
+                        terminal_validator=lambda:self._managed_failure_exact(job_id,data))
+                        if self._managed_capacity_gate is not None else nullcontext())
+                    with guard:self._seal_failure(job_id, data, code)
                     return {'state': 'failure_delivering', 'jobId': job_id}
             try:
-                outbox_id = adapter.poll(job_id)
+                outbox_id = (adapter.poll(job_id,capacity_permit=data.get('capacityPermit'))
+                             if self._managed_capacity_gate is not None else adapter.poll(job_id))
             except WorkerHeld:
                 if not tree and adapter._row(job_id)['phase'] in ('archive_pending', 'archive_open_pending'):
                     return {'state': 'retry_wait', 'jobId': job_id}
@@ -852,7 +966,9 @@ class ReferenceDriver:
                 self._save(job_id, 'awaiting_acceptance', data)
                 return {'state': 'awaiting_acceptance', 'jobId': job_id}
             local = self.worker._row(job_id)
-            if local['phase'] != 'delivered':
+            if self._managed_capacity_gate is not None:
+                self.worker.acknowledge_delivery(job_id,capacity_permit=data.get('capacityPermit'))
+            elif local['phase'] != 'delivered':
                 completion = dict(status='succeeded', result={'resultManifestSha256': json.loads(local['result'])['resultManifestSha256']})
                 with NodeGate(self.worker.engine_id) as gate:
                     acknowledged = self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion)

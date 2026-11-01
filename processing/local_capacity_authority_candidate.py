@@ -6,10 +6,12 @@ Other users, old writers, mount races, and container administrators can bypass
 it. No external service, cleanup, engine attestation, or NAS protocol is wired.
 """
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
 import stat
+import sys
 import threading
 
 from ops.reference_worker_daemon import DaemonStateLock
@@ -35,6 +37,7 @@ class LocalCapacityAuthority:
         self._journal_identity=None
         self._binding_value=None
         self._ledger_bindings=None
+        self._mount_pins={}
 
     def _read_binding(self):
         if self.binding.parent!=self.root or self.binding.resolve()!=self.binding:
@@ -58,10 +61,52 @@ class LocalCapacityAuthority:
             return (info.st_dev,info.st_ino),data
         finally:os.close(fd)
 
+    @staticmethod
+    def _mount_identity(fd):
+        info=os.fstat(fd)
+        fields=Path(f'/proc/self/fdinfo/{fd}').read_text().splitlines()
+        values=[line.split(':',1)[1].strip() for line in fields if line.startswith('mnt_id:')]
+        if len(values)!=1 or not values[0].isdigit() or not stat.S_ISDIR(info.st_mode):
+            raise CrossFsHeld('Linux mount identity unavailable')
+        return (info.st_dev,info.st_ino,int(values[0]))
+
+    def _pin_mounts(self):
+        if not sys.platform.startswith('linux') or not hasattr(os,'O_PATH'):
+            raise CrossFsHeld('Linux descriptor mount identity required')
+        try:
+            for name,ledger in self.ledgers.items():
+                fd=os.open(ledger.root,os.O_PATH|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+                try:identity=self._mount_identity(fd)
+                except BaseException:
+                    os.close(fd);raise
+                self._mount_pins[name]=(fd,identity)
+        except BaseException:
+            self._close_mounts();raise
+
+    def _close_mounts(self):
+        pins,self._mount_pins=self._mount_pins,{}
+        failure=None
+        for fd,_ in pins.values():
+            try:os.close(fd)
+            except OSError as error:
+                if failure is None:failure=error
+        if failure is not None:raise CrossFsHeld('mount descriptor cleanup failed') from failure
+
+    def _check_mounts(self):
+        if set(self._mount_pins)!=set(self.ledgers):raise CrossFsHeld('mount pins unavailable')
+        for name,ledger in self.ledgers.items():
+            pinned,identity=self._mount_pins[name]
+            if self._mount_identity(pinned)!=identity:raise CrossFsHeld('pinned mount identity changed')
+            current=os.open(ledger.root,os.O_PATH|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+            try:
+                if self._mount_identity(current)!=identity:raise CrossFsHeld('mounted filesystem changed')
+            finally:os.close(current)
+
     def _check(self):
         if self.pid!=os.getpid() or self._owner is None:
             raise CrossFsHeld('local authority owner unavailable')
         self._owner.check(self.root)
+        self._check_mounts()
         binding_identity,binding_value=self._read_binding()
         if binding_identity!=self._binding_identity or binding_value!=self._binding_value:
             raise CrossFsHeld('capacity authority binding changed')
@@ -114,14 +159,17 @@ class LocalCapacityAuthority:
                     self._ledger_bindings[name]=fingerprint
                 self._binding_identity,self._binding_value=identity,raw
                 self._journal_identity=(info.st_dev,info.st_ino)
+                self._pin_mounts()
                 self._check()
                 self._gate=CrossFsAdmission(self.journal,self.ledgers)
                 self._check()
                 return self
             except BaseException:
-                if self._owner is not None:
-                    try:owner.__exit__(None,None,None)
-                    finally:self._owner=None
+                try:self._close_mounts()
+                finally:
+                    if self._owner is not None:
+                        try:owner.__exit__(None,None,None)
+                        finally:self._owner=None
                 raise
 
     def acquire(self, **kwargs):
@@ -131,6 +179,41 @@ class LocalCapacityAuthority:
             self._check()
             return result
 
+    def hold_evidence(self, attempt_id):
+        """Digest exact current cooperative holds; never a transfer grant."""
+        with self._mutex:
+            self._check()
+            with self._gate._db() as db:
+                attempt=db.execute('SELECT plan,state FROM attempts WHERE id=?',(attempt_id,)).fetchone()
+                parts=db.execute('SELECT device,ledger,bytes,reservation,state FROM parts WHERE attempt=? ORDER BY device',(attempt_id,)).fetchall()
+            if attempt is None or attempt[1]!='admitted':raise CrossFsHeld('cooperative hold unavailable')
+            plan=json.loads(attempt[0]);devices=plan.get('devices')
+            if type(devices) is not dict or len(parts)!=len(devices):raise CrossFsHeld('hold inventory changed')
+            evidence=[]
+            for device,label,amount,reservation,state in parts:
+                entry=devices.get(device)
+                if (type(entry) is not dict or state!='acquired' or entry.get('ledger')!=label
+                        or entry.get('bytes')!=amount or label not in self.ledgers):
+                    raise CrossFsHeld('hold component changed')
+                ledger=self.ledgers[label]
+                with ledger._transaction() as db:
+                    row=db.execute('SELECT settings,state,remaining,allocated FROM reservations WHERE id=?',(reservation,)).fetchone()
+                    if row is None or row['state'] not in ('uncertain','engine_started'):raise CrossFsHeld('cooperative hold unavailable')
+                    settings=json.loads(row['settings'])
+                    expected={'job_id':plan['job'],'generation':plan['generation'],'reservation_id':reservation,
+                        'manifest_sha256':plan['manifest'],'input_bytes':entry['inputBytes'],'output_budget':entry['outputBudget'],
+                        'environment':plan['environment'],'ttl_seconds':plan['ttl']}
+                    if settings!=expected or row['remaining']+row['allocated']!=amount:
+                        raise CrossFsHeld('cooperative hold identity changed')
+                    evidence.append({'device':device,'ledger':label,'reservation':reservation,
+                        'settingsSha256':hashlib.sha256(json.dumps(settings,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+                        'reservedBytes':amount,'state':'active',
+                        'mountIdentity':list(self._mount_pins[label][1]),'ledgerIdentity':self._ledger_bindings[label]})
+            self._check()
+            value={'attemptId':attempt_id,'authorityId':json.loads(self._binding_value)['authorityId'],
+                   'planSha256':hashlib.sha256(attempt[0].encode()).hexdigest(),'holds':evidence}
+            return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
     def __exit__(self,*args):
         with self._mutex:
             owner=self._owner
@@ -139,4 +222,6 @@ class LocalCapacityAuthority:
             finally:
                 try:
                     if owner is not None:owner.__exit__(*args)
-                finally:self._owner=None;self._gate=None
+                finally:
+                    try:self._close_mounts()
+                    finally:self._owner=None;self._gate=None
