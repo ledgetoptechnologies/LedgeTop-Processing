@@ -15,7 +15,7 @@ async function main(){
   const project=processing.createProject({displayName:'Synthetic project'}),dataset=processing.createDataset({projectId:project.id,displayName:'Synthetic data',storageMode:'managed',rootKey:'datasets',relativePath:'source'});
   fs.mkdirSync(path.join(config.datasetsMount,'source'));const bytes=Buffer.from('synthetic image');fs.writeFileSync(path.join(config.datasetsMount,'source','image.jpg'),bytes);
   const hash=crypto.createHash('sha256').update(bytes).digest('hex');processing.finalizeDataset(dataset.id,[{id:'one',relativePath:'image.jpg',byteSize:bytes.length,sha256:hash,contentType:'image/jpeg',metadata:{width:10,height:10}}],hash);
-  const providers={};for(const env of ['staging','production'])providers[env]=processing.upsertProvider({authEnvKey:NO_AUTH_MARKER,type:'nodeodm',displayName:'fixture-'+env,endpoint:`http://127.0.0.1:${port}`,enabled:true});
+  const providers={};for(const env of ['staging','production'])providers[env]=processing.upsertProvider({authEnvKey:NO_AUTH_MARKER,type:'nodeodm',displayName:'fixture-'+env,endpoint:`http://127.0.0.1:${port}`,enabled:true,admissionLimit:2});
   const credentials={resolve:id=>id===providers.production.id?'synthetic-production-token-pppppppp':'synthetic-staging-token-ssssssss'};
   const deps={processing,repository,storage,config,providerCredentials:credentials};
   const controlCall=async(pathname)=>{const r=await fetch(`http://127.0.0.1:${control}${pathname}`),body=await r.json();if(r.status!==200)throw Error(`fixture control ${pathname.split('/')[1]}: ${JSON.stringify(body)}`);return body};
