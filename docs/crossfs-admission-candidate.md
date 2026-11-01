@@ -44,3 +44,21 @@ Qualification blockers:
   correct multipart limits, per-volume safety floors, held partial-admission crash
   recovery, external-writer and real power-loss tests. Actual owner-controlled
   TrueNAS configuration, quota policy and coordinated rollout remain separate.
+
+## Disabled local authority wrapper
+
+`LocalCapacityAuthority` requires an already provisioned owner-private binding
+file naming a fixed authority ID, existing journal inode/device, and allowed
+ledger roots, database inode/devices and floors. It holds `DaemonStateLock`
+for its lifetime and rechecks observed binding and inode identities before and
+after admission. It is disabled and has no running service or production hook.
+
+A bounded Linux synthetic suite checks exclusive ownership across processes,
+identity-change refusal, lock release, idempotent admission and disabled startup.
+These observations do not atomically bind SQLite or fence path/mount swaps; a
+host-wide provisioned service identity, cross-user protection, root/mount pinning,
+authenticated NAS/worker RPC and process-crash recovery are absent. Direct
+ScratchLedger and noncooperating Docker writers can bypass this wrapper. Existing
+cooperative budgets do not reserve disk blocks or enforce quota. Do not enable
+without verified writer termination, downstream custody, release/reconciliation,
+space policy and physical-store qualification.
