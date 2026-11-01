@@ -15,7 +15,8 @@ when the coordinator later changes state or loses authority. Caller-provided
 engine identity is not yet bound to trusted coordinator configuration. No
 qualified handover, reservation reconciliation, grant issuance ledger,
 transport authentication, clock policy or cross-host epoch fencing exists.
-The adapter uses idle socket timeouts, not an absolute exchange deadline.
+The loopback adapter uses one absolute deadline across identity checks and the
+socket exchange; this does not qualify an end-to-end cross-host request timeout.
 Docker administrators, local processes, other containers and direct engine
 access can bypass these cooperative checks. A broker that already forwarded
 init can remain held indefinitely. Database and filesystem ownership are not

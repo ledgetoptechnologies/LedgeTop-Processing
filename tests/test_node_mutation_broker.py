@@ -5,13 +5,14 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 from processing import node_mutation_broker as b
-from processing.engine_ingress_guard import BackendPin
+from processing.engine_ingress_guard import AdmissionError, BackendPin
 from processing.node_gate import NodeGate
 from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_tasks import TaskStore
@@ -20,12 +21,15 @@ from processing.viewer_tasks import TaskStore
 class NodeMutationBrokerTests(unittest.TestCase):
     def setUp(self):
         self.root=Path(tempfile.mkdtemp(prefix='lt-node-broker-test-')).resolve()
+        self.addCleanup(lambda:print('retained synthetic node broker root:',self.root,flush=True))
         self.engine='engine-synthetic';self.node='main';self.authority=str(uuid.uuid4());self.epoch=str(uuid.uuid4())
         self.origin='http://127.0.0.1:18080';self.secret=b'synthetic-key-'*4;self.calls=[]
+        self.drip=False;self.drip_done=threading.Event()
         path=self.root/'gate';self.patches=[patch('processing.node_gate.canonical_gate_path',return_value=path),
             patch('processing.node_mutation_broker.canonical_gate_path',return_value=path),patch.object(b,'QUALIFIED',True),
             patch.object(b,'local_engine_identity',return_value=self.engine),patch.object(b,'local_backend_identity',return_value=None)]
-        for item in self.patches:item.start()
+        for item in self.patches:
+            item.start();self.addCleanup(item.stop)
         with NodeGate(self.engine) as gate:gate.provision(self.node,self.origin,self.authority)
         state=path/'mutation-broker';state.mkdir(mode=0o700)
         owner=self
@@ -34,20 +38,26 @@ class NodeMutationBrokerTests(unittest.TestCase):
             def do_POST(self):
                 owner.calls.append((self.path,self.rfile.read(int(self.headers['Content-Length']))))
                 value=json.dumps({'uuid':self.headers['set-uuid'],'success':True}).encode()
-                self.send_response(200);self.send_header('Content-Length',str(len(value)));self.end_headers();self.wfile.write(value)
+                self.send_response(200);self.send_header('Content-Length',str(len(value)));self.end_headers()
+                if owner.drip:
+                    try:
+                        for byte in value:self.wfile.write(bytes([byte]));self.wfile.flush();time.sleep(.04)
+                    except (BrokenPipeError,ConnectionResetError):pass
+                    finally:owner.drip_done.set()
+                else:self.wfile.write(value)
         self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        self.addCleanup(self.server.server_close)
         self.thread=threading.Thread(target=self.server.serve_forever);self.thread.start()
+        def stop_server():
+            self.server.shutdown();self.thread.join(5)
+            self.assertFalse(self.thread.is_alive())
+        self.addCleanup(stop_server)
         self.adapter=b.LoopbackNodeODM(self.engine,BackendPin('a'*64,'sha256:'+'b'*64,self.server.server_port),'')
         self.config=dict(node_id=self.node,engine_id=self.engine,authority_id=self.authority,coordinator_epoch=self.epoch,
                          coordinator_origin=self.origin,gate_generation=1,secret=self.secret,adapter=self.adapter)
         self.broker=b.NodeMutationBroker(state,**self.config)
+        self.addCleanup(self.broker.close)
         self.task=str(uuid.uuid4());self.job=str(uuid.uuid4());self.body=b'synthetic-init'
-
-    def tearDown(self):
-        self.broker.close();self.server.shutdown();self.server.server_close();self.thread.join(5)
-        self.assertFalse(self.thread.is_alive())
-        for item in reversed(self.patches):item.stop()
-        print('retained synthetic node broker root:',self.root,flush=True)
 
     def grant(self,operation='init',body=None):
         body=self.body if body is None else body
@@ -78,6 +88,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with patch.object(self.adapter,'exchange',side_effect=lost):
             with self.assertRaises(OSError):self.broker.mutate(grant,signature,self.body)
         self.broker.close();self.broker=b.NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+        self.addCleanup(self.broker.close)
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
         self.assertEqual(len(self.calls),1)
         with self.broker.db:
@@ -91,6 +102,41 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
         self.assertEqual(self.calls,[])
         self.assertTrue(original.is_file())
+
+    def test_slow_drip_hits_absolute_deadline_and_retains_started_intent(self):
+        self.drip=True;self.adapter.deadline_seconds=.2
+        grant=self.grant();started=time.monotonic()
+        with self.assertRaises((b.BrokerHeld,AdmissionError)):
+            self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
+        self.assertLess(time.monotonic()-started,1.5)
+        self.assertTrue(self.drip_done.wait(3))
+        self.assertEqual(self.broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
+        self.assertEqual(len(self.calls),1)
+
+    def test_close_waits_for_inflight_mutation(self):
+        grant=self.grant();entered=threading.Event();release=threading.Event();closed=threading.Event();out=[]
+        original=self.adapter.exchange
+        def slow(*args):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('synthetic exchange timed out')
+            return original(*args)
+        def run():
+            try:out.append(self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body))
+            except Exception as exc:out.append(exc)
+        worker=threading.Thread(target=run)
+        closer=threading.Thread(target=lambda:(self.broker.close(),closed.set()))
+        with patch.object(self.adapter,'exchange',side_effect=slow):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3));closer.start()
+                self.assertFalse(closed.wait(.2))
+            finally:
+                release.set();worker.join(5)
+                if closer.ident is not None:closer.join(5)
+        self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertTrue(closed.is_set())
+        self.assertEqual(out[0]['uuid'],self.task)
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
 
     def test_issuer_binds_real_queue_claim_and_exact_viewer_phase(self):
         queue=Queue(self.root/'coordinator',node_ids=('cluster','main'),viewer_enabled=True)

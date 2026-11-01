@@ -16,10 +16,10 @@ import stat
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 
-from .engine_ingress_guard import BackendPin, local_backend_identity, local_engine_identity
+from .engine_ingress_guard import BackendPin, EngineIngressGuard, local_backend_identity, local_engine_identity
 from .node_gate import NodeGate, canonical_gate_path
-from .odx_smoke_worker import Client
 from .reference_protocol import decode_submission
 
 QUALIFIED = False
@@ -95,20 +95,23 @@ def issue_init_grant(queue, *, job_id, claim_token, engine_id, gate_generation,
 
 
 class LoopbackNodeODM:
-    """Local client with socket timeouts; no absolute request deadline yet."""
-    def __init__(self, engine_id, backend_pin, backend_token):
-        if type(backend_pin) is not BackendPin or type(backend_token) is not str:
+    """One fixed-loopback exchange bounded by a single monotonic deadline."""
+    def __init__(self, engine_id, backend_pin, backend_token, *, deadline_seconds=10):
+        if (type(backend_pin) is not BackendPin or type(backend_token) is not str
+                or not backend_token.isascii() or any(ord(c)<33 or ord(c)>126 for c in backend_token)
+                or type(deadline_seconds) not in (int,float) or not 0<deadline_seconds<=10):
             raise BrokerHeld('exact local backend required')
-        self.engine_id, self.pin, self.token = engine_id, backend_pin, backend_token
+        self.engine_id, self.pin, self.token, self.deadline_seconds = engine_id, backend_pin, backend_token, deadline_seconds
 
     def exchange(self, grant, body):
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + self.deadline_seconds
         if local_engine_identity(deadline) != self.engine_id: raise BrokerHeld('local engine changed')
         local_backend_identity(self.pin, deadline)
         route = '/task/new/init' if grant['operation'] == 'init' else '/task/new/commit/' + grant['engineTaskId']
-        client = Client('http://127.0.0.1:' + str(self.pin.backend_port), self.token, node=True)
-        raw = client.request('POST', route, body=body, timeout=10, limit=4096,
-            headers={'content-type': grant['contentType'], 'set-uuid': grant['engineTaskId']})
+        transport=SimpleNamespace(binding=SimpleNamespace(backend_port=self.pin.backend_port,backend_secret=self.token))
+        status,raw=EngineIngressGuard._exchange(transport,'POST',route,body,
+            {'content-type': grant['contentType'], 'set-uuid': grant['engineTaskId']},deadline)
+        if status!=200 or len(raw)>4096:raise BrokerHeld('backend response uncertain')
         value = decode_submission(raw)
         return _reply(value,grant['engineTaskId'])
 
@@ -124,7 +127,7 @@ class NodeMutationBroker:
                 or adapter.engine_id != engine_id): raise BrokerHeld('invalid broker binding')
         self.root=Path(root).absolute();self.node=node_id;self.engine=engine_id;self.authority=authority_id
         self.epoch=coordinator_epoch;self.origin=coordinator_origin;self.generation=gate_generation
-        self.secret=secret;self.adapter=adapter;self._mutex=threading.Lock();self._pid=os.getpid()
+        self.secret=secret;self.adapter=adapter;self._mutex=threading.Lock();self._pid=os.getpid();self._closed=False
         if (self.root != canonical_gate_path(engine_id) / 'mutation-broker'
                 or not self.root.is_dir() or self.root.is_symlink() or self.root.resolve()!=self.root
                 or self.root.stat().st_uid!=os.geteuid() or self.root.stat().st_mode&0o077):
@@ -168,7 +171,7 @@ class NodeMutationBroker:
         except BaseException:self.db.rollback();self.db.close();raise
 
     def _check_owner(self):
-        if self._pid!=os.getpid():raise BrokerHeld('node broker owner changed')
+        if self._closed or self._pid!=os.getpid():raise BrokerHeld('node broker owner changed')
         try:
             root=self.root.lstat();database=self.path.lstat()
             if (not stat.S_ISDIR(root.st_mode) or not stat.S_ISREG(database.st_mode)
@@ -179,7 +182,11 @@ class NodeMutationBroker:
                 raise BrokerHeld('node broker state changed')
         except OSError:raise BrokerHeld('node broker state unavailable') from None
 
-    def close(self): self.db.close()
+    def close(self):
+        with self._mutex:
+            if not self._closed:
+                self._closed=True
+                self.db.close()
 
     def mutate(self, grant, signature, body):
         if type(grant) is not dict or set(grant)!=_FIELDS or type(body) is not bytes or len(body)>65536:
