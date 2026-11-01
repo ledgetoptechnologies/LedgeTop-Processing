@@ -125,6 +125,33 @@ class LocalCapacityAuthorityTests(unittest.TestCase):
                 _read_exact(fake,2,1.0)
         self.assertEqual(fake.recv.call_count,1)
 
+    @unittest.skipUnless(sys.platform.startswith('linux'),'Linux mount ID fixture required')
+    def test_mount_identity_mismatch_holds_and_closes_owned_pin(self):
+        with self.authority() as authority:
+            pin=authority._mount_pins['local'][0]
+            original=authority._mount_identity
+            def altered(fd):
+                value=original(fd)
+                return value if fd==pin else (value[0],value[1],value[2]+1)
+            with patch.object(authority,'_mount_identity',side_effect=altered):
+                with self.assertRaisesRegex(CrossFsHeld,'mounted filesystem changed'):
+                    authority.acquire(**self.args)
+        with self.assertRaises(OSError):os.fstat(pin)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'),'Linux mount ID fixture required')
+    def test_mount_close_error_still_releases_owner(self):
+        authority=self.authority();authority.__enter__()
+        pin=authority._mount_pins['local'][0]
+        original_close=os.close
+        def injected(fd):
+            original_close(fd)
+            if fd==pin:raise OSError('synthetic close failure after close')
+        with patch('processing.local_capacity_authority_candidate.os.close',side_effect=injected):
+            with self.assertRaisesRegex(CrossFsHeld,'descriptor cleanup failed'):
+                authority.__exit__(None,None,None)
+        with DaemonStateLock(self.root) as fresh:fresh.check(self.root)
+        with self.assertRaises(OSError):os.fstat(pin)
+
     def test_disabled_refuses_before_use(self):
         with patch('processing.local_capacity_authority_candidate.LOCAL_CAPACITY_AUTHORITY_QUALIFIED',False):
             with self.assertRaises(CrossFsHeld):self.authority()

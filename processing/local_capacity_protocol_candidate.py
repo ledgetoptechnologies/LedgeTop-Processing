@@ -7,6 +7,7 @@ mount fence, or automatic cleanup. Status is journal state, not an admission
 capability. Trusted plan-provider execution itself is not deadline bounded.
 """
 import json
+import hashlib
 import os
 import socket
 import struct
@@ -87,6 +88,11 @@ class LocalCapacityProtocol:
                     row=db.execute('SELECT state FROM attempts WHERE id=?',(attempt,)).fetchone()
                 self.authority._check()
                 response={'attemptId':attempt,'state':row[0] if row else 'absent'}
+            if request['op'] in ('reserve','pin'):
+                self.authority._check()
+                binding=json.loads(self.authority._binding_value)
+                canonical=json.dumps(self.plans[attempt],sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+                response.update(authorityId=binding['authorityId'],planSha256=hashlib.sha256(canonical).hexdigest())
             data=json.dumps(response,sort_keys=True,separators=(',',':')).encode()
             remaining=deadline-time.monotonic()
             if remaining<=0:raise CrossFsHeld('local request deadline exceeded')

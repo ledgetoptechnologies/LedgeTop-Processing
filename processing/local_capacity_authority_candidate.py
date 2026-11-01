@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import threading
 
 from ops.reference_worker_daemon import DaemonStateLock
@@ -35,6 +36,7 @@ class LocalCapacityAuthority:
         self._journal_identity=None
         self._binding_value=None
         self._ledger_bindings=None
+        self._mount_pins={}
 
     def _read_binding(self):
         if self.binding.parent!=self.root or self.binding.resolve()!=self.binding:
@@ -58,10 +60,52 @@ class LocalCapacityAuthority:
             return (info.st_dev,info.st_ino),data
         finally:os.close(fd)
 
+    @staticmethod
+    def _mount_identity(fd):
+        info=os.fstat(fd)
+        fields=Path(f'/proc/self/fdinfo/{fd}').read_text().splitlines()
+        values=[line.split(':',1)[1].strip() for line in fields if line.startswith('mnt_id:')]
+        if len(values)!=1 or not values[0].isdigit() or not stat.S_ISDIR(info.st_mode):
+            raise CrossFsHeld('Linux mount identity unavailable')
+        return (info.st_dev,info.st_ino,int(values[0]))
+
+    def _pin_mounts(self):
+        if not sys.platform.startswith('linux') or not hasattr(os,'O_PATH'):
+            raise CrossFsHeld('Linux descriptor mount identity required')
+        try:
+            for name,ledger in self.ledgers.items():
+                fd=os.open(ledger.root,os.O_PATH|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+                try:identity=self._mount_identity(fd)
+                except BaseException:
+                    os.close(fd);raise
+                self._mount_pins[name]=(fd,identity)
+        except BaseException:
+            self._close_mounts();raise
+
+    def _close_mounts(self):
+        pins,self._mount_pins=self._mount_pins,{}
+        failure=None
+        for fd,_ in pins.values():
+            try:os.close(fd)
+            except OSError as error:
+                if failure is None:failure=error
+        if failure is not None:raise CrossFsHeld('mount descriptor cleanup failed') from failure
+
+    def _check_mounts(self):
+        if set(self._mount_pins)!=set(self.ledgers):raise CrossFsHeld('mount pins unavailable')
+        for name,ledger in self.ledgers.items():
+            pinned,identity=self._mount_pins[name]
+            if self._mount_identity(pinned)!=identity:raise CrossFsHeld('pinned mount identity changed')
+            current=os.open(ledger.root,os.O_PATH|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+            try:
+                if self._mount_identity(current)!=identity:raise CrossFsHeld('mounted filesystem changed')
+            finally:os.close(current)
+
     def _check(self):
         if self.pid!=os.getpid() or self._owner is None:
             raise CrossFsHeld('local authority owner unavailable')
         self._owner.check(self.root)
+        self._check_mounts()
         binding_identity,binding_value=self._read_binding()
         if binding_identity!=self._binding_identity or binding_value!=self._binding_value:
             raise CrossFsHeld('capacity authority binding changed')
@@ -114,14 +158,17 @@ class LocalCapacityAuthority:
                     self._ledger_bindings[name]=fingerprint
                 self._binding_identity,self._binding_value=identity,raw
                 self._journal_identity=(info.st_dev,info.st_ino)
+                self._pin_mounts()
                 self._check()
                 self._gate=CrossFsAdmission(self.journal,self.ledgers)
                 self._check()
                 return self
             except BaseException:
-                if self._owner is not None:
-                    try:owner.__exit__(None,None,None)
-                    finally:self._owner=None
+                try:self._close_mounts()
+                finally:
+                    if self._owner is not None:
+                        try:owner.__exit__(None,None,None)
+                        finally:self._owner=None
                 raise
 
     def acquire(self, **kwargs):
@@ -139,4 +186,6 @@ class LocalCapacityAuthority:
             finally:
                 try:
                     if owner is not None:owner.__exit__(*args)
-                finally:self._owner=None;self._gate=None
+                finally:
+                    try:self._close_mounts()
+                    finally:self._owner=None;self._gate=None
