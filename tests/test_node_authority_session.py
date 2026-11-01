@@ -7,9 +7,10 @@ import subprocess
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from processing.node_authority_session import RemoteAuthoritySession, SessionHeld, serve_coordinator
+from processing.node_authority_session import (RemoteAuthoritySession, SessionHeld, serve_coordinator,
+                                               serve_node_recovery, request_node_recovery)
 from processing.node_mutation_broker import BrokerHeld, LocalCoordinatorAuthority, NodeMutationBroker, issue_init_grant, sign_grant
 from processing.node_gate import NodeGate
 from processing.viewer_tasks import TaskStore
@@ -18,6 +19,53 @@ from tests.test_node_mutation_broker import NodeMutationBrokerTests
 
 @unittest.skipUnless(shutil.which('openssl'), 'synthetic openssl fixture required')
 class NodeAuthoritySessionTests(NodeMutationBrokerTests):
+    def test_recovery_endpoint_returns_pinned_actual_node_snapshot(self):
+        key=self.root/'recovery-synthetic.key';cert=self.root/'recovery-synthetic.crt'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=10)
+        pin=hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cert,key);server_context.load_verify_locations(cafile=str(cert))
+        server_context.verify_mode=ssl.CERT_REQUIRED
+        client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
+        client_raw,server_raw=socket.socketpair();client_raw.settimeout(3);server_raw.settimeout(3)
+        resources={'server':None,'client':None};errors=[]
+        def serve():
+            try:
+                resources['server']=server_context.wrap_socket(server_raw,server_side=True)
+                serve_node_recovery(resources['server'],engine_id=self.engine,peer_sha256=pin,timeout_seconds=3)
+            except Exception as error:errors.append(type(error).__name__)
+        thread=threading.Thread(target=serve)
+        def cleanup():
+            for channel in (resources['client'],resources['server'],client_raw,server_raw):
+                if channel is not None:
+                    try:channel.close()
+                    except OSError:pass
+            if thread.ident is not None:thread.join(5);self.assertFalse(thread.is_alive())
+        self.addCleanup(cleanup)
+        with patch('processing.node_authority_session.RECOVERY_ENDPOINT_QUALIFIED',True):
+            thread.start()
+            resources['client']=client_context.wrap_socket(client_raw,server_hostname='localhost')
+            report=request_node_recovery(resources['client'],node_id=self.node,engine_id=self.engine,
+                authority_id=self.authority,peer_sha256=pin,timeout_seconds=3)
+            thread.join(5);self.assertFalse(thread.is_alive())
+        self.assertEqual(errors,[])
+        self.assertEqual(report['identity']['coordinatorEpoch'],self.epoch)
+        self.assertEqual(report['operations'],[])
+        self.assertFalse(report['authorizesAdmission'])
+
+    def test_recovery_endpoint_disabled_by_default_closes_socket(self):
+        channel=Mock()
+        with self.assertRaises(SessionHeld):
+            serve_node_recovery(channel,engine_id=self.engine,peer_sha256='0'*64)
+        channel.close.assert_called_once_with()
+        channel=Mock()
+        with self.assertRaises(SessionHeld):
+            request_node_recovery(channel,node_id=self.node,engine_id=self.engine,
+                                  authority_id=self.authority,peer_sha256='0'*64)
+        channel.close.assert_called_once_with()
+
     def test_invalid_server_binding_closes_owned_socket(self):
         channel=Mock()
         with self.assertRaises(SessionHeld):

@@ -107,6 +107,59 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
     finally:sock.close()
 
 
+# This diagnostic endpoint does not hold the node reservation after reporting.
+# It cannot open admissions and has no production listener or bootstrap.
+RECOVERY_ENDPOINT_QUALIFIED = False
+
+
+def serve_node_recovery(sock, *, engine_id, peer_sha256, timeout_seconds=5):
+    """Answer one pinned-coordinator request with the actual local snapshot.
+
+    Socket I/O is bounded; filesystem syscalls during inspection are not.
+    """
+    from .node_mutation_broker import inspect_prior_node_state
+    try:
+        if RECOVERY_ENDPOINT_QUALIFIED is not True:
+            raise SessionHeld('node recovery endpoint is not qualified')
+        if type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=10:
+            raise SessionHeld('invalid recovery deadline')
+        _peer(sock,peer_sha256,True)
+        deadline=time.monotonic()+timeout_seconds
+        request=_read(sock,deadline)
+        if (type(request) is not dict or set(request)!={'version','nonce'} or request['version']!=1
+                or type(request['nonce']) is not str or len(request['nonce'])!=64
+                or any(c not in '0123456789abcdef' for c in request['nonce'])):
+            raise SessionHeld('invalid recovery request')
+        report=inspect_prior_node_state(engine_id)
+        _write(sock,{'version':1,'nonce':request['nonce'],'report':report},deadline)
+    finally:sock.close()
+
+
+def request_node_recovery(sock, *, node_id, engine_id, authority_id, peer_sha256, timeout_seconds=5):
+    """Read one node snapshot, tied to a configured peer and expected identity.
+
+    This evidence is a point-in-time diagnostic and cannot permit admissions.
+    """
+    try:
+        if RECOVERY_ENDPOINT_QUALIFIED is not True:
+            raise SessionHeld('node recovery endpoint is not qualified')
+        if type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=10:
+            raise SessionHeld('invalid recovery deadline')
+        _peer(sock,peer_sha256,False)
+        deadline=time.monotonic()+timeout_seconds;nonce=secrets.token_hex(32)
+        _write(sock,{'version':1,'nonce':nonce},deadline)
+        response=_read(sock,deadline)
+        if (type(response) is not dict or set(response)!={'version','nonce','report'}
+                or response['version']!=1 or response['nonce']!=nonce or type(response['report']) is not dict):
+            raise SessionHeld('invalid recovery response')
+        report=response['report'];identity=report.get('identity')
+        if (type(identity) is not dict or (identity.get('nodeId'),identity.get('engineId'),identity.get('authorityId'))
+                !=(node_id,engine_id,authority_id) or report.get('authorizesAdmission') is not False):
+            raise SessionHeld('node recovery identity differs')
+        return report
+    finally:sock.close()
+
+
 class RemoteAuthoritySession:
     """Node-side single-use mTLS stream witness, tied to one init claim."""
     def __init__(self,sock,*,authority,epoch,claim_token,peer_sha256,timeout_seconds=5):
