@@ -914,6 +914,42 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(len(self.fleet.commits), 1)
         self.assertEqual(sum(c[0] == 'commit' for c in self.engines['cluster'].calls), 1)
 
+    def test_failed_engine_status_retains_slot_until_explicit_stopped_resolution(self):
+        first=self.submit();second=self.submit();self.service.tick()
+        task=self.task(first);engine=self.engines['cluster'];engine_uuid=task['engine_uuid']
+        # Model a failed task whose child still occupies the engine.
+        engine.tasks[engine_uuid]['status']['code']=30
+        self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'],'held')
+        self.assertEqual(self.task(first)['error'],'engine_failure_termination_unverified')
+        self.assertEqual(self.service.info(first)['status']['code'],20)
+        self.assertEqual(self.service.info(first)['ledgetopHoldReason'],'engine_failure_termination_unverified')
+        self.assertIsNone(self.task(second)['node_id']);self.assertEqual(len(self.fleet.commits),1)
+        self.service.close();self.queue.close();self.make_queue_service();self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'],'held');self.assertIsNone(self.task(second)['node_id'])
+        with self.assertRaises(ValueError):
+            self.service.operator(task['job_id'],'resolve',{'note':'not yet stopped','workerStopped':False})
+        engine.finish(engine_uuid,30)
+        self.service.operator(task['job_id'],'resolve',{'note':'verified stopped','workerStopped':True})
+        self.service.tick();self.assertEqual(self.task(second)['job']['status'],'running')
+        self.assertEqual(len(self.fleet.commits),2)
+
+    def test_failed_hold_reason_survives_task_update_failure(self):
+        first=self.submit();second=self.submit();self.service.tick()
+        task=self.task(first);self.engines['cluster'].tasks[task['engine_uuid']]['status']['code']=30
+        update=self.service.store.update
+        def interrupted(identifier,**fields):
+            if fields.get('phase')=='held':raise OSError('synthetic interruption')
+            return update(identifier,**fields)
+        with patch.object(self.service.store,'update',side_effect=interrupted):
+            with self.assertRaises(OSError):self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'],'held')
+        self.assertEqual(self.service.info(first)['ledgetopHoldReason'],'engine_failure_termination_unverified')
+        self.service.close();self.queue.close();self.make_queue_service();self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'],'held')
+        self.assertEqual(self.service.info(first)['ledgetopHoldReason'],'engine_failure_termination_unverified')
+        self.assertIsNone(self.task(second)['node_id'])
+
     def test_running_cancel_status_50_holds_slot_even_after_restart(self):
         identifier = self.submit()
         next_id = self.submit()

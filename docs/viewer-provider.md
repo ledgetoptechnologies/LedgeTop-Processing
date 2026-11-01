@@ -91,6 +91,16 @@ body; a legitimate close-delimited response is conservatively uncertain until
 engine HTTP framing is qualified. After restart, a known processing job stays publicly
 running while its exact result is reconciled. Read outages back off to60seconds.
 
+A reported engine failure (status 30) or cancellation (status 50) holds the
+shared slot: the engine status alone does not prove its descendants stopped.
+The Viewer-compatible response remains nonterminal (code 20) with `ledgetopHeld`;
+for reported failure it also includes the fixed `ledgetopHoldReason` value
+`engine_failure_termination_unverified`. An authenticated operator must
+independently verify the exact worker and its processes are stopped before using
+the existing resolve action with `workerStopped:true` and a note. The flag is an
+operator assertion, not an automated physical termination check. Resolved work
+is reported failed; retained files are not deleted.
+
 Running cancellation retains the slot until the engine reports a terminal
 state. Queued cancellation prevents dispatch. `remove` hides/resets a public
 task but retains prior inputs, execution history and result copies. Download
