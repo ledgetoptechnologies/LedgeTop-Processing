@@ -268,19 +268,33 @@ class ViewerService:
                         raise RuntimeError('archive capture child termination uncertain') from None
 
     def _archive_run(self):
+        deferred = 0
         while not self._stop.is_set():
             try:
                 candidate = self.store.next_unarchived_success(self._archive_cursor)
                 if candidate is None:
                     self._stop.wait(2)
                     continue
+                previous_cursor = self._archive_cursor
                 self._archive_cursor, identifier = candidate
+                wrapped = self._archive_cursor <= previous_cursor
+                def defer():
+                    nonlocal deferred
+                    deferred += 1
+                    # Skip delayed entries promptly; yield periodically and
+                    # avoid a tight loop once a whole scan finds no work.
+                    if wrapped:
+                        self._stop.wait(.25)
+                        deferred = 0
+                    elif deferred >= 64:
+                        self._stop.wait(.1)
+                        deferred = 0
                 identity = None
                 prior = self._archive_retry.get(identifier)
                 # Without a readable identity we cannot distinguish a replacement;
                 # honor the bounded metadata-failure delay before trying again.
                 if prior is not None and prior[0] is None and time.monotonic() < prior[1]:
-                    self._stop.wait(.25)
+                    defer()
                     continue
                 due, failures = (prior[1], prior[2]) if prior is not None and prior[0] is None else (0, 0)
                 try:
@@ -295,8 +309,9 @@ class ViewerService:
                     else:
                         _, due, failures = prior
                     if time.monotonic() < due:
-                        self._stop.wait(.25)
+                        defer()
                         continue
+                    deferred = 0
                     self._archive_once(identifier, expected_identity=identity)
                     self._archive_retry.pop(identifier, None)
                 except ArchiveIdentityChanged:

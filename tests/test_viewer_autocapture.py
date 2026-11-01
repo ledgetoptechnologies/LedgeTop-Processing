@@ -478,6 +478,53 @@ finally:s.close();lease.close();q.close()
         self.assertEqual(self.service._archive_retry[self.identifier],(None,due,6))
         self.assertEqual(self.requests,0)
 
+    def test_deferred_backlog_does_not_delay_later_real_capture(self):
+        self.service.store.enable_archive_status()
+        delayed=['synthetic-deferred-'+str(i) for i in range(128)]
+        due=time.monotonic()+60
+        for identifier in delayed:
+            self.service._archive_retry[identifier]=(None,due,1)
+        candidates=delayed+[self.identifier]
+        def next_candidate(cursor):
+            index=cursor if cursor < len(candidates) else 0
+            return index+1,candidates[index]
+        capture=self.service._archive_once
+        def capture_and_stop(identifier,expected_identity=None):
+            try:return capture(identifier,expected_identity=expected_identity)
+            finally:self.service._stop.set()
+        waits=[]
+        original_wait=self.service._stop.wait
+        def wait(seconds):
+            waits.append(seconds)
+            return original_wait(seconds)
+        with patch.object(self.service.store,'next_unarchived_success',side_effect=next_candidate), \
+             patch.object(self.service,'_archive_once',side_effect=capture_and_stop), \
+             patch.object(self.service._stop,'wait',side_effect=wait):
+            self.service._archive_run()
+        self.assertEqual(Path(self.fixture.task(self.identifier)['archive_path']).read_bytes(),self.engine_response)
+        self.assertEqual(self.requests,1)
+        self.assertEqual([x for x in waits if x == .1],[.1,.1])
+        self.assertTrue(all(self.service._archive_retry[i]==(None,due,1) for i in delayed))
+
+    def test_all_deferred_scan_waits_after_wrap_without_attempts(self):
+        candidates=['delay-'+str(i) for i in range(130)];due=time.monotonic()+60
+        for identifier in candidates:self.service._archive_retry[identifier]=(None,due,1)
+        visits=[];waits=[]
+        def next_candidate(cursor):
+            index=cursor if cursor < len(candidates) else 0
+            visits.append(candidates[index]);return index+1,candidates[index]
+        def stop_on_wait(seconds):
+            waits.append(seconds)
+            if seconds==.25:self.service._stop.set();return True
+            return False
+        with patch.object(self.service.store,'next_unarchived_success',side_effect=next_candidate), \
+             patch.object(self.service,'_archive_once') as capture, \
+             patch.object(self.service._stop,'wait',side_effect=stop_on_wait):
+            self.service._archive_run()
+        self.assertEqual(visits,candidates+[candidates[0]])
+        self.assertEqual(waits,[.1,.1,.25]);capture.assert_not_called()
+        self.assertTrue(all(self.service._archive_retry[i]==(None,due,1) for i in candidates))
+
     def test_discovery_identity_read_failure_signals_health_without_stale_status_write(self):
         self.fixture.config.viewer_archive_autocapture = True
         self.service.store.enable_archive_status()
