@@ -35,7 +35,8 @@ class RemoteUploadSender:
     """Read an exact stored descriptor and send over an already authenticated TLS stream."""
     def __init__(self):self._unreaped=[]
     def send(self, channel, *, peer_sha256, store, claim_token, grant, signature, secret, evidence, timeout=10):
-        if type(evidence) is not UploadEvidence or self._unreaped or not 0<timeout<=900:
+        from .durable_upload_evidence import DurableUploadEvidence
+        if type(evidence) not in (UploadEvidence,DurableUploadEvidence) or self._unreaped or not 0<timeout<=900:
             raise SessionHeld('owned upload sender required')
         _peer(channel,peer_sha256,False)
         if sign_grant(grant,secret)!=signature:raise SessionHeld('upload signature invalid')
@@ -57,7 +58,9 @@ class RemoteUploadSender:
             completion.verify(deadline)
             if LocalUploadSender._issued_item(store,grant,claim_token)!=item:
                 raise SessionHeld('source identity changed')
-            evidence._record_verified(grant)
+            if type(evidence) is DurableUploadEvidence:
+                evidence._record_verified(grant,completion=completion,owner=self,store=store,claim_token=claim_token,item=item,deadline=deadline)
+            else:evidence._record_verified(grant)
             response=_read(channel,deadline)
             if type(response) is not dict or response!={'success':True}:raise SessionHeld('node response uncertain')
             return response

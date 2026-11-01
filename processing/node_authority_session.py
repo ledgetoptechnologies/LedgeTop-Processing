@@ -110,7 +110,8 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                     if set(public)!=_UPLOAD_FIELDS or body:raise SessionHeld('remote upload binding invalid')
                     if action=='complete':
                         from .remote_upload_transport import UploadEvidence
-                        if type(upload_evidence) is not UploadEvidence or not upload_evidence.wait_verified(public, min(end,time.monotonic()+3)):
+                        from .durable_upload_evidence import DurableUploadEvidence
+                        if type(upload_evidence) not in (UploadEvidence,DurableUploadEvidence) or not upload_evidence.wait_verified(public, min(end,time.monotonic()+3)):
                             raise SessionHeld('coordinator sender evidence unavailable')
                     item=LocalUploadSender._issued_item(store,public,grant.get('claimToken',''))
                     if (item['name']!=public.get('fileName') or item['bytes']!=public.get('fileBytes')

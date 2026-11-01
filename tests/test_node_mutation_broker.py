@@ -24,6 +24,7 @@ from processing.maintenance import Conflict
 from processing.viewer_tasks import TaskStore
 from processing.authority_lease import AuthorityLease, record_required
 from processing.broker_intent_fence import install_offline
+from processing.durable_upload_evidence import install_offline as install_evidence_offline
 
 
 def attach_lease(queue, directory):
@@ -97,6 +98,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
         self.owner_store=store
         with self.owner_queue._db() as db: install_offline(db,enabled=True)
+        with self.owner_queue._db() as db: install_evidence_offline(db,enabled=True)
         b.install_upload_issuer_schema(self.owner_queue)
         store.initialize(self.task,'Synthetic',[],None,'production')
         store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)

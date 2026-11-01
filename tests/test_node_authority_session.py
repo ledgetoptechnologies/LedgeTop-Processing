@@ -2,6 +2,7 @@
 import hashlib
 import shutil
 import socket
+import sqlite3
 import ssl
 import subprocess
 import threading
@@ -16,6 +17,7 @@ from processing.node_gate import NodeGate
 from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_tasks import TaskStore
 from processing.remote_upload_transport import RemoteUploadSender, UploadEvidence, receive_upload
+from processing.durable_upload_evidence import DurableUploadEvidence, EvidenceError
 from tests.test_node_mutation_broker import NodeMutationBrokerTests
 
 
@@ -104,7 +106,7 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
         client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
         authority_client,authority_server=socket.socketpair();data_client,data_server=socket.socketpair()
         for channel in (authority_client,authority_server,data_client,data_server):channel.settimeout(3)
-        evidence=UploadEvidence();errors=[];results=[];threads=[];resources=[]
+        evidence=DurableUploadEvidence(self.owner_queue);errors=[];results=[];threads=[];resources=[]
         def auth():
             try:
                 channel=server_context.wrap_socket(authority_server,server_side=True);resources.append(channel)
@@ -130,6 +132,7 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
                 grant=upload,signature=signature,secret=self.secret,evidence=evidence,timeout=8),{'success':True})
             node_thread.join(5);self.assertFalse(node_thread.is_alive());self.assertEqual(sender._unreaped,[])
             self.assertEqual(results[0]['success'],True);self.assertEqual(len(self.calls),2)
+            self.assertIn(b'\r\n\r\nx\r\n--',self.calls[-1][1])
             self.assertEqual(broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'complete')
             with self.owner_queue._db() as db:self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(upload['operationId'],)).fetchone()[0],'complete')
             retry_client,retry_server=socket.socketpair();retry_client.settimeout(3);retry_server.settimeout(3)
@@ -153,6 +156,18 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
             for thread in threads:
                 thread.join(5);self.assertFalse(thread.is_alive())
         self.assertEqual(errors,[])
+        with self.owner_queue._db() as db:
+            with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM broker_sender_evidence')
+        self.owner_lease.close();self.owner_queue.close()
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            recovered=DurableUploadEvidence(restarted)
+            self.assertTrue(recovered.wait_verified(upload,time.monotonic()+.1))
+            self.assertEqual(restarted.get(self.job)['status'],'held')
+            self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+            with restarted._db() as db:db.execute('DROP TRIGGER broker_sender_evidence_update')
+            with self.assertRaises(EvidenceError):recovered.wait_verified(upload,time.monotonic()+.1)
+        finally:restarted.close()
 
     def test_interrupted_mtls_upload_retains_both_intents(self):
         self.begin_upload()
@@ -168,7 +183,7 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
         client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
         authority_client,authority_server=socket.socketpair();data_client,data_server=socket.socketpair()
         for channel in (authority_client,authority_server,data_client,data_server):channel.settimeout(3)
-        evidence=UploadEvidence();errors=[];results=[];threads=[];resources=[];entered=threading.Event()
+        evidence=DurableUploadEvidence(self.owner_queue);errors=[];results=[];threads=[];resources=[];entered=threading.Event()
         def auth():
             try:
                 channel=server_context.wrap_socket(authority_server,server_side=True);resources.append(channel)

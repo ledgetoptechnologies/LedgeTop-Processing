@@ -75,3 +75,24 @@ physical backend fence are supplied. Lost evidence or a crash can conservatively
 hold work. Tests use one process and synthetic loopback peers with mocked Docker
 identity; they do not establish a real cross-host deployment, partition or
 power-loss safety. This code stays disabled and requires independent review.
+
+## Experimental durable coordinator sender evidence
+
+An additional explicit offline migration can install an append-only coordinator
+sender-evidence table. The coordinator's descriptor sender writes an exact
+operation, job, epoch and grant digest after all declared bytes are sent, the
+owned sender reports success, the source record is revalidated, and the matching
+coordinator intent is still started. The mTLS authority session can consult this
+evidence before accepting node completion. The synthetic test verifies that the
+evidence survives an orderly coordinator restart, remains readable only with
+the qualified schema and immutable triggers, and that the restarted job remains
+held. A truncated stream writes no such evidence.
+
+Evidence records sender verification, not independent proof of a node receipt.
+The authenticated node's completion message remains a trusted-node assertion.
+The evidence and its producing objects are trusted within the coordinator
+process; a privileged or old writer can alter the SQLite schema or bypass this
+path. The evidence has no automatic expiry, deletion, epoch adoption, restart
+reconciliation, or qualified downgrade. No process kill during a real transfer,
+power failure, or actual remote-node deployment has been tested. This remains
+an inactive prototype, not a release or operational migration.
