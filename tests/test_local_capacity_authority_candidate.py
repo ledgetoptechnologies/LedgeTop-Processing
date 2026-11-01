@@ -5,12 +5,15 @@ from pathlib import Path
 import tempfile
 import subprocess
 import sys
+import socket
+import struct
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from processing.crossfs_admission_candidate import CrossFsHeld
 from processing.local_capacity_authority_candidate import LocalCapacityAuthority
 from processing.scratch_policy import ScratchLedger
 from ops.reference_worker_daemon import DaemonStateLock
+from processing.local_capacity_protocol_candidate import LocalCapacityProtocol, _read_exact
 
 
 @unittest.skipUnless(os.name=='posix','POSIX lock fixture required')
@@ -82,6 +85,45 @@ class LocalCapacityAuthorityTests(unittest.TestCase):
         control=subprocess.run([sys.executable,'-c',child,str(self.root)],
             stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8)
         self.assertEqual(control.returncode,2,'child could not acquire lock after parent released')
+
+    def test_local_peer_protocol_fixed_plan_and_replay(self):
+        with patch('processing.local_capacity_protocol_candidate.LOCAL_CAPACITY_PROTOCOL_QUALIFIED',True):
+            with self.authority() as authority:
+                protocol=LocalCapacityProtocol(authority,trusted_uid=os.getuid(),plans={'attempt':self.args})
+                # Use owned socket pairs; protocol handles one framed request at a time.
+                def call(op):
+                    client,server=socket.socketpair()
+                    try:
+                        client.settimeout(3)
+                        request=json.dumps({'op':op,'attemptId':'attempt'}).encode()
+                        client.sendall(struct.pack('!I',len(request))+request)
+                        protocol.serve_one(server)
+                        size=struct.unpack('!I',client.recv(4))[0]
+                        return json.loads(client.recv(size))
+                    finally:client.close();server.close()
+                self.assertEqual(call('status')['state'],'absent')
+                self.assertEqual(call('reserve')['state'],'admitted')
+                self.assertEqual(call('pin')['state'],'admitted')
+                self.assertEqual(call('status')['state'],'admitted')
+
+    def test_local_peer_protocol_rejects_wrong_uid_without_intent(self):
+        with patch('processing.local_capacity_protocol_candidate.LOCAL_CAPACITY_PROTOCOL_QUALIFIED',True):
+            with self.authority() as authority:
+                protocol=LocalCapacityProtocol(authority,trusted_uid=os.getuid()+1,plans={'attempt':self.args})
+                client,server=socket.socketpair()
+                try:
+                    with self.assertRaises(CrossFsHeld):protocol.serve_one(server)
+                finally:client.close();server.close()
+                with authority._gate._db() as db:
+                    self.assertEqual(db.execute('select count(*) from attempts').fetchone()[0],0)
+
+    def test_local_protocol_absolute_read_deadline(self):
+        fake=MagicMock()
+        fake.recv.return_value=b'x'
+        with patch('processing.local_capacity_protocol_candidate.time.monotonic',side_effect=[0.5,1.1]):
+            with self.assertRaisesRegex(CrossFsHeld,'deadline'):
+                _read_exact(fake,2,1.0)
+        self.assertEqual(fake.recv.call_count,1)
 
     def test_disabled_refuses_before_use(self):
         with patch('processing.local_capacity_authority_candidate.LOCAL_CAPACITY_AUTHORITY_QUALIFIED',False):

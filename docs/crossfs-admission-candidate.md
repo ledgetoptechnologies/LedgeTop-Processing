@@ -62,3 +62,22 @@ ScratchLedger and noncooperating Docker writers can bypass this wrapper. Existin
 cooperative budgets do not reserve disk blocks or enforce quota. Do not enable
 without verified writer termination, downstream custody, release/reconciliation,
 space policy and physical-store qualification.
+
+## Disabled local peer protocol
+
+The source-only `LocalCapacityProtocol` handles one caller-owned AF_UNIX socket
+and checks Linux SO_PEERCRED against a configured UID. Request bodies contain
+only an operation and a preloaded fixed plan ID; callers cannot supply budgets.
+`reserve` and `pin` use the existing owner wrapper and journal; `status` reports
+only recorded state and is not proof that capacity remains available or that a
+caller holds authority. Unknown plans and peers are refused. This authenticates
+a cooperating local OS account, not a specific process; every process sharing
+that UID can act. It is not mTLS, not a remote protocol and installs no listener.
+
+An absolute monotonic deadline bounds frame recv and send, including slow input.
+It does not bound the trusted plan, SQLite lock or filesystem operation; those
+may run past the deadline, and an admitted mutation may have committed before a
+late response is lost. Retry must use the same exact persisted plan and reconcile
+on uncertainty. Tests use owned socket pairs and close both ends; no remote calls
+or listener are started. They do not prove process-crash recovery, atomic mount
+identity, host-wide enforcement, physical allocation, or durable remote delivery.
