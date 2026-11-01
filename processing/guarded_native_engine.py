@@ -1,9 +1,8 @@
 """Hard-disabled, in-process dispatcher integration experiment.
 
-Only a bounded verified file snapshot is supported. This is not a production
-transport, node isolation, writer fence, or large-dataset capacity mechanism.
+Chunked file-descriptor reads are bounded in memory, but filesystem calls can
+stall. This is not a production transport, node isolation or writer fence.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,12 +13,16 @@ import threading
 import time
 import uuid
 
-from .engine_ingress_guard import EngineIngressGuard
+from .engine_ingress_guard import EngineIngressGuard,MAX_STREAM_BYTES
 from .odx_smoke_worker import SmokeError
 from .reference_protocol import decode_submission
 
 QUALIFIED = False
-MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
+CHUNK_BYTES = 65536
+
+
+def _read_source(fd, count):
+    return os.read(fd, count)
 
 
 class GuardedNativeEngine:
@@ -66,11 +69,11 @@ class GuardedNativeEngine:
             raise SmokeError('guarded initialization uncertain')
 
     @staticmethod
-    def _snapshot(item):
+    def _open_source(item):
         if os.name!='posix' or not hasattr(os,'O_NOFOLLOW'):
             raise SmokeError('guarded source descriptor unavailable')
-        if type(item['bytes']) is not int or not 0<item['bytes']<=MAX_SNAPSHOT_BYTES:
-            raise SmokeError('guarded snapshot limit exceeded')
+        if type(item['bytes']) is not int or not 0<item['bytes']<=MAX_STREAM_BYTES:
+            raise SmokeError('guarded source limit exceeded')
         path=Path(item['path']);flags=os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|getattr(os,'O_CLOEXEC',0)
         fd=os.open(path,flags)
         try:
@@ -79,17 +82,10 @@ class GuardedNativeEngine:
             if (not stat.S_ISREG(first.st_mode) or first.st_nlink!=1 or identity(first)!=identity(named)
                 or first.st_size!=item['bytes'] or (os.name!='nt' and first.st_uid!=os.geteuid())):
                 raise SmokeError('guarded source identity changed')
-            data=bytearray()
-            while len(data)<item['bytes']:
-                part=os.read(fd,min(65536,item['bytes']-len(data)))
-                if not part:raise SmokeError('guarded source incomplete')
-                data.extend(part)
-            if os.read(fd,1) or identity(os.fstat(fd))!=identity(first) or identity(path.lstat())!=identity(first):
-                raise SmokeError('guarded source identity changed')
-            if hashlib.sha256(data).hexdigest()!=item['sha256']:
-                raise SmokeError('guarded source digest differs')
-            return bytes(data)
-        finally:os.close(fd)
+            return fd,path,identity(first)
+        except BaseException:
+            os.close(fd)
+            raise
 
     def upload(self, identifier, item):
         task=self.task
@@ -98,39 +94,75 @@ class GuardedNativeEngine:
         upload_id=str(uuid.uuid4())
         self.store.prepare_guarded_engine_upload(task['job_id'],task['claim_token'],item['name_key'],upload_id,
                                                  expected_generation=task['generation'])
-        data=self._snapshot(item)
-        source,writer=socket.socketpair();stop=threading.Event();errors=[]
+        fd,path,original=self._open_source(item)
+        try:source,writer=socket.socketpair()
+        except BaseException:
+            os.close(fd);raise
+        stop=threading.Event();done=threading.Event();success=threading.Event();errors=[]
         deadline=time.monotonic()+self.guard.binding.deadline_seconds
         def feed():
             try:
-                writer.setblocking(False);offset=0
-                while offset<len(data) and not stop.is_set():
-                    remaining=deadline-time.monotonic()
-                    if remaining<=0:raise OSError('sender deadline')
-                    if not select.select([],[writer],[],min(.1,remaining))[1]:continue
-                    try:count=writer.send(memoryview(data)[offset:offset+65536])
-                    except BlockingIOError:continue
-                    if not count:raise OSError('sender closed')
-                    offset+=count
-                if offset!=len(data):raise OSError('sender interrupted')
+                writer.setblocking(False);remaining_bytes=item['bytes']
+                while remaining_bytes and not stop.is_set():
+                    chunk=_read_source(fd,min(CHUNK_BYTES,remaining_bytes))
+                    if not chunk or stop.is_set():raise OSError('sender interrupted')
+                    remaining_bytes-=len(chunk);offset=0
+                    while offset<len(chunk) and not stop.is_set():
+                        remaining=deadline-time.monotonic()
+                        if remaining<=0:raise OSError('sender deadline')
+                        if not select.select([],[writer],[],min(.1,remaining))[1]:continue
+                        try:count=writer.send(memoryview(chunk)[offset:])
+                        except BlockingIOError:continue
+                        if not count:raise OSError('sender closed')
+                        offset+=count
+                    if offset!=len(chunk):raise OSError('sender interrupted')
+                if remaining_bytes or stop.is_set() or _read_source(fd,1):raise OSError('source changed')
+                def identity(s):return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_nlink)
+                if identity(os.fstat(fd))!=original or identity(path.lstat())!=original:
+                    raise OSError('source identity changed')
                 writer.shutdown(socket.SHUT_WR)
-            except (OSError,ValueError) as error:errors.append(error)
-        thread=threading.Thread(target=feed,daemon=True);thread.start()
+                success.set()
+            except BaseException as error:errors.append(error)
+            finally:
+                try:os.close(fd)
+                except OSError as error:errors.append(error)
+                done.set()
+        thread=None
         try:
-            result=self.guard.stream_bound_upload('/task/new/upload/'+identifier,self._headers(task,upload_id=upload_id),source)
-            thread.join(.2)
-        finally:
+            thread=threading.Thread(target=feed,daemon=True);thread.start()
+        except BaseException:
             stop.set()
             try:source.shutdown(socket.SHUT_RDWR)
             except OSError:pass
             try:writer.shutdown(socket.SHUT_RDWR)
             except OSError:pass
-            source.close();writer.close();thread.join(2)
-            if thread.is_alive():
-                self._unreaped.append(thread)
-                raise SmokeError('guarded sender did not exit')
-        if errors:raise SmokeError('guarded sender uncertain')
-        return result
+            source.close();writer.close()
+            if thread is not None and thread.ident is not None:
+                thread.join(2)
+                if thread.is_alive():self._unreaped.append(thread)
+            else:os.close(fd)
+            raise
+        engine=self
+        class Completion:
+            stopped=False
+            def verify(self,limit):
+                if not done.wait(max(0,limit-time.monotonic())) or not success.is_set() or errors:
+                    raise SmokeError('guarded sender uncertain')
+            def stop(self):
+                if not self.stopped:
+                    self.stopped=True;stop.set()
+                    try:source.shutdown(socket.SHUT_RDWR)
+                    except OSError:pass
+                    try:writer.shutdown(socket.SHUT_RDWR)
+                    except OSError:pass
+                    source.close();writer.close();thread.join(2)
+                    if thread.is_alive():engine._unreaped.append(thread)
+                if thread.is_alive():raise SmokeError('guarded sender did not exit')
+        completion=Completion()
+        try:
+            return self.guard.stream_bound_upload('/task/new/upload/'+identifier,self._headers(task,upload_id=upload_id),source,completion=completion)
+        finally:
+            completion.stop()
 
     def action(self, action, identifier):
         if action!='commit' or self.task is None or identifier!=self.task['engine_uuid']:

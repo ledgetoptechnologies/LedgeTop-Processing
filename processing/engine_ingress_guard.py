@@ -399,7 +399,7 @@ class EngineIngressGuard:
             db.commit()
             return result
 
-    def stream_bound_upload(self, target, pairs, source):
+    def stream_bound_upload(self, target, pairs, source, *, completion=None):
         """Stream raw file bytes using a previously persisted TaskStore intent."""
         from . import engine_upload_contract as contract
         if contract.QUALIFIED is not True:
@@ -411,26 +411,31 @@ class EngineIngressGuard:
             raise AdmissionError('bounded socket upload required')
         deadline=time.monotonic()+self.binding.deadline_seconds
         with self._owned(headers,engine_uuid,action,deadline,bound_id=upload_id) as db:
-            job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
-            task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()
-            record=self._bound_file(db,upload_id,job,task,'started')
-            boundary,prefix,suffix=_file_multipart(upload_id,record['name'])
-            result=self._exchange('POST',target,b'',{'Content-Type':'multipart/form-data; boundary='+boundary},deadline,
-                                  source=source,source_length=record['bytes'],expected_sha=record['sha256'],
-                                  file_prefix=prefix,file_suffix=suffix,forbidden=b'--'+boundary.encode('ascii'))
             try:
-                from .reference_protocol import decode_submission
-                response=decode_submission(result[1])
-                if result[0]!=200 or type(response) is not dict or response.get('success') is not True or 'error' in response:raise ValueError()
-            except (ValueError,UnicodeError):
-                raise AdmissionError('upstream upload unconfirmed; retain reservation') from None
-            if deadline-time.monotonic()<=0:raise AdmissionError('bounded upstream deadline exceeded')
-            if db.execute("UPDATE engine_ingress_uploads SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
-                raise AdmissionError('upload journal changed')
-            if db.execute("UPDATE viewer_engine_upload_intents SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
-                raise AdmissionError('file intent changed')
-            db.commit()
-            return result
+                job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
+                task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()
+                record=self._bound_file(db,upload_id,job,task,'started')
+                boundary,prefix,suffix=_file_multipart(upload_id,record['name'])
+                result=self._exchange('POST',target,b'',{'Content-Type':'multipart/form-data; boundary='+boundary},deadline,
+                                      source=source,source_length=record['bytes'],expected_sha=record['sha256'],
+                                      file_prefix=prefix,file_suffix=suffix,forbidden=b'--'+boundary.encode('ascii'))
+                try:
+                    from .reference_protocol import decode_submission
+                    response=decode_submission(result[1])
+                    if result[0]!=200 or type(response) is not dict or response.get('success') is not True or 'error' in response:raise ValueError()
+                except (ValueError,UnicodeError):
+                    raise AdmissionError('upstream upload unconfirmed; retain reservation') from None
+                if completion is not None:completion.verify(deadline)
+                if completion is not None:completion.stop()
+                if deadline-time.monotonic()<=0:raise AdmissionError('bounded upstream deadline exceeded')
+                if db.execute("UPDATE engine_ingress_uploads SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
+                    raise AdmissionError('upload journal changed')
+                if db.execute("UPDATE viewer_engine_upload_intents SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
+                    raise AdmissionError('file intent changed')
+                db.commit()
+                return result
+            finally:
+                if completion is not None:completion.stop()
 
     def read(self, method, target, pairs):
         headers = _headers(pairs)
@@ -490,7 +495,8 @@ class EngineIngressGuard:
         def wait(write=False):
             remaining = deadline - time.monotonic()
             if remaining <= 0: raise AdmissionError('bounded upstream deadline exceeded')
-            reads, writes, _ = select.select([] if write else [sock], [sock] if write else [], [], remaining)
+            reads, writes, _ = select.select([sock], [sock] if write else [], [], remaining)
+            if write and reads:raise AdmissionError('early upstream response; retain reservation')
             if not (writes if write else reads): raise AdmissionError('bounded upstream deadline exceeded')
         try:
             code = sock.connect_ex(('127.0.0.1', self.binding.backend_port))

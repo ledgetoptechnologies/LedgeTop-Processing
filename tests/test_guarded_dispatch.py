@@ -1,14 +1,18 @@
 """Synthetic in-process dispatcher→guard tests; no production topology."""
 import io
 import json
+import hashlib
 from pathlib import Path
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from types import SimpleNamespace
+from dataclasses import replace
 import unittest
 from unittest.mock import patch
 import uuid
@@ -29,10 +33,23 @@ class GuardedDispatchTests(unittest.TestCase):
         self.paths=patch('processing.node_gate.canonical_gate_path',side_effect=lambda engine:self.root/('gate-'+engine));self.paths.start()
         self.flags=[patch.object(engine_upload_contract,'QUALIFIED',True),patch.object(guarded_native_engine,'QUALIFIED',True)]
         for flag in self.flags:flag.start()
-        self.calls=[];self.bodies=[];self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;fixture=self
+        self.calls=[];self.bodies=[];self.large_wire=None;self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;self.early_upload=False;fixture=self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
-                body=self.rfile.read(int(self.headers['Content-Length']));route=self.path.split('?')[0]
+                length=int(self.headers['Content-Length']);route=self.path.split('?')[0]
+                if fixture.early_upload and '/upload/' in route:
+                    self.rfile.read(1);fixture.calls.append(route);data=b'{"success":true}'
+                    try:self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);self.wfile.flush()
+                    except OSError:pass
+                    self.close_connection=True;return
+                if length>1024*1024:
+                    digest=hashlib.sha256();remaining=length
+                    while remaining:
+                        chunk=self.rfile.read(min(65536,remaining))
+                        if not chunk:break
+                        digest.update(chunk);remaining-=len(chunk)
+                    fixture.large_wire=(length,remaining,digest.hexdigest());body=b'<bounded-large>'
+                else:body=self.rfile.read(length)
                 fixture.calls.append(route);fixture.bodies.append(body)
                 if fixture.drop and '/upload/' in route:
                     self.close_connection=True;return
@@ -41,7 +58,9 @@ class GuardedDispatchTests(unittest.TestCase):
                 if route=='/task/new/init':value={'uuid':self.headers['Set-UUID'],**({'success':False} if fixture.bad_init else {})}
                 elif '/commit/' in route:value={'uuid':str(uuid.uuid4()) if fixture.bad_commit else route.rsplit('/',1)[1],**({'success':True} if fixture.bad_commit else {})}
                 else:value={'success':True}
-                data=json.dumps(value).encode();self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+                data=json.dumps(value).encode()
+                try:self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+                except (BrokenPipeError,ConnectionResetError):pass
             def do_GET(self):
                 route=self.path.split('?')[0];fixture.calls.append(route)
                 identifier=route.split('/')[2]
@@ -60,7 +79,7 @@ class GuardedDispatchTests(unittest.TestCase):
         store=TaskStore(self.queue,self.root/'state'/'viewer-tasks');pin=OwnerPin.capture(self.queue);guards={}
         for node in ('cluster','main'):
             binding=Binding('engine-'+node,node,self.queue.authority_id,'http://127.0.0.1:18080',1,self.server.server_port,
-                'coordinator-'+'a'*40,'management-'+'b'*40,'backend-'+'c'*40)
+                'coordinator-'+'a'*40,'management-'+'b'*40,'backend-'+'c'*40,deadline_seconds=10)
             root=self.root/('gate-'+binding.engine_id)
             if not (root/'gate.json').exists():
                 with NodeGate(binding.engine_id) as gate:gate.provision(node,binding.coordinator_origin,self.queue.authority_id)
@@ -129,38 +148,36 @@ class GuardedDispatchTests(unittest.TestCase):
         self.assertEqual((task['phase'],task['job']['status']),('commit_pending','running'))
         self.service.tick();self.assertEqual(sum('/commit/' in route for route in self.calls),1)
 
-    def test_changed_source_bytes_hold_before_engine_upload(self):
+    def test_changed_source_bytes_hold_after_possible_engine_transfer(self):
         identifier=self.submit();path=Path(self.service.store.task(identifier)['files'][0]['path'])
         path.write_bytes(b'changed--photo!');self.service.tick();task=self.service.store.task(identifier)
         self.assertEqual((task['job']['status'],task['phase']),('held','held'))
-        self.assertEqual(self.calls,['/task/new/init']);self.assertEqual(path.read_bytes(),b'changed--photo!')
-        with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'prepared')
+        self.assertEqual(path.read_bytes(),b'changed--photo!')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
 
-    def test_snapshot_cap_holds_without_upstream_upload(self):
-        identifier=self.submit()
-        with patch.object(guarded_native_engine,'MAX_SNAPSHOT_BYTES',4):self.service.tick()
-        task=self.service.store.task(identifier)
-        self.assertEqual((task['job']['status'],task['phase']),('held','held'));self.assertEqual(self.calls,['/task/new/init'])
-        with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'prepared')
-
-    def test_snapshot_rejects_named_inode_swap_during_read(self):
+    def test_source_rejects_named_inode_swap_during_read(self):
         identifier=self.submit();item=self.service.store.task(identifier)['files'][0];path=Path(item['path'])
-        retained=path.with_name(path.name+'.retained');original=os.read;swapped=[]
+        retained=path.with_name(path.name+'.retained');original=guarded_native_engine._read_source;swapped=[]
         def replace_after_read(fd,size):
             data=original(fd,size)
             if data and not swapped:
                 path.rename(retained);path.write_bytes(data);swapped.append(True)
             return data
-        with patch('processing.guarded_native_engine.os.read',side_effect=replace_after_read):
-            with self.assertRaises(SmokeError):guarded_native_engine.GuardedNativeEngine._snapshot(item)
+        with patch('processing.guarded_native_engine._read_source',side_effect=replace_after_read):self.service.tick()
+        self.assertEqual(self.service.store.task(identifier)['job']['status'],'held')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
         self.assertTrue(swapped);self.assertEqual(retained.read_bytes(),b'synthetic-photo');self.assertEqual(path.read_bytes(),b'synthetic-photo')
 
     @unittest.skipUnless(os.name=='posix' and hasattr(os,'mkfifo'),'POSIX FIFO required')
-    def test_snapshot_refuses_fifo_without_waiting_for_writer(self):
+    def test_source_refuses_fifo_without_waiting_for_writer(self):
         path=self.root/'synthetic-fifo';os.mkfifo(path)
         script=('import json,sys\nfrom processing.guarded_native_engine import GuardedNativeEngine\n'
                 'from processing.odx_smoke_worker import SmokeError\n'
-                'try: GuardedNativeEngine._snapshot(json.loads(sys.stdin.read()))\n'
+                'try: GuardedNativeEngine._open_source(json.loads(sys.stdin.read()))\n'
                 'except SmokeError: print("held")\n'
                 'else: raise SystemExit(2)\n')
         result=subprocess.run([sys.executable,'-c',script],input=json.dumps({'path':str(path),'bytes':1,'sha256':'a'*64}),
@@ -176,3 +193,95 @@ class GuardedDispatchTests(unittest.TestCase):
             self.service.store.prepare_guarded_engine_upload(job['id'],job['claimToken'],'photo.jpg',str(uuid.uuid4()),expected_generation=2)
         with self.queue._db() as db:
             self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='viewer_engine_upload_intents'").fetchone())
+
+    def test_large_file_streams_in_bounded_chunks(self):
+        size=17*1024*1024+19
+        class Synthetic:
+            def __init__(self):self.remaining=size
+            def read(self,n):
+                count=min(n,self.remaining);self.remaining-=count;return b'x'*count
+        identifier=str(uuid.uuid4());self.service.initialize(identifier,'Synthetic',[],None,'production')
+        self.service.upload(identifier,'large.jpg',Synthetic(),size);self.service.commit(identifier)
+        requests=[];original=guarded_native_engine._read_source
+        def read(fd,count):requests.append(count);return original(fd,count)
+        with patch('processing.guarded_native_engine._read_source',side_effect=read):self.service.tick()
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['job']['status'],task['phase']),('running','processing'))
+        self.assertTrue(requests);self.assertLessEqual(max(requests),65536)
+        with self.queue._db() as db:
+            row=db.execute('SELECT upload_id,bytes,sha256,state FROM viewer_engine_upload_intents').fetchone()
+            self.assertEqual((row['bytes'],row['state']),(size,'complete'));upload=row['upload_id']
+        boundary='processing-'+uuid.UUID(upload).hex
+        prefix=(f'--{boundary}\r\nContent-Disposition: form-data; name="images"; filename="large.jpg"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
+        suffix=f'\r\n--{boundary}--\r\n'.encode();digest=hashlib.sha256(prefix);remaining=size
+        while remaining:
+            count=min(65536,remaining);digest.update(b'x'*count);remaining-=count
+        digest.update(suffix)
+        self.assertEqual(self.large_wire,(len(prefix)+size+len(suffix),0,digest.hexdigest()))
+
+    def test_slow_source_deadline_holds_and_stops_sender(self):
+        identifier=self.submit();engine=self.service.engines['cluster']
+        engine.guard.binding=replace(engine.guard.binding,deadline_seconds=.15)
+        original=guarded_native_engine._read_source;first=[]
+        def slow(fd,count):
+            if not first:first.append(True);time.sleep(.35)
+            return original(fd,count)
+        with patch('processing.guarded_native_engine._read_source',side_effect=slow):self.service.tick()
+        self.assertTrue(first);task=self.service.store.task(identifier)
+        self.assertEqual((task['job']['status'],task['phase']),('held','held'))
+        self.assertEqual(engine._unreaped,[])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+
+    def test_source_short_read_holds_without_retry(self):
+        identifier=self.submit();engine=self.service.engines['cluster']
+        with patch('processing.guarded_native_engine._read_source',return_value=b''):self.service.tick()
+        self.assertEqual(self.service.store.task(identifier)['job']['status'],'held')
+        self.assertEqual(engine._unreaped,[])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+        calls=len(self.calls);self.service.tick();self.assertEqual(len(self.calls),calls)
+
+    def test_unexpected_final_read_failure_holds(self):
+        identifier=self.submit();original=guarded_native_engine._read_source
+        def read(fd,count):
+            if count==1:raise RuntimeError('injected final read failure')
+            return original(fd,count)
+        with patch('processing.guarded_native_engine._read_source',side_effect=read):self.service.tick()
+        self.assertEqual(self.service.store.task(identifier)['job']['status'],'held')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+
+    def test_early_backend_response_holds_and_stops_sender(self):
+        size=17*1024*1024
+        class Synthetic:
+            def __init__(self):self.remaining=size
+            def read(self,n):
+                count=min(n,self.remaining);self.remaining-=count;return b'x'*count
+        identifier=str(uuid.uuid4());self.service.initialize(identifier,'Synthetic',[],None,'production')
+        self.service.upload(identifier,'large.jpg',Synthetic(),size);self.service.commit(identifier)
+        self.early_upload=True;engine=self.service.engines['cluster'];self.service.tick()
+        self.assertEqual(self.service.store.task(identifier)['job']['status'],'held')
+        self.assertEqual(engine._unreaped,[])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+
+    def test_thread_start_failure_closes_owned_fds(self):
+        identifier=self.submit();job=self.queue.claim({'workerId':'viewer-dispatch','nodeId':'cluster','profiles':['odm-viewer-v1']})
+        self.service.store.update(identifier,stage='running',phase='init_pending',node_id='cluster',engine_uuid=str(uuid.uuid4()),claim_token=job['claimToken'])
+        engine=self.service.engines['cluster'];task=self.service.store.task(identifier);engine.initialize(task)
+        self.service.store.update(identifier,phase='upload_pending');item=self.service.store.task(identifier)['files'][0]
+        opened=[];sockets=[];open_source=engine._open_source;socketpair=socket.socketpair
+        def capture_open(value):
+            result=open_source(value);opened.append(result[0]);return result
+        def capture_pair():
+            result=socketpair();sockets.extend(result);return result
+        with patch.object(engine,'_open_source',side_effect=capture_open),patch('processing.guarded_native_engine.socket.socketpair',side_effect=capture_pair),patch('processing.guarded_native_engine.threading.Thread.start',side_effect=RuntimeError('injected')):
+            with self.assertRaises(RuntimeError):engine.upload(task['engine_uuid'],item)
+        self.assertEqual(len(opened),1);self.assertEqual([sock.fileno() for sock in sockets],[-1,-1])
+        with self.assertRaises(OSError):os.fstat(opened[0])
+        with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'prepared')
