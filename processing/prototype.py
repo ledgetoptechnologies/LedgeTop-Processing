@@ -389,7 +389,13 @@ class Queue(Maintenance):
 
     @classmethod
     def _transfer_admission_clear(cls, db):
-        """Do not admit new work while any started transfer is unresolved."""
+        """Fail closed on a recovery hold or unresolved started transfer.
+
+        Checked inside the caller's SQLite transaction even if no optional
+        AdmissionDrain object is installed. It does not fence external writers.
+        """
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='coordinator_recovery_hold' LIMIT 1").fetchone():
+            return False
         try:
             cls._has_attested_started_transfer(db, None)
         except TransferJournalUnqualified:

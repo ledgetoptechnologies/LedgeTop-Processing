@@ -69,7 +69,8 @@ class AdmissionDrain:
         row = db.execute('SELECT authority_id,closed,generation FROM coordinator_admission WHERE singleton=1').fetchone()
         if row is None or row[0] != self.queue.authority_id or row[1] not in (0, 1) or type(row[2]) is not int or not 0 <= row[2] <= 2**53-1:
             raise AdmissionClosed()
-        return bool(row[1]) or self._recovery_held(db)
+        recovery_held=self._recovery_held(db)
+        return bool(row[1]) or recovery_held
 
     @contextmanager
     def admit(self):
