@@ -94,12 +94,19 @@ class ActualContentionTests(unittest.TestCase):
                 def handle(inner, method, route, request_headers, request_body, *, protected_transport):
                     target = worker if route.startswith('/ltds/worker/v1/') else public
                     return target.handle(method,route,request_headers,request_body,protected_transport=protected_transport)
-            server = create_reference_http_server(API(),'127.0.0.1',0)
-            thread = threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.01})
-            thread.start()
-            ledger_db = sqlite3.connect(':memory:')
-            ledger_db.row_factory = sqlite3.Row
+            server = None
+            thread = None
+            started = False
+            ledger_db = None
             try:
+                server = create_reference_http_server(API(),'127.0.0.1',0)
+                # Track and join actual handler threads, not only serve_forever.
+                server.daemon_threads = False
+                server.block_on_close = True
+                thread = threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.01})
+                thread.start(); started = True
+                ledger_db = sqlite3.connect(':memory:')
+                ledger_db.row_factory = sqlite3.Row
                 driver = object.__new__(ReferenceDriver)
                 driver.origin = 'http://127.0.0.1:' + str(server.server_port)
                 driver._bearer = 'synthetic-worker-token'
@@ -131,8 +138,8 @@ class ActualContentionTests(unittest.TestCase):
                 connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
                 try:
                     connection.request('POST',path,body=wire,headers=headers)
-                    lost = connection.getresponse()
-                    self.assertEqual(lost.status,200)
+                    discarded_response = connection.getresponse()
+                    self.assertEqual(discarded_response.status,200)
                 finally: connection.close()
                 connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
                 try:
@@ -176,9 +183,15 @@ class ActualContentionTests(unittest.TestCase):
                 self.assertEqual(ledger_db.execute('SELECT COUNT(*) FROM receipts').fetchone()[0],2)
             finally:
                 locker.rollback()
-                ledger_db.close()
-                server.shutdown(); server.server_close(); thread.join(timeout=3)
-                self.assertFalse(thread.is_alive())
+                if ledger_db is not None: ledger_db.close()
+                if server is not None:
+                    if started: server.shutdown()
+                    handlers = list(server._threads) if isinstance(server._threads, list) else []
+                    server.server_close()
+                    if started:
+                        thread.join(timeout=3)
+                        self.assertFalse(thread.is_alive())
+                    self.assertTrue(all(not handler.is_alive() for handler in handlers))
         finally:
             locker.rollback(); locker.close(); keeper.close()
 
