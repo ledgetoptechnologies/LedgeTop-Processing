@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,20 @@ class V2ClientJournalCandidateTests(unittest.TestCase):
         with self.assertRaises(journal.JournalHeld):self.client.start_once(self.value['requestId'],self.value['deliveryId'])
         changed=copy.deepcopy(self.value);changed['deliveryId']=base64.urlsafe_b64encode(b'y'*32).decode().rstrip('=')
         with self.assertRaises(journal.JournalHeld):self.client.prepare(journal._encode(changed).encode())
+    def test_changed_persisted_identity_cannot_start_dispatch(self):
+        self.client.prepare(self.raw)
+        request=self.value['requestId'];delivery=self.value['deliveryId']
+        for table,column in (('v2_requests','request_hash'),('v2_requests','canonical'),('v2_deliveries','admission')):
+            with self.subTest(column=column):
+                with sqlite3.connect(self.client.path) as db:
+                    previous=db.execute(f'SELECT {column} FROM {table}').fetchone()[0]
+                    db.execute(f'UPDATE {table} SET {column}=?',('changed',))
+                with self.assertRaisesRegex(journal.JournalHeld,'persisted dispatch identity changed'):
+                    self.client.start_once(request,delivery)
+                with sqlite3.connect(self.client.path) as db:
+                    self.assertEqual(db.execute('SELECT state FROM v2_deliveries').fetchone()[0],'prepared')
+                    db.execute(f'UPDATE {table} SET {column}=?',(previous,))
+        self.client.start_once(request,delivery)
     def test_unknown_requires_newer_same_ledger_evidence_and_no_retry(self):
         self.client.prepare(self.raw);self.client.start_once(self.value['requestId'],self.value['deliveryId'])
         unknown=self.record('unknown');signature=journal._mac(self.secret,journal.DOMAIN,unknown)

@@ -108,6 +108,18 @@ class V2ClientJournal:
             self._attest(db)
             if db.execute('SELECT 1 FROM v2_adoptions WHERE request_id=? LIMIT 1',(request_id,)).fetchone():
                 raise JournalHeld('v2 original authority has been superseded')
+            row=db.execute('''SELECT d.admission,d.state,r.request_hash,r.canonical FROM v2_deliveries d
+                JOIN v2_requests r ON r.request_id=d.request_id
+                WHERE d.request_id=? AND d.delivery_id=?''',(request_id,delivery_id)).fetchone()
+            if row is None or row['state']!='prepared':raise JournalHeld('v2 delivery requires reconciliation')
+            try:
+                admission,digest=contract.parse_admission(row['admission'].encode('ascii'))
+                canonical=dict(admission);canonical.pop('deliveryId')
+                valid=(admission['requestId']==request_id and admission['deliveryId']==delivery_id
+                    and digest==row['request_hash'] and _encode(canonical)==row['canonical'])
+            except Exception:
+                valid=False
+            if not valid:raise JournalHeld('v2 persisted dispatch identity changed')
             if db.execute("UPDATE v2_deliveries SET state='dispatch_started' WHERE request_id=? AND delivery_id=? AND state='prepared'",(request_id,delivery_id)).rowcount!=1:
                 raise JournalHeld('v2 delivery requires reconciliation')
 

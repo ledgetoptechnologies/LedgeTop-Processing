@@ -1,5 +1,10 @@
 # Disabled v2 client journal: prototype boundary
 
+Before recording dispatch, the journal revalidates its persisted admission,
+request hash, canonical binding and delivery identity in the same transaction.
+This catches inconsistent local records; it does not fence coordinated malicious
+rewrites, restored databases, old binaries or external writers.
+
 The client persists a canonical original request binding and distinct delivery
 identity before any future network operation. Dispatch is one-way: once marked
 started, the same delivery cannot be sent again, including after a crash before
