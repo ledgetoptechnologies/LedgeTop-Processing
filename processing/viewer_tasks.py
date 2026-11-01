@@ -31,6 +31,17 @@ class ArchiveClaimHeld(Conflict):
     """An archive capture claim is already held by an unknown writer."""
 
 
+# Experimental opt-in only. Qualification requires a real old-writer fence.
+INTAKE_JOURNAL_QUALIFIED = False
+INTAKE_JOURNAL_DDL = """CREATE TABLE viewer_intake_journal_v1 (
+    operation TEXT PRIMARY KEY, uuid TEXT NOT NULL, generation INTEGER NOT NULL,
+    name_key TEXT NOT NULL, directory TEXT NOT NULL, temporary TEXT NOT NULL,
+    final TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT,
+    state TEXT NOT NULL CHECK(state IN ('prepared','sealed','committed')),
+    UNIQUE(uuid,generation,name_key), UNIQUE(directory,temporary), UNIQUE(directory,final))"""
+
+INTAKE_INDEX_DDL = "CREATE INDEX viewer_intake_unfinished_v1 ON viewer_intake_journal_v1(uuid,generation) WHERE state!='committed'"
+
 class InputRecoveryRequired(Conflict):
     """Input files and database metadata need offline inspection."""
 
@@ -123,7 +134,7 @@ class TaskStore:
                         file['name_key'],file['name'],file['path'],file['bytes'],file['sha256']))
             return {'state':'prepared'}
 
-    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3, *, input_free_floor=None):
+    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3, *, input_free_floor=None, intake_journal=False):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
             raise ValueError('positive input limit required')
         self.queue = queue
@@ -139,6 +150,17 @@ class TaskStore:
         if input_free_floor is not None and (type(input_free_floor) is not int or input_free_floor<0):
             raise ValueError('invalid input free-space floor')
         self.input_free_floor=input_free_floor
+        if type(intake_journal) is not bool or (intake_journal and
+                (not INTAKE_JOURNAL_QUALIFIED or input_free_floor is None)):
+            raise ValueError('intake journal not qualified')
+        self.intake_journal=intake_journal
+        self._intake_reconciled=set()
+        if intake_journal:
+            with self.queue._db() as db:
+                schema=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_journal_v1' AND type='table'").fetchone()
+                index=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_unfinished_v1' AND type='index'").fetchone()
+                if schema is None or schema[0]!=INTAKE_JOURNAL_DDL or index is None or index[0]!=INTAKE_INDEX_DDL:
+                    raise InputRecoveryRequired('intake schema requires offline migration')
         self._lock = threading.RLock()
         self._archive_locks_lock = threading.Lock()
         self._archive_locks = {}
@@ -217,6 +239,21 @@ class TaskStore:
         # must fence all other writers; this local scan alone is not a fence.
         if self.input_free_floor is None:
             return
+        if self.intake_journal:
+            schema=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_journal_v1' AND type='table'").fetchone()
+            index=db.execute("SELECT sql FROM sqlite_master WHERE name='viewer_intake_unfinished_v1' AND type='index'").fetchone()
+            if schema is None or schema[0]!=INTAKE_JOURNAL_DDL or index is None or index[0]!=INTAKE_INDEX_DDL:
+                raise InputRecoveryRequired('intake schema changed')
+            if db.execute("SELECT 1 FROM viewer_intake_journal_v1 WHERE uuid=? AND generation=? AND state!='committed' LIMIT 1",(row['uuid'],row['generation'])).fetchone():
+                raise InputRecoveryRequired('intake journal needs inspection')
+            if (row['uuid'],row['generation']) in self._intake_reconciled:
+                return
+            if db.execute("""SELECT 1 FROM viewer_intake_journal_v1 j
+                LEFT JOIN viewer_files f ON f.uuid=j.uuid AND f.name_key=j.name_key
+                WHERE j.uuid=? AND j.generation=? AND j.state='committed'
+                  AND (f.uuid IS NULL OR f.path!=j.final OR f.bytes!=j.bytes OR f.sha256!=j.sha256)
+                LIMIT 1""",(row['uuid'],row['generation'])).fetchone():
+                raise InputRecoveryRequired('committed intake metadata differs')
         directory = self._directory(row)
         registered = {file['path'] for file in db.execute(
             'SELECT path FROM viewer_files WHERE uuid=?', (row['uuid'],))}
@@ -233,6 +270,8 @@ class TaskStore:
                     actual.add(entry.name)
         if actual != registered:
             raise InputRecoveryRequired('input files need inspection')
+        if self.intake_journal:
+            self._intake_reconciled.add((row['uuid'],row['generation']))
 
     @staticmethod
     def _job(db, row):
@@ -443,8 +482,43 @@ class TaskStore:
                     raise InputLimitExceeded('task input ceiling exceeded')
                 if existing is None and count >= 100000:
                     raise ValueError('task file count ceiling exceeded')
+            if self.intake_journal and existing is not None:
+                if existing['bytes'] != length:
+                    raise Conflict('input basename already contains different bytes')
+                digest=hashlib.sha256(); remaining=length
+                while remaining:
+                    chunk=stream.read(min(1024*1024,remaining))
+                    if not isinstance(chunk,bytes) or not chunk or len(chunk)>remaining:
+                        raise ValueError('input stream length differs')
+                    digest.update(chunk);remaining-=len(chunk)
+                if stream.read(1):raise ValueError('input stream length differs')
+                with self.queue._db() as db:
+                    self._reservation(db,identifier,environment,capability)
+                    current=self._row(db,identifier)
+                    saved=db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',(identifier,key)).fetchone()
+                    if current['stage']!='uploading' or current['job_id'] or current['generation']!=row['generation'] or saved is None or saved['bytes']!=length or saved['sha256']!=digest.hexdigest():
+                        raise Conflict('input basename already contains different bytes')
+                return {'success':True,'uuid':identifier}
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
+            journal_operation = None
+            if self.intake_journal:
+                journal_operation = secrets.token_hex(16)
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    current=self._row(db, identifier)
+                    self._reservation(db,identifier,environment,capability)
+                    if current['stage']!='uploading' or current['job_id'] or current['generation']!=row['generation'] or current['directory']!=row['directory']:
+                        raise InputRecoveryRequired('task identity changed')
+                    # Existing committed names use the established digest retry path.
+                    previous=db.execute('SELECT 1 FROM viewer_files WHERE uuid=? AND name_key=?',(identifier,key)).fetchone()
+                    if previous is None:
+                        try:
+                            db.execute("INSERT INTO viewer_intake_journal_v1 VALUES(?,?,?,?,?,?,?,?,NULL,'prepared')",(journal_operation,identifier,row['generation'],key,row['directory'],temporary.name,final.name,length))
+                        except sqlite3.IntegrityError:
+                            raise InputRecoveryRequired('input identity requires inspection') from None
+                    else:
+                        journal_operation=None
             try:
                 descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 digest = hashlib.sha256()
@@ -465,6 +539,12 @@ class TaskStore:
                     output.flush()
                     os.fsync(output.fileno())
                 value = digest.hexdigest()
+                if journal_operation:
+                    sync_directory(directory)
+                    with self.queue._db() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        if db.execute("UPDATE viewer_intake_journal_v1 SET sha256=?,state='sealed' WHERE operation=? AND state='prepared'",(value,journal_operation)).rowcount!=1:
+                            raise InputRecoveryRequired('input intent changed')
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
                     self._reservation(db,identifier,environment,capability)
@@ -488,10 +568,12 @@ class TaskStore:
                         (identifier, key, filename, final.name, length, value,
                          int(Path(filename).suffix.lower() in PHOTO_SUFFIXES)))
                     db.execute('UPDATE viewer_tasks SET updated_at=CURRENT_TIMESTAMP WHERE uuid=?', (identifier,))
+                    if journal_operation and db.execute("UPDATE viewer_intake_journal_v1 SET state='committed' WHERE operation=? AND state='sealed' AND sha256=?",(journal_operation,value)).rowcount!=1:
+                        raise InputRecoveryRequired('input intent changed')
                 return {'success': True, 'uuid': identifier}
             finally:
                 # Only this invocation's randomly named, explicitly owned tmp file.
-                if temporary.exists():
+                if journal_operation is None and temporary.exists():
                     temporary.unlink()
 
     @staticmethod

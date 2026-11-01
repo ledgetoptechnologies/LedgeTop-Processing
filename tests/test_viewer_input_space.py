@@ -106,6 +106,44 @@ class ViewerInputSpaceTests(unittest.TestCase):
         with tempfile.TemporaryFile(dir=self.spool) as output:
             with patch('processing.input_space.os.posix_fallocate',side_effect=OSError(errno.ENOSPC,'synthetic')):
                 with self.assertRaises(InputSpaceUnavailable):input_space.reserve_input(output.fileno(),1,0)
+    def journal_store(self):
+        from processing import viewer_tasks
+        with self.q._db() as db:
+            db.execute(viewer_tasks.INTAKE_JOURNAL_DDL)
+            db.execute(viewer_tasks.INTAKE_INDEX_DDL)
+        with patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True):
+            return TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
+
+    def test_opt_in_journal_upload_and_exact_retry(self):
+        store=self.journal_store();self.facade.service.store=store
+        body=multipart([('images','a.jpg',b'first')]);req=self.request(body)
+        self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
+        with self.q._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_intake_journal_v1').fetchone()[0],'committed')
+        retry=self.request(body);self.assertTrue(self.facade.handle(retry));self.assertEqual(retry.status,200)
+        self.assertEqual(len(store.task(self.identifier)['files']),1)
+
+    def test_opt_in_journal_rename_failure_holds_after_reopen(self):
+        from processing import viewer_tasks
+        store=self.journal_store();self.facade.service.store=store
+        original=viewer_tasks.sync_directory
+        def fail_after_rename(path):
+            if list(Path(path).glob('input-*')):raise OSError('synthetic after rename')
+            return original(path)
+        req=self.request(multipart([('images','a.jpg',b'payload')]))
+        with patch('processing.viewer_tasks.sync_directory',side_effect=fail_after_rename):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503)
+        with self.q._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_intake_journal_v1').fetchone()[0],'sealed')
+        with patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True):
+            restarted=TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
+        self.facade.service.store=restarted
+        retry=self.request(multipart([('images','a.jpg',b'payload')]))
+        self.assertTrue(self.facade.handle(retry));self.assertEqual(retry.status,503)
+        self.assertEqual(json.loads(retry.wfile.getvalue())['error'],'input_recovery_required')
+        self.assertEqual([p.read_bytes() for p in self.root.rglob('input-*')],[b'payload'])
+
     def test_restart_after_rename_failure_holds_and_retains_unregistered_bytes(self):
         body=multipart([('images','image.jpg',b'crash-window-bytes')]); req=self.request(body)
         with patch('processing.viewer_tasks.sync_directory',side_effect=OSError('synthetic crash window')):
