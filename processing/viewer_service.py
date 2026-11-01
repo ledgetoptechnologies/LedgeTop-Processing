@@ -190,6 +190,7 @@ class ViewerService:
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._archive_wake = threading.Event()
         self._thread = None
         self._unexpected_dispatch_failure = threading.Event()
         self._backoff = {}
@@ -314,9 +315,15 @@ class ViewerService:
         deferred = 0
         while not self._stop.is_set():
             try:
+                # Clear before the durable scan so a completion racing with the
+                # scan cannot be lost between observing no work and waiting.
+                self._archive_wake.clear()
+                # close() may have set both events immediately before clear().
+                if self._stop.is_set():
+                    break
                 candidate = self.store.next_unarchived_success(self._archive_cursor)
                 if candidate is None:
-                    self._stop.wait(2)
+                    self._archive_wake.wait(2)
                     continue
                 previous_cursor = self._archive_cursor
                 self._archive_cursor, identifier = candidate
@@ -950,6 +957,8 @@ class ViewerService:
         result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                   'environment': task['environment'], 'cancelled': code == 50}
         self.store.complete_engine_task(task, status, result)
+        if status == 'succeeded':
+            self._archive_wake.set()
 
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
@@ -975,6 +984,8 @@ class ViewerService:
                         or job['result'] != expected):
                     raise Conflict('terminal Viewer identity requires inspection')
                 self.store.complete_engine_task(task, job['status'], expected)
+                if job['status'] == 'succeeded':
+                    self._archive_wake.set()
             for job in jobs:
                 if job['profile'] != VIEWER_PROFILE or job['status'] not in ('running', 'held'):
                     continue
@@ -1084,6 +1095,7 @@ class ViewerService:
 
     def close(self):
         self._stop.set()
+        self._archive_wake.set()
         if self._thread:
             self._thread.join(timeout=10)
         if self._archive_thread:
