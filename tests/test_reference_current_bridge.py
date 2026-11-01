@@ -1,9 +1,9 @@
-import hashlib,json,os,select,ssl,subprocess,sys,threading,time,unittest
+import hashlib,io,json,os,select,ssl,subprocess,sys,tempfile,threading,time,unittest,zipfile
 from contextlib import contextmanager
+from unittest.mock import patch
 from pathlib import Path
 from tests.test_reference_joint_flow import ReferenceJointFlowTests as _JointFlow, WORKER, VIEWER, READER, PINS as OLD_PINS
 from tests.test_reference_sender import spawn_fixture_sender
-from ops.native_node_fixture import ARCHIVE
 
 PINS={
 'referenceAcceptance.js':'c9971cd7c61bcc12ba9ea20487fb32c03ae0d04bb05661ebea17b1fb97d84ce4',
@@ -37,6 +37,26 @@ class CurrentBridgeTests(_JointFlow):
         for name,digest in PINS.items():
             if hashlib.sha256((self.staged/'server'/name).read_bytes()).hexdigest()!=digest:
                 raise ValueError('staged_viewer_source_mismatch')
+        server=self.staged/'server';digest=hashlib.sha256();files=[]
+        for path in sorted(server.rglob('*')):
+            if path.is_symlink():raise ValueError('staged_source_symlink')
+            if path.is_file():
+                relative=path.relative_to(server).as_posix()
+                digest.update((relative+'\0'+hashlib.sha256(path.read_bytes()).hexdigest()+'\n').encode());files.append(relative)
+        if len(files)!=165 or digest.hexdigest()!='d5d5c0680da0e186034b6de2ad0d9974471fadd7b3f5d0506379fe04f5e99a2f':
+            raise ValueError('staged_server_tree_changed')
+        out=io.BytesIO()
+        with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as archive:
+            for name,data in {
+                'odm_orthophoto/odm_orthophoto.tif':'synthetic',
+                'odm_texturing/odm_textured_model_geo.glb':'glb',
+                'odm_texturing/odm_textured_model_geo.obj':'mtllib model.mtl\nv 0 0 0\n',
+                'odm_texturing/model.mtl':'newmtl surface\nmap_Kd texture.jpg\n',
+                'odm_texturing/texture.jpg':'texture','entwine_pointcloud/ept.json':'{}',
+                '3d_tiles/model/tileset.json':'{}'}.items():archive.writestr(name,data)
+        self.archive=out.getvalue()
+        for target in ('ops.native_node_fixture.ARCHIVE','tests.test_reference_joint_flow.ARCHIVE'):
+            active=patch(target,self.archive);active.start();self.addCleanup(active.stop)
         super().setUp()
 
     def test_crashed_coordinator_then_current_viewer_read_no_acceptance(self):
@@ -49,7 +69,7 @@ class CurrentBridgeTests(_JointFlow):
         self.assertEqual(private['phase'],'awaiting_acceptance')
         self.assertEqual(len(self.completion_envelopes),1)
         manifest=private['resultManifest'];self.assertEqual(len(manifest['objects']),1)
-        self.assertEqual(manifest['objects'][0]['sha256'],hashlib.sha256(ARCHIVE).hexdigest())
+        self.assertEqual(manifest['objects'][0]['sha256'],hashlib.sha256(self.archive).hexdigest())
         self.assert_retained_before_acceptance()
         self.servers[self.control_origin][2]();self.queue.close()
         port=int(self.control_origin.rsplit(':',1)[1]);marker=self.root/'child-commit.json'
@@ -57,6 +77,7 @@ class CurrentBridgeTests(_JointFlow):
         code=r"""
 import json,os,ssl,sys,time
 from contextlib import contextmanager
+from unittest.mock import patch
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore
 from processing.reference_control import ReferenceControlAPI
@@ -114,14 +135,35 @@ print('READY',flush=True);server.serve_forever()
             expected={'jobId':self.job,'generation':private['generation'],'environment':'staging',
                 'inputManifestSha256':private['manifestSha256'],'pipelineDigest':private['pipelineDigest'],
                 'resultManifestSha256':manifest['resultManifestSha256'],'requestedEngines':['odm']}
-            work=self.root/'current-bridge';work.mkdir()
-            env=dict(os.environ,VIEWER_STAGED_ROOT=str(self.staged),NODE_EXTRA_CA_CERTS=str(self.cert))
-            request=json.dumps(dict(work=str(work),origin=self.control_origin,token=VIEWER,expected=expected)).encode()
-            proc=subprocess.run(['node',str(Path(__file__).with_name('reference_current_bridge_synthetic.cjs'))],
-                                input=request,env=env,capture_output=True,timeout=15)
+            # Root-created synthetic configuration; custody executes as a separate unprivileged UID.
+            lab=Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix='viewer-model-')));os.chmod(lab,0o755)
+            custody=lab/'custody';custody.mkdir(mode=0o700);os.chown(custody,12345,12345)
+            lockroot=lab/'custody-lock';lockroot.mkdir(mode=0o755)
+            lockfile=lockroot/'viewer-source.lock';lockfile.touch(mode=0o660);os.chown(lockfile,0,12345);os.chmod(lockfile,0o660)
+            def identity(path):
+                fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC)
+                try:
+                    info=os.fstat(fd)
+                    fields=Path('/proc/self/fdinfo/'+str(fd)).read_text().splitlines()
+                    mount=next(line.split(':',1)[1].strip() for line in fields if line.startswith('mnt_id:'))
+                    return dict(dev=str(info.st_dev),ino=str(info.st_ino),mountId=mount)
+                finally:os.close(fd)
+            helper=Path('/usr/bin/python3.11')
+            configdir=Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix='ref-config-',dir='/opt')))
+            os.chmod(configdir,0o755);configpath=configdir/'custody.json'
+            configuration=dict(schemaVersion=1,environment='staging',custodyUid=12345,custodyGid=12345,
+                allowedGroupIds=[12345],custodyPath=str(custody),lockRootPath=str(lockroot),helperPath=str(helper),
+                helperSha256=hashlib.sha256(helper.read_bytes()).hexdigest(),custody=identity(custody),
+                lockRoot=identity(lockroot),lock=identity(lockfile))
+            configpath.write_text(json.dumps(configuration));os.chown(configpath,0,12345);os.chmod(configpath,0o640)
+            env=dict(os.environ,VIEWER_STAGED_ROOT=str(self.staged),NODE_EXTRA_CA_CERTS=str(self.cert),NODE_PATH='/src/apps/viewer/node_modules')
+            request=json.dumps(dict(custody=str(custody),configPath=str(configpath),origin=self.control_origin,token=VIEWER,expected=expected)).encode()
+            proc=subprocess.run(['/usr/bin/setpriv','--reuid=12345','--regid=12345','--clear-groups','--no-new-privs',
+                                 'node',str(Path(__file__).with_name('reference_current_bridge_synthetic.cjs'))],
+                                input=request,env=env,capture_output=True,timeout=30)
             self.assertEqual(proc.returncode,0,proc.stderr.decode())
-            answer=json.loads(proc.stdout);self.assertEqual(answer['sha256'],hashlib.sha256(ARCHIVE).hexdigest())
-            self.assertEqual(answer['acknowledgement'],'pending');self.assertEqual(answer['pending'],1);self.assertEqual(answer['acceptancePosts'],0)
+            answer=json.loads(proc.stdout);self.assertEqual(answer['sha256'],hashlib.sha256(self.archive).hexdigest())
+            self.assertEqual(answer['acknowledgement'],'pending');self.assertEqual(answer['pending'],1);self.assertEqual(answer['acceptancePosts'],0);self.assertIn(answer['modelStatus'],('staged','ready'))
             self.assertFalse((self.root/'ack-posts').exists())
             self.assert_retained_before_acceptance()
         finally:
