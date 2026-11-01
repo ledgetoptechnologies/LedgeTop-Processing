@@ -18,6 +18,7 @@ import errno
 import hashlib
 import hmac
 import json
+import math
 import re
 import select
 import socket
@@ -133,13 +134,16 @@ class Binding:
     management_secret: str = field(repr=False)
     backend_secret: str = field(repr=False)
     deadline_seconds: float = 5
+    upload_deadline_seconds: float = 300
 
     def __post_init__(self):
         if (self.node_id not in ('cluster', 'main') or type(self.generation) is not int
                 or self.generation < 1 or type(self.backend_port) is not int
                 or not 1024 <= self.backend_port <= 65535
                 or type(self.deadline_seconds) not in (int, float)
-                or not 0 < self.deadline_seconds <= 10):
+                or not 0 < self.deadline_seconds <= 10
+                or type(self.upload_deadline_seconds) not in (int, float)
+                or not 0 < self.upload_deadline_seconds <= 900):
             raise AdmissionError('fixed binding and bounded deadline required')
         secrets = (self.coordinator_secret, self.management_secret, self.backend_secret)
         if (any(not isinstance(v, str) or not 32 <= len(v) <= 4096
@@ -533,7 +537,13 @@ class EngineIngressGuard:
             return result
 
     def stream_bound_upload(self, target, pairs, source, *, completion=None):
-        deadline = time.monotonic() + self.binding.deadline_seconds
+        from .guarded_native_engine import SenderCompletion
+        now = time.monotonic()
+        if (type(completion) is not SenderCompletion or type(completion.deadline) not in (int,float)
+                or not math.isfinite(completion.deadline) or not now < completion.deadline
+                or completion.deadline > now + self.binding.upload_deadline_seconds):
+            raise AdmissionError('bounded sender deadline required')
+        deadline = completion.deadline
         with self.queue.pin_transfer(deadline):
             return self._stream_bound_upload(target, pairs, source, completion=completion, deadline=deadline)
 

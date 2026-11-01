@@ -26,9 +26,11 @@ pin during the network exchange, then rechecks identity and completes both
 journals in another short transaction. Synthetic tests pause HTTP and demonstrate
 another Queue read and SQLite write transaction can proceed while conflicting
 completion, task updates and Queue close are refused. A dropped response remains
-held without replay. Pin acquisition consumes the existing operation deadline,
-although releasing it can wait for the lifecycle mutex. No longer upload deadline
-is enabled by this change.
+held without replay. Pin acquisition consumes the operation deadline, although
+releasing it can wait for the lifecycle mutex. The inactive candidate uses a
+separate bounded per-file upload deadline (default 300 seconds, maximum 900),
+while bounded control requests keep their shorter deadline. Timeout is not proof
+that the remote engine rejected any bytes, so the durable hold is retained.
 
 Bound uploads also require the dispatcher's exact in-process sender completion
 object bound to the same socket and upload ID; the producer must report verified

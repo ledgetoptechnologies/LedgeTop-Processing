@@ -158,6 +158,15 @@ class GuardedDispatchTests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM engine_ingress_uploads').fetchone()[0],0)
         finally:left.close();right.close()
 
+    def test_upload_has_separate_longer_deadline_than_control_request(self):
+        identifier=self.submit();engine=self.service.engines['cluster']
+        engine.guard.binding=replace(engine.guard.binding,deadline_seconds=.15,upload_deadline_seconds=2)
+        def observe():
+            if self.calls and '/upload/' in self.calls[-1]:time.sleep(.3)
+        self.observer=observe
+        self.service.tick();self.observer=None
+        self.assertEqual(self.service.store.task(identifier)['phase'],'processing')
+
     def test_node_unavailable_during_upload_preserves_uncertain_intent(self):
         identifier=self.submit()
         def observe():
@@ -296,7 +305,7 @@ class GuardedDispatchTests(unittest.TestCase):
 
     def test_slow_source_deadline_holds_and_stops_sender(self):
         identifier=self.submit();engine=self.service.engines['cluster']
-        engine.guard.binding=replace(engine.guard.binding,deadline_seconds=.15)
+        engine.guard.binding=replace(engine.guard.binding,upload_deadline_seconds=.15)
         original=guarded_native_engine._read_source;first=[]
         def slow(fd,count):
             if not first:first.append(True);time.sleep(.35)
