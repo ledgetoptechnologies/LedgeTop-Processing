@@ -848,6 +848,34 @@ class ViewerServiceTests(unittest.TestCase):
             self.service.tick()
             self.assertEqual(send.call_count,1);upload.assert_not_called()
 
+    def test_unbound_http_commit_ack_reconciles_same_task_without_duplicate(self):
+        from http.server import ThreadingHTTPServer
+        from processing.synthetic_engine import SyntheticEngine,handler_for
+        from processing.viewer_service import NativeEngine
+        class UnboundCommit(SyntheticEngine):
+            def commit(self,identifier):
+                super().commit(identifier)
+                return {}
+        backend=UnboundCommit(1000,3600);token='synthetic-only-token-123456'
+        server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(backend,token))
+        thread=threading.Thread(target=server.serve_forever);thread.start()
+        try:
+            self.engines['cluster']=NativeEngine('http://127.0.0.1:'+str(server.server_port),token)
+            identifier=self.submit();self.service.tick()
+            task=self.task(identifier)
+            self.assertEqual(task['phase'],'commit_pending')
+            self.assertEqual(task['error'],'commit_ack_uncertain')
+            self.assertEqual(backend.commits,1)
+            engine_uuid=task['engine_uuid']
+            backend.tasks[engine_uuid]['code']=40
+            self.service.tick()
+            self.assertEqual(self.service.info(identifier)['status']['code'],40)
+            self.assertEqual(self.task(identifier)['engine_uuid'],engine_uuid)
+            self.assertEqual(backend.commits,1)
+        finally:
+            server.shutdown();server.server_close();thread.join(3)
+            self.assertFalse(thread.is_alive())
+
     def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
         identifier = self.submit()
         self.engines['cluster'].fail = 'commit'

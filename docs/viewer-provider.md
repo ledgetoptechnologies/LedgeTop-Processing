@@ -83,7 +83,9 @@ The public task UUID maps durably to a unique private engine UUID per reset.
 Each mutation has a durable intent. Lost init/upload acknowledgements hold the
 shared slot for inspection instead of starting another expensive job. Lost
 commit acknowledgements reconcile by status reads for that exact engine UUID;
-commit is never replayed. After restart, a known processing job stays publicly
+commit is never replayed. An empty or unbound JSON commit response is uncertain
+and follows the same reconciliation path. Commit response compatibility with
+each deployed engine version still requires qualification. After restart, a known processing job stays publicly
 running while its exact result is reconciled. Read outages back off to60seconds.
 
 Running cancellation retains the slot until the engine reports a terminal

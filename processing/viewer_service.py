@@ -119,7 +119,8 @@ class NativeEngine:
                                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
             result = json.loads(raw)
         if (not isinstance(result, dict) or 'error' in result or ('success' in result and result['success'] is not True)
-                or ('uuid' in result and result['uuid'] != identifier)):
+                or ('uuid' in result and result['uuid'] != identifier)
+                or (action == 'commit' and result.get('success') is not True and result.get('uuid') != identifier)):
             raise SmokeError('engine mutation acknowledgment uncertain')
         return result
 

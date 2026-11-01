@@ -30,6 +30,15 @@ class NativeEngineWireTests(unittest.TestCase):
             with patch.object(engine.client,'json',return_value=ack):
                 engine.initialize(task);engine.action('commit',identifier)
 
+    def test_unbound_commit_ack_is_uncertain(self):
+        engine=NativeEngine('http://127.0.0.1:3001');identifier=str(uuid.uuid4())
+        for ack in ({},{'message':'ok'},{'uuid':str(uuid.uuid4())},{'success':False}):
+            with self.subTest(ack=ack),patch.object(engine.client,'json',return_value=ack):
+                with self.assertRaises(SmokeError):engine.action('commit',identifier)
+        for ack in ({'success':True},{'uuid':identifier}):
+            with self.subTest(ack=ack),patch.object(engine.client,'json',return_value=ack):
+                self.assertEqual(engine.action('commit',identifier),ack)
+
     def test_real_http_init_upload_commit_cancel_and_archive(self):
         token = 'synthetic-engine-credential-' + 'x' * 32
         backend = SyntheticEngine(1000, 3600)
