@@ -7,6 +7,7 @@ from ops import run_native_cross_rehearsal as wrapper
 class WrapperSafety(unittest.TestCase):
     def test_unpinned_refuses_before_git_or_docker(self):
         with patch.object(sys,'argv',['fixture','--viewer-repo','.','--processing-repo','.']), \
+             patch.object(wrapper,'VIEWER_COMMIT_PIN',None), \
              patch.object(wrapper,'capture',side_effect=AssertionError('must not inspect')), \
              self.assertRaisesRegex(SystemExit,'not been pinned'):
             wrapper.main()

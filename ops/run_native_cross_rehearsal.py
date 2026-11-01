@@ -3,8 +3,8 @@ import argparse,hashlib,json,os,secrets,subprocess,sys,tempfile,threading,time
 from pathlib import Path
 
 PROCESSING_BASE='42da801be55b686e43a78e35b88d32de89f8c5b4'
-FIXTURE_COMMIT='8b4f0785e43374a6da114f0c90e93616153b8a28'
-VIEWER_COMMIT_PIN=None  # Set only after Viewer owner supplies and review verifies the stable head.
+FIXTURE_COMMIT='85c7a37ef36c431b1b69bd7b7d12bbcb4800f1a3'
+VIEWER_COMMIT_PIN='3fd097cadeeb1f3ac6fb2354a031798252c731f2'
 IMAGE='sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668'
 LABEL='org.openai.codex.native-cross'
 MAX_ARCHIVE_BYTES=536870912
@@ -40,7 +40,12 @@ def unpack(archive,dest,expected,allowed):
       if not b:raise RuntimeError('truncated archive')
       out.write(b);remaining-=len(b)
 unpack('/input/processing.tar',root/'processing',os.environ['PROCESSING_SHA'],('processing','tests/native_viewer_cross_server.py','tests/native_viewer_cross_client.cjs'))
-unpack('/input/viewer.tar',root/'viewer',os.environ['VIEWER_SHA'],('apps/viewer/server','packages/shared'))
+unpack('/input/viewer.tar',root/'viewer',os.environ['VIEWER_SHA'],('apps/viewer','packages/shared'))
+# ESM package resolution does not use NODE_PATH. This private fixture-only
+# link points to dependencies supplied by the pinned read-only test image.
+modules=Path('/src/apps/viewer/node_modules')
+if not modules.is_dir() or not (modules/'geotiff').is_dir():raise RuntimeError('fixture image dependencies unavailable')
+os.symlink(str(modules),str(root/'viewer/apps/viewer/node_modules'),target_is_directory=True)
 os.chdir(root/'processing');os.environ['VIEWER_SOURCE']=str(root/'viewer');os.environ['PYTHONPATH']=str(root/'processing')
 os.execv('/usr/bin/python3',['python3','tests/native_viewer_cross_server.py'])
 '''
@@ -97,10 +102,10 @@ def main():
     container=None;attempted=False
     try:
         psha=archive(processing,FIXTURE_COMMIT,['processing','tests/native_viewer_cross_server.py','tests/native_viewer_cross_client.cjs'],directory/'processing.tar')
-        vsha=archive(viewer,VIEWER_COMMIT_PIN,['apps/viewer/server','packages/shared'],directory/'viewer.tar')
+        vsha=archive(viewer,VIEWER_COMMIT_PIN,['apps/viewer','packages/shared'],directory/'viewer.tar')
         print('Archive SHA256:',psha,vsha,flush=True)
         attempted=True
-        container=capture(['docker','create','--pull=never','--name',name,'--label',LABEL+'='+run,'--network=none','--cpus=1.5','--memory=768m','--pids-limit=128','--read-only','--user=10001:10001','--log-opt','max-size=1m','--log-opt','max-file=1','--tmpfs','/tmp:rw,nosuid,nodev,size=512m,mode=1777','--mount',f'type=bind,src={directory},dst=/input,readonly','--env','PROCESSING_SHA='+psha,'--env','VIEWER_SHA='+vsha,'--entrypoint','/usr/bin/python3',IMAGE,'-c',BOOTSTRAP],timeout=30)
+        container=capture(['docker','create','--pull=never','--name',name,'--label',LABEL+'='+run,'--network=none','--cpus=1.5','--memory=768m','--pids-limit=128','--read-only','--user=10001:10001','--log-driver','json-file','--log-opt','max-size=1m','--log-opt','max-file=1','--tmpfs','/tmp:rw,nosuid,nodev,size=16g,mode=1777','--mount',f'type=bind,src={directory},dst=/input,readonly','--env','PROCESSING_SHA='+psha,'--env','VIEWER_SHA='+vsha,'--entrypoint','/usr/bin/python3',IMAGE,'-c',BOOTSTRAP],timeout=30)
         if len(container)!=64 or any(c not in '0123456789abcdef' for c in container):raise RuntimeError('container identity uncertain')
         with (directory/'container.id').open('x') as out:out.write(container+'\n');out.flush();os.fsync(out.fileno())
         def owned():
