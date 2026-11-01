@@ -105,8 +105,7 @@ the existing resolve action with `workerStopped:true` and a note. The flag is an
 operator assertion, not an automated physical termination check. Resolved work
 is reported failed; retained files are not deleted.
 
-Running cancellation retains the slot until the engine reports a terminal
-state. Queued cancellation prevents dispatch. `remove` hides/resets a public
+Queued cancellation prevents dispatch. `remove` hides/resets a public
 task but retains prior inputs, execution history and result copies. Download
 GETs may be retried; successful downloads do not delete outputs. The current
 Viewer adapter has no successful-ingestion acknowledgement. Verified cleanup
