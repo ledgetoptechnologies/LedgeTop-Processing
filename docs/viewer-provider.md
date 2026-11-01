@@ -88,7 +88,11 @@ and follows the same reconciliation path. Commit response compatibility with
 each deployed engine version still requires qualification. Mutation responses
 must use a single valid Content-Length or chunked framing and deliver the full
 body; a legitimate close-delimited response is conservatively uncertain until
-engine HTTP framing is qualified. After restart, a known processing job stays publicly
+engine HTTP framing is qualified. Native engine status reads also require
+unambiguous complete HTTP framing and reject duplicate JSON fields and
+non-finite numbers; malformed responses retain the slot and are retried.
+Legitimate close-delimited status responses will be treated as unavailable
+until their framing is qualified. After restart, a known processing job stays publicly
 running while its exact result is reconciled. Read outages back off to60seconds.
 
 Running cancellation retains the slot until the engine reports a terminal
