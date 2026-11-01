@@ -216,6 +216,63 @@ def verify_grant_evidence(grant_json, signature, secret):
         raise BrokerHeld('signed grant evidence authentication failed') from None
 
 
+def inspect_coordinator_held_grant(queue, witness, operation_id, secret, *, timeout_seconds=3):
+    """Read exact authenticated old-epoch evidence under the new local lease.
+
+    This is an inactive coordinator-side diagnostic. It does not contact a
+    node, inspect an engine, prove exclusive access, adopt an epoch or release
+    work. The caller must keep signing keys private and qualify them separately.
+    """
+    from .prototype import Queue, VIEWER_PROFILE
+    from .authority_lease import MARKER_DDL, LeaseUnavailable
+    from .broker_intent_fence import attest, IntentFenceError
+    if (QUALIFIED is not True or type(queue) is not Queue or type(witness) is not LocalCoordinatorAuthority
+            or witness.queue is not queue or not _uuid(operation_id)
+            or type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=5):
+        raise BrokerHeld('coordinator inspection unavailable')
+    deadline=time.monotonic()+timeout_seconds
+    try:
+        with queue.pin_transfer(deadline),witness.authority_lease.held(deadline):
+            witness._check()
+            with queue._db() as db:
+                db.execute('BEGIN')
+                marker=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone()
+                if (marker is None or marker['sql']!=MARKER_DDL or
+                        db.execute('SELECT COUNT(*) FROM coordinator_authority_lease WHERE singleton=1 AND required=1').fetchone()[0]!=1):
+                    raise BrokerHeld('authority marker unavailable')
+                try:attest(db)
+                except IntentFenceError:raise BrokerHeld('broker intent fence unavailable') from None
+                evidence=db.execute('SELECT grant_json,signature FROM broker_grant_evidence WHERE operation_id=?',(operation_id,)).fetchone()
+                intent=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(operation_id,)).fetchone()
+                if evidence is None or intent is None:raise BrokerHeld('held grant evidence unavailable')
+                grant=verify_grant_evidence(evidence['grant_json'],evidence['signature'],secret)
+                if (grant['operationId']!=operation_id or grant['authorityId']!=queue.authority_id
+                        or grant['coordinatorEpoch']==queue.startup_id or not _uuid(grant['coordinatorEpoch'])
+                        or intent['job_id']!=grant['jobId'] or intent['state']!='started'
+                        or intent['grant_hash']!=hashlib.sha256(_json(grant)).hexdigest()):
+                    raise BrokerHeld('held grant identity differs')
+                job=db.execute('SELECT * FROM jobs WHERE id=?',(grant['jobId'],)).fetchone()
+                tasks=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(grant['jobId'],)).fetchall()
+                if (job is None or len(tasks)!=1 or job['status']!='held' or job['held_reason']!='coordinator_restart'
+                        or job['profile']!=VIEWER_PROFILE or job['node_id']!=grant['nodeId']
+                        or job['environment']!=grant['environment'] or job['worker_id']!='viewer-dispatch'):
+                    raise BrokerHeld('held job identity differs')
+                task=tasks[0]
+                if (task['engine_uuid']!=grant['engineTaskId']
+                        or task['node_id']!=grant['nodeId'] or task['environment']!=grant['environment']
+                        or task['generation']!=grant['taskGeneration']):
+                    raise BrokerHeld('held task identity differs')
+                token=task['claim_token']
+                if (type(token) is not str or not token.isascii() or not 32<=len(token)<=128
+                        or type(job['claim_hash']) is not str
+                        or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
+                    raise BrokerHeld('held task claim differs')
+                witness._check()
+                return {'grant':grant,'intentState':'started','jobState':'held',
+                        'nodeState':'unverified','engineState':'unverified','authorizesRelease':False}
+    except LeaseUnavailable:raise BrokerHeld('coordinator lease unavailable') from None
+
+
 def _sender_confirmation(grant, secret):
     return hmac.new(secret, b'ledgetop-node-upload-verified-v1\0' + _json(grant), hashlib.sha256).hexdigest()
 

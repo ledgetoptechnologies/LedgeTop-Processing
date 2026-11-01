@@ -404,6 +404,32 @@ os._exit(27)
                 self.assertEqual(db.execute("SELECT state FROM broker_intents WHERE operation_id=?",(grant['operationId'],)).fetchone()[0],'started')
         finally:restarted.close()
 
+    def test_coordinator_restart_inspects_authenticated_grant_without_release(self):
+        from processing.authority_lease import acquire
+        grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
+        def lost(*args):original(*args);raise OSError('synthetic response loss')
+        with patch.object(self.adapter,'exchange',side_effect=lost):
+            with self.assertRaises(OSError):self.broker.mutate(grant,signature,self.body)
+        with self.assertRaises(b.BrokerHeld):
+            b.inspect_coordinator_held_grant(self.owner_queue,b.LocalCoordinatorAuthority(self.owner_queue),grant['operationId'],self.secret)
+        self.broker.close();self.owner_lease.close();self.owner_queue.close()
+        lease=acquire(self.root/'owner-lease',self.root/'owner-queue')
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            restarted.authority_lease=lease;witness=b.LocalCoordinatorAuthority(restarted)
+            evidence=b.inspect_coordinator_held_grant(restarted,witness,grant['operationId'],self.secret)
+            self.assertEqual(evidence['grant'],grant)
+            self.assertEqual((evidence['nodeState'],evidence['engineState']),('unverified','unverified'))
+            self.assertFalse(evidence['authorizesRelease'])
+            self.assertEqual(restarted.get(self.job)['status'],'held')
+            with self.assertRaises(b.BrokerHeld):
+                b.inspect_coordinator_held_grant(restarted,witness,grant['operationId'],b'wrong-synthetic-key-'*3)
+            self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+            lease.close()
+            with self.assertRaises(b.BrokerHeld):
+                b.inspect_coordinator_held_grant(restarted,witness,grant['operationId'],self.secret)
+        finally:restarted.close();lease.close()
+
     def test_lost_response_survives_broker_restart_without_replay(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
         def lost(*args):original(*args);raise OSError('synthetic response loss')
