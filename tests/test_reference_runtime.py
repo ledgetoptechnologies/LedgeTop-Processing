@@ -406,6 +406,114 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 release.set();submit.join(6)
                 if closer is not None:closer.join(6)
 
+    @unittest.skipUnless(os.name=='posix','synthetic openssl fixture requires POSIX')
+    def test_real_tls_shared_admission_close_restart_and_replay(self):
+        cert=self.root/'ephemeral-cert.pem';key=self.root/'ephemeral-key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes',
+            '-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost',
+            '-addext','subjectAltName=IP:127.0.0.1'],check=True,timeout=15,
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        key.chmod(0o600)
+        self.value['listener'].update(certificate=str(cert),privateKey=str(key),clientCA=str(cert))
+        self.value['viewerBearers']['production']='reference-production-'+'p'*32
+        self.write_config()
+        operator='operator-'+'o'*32
+        config=replace(self.config,reference_config_path=str(self.path),admission_drain_enabled=True,
+                       prototype_operator_token=operator)
+        tls_context=ssl.create_default_context(cafile=str(cert))
+        stages=[];release=threading.Event();workers=[]
+        def free_port():
+            with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
+        def start(current):
+            self.value['listener']['port']=free_port();self.write_config()
+            with patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True):handler=make_handler(current)
+            native=None
+            try:
+                handler.reference_listener.api.discover=lambda:self.snapshot
+                native=ThreadingHTTPServer(('127.0.0.1',0),handler)
+                lifecycle=CoordinatorService(native,handler);stop=threading.Event();result=[]
+                thread=threading.Thread(target=lambda:result.append(lifecycle.run(stop)))
+                thread.start()
+            except BaseException:
+                if native is not None:native.server_close()
+                handler.reference_listener.close();handler.viewer_service.close();handler.prototype_queue.close()
+                raise
+            stages.append((stop,thread,result))
+            deadline=time.monotonic()+5
+            while not lifecycle.healthy():
+                if not thread.is_alive() or time.monotonic()>=deadline:raise AssertionError('synthetic coordinator startup')
+                time.sleep(.02)
+            return handler,native.server_port,self.value['listener']['port']
+        def call(port,method,path,token,body=None,*,tls=False):
+            conn=(http.client.HTTPSConnection('127.0.0.1',port,timeout=5,context=tls_context) if tls
+                  else http.client.HTTPConnection('127.0.0.1',port,timeout=5))
+            try:
+                payload=None if body is None else json.dumps(body).encode()
+                headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'}
+                conn.request(method,path,body=payload,headers=headers)
+                response=conn.getresponse();data=json.loads(response.read());return response.status,data
+            finally:conn.close()
+        def stop_stage():
+            stop,thread,result=stages[-1];stop.set();thread.join(8)
+            self.assertFalse(thread.is_alive());self.assertEqual(result,[0])
+        try:
+            handler,native_port,tls_port=start(config)
+            staging=self.value['viewerBearers']['staging'];production=self.value['viewerBearers']['production']
+            worker=self.value['workers']['cluster']['bearer']
+            code,caps=call(tls_port,'GET','/ltds/v1/capabilities',staging,tls=True);self.assertEqual(code,200)
+            self.assertEqual(call(tls_port,'GET','/ltds/v1/capabilities','wrong',tls=True)[0],401)
+            fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
+            fixture['capabilityFingerprint']=caps['capabilityFingerprint']
+            fixture['pipeline']['odm']['optionsFingerprint']=caps['engines']['odm']['optionsFingerprint']
+            status,first=call(tls_port,'POST','/ltds/v1/jobs',staging,fixture,tls=True);self.assertEqual(status,201)
+            second=copy.deepcopy(fixture);second['submissionId']=str(uuid.uuid4())
+            gate=handler.prototype_queue.admission_drain;state=gate.status();entered=threading.Event();responses=[];closed=[]
+            original=handler.reference_listener.store._submit
+            def blocked(value):
+                entered.set()
+                if not release.wait(8):raise RuntimeError('synthetic deadline')
+                return original(value)
+            close_body=dict(closed=True,requestId=str(uuid.uuid4()),expectedGeneration=state['generation'],
+                            expectedClosed=False,expectedAuthorityId=state['authorityId'])
+            with patch.object(handler.reference_listener.store,'_submit',side_effect=blocked):
+                submit=threading.Thread(target=lambda:responses.append(call(tls_port,'POST','/ltds/v1/jobs',staging,second,tls=True)))
+                submit.start();workers.append(submit)
+                self.assertTrue(entered.wait(4))
+                closer=threading.Thread(target=lambda:closed.append(call(native_port,'POST','/v1/prototype/admission-drain',operator,close_body)))
+                closer.start();workers.append(closer)
+                self.assertTrue(gate._closing.wait(4));self.assertTrue(closer.is_alive())
+                for token in (staging,production):self.assertEqual(call(tls_port,'POST','/ltds/v1/jobs',token,fixture,tls=True)[0],503)
+                self.assertEqual(call(tls_port,'POST','/ltds/v1/jobs','wrong',fixture,tls=True)[0],401)
+                self.assertEqual(call(native_port,'POST','/task/new/init?token='+config.viewer_token,'unused',{})[0],503)
+                self.assertEqual(call(native_port,'POST','/task/new/init?token=wrong','unused',{})[0],401)
+                release.set();submit.join(8);closer.join(8)
+                self.assertFalse(submit.is_alive());self.assertFalse(closer.is_alive())
+                self.assertEqual(responses[0][0],201);self.assertEqual(closed[0][0],200)
+            claim={'jobId':first['jobId'],'claimRequestId':'tls-closed-claim'}
+            self.assertEqual(call(tls_port,'POST','/ltds/worker/v1/claim',worker,claim,tls=True)[0],409)
+            self.assertEqual(call(tls_port,'POST','/ltds/worker/v1/claim','wrong',claim,tls=True)[0],401)
+            stop_stage()
+            handler,native_port,tls_port=start(replace(config,admission_start_closed=True))
+            self.assertTrue(handler.prototype_queue.admission_drain.status()['closed'])
+            self.assertEqual(call(tls_port,'GET','/ltds/v1/jobs/'+first['jobId'],staging,tls=True)[1]['status'],'queued')
+            self.assertEqual(call(tls_port,'POST','/ltds/v1/jobs',staging,fixture,tls=True)[0],503)
+            self.assertEqual(call(native_port,'POST','/task/new/init?token='+config.viewer_token,'unused',{})[0],503)
+            state=handler.prototype_queue.admission_drain.status()
+            opened=dict(closed=False,requestId=str(uuid.uuid4()),expectedGeneration=state['generation'],
+                        expectedClosed=True,expectedAuthorityId=state['authorityId'])
+            self.assertEqual(call(native_port,'POST','/v1/prototype/admission-drain',operator,opened)[0],200)
+            status,replay=call(tls_port,'POST','/ltds/v1/jobs',staging,fixture,tls=True)
+            self.assertEqual((status,replay['jobId']),(200,first['jobId']))
+            self.assertEqual(len(handler.prototype_queue.list()),2)
+            stop_stage()
+        finally:
+            release.set()
+            for stop,_,_ in stages:stop.set()
+            for worker_thread in workers:worker_thread.join(9)
+            for _,thread,_ in stages:thread.join(9)
+            if any(thread.is_alive() for thread in workers) or any(thread.is_alive() for _,thread,_ in stages):
+                raise AssertionError('synthetic admission test thread did not exit')
+
     def test_actual_catalog_changes_fingerprints_and_stale_admission_is_rejected(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
         self.addCleanup(queue.close)

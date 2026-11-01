@@ -23,6 +23,9 @@ handler construction refuse an unqualified enable before constructing state.
 These changes must not be enabled on
 a deployed coordinator until its admission coverage, transport, external
 writer exclusion, nonempty migration and rollback have been separately
-qualified. The focused reference tests use synthetic data and mocked TLS
-assembly while exercising the reference adapter; native requests in the race
-test use loopback HTTP. They do not prove live network or engine fencing.
+qualified. The reference adapter tests use synthetic data and mocked TLS
+assembly. A separate local integration test uses an ephemeral self-signed
+certificate and the actual reference TLS listener together with native
+loopback HTTP to test authentication, close, in-flight admission, restart and
+replay. The fixture patches qualification only for synthetic construction;
+it does not test mutual TLS, live deployment, real workers or engine fencing.
