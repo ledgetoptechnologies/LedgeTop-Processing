@@ -7,12 +7,14 @@ No filesystem paths are part of the worker wire protocol.
 import hmac
 import json
 import re
+import sqlite3
 from types import MappingProxyType
 
 from . import reference_protocol as protocol
 from .maintenance import Conflict
 from .reference_api import Response
 from .reference_transfer import validate_grant
+from .reference_sqlite import is_sqlite_contention
 
 
 PREFIX = "/ltds/worker/v1"
@@ -210,5 +212,10 @@ class ReferenceWorkerAPI:
             return self._error(409, "worker_conflict")
         except (ValueError, TypeError):
             return self._error(400, "invalid_request")
+        except sqlite3.OperationalError as error:
+            if (method == 'GET' and isinstance(path, str) and path.endswith('/acceptance')
+                    and is_sqlite_contention(error)):
+                return self._error(503, 'acceptance_store_busy')
+            return self._error(500, 'internal_error')
         except Exception:
             return self._error(500, "internal_error")
