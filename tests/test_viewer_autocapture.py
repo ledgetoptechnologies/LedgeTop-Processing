@@ -153,6 +153,14 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         qualification=patch('processing.config.ARCHIVE_REGISTRY_QUALIFIED',True)
         qualification.start();self.addCleanup(qualification.stop)
         self.fixture.config.viewer_archive_registry=True
+
+    def submit_completed_for_registry_test(self):
+        self.fixture.service=self.service
+        self.service._catalog=lambda:{'ready':True,'commonOptions':[dict(item) for item in self.fixture.option_catalog]}
+        self.service._selected_options=lambda _node:[dict(item) for item in self.fixture.option_catalog]
+        identifier=self.fixture.submit()
+        self.service.tick();self.fixture.finish(identifier);self.service.tick()
+        return identifier
     def setUp(self):
         self.fixture = fixtures.ViewerServiceTests('runTest')
         self.fixture.setUp()
@@ -343,6 +351,122 @@ with patch.object(s,'_publish_archive_metadata',side_effect=lambda *_:os.kill(os
         finally:
             barrier.abort()
             for thread in threads:thread.join(timeout=3)
+
+    def test_registry_capacity_preserves_recorded_and_unknown_after_restart(self):
+        self.service._archive_once(self.identifier)
+        historical=self.service.store.task(self.identifier);historical_path=Path(historical['archive_path']);historical_bytes=historical_path.read_bytes()
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        with patch('processing.viewer_tasks.ARCHIVE_REGISTRY_LIMIT',1):
+            recorded_id=self.submit_completed_for_registry_test()
+            self.service._archive_once(recorded_id)
+            recorded=self.service.store.task(recorded_id);recorded_path=Path(recorded['archive_path']);recorded_bytes=recorded_path.read_bytes()
+            rejected_id=self.submit_completed_for_registry_test()
+            rejected=self.service.store.task(rejected_id);directory=Path(rejected['directory'])
+            with self.assertRaisesRegex(Conflict,'registry capacity reached'):
+                self.service.download(rejected_id,automatic=True)
+            self.assertFalse((directory/'all.zip.intent').exists());self.assertFalse((directory/'all.zip.partial').exists())
+            self.service.close()
+            self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+            with self.service.download(recorded_id)[0] as stream:self.assertEqual(stream.read(),recorded_bytes)
+            with self.assertRaisesRegex(Conflict,'historical archive format requires inspection'):
+                self.service.download(self.identifier)
+            with self.assertRaisesRegex(Conflict,'registry capacity reached'):
+                self.service.download(rejected_id,automatic=True)
+            self.assertEqual(historical_path.read_bytes(),historical_bytes)
+            self.assertEqual(recorded_path.read_bytes(),recorded_bytes)
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_registry').fetchone()[0],1)
+            authority=self.queue.authority_id
+            self.service.close();self.queue.close();self.lease.close()
+            script=r'''
+import hashlib,sys
+from types import SimpleNamespace
+import processing.config as config
+import processing.viewer_tasks as tasks
+from processing.authority_lease import AuthorityLease
+from processing.maintenance import Conflict
+from processing.prototype import Queue
+from processing.viewer_service import ViewerService
+root,lease_dir,authority,recorded,historical,rejected,expected=sys.argv[1:]
+config.ARCHIVE_REGISTRY_QUALIFIED=True;tasks.ARCHIVE_REGISTRY_LIMIT=1
+q=Queue(root,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+q.authority_lease=AuthorityLease(lease_dir,authority)
+c=SimpleNamespace(prototype_state_dir=root,viewer_max_input_bytes=20*1024**3,viewer_max_archive_bytes=4*1024**2,viewer_archive_free_floor=1,viewer_archive_registry=True,local_node_url='http://127.0.0.1:1',local_node_token='',main_node_url='http://127.0.0.1:2',main_node_token='')
+s=ViewerService(q,c)
+try:
+ with s.download(recorded)[0] as stream:
+  assert hashlib.sha256(stream.read()).hexdigest()==expected
+ for identifier,reason in ((historical,'historical archive format requires inspection'),(rejected,'archive registry capacity reached')):
+  try:s.download(identifier,automatic=True)
+  except Conflict as error:assert str(error)==reason
+  else:raise AssertionError('expected hold')
+finally:s.close();q.authority_lease.close();q.close()
+'''
+            try:
+                import hashlib
+                result=subprocess.run([sys.executable,'-c',script,str(self.root/'state'),str(self.lease_dir),authority,recorded_id,self.identifier,rejected_id,hashlib.sha256(recorded_bytes).hexdigest()],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+                self.assertEqual(result.returncode,0)
+            finally:
+                self.queue=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+                self.lease=authority_lease.AuthorityLease(self.lease_dir,authority);self.queue.authority_lease=self.lease
+                self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+
+    def test_registry_last_capacity_slot_is_transactionally_exclusive(self):
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        second=self.submit_completed_for_registry_test()
+        tasks=[self.service.store.task(identifier) for identifier in (self.identifier,second)]
+        barrier=threading.Barrier(3);results=[]
+        def register(task):
+            try:
+                barrier.wait(timeout=3);self.service.store.archive_registry_check(task,register=True);results.append('inserted')
+            except Conflict as exc:results.append(str(exc))
+        with patch('processing.viewer_tasks.ARCHIVE_REGISTRY_LIMIT',1):
+            threads=[threading.Thread(target=register,args=(task,)) for task in tasks]
+            for thread in threads:thread.start()
+            try:
+                barrier.wait(timeout=3)
+                for thread in threads:thread.join(timeout=3)
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertCountEqual(results,['inserted','archive registry capacity reached'])
+                with self.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_registry').fetchone()[0],1)
+            finally:
+                barrier.abort()
+                for thread in threads:thread.join(timeout=3)
+
+    def test_existing_entries_remain_usable_when_already_over_limit(self):
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        second=self.submit_completed_for_registry_test()
+        tasks=[self.service.store.task(identifier) for identifier in (self.identifier,second)]
+        for task in tasks:self.assertTrue(self.service.store.archive_registry_check(task,register=True))
+        with patch('processing.viewer_tasks.ARCHIVE_REGISTRY_LIMIT',1):
+            for task in tasks:self.assertTrue(self.service.store.archive_registry_check(task,register=True))
+            self.service._archive_once(self.identifier)
+        archive=Path(self.service.store.task(self.identifier)['archive_path'])
+        self.assertEqual(archive.read_bytes(),self.engine_response)
+        with self.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_registry').fetchone()[0],2)
+
+    def test_invalid_new_registry_identity_is_not_inserted(self):
+        self.allow_registry_for_test()
+        self.service=ViewerService(self.queue,self.fixture.config,engines=self.fixture.engines,probe=self.fixture.probe)
+        task=self.service.store.task(self.identifier)
+        oversized=dict(task,generation=2**63)
+        with self.assertRaises(Conflict):self.service.store.archive_registry_check(oversized,register=True)
+        with self.queue._db() as db:
+            original=db.execute('SELECT result FROM jobs WHERE id=?',(task['job_id'],)).fetchone()[0]
+            result=json.loads(original);result['engineTaskId']='not-a-uuid'
+            db.execute('UPDATE viewer_tasks SET engine_uuid=? WHERE uuid=?',('not-a-uuid',self.identifier))
+            db.execute('UPDATE jobs SET result=? WHERE id=?',(json.dumps(result,sort_keys=True,separators=(',',':')),task['job_id']))
+        try:
+            invalid=self.service.store.task(self.identifier)
+            with self.assertRaisesRegex(Conflict,'identity requires inspection'):
+                self.service.store.archive_registry_check(invalid,register=True)
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_registry').fetchone()[0],0)
+        finally:
+            with self.queue._db() as db:
+                db.execute('UPDATE viewer_tasks SET engine_uuid=? WHERE uuid=?',(task['engine_uuid'],self.identifier))
+                db.execute('UPDATE jobs SET result=? WHERE id=?',(original,task['job_id']))
 
     def test_registry_rejects_unrecognized_schema_without_mutation(self):
         with self.queue._db() as db:

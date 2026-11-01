@@ -34,6 +34,9 @@ VIEWER_PROFILE = 'odm-viewer-v1'
 # Tombstones are retained while any delayed request can replay. This explicit
 # finite ceiling bounds authenticated storage use; do not silently purge.
 RESERVATION_LIMIT = 100000
+# Never retire identity evidence automatically. Existing entries remain usable
+# even when a previous version has already exceeded this admission ceiling.
+ARCHIVE_REGISTRY_LIMIT = 100000
 PHOTO_SUFFIXES = frozenset(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
 INPUT_SUFFIXES = PHOTO_SUFFIXES | frozenset(('.txt', '.json', '.csv'))
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._ -]{0,179}\Z')
@@ -630,6 +633,15 @@ class TaskStore:
                 return False
             if row['archive_path'] is not None:
                 raise Conflict('historical archive format requires inspection')
+            try:
+                checked_uuid(identity[0]);checked_uuid(identity[2]);checked_uuid(identity[4])
+                if (identity[3] not in self.queue.node_ids or identity[5] not in ('production','staging')
+                        or identity[1] > 2**63-1):
+                    raise ValueError()
+            except (TypeError, ValueError):
+                raise Conflict('archive registry identity requires inspection') from None
+            if db.execute('SELECT COUNT(*) FROM viewer_archive_registry').fetchone()[0] >= ARCHIVE_REGISTRY_LIMIT:
+                raise Conflict('archive registry capacity reached')
             db.execute('INSERT INTO viewer_archive_registry VALUES (?,?,?,?,?,?)',identity)
             return True
 

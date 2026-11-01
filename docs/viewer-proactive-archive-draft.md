@@ -52,7 +52,11 @@ qualified and enabled, it records the exact task generation and terminal job
 binding in SQLite before either manual capture writes or an automatic capture
 child starts. Recorded historical archives without a registry entry hold for
 inspection: no automatic legacy classification or approval mechanism exists.
-Registry history has no qualified retirement or aggregate row/byte quota.
+New registry entries are capped at 100,000, with canonical bounded identifiers;
+existing entries remain readable even when the cap is reached or exceeded.
+There is no qualified retirement, SQLite file/WAL byte quota, or reserved
+space. Registration counts existing rows inside its write transaction, so
+database latency at scale has not been qualified.
 Earlier binaries ignore the registry entirely; external writer exclusion,
 nonempty migration and rollback must be qualified before enabling it. The
 registry does not fence external writers or authenticate engine bytes.
