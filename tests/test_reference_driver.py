@@ -84,14 +84,30 @@ class EngineTransport:
         return response
 
 
+class RetainedSyntheticRoot:
+    """Owned test root that is never recursively deleted, even on setup failure."""
+    def __init__(self):
+        self.name = tempfile.mkdtemp(prefix='lt-worker-result-custody-')
+        print('RETAINED_SYNTHETIC_WORKER_ROOT', self.name, flush=True)
+
+    def cleanup(self):
+        pass
+
+
 class ReferenceDriverTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = (RetainedSyntheticRoot()
+                     if self._testMethodName == 'test_completed_worker_bytes_survive_coordinator_outage_and_worker_reopen'
+                     else tempfile.TemporaryDirectory())
         self.root = Path(self.temp.name)
         self.patches = []
         self.gate_patch = patch('processing.node_gate.canonical_gate_path', return_value=self.root / 'gate')
         self.gate_patch.start()
+        if isinstance(self.temp, RetainedSyntheticRoot):
+            self.addCleanup(self.gate_patch.stop)
         self.queue = Queue(self.root / 'queue', reference_enabled=True)
+        if isinstance(self.temp, RetainedSyntheticRoot):
+            self.addCleanup(self.queue.close)
         self.store = ReferenceStore(self.queue)
         self.fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
         self.api = ReferenceControlAPI(self.store, viewer_bearers={VIEWER: 'staging'},
@@ -220,11 +236,6 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertFalse(any(call[0]=='initialize' for call in self.transport.calls))
 
     def test_completed_worker_bytes_survive_coordinator_outage_and_worker_reopen(self):
-        # This test owns its synthetic root but deliberately retains it. The
-        # inherited fixture normally recursively removes TemporaryDirectory.
-        self.temp._finalizer.detach()
-        self.temp.cleanup = lambda: None
-        print('RETAINED_SYNTHETIC_WORKER_ROOT', self.root, flush=True)
         from processing.reference_results import ReferenceResults, ResultAuthorization
         now = [time.time()]
         self.outbox.clock = lambda: now[0]
