@@ -11,8 +11,9 @@ class IntakeOfflineMigrationTests(unittest.TestCase):
         self.addCleanup(lambda: print('retained synthetic migration root:',self.root,flush=True))
         self.db=sqlite3.connect(self.root/'synthetic.db')
         self.addCleanup(self.db.close)
-        self.db.execute('CREATE TABLE viewer_tasks(uuid TEXT PRIMARY KEY, generation INTEGER, removed INTEGER)')
+        self.db.execute('CREATE TABLE viewer_tasks(uuid TEXT PRIMARY KEY, generation INTEGER, removed INTEGER, directory TEXT, environment TEXT, stage TEXT, job_id TEXT)')
         self.db.execute('CREATE TABLE viewer_files(uuid TEXT, name_key TEXT, path TEXT, PRIMARY KEY(uuid,name_key))')
+        self.db.execute('CREATE TABLE viewer_incarnations(uuid TEXT, generation INTEGER)')
         self.db.commit()
     def install(self):
         with patch.object(migration,'QUALIFIED',True):
@@ -20,13 +21,13 @@ class IntakeOfflineMigrationTests(unittest.TestCase):
             migration.authorize_connection(self.db)
     def test_default_disabled_and_nonempty_refused_atomically(self):
         with self.assertRaises(migration.MigrationUnavailable):migration.install_empty_offline(self.db)
-        self.db.execute("INSERT INTO viewer_tasks VALUES('task',1,0)");self.db.commit()
+        self.db.execute("INSERT INTO viewer_tasks VALUES('task',1,0,'dir','production','uploading',NULL)");self.db.commit()
         with patch.object(migration,'QUALIFIED',True):
             with self.assertRaises(migration.MigrationUnavailable):migration.install_empty_offline(self.db)
         self.assertIsNone(migration._schema(self.db,'table','viewer_intake_journal_v1'))
     def test_legacy_connection_rejected_and_trigger_tamper_detected(self):
         self.install()
-        self.db.execute("INSERT INTO viewer_tasks VALUES('task',1,0)");self.db.commit()
+        self.db.execute("INSERT INTO viewer_tasks VALUES('task',1,0,'dir','production','uploading',NULL)");self.db.commit()
         legacy=sqlite3.connect(self.root/'synthetic.db');self.addCleanup(legacy.close)
         for sql in ("UPDATE viewer_tasks SET generation=2", "DELETE FROM viewer_tasks", "INSERT INTO viewer_files VALUES('task','a','input')"):
             with self.assertRaises(sqlite3.OperationalError):legacy.execute(sql)

@@ -28,6 +28,17 @@ for table, predicate in (
                     f'WHEN EXISTS(SELECT 1 FROM {table} WHERE {predicate}) '
                     "BEGIN SELECT RAISE(ABORT, 'existing intake identity'); END")
 
+TRIGGERS['viewer_intake_guard_generation_v1']=(
+    'CREATE TRIGGER viewer_intake_guard_generation_v1 BEFORE UPDATE ON viewer_tasks '
+    'WHEN (NEW.generation IS NOT OLD.generation OR NEW.directory IS NOT OLD.directory) AND ('
+    "OLD.removed IS NOT 1 OR NEW.removed IS NOT 0 OR typeof(OLD.generation) IS NOT 'integer' "
+    "OR NEW.generation IS NOT OLD.generation+1 OR NEW.directory IS OLD.directory "
+    "OR NEW.environment IS NOT OLD.environment OR NEW.stage IS NOT 'uploading' OR NEW.job_id IS NOT NULL "
+    "OR EXISTS(SELECT 1 FROM viewer_files WHERE uuid=OLD.uuid) "
+    "OR NOT EXISTS(SELECT 1 FROM viewer_incarnations WHERE uuid=OLD.uuid AND generation=OLD.generation) "
+    "OR EXISTS(SELECT 1 FROM viewer_intake_journal_v1 WHERE uuid=OLD.uuid AND generation=OLD.generation AND state!='committed')) "
+    "BEGIN SELECT RAISE(ABORT, 'invalid intake generation'); END")
+
 TRIGGERS['viewer_intake_guard_insert_v1']=(
     'CREATE TRIGGER viewer_intake_guard_insert_v1 BEFORE INSERT ON viewer_intake_journal_v1 '
     f"WHEN {AUTHORIZE}() IS NOT 1 OR NEW.state IS NOT 'prepared' OR NEW.sha256 IS NOT NULL "

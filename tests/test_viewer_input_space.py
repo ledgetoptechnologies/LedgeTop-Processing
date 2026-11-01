@@ -164,6 +164,36 @@ class ViewerInputSpaceTests(unittest.TestCase):
                     db.execute('INSERT OR REPLACE INTO viewer_files SELECT * FROM viewer_files WHERE uuid=?',(self.identifier,))
         self.assertEqual(Path(store.task(self.identifier)['files'][0]['path']).read_bytes(),b'original')
 
+    def test_guarded_remove_reinitialize_archives_generation_and_keeps_bytes(self):
+        store=self.journal_store();self.facade.service.store=store
+        req=self.request(multipart([('images','a.jpg',b'first-generation')]))
+        self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
+        old_path=Path(store.task(self.identifier)['files'][0]['path'])
+        store.remove(self.identifier)
+        store.initialize(self.identifier,'second',[],None,'production')
+        with self.q._db() as db:
+            row=store._row(db,self.identifier)
+            self.assertEqual((row['generation'],row['removed'],row['stage']),(2,0,'uploading'))
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_incarnations WHERE uuid=? AND generation=1',(self.identifier,)).fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM viewer_intake_journal_v1 WHERE uuid=? AND generation=1 AND state='committed'",(self.identifier,)).fetchone()[0],1)
+        self.assertEqual(old_path.read_bytes(),b'first-generation')
+        req=self.request(multipart([('images','b.jpg',b'second-generation')]))
+        self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
+        self.assertEqual(old_path.read_bytes(),b'first-generation')
+
+    def test_guarded_unfinished_generation_cannot_be_removed_or_reset(self):
+        import sqlite3
+        store=self.journal_store();self.facade.service.store=store
+        body=multipart([('images','a.jpg',b'first')]);req=self.request(body)
+        with patch('pathlib.Path.unlink',side_effect=OSError('synthetic unlink failure')):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503)
+        with self.assertRaises(InputRecoveryRequired):store.remove(self.identifier)
+        with self.q._db() as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE viewer_tasks SET generation=2,directory='changed' WHERE uuid=?",(self.identifier,))
+        self.assertEqual([p.read_bytes() for p in self.root.rglob('input-*')],[b'first'])
+
     def test_opt_in_journal_upload_and_exact_retry(self):
         store=self.journal_store();self.facade.service.store=store
         body=multipart([('images','a.jpg',b'first')]);req=self.request(body)

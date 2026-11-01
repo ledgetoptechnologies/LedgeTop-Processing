@@ -438,6 +438,7 @@ class TaskStore:
                 raise Conflict('task history limit reached')
             generation = row['generation'] + 1 if row is not None else 1
             if row is not None:
+                if self.intake_journal:self._check_input_recovery(db,row)
                 old_files = [dict(item) for item in db.execute(
                     'SELECT * FROM viewer_files WHERE uuid=? ORDER BY rowid', (identifier,))]
                 db.execute('''INSERT INTO viewer_incarnations(uuid,generation,job_id,metadata,files)
@@ -453,10 +454,20 @@ class TaskStore:
             directory.mkdir(mode=0o700)
             sync_directory(self.root)
             db.execute('DELETE FROM viewer_files WHERE uuid=?', (identifier,))
-            db.execute('''INSERT OR REPLACE INTO viewer_tasks
-                (uuid,generation,directory,name,options,outputs,environment,option_evidence_required)
-                VALUES(?,?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
-                                          options_text, outputs_text, environment, int(evidence_text is not None)))
+            if row is not None and self.intake_journal:
+                changed=db.execute('''UPDATE viewer_tasks SET generation=?,directory=?,name=?,options=?,outputs=?,
+                    environment=?,option_evidence_required=?,stage='uploading',phase='uploading',job_id=NULL,
+                    node_id=NULL,engine_uuid=NULL,claim_token=NULL,error=NULL,progress=0,output_lines='[]',
+                    archive_path=NULL,removed=0,created_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                    WHERE uuid=? AND generation=? AND removed=1''',
+                    (generation,directory_name,name,options_text,outputs_text,environment,int(evidence_text is not None),
+                     identifier,row['generation'])).rowcount
+                if changed!=1:raise InputRecoveryRequired('task generation changed')
+            else:
+                db.execute('''INSERT OR REPLACE INTO viewer_tasks
+                    (uuid,generation,directory,name,options,outputs,environment,option_evidence_required)
+                    VALUES(?,?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
+                                              options_text, outputs_text, environment, int(evidence_text is not None)))
             if evidence_text is not None:
                 db.execute('INSERT INTO viewer_option_evidence(uuid,generation,definitions,sha256) VALUES(?,?,?,?)',
                     (identifier,generation,evidence_text,hashlib.sha256(evidence_text.encode()).hexdigest()))
@@ -1196,6 +1207,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier, removed=True)
+            if self.intake_journal:self._check_input_recovery(db,row)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
                 raise Conflict('active engine task cannot be removed')
