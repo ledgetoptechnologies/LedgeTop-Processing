@@ -7,10 +7,12 @@ module performs no transfer, execution, token issuance or network requests.
 from dataclasses import dataclass, field
 import hmac
 import re
+import sqlite3
 from types import MappingProxyType
 
 from .maintenance import Conflict
 from . import reference_protocol as protocol
+from .reference_sqlite import is_sqlite_contention
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,11 @@ class ReferenceAPI:
             return self._error(400, "invalid_request")
         except Conflict:
             return self._error(409, "reference_conflict")
+        except sqlite3.OperationalError as error:
+            if (method == 'POST' and isinstance(path, str) and path.endswith('/acceptance')
+                    and is_sqlite_contention(error)):
+                return self._error(503, 'acceptance_store_busy')
+            return self._error(500, 'internal_error')
         except Exception:
             # Framework/listener must not turn internal exceptions into a body
             # containing paths, credentials or private worker metadata.
