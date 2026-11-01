@@ -28,6 +28,11 @@ terminal metadata acceptance path applies the same global collision-state
 check, and validates stored terminal receipts and failure metadata before a
 private relay. These checks preserve suspect rows and return the same inspection
 status; they do not authorize artifact cleanup for terminal failures.
+The worker driver recognizes the exact sanitized inspection body on HTTP 409,
+reports a held background job (also alongside active foreground work), and
+keeps its acceptance checkpoint. Other 409 responses retain their existing
+pending/conflict behavior. This is a status observation, not an independently
+durable operator alert; a future poll must re-observe the stored hold.
 
 The additional fields are backwards-compatible for consumers that tolerate
 unknown JSON fields. Strict consumers must update before using this candidate.

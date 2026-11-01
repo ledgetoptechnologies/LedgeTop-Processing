@@ -315,7 +315,21 @@ class ReferenceDriver:
             response = self._open(request, timeout=10)
         except HTTPError as error:
             status = error.code
-            error.close()
+            inspection = False
+            try:
+                if status == 409:
+                    raw = error.read(4097)
+                    if len(raw) <= 4096:
+                        try:
+                            inspection = p.decode_submission(raw) == {'error': 'stored_reference_inspection'}
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
+                raise DriverWait('coordinator_unavailable') from None
+            finally:
+                error.close()
+            if inspection:
+                raise DriverHeld('stored_reference_inspection') from None
             if status in (400, 401, 403, 404):
                 raise DriverHeld('control_request_rejected') from None
             if status == 409:
@@ -521,9 +535,14 @@ class ReferenceDriver:
             else:
                 try:
                     background = self._background()
+                except DriverHeld as error:
+                    background = ({'state': 'held', 'reason': 'stored_reference_inspection'}
+                                  if str(error) == 'stored_reference_inspection' else {'state': 'background_retry'})
                 except Exception:
                     background = {'state': 'background_retry'}
             result = self._step()
+            if background['state'] == 'held':
+                return background if result['state'] == 'idle' else {**result, 'background': background}
             return background if result['state'] == 'idle' and background['state'] == 'completed' else result
         except DriverHeld as error:
             return {'state': 'held', 'reason': str(error)}
@@ -552,7 +571,12 @@ class ReferenceDriver:
             data = json.loads(row['data'])
             claim = data['claim']
             kind = 'acceptance' if row['stage'] == 'awaiting_acceptance' else 'terminal-acceptance'
-            status, relayed = self._request('GET', '/jobs/' + row['job'] + '/' + kind, claim_token=claim['claimToken'])
+            try:
+                status, relayed = self._request('GET', '/jobs/' + row['job'] + '/' + kind, claim_token=claim['claimToken'])
+            except DriverHeld as error:
+                if str(error) == 'stored_reference_inspection':
+                    return {'state': 'held', 'reason': 'stored_reference_inspection', 'jobId': row['job']}
+                raise
             if status != 409:
                 if kind == 'acceptance':
                     accepted = self._apply_acceptance(row['job'], relayed['receipts'])['fullyAccepted']

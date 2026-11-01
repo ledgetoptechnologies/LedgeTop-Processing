@@ -14,7 +14,7 @@ from processing import reference_protocol as p
 from processing.reference_api import ReferenceAPI
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI
-from processing.reference_driver import DriverWait, ReferenceDriver
+from processing.reference_driver import DriverHeld, DriverWait, ReferenceDriver
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_http import create_reference_http_server
 from processing.scratch_policy import ScratchLedger
@@ -157,6 +157,9 @@ class ActualContentionTests(unittest.TestCase):
                 status, relayed = driver._request('GET','/jobs/job-1/acceptance',claim_token='claim')
                 self.assertEqual((status,relayed['fullyAccepted']), (200,True))
                 self.assertEqual(len(relayed['receipts']),2)
+                # An ordinary authenticated conflict retains its prior pending
+                # semantics; it is not an inspection classification.
+                self.assertEqual(driver._request('GET','/jobs/job-1/transfer-grant',claim_token='claim'),(409,None))
 
                 # Apply the returned receipts through the actual worker and
                 # scratch-ledger methods, backed by an in-memory test ledger.
@@ -204,6 +207,20 @@ class ActualContentionTests(unittest.TestCase):
                 keeper.commit()
                 held=worker.handle('GET',worker_path,worker_headers,protected_transport=True)
                 self.assertEqual((held.status,held.body),(409,{'error':'stored_reference_inspection'}))
+                with self.assertRaises(DriverHeld) as driver_held:
+                    driver._request('GET','/jobs/job-1/acceptance',claim_token='claim')
+                self.assertEqual(str(driver_held.exception),'stored_reference_inspection')
+                self.assertNotIn('claim',str(driver_held.exception))
+                ledger_db.execute('CREATE TABLE driver_jobs(job TEXT,stage TEXT,data TEXT,background_checked INTEGER,created INTEGER)')
+                ledger_db.execute('INSERT INTO driver_jobs VALUES(?,?,?,?,?)',('job-1','awaiting_acceptance',
+                    json.dumps({'claim':{'claimToken':'claim'}}),0,1));ledger_db.commit()
+                driver._db=transaction;driver._state_owner=None;driver._lock=threading.Lock()
+                driver._combined_policy_initial=None;driver._step=lambda:{'state':'idle'}
+                driver.engine_cleanup=None;driver.cleanup_executor=None
+                reported=driver.step()
+                self.assertEqual(reported,{'state':'held','reason':'stored_reference_inspection','jobId':'job-1'})
+                self.assertEqual(ledger_db.execute('SELECT stage FROM driver_jobs').fetchone()[0],'awaiting_acceptance')
+                self.assertNotIn('claim',repr(reported))
                 self.assertEqual(keeper.execute("SELECT receipt_json FROM reference_acceptances WHERE receipt_id='bad-local'").fetchone()[0],'{')
                 # Malformed stored result metadata is a server-side hold on
                 # both routes, never reported as malformed client input.
