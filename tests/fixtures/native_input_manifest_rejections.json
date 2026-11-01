@@ -1,0 +1,63 @@
+{
+  "schema": "native-odm-input-v1-candidate",
+  "cases": [
+    {
+      "name": "duplicate-key",
+      "body": "{\"id\":\"attempt-0001\",\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1,\"sha256\":\"b5477bbe9dded1cd6a77b1370087d46e165da435f3505a214b4dde5c22917628\",\"totalBytes\":13}",
+      "expected": "reject"
+    },
+    {
+      "name": "floating-integer",
+      "body": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1.0,\"sha256\":\"b5477bbe9dded1cd6a77b1370087d46e165da435f3505a214b4dde5c22917628\",\"totalBytes\":13}",
+      "expected": "reject"
+    },
+    {
+      "name": "exponent-integer",
+      "body": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1e0,\"sha256\":\"b5477bbe9dded1cd6a77b1370087d46e165da435f3505a214b4dde5c22917628\",\"totalBytes\":13}",
+      "expected": "reject"
+    },
+    {
+      "name": "zero-object",
+      "body": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":0,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1,\"sha256\":\"cb4bb0fc77b3c6e64ec989b6e743f6a84d42b44772b56c55146aa3d8232b9eb3\",\"totalBytes\":4}",
+      "expected": "reject"
+    },
+    {
+      "name": "unsupported-name",
+      "body": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"bad#name.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1,\"sha256\":\"449af4a93cafbb205f4e03b67fc43acce9c611bbc2a688437526d9456185d168\",\"totalBytes\":13}",
+      "expected": "reject"
+    },
+    {
+      "name": "digest-mismatch",
+      "body": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"totalBytes\":13}",
+      "expected": "reject"
+    },
+    {
+      "name": "image-count-mismatch",
+      "body": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":2,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1,\"sha256\":\"24157cf8435067837e21304d7aed8209792e79115bc3dc0942fe7d43df323864\",\"totalBytes\":13}",
+      "expected": "reject"
+    },
+    {
+      "name": "duplicate-basename",
+      "body": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"IMAGE-01.JPG\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1,\"sha256\":\"b8959022d829bb759a6c6ab04acac05b5094e080490cf6badeb163173cd3ff2c\",\"totalBytes\":13}",
+      "expected": "reject"
+    },
+    {
+      "name": "utf8-bom",
+      "body": "\ufeff{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":1,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"}],\"revision\":1,\"sha256\":\"0840c3c17455266882f709fe62f7eb04c7cc7cfad11faeb76ca2111f1ea52121\",\"totalBytes\":4}",
+      "expected": "reject"
+    },
+    {
+      "name": "invalid-utf8",
+      "wireHex": "ff",
+      "expected": "reject"
+    }
+  ],
+  "generated": [
+    {
+      "name": "10000-photos-plus-gcp",
+      "photos": 10000,
+      "gcp": true,
+      "expected": "reject"
+    }
+  ]
+}

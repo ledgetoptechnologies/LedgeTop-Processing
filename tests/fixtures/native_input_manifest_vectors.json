@@ -1,0 +1,17 @@
+{
+  "schema": "native-odm-input-v1-candidate",
+  "vectors": [
+    {
+      "name": "one-image",
+      "expectedManifestId": "attempt-0001",
+      "canonical": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":1,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"}],\"revision\":1,\"sha256\":\"0840c3c17455266882f709fe62f7eb04c7cc7cfad11faeb76ca2111f1ea52121\",\"totalBytes\":4}",
+      "digest": "0840c3c17455266882f709fe62f7eb04c7cc7cfad11faeb76ca2111f1ea52121"
+    },
+    {
+      "name": "image-and-gcp",
+      "expectedManifestId": "attempt-0001",
+      "canonical": "{\"id\":\"attempt-0001\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":2,\"objects\":[{\"byteSize\":4,\"id\":\"o000001\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"image-01.jpg\",\"sha256\":\"f4dc1c96a30fbdeb2a15cb6d4229469fff36c0266dc0c346599093c24d4c0a01\"},{\"byteSize\":9,\"id\":\"o000002\",\"kind\":\"auxiliary\",\"mediaType\":\"text/plain\",\"name\":\"gcp_list.txt\",\"sha256\":\"21c662fd1a246c3def8d4ee7f9d71c317c042c0546a1c3b46f223678ee9e8e3b\"}],\"revision\":1,\"sha256\":\"b5477bbe9dded1cd6a77b1370087d46e165da435f3505a214b4dde5c22917628\",\"totalBytes\":13}",
+      "digest": "b5477bbe9dded1cd6a77b1370087d46e165da435f3505a214b4dde5c22917628"
+    }
+  ]
+}
