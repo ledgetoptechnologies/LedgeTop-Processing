@@ -31,6 +31,17 @@ class CandidateReceiptWireTests(unittest.TestCase):
         self.assertEqual(golden['receiptCanonicalUtf8'].encode('utf8'),payload)
         self.assertEqual(golden['receiptSha256'],hashlib.sha256(payload).hexdigest())
         self.assertEqual(golden['envelopeCanonicalUtf8'].encode('utf8'),valid)
+        uuid_receipt = dict(FIXTURE['acceptance'],
+            receiptId='11111111-1111-4111-8111-111111111111',
+            storageReceiptId='22222222-2222-4222-8222-222222222222',
+            acceptedAt='2026-10-27T12:00:00.123Z')
+        uuid_payload = p.canonical_json(uuid_receipt)
+        uuid_golden = json.loads((PATH/'golden-uuidv4.json').read_text(encoding='utf8'))
+        self.assertEqual(uuid_golden['receiptCanonicalUtf8'].encode('utf8'), uuid_payload)
+        self.assertEqual(uuid_golden['receiptSha256'], hashlib.sha256(uuid_payload).hexdigest())
+        self.assertEqual(uuid_golden['envelopeCanonicalUtf8'].encode('utf8'), wrap(uuid_payload))
+        self.assertEqual(p.validate_acceptance(uuid_receipt, result_manifest=FIXTURE['resultManifest'],
+            input_manifest_sha256=uuid_receipt['inputManifestSha256']), uuid_receipt)
         changed=payload.replace(b'receipt-1',b'receipt-2')
         # Deliberately reusing the old digest must not accept changed bytes.
         stale=wrap(changed,receiptSha256=hashlib.sha256(payload).hexdigest())
@@ -51,7 +62,7 @@ class CandidateReceiptWireTests(unittest.TestCase):
         self.assertEqual(len(p.canonical_json(bound)),1311009)
         self.assertEqual(len(wrap(p.canonical_json(bound))),1748238)
         vectors=[
-            (valid,True), (valid,True), (different_order,True), (wrap(biggest_bytes),True), (stale,False),
+            (valid,True), (uuid_golden['envelopeCanonicalUtf8'].encode('utf8'),True), (different_order,True), (wrap(biggest_bytes),True), (stale,False),
             (wrap(payload,receiptSha256=hashlib.sha256(payload).hexdigest().upper()),False),
             (wrap(payload,receiptSha256='0'*63),False),
             (wrap(payload,receiptBase64url=base64.urlsafe_b64encode(payload).decode('ascii')),False),
