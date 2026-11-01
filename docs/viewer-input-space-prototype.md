@@ -25,3 +25,12 @@ leave an existing owned incoming file for later inspection; no new cleanup is
 introduced. A multipart request can have earlier parts committed before a later
 part fails, so the client must reconcile or retry exact files. The tests use only
 small synthetic bytes and include a local HTTP request, not a real 50 GB job.
+
+When enabled, upload and commit scan a task directory against its recorded input
+paths and hold on an unrecorded `input-*`, any `.incoming-*`, or missing input.
+This preserves uncertain bytes across restart; it does not reconcile them. The
+scan is linear in task file count and the local lock is not a multi-process
+writer fence. A second writer or an old binary can race or bypass the scan;
+the disabled guard must not be enabled until exclusive authority is verified.
+Exact retries of already committed multipart parts are accepted; a different
+file under the same name remains a conflict.

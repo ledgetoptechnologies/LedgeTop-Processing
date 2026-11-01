@@ -21,7 +21,7 @@ from processing.input_space import InputSpaceUnavailable
 from processing.policy import plan
 from processing.prototype import Queue
 from processing.viewer_http import ViewerFacade
-from processing.viewer_tasks import TaskStore, InputLimitExceeded
+from processing.viewer_tasks import TaskStore, InputLimitExceeded, InputRecoveryRequired
 from tests.test_viewer_http import MemoryHandler, multipart, TOKEN, BOUNDARY
 
 @unittest.skipUnless(os.name=='posix' and hasattr(os,'posix_fallocate'),'POSIX fallocate required')
@@ -106,6 +106,47 @@ class ViewerInputSpaceTests(unittest.TestCase):
         with tempfile.TemporaryFile(dir=self.spool) as output:
             with patch('processing.input_space.os.posix_fallocate',side_effect=OSError(errno.ENOSPC,'synthetic')):
                 with self.assertRaises(InputSpaceUnavailable):input_space.reserve_input(output.fileno(),1,0)
+    def test_restart_after_rename_failure_holds_and_retains_unregistered_bytes(self):
+        body=multipart([('images','image.jpg',b'crash-window-bytes')]); req=self.request(body)
+        with patch('processing.viewer_tasks.sync_directory',side_effect=OSError('synthetic crash window')):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503)
+        orphan=list(self.root.rglob('input-*')); self.assertEqual(len(orphan),1)
+        self.assertEqual(orphan[0].read_bytes(),b'crash-window-bytes')
+        restarted=TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0)
+        self.facade.service.store=restarted
+        retry=self.request(body);self.assertTrue(self.facade.handle(retry))
+        self.assertEqual(retry.status,503)
+        self.assertEqual(json.loads(retry.wfile.getvalue())['error'],'input_recovery_required')
+        with self.assertRaises(InputRecoveryRequired):restarted.commit(self.identifier)
+        self.assertEqual(orphan[0].read_bytes(),b'crash-window-bytes')
+        self.assertEqual(restarted.task(self.identifier)['files'],[])
+
+    def test_restart_with_incoming_file_holds_without_deleting(self):
+        with self.q._db() as db:
+            directory=self.store._directory(self.store._row(db,self.identifier))
+        incoming=directory/'.incoming-synthetic';incoming.write_bytes(b'partial')
+        restarted=TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0)
+        with self.assertRaises(InputRecoveryRequired):
+            restarted.upload(self.identifier,'a.jpg',io.BytesIO(b'a'),1)
+        self.assertEqual(incoming.read_bytes(),b'partial')
+
+    def test_partial_multipart_retry_accepts_exact_existing_part(self):
+        body=multipart([('images','a.jpg',b'first'),('images','b.jpg',b'second')]); req=self.request(body)
+        original=self.store.upload; calls=[0]
+        def fail_second(*args,**kwargs):
+            calls[0]+=1
+            if calls[0]==2:raise InputSpaceUnavailable('synthetic')
+            return original(*args,**kwargs)
+        with patch.object(self.store,'upload',side_effect=fail_second):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503)
+        self.assertEqual(len(self.store.task(self.identifier)['files']),1)
+        retry=self.request(body);self.assertTrue(self.facade.handle(retry))
+        self.assertEqual(retry.status,200)
+        files=self.store.task(self.identifier)['files'];self.assertEqual(len(files),2)
+        self.assertEqual({Path(f['path']).read_bytes() for f in files},{b'first',b'second'})
+
     def test_concurrent_reservations_serialize_check_and_allocation(self):
         available=[10]; entered=threading.Event(); release=threading.Event(); results=[]
         def stat(_): return SimpleNamespace(f_bavail=available[0],f_frsize=1)

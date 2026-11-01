@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import uuid as uuid_module
 
 from .maintenance import Conflict
-from .viewer_tasks import InputLimitExceeded
+from .viewer_tasks import InputLimitExceeded, InputRecoveryRequired
 from .input_space import InputSpaceUnavailable, reserve_input
 from .viewer_limits import MAX_UPLOAD_BYTES
 
@@ -286,6 +286,9 @@ class ViewerFacade:
         except KeyError:
             handler.close_connection = True
             self._reply(handler, 404, {'error': 'task_not_found'})
+        except InputRecoveryRequired:
+            handler.close_connection = True
+            self._reply(handler, 503, {'error': 'input_recovery_required'})
         except Conflict:
             handler.close_connection = True
             self._reply(handler, 409, {'error': 'conflict'})

@@ -31,6 +31,10 @@ class ArchiveClaimHeld(Conflict):
     """An archive capture claim is already held by an unknown writer."""
 
 
+class InputRecoveryRequired(Conflict):
+    """Input files and database metadata need offline inspection."""
+
+
 class InputLimitExceeded(ValueError):
     """A task's configured cumulative input-byte allowance was exceeded."""
 
@@ -207,6 +211,28 @@ class TaskStore:
         if not directory.is_dir() or directory.is_symlink():
             raise Conflict('task directory unavailable')
         return directory
+
+    def _check_input_recovery(self, db, row):
+        # Prototype: never infer ownership or delete bytes. The authority lease
+        # must fence all other writers; this local scan alone is not a fence.
+        if self.input_free_floor is None:
+            return
+        directory = self._directory(row)
+        registered = {file['path'] for file in db.execute(
+            'SELECT path FROM viewer_files WHERE uuid=?', (row['uuid'],))}
+        if any(not re.fullmatch(r'input-[0-9a-f]{32}', name or '') for name in registered):
+            raise InputRecoveryRequired('input metadata needs inspection')
+        actual = set()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name.startswith('.incoming-'):
+                    raise InputRecoveryRequired('interrupted input needs inspection')
+                if entry.name.startswith('input-'):
+                    if not entry.is_file(follow_symlinks=False):
+                        raise InputRecoveryRequired('input path needs inspection')
+                    actual.add(entry.name)
+        if actual != registered:
+            raise InputRecoveryRequired('input files need inspection')
 
     @staticmethod
     def _job(db, row):
@@ -406,6 +432,7 @@ class TaskStore:
                 if row['stage'] != 'uploading' or row['job_id']:
                     raise Conflict('task is no longer accepting uploads')
                 directory = self._directory(row)
+                self._check_input_recovery(db, row)
                 existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                       (identifier, key)).fetchone()
                 total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
@@ -485,6 +512,7 @@ class TaskStore:
                 return {'success': True, 'uuid': identifier}
             if row['stage'] != 'uploading':
                 raise Conflict('task cannot be committed')
+            self._check_input_recovery(db, row)
             if not db.execute('SELECT 1 FROM viewer_files WHERE uuid=? AND is_photo=1 LIMIT 1',
                               (identifier,)).fetchone():
                 raise ValueError('at least one photo required')
