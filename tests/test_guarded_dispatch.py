@@ -30,11 +30,14 @@ from processing.viewer_tasks import TaskStore
 
 class GuardedDispatchTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name).resolve()
+        # Retain task-owned synthetic roots; no recursive cleanup is attempted.
+        self.root=Path(tempfile.mkdtemp(prefix='lt-guarded-options-')).resolve()
         self.paths=patch('processing.node_gate.canonical_gate_path',side_effect=lambda engine:self.root/('gate-'+engine));self.paths.start()
         self.flags=[patch.object(engine_upload_contract,'QUALIFIED',True),patch.object(guarded_native_engine,'QUALIFIED',True)]
         for flag in self.flags:flag.start()
-        self.calls=[];self.bodies=[];self.observer=None;self.large_wire=None;self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;self.early_upload=False;fixture=self
+        self.calls=[];self.catalog_calls=[];self.bodies=[];self.observer=None;self.large_wire=None;self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;self.early_upload=False;fixture=self
+        self.option_failure=set()
+        self.node_options={role:[{'name':'dynamic-flag','type':'bool','value':False}] for role in ('cluster','main')}
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 length=int(self.headers['Content-Length']);route=self.path.split('?')[0]
@@ -64,16 +67,25 @@ class GuardedDispatchTests(unittest.TestCase):
                 try:self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
                 except (BrokenPipeError,ConnectionResetError):pass
             def do_GET(self):
-                route=self.path.split('?')[0];fixture.calls.append(route)
+                route=self.path.split('?')[0]
+                if route in ('/info','/options'):
+                    role=self.server.node_role;fixture.catalog_calls.append((role,route))
+                    if role in fixture.option_failure:
+                        self.send_response(503);self.send_header('Content-Length','0');self.end_headers();return
+                    value={'version':'3.0.0','engine':'odm','engineVersion':'3.0.0'} if route=='/info' else fixture.node_options[role]
+                    data=json.dumps(value).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+                fixture.calls.append(route)
                 identifier=route.split('/')[2]
                 data=json.dumps({'uuid':identifier,'status':{'code':10},'progress':0}).encode()
                 self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
             def log_message(self,*_):pass
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.daemon_threads=False
+        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.daemon_threads=False;self.server.node_role='cluster'
         self.thread=threading.Thread(target=lambda:self.server.serve_forever(poll_interval=.01));self.thread.start()
+        self.main_server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.main_server.daemon_threads=False;self.main_server.node_role='main'
+        self.main_thread=threading.Thread(target=lambda:self.main_server.serve_forever(poll_interval=.01));self.main_thread.start()
         self.config=SimpleNamespace(prototype_state_dir=str(self.root/'state'),viewer_max_input_bytes=20*1024**3,
-            viewer_max_archive_bytes=1024*1024,local_node_url='http://synthetic.invalid',local_node_token='',
-            main_node_url='http://synthetic.invalid',main_node_token='',local_max_photos=1000,local_max_input_bytes=20*1024**3)
+            viewer_max_archive_bytes=1024*1024,local_node_url='http://127.0.0.1:'+str(self.server.server_port),local_node_token='',
+            main_node_url='http://127.0.0.1:'+str(self.main_server.server_port),main_node_token='',local_max_photos=1000,local_max_input_bytes=20*1024**3)
         self.create_service()
 
     def create_service(self):
@@ -93,17 +105,15 @@ class GuardedDispatchTests(unittest.TestCase):
             guards[node]=EngineIngressGuard(self.queue,binding,owner_pin=pin,backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,binding.backend_port), backend_probe=lambda *_:None,engine_probe=lambda _,eid=binding.engine_id:eid)
         self.service=ViewerService(self.queue,self.config,store=store,guarded_engines=guards,
                                    probe=lambda *args:{'ready':True,'maxImages':None,'taskQueueCount':0})
-        self.service._catalog=lambda:{'ready':True,'commonOptions':[]}
-        self.service._selected_options=lambda _node:[]
 
     def tearDown(self):
-        self.service.close();self.queue.close();self.server.shutdown();self.server.server_close();self.thread.join(5)
-        self.assertFalse(self.thread.is_alive());self.paths.stop()
+        self.service.close();self.queue.close();self.server.shutdown();self.main_server.shutdown();self.server.server_close();self.main_server.server_close();self.thread.join(5);self.main_thread.join(5)
+        self.assertFalse(self.thread.is_alive());self.assertFalse(self.main_thread.is_alive());self.paths.stop()
         for flag in self.flags:flag.stop()
-        self.tmp.cleanup()
+        print('Retained synthetic test root:',self.root)
 
-    def submit(self):
-        identifier=str(uuid.uuid4());self.service.initialize(identifier,'Synthetic',[],None,'production')
+    def submit(self,options=None):
+        identifier=str(uuid.uuid4());self.service.initialize(identifier,'Synthetic',options or [],None,'production')
         self.service.upload(identifier,'photo.jpg',io.BytesIO(b'synthetic-photo'),15);self.service.commit(identifier)
         return identifier
 
@@ -117,6 +127,53 @@ class GuardedDispatchTests(unittest.TestCase):
             row=db.execute('SELECT generation,name_key,state FROM viewer_engine_upload_intents').fetchone()
             self.assertEqual(tuple(row),(1,'photo.jpg','complete'))
             self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'complete')
+
+    def test_dynamic_selected_node_options_are_refreshed_before_dispatch(self):
+        identifier=self.submit([{'name':'dynamic-flag','value':True}])
+        self.assertEqual({role for role,route in self.catalog_calls if route=='/options'},{'cluster','main'})
+        self.node_options['cluster']=[{'name':'dynamic-flag','type':'bool','value':True}]
+        self.catalog_calls.clear();self.service.tick()
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['phase'],task['error'],task['job']['status']),
+                         ('waiting_node','option_definition_changed','queued'))
+        self.assertFalse(self.calls)
+        self.assertEqual({role for role,route in self.catalog_calls if route=='/options'},{'cluster'})
+        self.node_options['cluster']=[{'name':'dynamic-flag','type':'bool','value':False}]
+        self.catalog_calls.clear();self.service.tick()
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['node_id'],task['phase']),('cluster','processing'))
+        self.assertEqual({role for role,route in self.catalog_calls if route=='/options'},{'cluster'})
+
+    def test_selected_catalog_unavailable_waits_and_recovers_without_dispatch(self):
+        identifier=self.submit([{'name':'dynamic-flag','value':True}])
+        self.option_failure.add('cluster');self.catalog_calls.clear();self.service.tick()
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['phase'],task['error'],task['job']['status']),
+                         ('waiting_node','option_catalog_unavailable','queued'))
+        self.assertFalse(self.calls)
+        self.option_failure.clear();self.service.tick()
+        self.assertEqual(self.service.store.task(identifier)['phase'],'processing')
+
+    def test_catalog_discovers_new_upstream_flags_and_rejects_invalid_node_options(self):
+        self.assertEqual([option['name'] for option in self.service.options()],['dynamic-flag'])
+        for role in ('cluster','main'):
+            self.node_options[role].append({'name':'new-upstream-flag','type':'int','value':1})
+        self.assertEqual([option['name'] for option in self.service.options()],['dynamic-flag','new-upstream-flag'])
+        identifier=self.submit([{'name':'new-upstream-flag','value':2}])
+        self.node_options['cluster']=[]
+        self.service.tick()
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['phase'],task['error'],task['job']['status']),
+                         ('waiting_node','option_catalog_unavailable','queued'))
+        self.assertFalse(self.calls)
+
+    def test_large_route_refreshes_main_despite_unrelated_cluster_catalog_outage(self):
+        identifier=self.submit([{'name':'dynamic-flag','value':True}])
+        self.config.local_max_photos=0
+        self.option_failure.add('cluster');self.catalog_calls.clear();self.service.tick()
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['node_id'],task['phase']),('main','processing'))
+        self.assertEqual({role for role,route in self.catalog_calls if route=='/options'},{'main'})
 
     def test_upload_releases_db_mutex_but_fences_task_and_close(self):
         identifier=self.submit();entered=threading.Event();release=threading.Event();out=[]
