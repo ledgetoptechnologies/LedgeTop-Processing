@@ -33,7 +33,8 @@ from .reference_terminal import validate_terminal_acceptance
 from .reference_engine_cleanup import EngineCacheCleanup
 from .options import _validate_options
 
-_INSPECTION_HOLDS = frozenset(('stored_reference_inspection', 'reference_inspection_protocol_error'))
+_INSPECTION_HOLDS = frozenset(('stored_reference_inspection', 'reference_inspection_protocol_error',
+                               'control_child_reaping_uncertain'))
 
 
 def _inspection_markers(headers):
@@ -132,7 +133,8 @@ class ReferenceDriver:
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
-                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None):
+                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
+                 control_transport=None):
         self._combined_policy=combined_policy;self._combined_policy_initial=combined_policy;self.combined_preparation=None;self._combined_preparation_initial=None;self._active_step=None
         if combined_policy is not None:
             from .reference_combined_preparation import CombinedPreparationPolicy
@@ -189,6 +191,11 @@ class ReferenceDriver:
             raise ValueError('invalid private worker credential')
         self.worker, self.ledger, self.outbox, self.broker = worker, ledger, outbox, broker
         self.origin, self._bearer = coordinator_origin.rstrip('/'), worker_bearer
+        if control_transport is not None:
+            from .reference_control_subprocess import ProcessControlTransport
+            if type(control_transport) is not ProcessControlTransport or control_transport.origin != self.origin:
+                raise ValueError('explicit origin-bound control transport required')
+        self._control_transport = control_transport
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
         self.path = Path(state_path).absolute()
@@ -331,6 +338,29 @@ class ReferenceDriver:
 
     def _request(self, method, suffix, payload=None, *, claim_token=None):
         url = self.origin + PREFIX + suffix
+        transport = getattr(self, '_control_transport', None)
+        if transport is not None:
+            from .reference_control_subprocess import ControlTransportHeld
+            import base64
+            try:
+                result = transport.request(method, PREFIX + suffix, self._bearer, payload, claim_token)
+                status, markers = result['status'], result['markers']
+                if type(status) is not int or type(markers) is not list or any(type(m) is not str for m in markers):
+                    raise DriverWait('invalid_control_response')
+                if markers:
+                    if status == 409 and markers == ['1']:
+                        raise DriverHeld('stored_reference_inspection')
+                    raise DriverHeld('reference_inspection_protocol_error')
+                if status in (400, 401, 403, 404): raise DriverHeld('control_request_rejected')
+                if status == 409: return status, None
+                if status != 200 or type(result['body']) is not str: raise DriverWait('coordinator_unavailable')
+                decoded = base64.b64decode(result['body'], validate=True)
+                answer = p.decode_submission(decoded)
+                if type(answer) is not dict: raise DriverWait('invalid_control_response')
+                return 200, answer
+            except (DriverWait, DriverHeld): raise
+            except ControlTransportHeld: raise DriverHeld('control_child_reaping_uncertain') from None
+            except Exception: raise DriverWait('coordinator_unavailable') from None
         headers = {'Authorization': 'Bearer ' + self._bearer, 'Accept': 'application/json',
                    'Accept-Encoding': 'identity'}
         if claim_token is not None:
