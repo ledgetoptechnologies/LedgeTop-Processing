@@ -70,7 +70,7 @@ class LocalCoordinatorAuthority:
         except OSError:raise BrokerHeld('local coordinator lease unavailable') from None
 
     @contextmanager
-    def hold(self, grant, timeout):
+    def hold(self, grant, timeout, *, body=None, signature=None):
         from .prototype import VIEWER_PROFILE
         from .authority_lease import MARKER_DDL, LeaseUnavailable
         deadline=time.monotonic()+timeout
@@ -113,6 +113,9 @@ class LocalCoordinatorAuthority:
                     finally:self.queue._database_users-=1
             except LeaseUnavailable:raise BrokerHeld('installed authority lease unavailable') from None
         finally:self.queue._lifecycle_lock.release()
+
+    def check(self):
+        self._check()
 
 
 def _json(value):
@@ -200,11 +203,12 @@ class NodeMutationBroker:
     def __init__(self, root, *, node_id, engine_id, authority_id, coordinator_epoch,
                  coordinator_origin, gate_generation, secret, adapter, authority_witness):
         if QUALIFIED is not True: raise BrokerHeld('node broker is not qualified')
+        from .node_authority_session import RemoteAuthoritySession
         if (node_id not in ('cluster','main') or not _uuid(authority_id) or not _uuid(coordinator_epoch)
                 or type(engine_id) is not str or not re.fullmatch('[A-Za-z0-9:._-]{1,255}',engine_id)
                 or type(gate_generation) is not int or gate_generation < 1
                 or type(secret) is not bytes or len(secret) < 32 or type(adapter) is not LoopbackNodeODM
-                or adapter.engine_id != engine_id or type(authority_witness) is not LocalCoordinatorAuthority
+                or adapter.engine_id != engine_id or type(authority_witness) not in (LocalCoordinatorAuthority,RemoteAuthoritySession)
                 or (authority_witness.authority,authority_witness.epoch)!=(authority_id,coordinator_epoch)):
             raise BrokerHeld('invalid local broker binding')
         self.root=Path(root).absolute();self.node=node_id;self.engine=engine_id;self.authority=authority_id
@@ -292,7 +296,7 @@ class NodeMutationBroker:
         digest=hashlib.sha256(_json(grant)).hexdigest();identity=uuid.UUID(grant['jobId']).hex
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration')]).decode()
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
-        with self._mutex, self.witness.hold(grant,10), NodeGate(self.engine) as gate:
+        with self._mutex, self.witness.hold(grant,10,body=body,signature=signature), NodeGate(self.engine) as gate:
             self._check_owner()
             state=gate.snapshot();expected={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
             if any(state[k]!=v for k,v in expected.items()):raise BrokerHeld('node ownership changed')
@@ -323,7 +327,7 @@ class NodeMutationBroker:
             except BaseException:self.db.rollback();raise
             reply=_reply(self.adapter.exchange(grant,body),grant['engineTaskId'])
             self._check_owner()
-            self.witness._check()
+            self.witness.check()
             raw=_json(reply)
             if len(raw)>4096:raise BrokerHeld('backend response exceeds bound')
             self.db.execute('BEGIN IMMEDIATE')
