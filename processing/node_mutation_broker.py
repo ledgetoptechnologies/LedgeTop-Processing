@@ -287,7 +287,7 @@ def match_coordinator_node_evidence(queue, witness, operation_id, envelope, nonc
             or type(secret) is not bytes or len(secret)<32):
         raise BrokerHeld('node evidence unavailable')
     report=envelope['report']
-    fields={'nonce','grant','grantSignature','operationState','reservationId','observation','engineTaskState','nodeOrigin'}
+    fields={'nonce','grant','grantSignature','operationState','reservationId','observation','engineTaskState','engineTaskObservation','nodeOrigin'}
     if set(report)!=fields or report['nonce']!=nonce:raise BrokerHeld('node evidence differs')
     try:
         raw_report=_json(report)
@@ -301,12 +301,17 @@ def match_coordinator_node_evidence(queue, witness, operation_id, envelope, nonc
             or report['engineTaskState']!='unverified' or report['nodeOrigin']!='shared-key-only'
             or report['reservationId']!=uuid.UUID(grant['jobId']).hex):
         raise BrokerHeld('node and coordinator evidence differ')
+    task=report['engineTaskObservation']
+    if (type(task) is not dict or set(task)!={'uuid','statusCode'} or task['uuid']!=grant['engineTaskId']
+            or type(task['statusCode']) is not int or task['statusCode'] not in (10,20,30,40,50)):
+        raise BrokerHeld('node task observation differs')
     observation=report['observation']
     if observation is not None:
         if grant['operation']!='init':raise BrokerHeld('unsupported node observation')
         _reply(observation,grant['engineTaskId'])
     return {'operationId':operation_id,'coordinatorState':'held','nodeState':'reported-held',
-            'engineTaskState':'unverified','nodeIdentity':'not-independently-authenticated',
+            'engineTaskState':'unverified','engineTaskObservation':task,
+            'nodeIdentity':'not-independently-authenticated',
             'observationPresent':observation is not None,'authorizesRelease':False}
 
 
@@ -544,6 +549,23 @@ class LoopbackNodeODM:
         value = decode_submission(raw)
         return _reply(value,grant['engineTaskId'])
 
+    def inspect_task(self, task_id, deadline):
+        """Read sanitized point-in-time task status; no missing=idle inference."""
+        if not _uuid(task_id):raise BrokerHeld('invalid engine task identity')
+        if local_engine_identity(deadline)!=self.engine_id:raise BrokerHeld('local engine changed')
+        local_backend_identity(self.pin,deadline)
+        transport=SimpleNamespace(binding=SimpleNamespace(backend_port=self.pin.backend_port,backend_secret=self.token))
+        status,raw=EngineIngressGuard._exchange(transport,'GET','/task/'+task_id+'/info',b'',{},deadline,omit_empty_token=True)
+        if status!=200 or len(raw)>65536:raise BrokerHeld('engine task status unavailable')
+        try:
+            value=decode_submission(raw)
+            if (type(value) is not dict or value.get('uuid')!=task_id or type(value.get('status')) is not dict
+                    or type(value['status'].get('code')) is not int or value['status']['code'] not in (10,20,30,40,50)):
+                raise ValueError()
+            return {'uuid':task_id,'statusCode':value['status']['code']}
+        except (ValueError,TypeError,KeyError,RecursionError):
+            raise BrokerHeld('engine task status unavailable') from None
+
     def exchange_upload(self, grant, source):
         deadline=time.monotonic()+self.deadline_seconds
         if local_engine_identity(deadline)!=self.engine_id:raise BrokerHeld('local engine changed')
@@ -694,11 +716,15 @@ class NodeMutationBroker:
                         reply=_reply(json.loads(observation['reply_json']),grant['engineTaskId'])
                     self.db.commit()
                 except BaseException:self.db.rollback();raise
+                # This GET occurs while this cooperative gate is held. A
+                # missing/malformed response stays held; no absence inference.
+                task_observation=self.adapter.inspect_task(grant['engineTaskId'],deadline)
                 self._check_owner();check_gate()
                 if local_engine_identity(deadline)!=self.engine:raise BrokerHeld('local engine changed')
                 local_backend_identity(self.adapter.pin,deadline)
                 report={'nonce':nonce,'grant':grant,'grantSignature':signature,'operationState':'started',
-                        'reservationId':identity,'observation':reply,'engineTaskState':'unverified','nodeOrigin':'shared-key-only'}
+                        'reservationId':identity,'observation':reply,'engineTaskState':'unverified',
+                        'engineTaskObservation':task_observation,'nodeOrigin':'shared-key-only'}
                 mac=hmac.new(self.secret,b'ledgetop-node-held-evidence-v1\0'+_json(report),hashlib.sha256).hexdigest()
                 return {'report':report,'mac':mac}
         finally:self._mutex.release()

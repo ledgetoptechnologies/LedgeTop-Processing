@@ -46,6 +46,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         self.authority=self.owner_queue.authority_id;self.epoch=self.owner_queue.startup_id
         self.origin='http://127.0.0.1:18080';self.secret=b'synthetic-key-'*4;self.calls=[]
         self.drip=False;self.drip_done=threading.Event()
+        self.task_info_payload=None;self.task_info_status=200;self.task_info_delay=0
         path=self.root/'gate';self.patches=[patch('processing.node_gate.canonical_gate_path',return_value=path),
             patch('processing.node_mutation_broker.canonical_gate_path',return_value=path),patch.object(b,'QUALIFIED',True),
             patch.object(b,'local_engine_identity',return_value=self.engine),patch.object(b,'local_backend_identity',return_value=None)]
@@ -68,6 +69,15 @@ class NodeMutationBrokerTests(unittest.TestCase):
             def log_message(self,*_):pass
             def setup(self):
                 super().setup();self.connection.settimeout(2)
+            def do_GET(self):
+                if self.path.split('?',1)[0]!='/task/'+owner.task+'/info':
+                    self.send_error(404);return
+                if owner.task_info_delay:time.sleep(owner.task_info_delay)
+                payload=owner.task_info_payload
+                if payload is None:payload=json.dumps({'uuid':owner.task,'status':{'code':10},'name':'synthetic-private-name'}).encode()
+                self.send_response(owner.task_info_status);self.send_header('Content-Length',str(len(payload)));self.end_headers()
+                try:self.wfile.write(payload)
+                except (BrokenPipeError,ConnectionResetError):pass
             def do_POST(self):
                 owner.calls.append((self.path,self.rfile.read(int(self.headers['Content-Length']))))
                 value=json.dumps({'uuid':self.headers['set-uuid'],'success':True}).encode()
@@ -428,6 +438,8 @@ os._exit(27)
             self.assertTrue(result['observationPresent']);self.assertFalse(result['authorizesRelease'])
             self.assertEqual(result['nodeIdentity'],'not-independently-authenticated')
             self.assertEqual(result['engineTaskState'],'unverified')
+            self.assertEqual(result['engineTaskObservation'],{'uuid':grant['engineTaskId'],'statusCode':10})
+            self.assertNotIn('synthetic-private-name',json.dumps(result))
             self.assertEqual(restarted.get(self.job)['status'],'held')
             tampered=json.loads(json.dumps(node));tampered['report']['reservationId']='0'*32
             with self.assertRaises(b.BrokerHeld):
@@ -438,6 +450,30 @@ os._exit(27)
                 b.match_coordinator_node_evidence(restarted,witness,grant['operationId'],node,nonce,b'wrong-synthetic-key-'*3)
             self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
         finally:restarted.close();lease.close()
+
+    def test_task_query_refuses_missing_invalid_oversized_or_late_info(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
+        def lost(*args):original(*args);raise OSError('synthetic lost response')
+        with patch.object(self.adapter,'exchange',side_effect=lost):
+            with self.assertRaises(OSError):self.broker.mutate(grant,signature,self.body)
+        task=grant['engineTaskId'];nonce='d'*64
+        invalid=[(404,b'{}'),(200,b'not json'),
+                 (200,json.dumps({'uuid':str(uuid.uuid4()),'status':{'code':10}}).encode()),
+                 (200,json.dumps({'uuid':task,'status':{'code':True}}).encode()),
+                 (200,json.dumps({'uuid':task,'status':{'code':99}}).encode()),
+                 (200,('{"uuid":"'+task+'","status":{"code":10,"code":20}}').encode()),
+                 (200,b'x'*65537)]
+        for status,payload in invalid:
+            self.task_info_status=status;self.task_info_payload=payload
+            with self.subTest(status=status,prefix=payload[:20]):
+                with self.assertRaises((b.BrokerHeld,AdmissionError)):
+                    self.broker.inspect_held_evidence(grant,signature,nonce)
+        self.task_info_status=200;self.task_info_payload=None;self.task_info_delay=.2
+        with self.assertRaises((b.BrokerHeld,AdmissionError)):
+            self.broker.inspect_held_evidence(grant,signature,nonce,timeout_seconds=.05)
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(self.broker.db.execute('SELECT state FROM operations').fetchone()[0],'started')
+        with NodeGate(self.engine) as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
 
     def test_match_missing_engine_observation_remains_unverified(self):
         from processing.authority_lease import acquire
