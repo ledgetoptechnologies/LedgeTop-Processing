@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import threading
 import unittest
 import uuid
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 from processing import config, reference_protocol as ref
 from processing.maintenance import Conflict
-from processing.native_plan_binding import NativePlanBindings, catalog_sha, plan_sha, validate
+from processing.native_plan_binding import NativePlanBindings, catalog_sha, plan_sha, validate, validate_selected
 from processing.native_manifest_binding import NativeManifestBindings
 from tests.test_native_manifest_binding import ManifestBindingHTTP, BODY, CAP, OTHER
 
@@ -23,6 +24,30 @@ def template():
 
 
 class ScalarVectors(unittest.TestCase):
+    def test_conservative_option_domains_and_no_coercion(self):
+        def number(value): return {'type':'number','bits':struct.pack('>d',value).hex()}
+        def check(kind,domain,value,accept):
+            args=([{'name':'fixture','value':value}],[{'name':'fixture','type':kind,'domain':domain}])
+            if accept: validate_selected(*args)
+            else:
+                with self.assertRaises(Conflict): validate_selected(*args)
+        for kind,domain,value,accept in [
+            ('bool','',{'type':'bool','value':True},True),('bool','',{'type':'string','value':'true'},False),
+            ('int','positive integer',number(0),False),('int','positive integer',number(-1),False),
+            ('int','negative integer',number(0),False),('int','negative integer',number(-1),True),
+            ('int','integer: 1 <= x <= 14',number(14),True),('int','integer: 1 <= x <= 14',number(15),False),
+            ('int','integer',number(1.5),False),('int','integer: 1.5 <= x <= 14',number(2),False),
+            ('float','positive float',number(0.1),True),('float','float > 0.0',number(0),False),
+            ('float','positive float',number(0),False),('float','negative float',number(0),False),('float','negative float',number(-0.1),True),
+            ('float','percent',number(100),True),('float','percent',number(101),False),
+            ('float','float',{'type':'string','value':'1.2'},False),
+            ('enum',['alpha','beta'],{'type':'string','value':'alpha'},True),
+            ('enum',['alpha','beta'],{'type':'string','value':'other'},False),
+            ('string','string',{'type':'string','value':'hello'},True),
+            ('string','json',{'type':'string','value':'{}'},False),
+            ('int','unrecognized',number(1),False),('bool','',{'type':'null'},False)]:
+            with self.subTest(kind=kind,domain=domain,value=value): check(kind,domain,value,accept)
+
     def test_scalars_and_canonical_bytes(self):
         for bits in ('0000000000000000','0000000000000001','3fb999999999999a','3ff0000000000000','433fffffffffffff'):
             item = template(); item['options'] = [{'name':'value','value':{'type':'number','bits':bits}}]
@@ -131,15 +156,41 @@ class Binding(ManifestBindingHTTP):
         identifier=str(uuid.uuid4()); plan=self.plan_for(identifier)
         with patch.object(config,'NATIVE_PLAN_BINDING_QUALIFIED',True):
             binding=self.construct()
-            with patch.object(self.handler.viewer_service,'_catalog',return_value={'ready':True}):
+            with patch.object(self.handler.viewer_service,'_catalog',return_value={'ready':True,'commonOptions':[{'name':'crop','type':'float','domain':'unknown'}]}):
                 unsupported={**plan,'options':[{'name':'crop','value':{'type':'number','bits':'3ff0000000000000'}}]}
-                with self.assertRaisesRegex(Conflict,'not qualified'): binding.bind(identifier,'production',CAP,ref.canonical_json(unsupported))
+                with self.assertRaisesRegex(Conflict,'unsupported'): binding.bind(identifier,'production',CAP,ref.canonical_json(unsupported))
                 with self.assertRaisesRegex(Conflict,'manifest mismatch'): binding.bind(identifier,'production',CAP,ref.canonical_json({**plan,'manifestSha256':'0'*64}))
             with self.handler.prototype_queue._db() as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM native_plan_bindings').fetchone()[0],0)
 
+    def test_nonempty_catalog_evidence_replay_and_changed_catalog_hold(self):
+        identifier=str(uuid.uuid4()); plan=self.plan_for(identifier)
+        options=[{'name':'fixture','value':{'type':'bool','value':True}}]
+        definition={'name':'fixture','type':'bool','domain':'','value':'false','help':'synthetic'}
+        snapshot={'ready':True,'commonOptions':[definition]}
+        with patch.object(config,'NATIVE_PLAN_BINDING_QUALIFIED',True):
+            binding=self.construct()
+            with patch.object(self.handler.viewer_service,'_catalog',return_value=snapshot):
+                plan['options']=options; plan['expectedCatalogDigest']=binding.catalog_digest(options); body=ref.canonical_json(plan)
+                receipt=binding.bind(identifier,'production',CAP,body)
+            self.assertEqual(receipt['effectiveOptions'],{'state':'unavailable'})
+            with patch.object(self.handler.viewer_service,'_catalog',side_effect=RuntimeError('offline')):
+                self.assertEqual(binding.bind(identifier,'production',CAP,body),receipt)
+                self.assertEqual(binding.status(identifier,'production',CAP),receipt)
+            with self.handler.prototype_queue._db() as db:
+                row=db.execute('SELECT catalog_bytes FROM native_plan_bindings WHERE uuid=?',(identifier,)).fetchone()
+                self.assertEqual(bytes(row[0]),ref.canonical_json([definition]))
+            other=str(uuid.uuid4()); next_plan=self.plan_for(other); next_plan['options']=options
+            next_plan['expectedCatalogDigest']=plan['expectedCatalogDigest']
+            changed={'ready':True,'commonOptions':[{**definition,'help':'changed'}]}
+            with patch.object(self.handler.viewer_service,'_catalog',return_value=changed):
+                with self.assertRaisesRegex(Conflict,'catalog changed'): binding.bind(other,'production',CAP,ref.canonical_json(next_plan))
+
     def test_process_exit_after_commit_keeps_binding(self):
-        identifier=str(uuid.uuid4()); plan=self.plan_for(identifier); body=ref.canonical_json(plan)
+        identifier=str(uuid.uuid4()); plan=self.plan_for(identifier)
+        definition={'name':'fixture','type':'bool','domain':'','value':'false','help':'synthetic'}
+        plan['options']=[{'name':'fixture','value':{'type':'bool','value':True}}]
+        plan['expectedCatalogDigest']=catalog_sha(ref.canonical_json([definition])); body=ref.canonical_json(plan)
         self.stop()
         code = r'''
 import os,sys
@@ -153,7 +204,7 @@ config.NATIVE_MANIFEST_BINDING_QUALIFIED=True; config.NATIVE_PLAN_BINDING_QUALIF
 c=Config('a'*32,'http://127.0.0.1:1','http://127.0.0.1:2',1000,20*1024**3,
  prototype_state_dir=sys.argv[1],prototype_node_ids=('cluster',),treedar_node_ids=('cluster',),
  viewer_enabled=True,viewer_token=TOKEN,viewer_staging_token=STAGING,authority_lease_dir=sys.argv[2],viewer_manifest_binding=True)
-h=make_handler(c); h.viewer_service._catalog=lambda:{'ready':True}
+h=make_handler(c); h.viewer_service._catalog=lambda:{'ready':True,'commonOptions':[{'name':'fixture','type':'bool','domain':'','value':'false','help':'synthetic'}]}
 b=NativePlanBindings(h.viewer_service,NativeManifestBindings(h.viewer_service.store))
 b.bind(sys.argv[3],'production',CAP,bytes.fromhex(sys.argv[4]))
 os._exit(0)

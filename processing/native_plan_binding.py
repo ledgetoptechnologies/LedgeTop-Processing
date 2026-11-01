@@ -19,11 +19,12 @@ DDL = '''CREATE TABLE native_plan_bindings (uuid TEXT PRIMARY KEY, authority TEX
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,119}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 BITS = re.compile(r'[0-9a-f]{16}\Z')
+NUMBER_BOUND = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
 
 
 def _text(value, maximum, *, controls=True):
     ref._require(type(value) is str and len(value) <= maximum, 'invalid plan text')
-    ref._require(not any(0xd800 <= ord(c) <= 0xdfff or (controls and ord(c) < 32) for c in value), 'invalid plan text')
+    ref._require(not any(ord(c) == 0 or 0xd800 <= ord(c) <= 0xdfff or (controls and ord(c) < 32) for c in value), 'invalid plan text')
 
 
 def validate(body):
@@ -73,6 +74,58 @@ def catalog_sha(body):
     return hashlib.sha256(CATALOG_DOMAIN + body).hexdigest()
 
 
+def validate_selected(options, definitions):
+    """Conservative value/domain subset; not an engine-version attestation."""
+    if type(definitions) is not list or len(definitions) != len(options): raise Conflict('exact selected definitions required')
+    if any(type(item) is not dict or type(item.get('name')) is not str for item in definitions): raise Conflict('invalid option definitions')
+    names = [item['name'] for item in definitions]
+    if names != sorted(names) or len(set(names)) != len(names) or set(names) != {item['name'] for item in options}:
+        raise Conflict('exact selected definitions required')
+    by_name = {item['name']:item for item in definitions}
+    for option in options:
+        definition = by_name[option['name']]; scalar = option['value']
+        kind, domain, tag = definition.get('type'), definition.get('domain'), scalar['type']
+        if kind == 'bool':
+            if tag != 'bool' or domain != '': raise Conflict('unsupported option type or domain')
+        elif kind == 'enum':
+            if (tag != 'string' or type(domain) is not list or not 1 <= len(domain) <= 1000
+                    or any(type(entry) is not str or len(entry) > 256 for entry in domain) or scalar['value'] not in domain):
+                raise Conflict('unsupported option type or domain')
+        elif kind == 'string':
+            if tag != 'string' or domain != 'string': raise Conflict('unsupported option type or domain')
+        elif kind in ('int','float'):
+            if tag != 'number' or type(domain) is not str or len(domain) > 256: raise Conflict('unsupported option type or domain')
+            number = struct.unpack('>d', bytes.fromhex(scalar['bits']))[0]
+            if kind == 'int' and (not number.is_integer() or abs(number) > ref.MAX_SAFE_INTEGER):
+                raise Conflict('invalid integer option')
+            expected = 'integer' if kind == 'int' else 'float'
+            if domain == expected: continue
+            if domain == 'positive ' + expected:
+                if number <= 0: raise Conflict('option outside domain')
+                continue
+            if domain == 'negative ' + expected:
+                if number >= 0: raise Conflict('option outside domain')
+                continue
+            if domain == 'percent':
+                if not 0 <= number <= 100: raise Conflict('option outside domain')
+                continue
+            range_match = re.fullmatch(r'(float|integer): ('+NUMBER_BOUND+r') <= x <= ('+NUMBER_BOUND+r')', domain)
+            compare = re.fullmatch(r'(float|integer) (>=|>|<|<=) ('+NUMBER_BOUND+r')', domain)
+            if range_match and range_match[1] == expected:
+                if kind == 'int' and any(not re.fullmatch(r'[+-]?\d+', x) or abs(int(x)) > ref.MAX_SAFE_INTEGER for x in range_match.group(2,3)):
+                    raise Conflict('unsupported option domain')
+                lower, upper = float(range_match[2]), float(range_match[3])
+                if not math.isfinite(lower) or not math.isfinite(upper) or not lower <= number <= upper: raise Conflict('option outside domain')
+            elif compare and compare[1] == expected:
+                if kind == 'int' and (not re.fullmatch(r'[+-]?\d+', compare[3]) or abs(int(compare[3])) > ref.MAX_SAFE_INTEGER):
+                    raise Conflict('unsupported option domain')
+                bound = float(compare[3]); op = compare[2]
+                if not math.isfinite(bound) or not {'>=':number >= bound, '>':number > bound, '<':number < bound, '<=':number <= bound}[op]:
+                    raise Conflict('option outside domain')
+            else: raise Conflict('unsupported option type or domain')
+        else: raise Conflict('unsupported option type or domain')
+
+
 class NativePlanBindings:
     """Internal-only record, never exposed through the application or a wire route."""
     def __init__(self, service, manifest_binding):
@@ -112,9 +165,13 @@ class NativePlanBindings:
         if (row['authority'] != self.queue.authority_id or row['environment'] != plan['environment']
                 or row['capability_hash'] != reservation['capability_hash'] or row['manifest_binding_id'] != manifest_receipt['bindingId']
                 or bytes(row['plan_bytes']) != body or row['plan_sha'] != plan_sha(body)
-                or row['catalog_sha'] != catalog_sha(catalog) or plan['expectedCatalogDigest'] != row['catalog_sha']
-                or catalog != b'[]'):
+                or row['catalog_sha'] != catalog_sha(catalog) or plan['expectedCatalogDigest'] != row['catalog_sha']):
             raise Conflict('native plan binding changed')
+        try:
+            definitions = ref.decode_submission(catalog)
+            if ref.canonical_json(definitions) != catalog: raise Conflict('native plan catalog changed')
+            validate_selected(plan['options'], definitions)
+        except (ValueError, TypeError, KeyError, OverflowError): raise Conflict('native plan catalog changed') from None
         return self._receipt(plan, row['plan_sha'], row['catalog_sha'])
 
     @staticmethod
@@ -122,18 +179,30 @@ class NativePlanBindings:
         return {'protocol':'native-plan-v1-experiment', 'taskUuid':plan['taskUuid'], 'environment':plan['environment'],
                 'generation':1, 'bindingId':plan['bindingId'], 'manifestSha256':plan['manifestSha256'],
                 'planSha256':digest, 'catalogDigest':catalog, 'state':'identity_bound',
-                'engineEvidence':{'state':'unavailable'}, 'capacityReady':False, 'dispatchReady':False}
+                'engineEvidence':{'state':'unavailable'}, 'effectiveOptions':{'state':'unavailable'},
+                'capacityReady':False, 'dispatchReady':False}
 
-    def catalog_digest(self):
-        """Only the empty selection is supported; catalog health is still required."""
+    def _selected_catalog(self, options):
+        """Capture exact selected definitions; this is an untrusted observation."""
         snapshot = self.service._catalog()
         if snapshot.get('ready') is not True: raise Conflict('catalog unavailable')
-        return catalog_sha(b'[]')
+        definitions = snapshot.get('commonOptions', [])
+        if type(definitions) is not list: raise Conflict('invalid option catalog')
+        names = {item['name'] for item in options}
+        selected = [item for item in definitions if type(item) is dict and item.get('name') in names]
+        if any(type(item.get('name')) is not str for item in selected): raise Conflict('invalid option catalog')
+        selected.sort(key=lambda item:item['name'])
+        validate_selected(options, selected)
+        body = ref.canonical_json(selected)
+        if len(body) > 262144: raise Conflict('selected catalog too large')
+        return body
+
+    def catalog_digest(self, options=()):
+        return catalog_sha(self._selected_catalog(options))
 
     def bind(self, identifier, environment, capability, body):
         plan = validate(body)
         if plan['taskUuid'] != identifier or plan['environment'] != environment: raise Conflict('plan identity mismatch')
-        if plan['options']: raise Conflict('option domain profile not qualified')
         def check(db):
             reservation, manifest = self._manifest_locked(db, identifier, environment, capability)
             if plan['bindingId'] != manifest['bindingId'] or plan['manifestSha256'] != manifest['manifestSha256']:
@@ -144,7 +213,9 @@ class NativePlanBindings:
             existing = self._existing(db, plan, body, reservation, manifest)
             if existing is not None: return existing
         # Never use a fresh catalog to reinterpret an already bound plan.
-        try: observed = self.catalog_digest()
+        try:
+            observed_bytes = self._selected_catalog(plan['options'])
+            observed = catalog_sha(observed_bytes)
         except Exception:
             with self.store._lock, self.queue._db() as db:
                 db.execute('BEGIN'); reservation, manifest = check(db)
@@ -157,10 +228,10 @@ class NativePlanBindings:
             if existing is not None: return existing
             if observed != plan['expectedCatalogDigest']: raise Conflict('catalog changed')
             count, used = db.execute('SELECT COUNT(*),COALESCE(SUM(length(plan_bytes)+length(catalog_bytes)),0) FROM native_plan_bindings').fetchone()
-            if count >= MAX_RECORDS or used + len(body) + 2 > MAX_HISTORY_BYTES: raise Conflict('native plan history limit reached')
+            if count >= MAX_RECORDS or used + len(body) + len(observed_bytes) > MAX_HISTORY_BYTES: raise Conflict('native plan history limit reached')
             digest = plan_sha(body)
             db.execute('INSERT INTO native_plan_bindings VALUES(?,?,?,?,?,?,?,?,?)',
-                       (identifier,self.queue.authority_id,environment,reservation['capability_hash'],manifest['bindingId'],body,digest,b'[]',observed))
+                       (identifier,self.queue.authority_id,environment,reservation['capability_hash'],manifest['bindingId'],body,digest,observed_bytes,observed))
             return self._receipt(plan, digest, observed)
 
     def status(self, identifier, environment, capability):
@@ -172,7 +243,7 @@ class NativePlanBindings:
             body = bytes(row['plan_bytes'])
             try: plan = validate(body)
             except (ValueError, TypeError, KeyError, OverflowError): raise Conflict('native plan binding changed') from None
-            if (plan['taskUuid'] != identifier or plan['environment'] != environment or plan['options']
+            if (plan['taskUuid'] != identifier or plan['environment'] != environment
                     or plan['bindingId'] != manifest['bindingId'] or plan['manifestSha256'] != manifest['manifestSha256']):
                 raise Conflict('native plan binding changed')
             return self._existing(db, plan, body, reservation, manifest)
