@@ -34,6 +34,10 @@ _NORMALIZED = {"schemaVersion", "submissionId", "manifest", "pipeline", "capabil
                "environment", "requestDigest", "manifestSha256", "pipelineDigest"}
 
 
+class StoredReferenceCorrupt(Conflict):
+    """Persisted reference metadata requires inspection; never client input."""
+
+
 def _json(value):
     return protocol.canonical_json(value).decode("utf-8")
 
@@ -124,8 +128,19 @@ class ReferenceStore:
             raise Conflict("unknown reference job")
         return row
 
+    @staticmethod
+    def _stored_result(row):
+        if not row['result_json']:
+            return None
+        try:
+            return protocol.validate_result_manifest(json.loads(row['result_json']),
+                job_id=row['job_id'], generation=row['generation'], environment=row['environment'],
+                pipeline_digest=row['pipeline_digest'])
+        except (ValueError, TypeError, KeyError):
+            raise StoredReferenceCorrupt('stored result requires inspection') from None
+
     def _public(self, row):
-        result = json.loads(row["result_json"]) if row["result_json"] else None
+        result = self._stored_result(row)
         grant = json.loads(row['private_grant_json']) if row['private_grant_json'] else None
         recovering = row["status"] == "held" and row["held_reason"] == "coordinator_restart"
         phase, status, error = ('held' if recovering else row['phase']), row['status'], ('coordinator_restart' if recovering else row['error'])
@@ -149,7 +164,7 @@ class ReferenceStore:
         result = self._public(row)
         if private:
             result.update(submission=json.loads(row["input_json"]),
-                          resultManifest=json.loads(row["result_json"]) if row["result_json"] else None,
+                          resultManifest=self._stored_result(row),
                           claimToken=row["private_claim_token"], executionPhase=row["phase"])
         return result
 
@@ -586,7 +601,7 @@ class ReferenceStore:
                         or protocol.receipt_tombstone_digest(value) != item['digest']):
                     raise ValueError('stored acceptance identity changed')
             except (ValueError, TypeError, KeyError):
-                raise Conflict('stored acceptance requires inspection') from None
+                raise StoredReferenceCorrupt('stored acceptance requires inspection') from None
             receipts.append(value)
         return receipts
 
@@ -596,17 +611,44 @@ class ReferenceStore:
             row = self._row(db, job_id)
             if not row["result_json"] or row["phase"] not in ("awaiting_acceptance", "completed"):
                 raise Conflict("result is not ready for acceptance")
-            result = json.loads(row["result_json"])
+            result = self._stored_result(row)
             checked = protocol.validate_acceptance(receipt, result_manifest=result,
                 input_manifest_sha256=row["manifest_sha"])
             encoded, receipt_digest = _json(checked), protocol.receipt_tombstone_digest(checked)
             identities = {checked['receiptId'], checked['storageReceiptId']}
-            for existing in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances'):
-                prior = json.loads(existing['receipt_json'])
+            for existing in db.execute('SELECT receipt_id,job_id,digest,receipt_json FROM reference_acceptances'):
+                try:
+                    prior = json.loads(existing['receipt_json'])
+                    protocol._closed(prior, ('schemaVersion','receiptId','storageReceiptId','jobId','generation',
+                        'environment','inputManifestSha256','pipelineDigest','resultManifestSha256',
+                        'acceptedObjectIds','acceptedAt','validationVersion'), 'stored acceptance')
+                    for name in ('receiptId','storageReceiptId','jobId'):
+                        protocol._slug(prior[name],name)
+                    if (prior['receiptId'] != existing['receipt_id'] or prior['jobId'] != existing['job_id']
+                            or _json(prior) != existing['receipt_json']
+                            or protocol.receipt_tombstone_digest(prior) != existing['digest']):
+                        raise ValueError('stored acceptance identity changed')
+                except (ValueError, TypeError, KeyError):
+                    raise StoredReferenceCorrupt('stored acceptance requires inspection') from None
                 if existing['receipt_id'] != checked['receiptId'] and identities & {prior['receiptId'], prior['storageReceiptId']}:
                     raise Conflict('acceptance identity already bound')
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
-                for existing in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_terminal_acceptances'):
+                from .reference_terminal import FIELDS
+                for existing in db.execute('SELECT receipt_id,storage_receipt_id,job_id,generation,digest,receipt_json FROM reference_terminal_acceptances'):
+                    try:
+                        prior = json.loads(existing['receipt_json'])
+                        protocol._closed(prior,FIELDS,'stored terminal acceptance')
+                        for name in ('receiptId','storageReceiptId','jobId'):
+                            protocol._slug(prior[name],name)
+                        protocol._integer(prior['generation'],'generation')
+                        if (any(prior[key] != existing[column] for key,column in (
+                                ('receiptId','receipt_id'),('storageReceiptId','storage_receipt_id'),
+                                ('jobId','job_id'),('generation','generation')))
+                                or _json(prior) != existing['receipt_json']
+                                or protocol.digest(prior) != existing['digest']):
+                            raise ValueError('stored terminal acceptance identity changed')
+                    except (ValueError,TypeError,KeyError):
+                        raise StoredReferenceCorrupt('stored terminal acceptance requires inspection') from None
                     if identities & {existing['receipt_id'], existing['storage_receipt_id']}:
                         raise Conflict('acceptance identity belongs to terminal metadata')
             old = db.execute("SELECT job_id,digest,receipt_json FROM reference_acceptances WHERE receipt_id=?", (checked["receiptId"],)).fetchone()
@@ -616,7 +658,7 @@ class ReferenceStore:
                 # The digest column alone is not proof of the stored payload.
                 # Refuse to confirm a modified/noncanonical row; retain it for
                 # inspection without changing acceptance or cleanup state.
-                raise Conflict('stored acceptance requires inspection')
+                raise StoredReferenceCorrupt('stored acceptance requires inspection')
             receipts = self._validated_acceptances(db, row, result)
             accepted = {identifier for value in receipts for identifier in value['acceptedObjectIds']}
             if not old:
@@ -674,16 +716,16 @@ class ReferenceStore:
         """PRIVATE worker relay; metadata receipts grant no unverified deletion."""
         with self.queue._db() as db:
             row = self._row(db, job_id)
-            result = json.loads(row['result_json']) if row['result_json'] else None
+            result = self._stored_result(row)
             receipts = sorted(self._validated_acceptances(db, row, result),key=lambda value:value['receiptId'])
             relay = json.dumps({'receipts': receipts, 'fullyAccepted': False},
                 ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode('utf-8')
             if len(receipts) > protocol.MAX_OBJECTS or len(relay) > protocol.MAX_BODY_BYTES:
-                raise Conflict('stored acceptance relay requires inspection')
+                raise StoredReferenceCorrupt('stored acceptance relay requires inspection')
             if row['phase'] == 'completed' and result is not None:
                 accepted = {identifier for value in receipts for identifier in value['acceptedObjectIds']}
                 if accepted != {obj['id'] for obj in result['objects']}:
-                    raise Conflict('stored acceptance coverage requires inspection')
+                    raise StoredReferenceCorrupt('stored acceptance coverage requires inspection')
             return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed'}
 
     def pending_outbox(self, *, now=None, limit=100):

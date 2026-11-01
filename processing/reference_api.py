@@ -15,6 +15,7 @@ from .maintenance import Conflict
 from .admission_drain import AdmissionClosed
 from . import reference_protocol as protocol
 from .reference_sqlite import is_sqlite_contention
+from .reference_store import StoredReferenceCorrupt
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,8 @@ class ReferenceAPI:
     def _job(self, job_id, environment, *, private=False):
         try:
             job = self.store.get(job_id, private=private)
+        except StoredReferenceCorrupt:
+            raise
         except Conflict:
             return None
         if job["environment"] != environment:
@@ -182,6 +185,8 @@ class ReferenceAPI:
             return self._error(503, 'admission_draining')
         except (protocol.ProtocolError, ValueError, TypeError):
             return self._error(400, "invalid_request")
+        except StoredReferenceCorrupt:
+            return self._error(409, 'stored_reference_inspection')
         except Conflict:
             return self._error(409, "reference_conflict")
         except sqlite3.OperationalError as error:

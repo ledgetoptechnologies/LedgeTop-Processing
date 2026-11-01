@@ -47,7 +47,8 @@ class AcceptanceBoundTests(unittest.TestCase):
         self.store._quota = lambda *_: None
         self.store._row = lambda db, job: dict(job_id=job,
             phase=db.execute('SELECT phase FROM reference_jobs WHERE job_id=?', (job,)).fetchone()[0],
-            result_json=json.dumps(self.result), manifest_sha=self.queue.input_digest)
+            result_json=json.dumps(self.result), manifest_sha=self.queue.input_digest,
+            generation=self.result['generation'],environment=self.result['environment'],pipeline_digest=self.result['pipelineDigest'])
         self.store._public = lambda row: {'phase': row['phase']}
 
     def tearDown(self):
@@ -123,6 +124,17 @@ class AcceptanceBoundTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual([tuple(row) for row in db.execute('SELECT receipt_id,digest,receipt_json FROM reference_acceptances ORDER BY receipt_id')],before)
             self.assertEqual(db.execute('SELECT phase FROM reference_jobs').fetchone()[0],'awaiting_acceptance')
+
+    def test_inconsistent_terminal_collision_row_blocks_without_mutation(self):
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE reference_terminal_acceptances (receipt_id TEXT,storage_receipt_id TEXT,job_id TEXT,generation INTEGER,digest TEXT,receipt_json TEXT)')
+            db.execute('INSERT INTO reference_terminal_acceptances VALUES (?,?,?,?,?,?)',
+                ('other','storage-other','another-job',1,'0'*64,'{}'))
+        with self.assertRaises(Conflict):self.store.accept('job-1',self.receipt)
+        with self.queue._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT * FROM reference_terminal_acceptances').fetchone()),
+                ('other','storage-other','another-job',1,'0'*64,'{}'))
+            self.assertEqual(db.execute('SELECT count(*) FROM reference_acceptances').fetchone()[0],0)
 
     def test_concurrent_overlapping_receipts_add_coverage_at_most_once(self):
         receipts = [dict(self.receipt, receiptId='receipt-'+str(i), storageReceiptId='storage-'+str(i)) for i in range(2)]
