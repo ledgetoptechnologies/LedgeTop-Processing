@@ -51,6 +51,21 @@ class ArchiveStatePreflightTests(unittest.TestCase):
                 self.inspect()
         self.assertEqual(state_census.census(self.root, self.key), self.baseline)
 
+    def test_partial_scan_limit_holds_without_mutation(self):
+        # The census is precomputed to model growth after its bounded scan.
+        with patch('ops.state_census.census', return_value=self.baseline), \
+             patch('ops.state_census.MAX_TREE_ENTRIES', 1):
+            with self.assertRaisesRegex(preflight.PreflightHold, 'tree_limit_exceeded'):
+                self.inspect()
+        self.assertEqual(state_census.census(self.root, self.key), self.baseline)
+
+    def test_partial_scan_unreadable_holds_without_mutation(self):
+        with patch('ops.state_census.census', return_value=self.baseline), \
+             patch('ops.archive_state_preflight.os.scandir', side_effect=PermissionError('synthetic')):
+            with self.assertRaisesRegex(preflight.PreflightHold, 'tree_unreadable'):
+                self.inspect()
+        self.assertEqual(state_census.census(self.root, self.key), self.baseline)
+
     def test_unqualified_schema_holds(self):
         self.schema['table:jobs'] = '0' * 64
         with self.assertRaisesRegex(preflight.PreflightHold, 'schema_not_qualified'):

@@ -17,14 +17,23 @@ class PreflightHold(Exception):
 
 
 def _partial_present(root):
-    def failed(_error):
-        raise PreflightHold('tree_unreadable')
-
-    for _directory, directories, files in os.walk(root, followlinks=False, onerror=failed):
-        for name in directories + files:
-            if (name.endswith('.partial') or name.startswith('.incoming-')
-                    or name in ('.all.zip.restore', '.all.zip.restore-pending')):
-                return True
+    count = 1
+    pending = [root]
+    try:
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > state_census.MAX_TREE_ENTRIES:
+                        raise PreflightHold('tree_limit_exceeded')
+                    name = entry.name
+                    if (name.endswith('.partial') or name.startswith('.incoming-')
+                            or name in ('.all.zip.restore', '.all.zip.restore-pending')):
+                        return True
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+    except OSError:
+        raise PreflightHold('tree_unreadable') from None
     return False
 
 
