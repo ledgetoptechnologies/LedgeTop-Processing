@@ -13,9 +13,18 @@ MAX_BYTES=64*1024*1024
 
 def blocks_legacy(db,identifier):
     """Any extant marker blocks legacy task operations, including malformed rows."""
+    block_epoch(db,identifier)
     table=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_manifest_bindings'").fetchone()
     if table and db.execute('SELECT 1 FROM native_manifest_bindings WHERE uuid=?',(identifier,)).fetchone():
         raise Conflict('native manifest task requires qualified transfer')
+
+def block_epoch(db,identifier):
+    table=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_plan_epochs'").fetchone()
+    revokes=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_plan_epoch_revokes'").fetchone()
+    if bool(table)!=bool(revokes):raise Conflict('native plan epoch history incomplete')
+    # A missing epoch row cannot safely be distinguished from an old v1 task.
+    # While epoch tables exist, cooperating legacy mutations hold authority-wide.
+    if table:raise Conflict('native plan epoch mode excludes v1 operations')
 
 class NativeManifestBindings:
     def __init__(self,store):
@@ -41,6 +50,7 @@ class NativeManifestBindings:
         checked_uuid(identifier)
         reservation=self.store._reservation(db,identifier,environment,capability)
         if reservation is None:raise Conflict('task capability reservation required')
+        block_epoch(db,identifier)
         if db.execute('SELECT 1 FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone() or db.execute('SELECT 1 FROM viewer_incarnations WHERE uuid=?',(identifier,)).fetchone():
             raise Conflict('historical task requires inspection')
         # A failed legacy init can leave a directory before its DB transaction.

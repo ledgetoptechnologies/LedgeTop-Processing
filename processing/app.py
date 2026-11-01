@@ -19,6 +19,10 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if (type(config.viewer_plan_epoch) is not bool or
+        (config.viewer_plan_epoch and (runtime_config.NATIVE_PLAN_EPOCH_QUALIFIED is not True
+          or not config.viewer_plan_binding or not config.viewer_manifest_binding or not config.authority_lease_dir))):
+        raise RuntimeError('native_plan_epoch_not_qualified')
     if (type(config.viewer_plan_binding) is not bool or
         (config.viewer_plan_binding and (runtime_config.NATIVE_PLAN_BINDING_QUALIFIED is not True
           or not config.viewer_manifest_binding or not config.viewer_enabled or not config.authority_lease_dir))):
@@ -96,6 +100,13 @@ def make_handler(config: Config):
             registry = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
             binding = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_manifest_bindings'").fetchone()
             plan_binding_marker = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_plan_bindings'").fetchone()
+            plan_epoch_marker = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_plan_epochs'").fetchone()
+            plan_revoke_marker = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_plan_epoch_revokes'").fetchone()
+        if (plan_epoch_marker or plan_revoke_marker) and not config.viewer_plan_epoch:
+            try:queue.close()
+            finally:
+                if lease is not None:lease.close()
+            raise RuntimeError('native_plan_epoch_configuration_required')
         if plan_binding_marker and not config.viewer_plan_binding:
             try:queue.close()
             finally:
@@ -116,7 +127,7 @@ def make_handler(config: Config):
         from .viewer_service import ViewerService
         from .viewer_http import ViewerFacade
         service = ViewerService(queue, config)
-        binding=plan_binding=None
+        binding=plan_binding=plan_epoch=None
         if config.viewer_manifest_binding:
             from .native_manifest_binding import NativeManifestBindings
             try:binding=NativeManifestBindings(service.store)
@@ -130,6 +141,16 @@ def make_handler(config: Config):
         if config.viewer_plan_binding:
             from .native_plan_binding import NativePlanBindings
             try:plan_binding=NativePlanBindings(service,binding)
+            except BaseException:
+                try:service.close()
+                finally:
+                    try:queue.close()
+                    finally:
+                        if lease is not None:lease.close()
+                raise
+        if config.viewer_plan_epoch:
+            from .native_plan_epoch import NativePlanEpochs
+            try:plan_epoch=NativePlanEpochs(service,binding,plan_binding)
             except BaseException:
                 try:service.close()
                 finally:

@@ -195,7 +195,11 @@ class TaskStore:
             row=db.execute('SELECT * FROM viewer_reservations WHERE uuid=?',(identifier,)).fetchone()
             if row is not None:
                 self._reservation(db,identifier,environment,capability,allow_cancelled=True)
+                from .native_manifest_binding import block_epoch
+                block_epoch(db,identifier)
                 return {'uuid':identifier,'state':row['state']}
+            from .native_manifest_binding import block_epoch
+            block_epoch(db,identifier)
             if db.execute('SELECT 1 FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone():raise Conflict('UUID already belongs to a legacy task')
             if db.execute('SELECT COUNT(*) FROM viewer_reservations').fetchone()[0]>=RESERVATION_LIMIT:raise Conflict('reservation history limit reached')
             db.execute("INSERT INTO viewer_reservations(uuid,environment,capability_hash,state) VALUES (?,?,?,'reserved')",(identifier,environment,digest))
@@ -209,7 +213,10 @@ class TaskStore:
                 'runningCancellation':'requires_inspection'}
 
     def authorize_reservation(self,identifier,environment,capability):
-        with self.queue._db() as db:self._reservation(db,identifier,environment,capability,allow_cancelled=True)
+        with self.queue._db() as db:
+            self._reservation(db,identifier,environment,capability,allow_cancelled=True)
+            from .native_manifest_binding import block_epoch
+            block_epoch(db,identifier)
 
     def reject_manifest_legacy(self,identifier,environment,capability):
         with self.queue._db() as db:
@@ -222,6 +229,8 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             reserved=self._reservation(db,identifier,environment,capability,allow_cancelled=True)
             if reserved is None:raise KeyError('unknown reservation')
+            from .native_manifest_binding import block_epoch
+            block_epoch(db,identifier)
             if reserved['state']=='cancelled':return {'uuid':identifier,'state':'cancelled'}
             row=db.execute('SELECT * FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()
             if row is not None:
@@ -818,6 +827,8 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
+            from .native_manifest_binding import block_epoch
+            block_epoch(db,identifier)
             row = self._row(db, identifier)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
@@ -851,6 +862,8 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
+            from .native_manifest_binding import block_epoch
+            block_epoch(db,identifier)
             row=self._row(db,identifier)
             job=self._job(db,row)
             if self._cancelled_never_started(db, row, job):
@@ -869,6 +882,8 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
+            from .native_manifest_binding import block_epoch
+            block_epoch(db,identifier)
             row = self._row(db, identifier, removed=True)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
