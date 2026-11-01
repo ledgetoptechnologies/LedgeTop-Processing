@@ -25,13 +25,13 @@ from unittest.mock import patch
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore, PROFILE
 from processing import reference_owned_binding_candidate as candidate
-root, submission, binding, attempt, principal = sys.argv[1:]
+root, submission, binding, attempt = sys.argv[1:]
 q=Queue(root);q.allowed_profiles.add(PROFILE)
 try:
     store=ReferenceStore(q)
     with patch.object(candidate,'QUALIFIED',True):
         candidate.submit_bound_candidate(store,json.loads(submission),binding_id=binding,
-            attempt_id=attempt,principal_id=principal)
+            attempt_id=attempt,credential=b'S'*32)
     # Candidate returned after Queue context committed. Simulate a process
     # dying before it can send its response; q.close does not run.
     os._exit(75)
@@ -78,26 +78,27 @@ class OwnedBindingTests(unittest.TestCase):
             options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],
             allowed_odm_options={'pc-quality', 'projection'})
         self.binding, self.attempt, self.principal = (str(uuid.uuid4()) for _ in range(3))
+        self.credential = b'S' * 32
 
     def install(self):
         with patch.object(candidate, 'QUALIFIED', True):
-            candidate.install_empty_candidate(self.store, synthetic_pipeline_digest=self.submission['pipelineDigest'])
+            candidate.install_empty_candidate(self.store, synthetic_pipeline_digest=self.submission['pipelineDigest'], synthetic_principal_id=self.principal, synthetic_environment='staging', synthetic_credential=self.credential)
 
     def submit(self, **overrides):
-        args = dict(binding_id=self.binding, attempt_id=self.attempt, principal_id=self.principal)
+        args = dict(binding_id=self.binding, attempt_id=self.attempt, credential=self.credential)
         args.update(overrides)
         with patch.object(candidate, 'QUALIFIED', True):
             return candidate.submit_bound_candidate(self.store, self.submission, **args)
 
     def test_disabled_by_default_and_exact_replay(self):
         with self.assertRaises(Conflict):
-            candidate.install_empty_candidate(self.store, synthetic_pipeline_digest=self.submission['pipelineDigest'])
+            candidate.install_empty_candidate(self.store, synthetic_pipeline_digest=self.submission['pipelineDigest'], synthetic_principal_id=self.principal, synthetic_environment='staging', synthetic_credential=self.credential)
         self.install()
-        first, created = self.submit()
-        self.assertTrue(created)
-        replay, created = self.submit()
-        self.assertFalse(created)
-        self.assertEqual(first, replay)
+        first = self.submit()
+        self.assertTrue(first['created'])
+        replay = self.submit()
+        self.assertFalse(replay['created'])
+        self.assertEqual(first['binding'], replay['binding'])
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_owned_binding_candidate').fetchone()[0], 1)
@@ -105,12 +106,140 @@ class OwnedBindingTests(unittest.TestCase):
     def test_changed_attempt_binding_or_principal_holds(self):
         self.install()
         self.submit()
-        for key in ('binding_id', 'attempt_id', 'principal_id'):
+        for key in ('binding_id', 'attempt_id'):
             with self.subTest(key=key), self.assertRaises(Conflict):
                 self.submit(**{key: str(uuid.uuid4())})
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_owned_binding_candidate').fetchone()[0], 1)
+
+    def test_unknown_credential_rotation_overlap_and_revocation(self):
+        self.install()
+        with self.assertRaises(Conflict):
+            self.submit(credential=b'W' * 32)
+        first = self.submit()
+        self.assertEqual(first['binding']['firstCredentialRevision'], 1)
+        with patch.object(candidate, 'QUALIFIED', True):
+            candidate.rotate_candidate(self.store, principal_id=self.principal,
+                expected_revision=1, new_revision=2, new_credential=b'N' * 32)
+            with self.assertRaises(Conflict):
+                candidate.rotate_candidate(self.store, principal_id=self.principal,
+                    expected_revision=2, new_revision=3, new_credential=self.credential)
+            with self.assertRaises(Conflict):
+                candidate.rotate_candidate(self.store, principal_id=self.principal,
+                    expected_revision=1, new_revision=2, new_credential=b'X' * 32)
+            candidate.revoke_candidate(self.store, principal_id=self.principal, revision=1)
+        with self.assertRaises(Conflict):
+            self.submit()
+        replay = self.submit(credential=b'N' * 32)
+        self.assertEqual(first['binding'], replay['binding'])
+        self.assertEqual(replay['binding']['firstCredentialRevision'], 1)
+        self.assertFalse(replay['created'])
+        with patch.object(candidate, 'QUALIFIED', True):
+            candidate.revoke_candidate(self.store, principal_id=self.principal)
+            with self.assertRaises(Conflict):
+                candidate.rotate_candidate(self.store, principal_id=self.principal,
+                    expected_revision=2, new_revision=3, new_credential=b'X' * 32)
+        with self.assertRaises(Conflict):
+            self.submit(credential=b'N' * 32)
+
+    def test_revocation_serializes_with_bound_create(self):
+        self.install()
+        entered, release, revoke_started, revoke_done = (threading.Event() for _ in range(4))
+        original = self.store._submit_owned_transaction
+        def blocked(db, checked):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('synthetic release timed out')
+            return original(db, checked)
+        def submit():
+            return candidate.submit_bound_candidate(self.store, self.submission,
+                binding_id=self.binding, attempt_id=self.attempt, credential=self.credential)
+        def revoke():
+            revoke_started.set()
+            candidate.revoke_candidate(self.store, principal_id=self.principal)
+            revoke_done.set()
+        with patch.object(candidate, 'QUALIFIED', True), patch.object(self.store, '_submit_owned_transaction', side_effect=blocked):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                create = pool.submit(submit)
+                try:
+                    self.assertTrue(entered.wait(5))
+                    revoke_task = pool.submit(revoke)
+                    self.assertTrue(revoke_started.wait(5))
+                    self.assertFalse(revoke_done.wait(.1))
+                finally:
+                    release.set()
+                self.assertTrue(create.result(timeout=5)['created'])
+                revoke_task.result(timeout=5)
+            with self.assertRaises(Conflict):
+                submit()
+
+    def test_binding_is_immutable_and_replay_response_separates_status(self):
+        self.install()
+        first = self.submit()
+        with self.queue._db() as db:
+            for setting in ('OFF', 'ON'):
+                db.commit()
+                db.execute('PRAGMA recursive_triggers=' + setting)
+                self.assertEqual(db.execute('PRAGMA recursive_triggers').fetchone()[0], int(setting == 'ON'))
+                for sql, params in (
+                    ('UPDATE reference_owned_binding_candidate SET principal_id=?', (str(uuid.uuid4()),)),
+                    ('UPDATE reference_owned_binding_candidate SET binding_id=NULL', ()),
+                    ('DELETE FROM reference_owned_binding_candidate', ()),
+                    ('INSERT OR REPLACE INTO reference_owned_binding_candidate SELECT * FROM reference_owned_binding_candidate', ()),
+                    ('INSERT OR REPLACE INTO reference_owned_binding_candidate SELECT NULL,attempt_id,submission_id,job_id,generation,environment,manifest_sha,pipeline_digest,principal_id,first_revision FROM reference_owned_binding_candidate', ()),
+                ):
+                    with self.subTest(setting=setting, sql=sql), self.assertRaises(sqlite3.IntegrityError):
+                        db.execute(sql, params)
+            db.execute("UPDATE reference_jobs SET phase='fetching' WHERE job_id=?", (first['binding']['jobId'],))
+        replay = self.submit()
+        self.assertEqual(first['binding'], replay['binding'])
+        self.assertNotEqual(first['currentJob']['phase'], replay['currentJob']['phase'])
+
+    def test_principal_and_credential_mutations_are_monotonic(self):
+        self.install()
+        with self.queue._db() as db:
+            for setting in ('OFF', 'ON'):
+                db.commit()
+                db.execute('PRAGMA recursive_triggers=' + setting)
+                self.assertEqual(db.execute('PRAGMA recursive_triggers').fetchone()[0], int(setting == 'ON'))
+                statements = (
+                    ('UPDATE reference_owned_principal_candidate SET environment=?', ('production',)),
+                    ('UPDATE reference_owned_principal_candidate SET principal_id=NULL', ()),
+                    ('UPDATE reference_owned_principal_candidate SET environment=NULL', ()),
+                    ('UPDATE reference_owned_principal_candidate SET status=NULL', ()),
+                    ("UPDATE reference_owned_principal_candidate SET status='revoked',principal_id=NULL", ()),
+                    ("UPDATE reference_owned_principal_candidate SET status='revoked',environment=NULL", ()),
+                    ('DELETE FROM reference_owned_principal_candidate', ()),
+                    ('INSERT OR REPLACE INTO reference_owned_principal_candidate SELECT * FROM reference_owned_principal_candidate', ()),
+                    ("INSERT OR REPLACE INTO reference_owned_principal_candidate VALUES (NULL,'staging','active')", ()),
+                    ('UPDATE reference_owned_credential_candidate SET token_sha256=?', (b'X' * 32,)),
+                    ('UPDATE reference_owned_credential_candidate SET token_sha256=NULL', ()),
+                    ('UPDATE reference_owned_credential_candidate SET revision=2', ()),
+                    ('UPDATE reference_owned_credential_candidate SET revision=NULL', ()),
+                    ('UPDATE reference_owned_credential_candidate SET principal_id=?', (str(uuid.uuid4()),)),
+                    ('UPDATE reference_owned_credential_candidate SET principal_id=NULL', ()),
+                    ('UPDATE reference_owned_credential_candidate SET status=NULL', ()),
+                    ("UPDATE reference_owned_credential_candidate SET status='revoked',principal_id=NULL", ()),
+                    ("UPDATE reference_owned_credential_candidate SET status='revoked',revision=NULL", ()),
+                    ("UPDATE reference_owned_credential_candidate SET status='revoked',token_sha256=NULL", ()),
+                    ('DELETE FROM reference_owned_credential_candidate', ()),
+                    ('INSERT OR REPLACE INTO reference_owned_credential_candidate SELECT * FROM reference_owned_credential_candidate', ()),
+                    ("INSERT OR REPLACE INTO reference_owned_credential_candidate VALUES (NULL,2,?,'active')", (b'N' * 32,)),
+                )
+                for sql, params in statements:
+                    with self.subTest(setting=setting, sql=sql), self.assertRaises(sqlite3.IntegrityError):
+                        db.execute(sql, params)
+        with patch.object(candidate, 'QUALIFIED', True):
+            candidate.revoke_candidate(self.store, principal_id=self.principal, revision=1)
+            candidate.revoke_candidate(self.store, principal_id=self.principal)
+        with self.queue._db() as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE reference_owned_credential_candidate SET status='active'")
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE reference_owned_principal_candidate SET status='active'")
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("INSERT INTO reference_owned_credential_candidate VALUES (?,?,?,'active')", (self.principal, 2, b'N' * 32))
 
     def test_binding_write_failure_rolls_back_new_job(self):
         self.install()
@@ -135,7 +264,7 @@ class OwnedBindingTests(unittest.TestCase):
 
     def test_unique_binding_cannot_be_reused_for_new_submission(self):
         self.install()
-        first, _ = self.submit()
+        first = self.submit()
         body = dict(self.body, submissionId=str(uuid.uuid4()))
         other = protocol.validate_submission(body, environment='staging',
             capability_fingerprint=body['capabilityFingerprint'],
@@ -143,10 +272,10 @@ class OwnedBindingTests(unittest.TestCase):
             allowed_odm_options={'pc-quality', 'projection'})
         with patch.object(candidate, 'QUALIFIED', True), self.assertRaises(Conflict):
             candidate.submit_bound_candidate(self.store, other, binding_id=self.binding,
-                attempt_id=str(uuid.uuid4()), principal_id=self.principal)
+                attempt_id=str(uuid.uuid4()), credential=self.credential)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0], 1)
-            self.assertEqual(db.execute('SELECT job_id FROM reference_owned_binding_candidate').fetchone()[0], first['jobId'])
+            self.assertEqual(db.execute('SELECT job_id FROM reference_owned_binding_candidate').fetchone()[0], first['binding']['jobId'])
 
     def test_same_submission_wrong_environment_holds(self):
         self.install()
@@ -157,7 +286,7 @@ class OwnedBindingTests(unittest.TestCase):
             allowed_odm_options={'pc-quality', 'projection'})
         with patch.object(candidate, 'QUALIFIED', True), self.assertRaises(Conflict):
             candidate.submit_bound_candidate(self.store, other, binding_id=self.binding,
-                attempt_id=self.attempt, principal_id=self.principal)
+                attempt_id=self.attempt, credential=self.credential)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0], 1)
 
@@ -167,19 +296,19 @@ class OwnedBindingTests(unittest.TestCase):
         def run(_):
             barrier.wait()
             return candidate.submit_bound_candidate(self.store, self.submission,
-                binding_id=self.binding, attempt_id=self.attempt, principal_id=self.principal)
+                binding_id=self.binding, attempt_id=self.attempt, credential=self.credential)
         # Same Queue owner serializes its DB contexts; this is not a physical
         # multi-process writer-fence test.
         with patch.object(candidate, 'QUALIFIED', True):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 results = list(pool.map(run, range(2)))
-        self.assertEqual(sorted(created for _, created in results), [False, True])
-        self.assertEqual(results[0][0]['jobId'], results[1][0]['jobId'])
+        self.assertEqual(sorted(item['created'] for item in results), [False, True])
+        self.assertEqual(results[0]['binding'], results[1]['binding'])
 
     def test_nonempty_install_and_malformed_identity_hold(self):
         self.store.submit(self.submission)
         with patch.object(candidate, 'QUALIFIED', True), self.assertRaises(Conflict):
-            candidate.install_empty_candidate(self.store, synthetic_pipeline_digest=self.submission['pipelineDigest'])
+            candidate.install_empty_candidate(self.store, synthetic_pipeline_digest=self.submission['pipelineDigest'], synthetic_principal_id=self.principal, synthetic_environment='staging', synthetic_credential=self.credential)
         for value in ('x', self.binding + '\n', self.binding.upper()):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 candidate._uuid4(value)
@@ -194,7 +323,7 @@ class OwnedBindingTests(unittest.TestCase):
             allowed_odm_options={'pc-quality', 'projection'})
         with patch.object(candidate, 'QUALIFIED', True), self.assertRaises(Conflict):
             candidate.submit_bound_candidate(self.store, other, binding_id=self.binding,
-                attempt_id=self.attempt, principal_id=self.principal)
+                attempt_id=self.attempt, credential=self.credential)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0], 0)
             with self.assertRaises(sqlite3.IntegrityError):
@@ -204,7 +333,7 @@ class OwnedBindingTests(unittest.TestCase):
         self.install()
         self.queue.close()
         child = subprocess.Popen([sys.executable, '-c', _LOST_RESPONSE_CHILD,
-            self.root, json.dumps(self.submission), self.binding, self.attempt, self.principal],
+            self.root, json.dumps(self.submission), self.binding, self.attempt],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         print('owned synthetic child pid:', child.pid, flush=True)
         try:
@@ -216,12 +345,12 @@ class OwnedBindingTests(unittest.TestCase):
         self.addCleanup(self.queue.close)
         self.queue.allowed_profiles.add(PROFILE)
         self.store = ReferenceStore(self.queue)
-        replay, created = self.submit()
-        self.assertFalse(created)
+        replay = self.submit()
+        self.assertFalse(replay['created'])
         self.assertEqual(len(self.store.list()), 1)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_owned_binding_candidate').fetchone()[0], 1)
-            self.assertEqual(db.execute('SELECT job_id FROM reference_owned_binding_candidate').fetchone()[0], replay['jobId'])
+            self.assertEqual(db.execute('SELECT job_id FROM reference_owned_binding_candidate').fetchone()[0], replay['binding']['jobId'])
 
     def test_two_client_processes_exact_replay_at_one_owner(self):
         self.install()
@@ -249,9 +378,9 @@ class OwnedBindingTests(unittest.TestCase):
                         raise ValueError('invalid synthetic input')
                     payload = json.loads(self.rfile.read(length))
                     gate.wait()
-                    job, created = candidate.submit_bound_candidate(owner.store, payload,
-                        binding_id=owner.binding, attempt_id=owner.attempt, principal_id=owner.principal)
-                    data = json.dumps({'jobId': job['jobId'], 'created': created}).encode()
+                    result = candidate.submit_bound_candidate(owner.store, payload,
+                        binding_id=owner.binding, attempt_id=owner.attempt, credential=owner.credential)
+                    data = json.dumps({'jobId': result['binding']['jobId'], 'created': result['created']}).encode()
                     self.send_response(200)
                     self.send_header('Content-Length', str(len(data)))
                     self.end_headers()

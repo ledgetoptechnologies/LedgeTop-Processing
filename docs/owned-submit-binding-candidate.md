@@ -1,5 +1,9 @@
 # Disabled owner-controlled job binding experiment
 
+The later credential experiment changes the candidate method signature and
+return shape. See `owned-binding-auth-candidate.md` for its current scope and
+the original process-test history below for the earlier revision.
+
 This experiment creates a reference job and a Viewer attempt binding in one
 Queue-owned SQLite transaction. It returns no database connection and accepts
 no callback. An exact retry under the same binding, attempt, synthetic
