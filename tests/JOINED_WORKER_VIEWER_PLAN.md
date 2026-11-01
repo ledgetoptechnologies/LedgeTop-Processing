@@ -127,6 +127,31 @@ The worker archive streamed through the actual coordinator result proxy into
 Viewer candidate storage, and its exact acceptance persisted after the first
 coordinator process had been killed and restarted. Node again emitted the
 IP-address TLS server-name deprecation warning.
+
+The latest rehearsal pinned Viewer #402 head
+`2967a50220d724c36b51c600f076945be91b3c1d`. Since the prior passing Viewer
+head, only derivative evidence/inspection modules changed; the fixture does not
+invoke them. Processing is still pinned to the previously tested integrated
+runtime `4020f922990bca17598390868a8d378e80615154`. This is a synthetic
+candidate, not the deployed runtime. Independent review preceded the run.
+
+Run `c00032d86c264f5896688653f2a4f4b1` passed using the committed fixture blobs
+from `a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba`. All six fixture and nine
+Viewer module hashes and both image IDs matched the prior passing run documented
+below. The actual worker daemon finished with coordinator offline, the
+coordinator process restarted, Viewer staged the resulting real proxy stream,
+and the coordinator confirmed its exact receipt. This did not exercise Viewer
+derivative recovery or publication, real ODM, or host power loss. Node emitted
+the same IP-address TLS server-name deprecation warning.
+
+The retained root is
+`C:\Users\fstor\AppData\Local\Temp\ledgetop-acceptance-outer-e3q3z8ew`.
+The exact labeled Python container
+`a704a9206ca31187ee3d12c84ae6ffb4109777bca302eb2f9d6c2b4af4f121a3`
+and Viewer container
+`a9751bdf2245fdc9de506c4d2ccd63c4f1b788d990f92b56ac72bb8a1781e95b`
+both exited 0; inner process group exited 0, outer Windows Job active count 0,
+and no ownership uncertainty was reported. Both containers and root remain.
 Viewer module SHA-256 values, in the runner's order:
 
 * Consumer: `6cad93cd4f7abc24e5d17814a135d121f69e5e6b42c27d694f6fee2c1deb185e`

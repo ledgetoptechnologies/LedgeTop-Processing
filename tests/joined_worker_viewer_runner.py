@@ -9,7 +9,7 @@ import time
 
 source=Path(__file__).resolve().parents[1]
 viewer=Path(r'C:\Projects\viewer-download-retention-20261031')
-viewer_commit='82500cfa7f8baa23451d8933fa7fad4e0f971bf2'
+viewer_commit='2967a50220d724c36b51c600f076945be91b3c1d'
 processing_commit_expected='4020f922990bca17598390868a8d378e80615154'
 fixture_commit='a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba'
 fixture_hashes={
