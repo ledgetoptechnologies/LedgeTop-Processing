@@ -16,6 +16,15 @@ from processing.engine_ingress_guard import AdmissionError, BackendPin
 from processing.node_gate import NodeGate
 from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_tasks import TaskStore
+from processing.authority_lease import AuthorityLease, record_required
+
+
+def attach_lease(queue, directory):
+    directory.mkdir(mode=0o700)
+    lease=AuthorityLease(directory, queue.authority_id)
+    queue.authority_lease=lease
+    record_required(queue,lease)
+    return lease
 
 
 class NodeMutationBrokerTests(unittest.TestCase):
@@ -25,6 +34,8 @@ class NodeMutationBrokerTests(unittest.TestCase):
         self.engine='engine-synthetic';self.node='main'
         self.owner_queue=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
         self.addCleanup(self.owner_queue.close)
+        self.owner_lease=attach_lease(self.owner_queue,self.root/'owner-lease')
+        self.addCleanup(self.owner_lease.close)
         self.authority=self.owner_queue.authority_id;self.epoch=self.owner_queue.startup_id
         self.origin='http://127.0.0.1:18080';self.secret=b'synthetic-key-'*4;self.calls=[]
         self.drip=False;self.drip_done=threading.Event()
@@ -123,6 +134,13 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
         self.assertEqual(self.calls,[])
 
+    def test_lost_separate_authority_lease_refuses_grant_while_queue_stays_open(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret)
+        self.owner_lease.close()
+        self.assertFalse(self.owner_queue._lock.closed)
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.assertEqual(self.calls,[])
+
     def test_live_queue_rejects_valid_grant_after_task_phase_changes(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret)
         store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
@@ -155,6 +173,43 @@ class NodeMutationBrokerTests(unittest.TestCase):
         self.assertEqual(out[0]['uuid'],self.task)
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
         self.assertEqual(len(self.calls),1)
+
+    def test_authority_lease_close_waits_for_inflight_mutation(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret)
+        entered=threading.Event();release=threading.Event();closed=threading.Event();out=[]
+        original=self.adapter.exchange
+        def slow(*args):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('synthetic exchange timed out')
+            return original(*args)
+        def send():
+            try:out.append(self.broker.mutate(grant,signature,self.body))
+            except Exception as error:out.append(error)
+        worker=threading.Thread(target=send)
+        closer=threading.Thread(target=lambda:(self.owner_lease.close(),closed.set()))
+        with patch.object(self.adapter,'exchange',side_effect=slow):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3));closer.start();self.assertFalse(closed.wait(.2))
+            finally:
+                release.set();worker.join(5)
+                if closer.ident is not None:closer.join(5)
+        self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertTrue(closed.is_set())
+        self.assertEqual(out[0]['uuid'],self.task)
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.assertEqual(len(self.calls),1)
+
+    def test_reentrant_close_cannot_drop_authority_during_mutation(self):
+        grant=self.grant();original=self.adapter.exchange;checked=[]
+        def attempt_close(*args):
+            with self.assertRaises(RuntimeError):self.owner_queue.close()
+            with self.assertRaises(RuntimeError):self.owner_lease.close()
+            checked.append(True)
+            return original(*args)
+        with patch.object(self.adapter,'exchange',side_effect=attempt_close):
+            self.assertEqual(self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)['uuid'],self.task)
+        self.assertEqual(checked,[True]);self.assertFalse(self.owner_queue._lock.closed)
+        self.assertIsNotNone(self.owner_lease._descriptor)
 
     def test_lost_response_survives_broker_restart_without_replay(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
@@ -236,6 +291,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
     def test_other_local_queue_grant_reaches_its_node_gate_and_loopback_peer(self):
         queue=Queue(self.root/'coordinator',node_ids=('cluster','main'),viewer_enabled=True)
         node_path=self.root/'remote-node-gate'
+        lease=attach_lease(queue,self.root/'other-lease')
         try:
             store=TaskStore(queue,self.root/'coordinator'/'viewer-tasks')
             store.initialize(self.task,'Synthetic',[],None,'production')
@@ -256,7 +312,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     self.assertEqual(remote.mutate(grant,signature,self.body)['uuid'],self.task)
                     self.assertEqual(len(self.calls),1)
                 finally:remote.close()
-        finally:queue.close()
+        finally:queue.close();lease.close()
 
 
 if __name__=='__main__':unittest.main()

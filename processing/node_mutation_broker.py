@@ -41,16 +41,23 @@ class LocalCoordinatorAuthority:
     """Exact same-process Queue owner; never a remote authority assertion."""
     def __init__(self, queue):
         from .prototype import Queue
+        from .authority_lease import AuthorityLease
         if type(queue) is not Queue or queue._creator_pid != os.getpid() or queue._lock.closed:
             raise BrokerHeld('local coordinator owner required')
+        lease=getattr(queue,'authority_lease',None)
+        if type(lease) is not AuthorityLease or lease.authority!=queue.authority_id or lease._descriptor is None:
+            raise BrokerHeld('installed authority lease required')
         self.queue=queue; self.pid=os.getpid();self.epoch=queue.startup_id;self.authority=queue.authority_id
+        self.authority_lease=lease
         info=os.fstat(queue._lock.fileno());self.lock_identity=(info.st_dev,info.st_ino)
-        self._check()
+        with lease.held(time.monotonic()+2):self._check()
 
     def _check(self):
         queue=self.queue
         if (os.getpid()!=self.pid or queue._creator_pid!=self.pid or queue._lock.closed
-                or queue.startup_id!=self.epoch or queue.authority_id!=self.authority):
+                or queue.startup_id!=self.epoch or queue.authority_id!=self.authority
+                or getattr(queue,'authority_lease',None) is not self.authority_lease
+                or self.authority_lease.authority!=self.authority or self.authority_lease._descriptor is None):
             raise BrokerHeld('local coordinator authority unavailable')
         try:
             held=os.fstat(queue._lock.fileno());name=(queue.path.parent/'coordinator.lock').lstat()
@@ -62,32 +69,46 @@ class LocalCoordinatorAuthority:
     @contextmanager
     def hold(self, grant, timeout):
         from .prototype import VIEWER_PROFILE
+        from .authority_lease import MARKER_DDL, LeaseUnavailable
+        deadline=time.monotonic()+timeout
         if os.getpid()!=self.pid or not self.queue._lifecycle_lock.acquire(timeout=timeout):
             raise BrokerHeld('local coordinator owner unavailable')
         try:
-            self._check()
-            if (grant['authorityId'],grant['coordinatorEpoch'])!=(self.authority,self.epoch):
-                raise BrokerHeld('local coordinator epoch differs')
-            with self.queue._db() as db:
-                db.execute('BEGIN')
-                job=db.execute('SELECT * FROM jobs WHERE id=?',(grant['jobId'],)).fetchone()
-                tasks=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(grant['jobId'],)).fetchall()
-                active=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
-                if (job is None or len(tasks)!=1 or job['status']!='running' or job['profile']!=VIEWER_PROFILE
-                        or len(active)!=1 or active[0]['id']!=grant['jobId']
-                        or job['worker_id']!='viewer-dispatch' or job['node_id']!=grant['nodeId']
-                        or job['environment']!=grant['environment'] or not job['claim_hash']
-                        or not self.queue._transfer_admission_clear(db)):
-                    raise BrokerHeld('local active coordinator claim required')
-                task=tasks[0];token=task['claim_token']
-                if (task['removed'] or task['stage']!='running' or task['phase']!='init_pending'
-                        or task['engine_uuid']!=grant['engineTaskId'] or task['node_id']!=grant['nodeId']
-                        or task['environment']!=grant['environment'] or type(token) is not str
-                        or not 32<=len(token)<=128 or not token.isascii()
-                        or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
-                    raise BrokerHeld('local current task required')
-            yield
-            self._check()
+            try:
+                with self.authority_lease.held(deadline):
+                    self._check()
+                    if (grant['authorityId'],grant['coordinatorEpoch'])!=(self.authority,self.epoch):
+                        raise BrokerHeld('local coordinator epoch differs')
+                    with self.queue._db() as db:
+                        db.execute('BEGIN')
+                        schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone()
+                        if (schema is None or schema[0]!=MARKER_DDL or
+                                db.execute('SELECT COUNT(*) FROM coordinator_authority_lease WHERE singleton=1 AND required=1').fetchone()[0]!=1):
+                            raise BrokerHeld('authority lease marker unavailable')
+                        job=db.execute('SELECT * FROM jobs WHERE id=?',(grant['jobId'],)).fetchone()
+                        tasks=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(grant['jobId'],)).fetchall()
+                        active=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
+                        if (job is None or len(tasks)!=1 or job['status']!='running' or job['profile']!=VIEWER_PROFILE
+                                or len(active)!=1 or active[0]['id']!=grant['jobId']
+                                or job['worker_id']!='viewer-dispatch' or job['node_id']!=grant['nodeId']
+                                or job['environment']!=grant['environment'] or not job['claim_hash']
+                                or not self.queue._transfer_admission_clear(db)):
+                            raise BrokerHeld('local active coordinator claim required')
+                        task=tasks[0];token=task['claim_token']
+                        if (task['removed'] or task['stage']!='running' or task['phase']!='init_pending'
+                                or task['engine_uuid']!=grant['engineTaskId'] or task['node_id']!=grant['nodeId']
+                                or task['environment']!=grant['environment'] or type(token) is not str
+                                or not 32<=len(token)<=128 or not token.isascii()
+                                or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
+                            raise BrokerHeld('local current task required')
+                    # Queue.close uses an RLock and can otherwise be called
+                    # reentrantly by the owning thread during the exchange.
+                    self.queue._database_users+=1
+                    try:
+                        yield
+                        self._check()
+                    finally:self.queue._database_users-=1
+            except LeaseUnavailable:raise BrokerHeld('installed authority lease unavailable') from None
         finally:self.queue._lifecycle_lock.release()
 
 
