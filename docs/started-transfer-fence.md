@@ -30,6 +30,14 @@ held without replay. Pin acquisition consumes the existing operation deadline,
 although releasing it can wait for the lifecycle mutex. No longer upload deadline
 is enabled by this change.
 
+Bound uploads also require the dispatcher's exact in-process sender completion
+object bound to the same socket and upload ID; the producer must report verified
+EOF and exit before journal completion. This object is not an authentication
+boundary against code in the same interpreter. The guard checks the named gate
+directory and held lock inode before and after the exchange and rechecks node
+maintenance state at completion. Detection does not prevent a malicious or
+privileged writer from replacing and restoring a pathname between checks.
+
 The fence is not protection against a writer able to update/delete the upload
 journal, alter/drop triggers, replace the database or access the engine
 directly. Existing legacy unbound code and older executables are not qualified.

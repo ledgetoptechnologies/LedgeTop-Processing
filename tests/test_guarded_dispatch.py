@@ -147,6 +147,43 @@ class GuardedDispatchTests(unittest.TestCase):
         self.assertFalse(worker.is_alive());self.assertEqual(out,['done'])
         self.assertEqual(self.service.store.task(identifier)['phase'],'processing')
 
+    def test_missing_sender_completion_refuses_before_upload_intent(self):
+        guard=self.service.engines['cluster'].guard;left,right=socket.socketpair()
+        engine_id=str(uuid.uuid4());upload_id=str(uuid.uuid4())
+        headers=[('Authorization','Bearer '+guard.binding.coordinator_secret),('X-LedgeTop-Upload-ID',upload_id)]
+        try:
+            with self.assertRaises(ValueError):
+                guard.stream_bound_upload('/task/new/upload/'+engine_id,headers,left)
+            with self.queue._db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM engine_ingress_uploads').fetchone()[0],0)
+        finally:left.close();right.close()
+
+    def test_node_unavailable_during_upload_preserves_uncertain_intent(self):
+        identifier=self.submit()
+        def observe():
+            if self.calls and '/upload/' in self.calls[-1]:
+                with self.queue._db() as db:db.execute("UPDATE nodes SET state='held' WHERE id='cluster'")
+        self.observer=observe
+        self.service.tick();self.observer=None
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['job']['status'],task['phase']),('held','upload_pending'))
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+        self.assertEqual(len(self.calls),2)
+
+    def test_changed_gate_identity_preserves_intent_without_forwarding(self):
+        from processing import engine_ingress_guard as guard_module
+        identifier=self.submit();original=guard_module._gate_lock_identity;seen=[]
+        def changed(gate):
+            result=original(gate);seen.append(result)
+            return result if len(seen)==1 else (*result[:-1],result[-1]+1)
+        with patch.object(guard_module,'_gate_lock_identity',side_effect=changed):self.service.tick()
+        task=self.service.store.task(identifier)
+        self.assertEqual((task['job']['status'],task['phase']),('held','upload_pending'))
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+        self.assertEqual(self.calls,['/task/new/init'])
+
     def test_lost_upload_reply_holds_no_retry_after_restart(self):
         identifier=self.submit();self.drop=True;self.service.tick();task=self.service.store.task(identifier)
         self.assertEqual(task['job']['status'],'held');self.assertEqual(task['phase'],'upload_pending')

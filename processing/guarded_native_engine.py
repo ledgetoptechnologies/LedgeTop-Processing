@@ -25,6 +25,29 @@ def _read_source(fd, count):
     return os.read(fd, count)
 
 
+class SenderCompletion:
+    """Owned in-process sender evidence; not an interprocess security boundary."""
+    def __init__(self, *, source, writer, thread, stop, done, success, errors, engine, upload_id):
+        self.source,self.writer,self.thread,self.stop_event=source,writer,thread,stop
+        self.done,self.success,self.errors,self.engine,self.upload_id=done,success,errors,engine,upload_id
+        self.stopped=False
+
+    def verify(self, limit):
+        if not self.done.wait(max(0,limit-time.monotonic())) or not self.success.is_set() or self.errors:
+            raise SmokeError('guarded sender uncertain')
+
+    def stop(self):
+        if not self.stopped:
+            self.stopped=True;self.stop_event.set()
+            try:self.source.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
+            try:self.writer.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
+            self.source.close();self.writer.close();self.thread.join(2)
+            if self.thread.is_alive():self.engine._unreaped.append(self.thread)
+        if self.thread.is_alive():raise SmokeError('guarded sender did not exit')
+
+
 class GuardedNativeEngine:
     def __init__(self, store, guard):
         from . import engine_upload_contract
@@ -142,23 +165,8 @@ class GuardedNativeEngine:
                 if thread.is_alive():self._unreaped.append(thread)
             else:os.close(fd)
             raise
-        engine=self
-        class Completion:
-            stopped=False
-            def verify(self,limit):
-                if not done.wait(max(0,limit-time.monotonic())) or not success.is_set() or errors:
-                    raise SmokeError('guarded sender uncertain')
-            def stop(self):
-                if not self.stopped:
-                    self.stopped=True;stop.set()
-                    try:source.shutdown(socket.SHUT_RDWR)
-                    except OSError:pass
-                    try:writer.shutdown(socket.SHUT_RDWR)
-                    except OSError:pass
-                    source.close();writer.close();thread.join(2)
-                    if thread.is_alive():engine._unreaped.append(thread)
-                if thread.is_alive():raise SmokeError('guarded sender did not exit')
-        completion=Completion()
+        completion=SenderCompletion(source=source,writer=writer,thread=thread,stop=stop,done=done,
+                                    success=success,errors=errors,engine=self,upload_id=upload_id)
         try:
             return self.guard.stream_bound_upload('/task/new/upload/'+identifier,self._headers(task,upload_id=upload_id),source,completion=completion)
         finally:

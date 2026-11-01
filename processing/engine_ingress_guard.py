@@ -68,6 +68,25 @@ def _resume_upload_transaction(db, deadline):
     db.execute('BEGIN IMMEDIATE')
 
 
+def _gate_lock_identity(gate):
+    """Pin owned lock and directory identity; not a defense against root."""
+    try:
+        gate._check_lock()
+        root = gate.root
+        if root.is_symlink() or root.resolve() != root.absolute(): raise ValueError()
+        directory = root.lstat()
+        named = (root / 'gate.lock').lstat()
+        held = os.fstat(gate._stream.fileno())
+        if (not stat.S_ISDIR(directory.st_mode) or not stat.S_ISREG(named.st_mode)
+                or not stat.S_ISREG(held.st_mode) or named.st_nlink != 1
+                or (named.st_dev,named.st_ino)!=(held.st_dev,held.st_ino)
+                or (os.name != 'nt' and (directory.st_uid != os.geteuid() or held.st_uid != os.geteuid()))):
+            raise ValueError()
+        return (directory.st_dev,directory.st_ino,held.st_dev,held.st_ino)
+    except (OSError, ValueError, AttributeError, GateError):
+        raise AdmissionError('physical gate identity unavailable') from None
+
+
 @dataclass(frozen=True)
 class OwnerPin:
     """Trusted installation pin, never accepted from HTTP request fields.
@@ -526,23 +545,28 @@ class EngineIngressGuard:
         headers=_headers(pairs);_authenticate(headers,self.binding.coordinator_secret)
         action,engine_uuid=self._mutation('POST',target,headers)
         upload_id=_identifier(headers.get('x-ledgetop-upload-id'))
-        if action!='upload' or type(source) is not socket.socket:
+        from .guarded_native_engine import SenderCompletion
+        if (action!='upload' or type(source) is not socket.socket
+                or type(completion) is not SenderCompletion or completion.source is not source
+                or completion.upload_id != upload_id or completion.stopped):
             raise AdmissionError('bounded socket upload required')
         try:
             with NodeGate(self.binding.engine_id) as gate:
+                gate_identity = _gate_lock_identity(gate)
                 with self._owned(headers,engine_uuid,action,deadline,bound_id=upload_id,preheld_gate=gate) as db:
                     job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
                     task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()
                     record=dict(self._bound_file(db,upload_id,job,task,'started'))
                 # Started intent, trigger fence and Queue lifetime pin remain in
                 # force, but no SQLite transaction or lifecycle mutex is held.
-                gate._check_lock()
+                if _gate_lock_identity(gate) != gate_identity: raise AdmissionError('physical gate identity changed')
                 self._check_backend(deadline)
                 boundary,prefix,suffix=_file_multipart(upload_id,record['name'])
                 result=self._exchange('POST',target,b'',{'Content-Type':'multipart/form-data; boundary='+boundary},deadline,
                                       source=source,source_length=record['bytes'],expected_sha=record['sha256'],
                                       file_prefix=prefix,file_suffix=suffix,forbidden=b'--'+boundary.encode('ascii'))
                 self._check_backend(deadline)
+                if _gate_lock_identity(gate) != gate_identity: raise AdmissionError('physical gate identity changed')
                 try:
                     from .reference_protocol import decode_submission
                     response=decode_submission(result[1])
@@ -560,7 +584,8 @@ class EngineIngressGuard:
                     db.execute('PRAGMA busy_timeout='+str(max(1,int(remaining*1000))))
                     db.execute('BEGIN IMMEDIATE')
                     from .transfer_fence import attest
-                    attest(db); gate._check_lock()
+                    attest(db)
+                    if _gate_lock_identity(gate) != gate_identity: raise AdmissionError('physical gate identity changed')
                     if OwnerPin.capture(self.queue)!=self.owner_pin: raise AdmissionError('canonical owner lease changed')
                     state=gate.snapshot();reservation=state.get('reservation')
                     job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
@@ -572,9 +597,11 @@ class EngineIngressGuard:
                     expected_reservation={'id':job['id'],'workerId':job['worker_id'],
                         'nodeId':job['node_id'],'authorityId':self.queue.authority_id}
                     active=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
+                    node = self.queue._node(db,self.binding.node_id)
                     if (task is None or job['status']!='running' or task['phase']!='upload_pending'
                             or job['profile']!=VIEWER_PROFILE or job['worker_id']!='viewer-dispatch'
                             or len(active)!=1 or active[0]['id']!=job['id']
+                            or node['state'] not in ('active','scheduled','draining')
                             or db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()[0]!=1
                             or job['node_id']!=self.binding.node_id or task['node_id']!=self.binding.node_id
                             or task['engine_uuid']!=engine_uuid or task['claim_token']!=headers.get('x-ledgetop-claim')
