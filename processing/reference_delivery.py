@@ -34,7 +34,7 @@ class DeliveryReceiver:
         binding = {key: payload[key] for key in BINDING}
         if protocol.digest(binding) != envelope['outboxId']:
             raise Conflict('delivery outbox identity mismatch')
-        job = self.store.get(payload['jobId'], private=True)
+        job = self.store.get_v1(payload['jobId'], private=True)
         if (payload['generation'], payload['environment'], payload['inputManifestSha256'],
                 payload['pipelineDigest']) != (job['generation'], job['environment'],
                 job['manifestSha256'], job['pipelineDigest']):

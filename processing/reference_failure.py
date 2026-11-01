@@ -185,6 +185,7 @@ class FailureReceiver:
         receipt_json = protocol.canonical_json(receipt).decode()
         with self.store.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self.store._assert_v1_unbound(db, job_id=record['jobId'])
             row = self._authenticate(db, record, **identity)
             old = db.execute("SELECT * FROM reference_worker_failures WHERE job_id=? AND generation=?",
                              (record["jobId"], record["generation"])).fetchone()

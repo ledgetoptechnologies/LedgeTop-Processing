@@ -72,7 +72,7 @@ class ReferenceWorkerAPI:
         return Response(status, {"error": code})
 
     def _owned_job(self, job_id, identity, claim_token):
-        job = self.store.get(job_id, private=True)
+        job = self.store.get_v1(job_id, private=True)
         with self.store.queue._db() as db:
             claim = db.execute("SELECT * FROM reference_claims WHERE job_id=?", (job_id,)).fetchone()
         if (not claim or (claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
@@ -184,6 +184,12 @@ class ReferenceWorkerAPI:
                 job_id, operation, request_id = recovery.groups()
                 if method == 'GET' and body:
                     return self._error(400, 'invalid_request')
+                # Check the recovery service's own process/authority state
+                # before opening a Queue connection, preserving its v1 error
+                # contract on coordinator PID or authority drift.
+                self.recovery._check()
+                # Current v1 recovery credentials cannot act on a bound job.
+                self._owned_job(job_id, identity, token)
                 if method == 'GET' and operation == 'recovery-state':
                     return Response(200, self.recovery.state(job_id, identity=identity, claim_token=token))
                 if method == 'GET' and request_id:
