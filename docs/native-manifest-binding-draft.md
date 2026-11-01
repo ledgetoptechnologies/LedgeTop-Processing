@@ -17,13 +17,22 @@ same environment token and task capability and revalidates the stored manifest.
 
 The test receipt contains `protocol`, `version`, `taskUuid`, coordinator
 `generation`, `environment`, `manifestId`, `manifestRevision`,
-`manifestSha256`, `bindingId`, `state: identity_bound`, and
+`manifestSha256`, `acceptedInputLimit`, `bindingId`, `state: identity_bound`, and
 `capacityReady: false`. The binding ID hashes the server's authority and
 capability-binding metadata; it is not a signature, user identity, a transfer
 grant, or a physical-space receipt. Viewer-local initialization generation is
 not the coordinator generation. The environment bearer identifies a shared
 environment, not a distinct user. Credentials and input contents are not put
-in the receipt.
+in the receipt. The digest is unkeyed: a writer able to change both the stored
+policy and digest is not detected by this check. Trusted database ownership and
+writer exclusion remain prerequisites.
+
+Each record persists the input limit used at acceptance, included in the
+binding digest. A later lower limit does not invalidate inspection or exact
+replay of that historical identity; new declarations use the current limit.
+This is not authorization to allocate or transfer under an obsolete limit:
+future allocation logic must independently check current policy and remains
+unimplemented and disabled.
 
 The feature intentionally cannot initialize a bound task or upload/dispatch
 it. Legacy init, upload and commit are rejected for a UUID with a binding.

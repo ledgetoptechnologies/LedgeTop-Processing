@@ -6,7 +6,7 @@ from .viewer_tasks import checked_uuid
 
 DDL='''CREATE TABLE native_manifest_bindings (uuid TEXT PRIMARY KEY, environment TEXT NOT NULL,
  authority TEXT NOT NULL, generation INTEGER NOT NULL, capability_hash TEXT NOT NULL,
- manifest_id TEXT NOT NULL, revision INTEGER NOT NULL, manifest_sha TEXT NOT NULL,
+ manifest_id TEXT NOT NULL, revision INTEGER NOT NULL, manifest_sha TEXT NOT NULL, accepted_limit INTEGER NOT NULL, binding_id TEXT NOT NULL,
  manifest_bytes BLOB NOT NULL, UNIQUE(environment,manifest_id))'''
 MAX_RECORDS=1000
 MAX_BYTES=64*1024*1024
@@ -55,33 +55,40 @@ class NativeManifestBindings:
         from . import reference_protocol as ref
         decoded=ref.decode_submission(body)
         if type(decoded) is not dict or type(decoded.get('id')) is not str:raise ref.ProtocolError('manifest identity missing')
-        checked=manifest.validate(body,expected_manifest_id=decoded['id'],max_input_bytes=min(self.store.max_input_bytes,manifest.MAX_INPUT_BYTES))
         with self.store._lock,self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE');reservation=self._check(db,identifier,environment,capability)
             existing=db.execute('SELECT * FROM native_manifest_bindings WHERE uuid=?',(identifier,)).fetchone()
+            accepted_limit=existing['accepted_limit'] if existing else min(self.store.max_input_bytes,manifest.MAX_INPUT_BYTES)
+            if type(accepted_limit) is not int or not 1<=accepted_limit<=manifest.MAX_INPUT_BYTES:
+                raise Conflict('native manifest acceptance policy changed')
+            try:checked=manifest.validate(body,expected_manifest_id=decoded['id'],max_input_bytes=accepted_limit)
+            except (ValueError,TypeError,KeyError,OverflowError):
+                if existing:raise Conflict('native manifest binding changed') from None
+                raise
+            receipt=self._receipt(identifier,environment,reservation,checked,accepted_limit)
             if existing:
                 if (existing['environment']!=environment or existing['authority']!=self.queue.authority_id
                     or existing['generation']!=1 or existing['capability_hash']!=reservation['capability_hash']
                     or existing['manifest_id']!=checked['id'] or existing['revision']!=1
-                    or existing['manifest_sha']!=checked['sha256'] or bytes(existing['manifest_bytes'])!=body):
+                    or existing['manifest_sha']!=checked['sha256'] or existing['binding_id']!=receipt['bindingId'] or bytes(existing['manifest_bytes'])!=body):
                     raise Conflict('native manifest binding changed')
             else:
                 count,used=db.execute('SELECT COUNT(*),COALESCE(SUM(length(manifest_bytes)),0) FROM native_manifest_bindings').fetchone()
                 if count>=MAX_RECORDS or used+len(body)>MAX_BYTES:raise Conflict('native manifest history limit reached')
                 if db.execute('SELECT 1 FROM native_manifest_bindings WHERE environment=? AND manifest_id=?',(environment,checked['id'])).fetchone():
                     raise Conflict('native manifest identity already bound')
-                db.execute('INSERT INTO native_manifest_bindings VALUES(?,?,?,?,?,?,?,?,?)',
-                    (identifier,environment,self.queue.authority_id,1,reservation['capability_hash'],checked['id'],1,checked['sha256'],body))
-            return self._receipt(identifier,environment,reservation,checked)
+                db.execute('INSERT INTO native_manifest_bindings VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    (identifier,environment,self.queue.authority_id,1,reservation['capability_hash'],checked['id'],1,checked['sha256'],accepted_limit,receipt['bindingId'],body))
+            return receipt
 
-    def _receipt(self,identifier,environment,reservation,checked):
+    def _receipt(self,identifier,environment,reservation,checked,accepted_limit):
         from . import reference_protocol as ref
         bound={'authority':self.queue.authority_id,'environment':environment,'taskUuid':identifier,'generation':1,
-               'capabilityHash':reservation['capability_hash'],'manifestId':checked['id'],'manifestRevision':1,'manifestSha256':checked['sha256']}
+               'capabilityHash':reservation['capability_hash'],'manifestId':checked['id'],'manifestRevision':1,'manifestSha256':checked['sha256'],'acceptedInputLimit':accepted_limit}
         binding_id=hashlib.sha256(b'native-manifest-binding-v1\0'+ref.canonical_json(bound)).hexdigest()
         return {'protocol':'native-odm-input-v1-candidate','version':1,'taskUuid':identifier,'generation':1,
                 'environment':environment,'manifestId':checked['id'],'manifestRevision':1,
-                'manifestSha256':checked['sha256'],'bindingId':binding_id,'state':'identity_bound','capacityReady':False}
+                'manifestSha256':checked['sha256'],'acceptedInputLimit':accepted_limit,'bindingId':binding_id,'state':'identity_bound','capacityReady':False}
 
     def status(self,identifier,environment,capability):
         from . import reference_protocol as ref
@@ -92,7 +99,11 @@ class NativeManifestBindings:
             if (row['environment']!=environment or row['authority']!=self.queue.authority_id or row['generation']!=1
                     or row['capability_hash']!=reservation['capability_hash'] or row['revision']!=1):
                 raise Conflict('native manifest binding changed')
-            try:checked=manifest.validate(bytes(row['manifest_bytes']),expected_manifest_id=row['manifest_id'],max_input_bytes=min(self.store.max_input_bytes,manifest.MAX_INPUT_BYTES))
+            accepted_limit=row['accepted_limit']
+            if type(accepted_limit) is not int or not 1<=accepted_limit<=manifest.MAX_INPUT_BYTES:raise Conflict('native manifest acceptance policy changed')
+            try:checked=manifest.validate(bytes(row['manifest_bytes']),expected_manifest_id=row['manifest_id'],max_input_bytes=accepted_limit)
             except (ValueError,TypeError,KeyError,OverflowError):raise Conflict('native manifest binding changed') from None
             if row['manifest_sha']!=checked['sha256']:raise Conflict('native manifest binding changed')
-            return self._receipt(identifier,environment,reservation,checked)
+            receipt=self._receipt(identifier,environment,reservation,checked,accepted_limit)
+            if row['binding_id']!=receipt['bindingId']:raise Conflict('native manifest binding changed')
+            return receipt

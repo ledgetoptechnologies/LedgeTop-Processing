@@ -1,4 +1,5 @@
-import base64,http.client,json,tempfile,threading,time,unittest,uuid
+import base64,http.client,json,os,tempfile,threading,time,unittest,uuid
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,7 @@ CAP=base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip('=')
 OTHER=base64.urlsafe_b64encode(bytes(range(1,33))).decode().rstrip('=')
 BODY=json.loads((Path(__file__).parent/'fixtures/native_input_manifest_vectors.json').read_text())['vectors'][0]['canonical'].encode()
 
+@unittest.skipUnless(os.name=='posix','authority lease requires POSIX')
 class ManifestBindingHTTP(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.leases=self.root/'leases';self.leases.mkdir()
@@ -130,6 +132,28 @@ class ManifestBindingHTTP(unittest.TestCase):
             self.assertEqual(self.binding(second,cap=OTHER,body=ref.canonical_json(other))[0],409)
             self.assertEqual(self.binding(first),(200,receipt))
 
+    def test_lowered_limit_preserves_exact_receipt_but_rejects_new_binding(self):
+        identifier=str(uuid.uuid4());self.reserve(identifier);status,receipt=self.binding(identifier);self.assertEqual(status,200)
+        self.assertEqual(receipt['acceptedInputLimit'],20*1024**3);self.assertFalse(receipt['capacityReady'])
+        self.stop();self.config=replace(self.config,viewer_max_input_bytes=1);self.start()
+        self.assertEqual(self.request('GET','/task/ledgetop/input-manifest/'+identifier),(200,receipt))
+        self.assertEqual(self.binding(identifier),(200,receipt))
+        other=str(uuid.uuid4());self.reserve(other,OTHER);value=json.loads(BODY);value['id']='new-attempt';value['sha256']=ref.manifest_sha256(value)
+        self.assertEqual(self.binding(other,cap=OTHER,body=ref.canonical_json(value))[0],400)
+        with self.handler.prototype_queue._db() as db:
+            row=db.execute('SELECT accepted_limit,manifest_bytes FROM native_manifest_bindings WHERE uuid=?',(identifier,)).fetchone()
+            self.assertEqual(row['accepted_limit'],20*1024**3);self.assertEqual(bytes(row['manifest_bytes']),BODY)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM native_manifest_bindings').fetchone()[0],1)
+
+    def test_changed_stored_policy_holds_without_rewriting(self):
+        identifier=str(uuid.uuid4());self.reserve(identifier);self.assertEqual(self.binding(identifier)[0],200)
+        with self.handler.prototype_queue._db() as db:db.execute('UPDATE native_manifest_bindings SET accepted_limit=10 WHERE uuid=?',(identifier,))
+        self.assertEqual(self.request('GET','/task/ledgetop/input-manifest/'+identifier)[0],409)
+        self.assertEqual(self.binding(identifier)[0],409)
+        with self.handler.prototype_queue._db() as db:
+            row=db.execute('SELECT accepted_limit,manifest_bytes FROM native_manifest_bindings WHERE uuid=?',(identifier,)).fetchone()
+            self.assertEqual(row['accepted_limit'],10);self.assertEqual(bytes(row['manifest_bytes']),BODY)
+
 class ManifestBindingQualification(unittest.TestCase):
     def test_environment_cannot_enable_unqualified_feature(self):
         with patch.dict('os.environ',{'PROCESSING_API_TOKEN':'a'*32,'PROCESSING_VIEWER_MANIFEST_BINDING':'1'},clear=True):
@@ -151,5 +175,24 @@ class ManifestBindingQualification(unittest.TestCase):
                     with self.assertRaisesRegex(Conflict,'authority unavailable'):NativeManifestBindings(store)
                 with queue._db() as db:self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='native_manifest_bindings'").fetchone())
             finally:queue.close()
+
+    @unittest.skipUnless(os.name=='posix','authority lease requires POSIX')
+    def test_old_binding_schema_refuses_without_migration_or_row_change(self):
+        from processing import authority_lease
+        from processing.native_manifest_binding import NativeManifestBindings
+        from processing.viewer_tasks import TaskStore
+        from processing.maintenance import Conflict
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root);queue=Queue(root/'state');store=TaskStore(queue,root/'tasks');leases=root/'leases';leases.mkdir()
+            lease=authority_lease.AuthorityLease(leases,queue.authority_id);queue.authority_lease=lease
+            try:
+                with queue._db() as db:
+                    db.execute('CREATE TABLE native_manifest_bindings (uuid TEXT)');db.execute("INSERT INTO native_manifest_bindings VALUES ('synthetic-retain')")
+                with patch.object(runtime_config,'NATIVE_MANIFEST_BINDING_QUALIFIED',True):
+                    with self.assertRaisesRegex(Conflict,'schema changed'):NativeManifestBindings(store)
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT sql FROM sqlite_master WHERE name='native_manifest_bindings'").fetchone()[0],'CREATE TABLE native_manifest_bindings (uuid TEXT)')
+                    self.assertEqual(db.execute('SELECT uuid FROM native_manifest_bindings').fetchall()[0][0],'synthetic-retain')
+            finally:queue.close();lease.close()
 
 if __name__=='__main__':unittest.main()
