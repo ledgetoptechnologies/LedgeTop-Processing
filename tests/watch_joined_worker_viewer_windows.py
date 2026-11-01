@@ -15,6 +15,7 @@ root=Path(tempfile.mkdtemp(prefix='ledgetop-acceptance-outer-'))
 print('RETAINED_ROOT',root,'REHEARSAL',run_id,flush=True)
 label='ledgetop.synthetic.rehearsal'
 names=['synthetic-joined-python-'+run_id,'synthetic-joined-viewer-'+run_id]
+volume_name='synthetic-joined-models-'+run_id
 env=os.environ.copy();env.update(LT_SYNTHETIC_RUN_ID=run_id,LT_SYNTHETIC_ROOT=str(root))
 k=ctypes.WinDLL('kernel32',use_last_error=True); n=ctypes.WinDLL('ntdll',use_last_error=True)
 k.CreateJobObjectW.argtypes=(ctypes.c_void_p,wintypes.LPCWSTR);k.CreateJobObjectW.restype=wintypes.HANDLE
@@ -101,5 +102,15 @@ finally:
             print('OUTER_UNCERTAIN_NAME',name,flush=True);failure=failure or 'container state unavailable'
         except Exception as error:
             print('OUTER_UNCERTAIN_NAME',name,type(error).__name__,flush=True);failure=failure or 'container state unavailable'
+    try:
+        volume=json.loads(docker('volume','inspect',volume_name))[0]
+        if (volume['Name']!=volume_name or (volume.get('Labels') or {}).get(label)!=run_id
+                or volume.get('Driver')!='local'):raise RuntimeError('volume identity mismatch')
+        # Matching identity does not settle an ambiguous create or establish
+        # exclusive creation if another actor raced the initial absence check.
+        print('OUTER_MATCHING_VOLUME_RETAINED',volume_name,flush=True)
+    except Exception as error:
+        print('OUTER_UNCERTAIN_VOLUME',volume_name,type(error).__name__,flush=True)
+        failure=failure or 'volume identity unavailable'
     if failure:raise RuntimeError(failure)
 print('OUTER_CONTAINER_AND_JOB_EXIT_VERIFIED',flush=True)
