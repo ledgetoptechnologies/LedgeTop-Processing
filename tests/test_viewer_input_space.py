@@ -450,6 +450,43 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
         self.assertEqual(str(original),'original startup failure')
         self.assertEqual(len(original.__notes__),2)
 
+    def test_startup_db_failure_closes_queue_and_lease(self):
+        from contextlib import contextmanager
+        from processing import authority_lease
+        real_record=authority_lease.record_required
+        for failure_index in (1,2):
+            @contextmanager
+            def fail_after_record(queue,call_count):
+                call_count[0]+=1
+                if call_count[0]==failure_index:raise OSError('synthetic startup db failure')
+                with original_db() as db:yield db
+            def install_failure(queue,lease):
+                nonlocal original_db
+                real_record(queue,lease);original_db=queue._db;counts=[0]
+                queue._db=lambda:fail_after_record(queue,counts)
+            original_db=None
+            with self.qualify(), patch.object(authority_lease,'record_required',side_effect=install_failure):
+                with self.assertRaisesRegex(OSError,'synthetic startup db failure'):make_handler(self.settings())
+            probe=Queue(self.state,viewer_enabled=True);probe.close()
+            lease=authority_lease.acquire(self.leases,self.state);lease.close()
+
+    def test_startup_holds_historical_generation(self):
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue;store=handler.viewer_service.store
+            identifier=str(uuid.uuid4());store.initialize(identifier,'old',[],None,'production')
+            store.remove(identifier);store.initialize(identifier,'new',[],None,'production')
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            with self.assertRaisesRegex(InputRecoveryRequired,'historical intake'):make_handler(self.settings())
+
+    def test_startup_holds_orphan_viewer_files(self):
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue
+            with queue._db() as db:
+                db.execute('INSERT INTO viewer_files VALUES(?,?,?,?,?,?,?)',
+                    (str(uuid.uuid4()),'x.jpg','x.jpg','input-'+'a'*32,1,'a'*64,1))
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            with self.assertRaisesRegex(InputRecoveryRequired,'orphan input metadata'):make_handler(self.settings())
+
     def test_actual_startup_holds_orphan_directory(self):
         with self.qualify():
             handler=make_handler(self.settings())

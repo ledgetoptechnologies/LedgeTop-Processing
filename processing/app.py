@@ -122,24 +122,27 @@ def make_handler(config: Config):
             raise
     elif queue is not None:
         # Never silently bypass a previously enabled persistent barrier.
-        with queue._db() as db:
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
-        if exists:
-            error=RuntimeError('admission_drain_configuration_required')
+        try:
+            with queue._db() as db:
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
+            if exists:raise RuntimeError('admission_drain_configuration_required')
+        except BaseException as error:
             _release_failed_startup(error,queue=queue,lease=lease)
-            raise error
+            raise
     if queue is not None:
-        with queue._db() as db:
-            registry = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
-        if registry and not config.viewer_archive_registry:
-            error=RuntimeError('archive_registry_configuration_required')
+        try:
+            with queue._db() as db:
+                registry = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_registry'").fetchone()
+            if registry and not config.viewer_archive_registry:
+                raise RuntimeError('archive_registry_configuration_required')
+        except BaseException as error:
             _release_failed_startup(error,queue=queue,lease=lease)
-            raise error
+            raise
     service = facade = None
     if config.viewer_enabled:
-        from .viewer_service import ViewerService
-        from .viewer_http import ViewerFacade
         try:
+            from .viewer_service import ViewerService
+            from .viewer_http import ViewerFacade
             service = ViewerService(queue, config)
             spool = Path(config.prototype_state_dir) / 'viewer-spool'
             spool.mkdir(mode=0o700, exist_ok=True)
@@ -151,14 +154,11 @@ def make_handler(config: Config):
             raise
     reference_runtime = None
     if reference_settings is not None:
-        from .reference_runtime import ReferenceRuntime
         try:
+            from .reference_runtime import ReferenceRuntime
             reference_runtime = ReferenceRuntime(queue, config, reference_settings, viewer_service=service)
-        except Exception:
-            if service:
-                service.close()
-            if queue:
-                queue.close()
+        except BaseException as error:
+            _release_failed_startup(error,service=service,queue=queue,lease=lease)
             raise
 
     class Handler(BaseHTTPRequestHandler):
