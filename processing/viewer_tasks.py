@@ -286,13 +286,43 @@ class TaskStore:
             self._intake_reconciled.add((row['uuid'],row['generation']))
 
     def startup_intake_census(self):
-        """Bounded first-use checks, before accepting Viewer requests."""
+        """Bounded global and per-task checks, before accepting Viewer requests."""
         if not self.intake_journal:raise InputRecoveryRequired('intake journal required')
         with self._lock,self.queue._db() as db:
             rows=db.execute('SELECT * FROM viewer_tasks ORDER BY uuid LIMIT 1001').fetchall()
             if len(rows)>1000:raise InputRecoveryRequired('task census exceeds bound')
+            owners={}; directories=set()
             for row in rows:
-                self._check_input_recovery(db,row)
+                identity=(row['uuid'],row['generation'])
+                if identity in owners or not isinstance(row['directory'],str) or row['directory'] in directories:
+                    raise InputRecoveryRequired('task identity needs inspection')
+                owners[identity]=row['directory'];directories.add(row['directory'])
+            history=db.execute('SELECT uuid,generation,metadata FROM viewer_incarnations LIMIT 100001')
+            for count,entry in enumerate(history,1):
+                if count>100000:raise InputRecoveryRequired('incarnation census exceeds bound')
+                try:
+                    metadata=json.loads(entry['metadata']);directory=metadata['directory']
+                    identity=(entry['uuid'],entry['generation'])
+                    if (not isinstance(directory,str) or identity in owners or directory in directories
+                            or metadata['uuid']!=identity[0] or metadata['generation']!=identity[1]):
+                        raise ValueError()
+                except (KeyError,TypeError,ValueError,RecursionError):
+                    raise InputRecoveryRequired('incarnation identity needs inspection') from None
+                owners[identity]=directory;directories.add(directory)
+            journal=db.execute('SELECT uuid,generation,directory FROM viewer_intake_journal_v1 LIMIT 1000001')
+            for count,entry in enumerate(journal,1):
+                if count>1000000:raise InputRecoveryRequired('intake journal census exceeds bound')
+                if owners.get((entry['uuid'],entry['generation']))!=entry['directory']:
+                    raise InputRecoveryRequired('orphan intake journal needs inspection')
+            found=set()
+            with os.scandir(self.root) as entries:
+                for count,entry in enumerate(entries,1):
+                    if count>101000:raise InputRecoveryRequired('task directory census exceeds bound')
+                    if not entry.is_dir(follow_symlinks=False) or entry.name not in directories:
+                        raise InputRecoveryRequired('orphan task directory needs inspection')
+                    found.add(entry.name)
+            if found!=directories:raise InputRecoveryRequired('task directory missing')
+            for row in rows:self._check_input_recovery(db,row)
 
     @staticmethod
     def _job(db, row):

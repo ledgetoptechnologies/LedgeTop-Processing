@@ -437,6 +437,36 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'intake_journal_configuration_mismatch'):
             make_handler(self.settings(False))
         probe=Queue(self.state,viewer_enabled=True);probe.close()
+    def test_startup_cleanup_attempts_every_close_and_preserves_original(self):
+        from processing.app import _release_failed_startup
+        class Owned:
+            def __init__(self,name):self.name=name
+            def close(self):
+                closed.append(self.name)
+                if self.name!='lease':raise OSError('synthetic close failure')
+        closed=[];original=RuntimeError('original startup failure')
+        _release_failed_startup(original,Owned('service'),Owned('queue'),Owned('lease'))
+        self.assertEqual(closed,['service','queue','lease'])
+        self.assertEqual(str(original),'original startup failure')
+        self.assertEqual(len(original.__notes__),2)
+
+    def test_actual_startup_holds_orphan_directory(self):
+        with self.qualify():
+            handler=make_handler(self.settings())
+            orphan=self.state/'viewer-tasks'/'unregistered-task';orphan.mkdir();(orphan/'data').write_bytes(b'preserve')
+            queue=handler.prototype_queue;handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            with self.assertRaises(InputRecoveryRequired):make_handler(self.settings())
+            self.assertEqual((orphan/'data').read_bytes(),b'preserve')
+
+    def test_actual_startup_holds_orphan_journal(self):
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue
+            with queue._db() as db:
+                db.execute("INSERT INTO viewer_intake_journal_v1 VALUES(?,?,?,?,?,?,?,?,NULL,'prepared')",
+                           ('a'*32,str(uuid.uuid4()),1,'x.jpg','unregistered','temp','final',1))
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            with self.assertRaises(InputRecoveryRequired):make_handler(self.settings())
+
     def test_actual_startup_holds_unfinished_intake_and_releases_owned_locks(self):
         from processing import authority_lease
         with self.qualify():
