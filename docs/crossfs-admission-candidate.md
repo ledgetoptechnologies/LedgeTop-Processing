@@ -1,0 +1,46 @@
+# Inactive cooperative cross-filesystem admission experiment
+
+This candidate is disabled and is not connected to the Viewer, legacy scheduler,
+reference driver, NAS, or NodeODM. It does not reserve physical extents or set a
+filesystem quota. Never use its counters as a guarantee against other writers or
+unknown engine scratch consumption.
+
+One local process namespace groups caller-supplied worst-case component budgets
+by observed `st_dev`; each distinct device must use a single exact ScratchLedger.
+The common journal records deterministic attempt and per-device reservation IDs.
+Lost acknowledgements may replay the exact reservation. Partial acquisitions are
+retained; each acquired reservation is marked uncertain to avoid automatic TTL
+expiry. There is deliberately no release or production recovery protocol.
+
+Seven small tests use independent retained `/tmp` and `/dev/shm` roots and mock
+capacity values; they cover same-device grouping, same-journal competing attempts,
+expiry before pin, lost reservation acknowledgement, low space, alternate ledger
+rejection and a replaced journal after construction. This is not a process-kill,
+power-loss, real mount replacement, NAS or physical space guarantee test.
+
+Qualification blockers:
+
+* A per-user Path.home journal is not a host-global authority. Direct ScratchLedger
+  users, other OS accounts or namespaces, old versions and external software can
+  bypass it. A trusted, provisioned, host-owned canonical authority and exclusive
+  integration across all writers is needed.
+* Journal inode lstat checks are not atomic SQLite fd binding; directory/mount swaps
+  and concurrent path replacement remain possible. A newly created instance has no
+  trusted prior inode witness and can accept a replacement. Root paths and mounts
+  require pinned identities and tested recovery before qualification.
+* Each ledger probes `disk_usage` once; physical free space can change immediately.
+  Budgets are estimates and do not enforce NodeODM peak scratch or prevent external
+  consumers. Cross-host capacity requires an authenticated per-host authority; an
+  SMB mount's observed `st_dev` does not identify remote pool ownership.
+* Scratch holds are non-expiring uncertain state without a recovery/release flow.
+  Prove idempotent release only with exact writer termination, retained-source and
+  downstream custody evidence; never delete files or clear holds merely to unblock.
+* Before worker integration, unify these component reservations with the existing
+  driver reservation to prevent double charging or unbudgeted same-device copies;
+  include Viewer/NAS input, worker staging, NodeODM input/working/output, archive
+  and Viewer ingest on their actual filesystems. Persist closed per-attempt policies
+  and verify matching generation, environment and manifest in each authority.
+* Full 10k input support needs bounded authenticated manifest/inventory transport,
+  correct multipart limits, per-volume safety floors, held partial-admission crash
+  recovery, external-writer and real power-loss tests. Actual owner-controlled
+  TrueNAS configuration, quota policy and coordinated rollout remain separate.
