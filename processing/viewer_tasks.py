@@ -57,14 +57,15 @@ def sync_directory(path):
 
 
 class TaskStore:
-    def prepare_guarded_engine_upload(self, job_id, claim_token, name_key, upload_id):
+    def prepare_guarded_engine_upload(self, job_id, claim_token, name_key, upload_id, *, expected_generation=None):
         """Record exact DB-owned file identity; unwired, no physical fencing."""
         from . import engine_upload_contract as contract
         if contract.QUALIFIED is not True:
             raise Conflict('guarded file upload not qualified')
         checked_uuid(job_id);checked_uuid(upload_id)
         if (type(claim_token) is not str or not 32<=len(claim_token)<=128
-            or type(name_key) is not str or self._filename(name_key)!=name_key):
+            or type(name_key) is not str or self._filename(name_key)!=name_key
+            or (expected_generation is not None and (type(expected_generation) is not int or expected_generation<1))):
             raise Conflict('exact upload identity required')
         with self._lock,self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -76,6 +77,7 @@ class TaskStore:
                 or not hmac.compare_digest(hashlib.sha256(claim_token.encode()).hexdigest(),job['claim_hash'])
                 or task['claim_token']!=claim_token or task['stage']!='running' or task['phase']!='upload_pending'
                 or task['environment']!=job['environment'] or task['node_id']!=job['node_id']
+                or (expected_generation is not None and task['generation']!=expected_generation)
                 or task['removed'] or type(task['generation']) is not int or task['generation']<1):
                 raise Conflict('active task claim required')
             checked_uuid(task['uuid']);checked_uuid(task['engine_uuid'])
