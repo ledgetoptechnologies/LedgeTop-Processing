@@ -194,6 +194,9 @@ class ViewerService:
         self._unexpected_dispatch_failure = threading.Event()
         self._backoff = {}
         self._downloads = {}
+        # Do not make completed downloads wait on a different task's dispatch.
+        # The per-task locks still serialize manual and automatic capture.
+        self._downloads_lock = threading.Lock()
         self._archive_thread = None
         self._archive_cursor = 0
         self._archive_retry = {}
@@ -221,7 +224,8 @@ class ViewerService:
     def _archive_once_locked(self, identifier, expected_identity=None):
         """Run file capture in a reaped child that inherits coordinator flocks."""
         with self._lock:
-            lock = self._downloads.setdefault(identifier, threading.Lock())
+            with self._downloads_lock:
+                lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
             if self._stop.is_set():
                 return
@@ -728,7 +732,7 @@ class ViewerService:
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
-        with self._lock:
+        with self._downloads_lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
             if self._archive_child_unreaped.is_set():

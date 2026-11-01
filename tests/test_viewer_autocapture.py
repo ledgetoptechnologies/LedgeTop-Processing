@@ -220,6 +220,33 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.lease.close()
         self.fixture.temporary.cleanup()
 
+    def test_manual_and_automatic_capture_serialize_for_same_task(self):
+        entered=threading.Event();release=threading.Event();auto_done=threading.Event();errors=[]
+        engine=self.fixture.engines['cluster'];original=engine.download
+        def blocked(*args):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('fixture timed out')
+            return original(*args)
+        def manual():
+            try:
+                stream,_=self.service.download(self.identifier)
+                with stream:stream.read()
+            except Exception as error:errors.append(error)
+        def automatic():
+            try:self.service._archive_once(self.identifier)
+            except Exception as error:errors.append(error)
+            finally:auto_done.set()
+        first=threading.Thread(target=manual);second=threading.Thread(target=automatic)
+        with patch.object(engine,'download',side_effect=blocked), patch('processing.viewer_service.subprocess.Popen') as spawn:
+            try:
+                first.start();self.assertTrue(entered.wait(3));second.start()
+                self.assertFalse(auto_done.wait(.2));spawn.assert_not_called()
+            finally:
+                release.set();first.join(8)
+                if second.ident is not None:second.join(8)
+            self.assertFalse(first.is_alive());self.assertFalse(second.is_alive())
+            self.assertEqual(errors,[]);spawn.assert_not_called()
+
     def test_unreaped_capture_child_prevents_clean_shutdown(self):
         class Input:
             closed=False
@@ -607,7 +634,8 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(self.requests,1)
         # Widen the observed retry deadline for a deterministic check; the old
         # failure itself and the replacement capture use real worker processes.
-        self.service._archive_retry[self.identifier]=(identity,time.monotonic()+60,failures)
+        old_due=time.monotonic()+60
+        self.service._archive_retry[self.identifier]=(identity,old_due,failures)
         # Keep the documented unknown-identity remove/recreate gap out of this
         # test: here the scheduler must see the replacement's known identity.
         # Both locks are reentrant and follow the service's normal lock order.
@@ -622,10 +650,20 @@ finally:s.close();q.authority_lease.close();q.close()
             if time.monotonic()>=deadline:self.fail('replacement did not dispatch')
             time.sleep(.02)
         self.fixture.finish(self.identifier)
+        # Dispatch and capture are distinct asynchronous phases; retain a
+        # full bounded window for capture after the engine reports completion.
+        # This is still well before the 60-second old-generation deadline.
+        deadline=time.monotonic()+10
         while self.fixture.task(self.identifier)['archive_path'] is None:
-            if time.monotonic()>=deadline:self.fail('replacement inherited old backoff')
+            if time.monotonic()>=deadline:
+                current=self.fixture.task(self.identifier)
+                self.fail('replacement capture timed out: phase=%s job=%s archive=%s retry=%r requests=%s archive_thread_alive=%s' % (
+                    current['phase'],current['job']['status'],current.get('archive_state'),
+                    self.service._archive_retry.get(self.identifier),self.requests,
+                    bool(self.service._archive_thread and self.service._archive_thread.is_alive())))
             time.sleep(.05)
         new=self.fixture.task(self.identifier)
+        self.assertLess(time.monotonic(),old_due,'replacement capture must precede old retry')
         self.assertEqual(new['generation'],old['generation']+1);self.assertNotEqual(new['job_id'],old['job_id'])
         self.assertEqual(Path(new['archive_path']).read_bytes(),self.engine_response)
         self.assertTrue((old_dir/'all.zip.intent').exists());self.assertEqual(old_input.read_bytes(),old_bytes)
