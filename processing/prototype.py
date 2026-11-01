@@ -85,13 +85,29 @@ def _require_idle_state(path):
 
 
 class Queue(Maintenance):
+    def __setattr__(self, name, value):
+        if name in ('_recovery_hold_required','require_upload_census','require_incremental_upload_census') and name in self.__dict__:
+            raise AttributeError('admission policy is fixed for this queue lifetime')
+        super().__setattr__(name,value)
+
+    def __delattr__(self, name):
+        if name in ('_recovery_hold_required','require_upload_census','require_incremental_upload_census'):
+            raise AttributeError('admission policy is fixed for this queue lifetime')
+        super().__delattr__(name)
+
+    @property
+    def recovery_hold_required(self):
+        return self._recovery_hold_required
+
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 require_idle_existing=False, require_upload_census=False, require_incremental_upload_census=False):
+                 require_idle_existing=False, require_upload_census=False, require_incremental_upload_census=False, recovery_hold_required=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
             raise ValueError("node_ids must be unique configured slugs including cluster")
+        if type(recovery_hold_required) is not bool:raise ValueError('explicit recovery hold policy required')
+        self._recovery_hold_required = recovery_hold_required
         if type(require_upload_census) is not bool or type(require_incremental_upload_census) is not bool:
             raise ValueError('census qualification must be boolean')
         self.require_upload_census = require_upload_census
@@ -147,7 +163,11 @@ class Queue(Maintenance):
                 self._lock.close()
                 raise
         try:
+            if recovery_hold_required:_require_safe_idle_database_file(self.path)
             with self._db() as db:
+                if recovery_hold_required:
+                    db.execute('BEGIN IMMEDIATE')
+                    self._assert_required_recovery_hold(db)
                 db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
                 request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
@@ -169,6 +189,38 @@ class Queue(Maintenance):
         except BaseException:
             self._lock.close()
             raise
+
+    @staticmethod
+    def _assert_required_recovery_hold(db):
+        """Attest existing held state in the same write transaction as startup."""
+        from .admission_drain import AdmissionDrain
+        try:
+            expected={'coordinator_identity':'CREATE TABLE coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)',
+                      'coordinator_admission':AdmissionDrain._DDL,
+                      'coordinator_admission_operations':AdmissionDrain._OPS_DDL,
+                      'coordinator_recovery_hold':AdmissionDrain._HOLD_DDL,
+                      'coordinator_recovery_guard':AdmissionDrain._GUARD_DDL}
+            for name,ddl in expected.items():
+                row=db.execute("SELECT type,sql FROM sqlite_master WHERE name=?",(name,)).fetchone()
+                if row is None or row['type']!='table' or row['sql']!=ddl:
+                    raise ValueError('required schema missing')
+            identity=db.execute('SELECT singleton,authority_id FROM coordinator_identity').fetchall()
+            if len(identity)!=1 or identity[0]['singleton']!=1:
+                raise ValueError('authority missing')
+            authority=identity[0]['authority_id']
+            if type(authority) is not str or str(uuid.UUID(authority))!=authority:
+                raise ValueError('authority invalid')
+            admission=db.execute('SELECT singleton,authority_id,closed,generation FROM coordinator_admission').fetchall()
+            if (len(admission)!=1 or admission[0]['singleton']!=1 or admission[0]['authority_id']!=authority
+                    or admission[0]['closed']!=1 or type(admission[0]['generation']) is not int
+                    or not 0<=admission[0]['generation']<=2**53-1):
+                raise ValueError('admission is not held')
+            for name in ('coordinator_recovery_hold','coordinator_recovery_guard'):
+                rows=db.execute('SELECT singleton,authority_id FROM '+name).fetchall()
+                if len(rows)!=1 or rows[0]['singleton']!=1 or rows[0]['authority_id']!=authority:
+                    raise ValueError('recovery hold missing')
+        except (sqlite3.Error,ValueError,TypeError,KeyError,IndexError,AttributeError):
+            raise RuntimeError('required_recovery_hold_missing') from None
 
     def close(self):
         if os.getpid() != self._creator_pid:
@@ -401,6 +453,8 @@ class Queue(Maintenance):
 
     def _transfer_admission_clear(self, db, *, broker_allowed=None):
         """Do not admit new work while any started transfer is unresolved."""
+        if self.recovery_hold_required or db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('coordinator_recovery_hold','coordinator_recovery_guard') LIMIT 1").fetchone():
+            return False
         from .broker_intent_fence import clear as broker_clear
         if not broker_clear(db, broker_allowed): return False
         from .upload_intent_census import clear as census_clear

@@ -19,6 +19,14 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if (type(config.incremental_upload_census_required) is not bool or
+            (config.incremental_upload_census_required and (runtime_config.INCREMENTAL_UPLOAD_CENSUS_QUALIFIED is not True
+              or config.recovery_hold_required is not True or not config.authority_lease_dir or not config.prototype_state_dir))):
+        raise RuntimeError('incremental_upload_census_not_qualified')
+    if (type(config.recovery_hold_required) is not bool or
+            (config.recovery_hold_required and (runtime_config.RECOVERY_HOLD_QUALIFIED is not True
+              or config.admission_drain_enabled is not True or not config.prototype_state_dir))):
+        raise RuntimeError('recovery_hold_not_qualified')
     if config.admission_drain_enabled and runtime_config.ADMISSION_DRAIN_QUALIFIED is not True:
         raise RuntimeError('admission_drain_not_qualified')
     if (type(config.viewer_archive_registry) is not bool or
@@ -53,7 +61,9 @@ def make_handler(config: Config):
                       treedar_node_ids=config.treedar_node_ids,
                       viewer_enabled=config.viewer_enabled,
                       reference_enabled=reference_settings is not None,
-                      require_idle_existing=config.viewer_production_held) if config.prototype_state_dir else None
+                      require_idle_existing=config.viewer_production_held,
+                      recovery_hold_required=config.recovery_hold_required,
+                      require_incremental_upload_census=config.incremental_upload_census_required) if config.prototype_state_dir else None
     except BaseException:
         if lease is not None:
             lease.close()
@@ -71,6 +81,10 @@ def make_handler(config: Config):
         from .admission_drain import AdmissionDrain
         try:
             queue.admission_drain = AdmissionDrain(queue, initial_closed=config.admission_start_closed)
+            if config.recovery_hold_required:
+                with queue._db() as db:
+                    if not queue.admission_drain._recovery_held(db):
+                        raise RuntimeError('required_recovery_hold_missing')
         except BaseException:
             try:queue.close()
             finally:

@@ -369,8 +369,11 @@ class ReferenceStore:
         """
         with self.queue._db() as db:
             db.execute('BEGIN')
-            return self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
+            claim=self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
                 worker_instance_id=worker_instance_id, claim_token=claim_token)
+            if not self.queue._transfer_admission_clear(db):
+                raise Conflict('worker execution requires recovery inspection')
+            return claim
 
     def _claim_snapshot(self, db, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
         """Same authenticated observation inside an existing transaction."""
