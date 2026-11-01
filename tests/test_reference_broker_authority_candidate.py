@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,6 +22,7 @@ from processing.reference_store import ReferenceStore, PROFILE
 from processing.viewer_tasks import TaskStore
 from processing.engine_ingress_guard import BackendPin
 from processing.node_gate import NodeGate
+from processing.reference_engine_worker import ReferenceEngineWorker
 
 
 @unittest.skipUnless(os.name == 'posix', 'POSIX authority lease required')
@@ -72,6 +75,63 @@ class ReferenceBrokerAuthorityCandidateTests(unittest.TestCase):
             workerId='worker', workerInstanceId='instance', claimRequestId='claim-1',
             claimTokenSha256=hashlib.sha256(self.claim['claimToken'].encode()).hexdigest(),
             inputManifestSha256=self.job['manifestSha256'], pipelineDigest=self.job['pipelineDigest'])
+
+    def test_manifest_inventory_requires_every_exact_unique_confirmed_receipt(self):
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
+        manifest = fixture['submission']['manifest']
+        obj = manifest['objects'][0]
+        grant = self.grant()
+        secret = b'synthetic-signing-key-' * 2
+        receipt = dict(objectId=obj['id'], fileName=obj['name'], fileBytes=obj['byteSize'],
+                       sha256=obj['sha256'], operationId=str(uuid.uuid4()), state='complete',
+                       scopeSha256=hashlib.sha256(broker._json(grant)).hexdigest())
+        receipt['signature'] = broker._reference_receipt_signature(receipt, secret)
+        issues = {obj['id']: receipt['operationId']}
+        def check(items, active_grant=grant, active_manifest=manifest):
+            broker._reference_verified_image_only_uploads(active_manifest, active_manifest['sha256'], items,
+                                                         init_grant=active_grant, issues=issues, secret=secret)
+        check([receipt])
+        for receipts in ([], [receipt, receipt], [dict(receipt, sha256='0'*64)],
+                         [dict(receipt, state='started')], [dict(receipt, objectId='other')]):
+            with self.subTest(receipts=receipts), self.assertRaises(broker.BrokerHeld):
+                check(receipts)
+        for change in ({'jobId': str(uuid.uuid4())}, {'coordinatorEpoch': str(uuid.uuid4())},
+                       {'taskGeneration': grant['taskGeneration'] + 1}, {'claimTokenSha256': '0'*64}):
+            with self.subTest(change=change), self.assertRaises(broker.BrokerHeld):
+                check([receipt], dict(grant, **change))
+        single = json.loads(json.dumps(manifest))
+        single['objects'][0]['byteSize'] = 1
+        single['totalBytes'] = 1
+        from processing.reference_protocol import manifest_sha256
+        single['sha256'] = manifest_sha256(single)
+        single_grant = dict(grant, inputManifestSha256=single['sha256'])
+        bad_boolean = dict(receipt, fileBytes=True, scopeSha256=hashlib.sha256(broker._json(single_grant)).hexdigest())
+        bad_boolean['signature'] = broker._reference_receipt_signature(bad_boolean, secret)
+        with self.assertRaises(broker.BrokerHeld):
+            check([bad_boolean], single_grant, single)
+
+    def test_reference_upload_issue_binds_completed_init_and_manifest(self):
+        grant = self.grant()
+        secret = b'synthetic-signing-key-' * 2
+        signature = broker.sign_grant(grant, secret)
+        operation = str(uuid.uuid4())
+        with self.assertRaises(broker.BrokerHeld):
+            self.authority._issue_upload_candidate(grant, signature, object_id='image-1', operation_id=operation, secret=secret)
+        with self.authority.hold(grant, 2, create=True):
+            self.authority.completed(grant, {'uuid': grant['jobId'], 'success': True})
+        with self.assertRaises(broker.BrokerHeld):
+            self.authority._issue_upload_candidate(grant, signature, object_id='image-1', operation_id=grant['operationId'], secret=secret)
+        issue = self.authority._issue_upload_candidate(grant, signature, object_id='image-1', operation_id=operation, secret=secret)
+        self.assertEqual(issue['fileBytes'], 3)
+        self.assertEqual(issue, self.authority._issue_upload_candidate(grant, signature, object_id='image-1', operation_id=operation, secret=secret))
+        with self.assertRaises(broker.BrokerHeld):
+            self.authority._issue_upload_candidate(grant, signature, object_id='image-1', operation_id=str(uuid.uuid4()), secret=secret)
+        with self.assertRaises(broker.BrokerHeld):
+            self.authority._issue_upload_candidate(grant, signature, object_id='missing', operation_id=str(uuid.uuid4()), secret=secret)
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='held',held_reason='test_hold' WHERE id=?", (grant['jobId'],))
+        with self.assertRaises(broker.BrokerHeld):
+            self.authority._issue_upload_candidate(grant, signature, object_id='image-1', operation_id=operation, secret=secret)
 
     def test_claim_and_manifest_mismatch_hold(self):
         grant = self.grant()
@@ -137,6 +197,16 @@ class ReferenceBrokerAuthorityCandidateTests(unittest.TestCase):
             with patch.object(adapter, 'exchange', return_value={'uuid':grant['jobId'],'success':True}) as exchange:
                 result = service.mutate(grant, broker.sign_grant(grant, secret), b'init')
                 self.assertEqual(result['uuid'], grant['jobId'])
+                issue_id = str(uuid.uuid4())
+                issue_signature = broker.sign_reference_issue(grant, 'image-1', issue_id, secret)
+                issue = service.issue_reference_upload_candidate(grant, broker.sign_grant(grant, secret), object_id='image-1', operation_id=issue_id, issue_signature=issue_signature)
+                self.assertEqual(issue['fileSha256'], hashlib.sha256(b'abc').hexdigest())
+                with self.assertRaises(broker.BrokerHeld):
+                    service.issue_reference_upload_candidate(grant, '0'*64, object_id='image-1', operation_id=issue_id, issue_signature=issue_signature)
+                with self.assertRaises(broker.BrokerHeld):
+                    service.issue_reference_upload_candidate(grant, broker.sign_grant(grant, secret), object_id='image-1', operation_id=str(uuid.uuid4()), issue_signature=issue_signature)
+                with self.assertRaises(broker.BrokerHeld):
+                    service.issue_reference_upload_candidate(grant, broker.sign_grant(grant, secret), object_id='other', operation_id=issue_id, issue_signature=issue_signature)
                 self.assertEqual(service.mutate(grant, broker.sign_grant(grant, secret), b'init'), result)
                 self.assertEqual(exchange.call_count, 1)
                 changed = dict(grant, workerInstanceId='different')
@@ -179,6 +249,17 @@ class ReferenceBrokerAuthorityCandidateTests(unittest.TestCase):
                         service.mutate(grant, broker.sign_grant(grant, secret), b'init')
                 empty_gate.reserve.assert_not_called()
                 empty_gate.bind.assert_not_called()
+                self.assertEqual(exchange.call_count, 1)
+                allowance = service.start_reference_upload_intent_candidate(grant, broker.sign_grant(grant, secret),
+                    object_id='image-1', operation_id=issue_id, issue_signature=issue_signature)
+                with self.authority.hold(grant, 2, _allowed_upload=allowance):
+                    self.authority.check_deadline()
+                with self.assertRaises(broker.BrokerHeld):
+                    with self.authority.hold(grant, 2, _allowed_upload=(allowance[0], allowance[1], '0'*64)):
+                        self.fail('changed upload intent crossed authority')
+                with self.assertRaises(broker.BrokerHeld):
+                    service.start_reference_upload_intent_candidate(grant, broker.sign_grant(grant, secret),
+                        object_id='image-1', operation_id=issue_id, issue_signature=issue_signature)
                 self.assertEqual(exchange.call_count, 1)
 
     def test_coordinator_lock_timeout_never_reaches_forward(self):
@@ -257,6 +338,241 @@ class ReferenceBrokerAuthorityCandidateTests(unittest.TestCase):
                 self.assertIsNotNone(gate.snapshot()['reservation'])
             self.assertEqual(service.db.execute('SELECT state FROM operations WHERE id=?',
                                                 (grant['operationId'],)).fetchone()[0], 'started')
+
+    def _sender_rejects_corrupted_local_init(self, corruption):
+        gate_root = self.root / 'gate'
+        with patch.object(broker, 'QUALIFIED', True), \
+             patch('processing.node_gate.canonical_gate_path', return_value=gate_root), \
+             patch.object(broker, 'canonical_gate_path', return_value=gate_root):
+            with NodeGate('synthetic') as gate:
+                gate.provision('cluster', 'http://127.0.0.1:18080', self.queue.authority_id)
+            state = gate_root / 'mutation-broker'
+            state.mkdir(mode=0o700)
+            adapter = broker.LoopbackNodeODM('synthetic', BackendPin('a'*64, 'sha256:'+'b'*64, 12345), '')
+            secret = b'synthetic-signing-key-' * 2
+            service = broker.NodeMutationBroker(state, node_id='cluster', engine_id='synthetic',
+                authority_id=self.queue.authority_id, coordinator_epoch=self.queue.startup_id,
+                coordinator_origin='http://127.0.0.1:18080', gate_generation=1, secret=secret,
+                adapter=adapter, authority_witness=self.authority)
+            self.addCleanup(service.close)
+            grant = self.grant()
+            signature = broker.sign_grant(grant, secret)
+            with patch.object(adapter, 'exchange', return_value={'uuid':grant['jobId'],'success':True}):
+                service.mutate(grant, signature, b'init')
+            op = str(uuid.uuid4())
+            issue_sig = broker.sign_reference_issue(grant, 'image-1', op, secret)
+            service.issue_reference_upload_candidate(grant, signature, object_id='image-1', operation_id=op, issue_signature=issue_sig)
+            if corruption == 'grant':
+                service.db.execute('UPDATE operations SET grant_hash=? WHERE id=?', ('0'*64,grant['operationId']))
+            elif corruption == 'reply':
+                service.db.execute('UPDATE operations SET reply=? WHERE id=?', (json.dumps({'uuid':grant['jobId'],'success':True,'changed':True}),grant['operationId']))
+            service.db.commit()
+            worker = object.__new__(ReferenceEngineWorker)
+            worker.engine_id, worker.node_id, worker.authority_id = 'synthetic', 'cluster', self.queue.authority_id
+            worker.origin, worker.gate_generation = 'http://127.0.0.1:18080', 1
+            worker.ledger = MagicMock()
+            ledger_db = worker.ledger._transaction.return_value.__enter__.return_value
+            worker.ledger._reservation.return_value = dict(job=grant['jobId'], generation=grant['taskGeneration'],
+                environment=grant['environment'], settings=json.dumps({'manifest_sha256':grant['inputManifestSha256']}))
+            path = self.root / 'input.jpg'
+            path.write_bytes(b'abc')
+            worker._file = MagicMock(return_value=(path,3,hashlib.sha256(b'abc').hexdigest()))
+            def consume(upload, source, **kwargs):
+                chunks = []
+                source.settimeout(2)
+                while data := source.recv(1024):
+                    chunks.append(data)
+                self.assertEqual(b''.join(chunks), b'abc')
+                if corruption == 'loss':
+                    raise broker.BrokerHeld('synthetic response lost')
+                return {'success':True}
+            with patch.object(adapter, 'exchange_upload', side_effect=consume) as send:
+                if corruption in ('grant', 'reply', 'loss'):
+                    message = {'grant':'reference local init reservation changed', 'reply':'reference local init proof changed', 'loss':'synthetic response lost'}[corruption]
+                    with self.assertRaisesRegex(broker.BrokerHeld, message):
+                        service.send_reference_upload_candidate(grant, signature, object_id='image-1', operation_id=op,
+                            issue_signature=issue_sig, worker=worker, reservation_id='synthetic', relative_path='input.jpg')
+                else:
+                    result = service.send_reference_upload_candidate(grant, signature, object_id='image-1', operation_id=op,
+                        issue_signature=issue_sig, worker=worker, reservation_id='synthetic', relative_path='input.jpg')
+                    self.assertEqual(result['state'], 'complete')
+                self.assertEqual(send.call_count, 0 if corruption in ('grant','reply') else 1)
+                if corruption == 'loss':
+                    with self.assertRaises(broker.BrokerHeld):
+                        service.send_reference_upload_candidate(grant, signature, object_id='image-1', operation_id=op,
+                            issue_signature=issue_sig, worker=worker, reservation_id='synthetic', relative_path='input.jpg')
+                    self.assertEqual(send.call_count, 1)
+            worker._file.assert_called_once()
+            local = service.db.execute('SELECT state FROM operations WHERE id=?',(op,)).fetchone()
+            if corruption in ('grant','reply'):
+                self.assertIsNone(local)
+            else:
+                self.assertEqual(local['state'], 'started' if corruption == 'loss' else 'complete')
+            with self.queue._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(op,)).fetchone()[0], 'started' if corruption in ('grant','reply','loss') else 'complete')
+                receipt = db.execute('SELECT receipt_json FROM reference_broker_upload_receipt_candidate WHERE operation_id=?',(op,)).fetchone()
+                self.assertEqual(receipt is not None, corruption in ('success','commit_success','commit_loss','commit_crash'))
+            if corruption == 'success':
+                self.assertEqual(service.verify_reference_upload_inventory_candidate(grant, signature), 1)
+                saved_reservation = service.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()[0]
+                service.db.execute('DELETE FROM reservation WHERE singleton=1')
+                service.db.commit()
+                with self.assertRaisesRegex(broker.BrokerHeld, 'reference inventory init changed'):
+                    service.verify_reference_upload_inventory_candidate(grant, signature)
+                service.db.execute('INSERT INTO reservation VALUES(1,?)', (saved_reservation,))
+                old_reply = service.db.execute('SELECT reply FROM operations WHERE id=?', (grant['operationId'],)).fetchone()[0]
+                service.db.execute('UPDATE operations SET reply=? WHERE id=?', (json.dumps({'uuid':grant['jobId'],'success':True,'changed':True}),grant['operationId']))
+                service.db.commit()
+                with self.assertRaisesRegex(broker.BrokerHeld, 'reference inventory init changed'):
+                    service.verify_reference_upload_inventory_candidate(grant, signature)
+                service.db.execute('UPDATE operations SET reply=? WHERE id=?', (old_reply,grant['operationId']))
+                service.db.commit()
+                with self.queue._db() as db:
+                    saved_intent = tuple(db.execute('SELECT * FROM broker_intents WHERE operation_id=?', (grant['operationId'],)).fetchone())
+                    db.execute('DELETE FROM broker_intents WHERE operation_id=?', (grant['operationId'],))
+                with self.assertRaisesRegex(broker.BrokerHeld, 'reference inventory init changed'):
+                    service.verify_reference_upload_inventory_candidate(grant, signature)
+                with self.queue._db() as db:
+                    db.execute('INSERT INTO broker_intents VALUES(?,?,?,?)', saved_intent)
+                    db.execute('UPDATE broker_intents SET grant_hash=? WHERE operation_id=?', ('0'*64, grant['operationId']))
+                with self.assertRaisesRegex(broker.BrokerHeld, 'reference inventory init changed'):
+                    service.verify_reference_upload_inventory_candidate(grant, signature)
+                with self.queue._db() as db:
+                    db.execute('UPDATE broker_intents SET grant_hash=? WHERE operation_id=?', (saved_intent[2],grant['operationId']))
+                    saved_receipt = db.execute('SELECT receipt_json FROM reference_broker_upload_receipt_candidate WHERE operation_id=?',(op,)).fetchone()[0]
+                    changed_receipt = json.loads(saved_receipt)
+                    changed_receipt['sha256'] = '0'*64
+                    db.execute('UPDATE reference_broker_upload_receipt_candidate SET receipt_json=? WHERE operation_id=?', (json.dumps(changed_receipt),op))
+                bad_commit_id = str(uuid.uuid4())
+                bad_commit_sig = broker.sign_reference_commit(grant,bad_commit_id,b'','application/json',secret)
+                with patch.object(adapter,'exchange') as forward:
+                    with self.assertRaises(broker.BrokerHeld):
+                        service.commit_reference_candidate(grant,signature,operation_id=bad_commit_id,body=b'',
+                            content_type='application/json',commit_signature=bad_commit_sig)
+                    stale = dict(grant,taskGeneration=grant['taskGeneration']+1)
+                    with self.assertRaises(broker.BrokerHeld):
+                        service.commit_reference_candidate(stale,broker.sign_grant(stale,secret),operation_id=bad_commit_id,body=b'',
+                            content_type='application/json',commit_signature=broker.sign_reference_commit(stale,bad_commit_id,b'','application/json',secret))
+                    forward.assert_not_called()
+                with self.queue._db() as db:
+                    db.execute('DELETE FROM reference_broker_upload_receipt_candidate WHERE operation_id=?', (op,))
+                with self.assertRaises(broker.BrokerHeld):
+                    service.verify_reference_upload_inventory_candidate(grant, signature)
+                commit_id = str(uuid.uuid4())
+                commit_sig = broker.sign_reference_commit(grant,commit_id,b'','application/json',secret)
+                with patch.object(adapter,'exchange') as forward:
+                    with self.assertRaises(broker.BrokerHeld):
+                        service.commit_reference_candidate(grant,signature,operation_id=commit_id,body=b'',
+                            content_type='application/json',commit_signature=commit_sig)
+                    forward.assert_not_called()
+            if corruption in ('commit_success','commit_loss','commit_crash'):
+                commit_id = str(uuid.uuid4())
+                commit_sig = broker.sign_reference_commit(grant,commit_id,b'','application/json',secret)
+                response = {'uuid':grant['jobId'],'success':True}
+                effect = response if corruption in ('commit_success','commit_crash') else broker.BrokerHeld('synthetic commit response lost')
+                def crash_after_accept(*args, **kwargs):
+                    marker = Path(os.environ['LT_REFERENCE_CRASH_MARKER'])
+                    payload = json.dumps({'queue':str(self.queue.path),'broker':str(service.path),'operation':commit_id,
+                        'root':str(self.root),'epoch':grant['coordinatorEpoch']}).encode()
+                    fd = os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                    try:
+                        os.write(fd,payload)
+                        os.fsync(fd)
+                    finally:os.close(fd)
+                    directory = os.open(marker.parent,os.O_RDONLY|os.O_DIRECTORY)
+                    try:os.fsync(directory)
+                    finally:os.close(directory)
+                    os._exit(77)
+                callback = crash_after_accept if corruption == 'commit_crash' else effect if isinstance(effect,Exception) else None
+                with patch.object(adapter,'exchange',side_effect=callback,
+                                  return_value=response) as forward:
+                    with self.assertRaisesRegex(broker.BrokerHeld,'reference commit authentication failed'):
+                        service.commit_reference_candidate(grant,signature,operation_id=commit_id,body=b'changed',
+                            content_type='application/json',commit_signature=commit_sig)
+                    with self.assertRaisesRegex(broker.BrokerHeld,'reference commit authentication failed'):
+                        service.commit_reference_candidate(grant,signature,operation_id=str(uuid.uuid4()),body=b'',
+                            content_type='application/json',commit_signature=commit_sig)
+                    self.assertIsNone(service.db.execute('SELECT 1 FROM operations WHERE id=?',(commit_id,)).fetchone())
+                    forward.assert_not_called()
+                    if corruption == 'commit_loss':
+                        with self.assertRaisesRegex(broker.BrokerHeld,'synthetic commit response lost'):
+                            service.commit_reference_candidate(grant,signature,operation_id=commit_id,body=b'',
+                                content_type='application/json',commit_signature=commit_sig)
+                    else:
+                        self.assertEqual(service.commit_reference_candidate(grant,signature,operation_id=commit_id,body=b'',
+                            content_type='application/json',commit_signature=commit_sig),response)
+                    with self.assertRaises(broker.BrokerHeld):
+                        service.commit_reference_candidate(grant,signature,operation_id=commit_id,body=b'',
+                            content_type='application/json',commit_signature=commit_sig)
+                    self.assertEqual(forward.call_count,1)
+                with self.queue._db() as db:
+                    state = db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(commit_id,)).fetchone()[0]
+                    self.assertEqual(state,'complete' if corruption == 'commit_success' else 'started')
+                local_commit = service.db.execute('SELECT state FROM operations WHERE id=?',(commit_id,)).fetchone()
+                self.assertEqual(local_commit['state'],'complete' if corruption == 'commit_success' else 'started')
+            self.assertEqual(service._unreaped, [])
+
+    def test_sender_rejects_corrupted_init_grant(self):
+        self._sender_rejects_corrupted_local_init('grant')
+
+    def test_sender_rejects_corrupted_init_reply(self):
+        self._sender_rejects_corrupted_local_init('reply')
+
+    def test_sender_success_records_receipt(self):
+        self._sender_rejects_corrupted_local_init('success')
+
+    def test_sender_lost_response_keeps_started_intents(self):
+        self._sender_rejects_corrupted_local_init('loss')
+
+    def test_commit_success_cannot_replay(self):
+        self._sender_rejects_corrupted_local_init('commit_success')
+
+    def test_commit_lost_response_cannot_replay(self):
+        self._sender_rejects_corrupted_local_init('commit_loss')
+
+    def test_commit_crash_after_acceptance(self):
+        marker_name = os.environ.get('LT_REFERENCE_CRASH_MARKER')
+        if marker_name and sys.argv == ['-c','--lt-reference-crash-child']:
+            self._sender_rejects_corrupted_local_init('commit_crash')
+            self.fail('child did not crash at acceptance')
+        crash_root = Path(tempfile.mkdtemp(prefix='lt-reference-crash-parent-')).resolve()
+        print('retained synthetic crash root:',crash_root,flush=True)
+        marker = crash_root / 'accepted.json'
+        env = dict(os.environ, LT_REFERENCE_CRASH_MARKER=str(marker))
+        code = "import unittest; suite=unittest.defaultTestLoader.loadTestsFromName('tests.test_reference_broker_authority_candidate.ReferenceBrokerAuthorityCandidateTests.test_commit_crash_after_acceptance'); result=unittest.TextTestRunner().run(suite); raise SystemExit(not result.wasSuccessful())"
+        child = subprocess.Popen([sys.executable,'-c',code,'--lt-reference-crash-child'],
+            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=env)
+        try:
+            try:
+                output,_ = child.communicate(timeout=12)
+            except subprocess.TimeoutExpired:
+                self.fail('owned synthetic crash child timed out')
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate(timeout=3)
+        self.assertEqual(child.returncode,77,output.decode(errors='replace')[-2000:])
+        details = json.loads(marker.read_text())
+        queue_path, broker_path = Path(details['queue']),Path(details['broker'])
+        root = Path(details['root']).resolve()
+        self.assertTrue(queue_path.resolve().is_relative_to(root))
+        self.assertTrue(broker_path.resolve().is_relative_to(root))
+        from processing.broker_intent_fence import clear
+        coordinator = sqlite3.connect('file:'+str(queue_path)+'?mode=ro',uri=True)
+        local = sqlite3.connect('file:'+str(broker_path)+'?mode=ro',uri=True)
+        try:
+            self.assertFalse(clear(coordinator))
+            self.assertEqual(coordinator.execute('SELECT state FROM broker_intents WHERE operation_id=?',(details['operation'],)).fetchone()[0],'started')
+            self.assertEqual(local.execute('SELECT state FROM operations WHERE id=?',(details['operation'],)).fetchone()[0],'started')
+        finally:
+            coordinator.close();local.close()
+        restarted = Queue(root / 'queue')
+        try:
+            self.assertNotEqual(restarted.startup_id,details['epoch'])
+            with restarted._db() as db:
+                self.assertFalse(restarted._transfer_admission_clear(db))
+                self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(details['operation'],)).fetchone()[0],'started')
+        finally: restarted.close()
 
 
 if __name__ == '__main__':

@@ -38,6 +38,17 @@ _REFERENCE_INIT_FIELDS = _FIELDS | {'profile','workerId','workerInstanceId','cla
                                    'claimTokenSha256','inputManifestSha256','pipelineDigest'}
 _REFERENCE_COMPLETION_DDL = ('CREATE TABLE reference_broker_completion_candidate ('
     'operation_id TEXT PRIMARY KEY, grant_hash TEXT NOT NULL, response_sha256 TEXT NOT NULL)')
+_REFERENCE_UPLOAD_ISSUE_DDL = ('CREATE TABLE reference_broker_upload_issue_candidate ('
+    'operation_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, generation INTEGER NOT NULL, '
+    'manifest_sha TEXT NOT NULL, object_id TEXT NOT NULL, file_name TEXT NOT NULL, '
+    'file_bytes INTEGER NOT NULL, file_sha TEXT NOT NULL, claim_sha TEXT NOT NULL, '
+    'init_operation_id TEXT NOT NULL, UNIQUE(job_id,generation,object_id), '
+    'UNIQUE(job_id,generation,file_name))')
+_REFERENCE_RECEIPT_DDL = ('CREATE TABLE reference_broker_upload_receipt_candidate ('
+    'operation_id TEXT PRIMARY KEY, issue_sha256 TEXT NOT NULL, receipt_json TEXT NOT NULL)')
+_REFERENCE_COMMIT_DDL = ('CREATE TABLE reference_broker_commit_candidate ('
+    'operation_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, init_sha256 TEXT NOT NULL, '
+    'body_sha256 TEXT NOT NULL, content_type TEXT NOT NULL, UNIQUE(job_id))')
 _ISSUER_DDL = ('CREATE TABLE node_broker_upload_issues ('
     'operation_id TEXT PRIMARY KEY, task_uuid TEXT NOT NULL, generation INTEGER NOT NULL, '
     'file_key TEXT NOT NULL, file_path TEXT NOT NULL, root_path TEXT NOT NULL, root_dev INTEGER NOT NULL, '
@@ -53,6 +64,65 @@ _DDL = {
 class BrokerHeld(ValueError): pass
 
 
+def _reference_verified_image_only_uploads(manifest, manifest_sha, receipts, *, init_grant, issues, secret):
+    """Check an image-only inventory; auxiliary and LiDAR inputs are unsupported.
+
+    This validator does not itself establish receipt authenticity, durability,
+    or a right to start an engine. It must not be used for mixed manifests;
+    their required ODM and TreeDar input semantics are not defined here.
+    Reference commit remains disabled.
+    """
+    from .reference_protocol import manifest_sha256
+    try:
+        if manifest_sha256(manifest) != manifest_sha or manifest['sha256'] != manifest_sha:
+            raise ValueError()
+        objects = manifest['objects']
+        if type(objects) is not list or not objects or manifest['objectCount'] != len(objects):
+            raise ValueError()
+        expected = {}
+        names = set()
+        for obj in objects:
+            if (type(obj) is not dict or obj['kind'] != 'image' or type(obj['id']) is not str
+                    or not obj['id'] or type(obj['name']) is not str or not obj['name']
+                    or type(obj['byteSize']) is not int or obj['byteSize'] <= 0
+                    or type(obj['sha256']) is not str or not re.fullmatch('[a-f0-9]{64}', obj['sha256'])
+                    or obj['id'] in expected or obj['name'].lower() in names):
+                raise ValueError()
+            names.add(obj['name'].lower())
+            expected[obj['id']] = (obj['name'], obj['byteSize'], obj['sha256'])
+        if (type(secret) is not bytes or len(secret) < 32 or type(init_grant) is not dict
+                or init_grant['inputManifestSha256'] != manifest_sha or type(issues) is not dict
+                or set(issues) != set(expected) or type(receipts) is not list or len(receipts) != len(expected)):
+            raise ValueError()
+        scope = hashlib.sha256(_json(init_grant)).hexdigest()
+        seen = set()
+        operations = set()
+        for receipt in receipts:
+            if (type(receipt) is not dict or set(receipt) != {'objectId','fileName','fileBytes','sha256','operationId','state','scopeSha256','signature'}
+                    or type(receipt['objectId']) is not str or type(receipt['fileName']) is not str
+                    or type(receipt['fileBytes']) is not int or receipt['fileBytes'] <= 0
+                    or type(receipt['sha256']) is not str or not re.fullmatch('[a-f0-9]{64}', receipt['sha256'])
+                    or type(receipt['state']) is not str
+                    or receipt['objectId'] in seen or not _uuid(receipt['operationId'])
+                    or receipt['operationId'] in operations or receipt['state'] != 'complete'
+                    or receipt['scopeSha256'] != scope or issues.get(receipt['objectId']) != receipt['operationId']
+                    or type(receipt['signature']) is not str
+                    or not hmac.compare_digest(_reference_receipt_signature(receipt, secret), receipt['signature'])
+                    or expected.get(receipt['objectId']) != (receipt['fileName'],receipt['fileBytes'],receipt['sha256'])):
+                raise ValueError()
+            seen.add(receipt['objectId'])
+            operations.add(receipt['operationId'])
+        if seen != set(expected):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise BrokerHeld('reference upload inventory requires inspection') from None
+
+
+def _reference_receipt_signature(receipt, secret):
+    body = {key: value for key, value in receipt.items() if key != 'signature'}
+    return hmac.new(secret, b'ledgetop-reference-upload-receipt-v1\0' + _json(body), hashlib.sha256).hexdigest()
+
+
 def install_reference_completion_candidate(db, *, enabled=False):
     """Test-only empty-state preparation, never an upgrade or live migration."""
     if REFERENCE_AUTHORITY_QUALIFIED is not True or enabled is not True:
@@ -62,6 +132,9 @@ def install_reference_completion_candidate(db, *, enabled=False):
     if db.execute('SELECT 1 FROM broker_intents LIMIT 1').fetchone():
         raise BrokerHeld('existing broker intents require inspection')
     db.execute(_REFERENCE_COMPLETION_DDL)
+    db.execute(_REFERENCE_UPLOAD_ISSUE_DDL)
+    db.execute(_REFERENCE_RECEIPT_DDL)
+    db.execute(_REFERENCE_COMMIT_DDL)
 
 
 class LocalCoordinatorAuthority:
@@ -185,7 +258,7 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
         self._deadline = None
 
     @contextmanager
-    def hold(self, grant, timeout, *, create=False, body=None, signature=None):
+    def hold(self, grant, timeout, *, create=False, body=None, signature=None, _allowed_upload=None, _allowed_commit=None):
         from .reference_store import PROFILE
         from .authority_lease import MARKER_DDL, LeaseUnavailable
         from .broker_intent_fence import attest, IntentFenceError
@@ -259,6 +332,32 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
                                 raise BrokerHeld('exact active reference claim required')
                             digest = hashlib.sha256(_json(grant)).hexdigest()
                             allowed = (grant['operationId'], grant['jobId'], digest)
+                            if _allowed_commit is not None:
+                                if create or _allowed_upload is not None or type(_allowed_commit) is not tuple or len(_allowed_commit) != 3:
+                                    raise BrokerHeld('invalid commit intent allowance')
+                                commit_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_commit_candidate'").fetchone()
+                                if commit_schema is None or commit_schema[0] != _REFERENCE_COMMIT_DDL:
+                                    raise BrokerHeld('reference commit schema unavailable')
+                                commit = db.execute('SELECT * FROM reference_broker_commit_candidate WHERE operation_id=?', (_allowed_commit[0],)).fetchone()
+                                if (commit is None or commit['job_id'] != grant['jobId'] or commit['init_sha256'] != digest
+                                        or _allowed_commit != (commit['operation_id'],commit['job_id'],hashlib.sha256(_json(list(commit))).hexdigest())):
+                                    raise BrokerHeld('commit intent allowance changed')
+                                allowed = _allowed_commit
+                            if _allowed_upload is not None:
+                                if create or type(_allowed_upload) is not tuple or len(_allowed_upload) != 3:
+                                    raise BrokerHeld('invalid upload intent allowance')
+                                upload_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_upload_issue_candidate'").fetchone()
+                                if upload_schema is None or upload_schema[0] != _REFERENCE_UPLOAD_ISSUE_DDL:
+                                    raise BrokerHeld('reference issue schema unavailable')
+                                issue = db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE operation_id=?', (_allowed_upload[0],)).fetchone()
+                                if (issue is None or issue['job_id'] != grant['jobId']
+                                        or issue['generation'] != grant['taskGeneration']
+                                        or issue['manifest_sha'] != grant['inputManifestSha256']
+                                        or issue['claim_sha'] != grant['claimTokenSha256']
+                                        or issue['init_operation_id'] != grant['operationId']
+                                        or _allowed_upload != (issue['operation_id'], issue['job_id'], hashlib.sha256(_json(list(issue))).hexdigest())):
+                                    raise BrokerHeld('upload intent allowance changed')
+                                allowed = _allowed_upload
                             if not self.queue._transfer_admission_clear(db, broker_allowed=allowed):
                                 raise BrokerHeld('broker intent fence unavailable')
                             if verification_pass == 0 and create:
@@ -299,6 +398,51 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
         if self._deadline is None or time.monotonic() >= self._deadline:
             raise BrokerHeld('reference authority deadline exceeded')
 
+    def _issue_upload_candidate(self, init_grant, signature, *, object_id, operation_id, secret):
+        """Persist a manifest-derived issue under the original live claim.
+
+        The issue does not authorize transmission; reference upload remains
+        disabled until source-descriptor verification is integrated.
+        """
+        if (type(secret) is not bytes or type(signature) is not str
+                or not hmac.compare_digest(sign_grant(init_grant, secret), signature)
+                or not _uuid(operation_id) or operation_id == init_grant.get('operationId')
+                or type(object_id) is not str or not object_id):
+            raise BrokerHeld('exact signed issue request required')
+        with self.hold(init_grant, 10, create=False):
+            db = self._active_db
+            schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_upload_issue_candidate'").fetchone()
+            if schema is None or schema[0] != _REFERENCE_UPLOAD_ISSUE_DDL:
+                raise BrokerHeld('reference issue schema unavailable')
+            digest = hashlib.sha256(_json(init_grant)).hexdigest()
+            intent = db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?', (init_grant['operationId'],)).fetchone()
+            proof = db.execute('SELECT grant_hash FROM reference_broker_completion_candidate WHERE operation_id=?', (init_grant['operationId'],)).fetchone()
+            if (intent is None or tuple(intent) != (init_grant['jobId'], digest, 'complete')
+                    or proof is None or proof[0] != digest):
+                raise BrokerHeld('confirmed reference initialization required')
+            if db.execute('SELECT 1 FROM broker_intents WHERE operation_id=?', (operation_id,)).fetchone():
+                raise BrokerHeld('reference upload operation already used')
+            row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (init_grant['jobId'],)).fetchone()
+            submission = json.loads(row['input_json'])
+            objects = [obj for obj in submission['manifest']['objects'] if obj['id'] == object_id]
+            if len(objects) != 1 or objects[0]['kind'] != 'image':
+                raise BrokerHeld('manifest image required')
+            obj = objects[0]
+            issue = (operation_id, init_grant['jobId'], init_grant['taskGeneration'],
+                     init_grant['inputManifestSha256'], object_id, obj['name'], obj['byteSize'],
+                     obj['sha256'], init_grant['claimTokenSha256'], init_grant['operationId'])
+            old = db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE operation_id=?', (operation_id,)).fetchone()
+            if old is None:
+                try:
+                    db.execute('INSERT INTO reference_broker_upload_issue_candidate VALUES(?,?,?,?,?,?,?,?,?,?)', issue)
+                except sqlite3.IntegrityError:
+                    raise BrokerHeld('reference upload already issued') from None
+            elif tuple(old) != issue:
+                raise BrokerHeld('reference upload issue changed')
+            self.check_deadline()
+            return dict(zip(('operationId','jobId','generation','manifestSha256','objectId','fileName',
+                             'fileBytes','fileSha256','claimTokenSha256','initOperationId'), issue))
+
     def completed(self, grant, reply):
         if self._active_db is None:
             raise BrokerHeld('reference authority transaction required')
@@ -331,6 +475,21 @@ def _uuid(value):
 def sign_grant(grant, secret):
     if type(secret) is not bytes or len(secret) < 32: raise BrokerHeld('invalid signing key')
     return hmac.new(secret, b'ledgetop-node-mutation-v1\0' + _json(grant), hashlib.sha256).hexdigest()
+
+
+def sign_reference_issue(init_grant, object_id, operation_id, secret):
+    if type(secret) is not bytes or len(secret) < 32:
+        raise BrokerHeld('invalid signing key')
+    return hmac.new(secret, b'ledgetop-reference-upload-issue-v1\0' + _json(
+        {'initGrant': init_grant, 'objectId': object_id, 'operationId': operation_id}), hashlib.sha256).hexdigest()
+
+
+def sign_reference_commit(init_grant, operation_id, body, content_type, secret):
+    if type(secret) is not bytes or len(secret) < 32 or type(body) is not bytes:
+        raise BrokerHeld('invalid commit signing request')
+    return hmac.new(secret, b'ledgetop-reference-commit-v1\0' + _json(
+        {'initGrant':init_grant,'operationId':operation_id,'bodySha256':hashlib.sha256(body).hexdigest(),
+         'contentType':content_type}), hashlib.sha256).hexdigest()
 
 
 def _sender_confirmation(grant, secret):
@@ -571,8 +730,10 @@ class LoopbackNodeODM:
         value = decode_submission(raw)
         return _reply(value,grant['engineTaskId'])
 
-    def exchange_upload(self, grant, source):
+    def exchange_upload(self, grant, source, *, absolute_deadline=None):
         deadline=time.monotonic()+self.deadline_seconds
+        if absolute_deadline is not None: deadline=min(deadline,absolute_deadline)
+        if time.monotonic()>=deadline:raise BrokerHeld('backend deadline exceeded')
         if local_engine_identity(deadline)!=self.engine_id:raise BrokerHeld('local engine changed')
         local_backend_identity(self.pin,deadline)
         boundary,prefix,suffix=_file_multipart(grant['operationId'],grant['fileName'])
@@ -601,7 +762,7 @@ class NodeMutationBroker:
         self.root=Path(root).absolute();self.node=node_id;self.engine=engine_id;self.authority=authority_id
         self.epoch=coordinator_epoch;self.origin=coordinator_origin;self.generation=gate_generation
         self.secret=secret;self.adapter=adapter;self.witness=authority_witness
-        self._mutex=threading.Lock();self._pid=os.getpid();self._closed=False
+        self._mutex=threading.Lock();self._pid=os.getpid();self._closed=False;self._unreaped=[]
         if (self.root != canonical_gate_path(engine_id) / 'mutation-broker'
                 or not self.root.is_dir() or self.root.is_symlink() or self.root.resolve()!=self.root
                 or self.root.stat().st_uid!=os.geteuid() or self.root.stat().st_mode&0o077):
@@ -700,6 +861,252 @@ class NodeMutationBroker:
         if type(self.witness) is ReferenceCoordinatorAuthority:
             return self._execute(grant,'',lambda:self.adapter.exchange(grant,body,absolute_deadline=self.witness._deadline),body=body,signature=signature)
         return self._execute(grant,'',lambda:self.adapter.exchange(grant,body),body=body,signature=signature)
+
+    def issue_reference_upload_candidate(self, init_grant, signature, *, object_id, operation_id, issue_signature):
+        """Issue metadata only; this does not enable upload or commit."""
+        if type(self.witness) is not ReferenceCoordinatorAuthority:
+            raise BrokerHeld('reference authority required')
+        self._authenticate(init_grant, signature, 'init')
+        if (type(issue_signature) is not str or not re.fullmatch('[a-f0-9]{64}', issue_signature)
+                or not hmac.compare_digest(sign_reference_issue(init_grant, object_id, operation_id, self.secret), issue_signature)):
+            raise BrokerHeld('reference upload issue authentication failed')
+        return self.witness._issue_upload_candidate(init_grant, signature, object_id=object_id,
+                                                    operation_id=operation_id, secret=self.secret)
+
+    def start_reference_upload_intent_candidate(self, init_grant, signature, *, object_id, operation_id, issue_signature):
+        """Persist an upload intent only; transmission is not enabled."""
+        self._authenticate(init_grant, signature, 'init')
+        if (type(self.witness) is not ReferenceCoordinatorAuthority or type(issue_signature) is not str
+                or not hmac.compare_digest(sign_reference_issue(init_grant, object_id, operation_id, self.secret), issue_signature)):
+            raise BrokerHeld('reference upload issue authentication failed')
+        with self.witness.hold(init_grant, 10, create=False):
+            db = self.witness._active_db
+            issue = db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE operation_id=?', (operation_id,)).fetchone()
+            if (issue is None or issue['object_id'] != object_id or issue['job_id'] != init_grant['jobId']
+                    or issue['generation'] != init_grant['taskGeneration']
+                    or issue['manifest_sha'] != init_grant['inputManifestSha256']
+                    or issue['claim_sha'] != init_grant['claimTokenSha256']
+                    or issue['init_operation_id'] != init_grant['operationId']):
+                raise BrokerHeld('exact issued reference upload required')
+            allowed = (operation_id, init_grant['jobId'], hashlib.sha256(_json(list(issue))).hexdigest())
+            try:
+                db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')", allowed)
+            except sqlite3.IntegrityError:
+                raise BrokerHeld('reference upload requires inspection') from None
+            self.witness.check_deadline()
+            return allowed
+
+    def send_reference_upload_candidate(self, init_grant, signature, *, object_id, operation_id,
+                                        issue_signature, worker, reservation_id, relative_path):
+        """Disabled candidate: one owned input, no replay after any uncertainty."""
+        from .reference_engine_worker import ReferenceEngineWorker
+        from .guarded_native_engine import start_guarded_sender
+        if (type(worker) is not ReferenceEngineWorker or self._unreaped
+                or worker.engine_id != self.engine or worker.node_id != self.node
+                or worker.authority_id != self.authority or worker.origin != self.origin
+                or worker.gate_generation != self.generation):
+            raise BrokerHeld('exact reference worker required')
+        allowance = self.start_reference_upload_intent_candidate(init_grant, signature, object_id=object_id,
+            operation_id=operation_id, issue_signature=issue_signature)
+        deadline = time.monotonic() + 10
+        with self._execution_lock(deadline), self.witness.hold(init_grant, max(0, deadline-time.monotonic()),
+                _allowed_upload=allowance), NodeGate(self.engine) as gate:
+            self._check_owner()
+            state = gate.snapshot()
+            expected = {'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
+            identity = uuid.UUID(init_grant['jobId']).hex
+            job = {'id':init_grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
+            reservation = state['reservation']
+            if (any(state[k] != value for k,value in expected.items()) or not reservation
+                    or reservation['receiptId'] != identity or reservation['job'] != job
+                    or reservation['completionDigest'] is not None):
+                raise BrokerHeld('reference node gate changed')
+            db = self.witness._active_db
+            schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_upload_receipt_candidate'").fetchone()
+            if schema is None or schema[0] != _REFERENCE_RECEIPT_DDL:
+                raise BrokerHeld('reference receipt schema unavailable')
+            issue = db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE operation_id=?', (operation_id,)).fetchone()
+            if issue is None or hashlib.sha256(_json(list(issue))).hexdigest() != allowance[2]:
+                raise BrokerHeld('reference upload issue changed')
+            with worker.ledger._transaction() as ledger_db:
+                reserved = worker.ledger._reservation(ledger_db, reservation_id)
+                settings = json.loads(reserved['settings'])
+            if ((reserved['job'],reserved['generation'],reserved['environment'],settings['manifest_sha256']) !=
+                    (init_grant['jobId'],init_grant['taskGeneration'],init_grant['environment'],init_grant['inputManifestSha256'])):
+                raise BrokerHeld('reference scratch reservation changed')
+            path,_,_ = worker._file(reservation_id, relative_path, issue['file_bytes'], issue['file_sha'])
+            item = {'path':str(path),'bytes':issue['file_bytes'],'sha256':issue['file_sha'],'name':issue['file_name']}
+            durable_identity = _json([init_grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                existing = self.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+                init = self.db.execute('SELECT state,grant_hash,reply FROM operations WHERE id=? AND operation=?', (init_grant['operationId'],'init')).fetchone()
+                init_hash = hashlib.sha256(_json(init_grant)).hexdigest()
+                proof = db.execute('SELECT grant_hash,response_sha256 FROM reference_broker_completion_candidate WHERE operation_id=?', (init_grant['operationId'],)).fetchone()
+                if (existing is None or existing['identity'] != durable_identity or init is None or init['state'] != 'complete'
+                        or init['grant_hash'] != init_hash or proof is None or proof['grant_hash'] != init_hash):
+                    raise BrokerHeld('reference local init reservation changed')
+                try:
+                    init_reply = _reply(json.loads(init['reply']), init_grant['engineTaskId'])
+                except (ValueError, TypeError):
+                    raise BrokerHeld('reference local init proof changed') from None
+                if hashlib.sha256(_json(init_reply)).hexdigest() != proof['response_sha256']:
+                    raise BrokerHeld('reference local init proof changed')
+                self.db.execute('INSERT INTO operations VALUES(?,?,?,?,?,NULL)', (operation_id,'upload',issue['file_name'],allowance[2],'started'))
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
+            self.witness.check_deadline()
+            completion = start_guarded_sender(item, operation_id, deadline, self)
+            try:
+                upload = {'operationId':operation_id,'engineTaskId':init_grant['engineTaskId'],
+                          'fileName':issue['file_name'],'fileBytes':issue['file_bytes'],'bodySha256':issue['file_sha']}
+                reply = self.adapter.exchange_upload(upload, completion.source, absolute_deadline=self.witness._deadline)
+                completion.verify(deadline)
+                self.witness.check_deadline()
+                self._check_owner()
+                receipt = dict(objectId=issue['object_id'],fileName=issue['file_name'],fileBytes=issue['file_bytes'],
+                    sha256=issue['file_sha'],operationId=operation_id,state='complete',
+                    scopeSha256=hashlib.sha256(_json(init_grant)).hexdigest())
+                receipt['signature'] = _reference_receipt_signature(receipt,self.secret)
+                self.db.execute('BEGIN IMMEDIATE')
+                try:
+                    changed = self.db.execute("UPDATE operations SET state='complete',reply=? WHERE id=? AND state='started' AND grant_hash=?", (_json(reply).decode(),operation_id,allowance[2])).rowcount
+                    if changed != 1:raise BrokerHeld('reference upload operation changed')
+                    self.db.commit()
+                except BaseException:
+                    self.db.rollback()
+                    raise
+                db.execute('INSERT INTO reference_broker_upload_receipt_candidate VALUES(?,?,?)', (operation_id,allowance[2],_json(receipt).decode()))
+                changed = db.execute("UPDATE broker_intents SET state='complete' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='started'", allowance).rowcount
+                if changed != 1:raise BrokerHeld('reference upload intent changed')
+                return receipt
+            finally:
+                completion.stop()
+
+    def verify_reference_upload_inventory_candidate(self, init_grant, signature):
+        """Cross-check completed reference uploads without authorizing commit."""
+        if type(self.witness) is not ReferenceCoordinatorAuthority:
+            raise BrokerHeld('reference authority required')
+        self._authenticate(init_grant, signature, 'init')
+        deadline = time.monotonic() + 10
+        with self._execution_lock(deadline), self.witness.hold(init_grant, max(0, deadline-time.monotonic())), NodeGate(self.engine) as gate:
+            return self._verify_reference_inventory_locked(init_grant, gate)
+
+    def commit_reference_candidate(self, init_grant, signature, *, operation_id, body, content_type, commit_signature):
+        """Experimental image-only commit; no retries on uncertain outcome."""
+        if type(self.witness) is not ReferenceCoordinatorAuthority:
+            raise BrokerHeld('reference authority required')
+        self._authenticate(init_grant,signature,'init')
+        if (not _uuid(operation_id) or operation_id == init_grant['operationId'] or type(body) is not bytes
+                or len(body)>65536 or type(content_type) is not str or not re.fullmatch(r'[ -~]{1,256}',content_type)
+                or type(commit_signature) is not str
+                or not hmac.compare_digest(sign_reference_commit(init_grant,operation_id,body,content_type,self.secret),commit_signature)):
+            raise BrokerHeld('reference commit authentication failed')
+        deadline = time.monotonic()+10
+        init_hash = hashlib.sha256(_json(init_grant)).hexdigest()
+        commit = (operation_id,init_grant['jobId'],init_hash,hashlib.sha256(body).hexdigest(),content_type)
+        allowed = (operation_id,init_grant['jobId'],hashlib.sha256(_json(list(commit))).hexdigest())
+        with self._execution_lock(deadline):
+            with self.witness.hold(init_grant,max(0,deadline-time.monotonic())), NodeGate(self.engine) as gate:
+                self._verify_reference_inventory_locked(init_grant,gate)
+                db = self.witness._active_db
+                schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_commit_candidate'").fetchone()
+                if schema is None or schema[0] != _REFERENCE_COMMIT_DDL:
+                    raise BrokerHeld('reference commit schema unavailable')
+                if db.execute('SELECT 1 FROM broker_intents WHERE operation_id=?', (operation_id,)).fetchone():
+                    raise BrokerHeld('reference commit operation already used')
+                try:
+                    db.execute('INSERT INTO reference_broker_commit_candidate VALUES(?,?,?,?,?)',commit)
+                    db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",allowed)
+                except sqlite3.IntegrityError:
+                    raise BrokerHeld('reference commit requires inspection') from None
+            with self.witness.hold(init_grant,max(0,deadline-time.monotonic()),_allowed_commit=allowed), NodeGate(self.engine) as gate:
+                self._verify_reference_inventory_locked(init_grant,gate)
+                db = self.witness._active_db
+                self.db.execute('BEGIN IMMEDIATE')
+                try:
+                    self.db.execute('INSERT INTO operations VALUES(?,?,?,?,?,NULL)',(operation_id,'commit','',allowed[2],'started'))
+                    self.db.commit()
+                except BaseException:
+                    self.db.rollback()
+                    raise
+                self.witness.check_deadline()
+                adapter_grant = {'operation':'commit','engineTaskId':init_grant['engineTaskId'],'contentType':content_type}
+                reply = _reply(self.adapter.exchange(adapter_grant,body,absolute_deadline=self.witness._deadline),init_grant['engineTaskId'])
+                self._check_owner()
+                self.witness.check_deadline()
+                self.db.execute('BEGIN IMMEDIATE')
+                try:
+                    if self.db.execute("UPDATE operations SET state='complete',reply=? WHERE id=? AND grant_hash=? AND state='started'",(_json(reply).decode(),operation_id,allowed[2])).rowcount != 1:
+                        raise BrokerHeld('reference commit operation changed')
+                    self.db.commit()
+                except BaseException:
+                    self.db.rollback()
+                    raise
+                db.execute('INSERT INTO reference_broker_completion_candidate VALUES(?,?,?)',
+                           (operation_id,allowed[2],hashlib.sha256(_json(reply)).hexdigest()))
+                if db.execute("UPDATE broker_intents SET state='complete' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='started'",allowed).rowcount != 1:
+                    raise BrokerHeld('reference commit intent changed')
+                return reply
+
+    def _verify_reference_inventory_locked(self, init_grant, gate):
+        self._check_owner()
+        state = gate.snapshot()
+        reservation = state['reservation']
+        expected = {'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
+        job = {'id':init_grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
+        if (any(state[k] != value for k,value in expected.items()) or not reservation
+                or reservation['receiptId'] != uuid.UUID(init_grant['jobId']).hex
+                or reservation['job'] != job or reservation['completionDigest'] is not None):
+            raise BrokerHeld('reference node gate changed')
+        db = self.witness._active_db
+        durable_identity = _json([init_grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
+        local_reservation = self.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+        local_init = self.db.execute('SELECT state,grant_hash,reply FROM operations WHERE id=? AND operation=?', (init_grant['operationId'],'init')).fetchone()
+        init_hash = hashlib.sha256(_json(init_grant)).hexdigest()
+        init_proof = db.execute('SELECT grant_hash,response_sha256 FROM reference_broker_completion_candidate WHERE operation_id=?', (init_grant['operationId'],)).fetchone()
+        init_intent = db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?', (init_grant['operationId'],)).fetchone()
+        if (local_reservation is None or local_reservation['identity'] != durable_identity or local_init is None
+                or local_init['state'] != 'complete' or local_init['grant_hash'] != init_hash
+                or init_proof is None or init_proof['grant_hash'] != init_hash or init_intent is None
+                or tuple(init_intent) != (init_grant['jobId'],init_hash,'complete')):
+            raise BrokerHeld('reference inventory init changed')
+        try:
+            init_reply = _reply(json.loads(local_init['reply']), init_grant['engineTaskId'])
+        except (ValueError,TypeError):
+            raise BrokerHeld('reference inventory init changed') from None
+        if hashlib.sha256(_json(init_reply)).hexdigest() != init_proof['response_sha256']:
+            raise BrokerHeld('reference inventory init changed')
+        for table,ddl in (('reference_broker_upload_issue_candidate',_REFERENCE_UPLOAD_ISSUE_DDL),
+                          ('reference_broker_upload_receipt_candidate',_REFERENCE_RECEIPT_DDL)):
+            schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if schema is None or schema[0] != ddl:raise BrokerHeld('reference inventory schema unavailable')
+        submission = json.loads(db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (init_grant['jobId'],)).fetchone()[0])
+        issues = db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE job_id=? AND generation=?',
+                            (init_grant['jobId'],init_grant['taskGeneration'])).fetchall()
+        object_ops = {}
+        receipts = []
+        for issue in issues:
+            if (issue['manifest_sha'] != init_grant['inputManifestSha256'] or issue['claim_sha'] != init_grant['claimTokenSha256']
+                    or issue['init_operation_id'] != init_grant['operationId'] or issue['object_id'] in object_ops):
+                raise BrokerHeld('reference inventory issue changed')
+            digest = hashlib.sha256(_json(list(issue))).hexdigest()
+            intent = db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?', (issue['operation_id'],)).fetchone()
+            receipt = db.execute('SELECT issue_sha256,receipt_json FROM reference_broker_upload_receipt_candidate WHERE operation_id=?', (issue['operation_id'],)).fetchone()
+            local = self.db.execute('SELECT operation,file_key,grant_hash,state,reply FROM operations WHERE id=?', (issue['operation_id'],)).fetchone()
+            if (intent is None or tuple(intent) != (init_grant['jobId'],digest,'complete')
+                    or receipt is None or receipt['issue_sha256'] != digest or local is None
+                    or (local['operation'],local['file_key'],local['grant_hash'],local['state']) != ('upload',issue['file_name'],digest,'complete')):
+                raise BrokerHeld('reference inventory completion changed')
+            _upload_reply(json.loads(local['reply']))
+            object_ops[issue['object_id']] = issue['operation_id']
+            receipts.append(json.loads(receipt['receipt_json']))
+        _reference_verified_image_only_uploads(submission['manifest'], init_grant['inputManifestSha256'], receipts,
+            init_grant=init_grant, issues=object_ops, secret=self.secret)
+        self.witness.check_deadline()
+        return len(receipts)
 
     def _validate_upload(self, grant, signature):
         from .viewer_tasks import TaskStore
