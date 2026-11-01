@@ -344,7 +344,7 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'],'completed')
         self.assertEqual(self.store.acceptance_receipts(job['jobId'])['receipts'],[receipt])
 
-    def test_tree_result_survives_coordinator_outage_until_acceptance_after_restart(self):
+    def test_tree_result_survives_acceptance_error_until_driver_recreation(self):
         job=self.submit('treedar')
         self.advance(job,'executing')
         self.tree_proof(job)
@@ -361,10 +361,10 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
         original_request=self.driver._request
         def unavailable(method,suffix,*args,**kwargs):
             if method=='GET' and suffix.endswith('/acceptance'):
-                raise OSError('synthetic coordinator outage')
+                raise OSError('synthetic acceptance endpoint failure')
             return original_request(method,suffix,*args,**kwargs)
         self.driver._request=unavailable
-        self.assertEqual(self.driver.step(),{'state':'retry_wait','reason':'background_reconciliation_unavailable'})
+        self.assertEqual(self.driver.step(),{'state':'retry_wait','reason':'background_reconciliation_failed'})
         self.assertEqual(self.router._row(job['jobId'])['result'],result_before)
         self.assertEqual({name:(output/name).read_bytes() for name in REQUIRED_OUTPUTS},output_before)
         self.assertEqual(source.read_bytes(),source_before)
@@ -378,6 +378,13 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(),source_before)
         self.assertEqual(sum(call[0]=='create' for call in self.docker.calls),creates_before)
         self.assertTrue(self.store.acceptance_receipts(job['jobId'])['fullyAccepted'])
+
+    def test_background_failure_does_not_override_foreground_state(self):
+        self.driver._background=lambda: (_ for _ in ()).throw(ValueError('private synthetic detail'))
+        self.driver._step=lambda: {'state':'executing'}
+        self.assertEqual(self.driver.step(),{'state':'executing'})
+        self.driver._step=lambda: {'state':'idle'}
+        self.assertEqual(self.driver.step(),{'state':'retry_wait','reason':'background_reconciliation_failed'})
 
     def test_combined_and_unconfigured_tree_refused_before_claim(self):
         self.driver=self.open_driver(path=self.root/'private'/'unconfigured.sqlite',provenance=False)

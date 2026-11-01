@@ -525,7 +525,9 @@ class ReferenceDriver:
                     background = {'state': 'background_retry'}
             result = self._step()
             if result['state'] == 'idle' and background['state'] == 'background_retry':
-                return {'state': 'retry_wait', 'reason': 'background_reconciliation_unavailable'}
+                # Existing retry covers all background exceptions, including
+                # permanent corruption; it is not evidence of a transient fault.
+                return {'state': 'retry_wait', 'reason': 'background_reconciliation_failed'}
             return background if result['state'] == 'idle' and background['state'] == 'completed' else result
         except DriverHeld as error:
             return {'state': 'held', 'reason': str(error)}
