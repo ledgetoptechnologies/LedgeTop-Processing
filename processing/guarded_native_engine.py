@@ -146,7 +146,12 @@ class GuardedNativeEngine:
                     raise OSError('source identity changed')
                 writer.shutdown(socket.SHUT_WR)
                 success.set()
-            except BaseException as error:errors.append(error)
+            except BaseException as error:
+                errors.append(error)
+                # Wake the guard's blocking source read immediately. The
+                # completion still fails and the durable started intent holds.
+                try:writer.shutdown(socket.SHUT_WR)
+                except OSError:pass
             finally:
                 try:os.close(fd)
                 except OSError as error:errors.append(error)

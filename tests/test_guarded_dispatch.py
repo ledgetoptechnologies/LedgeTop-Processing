@@ -320,7 +320,10 @@ class GuardedDispatchTests(unittest.TestCase):
 
     def test_source_short_read_holds_without_retry(self):
         identifier=self.submit();engine=self.service.engines['cluster']
+        self.assertEqual(engine.guard.binding.upload_deadline_seconds,300)
+        started=time.monotonic()
         with patch('processing.guarded_native_engine._read_source',return_value=b''):self.service.tick()
+        self.assertLess(time.monotonic()-started,3)
         self.assertEqual(self.service.store.task(identifier)['job']['status'],'held')
         self.assertEqual(engine._unreaped,[])
         with self.queue._db() as db:
@@ -333,7 +336,9 @@ class GuardedDispatchTests(unittest.TestCase):
         def read(fd,count):
             if count==1:raise RuntimeError('injected final read failure')
             return original(fd,count)
+        started=time.monotonic()
         with patch('processing.guarded_native_engine._read_source',side_effect=read):self.service.tick()
+        self.assertLess(time.monotonic()-started,3)
         self.assertEqual(self.service.store.task(identifier)['job']['status'],'held')
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
