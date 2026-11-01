@@ -12,13 +12,14 @@ viewer=Path(r'C:\Projects\viewer-download-retention-20261031')
 viewer_commit='f13c4e0465640516305aa3f9eeb1ad0735254bb9'
 processing_commit_expected='4020f922990bca17598390868a8d378e80615154'
 fixture_commit='a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba'
+derivative_fixture_commit='1138871548dacde30ff6f6edb8626816095f1e2e'
 fixture_hashes={
     'worker_process_outage_fixture.py':'50b68420d6a20e9171f505274c27000fc7a0253c6793605f1d13275581700549',
     'worker_process_outage_engine.py':'f7f3fbc6f3ff0af14c1ef4fad1c6343e4500a09681636e627e028c5e0035903e',
     'joined_worker_viewer_coordinator.py':'8a79a07be92ef4eb637ecb131e6bad086e69832dd38608cd76c41c5999b4a432',
     'joined_worker_viewer_supervisor.py':'6ddda9b59f07019e0a13fa893f27c7cdd2055b5c50a830c16ca85492f5bfa19a',
     'joined_worker_viewer_watchdog.py':'8ae1289fdd548c873657beba4569d3623d8179498c84dcfcb083469f5cb7157a',
-    'joined_worker_viewer_sender.js':'dc9c7e374e4664d3ffeaf6037d8d0dd134f0ec4715e10a8d7424c5cdb63cfa2c',
+    'joined_worker_viewer_sender.js':'d58eda1e34e7ab6bbc0d577a9d619c2dc9c242405979bf49795ecc7106cbaf2f',
 }
 run_id=os.environ['LT_SYNTHETIC_RUN_ID'];root=Path(os.environ['LT_SYNTHETIC_ROOT']).resolve()
 if len(run_id)!=32 or any(c not in '0123456789abcdef' for c in run_id) or not root.is_dir():raise ValueError('invalid run identity')
@@ -65,13 +66,15 @@ try:
     if processing_commit!=processing_commit_expected:raise RuntimeError('unexpected Processing commit')
     fixture_oid=cmd('git','rev-parse',fixture_commit+'^{commit}').decode().strip()
     if fixture_oid!=fixture_commit:raise RuntimeError('invalid fixture commit')
-    print('COMMITS',processing_commit,viewer_commit,'FIXTURE_COMMIT',fixture_oid,'RUN_ID',run_id,'ROOT',root,flush=True)
+    derivative_oid=cmd('git','rev-parse',derivative_fixture_commit+'^{commit}').decode().strip()
+    if derivative_oid!=derivative_fixture_commit:raise RuntimeError('invalid derivative fixture commit')
+    print('COMMITS',processing_commit,viewer_commit,'FIXTURE_COMMIT',fixture_oid,'DERIVATIVE_FIXTURE_COMMIT',derivative_oid,'RUN_ID',run_id,'ROOT',root,flush=True)
     for repo,commit,name in ((source,processing_commit,'processing'),(viewer,viewer_commit,'viewer')):
         target=root/name;target.mkdir();archive=root/(name+'.tar')
         with archive.open('wb') as output:cmd('git','-C',str(repo),'archive','--format=tar',commit,timeout=30,stdout=output)
         with tarfile.open(archive) as tar:tar.extractall(target,filter='data')
     for name,expected in fixture_hashes.items():
-        data=cmd('git','show',fixture_oid+':tests/'+name)
+        data=cmd('git','show',(derivative_oid if name=='joined_worker_viewer_sender.js' else fixture_oid)+':tests/'+name)
         # Git normalized these files at commit time. Reconstruct the exact
         # reviewed/passing Windows snapshot bytes, then verify their digest.
         if name in ('worker_process_outage_fixture.py','worker_process_outage_engine.py'):
@@ -86,7 +89,8 @@ try:
         print('FIXTURE_SHA256',name,digest,flush=True)
     for name in ('nativeReferenceConsumerCandidate.js','nativeReferenceStorageCandidate.js','nativeReferenceObjectCandidate.js',
                  'nativeReferenceReceiptCandidate.js','nativeReferenceBoundSenderCandidate.js','nativeReferenceAcceptanceCandidate.js',
-                 'nativeReferenceProviderAuthCandidate.js','nativeReferenceSenderRevisionCandidate.js','nativeReferenceProtocolCandidate.js'):
+                 'nativeReferenceProviderAuthCandidate.js','nativeReferenceSenderRevisionCandidate.js','nativeReferenceProtocolCandidate.js',
+                 'database.js','processingRepository.js','repository.js'):
         print('VIEWER_MODULE_SHA256',name,hashlib.sha256((root/'viewer'/'apps'/'viewer'/'server'/name).read_bytes()).hexdigest(),flush=True)
     retained=root/'retained';retained.mkdir()
     images={}
@@ -122,7 +126,8 @@ try:
         time.sleep(.2)
     else:raise RuntimeError('Viewer container timeout')
     vlog=logs('viewer');print('VIEWER_LOG_BEGIN\n'+vlog+'\nVIEWER_LOG_END',flush=True)
-    if vs['ExitCode']!=0 or 'VIEWER_ACTUAL_PROXY_STAGED_AND_SENT' not in vlog:raise RuntimeError('Viewer did not stage/send')
+    if vs['ExitCode']!=0 or 'VIEWER_ACTUAL_PROXY_STAGED_AND_SENT' not in vlog or 'NATIVE_DERIVATIVE_HELD_UNRELATED_CLAIMED' not in vlog:
+        raise RuntimeError('Viewer did not stage/send or verify derivative hold')
     deadline=time.monotonic()+20
     while time.monotonic()<deadline:
         ps=exited('python')
