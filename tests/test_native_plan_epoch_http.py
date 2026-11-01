@@ -91,6 +91,19 @@ class EpochHTTP(Epoch):
         finally:conn.close()
         with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM native_plan_epochs').fetchone()[0],0)
 
+    def test_v2_path_identity_rejects_uppercase_and_percent_aliases(self):
+        identifier='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';operation='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+        base=self.base(identifier,operation);manifest=json.loads(BODY)
+        request={'schemaVersion':2,'operationKind':'plan_bind','manifestId':manifest['id'],'manifestSha256':manifest['sha256']}
+        self.assertEqual(self.raw('POST',base+'/open',ref.canonical_json(request))[0],200)
+        aliases=[self.base(identifier.upper(),operation),self.base(identifier.replace('a','%61',1),operation),
+                 self.base(identifier,operation.upper()),self.base(identifier,operation.replace('b','%62',1)),
+                 base.replace('/1/1','/01/1'),base.replace('/1/1','/%31/1'),base.replace('/1/1','/1/%31')]
+        for alias in aliases:
+            with self.subTest(alias=alias):self.assertIn(self.raw('GET',alias)[0],(400,404))
+        self.assertEqual(self.raw('GET',base)[0],200)
+        with self.handler.prototype_queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM native_plan_epochs').fetchone()[0],1)
+
     def test_manifest_trickle_times_out_without_binding(self):
         from tests.test_native_binding_deadline import trickle
         identifier,operation,manifest,base,_=self.setup_http();body=ref.canonical_json(manifest)
@@ -192,6 +205,80 @@ class Qualification(unittest.TestCase):
         import os
         with patch.dict(os.environ,{'PROCESSING_API_TOKEN':'a'*32,'PROCESSING_VIEWER_PLAN_EPOCH':'1'},clear=True),patch.object(config,'NATIVE_PLAN_EPOCH_QUALIFIED',True):
             with self.assertRaisesRegex(ValueError,'test-only'):config.from_environment()
+
+    @unittest.skipUnless(__import__('os').name=='posix','POSIX synthetic fixture')
+    def test_standalone_fixture_is_opt_in_and_stops(self):
+        import os,select,sys
+        env=os.environ.copy();env.pop('PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE',None)
+        denied=subprocess.run([sys.executable,'-m','tests.native_epoch_http_fixture'],input='STOP\n',capture_output=True,text=True,env=env,timeout=15)
+        self.assertNotEqual(denied.returncode,0);self.assertEqual(denied.stdout,'')
+        env['PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE']='1'
+        result=subprocess.run([sys.executable,'-m','tests.native_epoch_http_fixture'],input='STOP\n',capture_output=True,text=True,env=env,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr[-1000:])
+        info=json.loads(result.stdout);self.assertEqual((info['host'],info['fixture']),('127.0.0.1','synthetic-v2'))
+        self.assertTrue(1<=info['port']<=65535)
+        child=subprocess.Popen([sys.executable,'-m','tests.native_epoch_http_fixture'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
+        try:
+            self.assertTrue(select.select([child.stdout],[],[],8)[0]);info=json.loads(child.stdout.readline())
+            conn=http.client.HTTPConnection(info['host'],info['port'],timeout=3)
+            try:
+                identifier='00000000-0000-4000-8000-000000000001';operation='00000000-0000-4000-8000-000000000002'
+                path='/task/ledgetop/plan-epoch-v2/'+identifier+'/'+operation+'/1/1?'+urlencode({'token':TOKEN})
+                conn.request('GET',path,headers={'X-LedgeTop-Capability':CAP});response=conn.getresponse()
+                self.assertEqual(response.status,404);response.read()
+            finally:conn.close()
+            out,err=child.communicate('STOP\n',timeout=10);self.assertEqual(child.returncode,0,err[-1000:]);self.assertEqual(out,'')
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:child.wait(timeout=2)
+                except subprocess.TimeoutExpired:child.kill();child.wait(timeout=2)
+
+    @unittest.skipUnless(__import__('os').name=='posix','POSIX synthetic fixture')
+    def test_fixture_listener_start_failure_closes_owned_authority(self):
+        import contextlib,io,os,socket,tempfile
+        from tests import native_epoch_http_fixture as fixture
+        from processing.authority_lease import acquire
+        with tempfile.TemporaryDirectory() as parent:
+            root=Path(parent)/'owned';root.mkdir();ports=[];actual=fixture.FixtureServer
+            def server(*args,**kwargs):
+                result=actual(*args,**kwargs);ports.append(result.server_port);return result
+            with patch.dict(os.environ,{'PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE':'1'}), \
+                 patch.object(fixture.tempfile,'mkdtemp',return_value=str(root)), \
+                 patch.object(fixture,'FixtureServer',side_effect=server), \
+                 patch.object(fixture.threading.Thread,'start',side_effect=RuntimeError('synthetic start fault')), \
+                 contextlib.redirect_stderr(io.StringIO()) as errors:
+                with self.assertRaisesRegex(RuntimeError,'start fault'):fixture.main()
+            self.assertIn(str(root),errors.getvalue());self.assertTrue(root.exists());self.assertEqual(len(ports),1)
+            sock=socket.socket();sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            try:sock.bind(('127.0.0.1',ports[0]))
+            finally:sock.close()
+            lease=acquire(root/'leases',root/'state');lease.close()
+
+    @unittest.skipUnless(__import__('os').name=='posix','POSIX synthetic fixture')
+    def test_fixture_tracks_active_handler_after_listener_shutdown(self):
+        from http.server import BaseHTTPRequestHandler
+        from tests.native_epoch_http_fixture import FixtureServer
+        entered=threading.Event();release=threading.Event();results=[]
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_GET(self):
+                entered.set();release.wait(3);self.send_response(200);self.send_header('Content-Length','0');self.end_headers()
+        server=FixtureServer(('127.0.0.1',0),Handler);listener=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02});listener.start()
+        def client():
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=4)
+            try:conn.request('GET','/');response=conn.getresponse();results.append(response.status);response.read()
+            finally:conn.close()
+        worker=threading.Thread(target=client);worker.start()
+        try:
+            self.assertTrue(entered.wait(3));server.shutdown();server.server_close();listener.join(5);self.assertFalse(listener.is_alive())
+            self.assertFalse(server.wait_idle(.05));release.set();worker.join(5);self.assertFalse(worker.is_alive())
+            self.assertTrue(server.wait_idle(1));self.assertEqual(results,[200])
+        finally:
+            release.set()
+            if listener.is_alive():server.shutdown()
+            server.server_close();listener.join(5);worker.join(5)
+            self.assertFalse(listener.is_alive());self.assertFalse(worker.is_alive())
 
 
 class WireVectors(unittest.TestCase):

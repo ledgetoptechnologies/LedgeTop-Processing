@@ -62,3 +62,16 @@ or bad capability/unknown route, 409 conflict/closed/uncertain identity, 411
 invalid length, 413 body too large, 415 media/encoding, 408 body deadline and
 503 operational failure. These categories do not establish cross-principal
 occupancy secrecy: the bearer identifies an environment, not a user.
+
+For a synthetic cross-language test in one POSIX network namespace, launch
+`PROCESSING_SYNTHETIC_EPOCH_HTTP_FIXTURE=1 python -m tests.native_epoch_http_fixture`
+with stdin/stdout pipes from this source tree. The first stdout line is JSON
+with `host`, ephemeral `port` and `fixture`. The process uses newly created
+temporary state, fixed synthetic credentials from `tests.test_native_manifest_binding`,
+test-patched qualification and a synthetic healthy catalog. Send `STOP\n` to
+stdin and wait for exit; it also stops after 120 seconds without that message.
+The 120 seconds bounds the stdin wait, not total process lifetime or OS stalls;
+the invoking test must impose its own process timeout. The launcher tracks
+accepted handlers and waits up to five seconds for them after listener shutdown.
+An uncertain cleanup retains the temporary state and reports its path. This
+launcher is loopback HTTP only, not a TLS, production or engine test.

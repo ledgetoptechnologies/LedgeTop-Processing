@@ -261,7 +261,8 @@ class ViewerFacade:
     @staticmethod
     def _epoch_identity(match):
         from . import reference_protocol as ref
-        identifier=task_uuid(unquote(match[1]));operation=ref._uuid(unquote(match[2]),'operationId')
+        # V2 identity segments are canonical bytes, not legacy URL aliases.
+        identifier=ref._uuid(match[1],'taskUuid');operation=ref._uuid(match[2],'operationId')
         return identifier,operation
 
     def _environment(self, query):
