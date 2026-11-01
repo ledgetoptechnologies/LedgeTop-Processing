@@ -8,6 +8,7 @@ memory. Each multipart part is streamed to an unlinked private temporary file.
 from email.parser import BytesHeaderParser
 from email.policy import default as email_policy
 import hmac
+import errno
 import json
 import hashlib
 import os
@@ -119,6 +120,18 @@ def _copy_part(body, boundary, output):
             raise RequestError(400, 'truncated_multipart')
 
 
+class _ReservedPartWriter:
+    """Reserve only bytes actually found in the current part before writing."""
+    def __init__(self, output, floor):
+        self.output, self.floor, self.offset = output, floor, 0
+
+    def write(self, data):
+        if data:
+            reserve_input(self.output.fileno(), len(data), self.floor, self.offset)
+            self.output.write(data)
+            self.offset += len(data)
+
+
 def _multipart(stream, length, content_type, temp_dir=None, *, input_free_floor=None):
     message = BytesHeaderParser(policy=email_policy).parsebytes(
         b'Content-Type: ' + content_type.encode('ascii') + b'\r\n\r\n')
@@ -152,10 +165,8 @@ def _multipart(stream, length, content_type, temp_dir=None, *, input_free_floor=
         # unsafe basename. Preserve the decoded parameter exactly for validation.
         filename = headers.get_param('filename', header='Content-Disposition')
         with tempfile.TemporaryFile(mode='w+b', dir=temp_dir) as output:
-            if input_free_floor is not None:
-                reserve_input(output.fileno(),body.remaining+len(body.buffer),input_free_floor)
-            size, final = _copy_part(body, boundary, output)
-            if input_free_floor is not None:output.truncate(size)
+            writer = _ReservedPartWriter(output, input_free_floor) if input_free_floor is not None else output
+            size, final = _copy_part(body, boundary, writer)
             output.seek(0)
             yield name, filename, output, size
         if final:
@@ -287,8 +298,16 @@ class ViewerFacade:
         except (ValueError, TypeError, UnicodeError, RecursionError):
             handler.close_connection = True
             self._reply(handler, 400, {'error': 'invalid_request'})
-        except (OSError, TimeoutError):
+        except (OSError, TimeoutError) as error:
             handler.close_connection = True
+            if (self.input_free_floor is not None and handler.command == 'POST'
+                    and re.fullmatch(r'/task/new/upload/[^/]+', path)
+                    and getattr(error, 'errno', None) in (errno.ENOSPC, errno.EDQUOT)):
+                try:
+                    self._reply(handler, 503, {'error': 'insufficient_input_space'})
+                except OSError:
+                    pass
+                return True
             # Broken clients and upstream errors must not expose URLs or tokens.
             try:
                 self._reply(handler, 503, {'error': 'service_unavailable'})

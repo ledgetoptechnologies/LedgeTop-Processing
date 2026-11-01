@@ -49,7 +49,7 @@ class ViewerInputSpaceTests(unittest.TestCase):
             self.assertTrue(self.facade.handle(req))
         self.assertEqual(req.status,200);self.assertEqual(spool.call_count,1);self.assertEqual(dest.call_count,1)
         self.assertEqual(dest.call_args.args[1:],(len(payload),0))
-        self.assertGreaterEqual(spool.call_args.args[1],len(payload))
+        self.assertEqual(spool.call_args.args[1],len(payload))
         files=self.store.task(self.identifier)['files'];self.assertEqual(len(files),1)
         self.assertEqual(Path(files[0]['path']).read_bytes(),payload)
     def test_real_local_http_upload_uses_reserved_paths(self):
@@ -74,6 +74,22 @@ class ViewerInputSpaceTests(unittest.TestCase):
             connection.close();server.shutdown();server.server_close();thread.join(5)
             self.assertFalse(thread.is_alive())
 
+    def test_multipart_reserves_each_part_not_remaining_request(self):
+        body=multipart([('images','a.jpg',b'a'),('images','b.jpg',b'bb')]);req=self.request(body)
+        with patch('processing.viewer_http.reserve_input',wraps=input_space.reserve_input) as spool:
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,200)
+        self.assertEqual([call.args[1] for call in spool.call_args_list],[1,2])
+        self.assertEqual(len(self.store.task(self.identifier)['files']),2)
+
+    def test_real_upload_enospc_after_reservation_returns_space_error(self):
+        body=multipart([('images','image.jpg',b'payload')]);req=self.request(body)
+        with patch.object(self.store,'upload',side_effect=OSError(errno.ENOSPC,'synthetic')):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503)
+        self.assertEqual(json.loads(req.wfile.getvalue())['error'],'insufficient_input_space')
+        self.assertEqual(self.store.task(self.identifier)['files'],[])
+
     def test_spool_low_space_returns_503_without_destination_write(self):
         body=multipart([('images','image.jpg',b'x')]);req=self.request(body)
         with patch('processing.input_space.os.fstatvfs',return_value=SimpleNamespace(f_bavail=0,f_frsize=4096)):
@@ -90,6 +106,24 @@ class ViewerInputSpaceTests(unittest.TestCase):
         with tempfile.TemporaryFile(dir=self.spool) as output:
             with patch('processing.input_space.os.posix_fallocate',side_effect=OSError(errno.ENOSPC,'synthetic')):
                 with self.assertRaises(InputSpaceUnavailable):input_space.reserve_input(output.fileno(),1,0)
+    def test_concurrent_reservations_serialize_check_and_allocation(self):
+        available=[10]; entered=threading.Event(); release=threading.Event(); results=[]
+        def stat(_): return SimpleNamespace(f_bavail=available[0],f_frsize=1)
+        def allocate(_fd,_offset,size):
+            entered.set()
+            if not release.wait(2): raise RuntimeError('test allocation timed out')
+            available[0]-=size
+        def attempt():
+            try: input_space.reserve_input(0,6,4); results.append('ok')
+            except InputSpaceUnavailable: results.append('held')
+        with patch('processing.input_space.os.fstatvfs',side_effect=stat), \
+             patch('processing.input_space.os.posix_fallocate',side_effect=allocate):
+            first=threading.Thread(target=attempt); second=threading.Thread(target=attempt)
+            first.start(); self.assertTrue(entered.wait(2)); second.start(); release.set()
+            first.join(2); second.join(2)
+            self.assertFalse(first.is_alive()); self.assertFalse(second.is_alive())
+        self.assertCountEqual(results,['ok','held'])
+
     def test_default_task_limit_rejects_50_gib_before_reading(self):
         with self.assertRaises(InputLimitExceeded):self.store.upload(self.identifier,'image.jpg',io.BytesIO(b''),50*1024**3)
     def test_mismatched_facade_store_guard_is_rejected(self):
