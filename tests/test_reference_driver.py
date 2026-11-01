@@ -352,6 +352,21 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'], 'held')
         self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
 
+    def test_legacy_status_change_between_reads_is_held(self):
+        self.transport.code=10
+        job=self.submit();self.advance(job,'executing')
+        calls=[]
+        def flip(route,**kwargs):
+            if route.endswith('/info') and route.startswith('/task/'):
+                calls.append(route)
+                return {'uuid':job['jobId'],'status':{'code':10 if len(calls)==1 else 30}}
+            return self.transport.read(route,**kwargs)
+        with patch.object(self.native,'read',side_effect=flip):
+            result=self.driver.step()
+        self.assertEqual(result,{'state':'held','reason':'engine_reconciliation_required'})
+        self.assertEqual(len(calls),2)
+        with NodeGate('engine') as gate:self.assertIsNotNone(gate.snapshot()['reservation'])
+
     def test_unrelated_failure_ack_does_not_release_current_job_gate(self):
         from processing.reference_failure import make_failure, _receipt
         # An earlier retained record is due first in the actual shared outbox.

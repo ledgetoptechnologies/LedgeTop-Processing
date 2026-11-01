@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from . import reference_protocol as p
-from .reference_engine_worker import WorkerHeld
+from .reference_engine_worker import WorkerHeld, WorkerEngineTerminal
 from .reference_sender import ReferenceSender
 from .reference_transfer import BrokerClient, TransferResponseUnavailable, validate_grant
 from .viewer_service import NativeEngine
@@ -122,7 +122,14 @@ class ReferenceDriver:
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
-                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None):
+                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
+                 remote_reference=None):
+        if remote_reference is not None:
+            from .node_reference_runtime_candidate import RemoteReferenceRuntime
+            if (type(remote_reference) is not RemoteReferenceRuntime or execution_router is not None or combined_policy is not None
+                    or remote_reference.worker_instance_id != worker_instance_id):
+                raise ValueError('exact separate remote reference runtime required')
+        self.remote_reference=remote_reference
         self._combined_policy=combined_policy;self._combined_policy_initial=combined_policy;self.combined_preparation=None;self._combined_preparation_initial=None;self._active_step=None
         if combined_policy is not None:
             from .reference_combined_preparation import CombinedPreparationPolicy
@@ -223,8 +230,19 @@ class ReferenceDriver:
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
+            if remote_reference is not None:
+                factory=remote_reference.factory
+                settings['remoteReferenceCandidate']=dict(mode='remote-photo-v1',host=factory.host,port=factory.port,
+                    authority=factory.authority,epoch=factory.epoch,peerSha256=factory.pin,
+                    brokerSecretSha256=hashlib.sha256(remote_reference.broker.secret).hexdigest())
             binding = p.canonical_json(settings).decode()
             old = db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
+            if remote_reference is not None and old is None:
+                if db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
+                    raise ValueError('remote route requires empty driver history')
+                with worker._db() as journal:
+                    if journal.execute('SELECT 1 FROM executions LIMIT 1').fetchone():
+                        raise ValueError('remote route requires empty worker history')
             if execution_router is not None and old is None and db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
                 raise ValueError('unbound legacy driver claims require reconciliation')
             if old and old[0] != binding:
@@ -597,7 +615,7 @@ class ReferenceDriver:
                     sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
         return observed
 
-    def _seal_failure(self, job_id, data, code):
+    def _seal_failure(self, job_id, data, code, *, gate=None):
         claim = data['claim']
         failure = make_failure(job_id=job_id, generation=claim['generation'], environment=claim['environment'],
             input_manifest_sha256=claim['manifestSha256'], pipeline_digest=claim['pipelineDigest'],
@@ -608,28 +626,34 @@ class ReferenceDriver:
         # The failure outbox precedes ledger terminal state and physical completion.
         # A crash before the driver checkpoint safely re-derives this exact record.
         self._save(job_id, 'failure_delivering', data)
-        self._prepare_failure(job_id, data)
+        self._prepare_failure(job_id, data, gate=gate)
 
     @staticmethod
     def _failure_completion(failure):
         return {'status': 'failed', 'result': {key: failure[key] for key in ('failureSha256', 'terminalState', 'errorCode')}}
 
-    def _prepare_failure(self, job_id, data):
+    def _prepare_failure(self, job_id, data, *, gate=None):
         self.ledger.set_engine_state(data['reservation']['reservationId'], 'terminal', terminal_attested=True)
         local = self.worker._row(job_id)
         if local['phase'] == 'failure_delivered' and self.failure_outbox.get(data['failureOutboxId'])['state'] == 'acknowledged':
             return
+        if gate is not None:
+            return self._prepare_failure_gate(job_id,data,gate)
         with NodeGate(self.worker.engine_id) as gate:
-            if self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, self._failure_completion(data['failure'])):
-                return
-            if gate.snapshot()['reservation'] is None:
-                if self.failure_outbox.get(data['failureOutboxId'])['state'] != 'acknowledged':
-                    raise DriverHeld('terminal_gate_ownership_unavailable')
-                gate.acknowledge(self.worker._row(job_id)['receipt'], dict(id=job_id,
-                    workerId=self.worker_id, nodeId=self.node_id, authorityId=self.worker.authority_id,
-                    **self._failure_completion(data['failure'])))
-                return
-            gate.prepare_completion(self.worker._row(job_id)['receipt'], self._failure_completion(data['failure']))
+            return self._prepare_failure_gate(job_id,data,gate)
+
+    def _prepare_failure_gate(self,job_id,data,gate):
+        local=self.worker._row(job_id)
+        if self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, self._failure_completion(data['failure'])):
+            return
+        if gate.snapshot()['reservation'] is None:
+            if self.failure_outbox.get(data['failureOutboxId'])['state'] != 'acknowledged':
+                raise DriverHeld('terminal_gate_ownership_unavailable')
+            gate.acknowledge(local['receipt'], dict(id=job_id,
+                workerId=self.worker_id, nodeId=self.node_id, authorityId=self.worker.authority_id,
+                **self._failure_completion(data['failure'])))
+            return
+        gate.prepare_completion(local['receipt'], self._failure_completion(data['failure']))
 
     def _gate_ack_matches(self, state, receipt, job_id, completion):
         expected = dict(receiptId=receipt, generation=self.worker.gate_generation, kind='completion',
@@ -640,7 +664,7 @@ class ReferenceDriver:
     def _deliver_failure(self, job_id, request_id, data):
         tree = self._kind(job_id) == 'treedar'
         adapter = self._adapter(job_id)
-        if not tree:
+        if not tree and self.remote_reference is None:
             self._prepare_failure(job_id, data)
         completion = self.failure_outbox.get(data['failureOutboxId'])
         if completion['state'] != 'acknowledged':
@@ -667,6 +691,35 @@ class ReferenceDriver:
         completion = self.failure_outbox.get(data['failureOutboxId'])
         if completion['state'] != 'acknowledged':
             return {'state': 'failure_delivering', 'jobId': job_id}
+        if self.remote_reference is not None:
+            runtime=self.remote_reference;local=self.worker._row(job_id);identity=json.loads(local['identity'])
+            proof=identity['remoteBrokerProof'];failure=data['failure']
+            delivery=['failure',data['failureOutboxId'],failure['failureSha256'],failure['terminalState'],failure['errorCode']]
+            if local['phase']=='failure_delivered':
+                remote=runtime.factory.open('reconcile')
+                try:
+                    with runtime.broker.hold_remote_reconciled_failure_candidate(proof['initGrant'],proof['initSignature'],
+                            commit_operation_id=proof['commitOperationId'],delivery=delivery,remote=remote):
+                        if self.failure_outbox.get(data['failureOutboxId'])['state']!='acknowledged':
+                            raise DriverHeld('remote_failure_receipt_changed')
+                finally:remote.sock.close()
+                # The session's final confirmation must be received before
+                # checkpointing. Lost replies safely repeat this read-only path.
+                self._save(job_id,'awaiting_failure_acceptance',data)
+                return {'state':'awaiting_failure_acceptance','jobId':job_id}
+            remote=runtime.factory.open('proof')
+            try:
+                with runtime.broker.hold_remote_verified_commit_candidate(proof['initGrant'],proof['initSignature'],
+                        commit_operation_id=proof['commitOperationId'],delivery=delivery,remote=remote,
+                        manifest=identity['job']['submission']['manifest']) as gate:
+                    if self.failure_outbox.get(data['failureOutboxId'])['state']!='acknowledged':
+                        raise DriverHeld('remote_failure_receipt_changed')
+                    gate.acknowledge(local['receipt'],dict(id=job_id,workerId=self.worker_id,nodeId=self.node_id,
+                        authorityId=self.worker.authority_id,**self._failure_completion(failure)))
+                    self.worker._phase(job_id,'failure_delivered')
+            finally:remote.sock.close()
+            self._save(job_id,'awaiting_failure_acceptance',data)
+            return {'state':'awaiting_failure_acceptance','jobId':job_id}
         if tree:
             adapter.acknowledge_delivery(job_id)
             self._save(job_id, 'awaiting_failure_acceptance', data)
@@ -839,13 +892,25 @@ class ReferenceDriver:
                 arguments = dict(reservation_id=data['reservation']['reservationId'], input_paths=data['inputPaths'])
                 if self._kind(job_id) == 'treedar':
                     arguments['provenance'] = data['provenance']
-                adapter.start(fresh, **arguments)
+                if self.remote_reference is None:
+                    adapter.start(fresh, **arguments)
+                else:
+                    runtime=self.remote_reference
+                    plan_client=runtime.factory.open('plan')
+                    try:plan=plan_client.fetch(job_id=job_id,claim_token=token,worker_id=self.worker_id,
+                        worker_instance_id=self.worker_instance_id,claim_request_id=request_id)
+                    finally:plan_client.sock.close()
+                    self.worker.start_remote_broker_candidate(fresh,broker=runtime.broker,factory=runtime.factory,plan=plan,**arguments)
+                    self.worker.resume_remote_broker_candidate(job_id,broker=runtime.broker,factory=runtime.factory)
             self._save(job_id, 'executing', data)
             return {'state': 'executing', 'jobId': job_id}
         if stage == 'executing':
             adapter = self._adapter(job_id, for_execution=True)
             tree = self._kind(job_id) == 'treedar'
             local = None if tree else adapter._row(job_id)
+            if self.remote_reference is not None and local['phase']=='remote_processing_held':
+                self.worker.resume_remote_broker_candidate(job_id,broker=self.remote_reference.broker,factory=self.remote_reference.factory)
+                local=adapter._row(job_id)
             if not tree and local['phase'] in ('commit_pending', 'processing'):
                 terminal = self.worker.engine.read('/task/' + job_id + '/info')
                 if (type(terminal) is not dict or terminal.get('uuid') != job_id
@@ -856,7 +921,25 @@ class ReferenceDriver:
                     self._seal_failure(job_id, data, code)
                     return {'state': 'failure_delivering', 'jobId': job_id}
             try:
-                outbox_id = adapter.poll(job_id)
+                outbox_id = (adapter.poll(job_id) if self.remote_reference is None else
+                    self.worker.poll(job_id,broker=self.remote_reference.broker,factory=self.remote_reference.factory))
+            except WorkerEngineTerminal as terminal:
+                if self.remote_reference is None:
+                    raise DriverHeld('engine_reconciliation_required') from None
+                runtime=self.remote_reference;worker_row=self.worker._row(job_id)
+                identity=json.loads(worker_row['identity']);proof=identity['remoteBrokerProof']
+                remote=runtime.factory.open('proof')
+                try:
+                    with runtime.broker.hold_remote_verified_commit_candidate(proof['initGrant'],proof['initSignature'],
+                            commit_operation_id=proof['commitOperationId'],delivery=None,remote=remote,
+                            manifest=identity['job']['submission']['manifest']) as gate:
+                        current=self.worker.engine.read('/task/'+job_id+'/info')
+                        if (type(current) is not dict or current.get('uuid')!=job_id or type(current.get('status')) is not dict
+                                or current['status'].get('code')!=terminal.code):
+                            raise DriverHeld('remote_terminal_identity_changed')
+                        self._seal_failure(job_id,data,terminal.code,gate=gate)
+                finally:remote.sock.close()
+                return {'state':'failure_delivering','jobId':job_id}
             except WorkerHeld:
                 if not tree and adapter._row(job_id)['phase'] in ('archive_pending', 'archive_open_pending'):
                     return {'state': 'retry_wait', 'jobId': job_id}
@@ -895,7 +978,8 @@ class ReferenceDriver:
                 if acknowledged:
                     self.worker._phase(job_id, 'delivered')
                 else:
-                    self.worker.acknowledge_delivery(job_id)
+                    if self.remote_reference is None:self.worker.acknowledge_delivery(job_id)
+                    else:self.worker.acknowledge_delivery(job_id,broker=self.remote_reference.broker,factory=self.remote_reference.factory)
             self._save(job_id, 'awaiting_acceptance', data)
             return {'state': 'awaiting_acceptance', 'jobId': job_id}
         if stage == 'failure_delivering':

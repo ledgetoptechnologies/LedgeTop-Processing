@@ -45,10 +45,36 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting','brokerRangeMaxBytes'))
+                      'executionRouting','brokerRangeMaxBytes','referenceRemoteBroker'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
+REFERENCE_REMOTE_DAEMON_QUALIFIED = False
+
+
+def _reference_remote_broker_policy(config):
+    """Never silently fall back to direct engine execution on remote opt-in."""
+    if 'referenceRemoteBroker' in config:
+        from processing import node_mutation_broker, node_reference_authority_session, reference_engine_worker
+        if (REFERENCE_REMOTE_DAEMON_QUALIFIED is not True or node_mutation_broker.QUALIFIED is not True
+                or node_reference_authority_session.REFERENCE_REMOTE_QUALIFIED is not True
+                or reference_engine_worker.BROKER_WORKER_CANDIDATE_QUALIFIED is not True):
+            raise ValueError('remote reference broker daemon route is not qualified')
+        value=config['referenceRemoteBroker']
+        p._closed(value,('host','port','epoch','peerSha256','caFile','clientCertFile','clientKeyFile',
+                        'nodeMutationSecretHex','backendContainerId','backendImageId','backendPort'),'remote reference broker')
+        ipaddress.ip_address(value['host']);p._uuid(value['epoch'],'coordinator epoch');p._hash(value['peerSha256'],'peer fingerprint')
+        if (type(value['port']) is not int or not 1<=value['port']<=65535
+                or type(value['nodeMutationSecretHex']) is not str or not re.fullmatch('[a-f0-9]{64}',value['nodeMutationSecretHex'])):
+            raise ValueError('invalid remote reference broker binding')
+        from processing.engine_ingress_guard import BackendPin
+        BackendPin(value['backendContainerId'],value['backendImageId'],value['backendPort'])
+        for key in ('caFile','clientCertFile','clientKeyFile'):_file(value[key],private=key=='clientKeyFile')
+        if 'executionRouting' in config:raise ValueError('remote reference route cannot adopt multi-engine routing')
+        if config.get('engineCleanupEnabled',False) is not False or config.get('cleanupEnabled',False) is not False:
+            raise ValueError('remote reference cleanup is not qualified')
+        return value
+    return None
 
 
 def _execution_routing(config):
@@ -338,6 +364,7 @@ def load_config(path):
                  not 1 <= config['brokerRangeMaxBytes'] <= MAX_RANGE_BYTES)):
             raise ValueError('invalid broker range limit')
         _execution_routing(config)
+        _reference_remote_broker_policy(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
                 raise ValueError('absolute private directories required')
@@ -405,6 +432,7 @@ def build_worker(config):
         # Stop at the first uncertain drain/release. Strong ownership registries
         # retain later leases until explicit reconciliation or process death.
         if resources.get('serverClose') is not None:resources['serverClose']()
+        if resources.get('remoteRuntime') is not None:resources['remoteRuntime'].close()
         if resources.get('session') is not None:resources['session'].close()
         owner.__exit__(None,None,None)
         raise
@@ -412,6 +440,7 @@ def build_worker(config):
 
 def _build_worker(config,owner,resources):
     """Construct under the factory's mandatory state-root ownership capability."""
+    remote_config=_reference_remote_broker_policy(config)
     routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
@@ -441,6 +470,29 @@ def _build_worker(config,owner,resources):
         engine_id=config['engineId'], node_id=config['nodeId'], authority_id=config['authorityId'],
         coordinator_origin=config['gateCoordinatorOrigin'], gate_generation=config['gateGeneration'],
         worker_id=config['workerId'], engine_version=config['engineVersion'])
+    remote_runtime=None
+    if remote_config is not None:
+        from processing.engine_ingress_guard import BackendPin
+        from processing.node_gate import canonical_gate_path
+        from processing.node_mutation_broker import LoopbackNodeODM, NodeMutationBroker
+        from processing.node_reference_authority_session import RemoteReferenceSessionFactory
+        from processing.node_reference_runtime_candidate import RemoteReferenceRuntime
+        if parsed.port != remote_config['backendPort']:
+            raise ValueError('remote backend port differs')
+        factory=RemoteReferenceSessionFactory(host=remote_config['host'],port=remote_config['port'],authority=config['authorityId'],
+            epoch=remote_config['epoch'],peer_sha256=remote_config['peerSha256'],ca_file=remote_config['caFile'],
+            cert_file=remote_config['clientCertFile'],key_file=remote_config['clientKeyFile'])
+        adapter=LoopbackNodeODM(config['engineId'],BackendPin(remote_config['backendContainerId'],
+            remote_config['backendImageId'],remote_config['backendPort']),config['engineToken'])
+        node_broker=NodeMutationBroker(canonical_gate_path(config['engineId'])/'mutation-broker',node_id=config['nodeId'],
+            engine_id=config['engineId'],authority_id=config['authorityId'],coordinator_epoch=remote_config['epoch'],
+            coordinator_origin=config['gateCoordinatorOrigin'].rstrip('/'),gate_generation=config['gateGeneration'],
+            secret=bytes.fromhex(remote_config['nodeMutationSecretHex']),adapter=adapter,authority_witness=factory)
+        try:remote_runtime=RemoteReferenceRuntime(node_broker,factory,worker_instance_id=config['workerInstanceId'])
+        except BaseException:
+            node_broker.close()
+            raise
+        resources['remoteRuntime']=remote_runtime
     # Range support must be coordinated with the actual broker. Absence keeps
     # the existing single-response v1 behavior and makes no capability claim.
     broker = BrokerClient(config['brokerOrigin'], ssl_context=client_tls,
@@ -494,7 +546,7 @@ def _build_worker(config,owner,resources):
         state_path=root / 'driver.sqlite', ssl_context=client_tls, output_budget=config['outputBudget'],
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
-        execution_router=router, provenance_client=provenance,state_owner=owner,
+        execution_router=router, provenance_client=provenance,state_owner=owner,remote_reference=remote_runtime,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
@@ -523,6 +575,7 @@ def _build_worker(config,owner,resources):
                 owner.check(root)
                 # A failed join or lease close retains all later ownership.
                 original_close()
+                if remote_runtime is not None:remote_runtime.close()
                 session.close()
                 owner.__exit__(None,None,None)
                 closed = True

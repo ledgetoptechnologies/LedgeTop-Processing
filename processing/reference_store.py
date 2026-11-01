@@ -325,6 +325,8 @@ class ReferenceStore:
                 return None
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
                 return None
+            if not self.queue._transfer_admission_clear(db):
+                return None
             head = db.execute("""SELECT id,profile FROM jobs WHERE status='queued'
               ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1""").fetchone()
             if (not head or head["id"] != job_id or head["profile"] != PROFILE

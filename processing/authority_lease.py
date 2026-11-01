@@ -19,6 +19,9 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+import threading
+import stat
+from contextlib import contextmanager
 
 AUTHORITY = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 MARKER_DDL = ('CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), '
@@ -59,22 +62,64 @@ class AuthorityLease:
         except OSError:
             raise LeaseUnavailable('authority_lease_unavailable') from None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+            try:fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:raise LeaseUnavailable('authority_lease_held') from None
+            self._descriptor = descriptor
+            self._pid = os.getpid()
+            self._mutex = threading.RLock()
+            self._held_thread = None
+            info=os.fstat(descriptor);directory_info=directory.lstat()
+            self._identity=(info.st_dev,info.st_ino)
+            self._directory_identity=(directory_info.st_dev,directory_info.st_ino)
+            # Diagnostic only; the flock, not this content, is the lease.
+            record = json.dumps({'authorityId': authority, 'pid': os.getpid(), 'host': os.uname().nodename,
+                                 'acquiredAt': int(time.time())}).encode() + b'\n'
+            os.ftruncate(descriptor, 0)
+            os.pwrite(descriptor, record, 0)
+            os.fsync(descriptor)
+        except BaseException:
+            self._descriptor=None
             os.close(descriptor)
-            raise LeaseUnavailable('authority_lease_held') from None
-        self._descriptor = descriptor
-        # Diagnostic only; the flock, not this content, is the lease.
-        record = json.dumps({'authorityId': authority, 'pid': os.getpid(), 'host': os.uname().nodename,
-                             'acquiredAt': int(time.time())}).encode() + b'\n'
-        os.ftruncate(descriptor, 0)
-        os.pwrite(descriptor, record, 0)
-        os.fsync(descriptor)
+            raise
 
     def close(self):
-        descriptor, self._descriptor = getattr(self, '_descriptor', None), None
-        if descriptor is not None:
-            os.close(descriptor)
+        with self._mutex:
+            if self._held_thread == threading.get_ident():
+                raise LeaseUnavailable('authority_lease_operation_active')
+            descriptor, self._descriptor = getattr(self, '_descriptor', None), None
+            if descriptor is not None:
+                os.close(descriptor)
+
+    @contextmanager
+    def held(self, deadline):
+        """Pin this exact local lease object while a bounded operation runs."""
+        remaining=deadline-time.monotonic()
+        if os.getpid()!=self._pid or remaining<=0 or not self._mutex.acquire(timeout=remaining):
+            raise LeaseUnavailable('authority_lease_unavailable')
+        registered=False
+        try:
+            if self._held_thread is not None: raise LeaseUnavailable('authority_lease_operation_active')
+            self._held_thread=threading.get_ident();registered=True
+            self.check_held()
+            yield
+            self.check_held()
+        finally:
+            if registered:self._held_thread=None
+            self._mutex.release()
+
+    def check_held(self):
+        if self._held_thread!=threading.get_ident() or os.getpid()!=self._pid:
+            raise LeaseUnavailable('authority_lease_operation_required')
+        descriptor=self._descriptor
+        if descriptor is None:raise LeaseUnavailable('authority_lease_unavailable')
+        try:
+            directory=self.path.parent.lstat();named=self.path.lstat();opened=os.fstat(descriptor)
+            if (self.path.parent.resolve()!=self.path.parent.absolute() or self.path.is_symlink()
+                    or not stat.S_ISDIR(directory.st_mode) or not stat.S_ISREG(named.st_mode)
+                    or named.st_nlink!=1 or (directory.st_dev,directory.st_ino)!=self._directory_identity
+                    or (named.st_dev,named.st_ino)!=self._identity or (opened.st_dev,opened.st_ino)!=self._identity):
+                raise LeaseUnavailable('authority_lease_changed')
+        except OSError:raise LeaseUnavailable('authority_lease_unavailable') from None
 
 
 def acquire(directory, state_dir):
