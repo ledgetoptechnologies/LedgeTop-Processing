@@ -78,7 +78,7 @@ class LocalCoordinatorAuthority:
         except OSError:raise BrokerHeld('local coordinator lease unavailable') from None
 
     @contextmanager
-    def hold(self, grant, timeout, *, create=False):
+    def hold(self, grant, timeout, *, create=False, body=None, signature=None):
         from .prototype import VIEWER_PROFILE
         from .authority_lease import MARKER_DDL, LeaseUnavailable
         deadline=time.monotonic()+timeout
@@ -183,7 +183,7 @@ def _upload_reply(value):
 
 
 def issue_init_grant(queue, *, job_id, claim_token, engine_id, gate_generation,
-                     operation_id, body, content_type, secret):
+                     operation_id, body, content_type, secret, _authority_required=False, _broker_allowed=None):
     """Bind a grant to the currently observed coordinator-owned Viewer row.
 
     The observation is not revocation or a durable authority fence: this
@@ -200,12 +200,17 @@ def issue_init_grant(queue, *, job_id, claim_token, engine_id, gate_generation,
         raise BrokerHeld('invalid grant request')
     with queue._db() as db:
         db.execute('BEGIN')
+        if _authority_required:
+            from .authority_lease import MARKER_DDL
+            marker=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone()
+            if (marker is None or marker[0]!=MARKER_DDL or db.execute('SELECT COUNT(*) FROM coordinator_authority_lease WHERE singleton=1 AND required=1').fetchone()[0]!=1):
+                raise BrokerHeld('authority lease marker unavailable')
         job=db.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
         tasks=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job_id,)).fetchall()
         if (job is None or len(tasks)!=1 or job['status']!='running' or job['profile']!=VIEWER_PROFILE
                 or job['worker_id']!='viewer-dispatch' or job['node_id'] not in ('cluster','main')
                 or not job['claim_hash'] or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(claim_token.encode()).hexdigest())
-                or not queue._transfer_admission_clear(db)):
+                or not queue._transfer_admission_clear(db,broker_allowed=_broker_allowed)):
             raise BrokerHeld('active coordinator claim required')
         task=tasks[0]
         if (task['removed'] or task['stage']!='running' or task['phase']!='init_pending'
@@ -348,6 +353,7 @@ class LocalUploadSender:
         from .guarded_native_engine import start_guarded_sender
         if (QUALIFIED is not True or type(broker) is not NodeMutationBroker or self._unreaped
                 or type(grant) is not dict
+                or type(broker.witness) is not LocalCoordinatorAuthority
                 or getattr(store,'queue',None) is not broker.witness.queue
                 or type(secret) is not bytes or not hmac.compare_digest(sign_grant(grant,secret),signature)
                 or type(deadline_seconds) not in (int,float) or not 0<deadline_seconds<=900):
@@ -410,11 +416,12 @@ class NodeMutationBroker:
     def __init__(self, root, *, node_id, engine_id, authority_id, coordinator_epoch,
                  coordinator_origin, gate_generation, secret, adapter, authority_witness):
         if QUALIFIED is not True: raise BrokerHeld('node broker is not qualified')
+        from .node_authority_session import RemoteAuthoritySession
         if (node_id not in ('cluster','main') or not _uuid(authority_id) or not _uuid(coordinator_epoch)
                 or type(engine_id) is not str or not re.fullmatch('[A-Za-z0-9:._-]{1,255}',engine_id)
                 or type(gate_generation) is not int or gate_generation < 1
                 or type(secret) is not bytes or len(secret) < 32 or type(adapter) is not LoopbackNodeODM
-                or adapter.engine_id != engine_id or type(authority_witness) is not LocalCoordinatorAuthority
+                or adapter.engine_id != engine_id or type(authority_witness) not in (LocalCoordinatorAuthority,RemoteAuthoritySession)
                 or (authority_witness.authority,authority_witness.epoch)!=(authority_id,coordinator_epoch)):
             raise BrokerHeld('invalid local broker binding')
         self.root=Path(root).absolute();self.node=node_id;self.engine=engine_id;self.authority=authority_id
@@ -510,7 +517,7 @@ class NodeMutationBroker:
         # Upload is not implemented; never commit an empty or partially uploaded
         # NodeODM task while that stage lacks a durable completion contract.
         if grant['operation']=='commit':raise BrokerHeld('upload stage not qualified')
-        return self._execute(grant,'',lambda:self.adapter.exchange(grant,body))
+        return self._execute(grant,'',lambda:self.adapter.exchange(grant,body),body=body,signature=signature)
 
     def _validate_upload(self, grant, signature):
         from .viewer_tasks import TaskStore
@@ -523,6 +530,7 @@ class NodeMutationBroker:
 
     def lookup_upload(self, grant, signature):
         """Return exact completed replay without creating a producer or writer."""
+        if type(self.witness) is not LocalCoordinatorAuthority:raise BrokerHeld('remote upload not qualified')
         file_key=self._validate_upload(grant,signature)
         identity=uuid.UUID(grant['jobId']).hex
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
@@ -551,6 +559,7 @@ class NodeMutationBroker:
 
     def upload(self, grant, signature, source, *, _with_replay=False):
         """Consume and close one dedicated socket carrying exactly one file."""
+        if type(self.witness) is not LocalCoordinatorAuthority:raise BrokerHeld('remote upload not qualified')
         if type(source) is not socket.socket:raise BrokerHeld('dedicated socket required')
         try:
             file_key=self._validate_upload(grant,signature)
@@ -558,6 +567,7 @@ class NodeMutationBroker:
         finally:source.close()
 
     def confirm_upload(self, grant, signature, confirmation):
+        if type(self.witness) is not LocalCoordinatorAuthority:raise BrokerHeld('remote upload not qualified')
         file_key=self._validate_upload(grant,signature)
         if (type(confirmation) is not str or not re.fullmatch('[a-f0-9]{64}',confirmation)
                 or not hmac.compare_digest(_sender_confirmation(grant,self.secret),confirmation)):
@@ -587,11 +597,11 @@ class NodeMutationBroker:
             except BaseException:self.db.rollback();raise
             self.witness.completed(grant)
 
-    def _execute(self, grant, file_key, forward, *, with_replay=False):
+    def _execute(self, grant, file_key, forward, *, with_replay=False, body=None, signature=None):
         digest=hashlib.sha256(_json(grant)).hexdigest();identity=uuid.UUID(grant['jobId']).hex
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
-        with self._mutex, self.witness.hold(grant,10,create=True), NodeGate(self.engine) as gate:
+        with self._mutex, self.witness.hold(grant,10,create=True,body=body,signature=signature), NodeGate(self.engine) as gate:
             self._check_owner()
             state=gate.snapshot();expected={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
             if any(state[k]!=v for k,v in expected.items()):raise BrokerHeld('node ownership changed')
@@ -615,7 +625,9 @@ class NodeMutationBroker:
                         raise BrokerHeld('operation requires inspection')
                     reply=json.loads(old['reply'])
                     reply=_upload_reply(reply) if grant['operation']=='upload' else _reply(reply,grant['engineTaskId'])
-                    self.db.commit();self.witness.completed(grant);return (reply,True) if with_replay else reply
+                    self.db.commit()
+                    if not isinstance(self.witness,LocalCoordinatorAuthority):self.witness.check()
+                    self.witness.completed(grant);return (reply,True) if with_replay else reply
                 if self.db.execute("SELECT 1 FROM operations WHERE state!='complete' LIMIT 1").fetchone():
                     raise BrokerHeld('previous operation requires inspection')
                 if grant['operation']=='upload' and not self.db.execute("SELECT 1 FROM operations WHERE operation='init' AND state='complete'").fetchone():
@@ -629,7 +641,8 @@ class NodeMutationBroker:
             reply=forward()
             reply=_upload_reply(reply) if grant['operation']=='upload' else _reply(reply,grant['engineTaskId'])
             self._check_owner()
-            self.witness._check()
+            if isinstance(self.witness,LocalCoordinatorAuthority):self.witness._check()
+            else:self.witness.check()
             raw=_json(reply)
             if len(raw)>4096:raise BrokerHeld('backend response exceeds bound')
             self.db.execute('BEGIN IMMEDIATE')
