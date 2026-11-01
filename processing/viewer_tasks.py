@@ -437,6 +437,9 @@ class TaskStore:
                     found.add(entry.name)
             if found!=directories:raise InputRecoveryRequired('task directory missing')
             for row in rows:self._check_input_recovery(db,row)
+            db.set_progress_handler(None,0)
+            if time.monotonic()>=deadline:
+                raise InputRecoveryRequired('historical intake census exceeds bound')
 
     @staticmethod
     def _job(db, row):

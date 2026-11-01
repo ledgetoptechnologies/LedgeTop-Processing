@@ -532,6 +532,39 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
             finally:db.close()
             self.assertEqual(old.read_bytes(),b'first')
 
+    def test_sqlite_progress_interrupt_releases_connection_and_queue_lock(self):
+        import sqlite3
+        from processing import viewer_tasks
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue;store=handler.viewer_service.store
+            rows=[(str(uuid.uuid4()),1,'synthetic-'+str(n),'name','[]','null','production') for n in range(1001)]
+            with queue._db() as db:
+                db.executemany('INSERT INTO viewer_tasks(uuid,generation,directory,name,options,outputs,environment) VALUES(?,?,?,?,?,?,?)',rows)
+            calls=[0]
+            def clock():
+                calls[0]+=1
+                return 100 if calls[0]<=2 else 200
+            with patch.object(viewer_tasks.time,'monotonic',side_effect=clock):
+                with self.assertRaisesRegex(sqlite3.OperationalError,'interrupted'):
+                    store.startup_intake_census()
+            self.assertGreaterEqual(calls[0],3)
+            with queue._db() as db:self.assertEqual(db.execute('SELECT 1').fetchone()[0],1)
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            probe=Queue(self.state,viewer_enabled=True);probe.close()
+
+    def test_final_deadline_check_rejects_expired_census(self):
+        from processing import viewer_tasks
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue;store=handler.viewer_service.store
+            calls=[0]
+            def clock():
+                calls[0]+=1
+                return 100 if calls[0]<=2 else 200
+            with patch.object(viewer_tasks.time,'monotonic',side_effect=clock):
+                with self.assertRaisesRegex(InputRecoveryRequired,'exceeds bound'):
+                    store.startup_intake_census()
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+
     def test_startup_holds_at_zero_audit_deadline(self):
         from processing import viewer_tasks
         with self.qualify():

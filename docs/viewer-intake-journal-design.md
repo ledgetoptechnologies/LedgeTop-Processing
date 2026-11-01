@@ -89,3 +89,9 @@ unknown directory entries, uncooperative old writer, interrupted migration,
 10,000-entry bounded reconciliation and per-upload lookup measurement, and
 real-filesystem fault qualification. None of those future tests has been
 claimed by this design.
+
+The inactive historical census uses a SQLite VM progress handler and a final
+monotonic-time check. Those checks do not create a hard wall-clock deadline:
+SQLite internal allocations/JSON decoding and blocked filesystem calls can
+outlast it. It is not resumable, and holding startup at its fixed bounds may
+require operator investigation. External writer fencing remains mandatory.
