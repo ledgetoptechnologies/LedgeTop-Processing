@@ -33,6 +33,8 @@ class ArchiveClaimHeld(Conflict):
 
 # Experimental opt-in only. Qualification requires a real old-writer fence.
 INTAKE_JOURNAL_QUALIFIED = False
+INTAKE_CENSUS_MAX_FILES = 100000
+INTAKE_CENSUS_MAX_ENTRIES = 200000
 INTAKE_JOURNAL_DDL = """CREATE TABLE viewer_intake_journal_v1 (
     operation TEXT PRIMARY KEY, uuid TEXT NOT NULL, generation INTEGER NOT NULL,
     name_key TEXT NOT NULL, directory TEXT NOT NULL, temporary TEXT NOT NULL,
@@ -248,6 +250,9 @@ class TaskStore:
                 raise InputRecoveryRequired('intake journal needs inspection')
             if (row['uuid'],row['generation']) in self._intake_reconciled:
                 return
+            if db.execute("SELECT COUNT(*) FROM (SELECT 1 FROM viewer_intake_journal_v1 WHERE uuid=? AND generation=? LIMIT ?)",
+                          (row['uuid'],row['generation'],INTAKE_CENSUS_MAX_FILES+1)).fetchone()[0]>INTAKE_CENSUS_MAX_FILES:
+                raise InputRecoveryRequired('intake census exceeds bound')
             if db.execute("""SELECT 1 FROM viewer_intake_journal_v1 j
                 LEFT JOIN viewer_files f ON f.uuid=j.uuid AND f.name_key=j.name_key
                 WHERE j.uuid=? AND j.generation=? AND j.state='committed'
@@ -255,13 +260,19 @@ class TaskStore:
                 LIMIT 1""",(row['uuid'],row['generation'])).fetchone():
                 raise InputRecoveryRequired('committed intake metadata differs')
         directory = self._directory(row)
-        registered = {file['path'] for file in db.execute(
-            'SELECT path FROM viewer_files WHERE uuid=?', (row['uuid'],))}
-        if any(not re.fullmatch(r'input-[0-9a-f]{32}', name or '') for name in registered):
-            raise InputRecoveryRequired('input metadata needs inspection')
+        registered = set()
+        for file in db.execute('SELECT path FROM viewer_files WHERE uuid=? LIMIT ?',
+                               (row['uuid'],INTAKE_CENSUS_MAX_FILES+1)):
+            name=file['path']
+            if (not isinstance(name,str) or not re.fullmatch(r'input-[0-9a-f]{32}',name)
+                    or name in registered or len(registered)>=INTAKE_CENSUS_MAX_FILES):
+                raise InputRecoveryRequired('input metadata needs inspection')
+            registered.add(name)
         actual = set()
         with os.scandir(directory) as entries:
-            for entry in entries:
+            for entry_count,entry in enumerate(entries,1):
+                if entry_count>INTAKE_CENSUS_MAX_ENTRIES:
+                    raise InputRecoveryRequired('input directory census exceeds bound')
                 if entry.name.startswith('.incoming-'):
                     raise InputRecoveryRequired('interrupted input needs inspection')
                 if entry.name.startswith('input-'):

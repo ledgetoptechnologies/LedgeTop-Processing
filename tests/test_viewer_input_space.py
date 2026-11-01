@@ -114,6 +114,37 @@ class ViewerInputSpaceTests(unittest.TestCase):
         with patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True):
             return TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
 
+    def test_ten_thousand_synthetic_files_first_census_and_cached_check(self):
+        import time
+        store=self.journal_store()
+        with self.q._db() as db:
+            row=store._row(db,self.identifier);directory=store._directory(row)
+        seed=self.root/'synthetic-seed';seed.write_bytes(b'x')
+        rows=[]
+        for index in range(10000):
+            name='input-'+format(index,'032x');os.link(seed,directory/name)
+            rows.append((self.identifier,'photo-%05d.jpg'%index,'photo-%05d.jpg'%index,name,1,'0'*64,1))
+        with self.q._db() as db:
+            db.executemany('INSERT INTO viewer_files(uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)',rows)
+        start=time.monotonic()
+        with self.q._db() as db:store._check_input_recovery(db,store._row(db,self.identifier))
+        first=time.monotonic()-start
+        start=time.monotonic()
+        with self.q._db() as db:store._check_input_recovery(db,store._row(db,self.identifier))
+        cached=time.monotonic()-start
+        print('synthetic 10000 input census seconds:',round(first,4),'cached:',round(cached,4),flush=True)
+        self.assertIn((self.identifier,1),store._intake_reconciled)
+
+    def test_census_over_bound_fails_closed_preserving_files(self):
+        from processing import viewer_tasks
+        store=self.journal_store()
+        with self.q._db() as db:directory=store._directory(store._row(db,self.identifier))
+        for index in range(3):(directory/('input-'+format(index,'032x'))).write_bytes(b'x')
+        with patch.object(viewer_tasks,'INTAKE_CENSUS_MAX_ENTRIES',2):
+            with self.q._db() as db:
+                with self.assertRaises(InputRecoveryRequired):store._check_input_recovery(db,store._row(db,self.identifier))
+        self.assertEqual(len(list(directory.glob('input-*'))),3)
+
     def test_opt_in_journal_upload_and_exact_retry(self):
         store=self.journal_store();self.facade.service.store=store
         body=multipart([('images','a.jpg',b'first')]);req=self.request(body)
