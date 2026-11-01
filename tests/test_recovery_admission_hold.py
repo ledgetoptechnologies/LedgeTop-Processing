@@ -113,6 +113,10 @@ class RecoveryAdmissionHoldTests(unittest.TestCase):
         with patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True), patch('processing.config.RECOVERY_HOLD_QUALIFIED',True):
             handler=make_handler(config);q=handler.prototype_queue
             try:
+                with self.assertRaises(AttributeError):q.recovery_hold_required=False
+                with self.assertRaises(AttributeError):q._recovery_hold_required=False
+                with self.assertRaises(AttributeError):del q._recovery_hold_required
+                with self.assertRaises(AttributeError):del q.recovery_hold_required
                 with q._db() as db:
                     db.execute('DROP TABLE coordinator_recovery_hold')
                     db.execute('DROP TABLE coordinator_recovery_guard')
@@ -121,11 +125,33 @@ class RecoveryAdmissionHoldTests(unittest.TestCase):
                 self.assertEqual(q.get(job['id'])['status'],'queued')
             finally:q.close()
             with self.assertRaisesRegex(RuntimeError,'required_recovery_hold_missing'):make_handler(config)
-        q=Queue(root,recovery_hold_required=True)
+        with self.assertRaisesRegex(RuntimeError,'required_recovery_hold_missing'):
+            Queue(root,recovery_hold_required=True)
+
+    def test_missing_required_hold_refuses_before_running_job_recovery(self):
+        from processing.app import make_handler
+        from processing.config import Config
+        root=tempfile.mkdtemp(prefix='lt-required-preflight-')
+        print('retained synthetic recovery hold root:',root,flush=True)
+        q=Queue(root)
         try:
-            self.assertIsNone(q.claim({'workerId':'synthetic','nodeId':'cluster'}))
-            self.assertEqual(q.get(job['id'])['status'],'queued')
+            job,_=q.submit({'requestId':'running-history','environment':'production','profile':PROFILE})
+            q.claim({'workerId':'synthetic','nodeId':'cluster'})
+            gate=AdmissionDrain(q);gate.arm_recovery_hold()
+            with q._db() as db:
+                db.execute('DROP TABLE coordinator_recovery_hold')
+                db.execute('DROP TABLE coordinator_recovery_guard')
         finally:q.close()
+        config=Config('synthetic-api-'+'a'*32,'http://127.0.0.1:1','http://127.0.0.1:2',1000,100000,
+                      prototype_state_dir=root,prototype_operator_token='synthetic-op-'+'b'*32,
+                      admission_drain_enabled=True,recovery_hold_required=True)
+        with patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True),patch('processing.config.RECOVERY_HOLD_QUALIFIED',True):
+            with self.assertRaisesRegex(RuntimeError,'required_recovery_hold_missing'):make_handler(config)
+        db=sqlite3.connect((Path(root)/'jobs.sqlite3').as_uri()+'?mode=ro',uri=True)
+        try:
+            row=db.execute('SELECT status,held_reason FROM jobs WHERE id=?',(job['id'],)).fetchone()
+            self.assertEqual(row,('running',None))
+        finally:db.close()
 
     def test_hold_blocks_actual_reference_claim(self):
         from processing.reference_api import ReferenceAPI
@@ -154,6 +180,34 @@ class RecoveryAdmissionHoldTests(unittest.TestCase):
                                           worker_instance_id='instance',claim_request_id='claim'))
         finally:q.close()
 
+
+    def test_required_hold_applies_to_reference_store_after_restart(self):
+        from processing.reference_api import ReferenceAPI
+        from processing.reference_store import ReferenceStore
+        root=tempfile.mkdtemp(prefix='lt-required-reference-')
+        print('retained synthetic recovery hold root:',root,flush=True)
+        q=Queue(root,reference_enabled=True)
+        try:
+            store=ReferenceStore(q)
+            fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
+            token='synthetic-reference-token-0001'
+            api=ReferenceAPI(store,bearer_tokens={token:'staging'},
+                capability_fingerprint=fixture['capabilities']['capabilityFingerprint'],
+                options_fingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'],
+                allowed_odm_options={'pc-quality','projection'})
+            response=api.handle('POST','/ltds/v1/jobs',{'Authorization':'Bearer '+token},
+                                json.dumps(fixture['submission']).encode(),protected_transport=True)
+            AdmissionDrain(q).arm_recovery_hold()
+        finally:q.close()
+        q=Queue(root,reference_enabled=True,recovery_hold_required=True)
+        try:
+            store=ReferenceStore(q)
+            with q._db() as db:
+                db.execute('DROP TABLE coordinator_recovery_hold')
+                db.execute('DROP TABLE coordinator_recovery_guard')
+            self.assertIsNone(store.claim(response.body['jobId'],node_id='cluster',worker_id='worker',
+                                          worker_instance_id='instance',claim_request_id='claim'))
+        finally:q.close()
 
     def test_hold_denies_existing_reference_worker_execution_snapshot(self):
         from processing.reference_api import ReferenceAPI
