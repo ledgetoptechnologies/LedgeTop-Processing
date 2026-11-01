@@ -1,5 +1,6 @@
 """Synthetic mTLS stream with actual Queue, lease and node broker."""
 import hashlib
+import copy
 import shutil
 import socket
 import ssl
@@ -64,6 +65,78 @@ class NodeAuthoritySessionTests(NodeMutationBrokerTests):
         with self.assertRaises(SessionHeld):
             request_node_recovery(channel,node_id=self.node,engine_id=self.engine,
                                   authority_id=self.authority,peer_sha256='0'*64)
+        channel.close.assert_called_once_with()
+
+    def test_recovery_rejects_malformed_snapshot_and_disconnect(self):
+        from processing.node_mutation_broker import inspect_prior_node_state
+        report=inspect_prior_node_state(self.engine)
+        malformed=[]
+        for field,value in [('operations',[{'id':'bad','operation':'init','state':'complete'}]),
+                            ('journalReservation',['wrong']),('gateReservation',{'bad':1}),
+                            ('authorizesAdmission',True),('extra','surprise')]:
+            item=copy.deepcopy(report);item[field]=value;malformed.append(item)
+        for item in malformed:
+            channel=Mock()
+            response={'version':1,'nonce':'a'*64,'report':item}
+            with patch('processing.node_authority_session.RECOVERY_ENDPOINT_QUALIFIED',True), \
+                 patch('processing.node_authority_session._peer'),patch('processing.node_authority_session._write'), \
+                 patch('processing.node_authority_session.secrets.token_hex',return_value='a'*64), \
+                 patch('processing.node_authority_session._read',return_value=response):
+                with self.assertRaises(SessionHeld):
+                    request_node_recovery(channel,node_id=self.node,engine_id=self.engine,authority_id=self.authority,peer_sha256='0'*64)
+            channel.close.assert_called_once_with()
+        channel=Mock()
+        with patch('processing.node_authority_session.RECOVERY_ENDPOINT_QUALIFIED',True), \
+             patch('processing.node_authority_session._peer'),patch('processing.node_authority_session._write'), \
+             patch('processing.node_authority_session.secrets.token_hex',return_value='a'*64), \
+             patch('processing.node_authority_session._read',return_value={'version':1,'nonce':'b'*64,'report':report}):
+            with self.assertRaises(SessionHeld):
+                request_node_recovery(channel,node_id=self.node,engine_id=self.engine,authority_id=self.authority,peer_sha256='0'*64)
+        channel.close.assert_called_once_with()
+        channel=Mock()
+        with patch('processing.node_authority_session.RECOVERY_ENDPOINT_QUALIFIED',True), \
+             patch('processing.node_authority_session._peer'),patch('processing.node_authority_session._write'), \
+             patch('processing.node_authority_session._read',side_effect=SessionHeld('EOF')):
+            with self.assertRaises(SessionHeld):
+                request_node_recovery(channel,node_id=self.node,engine_id=self.engine,authority_id=self.authority,peer_sha256='0'*64)
+        channel.close.assert_called_once_with()
+
+    def test_recovery_wrong_tls_pin_is_rejected(self):
+        key=self.root/'wrong-pin.key';cert=self.root/'wrong-pin.crt'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=10)
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cert,key);server_context.load_verify_locations(cafile=str(cert));server_context.verify_mode=ssl.CERT_REQUIRED
+        client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
+        client_raw,server_raw=socket.socketpair();client_raw.settimeout(3);server_raw.settimeout(3)
+        channels={'server':None,'client':None}
+        def serve():
+            try:
+                channels['server']=server_context.wrap_socket(server_raw,server_side=True)
+                channels['server'].recv(1)
+            except OSError:pass
+        thread=threading.Thread(target=serve)
+        def cleanup():
+            for channel in (channels['client'],channels['server'],client_raw,server_raw):
+                if channel is not None:
+                    try:channel.close()
+                    except OSError:pass
+            if thread.ident is not None:thread.join(5);self.assertFalse(thread.is_alive())
+        self.addCleanup(cleanup)
+        thread.start();channels['client']=client_context.wrap_socket(client_raw,server_hostname='localhost')
+        with patch('processing.node_authority_session.RECOVERY_ENDPOINT_QUALIFIED',True):
+            with self.assertRaises(SessionHeld):
+                request_node_recovery(channels['client'],node_id=self.node,engine_id=self.engine,
+                                      authority_id=self.authority,peer_sha256='0'*64)
+        thread.join(5);self.assertFalse(thread.is_alive())
+
+    def test_recovery_rejects_bad_expected_identity_before_network(self):
+        channel=Mock()
+        with patch('processing.node_authority_session.RECOVERY_ENDPOINT_QUALIFIED',True), patch('processing.node_authority_session._peer') as peer:
+            with self.assertRaises(SessionHeld):
+                request_node_recovery(channel,node_id='wrong',engine_id=self.engine,authority_id=self.authority,peer_sha256='0'*64)
+            peer.assert_not_called()
         channel.close.assert_called_once_with()
 
     def test_invalid_server_binding_closes_owned_socket(self):

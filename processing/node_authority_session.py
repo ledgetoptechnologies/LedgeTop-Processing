@@ -9,6 +9,8 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import re
+import uuid
 import secrets
 import socket
 import ssl
@@ -126,13 +128,67 @@ def serve_node_recovery(sock, *, engine_id, peer_sha256, timeout_seconds=5):
         _peer(sock,peer_sha256,True)
         deadline=time.monotonic()+timeout_seconds
         request=_read(sock,deadline)
-        if (type(request) is not dict or set(request)!={'version','nonce'} or request['version']!=1
+        if (type(request) is not dict or set(request)!={'version','nonce'} or type(request['version']) is not int or request['version']!=1
                 or type(request['nonce']) is not str or len(request['nonce'])!=64
                 or any(c not in '0123456789abcdef' for c in request['nonce'])):
             raise SessionHeld('invalid recovery request')
         report=inspect_prior_node_state(engine_id)
         _write(sock,{'version':1,'nonce':request['nonce'],'report':report},deadline)
     finally:sock.close()
+
+
+def _recovery_report(report, node_id, engine_id, authority_id):
+    from .node_gate import _binding, ENGINE, GateError
+    def canonical_uuid(value):
+        try:return type(value) is str and str(uuid.UUID(value))==value
+        except (ValueError,AttributeError):return False
+    if (node_id not in ('main','cluster') or type(engine_id) is not str or not ENGINE.fullmatch(engine_id)
+            or not canonical_uuid(authority_id)):
+        raise SessionHeld('invalid expected recovery identity')
+    if (type(report) is not dict or set(report)!={'identity','gateReservation','journalReservation','operations','authorizesAdmission'}
+            or report['authorizesAdmission'] is not False):raise SessionHeld('invalid recovery report')
+    identity=report['identity']
+    fields={'version','nodeId','engineId','authorityId','coordinatorOrigin','generation','coordinatorEpoch','gateRoot','gateLock','journal'}
+    if (type(identity) is not dict or set(identity)!=fields or type(identity['version']) is not int or identity['version']!=1
+            or (identity['nodeId'],identity['engineId'],identity['authorityId'])!=(node_id,engine_id,authority_id)
+            or not canonical_uuid(identity['coordinatorEpoch']) or type(identity['generation']) is not int
+            or not 1<=identity['generation']<=2**63-1):raise SessionHeld('invalid recovery identity')
+    try:_binding(node_id,identity['coordinatorOrigin'],authority_id)
+    except (GateError,TypeError,ValueError):raise SessionHeld('invalid recovery identity') from None
+    for key in ('gateRoot','gateLock','journal'):
+        pair=identity[key]
+        if (type(pair) is not list or len(pair)!=2 or any(type(x) is not int or not 0<=x<=2**64-1 for x in pair)):
+            raise SessionHeld('invalid recovery identity')
+    reservation=report['gateReservation']
+    if reservation is not None:
+        if (type(reservation) is not dict or set(reservation)!={'receiptId','job','completionDigest'}
+                or type(reservation['receiptId']) is not str or not re.fullmatch('[a-f0-9]{32}',reservation['receiptId'])):
+            raise SessionHeld('invalid gate reservation')
+        job=reservation['job'];digest=reservation['completionDigest']
+        if job is not None:
+            if (type(job) is not dict or set(job)!={'id','workerId','nodeId','authorityId'}
+                    or not canonical_uuid(job['id']) or job['nodeId']!=node_id or job['authorityId']!=authority_id
+                    or type(job['workerId']) is not str or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,63}',job['workerId'])):
+                raise SessionHeld('invalid gate reservation')
+        if digest is not None and (job is None or type(digest) is not str or not re.fullmatch('[a-f0-9]{64}',digest)):
+            raise SessionHeld('invalid gate reservation')
+    stored=report['journalReservation']
+    if stored is not None:
+        if (type(stored) is not list or len(stored)!=8 or stored[:4]!=[authority_id,node_id,engine_id,identity['coordinatorEpoch']]
+                or not canonical_uuid(stored[4]) or not canonical_uuid(stored[5]) or stored[6] not in ('production','staging')
+                or type(stored[7]) is not int or stored[7]!=identity['generation']):
+            raise SessionHeld('invalid journal reservation')
+    operations=report['operations']
+    if type(operations) is not list or len(operations)>2:raise SessionHeld('invalid node operations')
+    seen_ids=set();seen_kinds=set()
+    for operation in operations:
+        if (type(operation) is not dict or set(operation)!={'id','operation','state'}
+                or not canonical_uuid(operation['id']) or operation['operation'] not in ('init','commit')
+                or operation['state'] not in ('started','complete')
+                or operation['id'] in seen_ids or operation['operation'] in seen_kinds):
+            raise SessionHeld('invalid node operations')
+        seen_ids.add(operation['id']);seen_kinds.add(operation['operation'])
+    return report
 
 
 def request_node_recovery(sock, *, node_id, engine_id, authority_id, peer_sha256, timeout_seconds=5):
@@ -145,18 +201,19 @@ def request_node_recovery(sock, *, node_id, engine_id, authority_id, peer_sha256
             raise SessionHeld('node recovery endpoint is not qualified')
         if type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=10:
             raise SessionHeld('invalid recovery deadline')
+        from .node_gate import ENGINE
+        try:valid_authority=type(authority_id) is str and str(uuid.UUID(authority_id))==authority_id
+        except (ValueError,AttributeError):valid_authority=False
+        if (node_id not in ('main','cluster') or type(engine_id) is not str or not ENGINE.fullmatch(engine_id) or not valid_authority):
+            raise SessionHeld('invalid expected recovery identity')
         _peer(sock,peer_sha256,False)
         deadline=time.monotonic()+timeout_seconds;nonce=secrets.token_hex(32)
         _write(sock,{'version':1,'nonce':nonce},deadline)
         response=_read(sock,deadline)
         if (type(response) is not dict or set(response)!={'version','nonce','report'}
-                or response['version']!=1 or response['nonce']!=nonce or type(response['report']) is not dict):
+                or type(response['version']) is not int or response['version']!=1 or response['nonce']!=nonce or type(response['report']) is not dict):
             raise SessionHeld('invalid recovery response')
-        report=response['report'];identity=report.get('identity')
-        if (type(identity) is not dict or (identity.get('nodeId'),identity.get('engineId'),identity.get('authorityId'))
-                !=(node_id,engine_id,authority_id) or report.get('authorizesAdmission') is not False):
-            raise SessionHeld('node recovery identity differs')
-        return report
+        return _recovery_report(response['report'],node_id,engine_id,authority_id)
     finally:sock.close()
 
 
