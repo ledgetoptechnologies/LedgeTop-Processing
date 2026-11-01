@@ -18,6 +18,7 @@ import secrets
 import stat
 import threading
 import uuid as uuid_module
+import sqlite3
 
 from .maintenance import Conflict
 
@@ -674,6 +675,45 @@ class TaskStore:
         with self._archive_locks_lock:
             return self._archive_locks.setdefault(identifier, threading.RLock())
 
+    _ARCHIVE_CLAIM_DDL = ('CREATE TABLE viewer_archive_claims_v1 ('
+        'uuid TEXT NOT NULL, generation INTEGER NOT NULL, job_id TEXT NOT NULL, '
+        'token_hash TEXT NOT NULL, PRIMARY KEY(uuid,generation))')
+
+    def install_archive_claim_schema(self):
+        """Explicit offline migration; never invoked implicitly by service startup."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
+            if existing is None:
+                db.execute(self._ARCHIVE_CLAIM_DDL)
+            elif existing[0] != self._ARCHIVE_CLAIM_DDL:
+                raise Conflict('archive claim schema requires inspection')
+
+    def require_archive_claim_schema(self):
+        with self.queue._db() as db:
+            row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
+            if row is None or row[0] != self._ARCHIVE_CLAIM_DDL:
+                raise Conflict('archive claim schema requires explicit migration')
+
+    def claim_archive(self, task):
+        token = uuid_module.uuid4().hex + uuid_module.uuid4().hex
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, task['uuid'])
+            job = self._job(db, row)
+            if (row['generation'] != task['generation'] or row['job_id'] != task['job_id']
+                    or any(row[k] != task[k] for k in ('engine_uuid', 'node_id', 'environment'))
+                    or row['archive_path'] is not None or row['removed']
+                    or ('archive_state' in row.keys() and row['archive_state'] != 'pending')
+                    or job is None or job['status'] != 'succeeded'):
+                raise Conflict('archive task changed')
+            try:
+                db.execute('INSERT INTO viewer_archive_claims_v1 VALUES (?,?,?,?)',
+                    (task['uuid'], task['generation'], task['job_id'], hashlib.sha256(token.encode()).hexdigest()))
+            except sqlite3.IntegrityError:
+                raise Conflict('archive requires inspection') from None
+        return token
+
     def set_archive_status(self, identifier, generation, job_id, state, reason):
         if state not in ('pending', 'inspection') or reason not in ('capture_failed', 'partial_requires_inspection'):
             raise ValueError('invalid archive status')
@@ -682,7 +722,7 @@ class TaskStore:
             return db.execute("UPDATE viewer_tasks SET archive_state=?,archive_reason=? WHERE uuid=? AND generation=? AND job_id=? AND removed=0 AND archive_path IS NULL",
                               (state, reason, identifier, generation, job_id)).rowcount == 1
 
-    def update(self, identifier, *, expected_archive_task=None, **fields):
+    def update(self, identifier, *, expected_archive_task=None, expected_archive_claim=None, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path', 'archive_state', 'archive_reason'}
         if not fields or not set(fields) <= allowed:
@@ -722,6 +762,9 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
             if expected_archive_task is not None:
+                claim_schema = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
+                if claim_schema and expected_archive_claim is None:
+                    raise Conflict('archive claim required')
                 task=expected_archive_task
                 if (set(fields)!={'archive_path'} or task['uuid']!=identifier or
                         any(row[key]!=task[key] for key in ('generation','job_id','engine_uuid','node_id','environment'))
@@ -732,6 +775,13 @@ class TaskStore:
                     raise Conflict('archive task no longer complete')
                 if row['archive_path'] not in (None,str(Path(fields['archive_path']).absolute())):
                     raise Conflict('competing archive publication')
+                if expected_archive_claim is not None:
+                    claim = db.execute('SELECT token_hash,job_id FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
+                                       (identifier, row['generation'])).fetchone()
+                    if (claim is None or claim['job_id'] != row['job_id'] or not hmac.compare_digest(
+                            claim['token_hash'], hashlib.sha256(expected_archive_claim.encode()).hexdigest())):
+                        raise Conflict('archive claim changed')
+                    db.execute('DELETE FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?', (identifier, row['generation']))
             if row['engine_uuid'] and fields.get('engine_uuid', row['engine_uuid']) != row['engine_uuid']:
                 raise Conflict('engine task identity is immutable')
             if fields.get('engine_uuid') and db.execute(

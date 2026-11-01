@@ -187,6 +187,16 @@ class ViewerService:
                     raise RuntimeError('archive registry configuration required')
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
+        self._durable_archive_claims = getattr(config, 'viewer_durable_archive_claims', False)
+        if type(self._durable_archive_claims) is not bool:
+            raise ValueError('explicit durable archive claims setting required')
+        if queue is not None:
+            if self._durable_archive_claims:
+                self.store.require_archive_claim_schema()
+            else:
+                with queue._db() as db:
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone():
+                        raise RuntimeError('durable archive claims configuration required')
         if self._archive_registry:
             self.store.enable_archive_registry()
         self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
@@ -221,6 +231,12 @@ class ViewerService:
     def _archive_inspection_held(self, task):
         identity = (task['uuid'], task['generation'], task['job_id'])
         return task.get('archive_state') == 'inspection' or identity in self._archive_volatile_holds
+
+    def _publish_captured_archive(self, identifier, task, path, claim):
+        if self._durable_archive_claims:
+            return self.store.update(identifier, expected_archive_task=task,
+                                     expected_archive_claim=claim, archive_path=str(path))
+        return self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
 
     def _reserve_archive(self, output, size):
         """Reserve output bytes; the free-space floor is a point-in-time check."""
@@ -271,6 +287,7 @@ class ViewerService:
             raw = json.dumps(payload, separators=(',', ':'), allow_nan=False).encode()
             if len(raw) > 16384:
                 raise Conflict('archive capture metadata exceeds bound')
+            claim = self.store.claim_archive(task) if self._durable_archive_claims else None
             env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in os.environ}
             process = subprocess.Popen([sys.executable, '-m', 'processing.viewer_archive_worker'],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -311,7 +328,7 @@ class ViewerService:
                         or (os.name != 'nt' and current.st_uid != os.geteuid())):
                     raise Conflict('captured archive identity changed')
                 # Bind publication to the captured incarnation in the same DB transaction.
-                self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
+                self._publish_captured_archive(identifier, task, path, claim)
             except Exception as exc:
                 failure = exc
             finally:
@@ -794,6 +811,7 @@ class ViewerService:
             task = self.store.task(identifier)
             if self._archive_inspection_held(task):
                 raise ArchiveInspectionHeld('archive requires inspection')
+            claim = self.store.claim_archive(task) if self._durable_archive_claims and not task['archive_path'] else None
             if self._archive_registry:
                 lease=getattr(self.queue,'authority_lease',None)
                 if lease is None or lease._descriptor is None or self.queue._lock.closed:
@@ -824,7 +842,7 @@ class ViewerService:
                             # archive_path was persisted, recover only that same
                             # content from the retained engine result.
                             stream, size = self._restore_recorded_archive(task, path, receipt, automatic=automatic)
-                            self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
+                            self._publish_captured_archive(identifier, task, path, claim)
                             return stream, size
                         current = path.lstat(); opened = os.fstat(stream.fileno())
                         if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
@@ -843,7 +861,7 @@ class ViewerService:
                             else:
                                 partial.unlink()
                         sync_directory(path.parent)
-                        self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
+                        self._publish_captured_archive(identifier, task, path, claim)
                         return stream, receipt['bytes']
                     except BaseException:
                         if stream is not None: stream.close()
@@ -898,7 +916,7 @@ class ViewerService:
                 os.link(partial, path)
                 partial.unlink()
                 sync_directory(path.parent)
-                self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
+                self._publish_captured_archive(identifier, task, path, claim)
                 return self._verify_archive(path, receipt), receipt['bytes']
             receipt_path = path.with_suffix('.zip.receipt')
             if receipt_path.exists() or receipt_path.is_symlink():

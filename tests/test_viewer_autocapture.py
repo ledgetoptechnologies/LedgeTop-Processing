@@ -20,6 +20,7 @@ from processing.config import from_environment
 from processing.maintenance import Conflict
 from processing.prototype import Queue
 from processing.viewer_service import ViewerService
+from processing.viewer_tasks import TaskStore
 from tests import test_viewer_service as fixtures
 
 
@@ -637,6 +638,67 @@ finally:s.close();q.authority_lease.close();q.close()
         self.service._archive_once(self.identifier)
         self.assertEqual(self.requests, 1)
         self.assertEqual(task['job']['status'], 'succeeded')
+
+    def test_durable_claim_opt_in_success_and_manual_reuse(self):
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_claims_v1').fetchone()[0], 0)
+        with self.service.download(self.identifier)[0] as stream:
+            self.assertEqual(stream.read(), self.engine_response)
+        self.assertEqual(Path(task['archive_path']).read_bytes(), self.engine_response)
+
+    def test_durable_claim_recreated_store_refuses_second_writer(self):
+        self.service.store.install_archive_claim_schema()
+        task = self.fixture.task(self.identifier)
+        token = self.service.store.claim_archive(task)
+        other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
+        other.require_archive_claim_schema()
+        with self.assertRaises(Conflict):
+            other.claim_archive(task)
+        with self.queue._db() as db:
+            stored = db.execute('SELECT token_hash FROM viewer_archive_claims_v1').fetchone()[0]
+        self.assertNotIn(token, stored)
+        self.assertEqual(task.get('archive_reason'), None)
+        partial = Path(task['directory']) / 'all.zip.partial'
+        partial.write_bytes(b'synthetic partial')
+        self.fixture.config.viewer_durable_archive_claims = True
+        restarted = ViewerService(self.queue, self.fixture.config, store=other)
+        with self.assertRaises(Conflict):
+            restarted.download(self.identifier)
+        self.assertEqual(partial.read_bytes(), b'synthetic partial')
+
+    def test_durable_claim_schema_requires_explicit_migration_and_config(self):
+        self.fixture.config.viewer_durable_archive_claims = True
+        with self.assertRaises(Conflict):
+            ViewerService(self.queue, self.fixture.config, store=self.service.store)
+        self.service.store.install_archive_claim_schema()
+        self.fixture.config.viewer_durable_archive_claims = False
+        with self.assertRaisesRegex(RuntimeError, 'durable archive claims configuration required'):
+            ViewerService(self.queue, self.fixture.config, store=self.service.store)
+        self.fixture.config.viewer_durable_archive_claims = True
+        restarted = ViewerService(self.queue, self.fixture.config, store=self.service.store)
+        self.assertTrue(restarted._durable_archive_claims)
+
+    def test_durable_claim_retains_archive_and_receipt_if_publication_fails(self):
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        task = self.fixture.task(self.identifier)
+        with patch.object(self.service.store, 'update', side_effect=OSError('synthetic commit failure')):
+            with self.assertRaises(OSError):
+                self.service._archive_once(self.identifier)
+        archive = Path(task['directory']) / 'all.zip'
+        receipt = Path(task['directory']) / 'all.zip.receipt'
+        original_archive, original_receipt = archive.read_bytes(), receipt.read_bytes()
+        self.assertEqual(original_archive, self.engine_response)
+        self.fixture.config.viewer_durable_archive_claims = True
+        restarted = ViewerService(self.queue, self.fixture.config, store=self.service.store)
+        with self.assertRaises(Conflict):
+            restarted.download(self.identifier)
+        self.assertEqual(archive.read_bytes(), original_archive)
+        self.assertEqual(receipt.read_bytes(), original_receipt)
 
     def test_unknown_length_and_low_space_preserve_partial_and_engine(self):
         self.include_length = False
