@@ -36,9 +36,15 @@ synthetic original bytes and result ZIP survived. Enabling archive status added
 synthetic candidate-era receipt survived restart; reference-configured handler
 construction also passed with synthetic config and mocked TLS setup.
 
-The test inspected the resulting database read-only and never ran the old
-coordinator against candidate-written state. It therefore does not qualify
-rollback. SQLite's added columns remain in the database, and this candidate
+The exact predecessor source was subsequently started against candidate-written
+synthetic state with reference handler configuration and mocked TLS, while its
+engines were offline. During a three-second dispatcher observation the completed
+and held states, result, receipt and an uncertain partial were retained, and no
+download was invoked. The network-none fixture had only loopback, which alone
+does not establish absence of loopback services. This narrow restart test does
+not exercise actual HTTP delivery, an old-writer overlap, power loss, or the
+real deployment updater, and does not qualify rollback. SQLite's added columns
+remain in the database, and this candidate
 offers no qualified reverse migration; enabling the optional archive registry
 can additionally create `viewer_archive_registry` but was not enabled here.
 The predecessor cannot be assumed to preserve candidate-only receipt or partial
