@@ -220,6 +220,11 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertFalse(any(call[0]=='initialize' for call in self.transport.calls))
 
     def test_completed_worker_bytes_survive_coordinator_outage_and_worker_reopen(self):
+        # This test owns its synthetic root but deliberately retains it. The
+        # inherited fixture normally recursively removes TemporaryDirectory.
+        self.temp._finalizer.detach()
+        self.temp.cleanup = lambda: None
+        print('RETAINED_SYNTHETIC_WORKER_ROOT', self.root, flush=True)
         from processing.reference_results import ReferenceResults, ResultAuthorization
         now = [time.time()]
         self.outbox.clock = lambda: now[0]
@@ -287,7 +292,9 @@ class ReferenceDriverTests(unittest.TestCase):
         stream = results.open(job['jobId'], generation=job['generation'], object_id=obj['id'],
             result_manifest_sha256=manifest['resultManifestSha256'], object_sha256=obj['sha256'],
             authorization=authorization)
-        self.assertEqual(b''.join(stream.chunks()), expected)
+        with stream:
+            self.assertEqual(b''.join(stream.chunks()), expected)
+        self.assertTrue(stream.closed)
         self.assertEqual(hashlib.sha256(expected).hexdigest(), obj['sha256'])
         self.assertTrue(archive.exists())
 
