@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 import uuid
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -286,7 +287,8 @@ class NodeMutationBrokerTests(unittest.TestCase):
             store=TaskStore(queue,self.root/'coordinator'/'viewer-tasks')
             b.install_upload_issuer_schema(queue)
             store.initialize(self.task,'Synthetic',[],None,'production')
-            store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)
+            store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1)
+            store.upload(self.task,'other.jpg',io.BytesIO(b'y'*65536),65536);store.commit(self.task)
             claim=queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]})
             store.update(self.task,stage='running',phase='init_pending',node_id='main',
                          engine_uuid=self.task,claim_token=claim['claimToken'])
@@ -303,17 +305,31 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     self.assertEqual(len(self.calls),1)
                     store.update(self.task,phase='upload_pending')
                     upload_id=str(uuid.uuid4())
-                    upload,upload_signature=b.issue_upload_grant(queue,job_id=claim['id'],claim_token=claim['claimToken'],
+                    upload,upload_signature=b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
                         engine_id=self.engine,gate_generation=1,operation_id=upload_id,file_key='synthetic.jpg',secret=self.secret)
                     sender=b.LocalUploadSender()
                     stored=store.task(self.task)['files'][0]
                     original=Path(stored['path']);alternate=original.parent/('input-'+uuid.uuid4().hex)
                     alternate.write_bytes(original.read_bytes());alternate.chmod(0o600)
-                    with queue._db() as db:db.execute('UPDATE viewer_files SET path=? WHERE uuid=?',(alternate.name,self.task))
+                    with queue._db() as db:db.execute("UPDATE viewer_files SET path=? WHERE uuid=? AND name_key='synthetic.jpg'",(alternate.name,self.task))
                     with self.assertRaises(b.BrokerHeld):
                         sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
                     self.assertEqual(len(self.calls),1)
-                    with queue._db() as db:db.execute('UPDATE viewer_files SET path=? WHERE uuid=?',(original.name,self.task))
+                    with queue._db() as db:db.execute("UPDATE viewer_files SET path=? WHERE uuid=? AND name_key='synthetic.jpg'",(original.name,self.task))
+                    task_dir=original.parent;different_dir=store.root/('other-'+uuid.uuid4().hex)
+                    different_dir.mkdir(mode=0o700);(different_dir/original.name).write_bytes(original.read_bytes())
+                    with queue._db() as db:db.execute('UPDATE viewer_tasks SET directory=? WHERE uuid=?',(different_dir.name,self.task))
+                    with self.assertRaises(b.BrokerHeld):
+                        sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
+                    with queue._db() as db:db.execute('UPDATE viewer_tasks SET directory=? WHERE uuid=?',(task_dir.name,self.task))
+                    old_root=store.root;other_root=self.root/'alternate-root';other_root.mkdir(mode=0o700)
+                    other_dir=other_root/task_dir.name;other_dir.mkdir(mode=0o700)
+                    (other_dir/original.name).write_bytes(original.read_bytes())
+                    try:
+                        store.root=other_root
+                        with self.assertRaises(b.BrokerHeld):
+                            sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
+                    finally:store.root=old_root
                     self.assertTrue(sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
                     self.assertEqual(sender._unreaped,[])
                     self.assertEqual(len(self.calls),2)
@@ -322,12 +338,36 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     with patch('processing.guarded_native_engine.start_guarded_sender',side_effect=AssertionError('replay started producer')):
                         self.assertTrue(sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
                     self.assertEqual(len(self.calls),2)
-                    replay,replay_signature=b.issue_upload_grant(queue,job_id=claim['id'],claim_token=claim['claimToken'],
+                    replay,replay_signature=b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
                         engine_id=self.engine,gate_generation=1,operation_id=upload_id,file_key='synthetic.jpg',secret=self.secret)
                     self.assertEqual((replay,replay_signature),(upload,upload_signature))
                     with self.assertRaises(b.BrokerHeld):
-                        b.issue_upload_grant(queue,job_id=claim['id'],claim_token=claim['claimToken'],
+                        b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
                             engine_id=self.engine,gate_generation=1,operation_id=str(uuid.uuid4()),file_key='synthetic.jpg',secret=self.secret)
+                    racing,racing_signature=b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
+                        engine_id=self.engine,gate_generation=1,operation_id=str(uuid.uuid4()),file_key='other.jpg',secret=self.secret)
+                    racing_item=next(item for item in store.task(self.task)['files'] if item['name_key']=='other.jpg')
+                    from processing.guarded_native_engine import start_guarded_sender
+                    other_owner=SimpleNamespace(_unreaped=[]);original_lookup=remote.lookup_upload
+                    def complete_between_lookup_and_send(g,s):
+                        self.assertIsNone(original_lookup(g,s))
+                        deadline=time.monotonic()+5
+                        other=start_guarded_sender(racing_item,g['operationId'],deadline,other_owner)
+                        try:
+                            remote.upload(g,s,other.source)
+                            other.verify(deadline)
+                            remote.confirm_upload(g,s,b._sender_confirmation(g,self.secret))
+                        finally:other.stop()
+                        return None
+                    def replay_sender(*args,**kwargs):
+                        started=start_guarded_sender(*args,**kwargs)
+                        started.verify=lambda _deadline:(_ for _ in ()).throw(AssertionError('replay verified an aborted producer'))
+                        return started
+                    with patch.object(remote,'lookup_upload',side_effect=complete_between_lookup_and_send), \
+                         patch('processing.guarded_native_engine.start_guarded_sender',side_effect=replay_sender):
+                        self.assertTrue(sender.send(remote,racing,racing_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
+                    self.assertEqual(other_owner._unreaped,[]);self.assertEqual(sender._unreaped,[])
+                    self.assertEqual(len(self.calls),3)
                 finally:remote.close()
         finally:queue.close()
 

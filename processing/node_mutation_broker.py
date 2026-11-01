@@ -30,7 +30,9 @@ _FIELDS = {'authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineT
 _UPLOAD_FIELDS = _FIELDS | {'fileName','fileBytes'}
 _ISSUER_DDL = ('CREATE TABLE node_broker_upload_issues ('
     'operation_id TEXT PRIMARY KEY, task_uuid TEXT NOT NULL, generation INTEGER NOT NULL, '
-    'file_key TEXT NOT NULL, file_path TEXT NOT NULL, grant_hash TEXT NOT NULL, UNIQUE(task_uuid,generation,file_key))')
+    'file_key TEXT NOT NULL, file_path TEXT NOT NULL, root_path TEXT NOT NULL, root_dev INTEGER NOT NULL, '
+    'root_ino INTEGER NOT NULL, task_dir TEXT NOT NULL, task_dev INTEGER NOT NULL, task_ino INTEGER NOT NULL, '
+    'grant_hash TEXT NOT NULL, UNIQUE(task_uuid,generation,file_key))')
 _DDL = {
     'binding': 'CREATE TABLE binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), digest TEXT NOT NULL)',
     'reservation': 'CREATE TABLE reservation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL)',
@@ -125,18 +127,30 @@ def install_upload_issuer_schema(queue):
         elif old['sql']!=_ISSUER_DDL:raise BrokerHeld('upload issuer schema changed')
 
 
-def issue_upload_grant(queue, *, job_id, claim_token, engine_id, gate_generation,
+def _source_scope(store, row):
+    try:
+        root=store.root;directory=store._directory(row)
+        first=root.lstat();second=directory.lstat()
+        if (not stat.S_ISDIR(first.st_mode) or not stat.S_ISDIR(second.st_mode)
+                or first.st_uid!=os.geteuid() or second.st_uid!=os.geteuid()
+                or first.st_mode&0o077 or second.st_mode&0o077):raise ValueError()
+        return (str(root),first.st_dev,first.st_ino,row['directory'],second.st_dev,second.st_ino)
+    except (OSError,ValueError):raise BrokerHeld('source directory requires inspection') from None
+
+
+def issue_upload_grant(queue, *, store, job_id, claim_token, engine_id, gate_generation,
                        operation_id, file_key, secret):
     """Record and sign exact input metadata from the active Queue transaction."""
     from .prototype import Queue, VIEWER_PROFILE
     from .viewer_tasks import TaskStore
-    if QUALIFIED is not True or type(queue) is not Queue or queue._creator_pid!=os.getpid() or queue._lock.closed:
+    if (QUALIFIED is not True or type(queue) is not Queue or type(store) is not TaskStore or store.queue is not queue
+            or queue._creator_pid!=os.getpid() or queue._lock.closed):
         raise BrokerHeld('actual coordinator owner required')
     if (not _uuid(job_id) or not _uuid(operation_id) or type(claim_token) is not str or not 1<=len(claim_token)<=128
             or type(engine_id) is not str or not re.fullmatch('[A-Za-z0-9:._-]{1,255}',engine_id)
             or type(gate_generation) is not int or gate_generation<1 or type(file_key) is not str
             or TaskStore._filename(file_key)!=file_key):raise BrokerHeld('invalid upload request')
-    with queue._db() as db:
+    with store._lock, queue._db() as db:
         db.execute('BEGIN IMMEDIATE')
         schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='node_broker_upload_issues'").fetchone()
         if schema is None or schema['sql']!=_ISSUER_DDL:raise BrokerHeld('offline upload issuer migration required')
@@ -161,15 +175,18 @@ def issue_upload_grant(queue, *, job_id, claim_token, engine_id, gate_generation
                    operation='upload',bodySha256=file['sha256'],contentType='application/octet-stream',
                    fileName=file['name'],fileBytes=file['bytes'])
         digest=hashlib.sha256(_json(grant)).hexdigest()
+        scope=_source_scope(store,task)
         existing=db.execute('SELECT * FROM node_broker_upload_issues WHERE operation_id=?',(operation_id,)).fetchone()
         if existing is None:
             if db.execute('SELECT COUNT(*) FROM node_broker_upload_issues').fetchone()[0]>=100000:
                 raise BrokerHeld('upload issuer capacity reached')
             if db.execute('SELECT 1 FROM node_broker_upload_issues WHERE task_uuid=? AND generation=? AND file_key=?',
                           (task['uuid'],task['generation'],file_key)).fetchone():raise BrokerHeld('file issue already exists')
-            db.execute('INSERT INTO node_broker_upload_issues VALUES(?,?,?,?,?,?)',
-                       (operation_id,task['uuid'],task['generation'],file_key,file['path'],digest))
-        elif (existing['task_uuid'],existing['generation'],existing['file_key'],existing['file_path'],existing['grant_hash']) != (task['uuid'],task['generation'],file_key,file['path'],digest):
+            db.execute('INSERT INTO node_broker_upload_issues VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (operation_id,task['uuid'],task['generation'],file_key,file['path'],*scope,digest))
+        elif (existing['task_uuid'],existing['generation'],existing['file_key'],existing['file_path'],
+              existing['root_path'],existing['root_dev'],existing['root_ino'],existing['task_dir'],
+              existing['task_dev'],existing['task_ino'],existing['grant_hash']) != (task['uuid'],task['generation'],file_key,file['path'],*scope,digest):
             raise BrokerHeld('upload issue changed')
         return grant,sign_grant(grant,secret)
 
@@ -211,6 +228,8 @@ class LocalUploadSender:
             if (issued is None or (issued['task_uuid'],issued['generation'],issued['file_key'],issued['grant_hash'])
                     != (row['uuid'],row['generation'],file_key,digest)):
                 raise BrokerHeld('durable upload issue changed')
+            if tuple(issued[k] for k in ('root_path','root_dev','root_ino','task_dir','task_dev','task_ino')) != _source_scope(store,row):
+                raise BrokerHeld('stored input directory changed')
             task=store._task(db,row)
             files=[item for item in task['files'] if item['name_key']==file_key]
             if (len(files)!=1 or files[0]['name']!=grant['fileName'] or files[0]['bytes']!=grant['fileBytes']
@@ -233,7 +252,9 @@ class LocalUploadSender:
         deadline=time.monotonic()+deadline_seconds
         completion=start_guarded_sender(item,grant['operationId'],deadline,self)
         try:
-            result=broker.upload(grant,signature,completion.source)
+            result,replayed=broker.upload(grant,signature,completion.source,_with_replay=True)
+            if replayed:
+                return result
             completion.verify(deadline)
             if self._issued_item(store,grant,claim_token)!=item:
                 raise BrokerHeld('stored input identity changed')
@@ -418,12 +439,12 @@ class NodeMutationBroker:
                 reply=_upload_reply(json.loads(row['reply']));self.db.commit();return reply
             except BaseException:self.db.rollback();raise
 
-    def upload(self, grant, signature, source):
+    def upload(self, grant, signature, source, *, _with_replay=False):
         """Consume and close one dedicated socket carrying exactly one file."""
         if type(source) is not socket.socket:raise BrokerHeld('dedicated socket required')
         try:
             file_key=self._validate_upload(grant,signature)
-            return self._execute(grant,file_key,lambda:self.adapter.exchange_upload(grant,source))
+            return self._execute(grant,file_key,lambda:self.adapter.exchange_upload(grant,source),with_replay=_with_replay)
         finally:source.close()
 
     def confirm_upload(self, grant, signature, confirmation):
@@ -454,7 +475,7 @@ class NodeMutationBroker:
                 self.db.commit()
             except BaseException:self.db.rollback();raise
 
-    def _execute(self, grant, file_key, forward):
+    def _execute(self, grant, file_key, forward, *, with_replay=False):
         digest=hashlib.sha256(_json(grant)).hexdigest();identity=uuid.UUID(grant['jobId']).hex
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
@@ -482,7 +503,7 @@ class NodeMutationBroker:
                         raise BrokerHeld('operation requires inspection')
                     reply=json.loads(old['reply'])
                     reply=_upload_reply(reply) if grant['operation']=='upload' else _reply(reply,grant['engineTaskId'])
-                    self.db.commit();return reply
+                    self.db.commit();return (reply,True) if with_replay else reply
                 if self.db.execute("SELECT 1 FROM operations WHERE state!='complete' LIMIT 1").fetchone():
                     raise BrokerHeld('previous operation requires inspection')
                 if grant['operation']=='upload' and not self.db.execute("SELECT 1 FROM operations WHERE operation='init' AND state='complete'").fetchone():
@@ -505,4 +526,4 @@ class NodeMutationBroker:
                 if changed!=1:raise BrokerHeld('operation identity changed')
                 self.db.commit()
             except BaseException:self.db.rollback();raise
-            return reply
+            return (reply,False) if with_replay else reply

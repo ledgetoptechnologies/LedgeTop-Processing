@@ -12,9 +12,14 @@ body digest. Its NodeGate reservation and SQLite started intent survive an
 uncertain response; exact completed replay does not repeat the mutation.
 For uploads, an explicit offline issuer schema journals the operation ID and
 binds the grant to the stored filename, length and SHA-256; its private issuer
-journal also pins the Viewer-relative file path. The sender re-reads that
-Queue/TaskStore binding before opening the file and after its descriptor check.
-Exact completed replay checks node state before starting a producer. The node streams a
+journal also pins the Viewer-relative file path and its TaskStore root and task
+directory names and device/inode identities. The sender re-reads that
+Queue/TaskStore binding before opening the file and after its descriptor check;
+these observations do not fence concurrent privileged filesystem writers.
+Exact completed replay checks node state before starting a producer. If another
+sender completes after that check, the broker reports a replay and the unused
+producer is stopped and joined without treating its closed socket as a failure.
+The node streams a
 dedicated socket into deterministic multipart while checking the same length and
 digest. The node retains an `awaiting_sender` hold after backend acceptance
 until the local descriptor sender completes its own identity check and the
