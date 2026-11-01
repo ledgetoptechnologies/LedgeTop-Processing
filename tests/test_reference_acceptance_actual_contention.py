@@ -1,14 +1,23 @@
 """Real API/store transactions against independent in-memory SQLite connections."""
 from contextlib import contextmanager
 import json
+import http.client
 from pathlib import Path
 import sqlite3
+import threading
 import unittest
 import uuid
+from urllib.request import urlopen
+from unittest.mock import patch
 
+from processing import reference_protocol as p
 from processing.reference_api import ReferenceAPI
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_driver import DriverWait, ReferenceDriver
+from processing.reference_engine_worker import ReferenceEngineWorker
+from processing.reference_http import create_reference_http_server
+from processing.scratch_policy import ScratchLedger
 
 
 class MemoryQueue:
@@ -78,6 +87,98 @@ class ActualContentionTests(unittest.TestCase):
             restored = worker.handle('GET', worker_path, worker_headers, protected_transport=True)
             self.assertEqual(restored.status,200)
             self.assertEqual(restored.body['receipts'],[receipt])
+
+            # Real loopback HTTP adapters and the real driver's control client;
+            # one retained receipt already exists from the contention exercise.
+            class API:
+                def handle(inner, method, route, request_headers, request_body, *, protected_transport):
+                    target = worker if route.startswith('/ltds/worker/v1/') else public
+                    return target.handle(method,route,request_headers,request_body,protected_transport=protected_transport)
+            server = create_reference_http_server(API(),'127.0.0.1',0)
+            thread = threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.01})
+            thread.start()
+            ledger_db = sqlite3.connect(':memory:')
+            ledger_db.row_factory = sqlite3.Row
+            try:
+                driver = object.__new__(ReferenceDriver)
+                driver.origin = 'http://127.0.0.1:' + str(server.server_port)
+                driver._bearer = 'synthetic-worker-token'
+                driver._open = urlopen
+                locker.execute('BEGIN IMMEDIATE')
+                locker.execute("UPDATE jobs SET status=status WHERE id='job-1'")
+                with self.assertRaises(DriverWait):
+                    driver._request('GET','/jobs/job-1/acceptance',claim_token='claim')
+                locker.rollback()
+                status, partial = driver._request('GET','/jobs/job-1/acceptance',claim_token='claim')
+                self.assertEqual((status,partial['fullyAccepted']), (200,False))
+
+                # The second object is accepted over HTTP; discard the first
+                # committed response body and retry the exact same receipt.
+                final = dict(receipt, receiptId='receipt-2', storageReceiptId='storage-2',
+                             acceptedObjectIds=['result-2'])
+                wire = json.dumps(final).encode()
+                # Shrink only this isolated process's wire ceiling: the single
+                # request still fits, but the full two-receipt relay cannot.
+                with patch.object(p,'MAX_BODY_BYTES',len(wire)+50):
+                    connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
+                    try:
+                        connection.request('POST',path,body=wire,headers=headers)
+                        bounded = connection.getresponse()
+                        self.assertEqual(bounded.status,409)
+                        bounded.read()
+                    finally: connection.close()
+                    self.assertEqual(keeper.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],1)
+                connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
+                try:
+                    connection.request('POST',path,body=wire,headers=headers)
+                    lost = connection.getresponse()
+                    self.assertEqual(lost.status,200)
+                finally: connection.close()
+                connection = http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
+                try:
+                    connection.request('POST',path,body=wire,headers=headers)
+                    replay_http = connection.getresponse()
+                    self.assertEqual(replay_http.status,200)
+                    self.assertFalse(json.loads(replay_http.read())['created'])
+                finally: connection.close()
+                status, relayed = driver._request('GET','/jobs/job-1/acceptance',claim_token='claim')
+                self.assertEqual((status,relayed['fullyAccepted']), (200,True))
+                self.assertEqual(len(relayed['receipts']),2)
+
+                # Apply the returned receipts through the actual worker and
+                # scratch-ledger methods, backed by an in-memory test ledger.
+                ledger_db.executescript('''CREATE TABLE results(reservation TEXT, identity TEXT);
+                  CREATE TABLE receipts(id TEXT, storage_id TEXT, payload TEXT);
+                  CREATE TABLE objects(reservation TEXT,id TEXT,accepted INTEGER);''')
+                identity = {'job_id':'job-1','generation':1,'manifest_sha256':receipt['inputManifestSha256'],
+                    'pipeline_sha256':receipt['pipelineDigest'], 'result_manifest_sha256':manifest['resultManifestSha256'],
+                    'objects':[{'object_id':obj['id']} for obj in manifest['objects']]}
+                ledger_db.execute('INSERT INTO results VALUES (?,?)',('reservation',json.dumps(identity)))
+                ledger_db.executemany('INSERT INTO objects VALUES (?,?,NULL)',
+                    [('reservation',obj['id']) for obj in manifest['objects']])
+                ledger_db.commit()
+                ledger = object.__new__(ScratchLedger)
+                @contextmanager
+                def transaction():
+                    with ledger_db: yield ledger_db
+                ledger._transaction = transaction
+                ledger._now = lambda _db: 1
+                node = object.__new__(ReferenceEngineWorker)
+                node.ledger = ledger
+                node._row = lambda _: {'result':json.dumps(manifest),'outbox_id':'outbox',
+                    'identity':json.dumps({'job':{'generation':1,'environment':'staging',
+                      'pipelineDigest':receipt['pipelineDigest'],'manifestSha256':receipt['inputManifestSha256']},
+                      'reservation':'reservation'})}
+                applied = node.apply_viewer_acceptance('job-1',relayed['receipts'])
+                self.assertTrue(applied['fullyAccepted'])
+                self.assertEqual(len(applied['acceptedObjectIds']),2)
+                self.assertTrue(node.apply_viewer_acceptance('job-1',relayed['receipts'])['fullyAccepted'])
+                self.assertEqual(ledger_db.execute('SELECT COUNT(*) FROM receipts').fetchone()[0],2)
+            finally:
+                locker.rollback()
+                ledger_db.close()
+                server.shutdown(); server.server_close(); thread.join(timeout=3)
+                self.assertFalse(thread.is_alive())
         finally:
             locker.rollback(); locker.close(); keeper.close()
 
