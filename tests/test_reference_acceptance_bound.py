@@ -57,7 +57,11 @@ class AcceptanceBoundTests(unittest.TestCase):
         first = self.store.accept('job-1', self.receipt)
         self.assertTrue(first['created'])
         self.assertFalse(first['fullyAccepted'])
-        self.assertFalse(self.store.accept('job-1', self.receipt)['created'])
+        replay = self.store.accept('job-1', self.receipt)
+        self.assertFalse(replay['created'])
+        for response in (first,replay):
+            self.assertEqual(response['receiptId'],self.receipt['receiptId'])
+            self.assertEqual(response['receiptSha256'],p.digest(self.receipt))
         for objects in ([], ['result-1']):
             duplicate = dict(self.receipt, receiptId='other', storageReceiptId='other-storage', acceptedObjectIds=objects)
             with self.assertRaises(Conflict): self.store.accept('job-1', duplicate)
@@ -66,6 +70,27 @@ class AcceptanceBoundTests(unittest.TestCase):
         self.assertTrue(self.store.accept('job-1', final)['fullyAccepted'])
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM reference_acceptances').fetchone()[0], 2)
+
+    def test_rollback_before_commit_emits_no_success_and_exact_retry_is_safe(self):
+        original = self.queue._db
+        @contextmanager
+        def failed_commit():
+            with self.queue.lock:
+                try:
+                    yield self.queue.db
+                    raise sqlite3.OperationalError('synthetic pre-commit loss')
+                finally:
+                    self.queue.db.rollback()
+        self.queue._db = failed_commit
+        try:
+            with self.assertRaises(sqlite3.OperationalError): self.store.accept('job-1',self.receipt)
+        finally:
+            self.queue._db = original
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM reference_acceptances').fetchone()[0],0)
+        response = self.store.accept('job-1',self.receipt)
+        self.assertTrue(response['created'])
+        self.assertEqual(response['receiptSha256'],p.digest(self.receipt))
 
     def test_concurrent_overlapping_receipts_add_coverage_at_most_once(self):
         receipts = [dict(self.receipt, receiptId='receipt-'+str(i), storageReceiptId='storage-'+str(i)) for i in range(2)]
