@@ -85,7 +85,10 @@ shared slot for inspection instead of starting another expensive job. Lost
 commit acknowledgements reconcile by status reads for that exact engine UUID;
 commit is never replayed. An empty or unbound JSON commit response is uncertain
 and follows the same reconciliation path. Commit response compatibility with
-each deployed engine version still requires qualification. After restart, a known processing job stays publicly
+each deployed engine version still requires qualification. Mutation responses
+must use a single valid Content-Length or chunked framing and deliver the full
+body; a legitimate close-delimited response is conservatively uncertain until
+engine HTTP framing is qualified. After restart, a known processing job stays publicly
 running while its exact result is reconciled. Read outages back off to60seconds.
 
 Running cancellation retains the slot until the engine reports a terminal

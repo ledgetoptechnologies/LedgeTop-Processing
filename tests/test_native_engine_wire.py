@@ -1,5 +1,5 @@
 import hashlib
-from http.server import ThreadingHTTPServer
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import io
 import json
 from pathlib import Path
@@ -38,6 +38,41 @@ class NativeEngineWireTests(unittest.TestCase):
         for ack in ({'success':True},{'uuid':identifier}):
             with self.subTest(ack=ack),patch.object(engine.client,'json',return_value=ack):
                 self.assertEqual(engine.action('commit',identifier),ack)
+
+    def test_real_http_truncated_or_ambiguous_commit_ack_is_uncertain(self):
+        body=b'{"success":true}'
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*_):pass
+            def do_POST(self):
+                self.send_response(200)
+                if self.server.mode=='truncated':self.send_header('Content-Length',str(len(body)+10))
+                elif self.server.mode=='duplicate':
+                    self.send_header('Content-Length',str(len(body)));self.send_header('Content-Length',str(len(body)))
+                elif self.server.mode=='conflicting':
+                    self.send_header('Content-Length',str(len(body)));self.send_header('Transfer-Encoding','chunked')
+                elif self.server.mode in ('chunked','chunked-truncated'):
+                    self.send_header('Transfer-Encoding','chunked')
+                elif self.server.mode!='close-delimited':self.send_header('Content-Length',str(len(body)))
+                self.end_headers()
+                if self.server.mode in ('chunked','chunked-truncated'):
+                    self.wfile.write(('%x\r\n'%len(body)).encode()+body+b'\r\n')
+                    if self.server.mode=='chunked':self.wfile.write(b'0\r\n\r\n')
+                else:self.wfile.write(body)
+                self.wfile.flush();self.close_connection=True
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever);thread.start()
+        try:
+            engine=NativeEngine('http://127.0.0.1:'+str(server.server_port));identifier=str(uuid.uuid4())
+            for mode in ('truncated','duplicate','conflicting','close-delimited','chunked-truncated'):
+                with self.subTest(mode=mode):
+                    server.mode=mode
+                    with self.assertRaises(SmokeError):engine.action('commit',identifier)
+            for mode in ('complete','chunked'):
+                server.mode=mode;self.assertEqual(engine.action('commit',identifier),{'success':True})
+        finally:
+            server.shutdown();server.server_close();thread.join(3)
+            self.assertFalse(thread.is_alive())
 
     def test_real_http_init_upload_commit_cancel_and_archive(self):
         token = 'synthetic-engine-credential-' + 'x' * 32

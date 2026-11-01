@@ -105,12 +105,25 @@ class Client:
             response = connection.getresponse()
             if not 200 <= response.status < 300:
                 raise SmokeError('HTTP request rejected or redirected; inspect private receipt')
-            declared = response.getheader('Content-Length')
-            if declared is not None and (int(declared) < 0 or int(declared) > limit):
-                raise SmokeError('HTTP response exceeds limit')
+            headers_received=response.getheaders()
+            lengths=[value.strip() for key,value in headers_received if key.lower()=='content-length']
+            transfers=[value.strip().lower() for key,value in headers_received if key.lower()=='transfer-encoding']
+            if (len(lengths)>1 or len(transfers)>1 or (lengths and transfers)
+                or (transfers and transfers!=['chunked'])
+                or (method.upper() in ('POST','PUT','PATCH','DELETE') and not lengths and not transfers)):
+                raise SmokeError('HTTP response framing uncertain')
+            declared=None
+            if lengths:
+                value=lengths[0]
+                if not value.isascii() or not value.isdecimal():
+                    raise SmokeError('HTTP response framing uncertain')
+                declared=int(value)
+                if declared>limit:raise SmokeError('HTTP response exceeds limit')
             result = response.read(limit + 1)
             if len(result) > limit:
                 raise SmokeError('HTTP response exceeds limit')
+            if declared is not None and len(result)!=declared:
+                raise SmokeError('HTTP response framing uncertain')
             return result
         except SmokeError:
             raise

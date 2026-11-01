@@ -876,6 +876,32 @@ class ViewerServiceTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join(3)
             self.assertFalse(thread.is_alive())
 
+    def test_truncated_http_commit_ack_reconciles_same_task_once(self):
+        from http.server import ThreadingHTTPServer
+        from processing.synthetic_engine import SyntheticEngine,handler_for
+        from processing.viewer_service import NativeEngine
+        backend=SyntheticEngine(1000,3600);token='synthetic-only-token-123456'
+        base=handler_for(backend,token)
+        class Handler(base):
+            def send_header(self,key,value):
+                if self.path.startswith('/task/new/commit/') and key.lower()=='content-length':
+                    value=str(int(value)+10);self.close_connection=True
+                return super().send_header(key,value)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever);thread.start()
+        try:
+            self.engines['cluster']=NativeEngine('http://127.0.0.1:'+str(server.server_port),token)
+            identifier=self.submit();self.service.tick();task=self.task(identifier)
+            self.assertEqual(task['phase'],'commit_pending')
+            self.assertEqual(task['error'],'commit_ack_uncertain');self.assertEqual(backend.commits,1)
+            engine_uuid=task['engine_uuid'];backend.tasks[engine_uuid]['code']=40
+            self.service.tick()
+            self.assertEqual(self.service.info(identifier)['status']['code'],40)
+            self.assertEqual(self.task(identifier)['engine_uuid'],engine_uuid);self.assertEqual(backend.commits,1)
+        finally:
+            server.shutdown();server.server_close();thread.join(3)
+            self.assertFalse(thread.is_alive())
+
     def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
         identifier = self.submit()
         self.engines['cluster'].fail = 'commit'
