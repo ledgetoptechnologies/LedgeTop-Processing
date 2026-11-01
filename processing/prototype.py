@@ -451,6 +451,23 @@ class Queue(Maintenance):
             db.execute('BEGIN')
             return self._has_attested_started_transfer(db, identifier)
 
+    def transfer_journal_inspection_required(self):
+        """Read-only reason for a fleet-wide unqualified transfer hold.
+
+        This is an observation, not a claim, gate override, or reconciliation.
+        """
+        try:
+            with self._db() as db:
+                db.execute('BEGIN')
+                try:
+                    self._has_attested_started_transfer(db, None)
+                except TransferJournalUnqualified:
+                    return True
+                return False
+        except sqlite3.Error:
+            # Inspection itself failed; never imply the journal is qualified.
+            return True
+
     def _transfer_admission_clear(self, db, *, broker_allowed=None):
         """Do not admit new work while any started transfer is unresolved."""
         if self.recovery_hold_required or db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('coordinator_recovery_hold','coordinator_recovery_guard') LIMIT 1").fetchone():

@@ -553,6 +553,14 @@ class ViewerService:
     def info(self, identifier):
         info = self.store.info(identifier)
         info['ledgetopArchiveHealth'] = self._archive_health()
+        job = (self.store.task(identifier)['job']
+               if info['status']['code'] == 10 and not info.get('ledgetopHeld') else None)
+        if (job and job['status'] == 'queued'
+                and self.queue.transfer_journal_inspection_required()):
+            # The job is still queued and unclaimed; expose the fleet-wide hold
+            # without suggesting that an engine was started or a slot was freed.
+            info['ledgetopHeld'] = True
+            info['ledgetopHoldReason'] = 'transfer_journal_inspection_required'
         if info['status']['code'] == 40:
             task = self.store.task(identifier)
             if self._durable_archive_claims and self.store.archive_claim_held(task):

@@ -863,6 +863,17 @@ class ViewerServiceTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0], 'started')
 
+    def test_journal_inspection_marker_only_applies_to_queued_jobs(self):
+        uploading = self.initialize()
+        queued = self.submit()
+        self.assertNotIn('ledgetopHoldReason', self.service.info(queued))
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
+        self.assertNotIn('ledgetopHoldReason', self.service.info(uploading))
+        self.assertEqual(self.service.info(queued)['ledgetopHoldReason'],
+                         'transfer_journal_inspection_required')
+        self.assertEqual(self.task(queued)['job']['status'], 'queued')
+
     def test_unrelated_completed_legacy_journal_keeps_submission_visibly_held(self):
         from processing.engine_ingress_guard import STREAM_DDL
         identifier = self.submit()
@@ -870,14 +881,15 @@ class ViewerServiceTests(unittest.TestCase):
             db.execute(STREAM_DDL)
             db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
                        ('unrelated-upload', 'unrelated-job', 'unrelated-engine', 1, 'a' * 64, 'complete'))
-        self.engines['cluster'].fail = 'initialize'
         self.service.tick()
         task = self.task(identifier)
-        self.assertEqual((task['job']['status'], task['job']['heldReason']), ('held', 'transfer_uncertain'))
+        self.assertEqual((task['job']['status'], task['job']['heldReason']), ('queued', None))
         info = self.service.info(identifier)
-        self.assertEqual((info['ledgetopHeld'], info['ledgetopHoldReason']), (True, 'transfer_uncertain'))
+        self.assertEqual((info['status']['code'], info['ledgetopHeld'], info['ledgetopHoldReason']),
+                         (10, True, 'transfer_journal_inspection_required'))
         self.service.tick()
-        self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+        self.assertFalse(self.engines['cluster'].calls)
+        self.assertFalse(self.engines['main'].calls)
         with self.queue._db() as db:
             self.assertEqual(tuple(db.execute('SELECT upload_id,state FROM engine_ingress_uploads').fetchone()),
                              ('unrelated-upload', 'complete'))
@@ -886,11 +898,12 @@ class ViewerServiceTests(unittest.TestCase):
         identifier = self.submit()
         with self.queue._db() as db:
             db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
-        self.engines['cluster'].fail = 'initialize'
         self.service.tick()
         task = self.task(identifier)
-        self.assertEqual((task['job']['status'], task['job']['heldReason']), ('held', 'transfer_uncertain'))
-        self.assertEqual(self.service.info(identifier)['ledgetopHoldReason'], 'transfer_uncertain')
+        self.assertEqual((task['job']['status'], task['job']['heldReason']), ('queued', None))
+        self.assertEqual(self.service.info(identifier)['ledgetopHoldReason'], 'transfer_journal_inspection_required')
+        self.assertFalse(self.engines['cluster'].calls)
+        self.assertFalse(self.engines['main'].calls)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM engine_ingress_uploads').fetchone()[0], 0)
 
@@ -904,16 +917,18 @@ class ViewerServiceTests(unittest.TestCase):
                            ('other', 'other-job', 'other-engine', 1, 'a' * 64, 'complete'))
             else:
                 db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
-        self.engines['cluster'].fail = 'initialize'
         self.service.tick()
         job = self.task(first)['job']
-        self.assertEqual((job['status'], job['heldReason']), ('held', 'transfer_uncertain'))
+        self.assertEqual((job['status'], job['heldReason']), ('queued', None))
+        self.assertEqual(self.service.info(first)['ledgetopHoldReason'], 'transfer_journal_inspection_required')
         with self.assertRaises(Conflict):
             self.queue.operator(job['id'], 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
         self.assertIsNone(self.queue.claim({'workerId': 'synthetic-next', 'nodeId': 'cluster',
                                             'profiles': [VIEWER_PROFILE]}))
         self.assertEqual(self.task(second)['job']['status'], 'queued')
-        self.assertEqual(self.task(first)['job']['status'], 'held')
+        self.assertEqual(self.task(first)['job']['status'], 'queued')
+        self.assertFalse(self.engines['cluster'].calls)
+        self.assertFalse(self.engines['main'].calls)
 
     def test_legacy_journal_cannot_resolve_uncertain_hold_or_release_slot(self):
         self.assert_unqualified_journal_cannot_resolve('unrelated_complete')
@@ -1082,24 +1097,18 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(second)['job']['status'], 'queued')
         self.assertIsNone(self.queue.claim({'workerId': 'synthetic-next', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}))
 
-    def test_corrupt_trigger_preventing_hold_keeps_slot_and_sets_dispatch_warning(self):
-        import time
+    def test_corrupt_journal_blocks_before_a_rejecting_hold_trigger_is_reached(self):
         identifier = self.submit()
         with self.queue._db() as db:
             db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
             db.execute("CREATE TRIGGER synthetic_reject_hold BEFORE UPDATE ON jobs WHEN NEW.status='held' "
                        "BEGIN SELECT RAISE(ABORT,'synthetic hold blocked'); END")
-        self.engines['cluster'].fail = 'initialize'
-        self.service.start()
-        try:
-            deadline = time.monotonic() + 5
-            while not self.service.dispatcher_status()['unexpectedFailureObserved'] and time.monotonic() < deadline:
-                time.sleep(.02)
-            self.assertTrue(self.service.dispatcher_status()['unexpectedFailureObserved'])
-            self.assertEqual(self.task(identifier)['job']['status'], 'running')
-            self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
-        finally:
-            self.service.close()
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertEqual(self.service.info(identifier)['ledgetopHoldReason'], 'transfer_journal_inspection_required')
+        self.assertFalse(self.engines['cluster'].calls)
+        self.assertFalse(self.engines['main'].calls)
+        self.assertFalse(self.service.dispatcher_status()['unexpectedFailureObserved'])
 
     def test_contradictory_native_init_ack_holds_photo_job_without_upload(self):
         from processing.viewer_service import NativeEngine
