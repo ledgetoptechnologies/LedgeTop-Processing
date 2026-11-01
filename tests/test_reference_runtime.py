@@ -615,6 +615,35 @@ class ReferenceRuntimeTests(unittest.TestCase):
             stop.set()
             running.join(timeout=6)
 
+    def test_failed_dispatcher_drain_retains_authority_while_process_lives(self):
+        config = replace(self.config, viewer_enabled=False)
+        handler = make_handler(config)
+        self.addCleanup(handler.prototype_queue.close)
+
+        class UncertainDispatcher:
+            def __init__(self): self._stop = threading.Event()
+            def start(self): pass
+            def close(self): raise RuntimeError('synthetic uncertain child')
+
+        handler.viewer_service = UncertainDispatcher()
+        native = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        service = CoordinatorService(native, handler)
+        stop, exits = threading.Event(), []
+        running = threading.Thread(target=lambda: exits.append(service.run(stop)))
+        running.start()
+        try:
+            self.wait_for(service.healthy)
+            stop.set()
+            running.join(timeout=3)
+            self.assertFalse(running.is_alive())
+            self.assertEqual(exits, [2])
+            self.assertEqual(service.health()['reason'], 'dispatcher_drain_failed')
+            with self.assertRaises(RuntimeError):
+                Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+        finally:
+            stop.set()
+            running.join(timeout=5)
+
     @unittest.skipUnless(sys.platform.startswith('linux'), 'actual POSIX SIGTERM semantics')
     def test_main_sigterm_exits_cleanly_and_preserves_default_native_health_contract(self):
         with socket.socket() as probe:

@@ -449,14 +449,21 @@ class CoordinatorService:
                     self._failed('reference_drain_failed', stop)
                 self._close_server(self._reference_server, self._reference_thread, stop)
             if service is not None:
+                dispatcher_drained = True
                 try:
                     service.close()
                 except BaseException:
+                    dispatcher_drained = False
                     self._failed('dispatcher_drain_failed', stop)
                 thread = getattr(service, '_thread', None)
                 if thread is not None:
                     thread.join()  # close()'s legacy ten-second join is insufficient.
-            if self.handler.prototype_queue:
+            else:
+                dispatcher_drained = True
+            # A failed close may leave an archive writer holding inherited
+            # authority. Keep this process's lease until explicit teardown.
+            # Process exit still drops its descriptor and is not a host fence.
+            if self.handler.prototype_queue and dispatcher_drained:
                 self.handler.prototype_queue.close()
             with self._lock:
                 failed = self._state == 'failed'
