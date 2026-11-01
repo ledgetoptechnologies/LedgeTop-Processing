@@ -20,6 +20,10 @@ def main():
                 return super().commit(identifier)
         def download(self,identifier):return io.BytesIO(data),len(data)
     try:
+        # Fail before creating coordinator or engines if the pinned source or
+        # fixture image cannot load the real Viewer worker dependencies.
+        preflight="const b=process.env.VIEWER_SOURCE+'/apps/viewer/server';for(const [f,n] of [['database','openDatabase'],['repository','ViewerRepository'],['processingRepository','ProcessingRepository'],['storageManager','StorageManager'],['processingWorker','processOne'],['providerAuth','NO_AUTH_MARKER']]){if(require(b+'/'+f)[n]===undefined)throw Error('missing Viewer export '+f+':'+n)}"
+        subprocess.run(['node','-e',preflight],env={**os.environ,'VIEWER_SOURCE':viewer,'NODE_PATH':'/src/apps/viewer/node_modules'},check=True,timeout=15)
         for engine in (Engine(1000,3600),Engine(None,3600)):
             engines.append(engine);server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(engine,'synthetic-node-token-nnnnnnnn'))
             thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02});servers.append(server);thread.start();threads.append(thread)
