@@ -55,7 +55,7 @@ class MountRestoreE2E(unittest.TestCase):
     def test_backup_remount_restore(self):
         image_compat = os.environ.get('LEDGETOP_IMAGE_COMPAT_E2E') == '1'
         old_image = 'sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004'
-        candidate_image = 'sha256:df741c6ad340ebc32dc3a4c9caf4b6468260cd9cf42523c6f6406e7e05bbbdee'
+        candidate_image = 'sha256:9401f6879c0a6b634e40b6731a0e34a6d7306ae6efea8b1375577fe15d329b5f'
         ident = 'codex-viewer-e2e-' + uuid.uuid4().hex
         print('synthetic owner label: ' + ident, flush=True)
         volume = ident + '-backup'
@@ -228,7 +228,7 @@ print('synthetic candidate enabled capture and inspection verified',flush=True)
                    'import time; time.sleep(120)')
             if image_compat:
                 for image, revision in ((old_image, '693cb7eca32295da959a4f42399f317577ef8a8a'),
-                                        (candidate_image, '4d7c3c7f08eaf965b84098fbb69ee407c2335bcf')):
+                                        (candidate_image, '7d400d8ec9abbd20fdbc84403d32fdd261f71db9')):
                     observed = json.loads(docker('image', 'inspect', image).stdout)[0]
                     if observed.get('Id') != image or observed.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != revision:
                         raise RuntimeError('exact image revision required')
