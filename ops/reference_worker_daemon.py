@@ -375,6 +375,8 @@ def load_config(path):
         if (type(config['cleanupEnabled']) is not bool or type(config['engineCleanupEnabled']) is not bool
                 or type(config['allowedEnvironments']) is not list or not config['allowedEnvironments']):
             raise ValueError('invalid worker sharing or cleanup policy')
+        if config['cleanupEnabled'] or config['engineCleanupEnabled']:
+            raise ValueError('result cleanup requires qualified downstream custody')
         for environment in config['allowedEnvironments']:
             p._environment(environment)
         # Names and numeric/bool value types are discovered from /options for

@@ -482,7 +482,7 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(json.loads(row['data'])['terminalAcceptance'], receipt)
         self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
 
-    def test_background_success_acceptance_and_optional_cleanup_do_not_block_new_work(self):
+    def test_background_success_acceptance_progresses_while_results_are_retained(self):
         job = self.submit()
         self.advance(job, 'awaiting_acceptance')
         private = self.store.get(job['jobId'], private=True)
@@ -593,6 +593,11 @@ class ReferenceDriverTests(unittest.TestCase):
         settings = load_config(str(path))
         self.assertFalse(settings['cleanupEnabled'])
         self.assertEqual(settings['allowedEnvironments'], ['production','staging'])
+        for key in ('cleanupEnabled', 'engineCleanupEnabled'):
+            invalid = dict(config, **{key: True})
+            path.write_text(json.dumps(invalid))
+            with self.assertRaises(ValueError):
+                load_config(str(path))
         config['allowedOdmOptions'] = ['numeric-limit']
         path.write_text(json.dumps(config))
         with self.assertRaises(ValueError) as observed:
@@ -623,6 +628,26 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(sentinel.read_bytes(), b'synthetic-retained-data')
         self.assertFalse((jobs / 'synthetic-reservation').exists())
 
+    def test_full_receipt_cannot_authorize_injected_scratch_cleanup(self):
+        job = self.submit()
+        self.advance(job, 'awaiting_acceptance')
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        receipt = dict(schemaVersion=1, receiptId='cleanup-viewer', storageReceiptId='cleanup-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']], acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+        self.store.accept(job['jobId'], receipt)
+        self.driver.cleanup_executor = ScratchCleanupExecutor(self.ledger)
+        self.assertEqual(self.driver.step(), {'state':'held','reason':'result_cleanup_custody_unqualified'})
+        self.assertTrue(list(self.scratch.glob('jobs/*/all.zip')))
+        self.assertTrue(list(self.scratch.glob('jobs/*/*.input')))
+
+    def test_driver_rejects_any_configured_cleanup_without_custody_authority(self):
+        for name in ('cleanup_executor', 'engine_cleanup'):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'qualified downstream custody'):
+                self.make_driver(**{name: object()})
+
+    @unittest.skip('Disabled until independently verified Viewer custody qualifies cleanup')
     @unittest.skipUnless(sys.platform.startswith('linux'), 'exact-object cleanup requires Linux')
     def test_opted_in_background_cleanup_removes_only_accepted_result_after_receipt(self):
         job = self.submit()
@@ -664,7 +689,7 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
         self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
             'https://coordinator.invalid:9443', TOKEN, state_path=self.root / 'actual-driver.sqlite', ssl_context=self.context,
             output_budget=1024 * 1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
-            worker_instance_id='instance', engine_cleanup=self.engine_cleanup)
+            worker_instance_id='instance')
         self.driver._request = self.request
         self.driver.sender._open = self.sender_open
 
@@ -682,6 +707,17 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             acceptedObjectIds=[obj['id'] for obj in result['objects']] if full else [],
             acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
 
+    def test_full_receipt_cannot_authorize_injected_engine_cleanup(self):
+        job = self.submit(contents=(b'abc',))
+        self.advance(job, 'awaiting_acceptance')
+        self.store.accept(job['jobId'], self.acceptance(job, full=True))
+        self.driver.engine_cleanup = self.engine_cleanup
+        self.assertEqual(self.driver.step(), {'state':'held','reason':'result_cleanup_custody_unqualified'})
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
+        self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 40)
+        self.assertTrue(list(self.scratch.glob('jobs/*/all.zip')))
+
+    @unittest.skip('Disabled until independently verified Viewer custody qualifies cleanup')
     def test_actual_native_http_cache_removed_once_only_after_full_viewer_ack_with_inputs_retained(self):
         job = self.submit(contents=(b'abc',))
         self.advance(job, 'awaiting_acceptance')

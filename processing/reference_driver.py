@@ -2,7 +2,8 @@
 
 ODM is the default; an explicit router binds supported engines per claimed job.
 Engine mutations remain physically fenced. Delivery, Viewer acceptance and
-optional exact-object cleanup continue after slot release.
+result retention continue after slot release. Cleanup remains held until
+durable downstream custody and physical writer authority are qualified.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -30,7 +31,6 @@ from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
 from .reference_terminal import validate_terminal_acceptance
-from .reference_engine_cleanup import EngineCacheCleanup
 from .options import _validate_options
 
 _INSPECTION_HOLDS = frozenset(('stored_reference_inspection', 'reference_inspection_protocol_error'))
@@ -145,9 +145,8 @@ class ReferenceDriver:
             raise ValueError('actual native engine and broker client required')
         if worker.ledger is not ledger or worker.outbox is not outbox or not isinstance(failure_outbox, FailureOutbox):
             raise ValueError('driver durable components differ')
-        if engine_cleanup is not None and (not isinstance(engine_cleanup, EngineCacheCleanup)
-                                           or engine_cleanup.worker is not worker):
-            raise ValueError('engine cleanup ownership differs')
+        if cleanup_executor is not None or engine_cleanup is not None:
+            raise ValueError('result cleanup requires qualified downstream custody')
         if execution_router is not None and (not isinstance(execution_router, ExecutionRouter)
                 or execution_router.odm_worker is not worker or execution_router.failure_outbox is not failure_outbox):
             raise ValueError('execution router ownership differs')
@@ -543,6 +542,8 @@ class ReferenceDriver:
 
     def step(self):
         """Perform one bounded stage; never return private metadata or paths."""
+        if self.engine_cleanup is not None or self.cleanup_executor is not None:
+            return {'state':'held','reason':'result_cleanup_custody_unqualified'}
         if self._state_owner is not None:
             try:self._state_owner.check(self.path.parent)
             except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
@@ -586,6 +587,11 @@ class ReferenceDriver:
 
     def _background(self):
         """One retained acknowledgement plus at most one separately fenced cleanup."""
+        # A v1 receipt confirms coordinator metadata, not independently durable
+        # downstream custody.  Do not permit an injected or subsequently
+        # configured executor to turn that receipt into deletion authority.
+        if self.engine_cleanup is not None or self.cleanup_executor is not None:
+            raise DriverHeld('result_cleanup_custody_unqualified')
         with self._db() as db:
             row = db.execute("""SELECT * FROM driver_jobs WHERE stage IN
               ('awaiting_acceptance','awaiting_failure_acceptance') ORDER BY background_checked,created LIMIT 1""").fetchone()
