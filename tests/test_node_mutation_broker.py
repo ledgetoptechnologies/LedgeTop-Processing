@@ -2,12 +2,14 @@
 import hashlib
 import io
 import json
+import socket
 from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
 import uuid
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -70,7 +72,9 @@ class NodeMutationBrokerTests(unittest.TestCase):
                         for byte in value:self.wfile.write(bytes([byte]));self.wfile.flush();time.sleep(.04)
                     except (BrokenPipeError,ConnectionResetError):pass
                     finally:owner.drip_done.set()
-                else:self.wfile.write(value)
+                else:
+                    try:self.wfile.write(value)
+                    except (BrokenPipeError,ConnectionResetError):pass
         self.server=OwnedHTTPServer(('127.0.0.1',0),Handler)
         self.addCleanup(self.server.server_close)
         self.thread=threading.Thread(target=self.server.serve_forever)
@@ -86,9 +90,11 @@ class NodeMutationBrokerTests(unittest.TestCase):
         self.adapter=b.LoopbackNodeODM(self.engine,BackendPin('a'*64,'sha256:'+'b'*64,self.server.server_port),'')
         self.task=str(uuid.uuid4());self.body=b'synthetic-init'
         store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
+        self.owner_store=store
         store.initialize(self.task,'Synthetic',[],None,'production')
         store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)
         claim=self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]})
+        self.owner_claim=claim
         self.job=claim['id']
         store.update(self.task,stage='running',phase='init_pending',node_id='main',
                      engine_uuid=self.task,claim_token=claim['claimToken'])
@@ -101,9 +107,13 @@ class NodeMutationBrokerTests(unittest.TestCase):
     def grant(self,operation='init',body=None):
         body=self.body if body is None else body
         return dict(authorityId=self.authority,nodeId=self.node,engineId=self.engine,coordinatorEpoch=self.epoch,
-                    jobId=self.job,engineTaskId=self.task,environment='production',gateGeneration=1,
+                    jobId=self.job,engineTaskId=self.task,environment='production',gateGeneration=1,taskGeneration=1,
                     operationId=str(uuid.uuid4()),operation=operation,bodySha256=hashlib.sha256(body).hexdigest(),
                     contentType='application/octet-stream')
+
+    def begin_upload(self):
+        init=self.grant();self.broker.mutate(init,b.sign_grant(init,self.secret),self.body)
+        self.owner_store.update(self.task,phase='upload_pending')
 
     def test_signed_local_init_replays_and_binds_job_task_epoch(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret)
@@ -245,6 +255,165 @@ class NodeMutationBrokerTests(unittest.TestCase):
         self.assertEqual(self.calls,[])
         self.assertTrue(original.is_file())
 
+    def test_upload_response_loss_retains_started_and_refuses_replay_after_reopen(self):
+        self.begin_upload()
+        payload=b'synthetic-photo'
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(upload,self.secret);source,writer=socket.socketpair()
+        original=self.adapter.exchange_upload
+        def lost(*args):original(*args);raise OSError('synthetic upload response loss')
+        try:
+            writer.sendall(payload);writer.shutdown(socket.SHUT_WR)
+            with patch.object(self.adapter,'exchange_upload',side_effect=lost):
+                with self.assertRaises(OSError):self.broker.upload(upload,signature,source)
+        finally:source.close();writer.close()
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'started')
+        self.broker.close();self.broker=b.NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+        self.addCleanup(self.broker.close)
+        source,writer=socket.socketpair()
+        try:
+            with self.assertRaises(b.BrokerHeld):self.broker.upload(upload,signature,source)
+        finally:source.close();writer.close()
+        self.assertEqual(len(self.calls),2)
+
+    def test_closed_authority_lease_refuses_upload_before_intent(self):
+        self.begin_upload();self.owner_lease.close()
+        payload=b'synthetic-photo'
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(upload,self.secret);source,writer=socket.socketpair()
+        try:
+            with self.assertRaises(b.BrokerHeld):self.broker.upload(upload,signature,source)
+            with self.assertRaises(b.BrokerHeld):self.broker.lookup_upload(upload,signature)
+        finally:source.close();writer.close()
+        self.assertEqual(self.broker.db.execute("SELECT COUNT(*) FROM operations WHERE operation='upload'").fetchone()[0],0)
+        self.assertEqual(len(self.calls),1)
+
+    def test_sender_rejects_store_outside_broker_witness_queue(self):
+        self.begin_upload();payload=b'synthetic-photo'
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        sender=b.LocalUploadSender()
+        with self.assertRaises(b.BrokerHeld):
+            sender.send(self.broker,upload,b.sign_grant(upload,self.secret),
+                        store=SimpleNamespace(queue=object()),claim_token=self.owner_claim['claimToken'],secret=self.secret)
+        self.assertEqual(sender._unreaped,[]);self.assertEqual(len(self.calls),1)
+
+    def test_authority_loss_after_upload_prevents_confirmation(self):
+        self.begin_upload();payload=b'synthetic-photo'
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(upload,self.secret);source,writer=socket.socketpair()
+        try:
+            writer.sendall(payload);writer.shutdown(socket.SHUT_WR)
+            self.assertTrue(self.broker.upload(upload,signature,source)['success'])
+        finally:source.close();writer.close()
+        self.owner_lease.close()
+        with self.assertRaises(b.BrokerHeld):
+            self.broker.confirm_upload(upload,signature,b._sender_confirmation(upload,self.secret))
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'awaiting_sender')
+
+    def test_authority_lease_remains_held_through_upload_exchange(self):
+        self.begin_upload();payload=b'synthetic-photo'
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(upload,self.secret);source,writer=socket.socketpair()
+        writer.sendall(payload);writer.shutdown(socket.SHUT_WR)
+        entered=threading.Event();release=threading.Event();closed=threading.Event();out=[]
+        original=self.adapter.exchange_upload
+        def pause(*args):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('synthetic upload timed out')
+            return original(*args)
+        def send():
+            try:out.append(self.broker.upload(upload,signature,source))
+            except Exception as exc:out.append(exc)
+        worker=threading.Thread(target=send)
+        closer=threading.Thread(target=lambda:(self.owner_lease.close(),closed.set()))
+        with patch.object(self.adapter,'exchange_upload',side_effect=pause):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3));closer.start();self.assertFalse(closed.wait(.2))
+            finally:
+                release.set();worker.join(5)
+                if closer.ident is not None:closer.join(5)
+                source.close();writer.close()
+        self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertTrue(closed.is_set())
+        self.assertTrue(out[0]['success'])
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'awaiting_sender')
+
+    def test_accepted_upload_waits_for_authenticated_sender_confirmation(self):
+        self.begin_upload()
+        payload=b'synthetic-photo'
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(upload,self.secret);source,writer=socket.socketpair()
+        try:
+            writer.sendall(payload);writer.shutdown(socket.SHUT_WR)
+            self.assertTrue(self.broker.upload(upload,signature,source)['success'])
+        finally:source.close();writer.close()
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'awaiting_sender')
+        with self.assertRaises(b.BrokerHeld):self.broker.confirm_upload(upload,signature,'0'*64)
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'awaiting_sender')
+        self.broker.confirm_upload(upload,signature,b._sender_confirmation(upload,self.secret))
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'complete')
+        self.broker.db.execute("UPDATE operations SET file_key='changed.jpg' WHERE operation='upload'")
+        source,writer=socket.socketpair()
+        try:
+            with self.assertRaises(b.BrokerHeld):self.broker.upload(upload,signature,source)
+        finally:source.close();writer.close()
+        self.assertEqual(len(self.calls),2)
+
+    def test_sender_verification_failure_never_confirms_accepted_upload(self):
+        from processing.guarded_native_engine import SenderCompletion
+        from processing.odx_smoke_worker import SmokeError
+        self.begin_upload()
+        payload=b'synthetic-photo';path=self.root/'photo.jpg';path.write_bytes(payload);path.chmod(0o600)
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        item=dict(name='photo.jpg',bytes=len(payload),sha256=upload['bodySha256'],path=str(path))
+        sender=b.LocalUploadSender()
+        with patch.object(SenderCompletion,'verify',side_effect=SmokeError('synthetic sender verification failure')), \
+             patch.object(b.LocalUploadSender,'_issued_item',return_value=item):
+            with self.assertRaises(SmokeError):sender.send(self.broker,upload,b.sign_grant(upload,self.secret),store=self.owner_store,claim_token=self.owner_claim['claimToken'],secret=self.secret)
+        self.assertEqual(sender._unreaped,[])
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'awaiting_sender')
+        self.assertEqual(path.read_bytes(),payload)
+        with patch.object(b.LocalUploadSender,'_issued_item',return_value=item), \
+             patch('processing.guarded_native_engine.start_guarded_sender',side_effect=AssertionError('uncertain replay started producer')):
+            with self.assertRaises(b.BrokerHeld):sender.send(self.broker,upload,b.sign_grant(upload,self.secret),store=self.owner_store,claim_token=self.owner_claim['claimToken'],secret=self.secret)
+
+    def test_mismatched_stream_stays_started_without_retry(self):
+        self.begin_upload()
+        expected=b'synthetic-photo';altered=b'wrong-photo----'
+        self.assertEqual(len(expected),len(altered))
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(expected),
+                    bodySha256=hashlib.sha256(expected).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(upload,self.secret);source,writer=socket.socketpair()
+        try:
+            writer.sendall(altered);writer.shutdown(socket.SHUT_WR)
+            with self.assertRaises(AdmissionError):self.broker.upload(upload,signature,source)
+        finally:source.close();writer.close()
+        self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'started')
+        source,writer=socket.socketpair()
+        try:
+            with self.assertRaises(b.BrokerHeld):self.broker.upload(upload,signature,source)
+        finally:source.close();writer.close()
+
+    def test_tampered_upload_grant_is_rejected_before_node_intent(self):
+        self.begin_upload()
+        payload=b'synthetic-photo'
+        upload=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                    bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(upload,self.secret)
+        tampered=dict(upload,fileName='other.jpg');source,writer=socket.socketpair()
+        try:
+            with self.assertRaises(b.BrokerHeld):self.broker.upload(tampered,signature,source)
+        finally:source.close();writer.close()
+        self.assertEqual(self.broker.db.execute("SELECT COUNT(*) FROM operations WHERE operation='upload'").fetchone()[0],0)
+        self.assertEqual(len(self.calls),1)
+
     def test_slow_drip_hits_absolute_deadline_and_retains_started_intent(self):
         self.drip=True;self.adapter.deadline_seconds=.2
         grant=self.grant();started=time.monotonic()
@@ -307,8 +476,10 @@ class NodeMutationBrokerTests(unittest.TestCase):
         lease=attach_lease(queue,self.root/'other-lease')
         try:
             store=TaskStore(queue,self.root/'coordinator'/'viewer-tasks')
+            b.install_upload_issuer_schema(queue)
             store.initialize(self.task,'Synthetic',[],None,'production')
-            store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)
+            store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1)
+            store.upload(self.task,'other.jpg',io.BytesIO(b'y'*65536),65536);store.commit(self.task)
             claim=queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]})
             store.update(self.task,stage='running',phase='init_pending',node_id='main',
                          engine_uuid=self.task,claim_token=claim['claimToken'])
@@ -324,6 +495,75 @@ class NodeMutationBrokerTests(unittest.TestCase):
                         content_type='application/octet-stream',secret=self.secret)
                     self.assertEqual(remote.mutate(grant,signature,self.body)['uuid'],self.task)
                     self.assertEqual(len(self.calls),1)
+                    store.update(self.task,phase='upload_pending')
+                    upload_id=str(uuid.uuid4())
+                    upload,upload_signature=b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
+                        engine_id=self.engine,gate_generation=1,operation_id=upload_id,file_key='synthetic.jpg',secret=self.secret)
+                    sender=b.LocalUploadSender()
+                    stored=store.task(self.task)['files'][0]
+                    original=Path(stored['path']);alternate=original.parent/('input-'+uuid.uuid4().hex)
+                    alternate.write_bytes(original.read_bytes());alternate.chmod(0o600)
+                    with queue._db() as db:db.execute("UPDATE viewer_files SET path=? WHERE uuid=? AND name_key='synthetic.jpg'",(alternate.name,self.task))
+                    with self.assertRaises(b.BrokerHeld):
+                        sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
+                    self.assertEqual(len(self.calls),1)
+                    with queue._db() as db:db.execute("UPDATE viewer_files SET path=? WHERE uuid=? AND name_key='synthetic.jpg'",(original.name,self.task))
+                    task_dir=original.parent;different_dir=store.root/('other-'+uuid.uuid4().hex)
+                    different_dir.mkdir(mode=0o700);(different_dir/original.name).write_bytes(original.read_bytes())
+                    with queue._db() as db:db.execute('UPDATE viewer_tasks SET directory=? WHERE uuid=?',(different_dir.name,self.task))
+                    with self.assertRaises(b.BrokerHeld):
+                        sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
+                    with queue._db() as db:db.execute('UPDATE viewer_tasks SET directory=? WHERE uuid=?',(task_dir.name,self.task))
+                    old_root=store.root;other_root=self.root/'alternate-root';other_root.mkdir(mode=0o700)
+                    other_dir=other_root/task_dir.name;other_dir.mkdir(mode=0o700)
+                    (other_dir/original.name).write_bytes(original.read_bytes())
+                    try:
+                        store.root=other_root
+                        with self.assertRaises(b.BrokerHeld):
+                            sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
+                    finally:store.root=old_root
+                    self.assertTrue(sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
+                    self.assertEqual(sender._unreaped,[])
+                    self.assertEqual(len(self.calls),2)
+                    self.assertIn(b'filename="synthetic.jpg"',self.calls[1][1])
+                    self.assertIn(b'\r\n\r\nx\r\n',self.calls[1][1])
+                    with patch('processing.guarded_native_engine.start_guarded_sender',side_effect=AssertionError('replay started producer')):
+                        self.assertTrue(sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
+                    self.assertEqual(len(self.calls),2)
+                    replay,replay_signature=b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
+                        engine_id=self.engine,gate_generation=1,operation_id=upload_id,file_key='synthetic.jpg',secret=self.secret)
+                    self.assertEqual((replay,replay_signature),(upload,upload_signature))
+                    with self.assertRaises(b.BrokerHeld):
+                        b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
+                            engine_id=self.engine,gate_generation=1,operation_id=str(uuid.uuid4()),file_key='synthetic.jpg',secret=self.secret)
+                    racing,racing_signature=b.issue_upload_grant(queue,store=store,job_id=claim['id'],claim_token=claim['claimToken'],
+                        engine_id=self.engine,gate_generation=1,operation_id=str(uuid.uuid4()),file_key='other.jpg',secret=self.secret)
+                    racing_item=next(item for item in store.task(self.task)['files'] if item['name_key']=='other.jpg')
+                    from processing.guarded_native_engine import start_guarded_sender
+                    other_owner=SimpleNamespace(_unreaped=[]);original_lookup=remote.lookup_upload
+                    def complete_between_lookup_and_send(g,s):
+                        self.assertIsNone(original_lookup(g,s))
+                        deadline=time.monotonic()+5
+                        other=start_guarded_sender(racing_item,g['operationId'],deadline,other_owner)
+                        try:
+                            remote.upload(g,s,other.source)
+                            other.verify(deadline)
+                            remote.confirm_upload(g,s,b._sender_confirmation(g,self.secret))
+                        finally:other.stop()
+                        return None
+                    def replay_sender(*args,**kwargs):
+                        started=start_guarded_sender(*args,**kwargs)
+                        started.verify=lambda _deadline:(_ for _ in ()).throw(AssertionError('replay verified an aborted producer'))
+                        return started
+                    with patch.object(remote,'lookup_upload',side_effect=complete_between_lookup_and_send), \
+                         patch('processing.guarded_native_engine.start_guarded_sender',side_effect=replay_sender):
+                        self.assertTrue(sender.send(remote,racing,racing_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)['success'])
+                    self.assertEqual(other_owner._unreaped,[]);self.assertEqual(sender._unreaped,[])
+                    self.assertEqual(len(self.calls),3)
+                    lease.close()
+                    with self.assertRaises(b.BrokerHeld):
+                        sender.send(remote,upload,upload_signature,store=store,claim_token=claim['claimToken'],secret=self.secret)
+                    self.assertEqual(len(self.calls),3)
                 finally:remote.close()
         finally:queue.close();lease.close()
 

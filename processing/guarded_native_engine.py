@@ -49,6 +49,61 @@ class SenderCompletion:
         if self.thread.is_alive():raise SmokeError('guarded sender did not exit')
 
 
+def start_guarded_sender(item, upload_id, deadline, owner, *, open_source=None):
+    """Start the existing bounded descriptor sender for an owned socket pair."""
+    fd,path,original=(open_source or GuardedNativeEngine._open_source)(item)
+    try:source,writer=socket.socketpair()
+    except BaseException:
+        os.close(fd);raise
+    stop=threading.Event();done=threading.Event();success=threading.Event();errors=[]
+    def feed():
+        try:
+            writer.setblocking(False);remaining_bytes=item['bytes']
+            while remaining_bytes and not stop.is_set():
+                chunk=_read_source(fd,min(CHUNK_BYTES,remaining_bytes))
+                if not chunk or stop.is_set():raise OSError('sender interrupted')
+                remaining_bytes-=len(chunk);offset=0
+                while offset<len(chunk) and not stop.is_set():
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise OSError('sender deadline')
+                    if not select.select([],[writer],[],min(.1,remaining))[1]:continue
+                    try:count=writer.send(memoryview(chunk)[offset:])
+                    except BlockingIOError:continue
+                    if not count:raise OSError('sender closed')
+                    offset+=count
+                if offset!=len(chunk):raise OSError('sender interrupted')
+            if remaining_bytes or stop.is_set() or _read_source(fd,1):raise OSError('source changed')
+            def identity(s):return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_nlink)
+            if identity(os.fstat(fd))!=original or identity(path.lstat())!=original:
+                raise OSError('source identity changed')
+            writer.shutdown(socket.SHUT_WR);success.set()
+        except BaseException as error:
+            errors.append(error)
+            try:writer.shutdown(socket.SHUT_WR)
+            except OSError:pass
+        finally:
+            try:os.close(fd)
+            except OSError as error:errors.append(error)
+            done.set()
+    thread=None
+    try:
+        thread=threading.Thread(target=feed,daemon=True);thread.start()
+    except BaseException:
+        stop.set()
+        try:source.shutdown(socket.SHUT_RDWR)
+        except OSError:pass
+        try:writer.shutdown(socket.SHUT_RDWR)
+        except OSError:pass
+        source.close();writer.close()
+        if thread is not None and thread.ident is not None:
+            thread.join(2)
+            if thread.is_alive():owner._unreaped.append(thread)
+        else:os.close(fd)
+        raise
+    return SenderCompletion(source=source,writer=writer,thread=thread,stop=stop,done=done,
+                            success=success,errors=errors,engine=owner,upload_id=upload_id,deadline=deadline)
+
+
 class GuardedNativeEngine:
     def __init__(self, store, guard):
         from . import engine_upload_contract
@@ -118,63 +173,10 @@ class GuardedNativeEngine:
         upload_id=str(uuid.uuid4())
         self.store.prepare_guarded_engine_upload(task['job_id'],task['claim_token'],item['name_key'],upload_id,
                                                  expected_generation=task['generation'])
-        fd,path,original=self._open_source(item)
-        try:source,writer=socket.socketpair()
-        except BaseException:
-            os.close(fd);raise
-        stop=threading.Event();done=threading.Event();success=threading.Event();errors=[]
         deadline=time.monotonic()+self.guard.binding.upload_deadline_seconds
-        def feed():
-            try:
-                writer.setblocking(False);remaining_bytes=item['bytes']
-                while remaining_bytes and not stop.is_set():
-                    chunk=_read_source(fd,min(CHUNK_BYTES,remaining_bytes))
-                    if not chunk or stop.is_set():raise OSError('sender interrupted')
-                    remaining_bytes-=len(chunk);offset=0
-                    while offset<len(chunk) and not stop.is_set():
-                        remaining=deadline-time.monotonic()
-                        if remaining<=0:raise OSError('sender deadline')
-                        if not select.select([],[writer],[],min(.1,remaining))[1]:continue
-                        try:count=writer.send(memoryview(chunk)[offset:])
-                        except BlockingIOError:continue
-                        if not count:raise OSError('sender closed')
-                        offset+=count
-                    if offset!=len(chunk):raise OSError('sender interrupted')
-                if remaining_bytes or stop.is_set() or _read_source(fd,1):raise OSError('source changed')
-                def identity(s):return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns,s.st_nlink)
-                if identity(os.fstat(fd))!=original or identity(path.lstat())!=original:
-                    raise OSError('source identity changed')
-                writer.shutdown(socket.SHUT_WR)
-                success.set()
-            except BaseException as error:
-                errors.append(error)
-                # Wake the guard's blocking source read immediately. The
-                # completion still fails and the durable started intent holds.
-                try:writer.shutdown(socket.SHUT_WR)
-                except OSError:pass
-            finally:
-                try:os.close(fd)
-                except OSError as error:errors.append(error)
-                done.set()
-        thread=None
+        completion=start_guarded_sender(item,upload_id,deadline,self,open_source=self._open_source)
         try:
-            thread=threading.Thread(target=feed,daemon=True);thread.start()
-        except BaseException:
-            stop.set()
-            try:source.shutdown(socket.SHUT_RDWR)
-            except OSError:pass
-            try:writer.shutdown(socket.SHUT_RDWR)
-            except OSError:pass
-            source.close();writer.close()
-            if thread is not None and thread.ident is not None:
-                thread.join(2)
-                if thread.is_alive():self._unreaped.append(thread)
-            else:os.close(fd)
-            raise
-        completion=SenderCompletion(source=source,writer=writer,thread=thread,stop=stop,done=done,
-                                    success=success,errors=errors,engine=self,upload_id=upload_id,deadline=deadline)
-        try:
-            return self.guard.stream_bound_upload('/task/new/upload/'+identifier,self._headers(task,upload_id=upload_id),source,completion=completion)
+            return self.guard.stream_bound_upload('/task/new/upload/'+identifier,self._headers(task,upload_id=upload_id),completion.source,completion=completion)
         finally:
             completion.stop()
 
