@@ -53,10 +53,16 @@ async function main(){
       authorizeConfiguration:()=>true,resolveSecret:async()=>({revision:1,token:ready.viewerToken}),ca,pin,
       timeoutMs:3000,maxAttempts:1,syntheticOnly:true,enabled:true});
     assert.equal(result.observation,'matching_receipt_response');assert.equal(result.state,'held');
-    const config={datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),
+    const config={datasetsMount:path.join(root,'datasets'),modelsMount:process.env.JOINED_MODELS_ROOT,
       cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),storageReserveBytes:0,
       storageReservePercent:0,meshDerivativesEnabled:true,opsBaseUrl:'http://operations.test'};
-    for(const key of ['datasetsMount','modelsMount','cacheMount','trashMount'])fs.mkdirSync(config[key],{mode:0o700});
+    for(const key of ['datasetsMount','cacheMount','trashMount'])fs.mkdirSync(config[key],{mode:0o700});
+    if(config.modelsMount!=='/synthetic-models')throw Error('synthetic volume required');
+    fs.chmodSync(config.modelsMount,0o700);
+    const capacity=fs.statfsSync(config.modelsMount,{bigint:true});
+    console.log('SYNTHETIC_MODELS_STATFS',JSON.stringify({bsize:String(capacity.bsize),bavail:String(capacity.bavail),
+      freeBytes:String(capacity.bsize*capacity.bavail),freeInodes:String(capacity.ffree),
+      requestedBytes:String(32*1024*1024+64*1024*1024),requestedInodes:'1000000',floorInodes:'1024'}));
     const storage=new StorageManager(config);storage.initialize();
     const ingest=await ingestHeld({db,job,processing,repository,storage,config,root:resultRoot,
       maxBytes:8*1024*1024,maxDiskBytes:32*1024*1024,authorizeBinding:()=>true,authorizeIngest:()=>true,enabled:true});
