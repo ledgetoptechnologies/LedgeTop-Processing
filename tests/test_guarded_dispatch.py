@@ -23,7 +23,7 @@ from processing.engine_ingress_guard import BackendPin,Binding,EngineIngressGuar
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.node_gate import NodeGate, GateBusy
-from processing.prototype import Queue
+from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_service import ViewerService
 from processing.viewer_tasks import TaskStore
 
@@ -198,6 +198,9 @@ class GuardedDispatchTests(unittest.TestCase):
         identifier=self.submit();self.drop=True;self.service.tick();task=self.service.store.task(identifier)
         self.assertEqual(task['job']['status'],'held');self.assertEqual(task['phase'],'upload_pending')
         self.assertEqual(task['job']['heldReason'],'transfer_uncertain')
+        with self.assertRaises(Conflict):
+            self.queue.operator(task['job_id'],'resolve',{'note':'synthetic stopped','workerStopped':True})
+        self.assertIsNone(self.queue.claim({'workerId':'synthetic-next','nodeId':'cluster','profiles':[VIEWER_PROFILE]}))
         self.assertEqual(len(self.calls),2)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')

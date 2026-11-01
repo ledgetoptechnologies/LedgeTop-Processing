@@ -438,6 +438,15 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             if not row:
                 raise Conflict("unknown job")
+            if action == 'resolve':
+                if row['held_reason'] == 'transfer_uncertain':
+                    raise Conflict('transfer requires independently fenced reconciliation')
+                try:
+                    started = self._has_attested_started_transfer(db, identifier)
+                except TransferJournalUnqualified:
+                    raise Conflict('transfer journal requires independently fenced reconciliation') from None
+                if started:
+                    raise Conflict('transfer requires independently fenced reconciliation')
             if action == "hold" and (row["status"] == "running" or
                                      (row["status"] == "held" and row['held_reason'] == 'coordinator_restart')):
                 status = "held"

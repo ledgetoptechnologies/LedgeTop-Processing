@@ -894,6 +894,50 @@ class ViewerServiceTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM engine_ingress_uploads').fetchone()[0], 0)
 
+    def assert_unqualified_journal_cannot_resolve(self, schema):
+        from processing.engine_ingress_guard import STREAM_DDL
+        first, second = self.submit(), self.submit()
+        with self.queue._db() as db:
+            if schema == 'unrelated_complete':
+                db.execute(STREAM_DDL)
+                db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                           ('other', 'other-job', 'other-engine', 1, 'a' * 64, 'complete'))
+            else:
+                db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
+        self.engines['cluster'].fail = 'initialize'
+        self.service.tick()
+        job = self.task(first)['job']
+        self.assertEqual((job['status'], job['heldReason']), ('held', 'transfer_uncertain'))
+        with self.assertRaises(Conflict):
+            self.queue.operator(job['id'], 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic-next', 'nodeId': 'cluster',
+                                            'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+        self.assertEqual(self.task(first)['job']['status'], 'held')
+
+    def test_legacy_journal_cannot_resolve_uncertain_hold_or_release_slot(self):
+        self.assert_unqualified_journal_cannot_resolve('unrelated_complete')
+
+    def test_corrupt_journal_cannot_resolve_uncertain_hold_or_release_slot(self):
+        self.assert_unqualified_journal_cannot_resolve('corrupt')
+
+    def test_preexisting_operator_hold_cannot_resolve_with_unqualified_journal(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        first, second = self.submit(), self.submit()
+        self.engines['cluster'].fail = 'initialize'
+        self.service.tick()
+        job = self.task(first)['job']
+        self.assertEqual((job['status'], job['heldReason']), ('held', 'operator'))
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('other', 'other-job', 'other-engine', 1, 'a' * 64, 'complete'))
+        with self.assertRaises(Conflict):
+            self.queue.operator(job['id'], 'resolve', {'note': 'synthetic stopped', 'workerStopped': True})
+        self.assertIsNone(self.queue.claim({'workerId': 'synthetic-next', 'nodeId': 'cluster',
+                                            'profiles': [VIEWER_PROFILE]}))
+        self.assertEqual(self.task(second)['job']['status'], 'queued')
+
     def test_corrupt_trigger_preventing_hold_keeps_slot_and_sets_dispatch_warning(self):
         import time
         identifier = self.submit()
