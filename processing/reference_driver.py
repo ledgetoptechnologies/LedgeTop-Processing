@@ -123,8 +123,17 @@ class ReferenceDriver:
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
                  execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
-                 remote_reference=None, transfer_journal=False, normalized_transfer=False):
+                 remote_reference=None, transfer_journal=False, normalized_transfer=False, fetch_pin=False, fetch_batch_size=0):
         from . import reference_transfer_journal_candidate as transfer_journal_module
+        from . import reference_fetch_pin_candidate as fetch_pin_module
+        if type(fetch_pin) is not bool or (fetch_pin and (not normalized_transfer or fetch_pin_module.QUALIFIED is not True)):
+            raise ValueError('fetch pin is not qualified')
+        self._fetch_pin = fetch_pin
+        from . import reference_fetch_batch_candidate as fetch_batch_module
+        if type(fetch_batch_size) is not int or not 0 <= fetch_batch_size <= 4 or (fetch_batch_size and
+                (not fetch_pin or fetch_batch_module.QUALIFIED is not True)):
+            raise ValueError('fetch batch is not qualified')
+        self._fetch_batch_size = fetch_batch_size
         if (type(normalized_transfer) is not bool or (normalized_transfer and
                 (not transfer_journal or transfer_journal_module.NORMALIZED_QUALIFIED is not True))):
             raise ValueError('normalized transfer is not qualified')
@@ -250,6 +259,10 @@ class ReferenceDriver:
                 settings['transferJournal'] = 'reference-object-journal-v1'
             if self._normalized_transfer:
                 settings['normalizedTransfer'] = 'reference-input-cursor-v1'
+            if self._fetch_pin:
+                settings['fetchPin'] = 'reference-fetch-pin-v1'
+            if self._fetch_batch_size:
+                settings['fetchBatchSize'] = self._fetch_batch_size
             if execution_router is not None:
                 settings['executionRouting'] = dict(mode='per-job-v1', path=str(execution_router.path),
                     provenancePath=str(provenance_client.path) if provenance_client is not None else None)
@@ -898,17 +911,35 @@ class ReferenceDriver:
                 cursor = data.get('inputCursor')
                 if type(cursor) is not int or not 0 <= cursor <= len(objects_in_order) or paths:
                     raise DriverHeld('transfer_cursor_changed')
-                status, observed = self._request('GET', suffix + '/claim-state', claim_token=token)
-                if status != 200:
-                    raise DriverHeld('transfer_claim_unavailable')
                 expected_claim = dict(authorityId=self.worker.authority_id, jobId=job_id,
                     generation=claim['generation'], environment=claim['environment'], nodeId=self.node_id,
                     workerId=self.worker_id, workerInstanceId=self.worker_instance_id,
                     claimTokenSha256=hashlib.sha256(token.encode()).hexdigest(),
                     manifestSha256=claim['manifestSha256'], pipelineDigest=claim['pipelineDigest'],
                     status='running', executionPhase='fetching', heldReason=None)
-                if type(observed) is not dict or any(observed.get(key) != value for key,value in expected_claim.items()):
-                    raise DriverHeld('transfer_claim_changed')
+                def observe_claim():
+                    status, observed = self._request('GET', suffix + '/claim-state', claim_token=token)
+                    if status != 200:raise DriverHeld('transfer_claim_unavailable')
+                    if type(observed) is not dict or any(observed.get(key) != value for key,value in expected_claim.items()):
+                        raise DriverHeld('transfer_claim_changed')
+                observe_claim()
+                if self._fetch_pin:
+                    from . import reference_transfer_journal_candidate as tj
+                    from . import reference_fetch_pin_candidate as fetch_pin_module
+                    stat_directory = directory.stat()
+                    with self._db() as db:
+                        tj.bind(db, job=job_id, generation=claim['generation'], manifest_sha=claim['manifestSha256'],
+                            reservation=reservation, directory_device=stat_directory.st_dev, directory_inode=stat_directory.st_ino)
+                        tj.pin_intent(db, job=job_id, generation=claim['generation'], manifest_sha=claim['manifestSha256'],
+                            reservation=reservation, directory_device=stat_directory.st_dev, directory_inode=stat_directory.st_ino)
+                    fetch_pin_module.acquire(self.ledger,self._state_owner,reservation=reservation,job=job_id,
+                        generation=claim['generation'],environment=claim['environment'],manifest_sha256=claim['manifestSha256'],
+                        directory_device=stat_directory.st_dev,directory_inode=stat_directory.st_ino)
+                if self._fetch_batch_size and cursor < len(objects_in_order):
+                    from . import reference_fetch_batch_candidate as batch
+                    return batch.run(self,job_id=job_id,claim=claim,grant=grant,reservation=reservation,
+                        directory=directory,cursor=cursor,objects=objects_in_order[cursor:cursor+self._fetch_batch_size],
+                        observe_claim=observe_claim)
             if self._transfer_journal and paths:
                 objects = {item['id']: item for item in claim['submission']['manifest']['objects']}
                 with self._db() as db:

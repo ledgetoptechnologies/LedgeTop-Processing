@@ -371,6 +371,131 @@ class ReferenceDriverTests(unittest.TestCase):
             with self.driver._db() as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM transfer_journal_object WHERE state='charged'").fetchone()[0],2)
 
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX fetch pin required')
+    def test_fetch_pin_intent_precedes_synthetic_download_and_survives_ttl(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        from processing import reference_fetch_pin_candidate as pin
+        with patch.object(journal,'QUALIFIED',True), patch.object(journal,'NORMALIZED_QUALIFIED',True), patch.object(pin,'QUALIFIED',True), DaemonStateLock(self.root) as owner:
+            pin.install(self.ledger,owner,enabled=True)
+            self.driver=ReferenceDriver(self.worker,self.ledger,self.outbox,self.broker,
+                'https://coordinator.invalid:9443',TOKEN,state_path=self.root/'pin-driver.sqlite',ssl_context=self.context,
+                output_budget=1024*1024,transfer_ttl=240,safety_floor=1024,failure_outbox=self.failures,
+                worker_instance_id='instance',state_owner=owner,transfer_journal=True,normalized_transfer=True,fetch_pin=True)
+            self.driver._request=self.request;self.driver.sender._open=self.sender_open
+            job=self.submit();self.advance(job,'fetching')
+            def check_before_download(grant,object_id,destination):
+                with self.driver._db() as db:self.assertIsNotNone(db.execute('SELECT 1 FROM transfer_fetch_pin_intent').fetchone())
+                with self.ledger._transaction() as db:
+                    self.ledger._expire(db,10**12)
+                    self.assertEqual(tuple(db.execute('SELECT allocated,state FROM reservations').fetchone()),(0,'reserved'))
+                    self.assertEqual(db.execute('SELECT state FROM reference_fetch_pins').fetchone()[0],'active')
+                return self.download(grant,object_id,destination)
+            with patch.object(self.broker,'download_object',side_effect=check_before_download):
+                self.assertEqual(self.driver.step()['state'],'fetching')
+            with self.ledger._transaction() as db:
+                self.ledger._expire(db,10**12)
+                self.assertEqual(db.execute('SELECT state FROM reservations').fetchone()[0],'reserved')
+                self.assertEqual(db.execute('SELECT state FROM reference_fetch_pins').fetchone()[0],'active')
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX fetch batch required')
+    def test_fetch_batch_incomplete_holds_without_resending(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        from processing import reference_fetch_pin_candidate as pin
+        from processing import reference_fetch_batch_candidate as batch
+        with patch.object(journal,'QUALIFIED',True), patch.object(journal,'NORMALIZED_QUALIFIED',True), patch.object(pin,'QUALIFIED',True), patch.object(batch,'QUALIFIED',True), DaemonStateLock(self.root) as owner:
+            pin.install(self.ledger,owner,enabled=True)
+            self.driver=ReferenceDriver(self.worker,self.ledger,self.outbox,self.broker,
+                'https://coordinator.invalid:9443',TOKEN,state_path=self.root/'batch-driver.sqlite',ssl_context=self.context,
+                output_budget=1024*1024,transfer_ttl=240,safety_floor=1024,failure_outbox=self.failures,
+                worker_instance_id='instance',state_owner=owner,transfer_journal=True,normalized_transfer=True,fetch_pin=True,fetch_batch_size=2)
+            self.driver._request=self.request;self.driver.sender._open=self.sender_open
+            job=self.submit(contents=(b'first',b'second'));self.advance(job,'fetching')
+            calls=[]
+            def fail_second(grant,object_id,destination):
+                calls.append(object_id)
+                if len(calls)==2:raise TransferResponseUnavailable('synthetic missing response')
+                return self.download(grant,object_id,destination)
+            with patch.object(self.broker,'download_object',side_effect=fail_second):
+                self.assertEqual(self.driver.step()['state'],'retry_wait')
+                self.assertEqual(self.driver.step(),{'state':'held','reason':'fetch_batch_incomplete_requires_reconciliation'})
+                self.assertEqual(len(calls),2)
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_fetch_batches').fetchone()[0],'started')
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM transfer_fetch_batch_items WHERE state='started'").fetchone()[0],2)
+            with self.ledger._transaction() as db:self.assertEqual(db.execute('SELECT state FROM reference_fetch_pins').fetchone()[0],'active')
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX fetch batch required')
+    def test_fetch_batch_reconciles_all_files_after_ledger_before_cursor(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        from processing import reference_fetch_pin_candidate as pin
+        from processing import reference_fetch_batch_candidate as batch
+        with patch.object(journal,'QUALIFIED',True), patch.object(journal,'NORMALIZED_QUALIFIED',True), patch.object(pin,'QUALIFIED',True), patch.object(batch,'QUALIFIED',True), DaemonStateLock(self.root) as owner:
+            pin.install(self.ledger,owner,enabled=True)
+            self.driver=ReferenceDriver(self.worker,self.ledger,self.outbox,self.broker,
+                'https://coordinator.invalid:9443',TOKEN,state_path=self.root/'batch-driver.sqlite',ssl_context=self.context,
+                output_budget=1024*1024,transfer_ttl=240,safety_floor=1024,failure_outbox=self.failures,
+                worker_instance_id='instance',state_owner=owner,transfer_journal=True,normalized_transfer=True,fetch_pin=True,fetch_batch_size=2)
+            self.driver._request=self.request;self.driver.sender._open=self.sender_open
+            job=self.submit(contents=(b'first',b'second'));self.advance(job,'fetching')
+            with patch.object(self.broker,'download_object',wraps=self.download) as download:
+                with patch.object(journal,'charged',side_effect=RuntimeError('synthetic checkpoint loss')):
+                    self.assertEqual(self.driver.step()['state'],'retry_wait')
+                self.assertEqual(download.call_count,2)
+                self.assertEqual(self.driver.step()['state'],'fetching')
+                self.assertEqual(download.call_count,2)
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_fetch_batches').fetchone()[0],'charged')
+                data=json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?',(job['jobId'],)).fetchone()[0])
+                self.assertEqual(data['inputCursor'],2)
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX fetch batch required')
+    def test_fetch_batch_does_not_request_after_grant_expiry(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        from processing import reference_fetch_pin_candidate as pin
+        from processing import reference_fetch_batch_candidate as batch
+        with patch.object(journal,'QUALIFIED',True), patch.object(journal,'NORMALIZED_QUALIFIED',True), patch.object(pin,'QUALIFIED',True), patch.object(batch,'QUALIFIED',True), DaemonStateLock(self.root) as owner:
+            pin.install(self.ledger,owner,enabled=True);now=[time.time()]
+            self.driver=ReferenceDriver(self.worker,self.ledger,self.outbox,self.broker,
+                'https://coordinator.invalid:9443',TOKEN,state_path=self.root/'batch-driver.sqlite',ssl_context=self.context,
+                output_budget=1024*1024,transfer_ttl=240,safety_floor=1024,failure_outbox=self.failures,
+                worker_instance_id='instance',state_owner=owner,transfer_journal=True,normalized_transfer=True,fetch_pin=True,fetch_batch_size=2,clock=lambda:now[0])
+            self.driver._request=self.request;self.driver.sender._open=self.sender_open
+            job=self.submit(contents=(b'first',b'second'));self.advance(job,'fetching')
+            calls=[]
+            def expire_after_first(grant,object_id,destination):
+                calls.append(object_id);result=self.download(grant,object_id,destination);now[0]+=1000;return result
+            with patch.object(self.broker,'download_object',side_effect=expire_after_first):
+                self.assertEqual(self.driver.step(),{'state':'held','reason':'transfer_grant_expired'})
+            self.assertEqual(len(calls),1)
+            with self.driver._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM transfer_fetch_batches').fetchone()[0],'started')
+
+    @unittest.skipUnless(os.name == 'posix', 'owned POSIX fetch batch required')
+    def test_fetch_batch_four_inputs_reaches_synthetic_delivery(self):
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing import reference_transfer_journal_candidate as journal
+        from processing import reference_fetch_pin_candidate as pin
+        from processing import reference_fetch_batch_candidate as batch
+        with patch.object(journal,'QUALIFIED',True),patch.object(journal,'NORMALIZED_QUALIFIED',True),patch.object(pin,'QUALIFIED',True),patch.object(batch,'QUALIFIED',True),DaemonStateLock(self.root) as owner:
+            pin.install(self.ledger,owner,enabled=True)
+            self.driver=ReferenceDriver(self.worker,self.ledger,self.outbox,self.broker,
+                'https://coordinator.invalid:9443',TOKEN,state_path=self.root/'batch-driver.sqlite',ssl_context=self.context,
+                output_budget=1024*1024,transfer_ttl=240,safety_floor=1024,failure_outbox=self.failures,
+                worker_instance_id='instance',state_owner=owner,transfer_journal=True,normalized_transfer=True,fetch_pin=True,fetch_batch_size=4)
+            self.driver._request=self.request;self.driver.sender._open=self.sender_open
+            job=self.submit(contents=(b'one',b'two',b'three',b'four'))
+            self.advance(job,'awaiting_acceptance')
+            self.assertEqual(self.store.get(job['jobId'])['phase'],'awaiting_acceptance')
+            self.assertEqual(len([call for call in self.transport.calls if call[0]=='upload']),4)
+            with self.driver._db() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM transfer_fetch_batch_items WHERE state='charged'").fetchone()[0],4)
+            with self.ledger._transaction() as db:
+                self.assertEqual(db.execute('SELECT state FROM reference_fetch_pins').fetchone()[0],'active')
+
     def test_acceptance_retry_rotation_survives_clock_rewind_and_restart(self):
         data=json.dumps({'claim':{'claimToken':'synthetic'}})
         with self.driver._db() as db:

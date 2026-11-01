@@ -220,3 +220,31 @@ class ClaimObservationCacheCandidateTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM transfer_journal_object WHERE state='charged'").fetchone()[0],500)
             report=io.StringIO();pstats.Stats(profiler,stream=report).strip_dirs().sort_stats('cumulative').print_stats(12)
             print('synthetic 500/10000 one-byte fetches: seconds=%.3f'%elapsed,report.getvalue(),flush=True)
+
+    @unittest.skipUnless(os.environ.get('LT_ENABLE_SYNTHETIC_PROFILE') == '1', 'explicit synthetic profile opt-in required')
+    def test_profile_500_batched_fetches_under_ten_thousand_metadata(self):
+        import cProfile
+        import io
+        import pstats
+        from ops.reference_worker_daemon import DaemonStateLock
+        from processing.reference_driver import ReferenceDriver
+        from processing import reference_transfer_journal_candidate as journal
+        from processing import reference_fetch_pin_candidate as pin
+        from processing import reference_fetch_batch_candidate as batch
+        with patch.object(journal,'QUALIFIED',True),patch.object(journal,'NORMALIZED_QUALIFIED',True),patch.object(pin,'QUALIFIED',True),patch.object(batch,'QUALIFIED',True),DaemonStateLock(self.root) as owner:
+            pin.install(self.ledger,owner,enabled=True)
+            self.driver=ReferenceDriver(self.worker,self.ledger,self.outbox,self.broker,
+                'https://coordinator.invalid:9443',TOKEN,state_path=self.root/'batch-driver.sqlite',ssl_context=self.context,
+                output_budget=1024*1024,transfer_ttl=240,safety_floor=1024,failure_outbox=self.failures,
+                worker_instance_id='instance',state_owner=owner,transfer_journal=True,normalized_transfer=True,fetch_pin=True,fetch_batch_size=4)
+            self.driver._request=self.request;self.driver.sender._open=self.sender_open
+            job=self.submit(contents=(b'x',)*10000);self.advance(job,'fetching')
+            profiler=cProfile.Profile();started=time.monotonic();profiler.enable()
+            try:
+                for _ in range(125):self.assertEqual(self.driver.step()['state'],'fetching')
+            finally:profiler.disable()
+            elapsed=time.monotonic()-started
+            with self.driver._db() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM transfer_fetch_batch_items WHERE state='charged'").fetchone()[0],500)
+            report=io.StringIO();pstats.Stats(profiler,stream=report).strip_dirs().sort_stats('cumulative').print_stats(12)
+            print('synthetic 500/10000 one-byte batched fetches: seconds=%.3f'%elapsed,report.getvalue(),flush=True)

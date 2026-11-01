@@ -53,9 +53,12 @@ def _parts(content_type, body):
 class NativeNodeFixture:
     synthetic_fixture = True
 
-    def __init__(self, path, host='127.0.0.1', port=0, engine_version='synthetic-transport-only', *, synthetic_enabled=False):
+    def __init__(self, path, host='127.0.0.1', port=0, engine_version='synthetic-transport-only', *, synthetic_enabled=False, synthetic_multi_upload=False):
         if synthetic_enabled is not True:
             raise ValueError('explicit synthetic fixture opt-in required')
+        if type(synthetic_multi_upload) is not bool:
+            raise ValueError('explicit synthetic multi-upload setting required')
+        self._multi_upload=synthetic_multi_upload
         if not ipaddress.ip_address(host).is_loopback or type(port) is not int or not 0 <= port <= 65535:
             raise ValueError('synthetic fixture requires literal loopback binding')
         if type(engine_version) is not str or not 1 <= len(engine_version) <= 128 or not all(0x21 <= ord(c) <= 0x7e for c in engine_version):
@@ -78,6 +81,18 @@ class NativeNodeFixture:
               CREATE TABLE IF NOT EXISTS calls (action TEXT NOT NULL,job TEXT NOT NULL);
               CREATE UNIQUE INDEX IF NOT EXISTS single_mutation ON calls(action,job)
                 WHERE action IN ('initialize','upload','commit');''')
+            db.execute('CREATE TABLE IF NOT EXISTS fixture_config (singleton INTEGER PRIMARY KEY, multi_upload INTEGER NOT NULL)')
+            setting=db.execute('SELECT multi_upload FROM fixture_config WHERE singleton=1').fetchone()
+            if setting is None:
+                if synthetic_multi_upload and db.execute('SELECT 1 FROM calls LIMIT 1').fetchone():
+                    raise ValueError('synthetic multi-upload requires empty fixture')
+                db.execute('INSERT INTO fixture_config VALUES(1,?)',(int(synthetic_multi_upload),))
+            elif setting[0]!=int(synthetic_multi_upload):
+                raise ValueError('synthetic fixture mode changed')
+            if synthetic_multi_upload:
+                db.execute('DROP INDEX IF EXISTS single_mutation')
+                db.execute("CREATE UNIQUE INDEX single_mutation ON calls(action,job) WHERE action IN ('initialize','commit')")
+                db.execute('CREATE TABLE IF NOT EXISTS fixture_uploads (job TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(job,name))')
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -259,9 +274,14 @@ class NativeNodeFixture:
                 if len(parts) != 1 or parts[0][0] != 'images' or parts[0][1] is None or parts[0][2] != b'abc':
                     raise ValueError('fixture accepts abc only')
                 p._basename(parts[0][1])
-                if task['uploaded'] or task['committed']:
+                if task['committed'] or (task['uploaded'] and not self._multi_upload):
                     return 409, {'error': 'synthetic_upload_exists'}, False
-                db.execute('UPDATE tasks SET uploaded=1 WHERE uuid=?', (identifier,))
+                if self._multi_upload:
+                    if db.execute('SELECT COUNT(*) FROM fixture_uploads WHERE job=?',(identifier,)).fetchone()[0]>=64:
+                        return 409, {'error':'synthetic_upload_limit'}, False
+                    try:db.execute('INSERT INTO fixture_uploads VALUES(?,?)',(identifier,parts[0][1].lower()))
+                    except sqlite3.IntegrityError:return 409, {'error':'synthetic_upload_exists'}, False
+                db.execute('UPDATE tasks SET uploaded=uploaded+1 WHERE uuid=?', (identifier,))
                 db.execute("INSERT INTO calls VALUES('upload',?)", (identifier,))
                 return 200, {'success': True}, False
             if method == 'POST' and action == 'commit' and read is None:

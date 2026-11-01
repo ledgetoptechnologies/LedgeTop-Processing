@@ -33,7 +33,7 @@ from processing.viewer_tasks import TaskStore
 
 @unittest.skipUnless(os.name=='posix','owned POSIX fixture required')
 class RemoteDaemonCandidateTests(unittest.TestCase):
-    def _run_daemon_photo(self,terminal_code,*,disconnect=False,paged=False,normalized=False,fetch_crash=False):
+    def _run_daemon_photo(self,terminal_code,*,disconnect=False,paged=False,normalized=False,fetch_crash=False,batch_crash=False,batch_success=False):
         root=Path(tempfile.mkdtemp(prefix='lt-remote-daemon-e2e-')).resolve();root.chmod(0o700)
         print('retained synthetic remote daemon root:',root,flush=True)
         for name in ('state','scratch','leases','xdg'):(root/name).mkdir(mode=0o700)
@@ -55,7 +55,7 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
         allow_receipt_retry=threading.Event()
         old_xdg=os.environ.get('XDG_STATE_HOME');os.environ['XDG_STATE_HOME']=str(root/'xdg')
         try:
-            engine=NativeNodeFixture(root/'engine.sqlite',synthetic_enabled=True)
+            engine=NativeNodeFixture(root/'engine.sqlite',synthetic_enabled=True,synthetic_multi_upload=batch_crash or batch_success)
             engine.start()
             if terminal_code!=40:
                 with sqlite3.connect(engine.path) as engine_db:
@@ -143,16 +143,24 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                     backendContainerId='a'*64,backendImageId='sha256:'+'b'*64,backendPort=int(engine.origin.rsplit(':',1)[1])))
             if paged:config['referenceRemoteBroker']['paged']=True
             if normalized:config['normalizedTransferCandidate']=True
+            if batch_crash or batch_success:config.update(fetchPinCandidate=True,fetchBatchSizeCandidate=2)
             config_path=root/'worker.json';config_path.write_text(json.dumps(config),encoding='utf-8');config_path.chmod(0o600)
             raw=copy.deepcopy(fixture['submission']);raw['submissionId']=str(uuid.uuid4())
             obj=dict(id='image-'+raw['submissionId'],name='test.jpg',byteSize=3,sha256=hashlib.sha256(b'abc').hexdigest(),kind='image',mediaType='image/jpeg')
-            raw['manifest'].update(objects=[obj],objectCount=1,totalBytes=3,inputCounts=dict(images=1,lidarObjects=0,points=0))
+            objects=[obj]
+            if batch_crash or batch_success:objects.append(dict(obj,id=obj['id']+'-2',name='test2.jpg'))
+            raw['manifest'].update(objects=objects,objectCount=len(objects),totalBytes=3*len(objects),inputCounts=dict(images=len(objects),lidarObjects=0,points=0))
             raw['manifest']['sha256']=manifest_sha256(raw['manifest'])
             job=store.submit(validate_submission(raw,environment='staging',capability_fingerprint=raw['capabilityFingerprint']))[0]
             bootstrap="import sys; import ops.reference_worker_daemon as d; import processing.node_mutation_broker as b; import processing.node_reference_authority_session as s; import processing.reference_engine_worker as w; import processing.reference_transfer_journal_candidate as j; j.QUALIFIED=True; j.NORMALIZED_QUALIFIED=True; d.REFERENCE_REMOTE_DAEMON_QUALIFIED=True; b.QUALIFIED=True; s.REFERENCE_REMOTE_QUALIFIED=True; s.REFERENCE_PAGING_QUALIFIED=True; w.BROKER_WORKER_CANDIDATE_QUALIFIED=True; b.local_engine_identity=lambda deadline:'synthetic-engine'; b.local_backend_identity=lambda pin,deadline:None; sys.argv=['reference_worker_daemon','--odm-only','--config',sys.argv[1]]; raise SystemExit(d.main())"
             marker=root/'synthetic-fetch-crash.marker'
             if fetch_crash:
                 hook='''import os,time\nimport processing.reference_driver as rd\noriginal_save=rd.ReferenceDriver._save\ndef crash_before_cursor(self,job,stage,data):\n    marker=os.environ['LT_SYNTHETIC_FETCH_CRASH_MARKER']\n    if stage=='fetching' and data.get('inputCursor')==1 and not os.path.exists(marker):\n        fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)\n        try:\n            os.write(fd,b'charged-before-cursor');os.fsync(fd)\n        finally:os.close(fd)\n        while True:time.sleep(0.1)\n    return original_save(self,job,stage,data)\nrd.ReferenceDriver._save=crash_before_cursor\n'''
+                bootstrap='exec('+repr(hook)+'); '+bootstrap
+            if batch_success:
+                bootstrap="import processing.reference_fetch_pin_candidate as p; import processing.reference_fetch_batch_candidate as f; p.QUALIFIED=True; f.QUALIFIED=True; "+bootstrap
+            if batch_crash:
+                hook='''import os,time\nimport processing.reference_transfer as rt\nimport processing.reference_fetch_pin_candidate as pin\nimport processing.reference_fetch_batch_candidate as batch\npin.QUALIFIED=True;batch.QUALIFIED=True\noriginal_batch=batch.run\ndef report_batch_hold(*args,**kwargs):\n    try:return original_batch(*args,**kwargs)\n    except Exception as error:\n        if str(error)=='fetch_batch_incomplete_requires_reconciliation':\n            fd=os.open(os.environ['LT_SYNTHETIC_FETCH_CRASH_MARKER']+'.held',os.O_CREAT|os.O_TRUNC|os.O_WRONLY,0o600)\n            try:os.write(fd,b'incomplete-batch-held');os.fsync(fd)\n            finally:os.close(fd)\n        raise\nbatch.run=report_batch_hold\noriginal_download=rt.BrokerClient.download_object\ndef pause_after_first(self,*args,**kwargs):\n    result=original_download(self,*args,**kwargs)\n    marker=os.environ['LT_SYNTHETIC_FETCH_CRASH_MARKER']\n    if not os.path.exists(marker):\n        fd=os.open(marker,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)\n        try:\n            os.write(fd,b'batch-first-file-published');os.fsync(fd)\n        finally:os.close(fd)\n        while True:time.sleep(0.1)\n    return result\nrt.BrokerClient.download_object=pause_after_first\n'''
                 bootstrap='exec('+repr(hook)+'); '+bootstrap
             child_env=dict(os.environ,LT_SYNTHETIC_FETCH_CRASH_MARKER=str(marker))
             log=open(root/'daemon.log','wb')
@@ -164,7 +172,26 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                     state=store.get(job['jobId'],private=True)
                     if state['phase']=='awaiting_transfer' and not granted:
                         store.receive_transfer_grant(job['jobId'],dict(state['transferRequest'],jobId=job['jobId'],
-                            environment='staging',objectIds=[obj['id']],token=fetch_token));granted=True
+                            environment='staging',objectIds=[item['id'] for item in objects],token=fetch_token));granted=True
+                    if batch_crash and marker.exists() and not restarted:
+                        process.kill();self.assertEqual(process.wait(timeout=5),-signal.SIGKILL)
+                        with sqlite3.connect('file:'+str(root/'state'/'driver.sqlite')+'?mode=ro',uri=True,timeout=1) as db:
+                            self.assertEqual(db.execute('SELECT state FROM transfer_fetch_batches').fetchone()[0],'started')
+                            self.assertEqual(db.execute("SELECT COUNT(*) FROM transfer_fetch_batch_items WHERE state='started'").fetchone()[0],2)
+                        with sqlite3.connect('file:'+str(root/'state'/'scratch.sqlite')+'?mode=ro',uri=True,timeout=1) as db:
+                            self.assertEqual(db.execute('SELECT state FROM reference_fetch_pins').fetchone()[0],'active')
+                        self.assertEqual(len(fetch_calls),1)
+                        process=subprocess.Popen([os.environ.get('PYTHON','python3'),'-c',bootstrap,str(config_path)],stdout=log,stderr=log,env=child_env)
+                        restarted=True
+                    if batch_crash and restarted and Path(str(marker)+'.held').exists():
+                        with sqlite3.connect('file:'+str(root/'state'/'driver.sqlite')+'?mode=ro',uri=True,timeout=1) as db:
+                            current=db.execute('SELECT stage,data FROM driver_jobs WHERE job=?',(job['jobId'],)).fetchone()
+                        if current and current[0]=='fetching' and len(fetch_calls)==1:
+                            time.sleep(1)
+                            self.assertEqual(len(fetch_calls),1)
+                            self.assertEqual(engine.counts(),{'initialize':0,'upload':0,'commit':0,'download':0})
+                            self.assertEqual(len(list((root/'scratch').rglob('*.input'))),1)
+                            released=True;break
                     if fetch_crash and marker.exists() and not restarted:
                         process.kill();self.assertEqual(process.wait(timeout=5),-signal.SIGKILL)
                         with sqlite3.connect('file:'+str(root/'state'/'driver.sqlite')+'?mode=ro',uri=True,timeout=1) as db:
@@ -188,7 +215,7 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                             allow_receipt_retry.set()
                             process=subprocess.Popen([os.environ.get('PYTHON','python3'),'-c',bootstrap,str(config_path)],stdout=log,stderr=log,env=dict(os.environ))
                             restarted=True
-                    if (terminal_code==40 and state['phase']=='awaiting_acceptance') or (terminal_code!=40 and state['status'] in ('failed','cancelled')):
+                    if not batch_crash and ((terminal_code==40 and state['phase']=='awaiting_acceptance') or (terminal_code!=40 and state['status'] in ('failed','cancelled'))):
                         with NodeGate('synthetic-engine') as gate:released=gate.snapshot()['reservation'] is None
                         if released:break
                     time.sleep(0.1)
@@ -202,17 +229,22 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
                 if fetch_crash:
                     self.assertTrue(restarted)
                     self.assertEqual(len(fetch_calls),1)
-                self.assertEqual(engine.counts(),{'initialize':1,'upload':1,'commit':1,'download':1 if terminal_code==40 else 0})
-                inputs=[path for path in (root/'scratch').rglob('*.input') if path.is_file()]
-                archives=[path for path in (root/'scratch').rglob('all.zip') if path.is_file()]
-                self.assertEqual(len(inputs),1);self.assertEqual(inputs[0].read_bytes(),b'abc')
-                self.assertEqual(len(archives),1 if terminal_code==40 else 0)
-                if terminal_code!=40:
-                    self.assertEqual(state['status'],'failed' if terminal_code==30 else 'cancelled')
-                    with queue._db() as db:
-                        failure=db.execute('SELECT failure_json,delivery_state FROM reference_worker_failures WHERE job_id=?',(job['jobId'],)).fetchone()
-                        self.assertEqual(failure['delivery_state'],'awaiting_viewer_failure_acceptance')
-                        self.assertEqual(json.loads(failure['failure_json'])['terminalState'],'failed' if terminal_code==30 else 'cancelled')
+                if batch_crash:
+                    self.assertTrue(restarted and Path(str(marker)+'.held').exists())
+                    inputs=[path for path in (root/'scratch').rglob('*.input') if path.is_file()]
+                    self.assertEqual(len(inputs),1);self.assertEqual(inputs[0].read_bytes(),b'abc')
+                if not batch_crash:
+                    self.assertEqual(engine.counts(),{'initialize':1,'upload':2 if batch_success else 1,'commit':1,'download':1 if terminal_code==40 else 0})
+                    inputs=[path for path in (root/'scratch').rglob('*.input') if path.is_file()]
+                    archives=[path for path in (root/'scratch').rglob('all.zip') if path.is_file()]
+                    self.assertEqual(len(inputs),2 if batch_success else 1);self.assertTrue(all(path.read_bytes()==b'abc' for path in inputs))
+                    self.assertEqual(len(archives),1 if terminal_code==40 else 0)
+                    if terminal_code!=40:
+                        self.assertEqual(state['status'],'failed' if terminal_code==30 else 'cancelled')
+                        with queue._db() as db:
+                            failure=db.execute('SELECT failure_json,delivery_state FROM reference_worker_failures WHERE job_id=?',(job['jobId'],)).fetchone()
+                            self.assertEqual(failure['delivery_state'],'awaiting_viewer_failure_acceptance')
+                            self.assertEqual(json.loads(failure['failure_json'])['terminalState'],'failed' if terminal_code==30 else 'cancelled')
                 self.assertEqual(errors,[])
         finally:
             stop.set()
@@ -248,6 +280,8 @@ class RemoteDaemonCandidateTests(unittest.TestCase):
         self.assertTrue(all(not thread.is_alive() for thread in threads))
 
     def test_actual_daemon_photo_success_normalized(self):self._run_daemon_photo(40,paged=True,normalized=True)
+    def test_actual_daemon_two_input_batch_success(self):self._run_daemon_photo(40,paged=True,normalized=True,batch_success=True)
+    def test_actual_daemon_kill_during_started_batch_holds(self):self._run_daemon_photo(40,paged=True,normalized=True,batch_crash=True)
     def test_actual_daemon_kill_before_normalized_cursor(self):self._run_daemon_photo(40,paged=True,normalized=True,fetch_crash=True)
     def test_actual_daemon_photo_success_paged(self):self._run_daemon_photo(40,paged=True)
     def test_actual_daemon_photo_success(self):self._run_daemon_photo(40)

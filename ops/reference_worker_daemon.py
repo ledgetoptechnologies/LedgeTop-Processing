@@ -45,7 +45,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting','brokerRangeMaxBytes','referenceRemoteBroker','normalizedTransferCandidate'))
+                      'executionRouting','brokerRangeMaxBytes','referenceRemoteBroker','normalizedTransferCandidate','fetchPinCandidate','fetchBatchSizeCandidate'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -60,6 +60,23 @@ def _normalized_transfer_policy(config):
             or journal.NORMALIZED_QUALIFIED is not True or 'referenceRemoteBroker' not in config):
         raise ValueError('normalized transfer candidate is not qualified')
     return True
+
+
+def _fetch_pin_policy(config):
+    if 'fetchPinCandidate' not in config:return False
+    from processing import reference_fetch_pin_candidate as pin
+    if config['fetchPinCandidate'] is not True or pin.QUALIFIED is not True or not _normalized_transfer_policy(config):
+        raise ValueError('fetch pin candidate is not qualified')
+    return True
+
+
+def _fetch_batch_policy(config):
+    if 'fetchBatchSizeCandidate' not in config:return 0
+    from processing import reference_fetch_batch_candidate as batch
+    value=config['fetchBatchSizeCandidate']
+    if type(value) is not int or not 1<=value<=4 or batch.QUALIFIED is not True or not _fetch_pin_policy(config):
+        raise ValueError('fetch batch candidate is not qualified')
+    return value
 
 
 def _reference_remote_broker_policy(config):
@@ -378,6 +395,8 @@ def load_config(path):
         _execution_routing(config)
         _reference_remote_broker_policy(config)
         _normalized_transfer_policy(config)
+        _fetch_pin_policy(config)
+        _fetch_batch_policy(config)
         for field in ('stateRoot','scratchRoot'):
             if type(config[field]) is not str or not Path(config[field]).is_absolute():
                 raise ValueError('absolute private directories required')
@@ -455,6 +474,8 @@ def _build_worker(config,owner,resources):
     """Construct under the factory's mandatory state-root ownership capability."""
     remote_config=_reference_remote_broker_policy(config)
     normalized_transfer=_normalized_transfer_policy(config)
+    fetch_pin=_fetch_pin_policy(config)
+    fetch_batch_size=_fetch_batch_policy(config)
     routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
@@ -475,6 +496,12 @@ def _build_worker(config,owner,resources):
         raise ValueError('actual engine version differs from configured pin')
     ledger = ScratchLedger(root / 'scratch.sqlite', scratch, safety_floor_bytes=config['safetyFloor'],
                            cleanup_grace_seconds=config['cleanupGrace'])
+    if fetch_pin:
+        from processing import reference_fetch_pin_candidate as pin
+        with ledger._transaction() as db:
+            existing = db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_fetch_pins'").fetchone()
+            if existing: pin.attest(db)
+        if not existing: pin.install(ledger,owner,enabled=True)
     from processing.reference_readers import ReaderSession
     session=ReaderSession(ledger)
     session.__enter__()
@@ -562,7 +589,7 @@ def _build_worker(config,owner,resources):
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
         execution_router=router, provenance_client=provenance,state_owner=owner,remote_reference=remote_runtime,
-        transfer_journal=normalized_transfer, normalized_transfer=normalized_transfer,
+        transfer_journal=normalized_transfer, normalized_transfer=normalized_transfer, fetch_pin=fetch_pin, fetch_batch_size=fetch_batch_size,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)

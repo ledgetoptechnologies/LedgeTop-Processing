@@ -27,8 +27,27 @@ def install(db, *, enabled=False):
         PRIMARY KEY(job,object_id), FOREIGN KEY(job) REFERENCES transfer_journal_binding(job))''')
     db.execute('''CREATE TABLE transfer_journal_private (
         job TEXT PRIMARY KEY, payload TEXT NOT NULL, digest TEXT NOT NULL)''')
+    db.execute('''CREATE TABLE transfer_fetch_pin_intent (
+        job TEXT PRIMARY KEY, identity TEXT NOT NULL)''')
+    db.execute('''CREATE TABLE transfer_fetch_batches (
+        job TEXT NOT NULL, cursor INTEGER NOT NULL, identity TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('started','verified','charged')),
+        PRIMARY KEY(job,cursor))''')
+    db.execute('''CREATE TABLE transfer_fetch_batch_items (
+        job TEXT NOT NULL, cursor INTEGER NOT NULL, object_id TEXT NOT NULL, identity TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('started','verified','charged')),
+        PRIMARY KEY(job,cursor,object_id))''')
     db.execute("CREATE TRIGGER transfer_journal_private_no_update BEFORE UPDATE ON transfer_journal_private BEGIN SELECT RAISE(ABORT,'immutable private transfer input'); END")
     db.execute("CREATE TRIGGER transfer_journal_private_no_delete BEFORE DELETE ON transfer_journal_private BEGIN SELECT RAISE(ABORT,'immutable private transfer input'); END")
+
+
+def pin_intent(db, *, job, generation, manifest_sha, reservation, directory_device, directory_inode):
+    if QUALIFIED is not True:raise TransferJournalHeld('transfer journal is not qualified')
+    identity=canonical_json(dict(job=job,generation=generation,manifestSha256=manifest_sha,
+        reservation=reservation,directoryDevice=directory_device,directoryInode=directory_inode)).decode()
+    db.execute('INSERT OR IGNORE INTO transfer_fetch_pin_intent VALUES(?,?)',(job,identity))
+    row=db.execute('SELECT identity FROM transfer_fetch_pin_intent WHERE job=?',(job,)).fetchone()
+    if row is None or row[0]!=identity:raise TransferJournalHeld('fetch pin intent changed')
 
 
 def save_private(db, *, job, claim, grant):

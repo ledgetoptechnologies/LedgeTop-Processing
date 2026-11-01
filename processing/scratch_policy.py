@@ -238,8 +238,14 @@ class ScratchLedger:
 
     def _expire(self, db, now):
         # Neither engine-started nor uncertain reservations may expire automatically.
-        db.execute("UPDATE reservations SET state='expired', remaining=0 "
-                   "WHERE state='reserved' AND expires<=? AND allocated=0", (now,))
+        from . import reference_fetch_pin_candidate as fetch_pin
+        pinned = fetch_pin.present(db)
+        if pinned:
+            db.execute("UPDATE reservations SET state='expired', remaining=0 WHERE state='reserved' AND expires<=? AND allocated=0 "
+                       "AND NOT EXISTS (SELECT 1 FROM reference_fetch_pins p WHERE p.reservation=reservations.id AND p.state='active')", (now,))
+        else:
+            db.execute("UPDATE reservations SET state='expired', remaining=0 "
+                       "WHERE state='reserved' AND expires<=? AND allocated=0", (now,))
 
     def reserve(self, *, job_id, generation, reservation_id, manifest_sha256,
                 input_bytes, output_budget, environment, ttl_seconds, worker_ready):
@@ -573,12 +579,17 @@ class ScratchLedger:
                        "DO UPDATE SET state=excluded.state", (reservation_id, object_id, reference, kind, state))
 
     def _eligible(self, db, now):
+        from . import reference_fetch_pin_candidate as fetch_pin
+        pinned = fetch_pin.present(db)
+        exclusion = ''
+        if pinned:
+            exclusion = " AND NOT EXISTS(SELECT 1 FROM reference_fetch_pins f WHERE f.reservation=o.reservation AND f.state='active')"
         return db.execute("""SELECT o.*,r.generation FROM objects o JOIN reservations r
             ON r.id=o.reservation WHERE r.state='terminal' AND o.accepted IS NOT NULL
             AND o.cleaned IS NULL AND MAX(o.accepted,r.terminal_at)<=?
             AND NOT EXISTS(SELECT 1 FROM cleanup_intents c WHERE c.reservation=o.reservation AND c.object=o.id)
             AND NOT EXISTS(SELECT 1 FROM pins p WHERE p.reservation=o.reservation
-              AND p.object=o.id AND p.state!='released') ORDER BY o.reservation,o.id""", (now-self.grace,))
+              AND p.object=o.id AND p.state!='released')""" + exclusion + " ORDER BY o.reservation,o.id", (now-self.grace,))
 
     def cleanup_candidates(self, *, max_count=100, max_bytes=1024**3):
         _integer(max_count, "max count"); _integer(max_bytes, "max bytes")

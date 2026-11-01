@@ -76,6 +76,22 @@ class NativeNodeFixtureTests(unittest.TestCase):
             self.engine.action('commit', self.job)
         self.assertEqual(self.fixture.counts(), dict(initialize=1,upload=1,commit=1,download=0))
 
+    def test_opt_in_multiple_distinct_uploads_rejects_duplicate_after_restart(self):
+        self.fixture.close()
+        self.fixture=NativeNodeFixture(self.root/'multi.sqlite',synthetic_enabled=True,synthetic_multi_upload=True).start()
+        self.engine=NativeEngine(self.fixture.origin)
+        self.initialize()
+        for name in ('first.jpg','second.jpg'):
+            path=self.root/name;path.write_bytes(b'abc')
+            self.engine.upload(self.job,dict(path=str(path),bytes=3,sha256=hashlib.sha256(b'abc').hexdigest(),name=name))
+        self.fixture.close()
+        self.fixture=NativeNodeFixture(self.root/'multi.sqlite',synthetic_enabled=True,synthetic_multi_upload=True).start()
+        self.engine=NativeEngine(self.fixture.origin)
+        with self.assertRaises(SmokeError):
+            self.engine.upload(self.job,dict(path=str(self.root/'first.jpg'),bytes=3,sha256=hashlib.sha256(b'abc').hexdigest(),name='FIRST.JPG'))
+        self.engine.action('commit',self.job)
+        self.assertEqual(self.fixture.counts(),dict(initialize=1,upload=2,commit=1,download=0))
+
     def test_real_native_remove_only_exact_completed_task(self):
         self.initialize()
         with self.assertRaises(SmokeError):
