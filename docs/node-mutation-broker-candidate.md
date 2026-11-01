@@ -67,3 +67,34 @@ persistent SQLite and a loopback HTTP peer, but Docker identity checks are mocke
 They do not establish
 production network isolation, actual NodeODM image compatibility, process
 power-loss recovery or authenticated remote coordinator transport.
+
+## Experimental coordinator intent integration
+
+An explicit offline migration adds a coordinator-side per-operation intent and
+SQLite triggers. A short transaction verifies the current job/task and records
+`started` before the node operation. Job/task/file triggers and global claim
+admission hold work while any intent is not `complete`. Init completes its
+coordinator intent only after the node journal records its reply; upload remains
+started through the sender confirmation and node completion. Exceptions leave
+the intent started for inspection; no automatic timeout releases it. The Queue
+lifecycle mutex and coordinator SQLite transaction are not held across the
+network exchange. The authority lease and node-local gate are still held.
+
+The migration is not automatic. It requires an independently idle coordinator
+and an offline upgrade, with the old writer and all other consumers stopped.
+Downgrade is not qualified: older code or privileged DB writers can modify the
+journal or remove its triggers. Missing triggers cause current-code admission
+and broker calls to fail closed but cannot prevent a rogue writer from changing
+a protected row after removing a trigger. Marker deletion and direct database
+or filesystem manipulation are not fenced. State schema validation covers the
+known job schema and required Viewer columns, not every possible migration.
+
+A simulated lost response followed by an orderly Queue restart leaves the operation
+started and job held. A separate owned child exits abruptly after persisting a
+synthetic intent; restart also holds that job. The child test does not interrupt an
+actual network exchange and neither test proves power-loss behavior.
+Cross-database completion leaves a conservative unresolved hold if the process
+dies after node completion but before coordinator completion. There is no
+qualified recovery or authenticated cross-host authority. The sender HMAC uses
+the shared signing key and is not independent proof of descriptor verification.
+This remains an inactive prototype.

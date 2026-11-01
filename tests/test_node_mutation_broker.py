@@ -3,6 +3,9 @@ import hashlib
 import io
 import json
 import socket
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -17,8 +20,10 @@ from processing import node_mutation_broker as b
 from processing.engine_ingress_guard import AdmissionError, BackendPin
 from processing.node_gate import NodeGate
 from processing.prototype import Queue, VIEWER_PROFILE
+from processing.maintenance import Conflict
 from processing.viewer_tasks import TaskStore
 from processing.authority_lease import AuthorityLease, record_required
+from processing.broker_intent_fence import install_offline
 
 
 def attach_lease(queue, directory):
@@ -91,6 +96,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         self.task=str(uuid.uuid4());self.body=b'synthetic-init'
         store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
         self.owner_store=store
+        with self.owner_queue._db() as db: install_offline(db,enabled=True)
         store.initialize(self.task,'Synthetic',[],None,'production')
         store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)
         claim=self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]})
@@ -171,7 +177,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
         self.assertEqual(self.calls,[])
 
-    def test_queue_close_waits_for_authorized_mutation_then_revokes(self):
+    def test_queue_close_refuses_during_mutation_then_revokes(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret)
         entered=threading.Event();release=threading.Event();closed=threading.Event();out=[]
         original=self.adapter.exchange
@@ -183,17 +189,21 @@ class NodeMutationBrokerTests(unittest.TestCase):
             try:out.append(self.broker.mutate(grant,signature,self.body))
             except Exception as error:out.append(error)
         worker=threading.Thread(target=send)
-        closer=threading.Thread(target=lambda:(self.owner_queue.close(),closed.set()))
+        def attempt_close():
+            try:self.owner_queue.close()
+            except RuntimeError:closed.set()
+        closer=threading.Thread(target=attempt_close)
         with patch.object(self.adapter,'exchange',side_effect=slow):
             worker.start()
             try:
                 self.assertTrue(entered.wait(3));closer.start()
-                self.assertFalse(closed.wait(.2))
+                self.assertTrue(closed.wait(2))
             finally:
                 release.set();worker.join(5)
                 if closer.ident is not None:closer.join(5)
         self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertTrue(closed.is_set())
         self.assertEqual(out[0]['uuid'],self.task)
+        self.owner_queue.close()
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
         self.assertEqual(len(self.calls),1)
 
@@ -233,6 +243,109 @@ class NodeMutationBrokerTests(unittest.TestCase):
             self.assertEqual(self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)['uuid'],self.task)
         self.assertEqual(checked,[True]);self.assertFalse(self.owner_queue._lock.closed)
         self.assertIsNotNone(self.owner_lease._descriptor)
+
+    def test_reentrant_and_external_transitions_are_fenced_without_blocking_reads(self):
+        pending=str(uuid.uuid4())
+        self.owner_store.initialize(pending,'Next',[],None,'production')
+        self.owner_store.upload(pending,'next.jpg',io.BytesIO(b'x'),1);self.owner_store.commit(pending)
+        grant=self.grant();original=self.adapter.exchange
+        def callback(*args):
+            self.assertEqual(self.owner_queue.get(self.job)['status'],'running')
+            self.assertIsNone(self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+            with self.assertRaises(sqlite3.IntegrityError):self.owner_queue.operator(self.job,'hold',{'note':'synthetic'})
+            with self.assertRaises(Conflict):self.owner_queue.complete(self.job,{'claimToken':self.owner_claim['claimToken'],'status':'succeeded','result':{}})
+            raw=sqlite3.connect(self.owner_queue.path,timeout=0)
+            try:
+                with self.assertRaises(sqlite3.IntegrityError):raw.execute("UPDATE jobs SET status='failed' WHERE id=?",(self.job,))
+            finally:raw.close()
+            return original(*args)
+        with patch.object(self.adapter,'exchange',side_effect=callback):
+            self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
+        self.assertEqual(self.owner_queue.get(self.job)['status'],'running')
+
+    def test_upload_keeps_barrier_until_confirmation_and_queue_remains_readable(self):
+        self.begin_upload();payload=b'synthetic-photo'
+        grant=dict(self.grant(),operation='upload',fileName='photo.jpg',fileBytes=len(payload),
+                   bodySha256=hashlib.sha256(payload).hexdigest(),contentType='application/octet-stream')
+        signature=b.sign_grant(grant,self.secret);source,writer=socket.socketpair()
+        original=self.adapter.exchange_upload
+        def callback(*args):
+            self.assertEqual(self.owner_queue.get(self.job)['status'],'running')
+            with self.assertRaises(sqlite3.IntegrityError):self.owner_queue.operator(self.job,'hold',{'note':'synthetic'})
+            return original(*args)
+        try:
+            writer.sendall(payload);writer.shutdown(socket.SHUT_WR)
+            with patch.object(self.adapter,'exchange_upload',side_effect=callback):
+                self.broker.upload(grant,signature,source)
+        finally:source.close();writer.close()
+        with self.owner_queue._db() as db:
+            self.assertEqual(db.execute("SELECT state FROM broker_intents WHERE operation_id=?",(grant['operationId'],)).fetchone()[0],'started')
+        with self.assertRaises(Conflict):self.owner_queue.complete(self.job,{'claimToken':self.owner_claim['claimToken'],'status':'succeeded','result':{}})
+        self.broker.confirm_upload(grant,signature,b._sender_confirmation(grant,self.secret))
+        with self.owner_queue._db() as db:
+            self.assertEqual(db.execute("SELECT state FROM broker_intents WHERE operation_id=?",(grant['operationId'],)).fetchone()[0],'complete')
+
+    def test_orphan_started_intent_blocks_next_claim_even_without_active_job(self):
+        next_id=str(uuid.uuid4())
+        self.owner_store.initialize(next_id,'Next',[],None,'production')
+        self.owner_store.upload(next_id,'next.jpg',io.BytesIO(b'x'),1);self.owner_store.commit(next_id)
+        with self.owner_queue._db() as db:
+            db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(str(uuid.uuid4()),str(uuid.uuid4()),'a'*64))
+            db.execute("UPDATE jobs SET status='failed' WHERE id=?",(self.job,))
+        self.assertIsNone(self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+        raw=sqlite3.connect(self.owner_queue.path,timeout=0)
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):raw.execute("UPDATE jobs SET status='running' WHERE status='queued'")
+        finally:raw.close()
+
+    def test_missing_fence_trigger_fails_closed(self):
+        grant=self.grant()
+        with self.owner_queue._db() as db:db.execute('DROP TRIGGER broker_job_update')
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
+        self.assertEqual(self.calls,[])
+        with self.owner_queue._db() as db:self.assertFalse(self.owner_queue._transfer_admission_clear(db))
+
+    def test_abrupt_owned_process_exit_preserves_intent_and_holds_restart(self):
+        directory=self.root/'owned-crash-queue'
+        child="""
+import os, sys, uuid
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+from processing.broker_intent_fence import install_offline
+root=Path(sys.argv[1]);q=Queue(root);TaskStore(q,root/'viewer-tasks')
+with q._db() as db:install_offline(db,enabled=True)
+job,_=q.submit({'requestId':'crash-fixture','environment':'production','profile':'treedar-synthetic-v1'})
+q.claim({'workerId':'crash-fixture'})
+with q._db() as db:db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(str(uuid.uuid4()),job['id'],'a'*64))
+os._exit(27)
+"""
+        result=subprocess.run([sys.executable,'-c',child,str(directory)],timeout=10,capture_output=True,text=True)
+        self.assertEqual(result.returncode,27,result.stderr)
+        restarted=Queue(directory)
+        try:
+            jobs=restarted.list();self.assertEqual(len(jobs),1);self.assertEqual(jobs[0]['status'],'held')
+            with restarted._db() as db:self.assertEqual(db.execute("SELECT state FROM broker_intents").fetchone()[0],'started')
+            self.assertIsNone(restarted.claim({'workerId':'crash-fixture'}))
+        finally:restarted.close()
+
+    def test_lost_forward_persists_barrier_across_coordinator_restart(self):
+        pending=str(uuid.uuid4())
+        self.owner_store.initialize(pending,'Next',[],None,'production')
+        self.owner_store.upload(pending,'next.jpg',io.BytesIO(b'x'),1);self.owner_store.commit(pending)
+        grant=self.grant();original=self.adapter.exchange
+        def lost(*args):original(*args);raise OSError('synthetic lost response')
+        with patch.object(self.adapter,'exchange',side_effect=lost):
+            with self.assertRaises(OSError):self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
+        self.broker.close();self.owner_lease.close();self.owner_queue.close()
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        try:
+            self.assertEqual(restarted.get(self.job)['status'],'held')
+            self.assertIsNone(restarted.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]}))
+            with self.assertRaises(Conflict):restarted.operator(self.job,'resolve',{'note':'synthetic','workerStopped':True})
+            with restarted._db() as db:
+                self.assertEqual(db.execute("SELECT state FROM broker_intents WHERE operation_id=?",(grant['operationId'],)).fetchone()[0],'started')
+        finally:restarted.close()
 
     def test_lost_response_survives_broker_restart_without_replay(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
@@ -476,6 +589,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
         lease=attach_lease(queue,self.root/'other-lease')
         try:
             store=TaskStore(queue,self.root/'coordinator'/'viewer-tasks')
+            with queue._db() as db: install_offline(db,enabled=True)
             b.install_upload_issuer_schema(queue)
             store.initialize(self.task,'Synthetic',[],None,'production')
             store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1)

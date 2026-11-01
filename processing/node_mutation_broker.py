@@ -78,12 +78,15 @@ class LocalCoordinatorAuthority:
         except OSError:raise BrokerHeld('local coordinator lease unavailable') from None
 
     @contextmanager
-    def hold(self, grant, timeout):
+    def hold(self, grant, timeout, *, create=False):
         from .prototype import VIEWER_PROFILE
         from .authority_lease import MARKER_DDL, LeaseUnavailable
         deadline=time.monotonic()+timeout
-        if os.getpid()!=self.pid or not self.queue._lifecycle_lock.acquire(timeout=timeout):
+        if os.getpid()!=self.pid:
             raise BrokerHeld('local coordinator owner unavailable')
+        with self.queue._lifecycle_lock:
+            if self.queue._lock.closed: raise BrokerHeld('local coordinator owner unavailable')
+            self.queue._database_users+=1
         try:
             try:
                 with self.authority_lease.held(deadline):
@@ -91,11 +94,16 @@ class LocalCoordinatorAuthority:
                     if (grant['authorityId'],grant['coordinatorEpoch'])!=(self.authority,self.epoch):
                         raise BrokerHeld('local coordinator epoch differs')
                     with self.queue._db() as db:
-                        db.execute('BEGIN')
+                        db.execute('BEGIN IMMEDIATE')
                         schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone()
                         if (schema is None or schema[0]!=MARKER_DDL or
                                 db.execute('SELECT COUNT(*) FROM coordinator_authority_lease WHERE singleton=1 AND required=1').fetchone()[0]!=1):
                             raise BrokerHeld('authority lease marker unavailable')
+                        from .broker_intent_fence import attest, IntentFenceError
+                        try: attest(db)
+                        except IntentFenceError: raise BrokerHeld('broker intent fence unavailable') from None
+                        digest=hashlib.sha256(_json(grant)).hexdigest()
+                        allowed=(grant['operationId'],grant['jobId'],digest)
                         job=db.execute('SELECT * FROM jobs WHERE id=?',(grant['jobId'],)).fetchone()
                         tasks=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(grant['jobId'],)).fetchall()
                         active=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
@@ -103,7 +111,7 @@ class LocalCoordinatorAuthority:
                                 or len(active)!=1 or active[0]['id']!=grant['jobId']
                                 or job['worker_id']!='viewer-dispatch' or job['node_id']!=grant['nodeId']
                                 or job['environment']!=grant['environment'] or not job['claim_hash']
-                                or not self.queue._transfer_admission_clear(db)):
+                                or not self.queue._transfer_admission_clear(db,broker_allowed=allowed)):
                             raise BrokerHeld('local active coordinator claim required')
                         task=tasks[0];token=task['claim_token']
                         expected_phase={'init':'init_pending','upload':'upload_pending'}.get(grant.get('operation'))
@@ -114,15 +122,28 @@ class LocalCoordinatorAuthority:
                                 or not 32<=len(token)<=128 or not token.isascii()
                                 or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
                             raise BrokerHeld('local current task required')
-                    # Queue.close uses an RLock and can otherwise be called
-                    # reentrantly by the owning thread during the exchange.
-                    self.queue._database_users+=1
-                    try:
-                        yield
-                        self._check()
-                    finally:self.queue._database_users-=1
+                        if create:
+                            row=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                            if row is None:
+                                db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(grant['operationId'],grant['jobId'],digest))
+                            elif tuple(row)==(grant['jobId'],digest,'complete'):
+                                db.execute("UPDATE broker_intents SET state='started' WHERE operation_id=? AND state='complete'",(grant['operationId'],))
+                            elif tuple(row)!=(grant['jobId'],digest,'started'):
+                                raise BrokerHeld('broker intent identity changed')
+                    yield
+                    self._check()
             except LeaseUnavailable:raise BrokerHeld('installed authority lease unavailable') from None
-        finally:self.queue._lifecycle_lock.release()
+        finally:
+            with self.queue._lifecycle_lock:
+                self.queue._database_users-=1
+
+    def completed(self, grant):
+        from .broker_intent_fence import attest
+        digest=hashlib.sha256(_json(grant)).hexdigest()
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');attest(db)
+            changed=db.execute("UPDATE broker_intents SET state='complete' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='started'",(grant['operationId'],grant['jobId'],digest)).rowcount
+            if changed!=1:raise BrokerHeld('broker intent completion changed')
 
 
 def _json(value):
@@ -299,7 +320,7 @@ class LocalUploadSender:
                     or job['environment']!=grant['environment'] or grant['authorityId']!=queue.authority_id
                     or grant['coordinatorEpoch']!=queue.startup_id or not job['claim_hash']
                     or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(claim_token.encode()).hexdigest())
-                    or not queue._transfer_admission_clear(db)):raise BrokerHeld('active coordinator claim required')
+                    or not queue._transfer_admission_clear(db,broker_allowed=(grant['operationId'],grant['jobId'],hashlib.sha256(_json(grant)).hexdigest()))):raise BrokerHeld('active coordinator claim required')
             row=rows[0]
             if (row['removed'] or row['stage']!='running' or row['phase']!='upload_pending'
                     or row['generation']!=grant['taskGeneration'] or row['engine_uuid']!=grant['engineTaskId']
@@ -555,17 +576,19 @@ class NodeMutationBroker:
                 row=self.db.execute('SELECT grant_hash,state,file_key FROM operations WHERE id=? AND operation=?',
                                     (grant['operationId'],'upload')).fetchone()
                 if row is None or row['grant_hash']!=digest or row['file_key']!=file_key:raise BrokerHeld('upload identity changed')
-                if row['state']=='complete':self.db.commit();return
+                if row['state']=='complete':
+                    self.db.commit();self.witness.completed(grant);return
                 if row['state']!='awaiting_sender':raise BrokerHeld('upload confirmation unavailable')
                 self.db.execute("UPDATE operations SET state='complete' WHERE id=? AND state='awaiting_sender'",(grant['operationId'],))
                 self.db.commit()
             except BaseException:self.db.rollback();raise
+            self.witness.completed(grant)
 
     def _execute(self, grant, file_key, forward, *, with_replay=False):
         digest=hashlib.sha256(_json(grant)).hexdigest();identity=uuid.UUID(grant['jobId']).hex
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
-        with self._mutex, self.witness.hold(grant,10), NodeGate(self.engine) as gate:
+        with self._mutex, self.witness.hold(grant,10,create=True), NodeGate(self.engine) as gate:
             self._check_owner()
             state=gate.snapshot();expected={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
             if any(state[k]!=v for k,v in expected.items()):raise BrokerHeld('node ownership changed')
@@ -589,7 +612,7 @@ class NodeMutationBroker:
                         raise BrokerHeld('operation requires inspection')
                     reply=json.loads(old['reply'])
                     reply=_upload_reply(reply) if grant['operation']=='upload' else _reply(reply,grant['engineTaskId'])
-                    self.db.commit();return (reply,True) if with_replay else reply
+                    self.db.commit();self.witness.completed(grant);return (reply,True) if with_replay else reply
                 if self.db.execute("SELECT 1 FROM operations WHERE state!='complete' LIMIT 1").fetchone():
                     raise BrokerHeld('previous operation requires inspection')
                 if grant['operation']=='upload' and not self.db.execute("SELECT 1 FROM operations WHERE operation='init' AND state='complete'").fetchone():
@@ -613,4 +636,5 @@ class NodeMutationBroker:
                 if changed!=1:raise BrokerHeld('operation identity changed')
                 self.db.commit()
             except BaseException:self.db.rollback();raise
+            if grant['operation']=='init':self.witness.completed(grant)
             return (reply,False) if with_replay else reply

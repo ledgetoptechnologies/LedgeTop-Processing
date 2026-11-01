@@ -388,8 +388,10 @@ class Queue(Maintenance):
             return self._has_attested_started_transfer(db, identifier)
 
     @classmethod
-    def _transfer_admission_clear(cls, db):
+    def _transfer_admission_clear(cls, db, *, broker_allowed=None):
         """Do not admit new work while any started transfer is unresolved."""
+        from .broker_intent_fence import clear as broker_clear
+        if not broker_clear(db, broker_allowed): return False
         try:
             cls._has_attested_started_transfer(db, None)
         except TransferJournalUnqualified:
