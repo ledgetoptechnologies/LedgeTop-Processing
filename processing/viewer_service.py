@@ -263,6 +263,8 @@ class ViewerService:
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])
+        if task.get('claim_token') and self.queue.hold_started_transfer(task['job_id'], task['claim_token']):
+            return
         if job and (job['status'] == 'running' or
                     (job['status'] == 'held' and job['heldReason'] == 'coordinator_restart')):
             self.queue.operator(task['job_id'], 'hold', {'note': reason})

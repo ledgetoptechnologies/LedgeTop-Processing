@@ -278,6 +278,24 @@ class Queue(Maintenance):
                        (payload["status"], result, identifier))
             return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
 
+    def hold_started_transfer(self, identifier, token):
+        """Hold a matching unfinished upload without modifying its evidence."""
+        if type(token) is not str or not 1 <= len(token) <= 128: return False
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
+            if not table: return False
+            from .transfer_fence import attest
+            attest(db)
+            row = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+            started = db.execute("SELECT 1 FROM engine_ingress_uploads WHERE job_id=? AND state='started'", (identifier,)).fetchone()
+            if not row or not started or not row['claim_hash'] or not hmac.compare_digest(
+                    hashlib.sha256(token.encode()).hexdigest(), row['claim_hash']): return False
+            if row['status'] == 'running':
+                db.execute("UPDATE jobs SET status='held',held_reason='transfer_uncertain',updated_at=CURRENT_TIMESTAMP WHERE id=?", (identifier,))
+                return True
+            return row['status'] == 'held'
+
     def operator(self, identifier, action, payload):
         """A separate human/operator credential is required by the HTTP layer.
 

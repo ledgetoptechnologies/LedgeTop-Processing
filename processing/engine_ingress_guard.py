@@ -12,7 +12,7 @@ The actual NodeGate lock and SQLite write transaction stay held through one
 fixed-loopback HTTP exchange, with an absolute deadline and bounded response.
 An uncertain exchange retains its durable host reservation; it is never replayed.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 import errno
 import hashlib
@@ -323,14 +323,17 @@ class EngineIngressGuard:
         return intent
 
     @contextmanager
-    def _owned(self, headers, engine_uuid, action, deadline, permit=None, bound_id=None):
+    def _owned(self, headers, engine_uuid, action, deadline, permit=None, bound_id=None, preheld_gate=None):
         binding = self.binding
         job_id = _identifier(headers.get('x-ledgetop-job'))
         token = headers.get('x-ledgetop-claim', '')
         if not 32 <= len(token) <= 128:
             raise AdmissionError('original claim required')
         try:
-            with _queue_lifecycle(self.queue, deadline), NodeGate(binding.engine_id) as gate:
+            gate_context = NodeGate(binding.engine_id) if preheld_gate is None else nullcontext(preheld_gate)
+            with _queue_lifecycle(self.queue, deadline), gate_context as gate:
+                if gate.engine_id != binding.engine_id: raise AdmissionError('physical gate mismatch')
+                gate._check_lock()
                 self._check_backend(deadline)
                 state = gate.snapshot()
                 expected = {'engineId': binding.engine_id, 'nodeId': binding.node_id,
@@ -525,11 +528,16 @@ class EngineIngressGuard:
         upload_id=_identifier(headers.get('x-ledgetop-upload-id'))
         if action!='upload' or type(source) is not socket.socket:
             raise AdmissionError('bounded socket upload required')
-        with self._owned(headers,engine_uuid,action,deadline,bound_id=upload_id) as db:
-            try:
-                job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
-                task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()
-                record=self._bound_file(db,upload_id,job,task,'started')
+        try:
+            with NodeGate(self.binding.engine_id) as gate:
+                with self._owned(headers,engine_uuid,action,deadline,bound_id=upload_id,preheld_gate=gate) as db:
+                    job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
+                    task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()
+                    record=dict(self._bound_file(db,upload_id,job,task,'started'))
+                # Started intent, trigger fence and Queue lifetime pin remain in
+                # force, but no SQLite transaction or lifecycle mutex is held.
+                gate._check_lock()
+                self._check_backend(deadline)
                 boundary,prefix,suffix=_file_multipart(upload_id,record['name'])
                 result=self._exchange('POST',target,b'',{'Content-Type':'multipart/form-data; boundary='+boundary},deadline,
                                       source=source,source_length=record['bytes'],expected_sha=record['sha256'],
@@ -544,14 +552,50 @@ class EngineIngressGuard:
                 if completion is not None:completion.verify(deadline)
                 if completion is not None:completion.stop()
                 if deadline-time.monotonic()<=0:raise AdmissionError('bounded upstream deadline exceeded')
-                if db.execute("UPDATE engine_ingress_uploads SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
-                    raise AdmissionError('upload journal changed')
-                if db.execute("UPDATE viewer_engine_upload_intents SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
-                    raise AdmissionError('file intent changed')
-                db.commit()
+                # Recheck the durable transfer and original job under a fresh
+                # write transaction before marking either intent complete.
+                with _queue_lifecycle(self.queue, deadline), self.queue._db() as db:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise AdmissionError('bounded upstream deadline exceeded')
+                    db.execute('PRAGMA busy_timeout='+str(max(1,int(remaining*1000))))
+                    db.execute('BEGIN IMMEDIATE')
+                    from .transfer_fence import attest
+                    attest(db); gate._check_lock()
+                    if OwnerPin.capture(self.queue)!=self.owner_pin: raise AdmissionError('canonical owner lease changed')
+                    state=gate.snapshot();reservation=state.get('reservation')
+                    job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
+                    if job is None: raise AdmissionError('upload claim unavailable')
+                    task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()
+                    expected_gate={'engineId':self.binding.engine_id,'nodeId':self.binding.node_id,
+                        'authorityId':self.queue.authority_id,'coordinatorOrigin':self.binding.coordinator_origin,
+                        'generation':self.binding.generation}
+                    expected_reservation={'id':job['id'],'workerId':job['worker_id'],
+                        'nodeId':job['node_id'],'authorityId':self.queue.authority_id}
+                    active=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
+                    if (task is None or job['status']!='running' or task['phase']!='upload_pending'
+                            or job['profile']!=VIEWER_PROFILE or job['worker_id']!='viewer-dispatch'
+                            or len(active)!=1 or active[0]['id']!=job['id']
+                            or db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()[0]!=1
+                            or job['node_id']!=self.binding.node_id or task['node_id']!=self.binding.node_id
+                            or task['engine_uuid']!=engine_uuid or task['claim_token']!=headers.get('x-ledgetop-claim')
+                            or not job['claim_hash'] or not hmac.compare_digest(job['claim_hash'],
+                                hashlib.sha256(task['claim_token'].encode()).hexdigest())
+                            or any(state.get(key)!=value for key,value in expected_gate.items())
+                            or not reservation or reservation['receiptId']!=uuid.UUID(job['id']).hex
+                            or reservation['job']!=expected_reservation):
+                        raise AdmissionError('upload claim changed')
+                    if dict(self._bound_file(db,upload_id,job,task,'started')) != record:
+                        raise AdmissionError('upload file identity changed')
+                    journal=db.execute('SELECT job_id,engine_uuid,byte_count,sha256,state FROM engine_ingress_uploads WHERE upload_id=?',(upload_id,)).fetchone()
+                    if journal is None or tuple(journal)!=(job['id'],engine_uuid,record['bytes'],record['sha256'],'started'):
+                        raise AdmissionError('upload journal changed')
+                    if db.execute("UPDATE engine_ingress_uploads SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
+                        raise AdmissionError('upload journal changed')
+                    if db.execute("UPDATE viewer_engine_upload_intents SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
+                        raise AdmissionError('file intent changed')
                 return result
-            finally:
-                if completion is not None:completion.stop()
+        finally:
+            if completion is not None:completion.stop()
 
     def read(self, method, target, pairs):
         headers = _headers(pairs)

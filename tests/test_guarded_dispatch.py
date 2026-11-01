@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ from processing import engine_upload_contract,guarded_native_engine
 from processing.engine_ingress_guard import BackendPin,Binding,EngineIngressGuard,OwnerPin
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
-from processing.node_gate import NodeGate
+from processing.node_gate import NodeGate, GateBusy
 from processing.prototype import Queue
 from processing.viewer_service import ViewerService
 from processing.viewer_tasks import TaskStore
@@ -33,7 +34,7 @@ class GuardedDispatchTests(unittest.TestCase):
         self.paths=patch('processing.node_gate.canonical_gate_path',side_effect=lambda engine:self.root/('gate-'+engine));self.paths.start()
         self.flags=[patch.object(engine_upload_contract,'QUALIFIED',True),patch.object(guarded_native_engine,'QUALIFIED',True)]
         for flag in self.flags:flag.start()
-        self.calls=[];self.bodies=[];self.large_wire=None;self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;self.early_upload=False;fixture=self
+        self.calls=[];self.bodies=[];self.observer=None;self.large_wire=None;self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;self.early_upload=False;fixture=self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 length=int(self.headers['Content-Length']);route=self.path.split('?')[0]
@@ -51,6 +52,7 @@ class GuardedDispatchTests(unittest.TestCase):
                     fixture.large_wire=(length,remaining,digest.hexdigest());body=b'<bounded-large>'
                 else:body=self.rfile.read(length)
                 fixture.calls.append(route);fixture.bodies.append(body)
+                if fixture.observer:fixture.observer()
                 if fixture.drop and '/upload/' in route:
                     self.close_connection=True;return
                 if (fixture.drop_init and route=='/task/new/init') or (fixture.drop_commit and '/commit/' in route):
@@ -77,6 +79,11 @@ class GuardedDispatchTests(unittest.TestCase):
     def create_service(self):
         self.queue=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
         store=TaskStore(self.queue,self.root/'state'/'viewer-tasks');pin=OwnerPin.capture(self.queue);guards={}
+        from processing.transfer_fence import install_offline, attest
+        with self.queue._db() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone():
+                attest(db)
+            else: install_offline(db,enabled=True)
         for node in ('cluster','main'):
             binding=Binding('engine-'+node,node,self.queue.authority_id,'http://127.0.0.1:18080',1,self.server.server_port,
                 'coordinator-'+'a'*40,'management-'+'b'*40,'backend-'+'c'*40,deadline_seconds=10)
@@ -110,9 +117,40 @@ class GuardedDispatchTests(unittest.TestCase):
             self.assertEqual(tuple(row),(1,'photo.jpg','complete'))
             self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'complete')
 
+    def test_upload_releases_db_mutex_but_fences_task_and_close(self):
+        identifier=self.submit();entered=threading.Event();release=threading.Event();out=[]
+        def observe():
+            if self.calls and '/upload/' in self.calls[-1]:
+                entered.set()
+                if not release.wait(4):raise RuntimeError('synthetic transfer timed out')
+        self.observer=observe
+        def work():
+            try:self.service.tick();out.append('done')
+            except Exception as error:out.append(type(error).__name__)
+        worker=threading.Thread(target=work);worker.start()
+        try:
+            self.assertTrue(entered.wait(3))
+            # Both a normal Queue read and a separate write transaction must be
+            # possible while upstream is stalled; the guard itself stays owned.
+            task=self.service.store.task(identifier)
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                self.assertEqual(db.execute("SELECT state FROM engine_ingress_uploads").fetchone()[0],'started')
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.queue.complete(task['job_id'],{'claimToken':task['claim_token'],'status':'succeeded','result':{}})
+            with self.assertRaises(sqlite3.IntegrityError):self.service.store.update(identifier,phase='processing')
+            with self.assertRaises(RuntimeError):self.queue.close()
+            with self.assertRaises(GateBusy):
+                with NodeGate('engine-cluster'):pass
+        finally:
+            release.set();worker.join(5);self.observer=None
+        self.assertFalse(worker.is_alive());self.assertEqual(out,['done'])
+        self.assertEqual(self.service.store.task(identifier)['phase'],'processing')
+
     def test_lost_upload_reply_holds_no_retry_after_restart(self):
         identifier=self.submit();self.drop=True;self.service.tick();task=self.service.store.task(identifier)
-        self.assertEqual(task['job']['status'],'held');self.assertEqual(task['phase'],'held')
+        self.assertEqual(task['job']['status'],'held');self.assertEqual(task['phase'],'upload_pending')
+        self.assertEqual(task['job']['heldReason'],'transfer_uncertain')
         self.assertEqual(len(self.calls),2)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
@@ -151,7 +189,7 @@ class GuardedDispatchTests(unittest.TestCase):
     def test_changed_source_bytes_hold_after_possible_engine_transfer(self):
         identifier=self.submit();path=Path(self.service.store.task(identifier)['files'][0]['path'])
         path.write_bytes(b'changed--photo!');self.service.tick();task=self.service.store.task(identifier)
-        self.assertEqual((task['job']['status'],task['phase']),('held','held'))
+        self.assertEqual((task['job']['status'],task['phase']),('held','upload_pending'))
         self.assertEqual(path.read_bytes(),b'changed--photo!')
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')
@@ -228,7 +266,7 @@ class GuardedDispatchTests(unittest.TestCase):
             return original(fd,count)
         with patch('processing.guarded_native_engine._read_source',side_effect=slow):self.service.tick()
         self.assertTrue(first);task=self.service.store.task(identifier)
-        self.assertEqual((task['job']['status'],task['phase']),('held','held'))
+        self.assertEqual((task['job']['status'],task['phase']),('held','upload_pending'))
         self.assertEqual(engine._unreaped,[])
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'started')

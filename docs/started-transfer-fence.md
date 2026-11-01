@@ -2,11 +2,12 @@
 
 This is an offline migration and guarded-upload prerequisite experiment. It is
 not enabled or wired into production. The migration refuses an existing upload
-journal or an active job, installs the known upload schema and six attested
+journal or an active job, installs the known upload schema and nine attested
 SQLite triggers, and protects inserts/updates/deletes of the matching job and
-Viewer task, including rebinding another task to the job, while an upload journal
-row is `started`. It permits only the exact running-to-coordinator-restart-held
-transition with job identity and claim unchanged; other operator holds and
+Viewer task and file rows, including rebinding another task to the job, while an
+upload journal row is `started`. It permits only exact running-to-held
+transitions for coordinator restart or uncertain transfer, with identity and
+claim unchanged; other operator holds and
 progress updates are conservatively blocked. A restarted coordinator can thus
 open and report the job held while retaining the started upload and shared slot.
 A legacy started job with a null node binding cannot take the startup repair
@@ -19,18 +20,23 @@ migration requires an independent externally fenced idle coordinator; checking
 SQLite alone is not an external fence.
 
 `Queue.pin_transfer` retains the current process's coordinator lease while
-allowing other threads to acquire the lifecycle mutex. The bound upload path
-uses the pin and checks migration attestation, but still holds the old Queue
-lifecycle mutex and SQLite transaction for the actual network stream. Pin
-acquisition consumes the existing operation deadline, although releasing the pin
-can wait for the lifecycle mutex. No longer
-upload deadline is enabled by this change. Releasing those locks requires
-pre/post transaction refactoring and independent tests before it is safe.
+allowing other threads to acquire the lifecycle mutex. The candidate bound upload
+commits its started intent in a short transaction, retains NodeGate and the Queue
+pin during the network exchange, then rechecks identity and completes both
+journals in another short transaction. Synthetic tests pause HTTP and demonstrate
+another Queue read and SQLite write transaction can proceed while conflicting
+completion, task updates and Queue close are refused. A dropped response remains
+held without replay. Pin acquisition consumes the existing operation deadline,
+although releasing it can wait for the lifecycle mutex. No longer upload deadline
+is enabled by this change.
 
 The fence is not protection against a writer able to update/delete the upload
 journal, alter/drop triggers, replace the database or access the engine
 directly. Existing legacy unbound code and older executables are not qualified.
 Neither a timeout nor process death proves a NodeODM task stopped. The worker
 must preserve the started journal and physical gate until separately reconciled;
-there is no automatic retry, expiry, reset or operator bypass here. Schema
-installation and the tests make no change to live nodes.
+there is no automatic retry, expiry, reset or operator bypass here. The pre-held
+NodeGate reverses the normal lifecycle/gate acquisition order; NodeGate uses a
+nonblocking lock, but concurrency and deadlock behavior require further review.
+Synthetic interruption is not process death, real NodeODM, a remote broker or
+power loss. Schema installation and tests make no change to live nodes.
