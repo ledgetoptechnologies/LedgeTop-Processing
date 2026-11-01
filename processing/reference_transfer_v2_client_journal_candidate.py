@@ -25,7 +25,10 @@ DDL_DELIVERY=("CREATE TABLE v2_deliveries (delivery_id TEXT PRIMARY KEY, request
               "state TEXT NOT NULL CHECK(state IN ('prepared','dispatch_started','recorded','absent','unknown')), observation TEXT)")
 DDL_ADOPTION=('CREATE TABLE v2_adoptions (request_id TEXT NOT NULL, recovery_generation INTEGER NOT NULL, '
               'record TEXT NOT NULL, PRIMARY KEY(request_id,recovery_generation))')
-SCHEMA=(('v2_requests',DDL_REQUEST),('v2_deliveries',DDL_DELIVERY),('v2_adoptions',DDL_ADOPTION))
+DDL_STREAM=("CREATE TABLE v2_local_streams (delivery_id TEXT PRIMARY KEY, identity TEXT NOT NULL, "
+            "file_name TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('started','verified'))) ")
+DDL_STREAM=DDL_STREAM.rstrip()
+SCHEMA=(('v2_requests',DDL_REQUEST),('v2_deliveries',DDL_DELIVERY),('v2_adoptions',DDL_ADOPTION),('v2_local_streams',DDL_STREAM))
 
 class JournalHeld(ValueError):pass
 
@@ -133,6 +136,8 @@ class V2ClientJournal:
                 raise JournalHeld('v2 reconciliation identity changed')
             if db.execute('SELECT 1 FROM v2_adoptions WHERE request_id=? LIMIT 1',(record['requestId'],)).fetchone():
                 raise JournalHeld('v2 original authority has been superseded')
+            if db.execute("SELECT 1 FROM v2_local_streams WHERE delivery_id=? AND state='started'",(record['deliveryId'],)).fetchone():
+                raise JournalHeld('v2 local stream requires fencing')
             binding=json.loads(row['admission'])['binding']
             if ((record['authorityId'],record['authorityEpoch'],record['claimLineageSha256']) !=
                     (binding['authorityId'],binding['epoch'],binding['claimLineageSha256'])
@@ -170,6 +175,9 @@ class V2ClientJournal:
                     (binding['authorityId'],binding['epoch'],binding['claimLineageSha256'])
                     or record['recoveryActor']==binding['workerInstanceId']):
                 raise JournalHeld('v2 recovery binding changed')
+            if db.execute("""SELECT 1 FROM v2_local_streams s JOIN v2_deliveries d ON d.delivery_id=s.delivery_id
+                    WHERE d.request_id=? AND s.state='started' LIMIT 1""",(record['requestId'],)).fetchone():
+                raise JournalHeld('v2 local stream requires fencing')
             last=db.execute('SELECT MAX(recovery_generation) FROM v2_adoptions WHERE request_id=?',(record['requestId'],)).fetchone()[0] or 0
             encoded=_encode(record)
             existing=db.execute('SELECT record FROM v2_adoptions WHERE request_id=? AND recovery_generation=?',(record['requestId'],record['recoveryGeneration'])).fetchone()
