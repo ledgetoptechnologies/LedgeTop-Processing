@@ -9,7 +9,7 @@ INDEX="CREATE INDEX upload_census_unresolved ON broker_intents(operation_id) WHE
 _VALID = "EXISTS (SELECT 1 FROM upload_intent_kinds k WHERE k.operation_id=NEW.operation_id AND k.job_id=NEW.job_id AND k.grant_hash=NEW.grant_hash AND upload_intent_valid(NEW.operation_id,NEW.job_id,NEW.grant_hash,k.kind)=1 AND (k.kind IN ('init','upload_local') OR (k.kind='upload_remote' AND EXISTS (SELECT 1 FROM broker_node_receipts r JOIN broker_sender_evidence e ON e.operation_id=r.operation_id WHERE r.operation_id=NEW.operation_id AND upload_receipt_valid(NEW.operation_id,NEW.job_id,NEW.grant_hash,r.job_id,r.epoch,r.grant_hash,r.receipt_json,r.receipt_sha256,e.job_id,e.epoch,e.grant_hash)=1))))"
 TRIGGERS={
  'upload_guard_kind_insert': "CREATE TRIGGER upload_guard_kind_insert BEFORE INSERT ON upload_intent_kinds WHEN upload_census_writer()!=1 OR upload_intent_valid(NEW.operation_id,NEW.job_id,NEW.grant_hash,NEW.kind)!=1 OR NEW.kind NOT IN ('init','upload_local','upload_remote') OR EXISTS (SELECT 1 FROM upload_intent_kinds WHERE operation_id=NEW.operation_id) OR NOT EXISTS (SELECT 1 FROM broker_intents WHERE operation_id=NEW.operation_id AND job_id=NEW.job_id AND grant_hash=NEW.grant_hash AND state='started') BEGIN SELECT RAISE(ABORT,'unqualified upload classification'); END",
- 'upload_guard_intent_insert': "CREATE TRIGGER upload_guard_intent_insert BEFORE INSERT ON broker_intents WHEN upload_census_writer()!=1 OR upload_intent_valid(NEW.operation_id,NEW.job_id,NEW.grant_hash,'init')!=1 OR (EXISTS (SELECT 1 FROM upload_intent_kinds WHERE operation_id=NEW.operation_id AND (job_id IS NOT NEW.job_id OR grant_hash IS NOT NEW.grant_hash))) OR (NEW.state IS 'complete' AND NOT ("+_VALID+")) BEGIN SELECT RAISE(ABORT,'unqualified upload intent'); END",
+ 'upload_guard_intent_insert': "CREATE TRIGGER upload_guard_intent_insert BEFORE INSERT ON broker_intents WHEN upload_census_writer()!=1 OR upload_intent_valid(NEW.operation_id,NEW.job_id,NEW.grant_hash,'init')!=1 OR EXISTS (SELECT 1 FROM broker_intents WHERE operation_id=NEW.operation_id) OR (EXISTS (SELECT 1 FROM upload_intent_kinds WHERE operation_id=NEW.operation_id AND (job_id IS NOT NEW.job_id OR grant_hash IS NOT NEW.grant_hash))) OR (NEW.state IS 'complete' AND NOT ("+_VALID+")) BEGIN SELECT RAISE(ABORT,'unqualified upload intent'); END",
  'upload_guard_intent_update': "CREATE TRIGGER upload_guard_intent_update BEFORE UPDATE ON broker_intents WHEN upload_census_writer()!=1 OR upload_intent_valid(NEW.operation_id,NEW.job_id,NEW.grant_hash,'init')!=1 OR OLD.operation_id IS NOT NEW.operation_id OR OLD.job_id IS NOT NEW.job_id OR OLD.grant_hash IS NOT NEW.grant_hash OR (NEW.state IS 'complete' AND NOT ("+_VALID+")) BEGIN SELECT RAISE(ABORT,'unqualified upload intent'); END",
  'upload_guard_intent_delete': "CREATE TRIGGER upload_guard_intent_delete BEFORE DELETE ON broker_intents BEGIN SELECT RAISE(ABORT,'upload intent immutable'); END",
  'upload_guard_evidence_insert': "CREATE TRIGGER upload_guard_evidence_insert BEFORE INSERT ON broker_sender_evidence WHEN upload_census_writer()!=1 OR EXISTS (SELECT 1 FROM broker_sender_evidence WHERE operation_id=NEW.operation_id) OR NOT EXISTS (SELECT 1 FROM broker_intents i JOIN upload_intent_kinds k ON k.operation_id=i.operation_id WHERE i.operation_id=NEW.operation_id AND i.job_id=NEW.job_id AND i.grant_hash=NEW.grant_hash AND i.state='started' AND k.kind='upload_remote') BEGIN SELECT RAISE(ABORT,'unqualified sender evidence'); END",
@@ -62,7 +62,13 @@ def install_offline(db, *, enabled=False):
         attest_census(db)
         if is_enabled(db):raise IncrementalError('incremental census already exists')
         if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():raise IncrementalError('idle coordinator required')
-        if db.execute("SELECT 1 FROM broker_intents WHERE operation_id IS NULL OR operation_id='' LIMIT 1").fetchone():raise IncrementalError('invalid historical intent identity')
+        # TEXT PRIMARY KEY does not imply NOT NULL in ordinary SQLite tables;
+        # BLOB values also sort outside TEXT and can invalidate a paged cursor.
+        # Validate every key in a streaming pass before using keyset pagination.
+        from .node_mutation_broker import _uuid
+        for key in db.execute('SELECT operation_id FROM broker_intents'):
+            if type(key[0]) is not str or not _uuid(key[0]):
+                raise IncrementalError('invalid historical intent identity')
         if db.execute('SELECT 1 FROM upload_intent_kinds k LEFT JOIN broker_intents i ON i.operation_id=k.operation_id WHERE i.operation_id IS NULL LIMIT 1').fetchone():
             raise IncrementalError('orphan classifications require inspection')
         db.execute(INDEX)

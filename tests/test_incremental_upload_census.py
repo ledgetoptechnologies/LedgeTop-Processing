@@ -63,6 +63,35 @@ class IncrementalCensusTests(_Base):
         with self.assertRaises(incremental.IncrementalError):self.enable_incremental()
         with self.queue._db() as db:self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='upload_incremental_required'").fetchone())
 
+    def test_replace_cannot_reopen_completed_intent_with_either_trigger_setting(self):
+        self.install();operation=self.row('init');self.enable_incremental()
+        for recursive in (0,1):
+            with self.subTest(recursive=recursive):
+                with self.queue._db() as db:
+                    db.execute('PRAGMA recursive_triggers='+str(recursive))
+                    row=db.execute('SELECT job_id,grant_hash FROM broker_intents WHERE operation_id=?',(operation,)).fetchone()
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute("INSERT OR REPLACE INTO broker_intents VALUES(?,?,?,'started')",(operation,row['job_id'],row['grant_hash']))
+                    self.assertEqual(db.execute('SELECT state FROM broker_intents WHERE operation_id=?',(operation,)).fetchone()[0],'complete')
+
+    def test_migration_refuses_blob_operation_key(self):
+        self.install()
+        with self.queue._db() as db:
+            db.execute("INSERT INTO broker_intents VALUES(?,?,?,'complete')",(sqlite3.Binary(str(uuid.uuid4()).encode()),str(uuid.uuid4()),'a'*64))
+        with self.assertRaises(incremental.IncrementalError):self.enable_incremental()
+        with self.queue._db() as db:self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='upload_incremental_required'").fetchone())
+
+    def test_migration_refuses_null_operation_key(self):
+        self.install()
+        with self.queue._db() as db:db.execute("INSERT INTO broker_intents VALUES(?,?,?,'complete')",(None,str(uuid.uuid4()),'a'*64))
+        with self.assertRaises(incremental.IncrementalError):self.enable_incremental()
+        with self.queue._db() as db:self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='upload_incremental_required'").fetchone())
+
+    def test_migration_refuses_noncanonical_text_key(self):
+        self.install()
+        with self.queue._db() as db:db.execute("INSERT INTO broker_intents VALUES(?,?,?,'complete')",(str(uuid.uuid4()).upper(),str(uuid.uuid4()),'a'*64))
+        with self.assertRaises(incremental.IncrementalError):self.enable_incremental()
+
     def test_migration_refuses_orphan_classification(self):
         self.install()
         with self.queue._db() as db:db.execute('INSERT INTO upload_intent_kinds VALUES(?,?,?,?)',(str(uuid.uuid4()),str(uuid.uuid4()),'a'*64,'init'))

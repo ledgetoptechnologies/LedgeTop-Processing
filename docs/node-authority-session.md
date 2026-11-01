@@ -224,5 +224,7 @@ review and actual cross-host, failure and migration qualification.
 
 The incremental index covers the broker-intent census only. The separate
 legacy `engine_ingress_uploads` admission checks may still scan their own
-history and require separate performance assessment. The offline audit refuses
-null or empty operation keys rather than skipping them during pagination.
+history and require separate performance assessment. The offline audit streams every operation key and refuses null, non-text,
+empty or noncanonical UUID keys before pagination. The insert guard also rejects
+`INSERT OR REPLACE` on existing intents with either SQLite recursive-trigger
+setting.
