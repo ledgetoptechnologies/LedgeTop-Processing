@@ -4,12 +4,17 @@ The node broker can be supplied a `RemoteAuthoritySession` instead of the
 same-process witness. A caller must establish an already verified mTLS channel
 with explicit peer certificate pins. The coordinator-side stream handler pins
 the actual Queue lifetime and installed host AuthorityLease, and signs a fresh,
-sequence-and-nonce-bound challenge only after revalidating the exact init grant
-against the live Queue. The node challenges before forwarding and again before
+sequence-and-nonce-bound challenge only after checking the authority marker and
+revalidating the exact init grant in the same Queue read transaction. The node
+challenges before forwarding and again before
 marking its durable operation complete. Frames and wait times are bounded;
 EOF, peer mismatch or timeout refuses the operation. Any already-started
 intent and NodeGate reservation are retained. The broker's existing persistent
 binding refuses a new coordinator epoch; there is no automatic reset or adoption.
+The coordinator's idle timeout is at least 12 seconds, longer than the current
+10-second backend exchange; contention and scheduling can still cause a safe
+hold. A whole session is limited to 60 seconds. There is no heartbeat during
+the backend exchange, and these bounds do not form an end-to-end deadline.
 
 The synthetic test uses a real mTLS stream, Queue, AuthorityLease, broker and
 loopback NodeODM-like HTTP server, with mocked Docker identity. Closing the

@@ -62,12 +62,20 @@ def _read(sock, deadline):
     except (ValueError,UnicodeError,RecursionError):raise SessionHeld('invalid session frame') from None
 
 
-def serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds=60, idle_seconds=5):
+def serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds=60, idle_seconds=15):
     """Serve one node connection; no listener, reconnect or authority adoption."""
+    try:
+        return _serve_coordinator(sock,queue=queue,witness=witness,secret=secret,peer_sha256=peer_sha256,
+                                  session_seconds=session_seconds,idle_seconds=idle_seconds)
+    finally:sock.close()
+
+
+def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seconds, idle_seconds):
     from .node_mutation_broker import LocalCoordinatorAuthority, issue_init_grant
     if (type(witness) is not LocalCoordinatorAuthority or witness.queue is not queue
-            or type(session_seconds) not in (int,float) or not 0<session_seconds<=60
-            or type(idle_seconds) not in (int,float) or not 0<idle_seconds<=10):
+            or type(session_seconds) not in (int,float) or not 12<=session_seconds<=60
+            or type(idle_seconds) not in (int,float) or not 12<=idle_seconds<=30
+            or idle_seconds>session_seconds):
         raise SessionHeld('bounded coordinator session required')
     _peer(sock,peer_sha256,True);end=time.monotonic()+session_seconds;sequence=0
     try:
@@ -90,7 +98,7 @@ def serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_seco
                 observed,signature=issue_init_grant(queue,job_id=grant.get('jobId'),
                     claim_token=grant.get('claimToken',''),engine_id=grant.get('engineId'),
                     gate_generation=grant.get('gateGeneration'),operation_id=grant.get('operationId'),
-                    body=body,content_type=grant.get('contentType'),secret=secret)
+                    body=body,content_type=grant.get('contentType'),secret=secret,_authority_required=True)
                 # Claim token is session-only and is never part of the signed grant.
                 public={k:v for k,v in grant.items() if k!='claimToken'}
                 if observed!=public:raise SessionHeld('coordinator grant changed')

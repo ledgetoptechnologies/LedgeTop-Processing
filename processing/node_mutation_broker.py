@@ -141,7 +141,7 @@ def _reply(value, task):
 
 
 def issue_init_grant(queue, *, job_id, claim_token, engine_id, gate_generation,
-                     operation_id, body, content_type, secret):
+                     operation_id, body, content_type, secret, _authority_required=False):
     """Bind a grant to the currently observed coordinator-owned Viewer row.
 
     The observation is not revocation or a durable authority fence: this
@@ -158,6 +158,12 @@ def issue_init_grant(queue, *, job_id, claim_token, engine_id, gate_generation,
         raise BrokerHeld('invalid grant request')
     with queue._db() as db:
         db.execute('BEGIN')
+        if _authority_required:
+            from .authority_lease import MARKER_DDL
+            marker=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone()
+            if (marker is None or marker['sql']!=MARKER_DDL or
+                    db.execute('SELECT COUNT(*) FROM coordinator_authority_lease WHERE singleton=1 AND required=1').fetchone()[0]!=1):
+                raise BrokerHeld('authority lease marker unavailable')
         job=db.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
         tasks=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job_id,)).fetchall()
         if (job is None or len(tasks)!=1 or job['status']!='running' or job['profile']!=VIEWER_PROFILE
