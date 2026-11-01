@@ -23,7 +23,7 @@ import uuid
 import zipfile
 
 from .maintenance import Conflict
-from .odx_smoke_worker import Client, SmokeError
+from .odx_smoke_worker import Client, SmokeError, strict_wire_json
 from .options import catalog, discover_node, _NoRedirect
 from .policy import plan
 from .prototype import VIEWER_PROFILE
@@ -68,10 +68,22 @@ class NativeEngine:
             with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=5) as response:
                 if 'json' not in response.headers.get('Content-Type', ''):
                     raise ValueError()
-                raw = response.read(limit + 1)
-                if len(raw) > limit:
+                lengths=response.headers.get_all('Content-Length',[])
+                transfers=response.headers.get_all('Transfer-Encoding',[])
+                if (len(lengths)>1 or len(transfers)>1 or (lengths and transfers)
+                    or (transfers and transfers[0].strip().lower()!='chunked')
+                    or (not lengths and not transfers)):
                     raise ValueError()
-                value = json.loads(raw)
+                declared=None
+                if lengths:
+                    value=lengths[0].strip()
+                    if not value.isascii() or not value.isdecimal():raise ValueError()
+                    declared=int(value)
+                    if declared>limit:raise ValueError()
+                raw = response.read(limit + 1)
+                if len(raw) > limit or (declared is not None and len(raw)!=declared):
+                    raise ValueError()
+                value = strict_wire_json(raw)
                 if isinstance(value, dict) and 'error' in value:
                     raise ValueError()
                 return value
@@ -105,7 +117,7 @@ class NativeEngine:
             headers={'Content-Type': 'multipart/form-data; boundary=' + boundary},
             file=path, prefix=prefix, suffix=f'\r\n--{boundary}--\r\n'.encode(),
             expected_hash=item['sha256'], timeout=120)
-        result = json.loads(raw)
+        result = strict_wire_json(raw)
         if not isinstance(result, dict) or result.get('success') is not True or 'error' in result:
             raise SmokeError('engine upload acknowledgment uncertain')
 
@@ -117,7 +129,7 @@ class NativeEngine:
             route = '/task/' + action
             raw = self.client.request('POST', self.route(route), body=urlencode({'uuid': identifier}).encode(),
                                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
-            result = json.loads(raw)
+            result = strict_wire_json(raw)
         if (not isinstance(result, dict) or 'error' in result or ('success' in result and result['success'] is not True)
                 or ('uuid' in result and result['uuid'] != identifier)
                 or (action == 'commit' and result.get('success') is not True and result.get('uuid') != identifier)):

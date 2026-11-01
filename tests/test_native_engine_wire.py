@@ -74,6 +74,60 @@ class NativeEngineWireTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join(3)
             self.assertFalse(thread.is_alive())
 
+    def test_real_http_ambiguous_status_and_ack_are_rejected(self):
+        from processing.viewer_service import EngineUnavailable
+        identifier=str(uuid.uuid4())
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*_):pass
+            def respond(self):
+                self.send_response(200);self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(self.server.payload)));self.end_headers()
+                self.wfile.write(self.server.payload)
+            def do_GET(self):self.respond()
+            def do_POST(self):self.respond()
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever);thread.start()
+        try:
+            engine=NativeEngine('http://127.0.0.1:'+str(server.server_port))
+            for raw in (b'{"status":{"code":20,"code":40}}',b'{"progress":NaN}',b'{"progress":1e999}'):
+                with self.subTest(raw=raw):
+                    server.payload=raw
+                    with self.assertRaises(EngineUnavailable):engine.read('/task/'+identifier+'/info')
+            server.payload=b'{"success":false,"success":true}'
+            with self.assertRaises(SmokeError):engine.action('commit',identifier)
+            server.payload=b'{"uuid":"'+identifier.encode()+b'","status":{"code":20},"progress":1.5}'
+            self.assertEqual(engine.read('/task/'+identifier+'/info')['progress'],1.5)
+        finally:
+            server.shutdown();server.server_close();thread.join(3)
+            self.assertFalse(thread.is_alive())
+
+    def test_real_http_incomplete_status_never_becomes_completion(self):
+        from processing.viewer_service import EngineUnavailable
+        identifier=str(uuid.uuid4())
+        body=b'{"uuid":"'+identifier.encode()+b'","status":{"code":40}}'
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*_):pass
+            def do_GET(self):
+                self.send_response(200);self.send_header('Content-Type','application/json')
+                if self.server.mode=='truncated':self.send_header('Content-Length',str(len(body)+8))
+                elif self.server.mode=='duplicate':
+                    self.send_header('Content-Length',str(len(body)));self.send_header('Content-Length',str(len(body)))
+                elif self.server.mode=='conflicting':
+                    self.send_header('Content-Length',str(len(body)));self.send_header('Transfer-Encoding','chunked')
+                elif self.server.mode!='close':self.send_header('Content-Length',str(len(body)))
+                self.end_headers();self.wfile.write(body);self.wfile.flush();self.close_connection=True
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever);thread.start()
+        try:
+            engine=NativeEngine('http://127.0.0.1:'+str(server.server_port))
+            for mode in ('truncated','duplicate','conflicting','close'):
+                with self.subTest(mode=mode):
+                    server.mode=mode
+                    with self.assertRaises(EngineUnavailable):engine.read('/task/'+identifier+'/info')
+            server.mode='complete';self.assertEqual(engine.read('/task/'+identifier+'/info')['status']['code'],40)
+        finally:
+            server.shutdown();server.server_close();thread.join(3);self.assertFalse(thread.is_alive())
+
     def test_real_http_init_upload_commit_cancel_and_archive(self):
         token = 'synthetic-engine-credential-' + 'x' * 32
         backend = SyntheticEngine(1000, 3600)

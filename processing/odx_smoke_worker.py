@@ -54,6 +54,23 @@ def exact_origin(value):
     return value.rstrip('/')
 
 
+def strict_wire_json(raw):
+    """Reject ambiguous or non-finite JSON from HTTP peers."""
+    def pairs(items):
+        result={}
+        for key,value in items:
+            if key in result:raise ValueError('duplicate JSON key')
+            result[key]=value
+        return result
+    def number(value):
+        result=float(value)
+        if not math.isfinite(result):raise ValueError('non-finite JSON number')
+        return result
+    def constant(_):raise ValueError('non-finite JSON number')
+    try:return json.loads(raw,object_pairs_hook=pairs,parse_float=number,parse_constant=constant)
+    except RecursionError:raise ValueError('JSON nesting too deep') from None
+
+
 class Client:
     """Direct HTTP connections: no redirects, proxies, request logging or retries."""
 
@@ -151,7 +168,7 @@ class Client:
             body = b''
         raw = self.request(method, route, body, headers, timeout=timeout)
         try:
-            value = json.loads(raw)
+            value = strict_wire_json(raw)
             if isinstance(value, dict) and 'error' in value:
                 raise ValueError()
             if not isinstance(value, (dict, list)):
@@ -169,7 +186,7 @@ class Client:
                            headers={'Content-Type': 'multipart/form-data; boundary=' + boundary},
                            file=path, prefix=prefix, suffix=suffix, expected_hash=digest)
         try:
-            value = json.loads(raw)
+            value = strict_wire_json(raw)
             if not isinstance(value, dict) or 'error' in value or value.get('success') is not True:
                 raise ValueError()
         except Exception:

@@ -902,6 +902,32 @@ class ViewerServiceTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join(3)
             self.assertFalse(thread.is_alive())
 
+    def test_truncated_status_cannot_release_slot_or_report_completion(self):
+        from http.server import ThreadingHTTPServer
+        from processing.synthetic_engine import SyntheticEngine,handler_for
+        from processing.viewer_service import NativeEngine
+        backend=SyntheticEngine(1000,3600);token='synthetic-only-token-123456'
+        base=handler_for(backend,token)
+        class Handler(base):
+            def send_header(self,key,value):
+                if (self.server.truncate and self.path.startswith('/task/') and '/info' in self.path
+                    and key.lower()=='content-length'):
+                    value=str(int(value)+10);self.close_connection=True
+                return super().send_header(key,value)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.truncate=False
+        thread=threading.Thread(target=server.serve_forever);thread.start()
+        try:
+            self.engines['cluster']=NativeEngine('http://127.0.0.1:'+str(server.server_port),token)
+            first=self.submit();second=self.submit();self.service.tick()
+            task=self.task(first);backend.tasks[task['engine_uuid']]['code']=40
+            server.truncate=True;self.service.tick()
+            self.assertEqual(self.task(first)['job']['status'],'running')
+            self.assertIsNone(self.task(second)['node_id']);self.assertEqual(backend.commits,1)
+            server.truncate=False;self.service._backoff.clear();self.service.tick()
+            self.assertEqual(self.task(first)['job']['status'],'succeeded')
+        finally:
+            server.shutdown();server.server_close();thread.join(3);self.assertFalse(thread.is_alive())
+
     def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
         identifier = self.submit()
         self.engines['cluster'].fail = 'commit'
