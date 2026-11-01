@@ -47,7 +47,8 @@ class BoundFileTests(GuardTests):
         thread = threading.Thread(target=run)
         completion = SenderCompletion(source=source, writer=writer, thread=thread, stop=stop,
                                       done=done, success=success, errors=errors,
-                                      engine=SimpleNamespace(_unreaped=[]), upload_id=upload)
+                                      engine=SimpleNamespace(_unreaped=[]), upload_id=upload,
+                                      deadline=time.monotonic()+10)
         thread.start()
         if release is None and not done.wait(3):
             raise RuntimeError('synthetic sender did not finish')

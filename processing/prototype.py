@@ -355,6 +355,30 @@ class Queue(Maintenance):
                    (payload["status"], result, identifier))
         return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
 
+    def has_attested_started_transfer(self, identifier):
+        """Recognize a persisted guarded transfer after an unguarded restart.
+
+        An older empty journal is not evidence that the newer fence exists.
+        Nonempty or malformed unqualified journals remain an operator hold.
+        """
+        with self._db() as db:
+            db.execute('BEGIN')
+            table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
+            if not table:
+                return False
+            from .transfer_fence import TransferFenceError, attest
+            try:
+                attest(db)
+            except TransferFenceError:
+                try:
+                    nonempty = db.execute('SELECT 1 FROM engine_ingress_uploads LIMIT 1').fetchone()
+                except sqlite3.DatabaseError:
+                    raise Conflict('unqualified transfer journal requires inspection') from None
+                if nonempty:
+                    raise Conflict('unqualified transfer journal requires inspection') from None
+                return False
+            return bool(db.execute("SELECT 1 FROM engine_ingress_uploads WHERE job_id=? AND state='started'", (identifier,)).fetchone())
+
     def hold_started_transfer(self, identifier, token):
         """Hold a matching unfinished upload without modifying its evidence."""
         if type(token) is not str or not 1 <= len(token) <= 128: return False

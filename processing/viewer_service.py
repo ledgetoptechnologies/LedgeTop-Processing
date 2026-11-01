@@ -1019,7 +1019,8 @@ class ViewerService:
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])
-        if (self._guarded_engines_enabled and task.get('claim_token')
+        if (task.get('claim_token')
+                and (self._guarded_engines_enabled or self.queue.has_attested_started_transfer(task['job_id']))
                 and self.queue.hold_started_transfer(task['job_id'], task['claim_token'])):
             return
         if job and (job['status'] == 'running' or

@@ -27,9 +27,10 @@ def _read_source(fd, count):
 
 class SenderCompletion:
     """Owned in-process sender evidence; not an interprocess security boundary."""
-    def __init__(self, *, source, writer, thread, stop, done, success, errors, engine, upload_id):
+    def __init__(self, *, source, writer, thread, stop, done, success, errors, engine, upload_id, deadline):
         self.source,self.writer,self.thread,self.stop_event=source,writer,thread,stop
         self.done,self.success,self.errors,self.engine,self.upload_id=done,success,errors,engine,upload_id
+        self.deadline=deadline
         self.stopped=False
 
     def verify(self, limit):
@@ -122,7 +123,7 @@ class GuardedNativeEngine:
         except BaseException:
             os.close(fd);raise
         stop=threading.Event();done=threading.Event();success=threading.Event();errors=[]
-        deadline=time.monotonic()+self.guard.binding.deadline_seconds
+        deadline=time.monotonic()+self.guard.binding.upload_deadline_seconds
         def feed():
             try:
                 writer.setblocking(False);remaining_bytes=item['bytes']
@@ -145,7 +146,12 @@ class GuardedNativeEngine:
                     raise OSError('source identity changed')
                 writer.shutdown(socket.SHUT_WR)
                 success.set()
-            except BaseException as error:errors.append(error)
+            except BaseException as error:
+                errors.append(error)
+                # Wake the guard's blocking source read immediately. The
+                # completion still fails and the durable started intent holds.
+                try:writer.shutdown(socket.SHUT_WR)
+                except OSError:pass
             finally:
                 try:os.close(fd)
                 except OSError as error:errors.append(error)
@@ -166,7 +172,7 @@ class GuardedNativeEngine:
             else:os.close(fd)
             raise
         completion=SenderCompletion(source=source,writer=writer,thread=thread,stop=stop,done=done,
-                                    success=success,errors=errors,engine=self,upload_id=upload_id)
+                                    success=success,errors=errors,engine=self,upload_id=upload_id,deadline=deadline)
         try:
             return self.guard.stream_bound_upload('/task/new/upload/'+identifier,self._headers(task,upload_id=upload_id),source,completion=completion)
         finally:

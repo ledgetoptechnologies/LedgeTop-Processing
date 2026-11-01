@@ -850,6 +850,19 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
 
+    def test_nonempty_legacy_transfer_journal_requires_inspection(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        identifier = self.submit()
+        job_id = self.task(identifier)['job_id']
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('synthetic-upload', job_id, 'synthetic-engine', 1, 'a' * 64, 'started'))
+        with self.assertRaises(Conflict):
+            self.queue.has_attested_started_transfer(job_id)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0], 'started')
+
     def test_contradictory_native_init_ack_holds_photo_job_without_upload(self):
         from processing.viewer_service import NativeEngine
         identifier=self.submit()
