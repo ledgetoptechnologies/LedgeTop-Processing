@@ -2,7 +2,7 @@
 // UNREVIEWED. Synthetic-only Viewer candidate consumer over actual result HTTP.
 const fs=require('node:fs'),path=require('node:path'),https=require('node:https'),crypto=require('node:crypto');
 const assert=require('node:assert/strict');
-const root=process.env.JOINED_ROOT,viewer='/viewer/apps/viewer/server';
+const root=process.env.JOINED_ROOT,viewer='/src/apps/viewer/server';
 const receipts=require(path.join(viewer,'nativeReferenceReceiptCandidate'));
 const {stageAndHold}=require(path.join(viewer,'nativeReferenceConsumerCandidate'));
 const {sendBound}=require(path.join(viewer,'nativeReferenceBoundSenderCandidate'));
