@@ -149,10 +149,30 @@ try:
     first_log=docker('logs',sender_id)
     if first_state['ExitCode']!=0 or 'FIRST_SEND_RETRY_HELD synthetic-only' not in first_log:
         raise RuntimeError('first sender did not retain a retryable receipt')
-    if not state(server_id)['Running']:raise RuntimeError('server exited before sender restart')
+    deadline=time.monotonic()+12
+    while time.monotonic()<deadline:
+        first_server=state(server_id)
+        if not first_server['Running']:break
+        time.sleep(.2)
+    else:raise RuntimeError('first server did not stop after lost reply')
+    if first_server['ExitCode']!=0:raise RuntimeError('first server failed')
+    first_server_log=docker('logs',server_id)
+    if ('SERVER_START_RECEIPTS 0' not in first_server_log
+        or 'RETAINED_RECEIPTS 1' not in first_server_log):
+        raise RuntimeError('first server did not durably retain acceptance')
     print('FIRST_SENDER_STOPPED',sender_id,first_state['ExitCode'],flush=True)
-    # A second docker start creates a new Node process while retaining the
-    # same container filesystem and SQLite database. No fresh receipt is made.
+    print('FIRST_SERVER_STOPPED',server_id,first_server['ExitCode'],flush=True)
+    # Restart the same owned Processing container with its retained SQLite file.
+    docker('start',server_id)
+    deadline=time.monotonic()+12
+    while time.monotonic()<deadline:
+        resumed=state(server_id); logs=docker('logs',server_id)
+        if ('SERVER_START_RECEIPTS 1' in logs and
+            logs.count('READY synthetic loopback 17864')>=2):break
+        if not resumed['Running']:raise RuntimeError('restarted server exited before ready')
+        time.sleep(.2)
+    else:raise RuntimeError('restarted server did not become ready')
+    # A second start creates a new Node process with the same SQLite receipt.
     docker('start',sender_id)
     deadline=time.monotonic()+30
     while time.monotonic()<deadline:
@@ -169,7 +189,9 @@ try:
         or 'ACCEPTANCE_RESULT 200 True' not in server_log
         or 'SYNTHETIC_FIRST_REPLY_DISCARDED_AFTER_COMMIT' not in server_log
         or 'ACCEPTANCE_RESULT 200 False' not in server_log
-        or 'RETAINED_RECEIPTS 1' not in server_log):
+        or server_log.count('RETAINED_RECEIPTS 1') != 2
+        or 'SERVER_START_RECEIPTS 0' not in server_log
+        or 'SERVER_START_RECEIPTS 1' not in server_log):
         raise RuntimeError('rehearsal assertions incomplete')
     print('REHEARSAL_PASS',flush=True)
 finally:
