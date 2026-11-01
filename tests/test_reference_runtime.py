@@ -345,9 +345,12 @@ class ReferenceRuntimeTests(unittest.TestCase):
         # A configured TreeDar node is not proof of a compatible Viewer result
         # transport, provenance authority, or a qualified worker/retention path.
         from processing import reference_protocol as protocol
-        queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
+        queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"),
+                      treedar_node_ids=('main',), reference_enabled=True)
         self.addCleanup(queue.close)
+        self.assertEqual(queue.treedar_node_ids, ('main',))
         runtime = self.runtime(queue)
+        self.addCleanup(runtime.close)
         headers = {"Authorization": "Bearer " + self.value["viewerBearers"]["staging"]}
         capabilities = runtime.api.handle("GET", "/ltds/v1/capabilities", headers, protected_transport=True)
         self.assertEqual(capabilities.status, 200)
@@ -366,11 +369,16 @@ class ReferenceRuntimeTests(unittest.TestCase):
                                      available_engines=('treedar',), allowed_odm_options=set())
         response = runtime.api.handle('POST', '/ltds/v1/jobs', headers, json.dumps(body).encode(), protected_transport=True)
         self.assertEqual((response.status, response.body), (400, {'error': 'invalid_request'}))
-        body['pipeline']['gaussian_splat']['requested'] = True
-        response = runtime.api.handle('POST', '/ltds/v1/jobs', headers, json.dumps(body).encode(), protected_transport=True)
+        gaussian = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
+        gaussian['capabilityFingerprint'] = capabilities.body['capabilityFingerprint']
+        gaussian['pipeline']['odm']['optionsFingerprint'] = capabilities.body['engines']['odm']['optionsFingerprint']
+        protocol.validate_submission(gaussian, environment='staging', capability_fingerprint=gaussian['capabilityFingerprint'],
+                                     options_fingerprint=gaussian['pipeline']['odm']['optionsFingerprint'],
+                                     available_engines=('odm',), allowed_odm_options=set())
+        gaussian['pipeline']['gaussian_splat']['requested'] = True
+        response = runtime.api.handle('POST', '/ltds/v1/jobs', headers, json.dumps(gaussian).encode(), protected_transport=True)
         self.assertEqual((response.status, response.body), (400, {'error': 'invalid_request'}))
         self.assertEqual(queue.list(), [])
-        runtime.close()
 
     def test_discovery_allowlist_uses_definitions_and_excludes_string_path_credentials(self):
         first = discovered_policy(self.snapshot, self.config)
