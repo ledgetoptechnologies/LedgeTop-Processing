@@ -12,6 +12,7 @@ class AdmissionClosed(Exception):
 class AdmissionDrain:
     _DDL = 'CREATE TABLE coordinator_admission (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL, closed INTEGER NOT NULL CHECK(closed IN (0,1)), generation INTEGER NOT NULL CHECK(generation>=0))'
     _HOLD_DDL = 'CREATE TABLE coordinator_recovery_hold (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)'
+    _GUARD_DDL = 'CREATE TABLE coordinator_recovery_guard (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)'
     _OPS_DDL = 'CREATE TABLE coordinator_admission_operations (request_id TEXT PRIMARY KEY, authority_id TEXT NOT NULL, expected_generation INTEGER NOT NULL, expected_closed INTEGER NOT NULL, closed INTEGER NOT NULL, generation INTEGER NOT NULL)'
 
     def __init__(self, queue, *, initial_closed=False):
@@ -36,11 +37,15 @@ class AdmissionDrain:
                 if initial_closed and not closed:raise AdmissionClosed()
 
     def _recovery_held(self, db):
-        table=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_recovery_hold'").fetchone()
-        if table is None:return False
-        if table[0]!=self._HOLD_DDL:raise AdmissionClosed()
-        rows=db.execute('SELECT singleton,authority_id FROM coordinator_recovery_hold').fetchall()
-        if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.queue.authority_id:raise AdmissionClosed()
+        objects=db.execute("SELECT name,sql,type FROM sqlite_master WHERE name IN ('coordinator_recovery_hold','coordinator_recovery_guard')").fetchall()
+        if not objects:return False
+        expected={'coordinator_recovery_hold':self._HOLD_DDL,'coordinator_recovery_guard':self._GUARD_DDL}
+        if len(objects)!=2:raise AdmissionClosed()
+        for name,sql,kind in objects:
+            if kind!='table' or sql!=expected[name]:raise AdmissionClosed()
+            # Names come from the fixed constant above, not a caller.
+            rows=db.execute('SELECT singleton,authority_id FROM '+name).fetchall()
+            if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.queue.authority_id:raise AdmissionClosed()
         return True
 
     def arm_recovery_hold(self):
@@ -62,7 +67,9 @@ class AdmissionDrain:
                         if generation>=2**53-1:raise AdmissionClosed()
                         db.execute('UPDATE coordinator_admission SET closed=1,generation=? WHERE singleton=1',(generation+1,))
                     db.execute(self._HOLD_DDL)
+                    db.execute(self._GUARD_DDL)
                     db.execute('INSERT INTO coordinator_recovery_hold VALUES(1,?)',(self.queue.authority_id,))
+                    db.execute('INSERT INTO coordinator_recovery_guard VALUES(1,?)',(self.queue.authority_id,))
             finally:self._closing.clear()
 
     def _closed(self, db):

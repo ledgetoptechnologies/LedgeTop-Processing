@@ -1,9 +1,12 @@
 """Owned synthetic admission state; roots intentionally retained."""
 import tempfile
+import sqlite3
+import threading
 import json
 from pathlib import Path
 import unittest
 import uuid
+from unittest.mock import patch
 from processing.admission_drain import AdmissionDrain, AdmissionClosed
 from processing.maintenance import Conflict
 from processing.prototype import Queue, PROFILE
@@ -34,6 +37,64 @@ class RecoveryAdmissionHoldTests(unittest.TestCase):
                 with gate.admit():self.fail('recovery hold opened')
         finally:q.close()
 
+
+    def test_failed_install_rolls_back_closed_state_and_both_markers(self):
+        root=tempfile.mkdtemp(prefix='lt-recovery-failed-install-')
+        print('retained synthetic recovery hold root:',root,flush=True)
+        q=Queue(root)
+        try:
+            gate=AdmissionDrain(q)
+            with patch.object(AdmissionDrain,'_GUARD_DDL','not a SQL statement'):
+                with self.assertRaises(sqlite3.OperationalError):gate.arm_recovery_hold()
+            self.assertFalse(gate.status()['closed'])
+            with q._db() as db:
+                rows=db.execute("SELECT name FROM sqlite_master WHERE name IN ('coordinator_recovery_hold','coordinator_recovery_guard')").fetchall()
+                self.assertEqual(rows,[])
+        finally:q.close()
+
+    def test_arm_waits_for_in_progress_claim_transaction(self):
+        root=tempfile.mkdtemp(prefix='lt-recovery-claim-race-')
+        print('retained synthetic recovery hold root:',root,flush=True)
+        q=Queue(root);release=threading.Event();entered=threading.Event();arm_started=threading.Event();arm_done=threading.Event();out=[]
+        try:
+            gate=AdmissionDrain(q)
+            q.submit({'requestId':'synthetic-one','environment':'production','profile':PROFILE})
+            check=q._transfer_admission_clear
+            def paused(db):
+                entered.set()
+                if not release.wait(3):raise RuntimeError('synthetic test timed out')
+                return check(db)
+            def claim():out.append(q.claim({'workerId':'synthetic','nodeId':'cluster'}))
+            def arm():arm_started.set();gate.arm_recovery_hold();arm_done.set()
+            with patch.object(q,'_transfer_admission_clear',side_effect=paused):
+                claimant=threading.Thread(target=claim);armer=threading.Thread(target=arm)
+                claimant.start()
+                try:
+                    self.assertTrue(entered.wait(2));armer.start();self.assertTrue(arm_started.wait(2))
+                    self.assertFalse(arm_done.wait(.1))
+                finally:
+                    release.set();claimant.join(4)
+                    if armer.ident is not None:armer.join(4)
+                self.assertFalse(claimant.is_alive());self.assertFalse(armer.is_alive())
+            self.assertTrue(arm_done.is_set());self.assertEqual(len(out),1)
+            self.assertIsNotNone(out[0]);self.assertTrue(gate.status()['closed'])
+        finally:q.close()
+
+    def test_lost_one_marker_still_denies_claim_and_reopen(self):
+        root=tempfile.mkdtemp(prefix='lt-recovery-missing-marker-')
+        print('retained synthetic recovery hold root:',root,flush=True)
+        q=Queue(root)
+        try:
+            gate=AdmissionDrain(q)
+            q.submit({'requestId':'synthetic-one','environment':'production','profile':PROFILE})
+            gate.arm_recovery_hold()
+            with q._db() as db:db.execute('DROP TABLE coordinator_recovery_hold')
+            self.assertIsNone(q.claim({'workerId':'synthetic','nodeId':'cluster'}))
+            with self.assertRaises(AdmissionClosed):gate.status()
+            with self.assertRaises(AdmissionClosed):
+                gate.set_closed(False,request_id=str(uuid.uuid4()),expected_generation=1,
+                                expected_closed=True,expected_authority=q.authority_id)
+        finally:q.close()
 
     def test_hold_blocks_actual_reference_claim(self):
         from processing.reference_api import ReferenceAPI

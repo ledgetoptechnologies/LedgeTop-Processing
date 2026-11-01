@@ -394,7 +394,7 @@ class Queue(Maintenance):
         Checked inside the caller's SQLite transaction even if no optional
         AdmissionDrain object is installed. It does not fence external writers.
         """
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name='coordinator_recovery_hold' LIMIT 1").fetchone():
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('coordinator_recovery_hold','coordinator_recovery_guard') LIMIT 1").fetchone():
             return False
         try:
             cls._has_attested_started_transfer(db, None)
