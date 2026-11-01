@@ -118,6 +118,74 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
     finally:sock.close()
 
 
+# Disabled until certificate provisioning, physical isolation, and listener lifecycle
+# are qualified. This diagnostic never adopts an epoch or authorizes release.
+# There is no identity provisioning or listener bootstrap in this candidate;
+# socket deadlines do not bound filesystem and SQLite inspection syscalls.
+HELD_EVIDENCE_ENDPOINT_QUALIFIED = False
+
+
+def serve_held_evidence(sock, *, engine_id, coordinator_pin, node_certificate_pin, secret, timeout_seconds=5):
+    from .node_mutation_broker import inspect_prior_node_state
+    try:
+        if HELD_EVIDENCE_ENDPOINT_QUALIFIED is not True:
+            raise SessionHeld('held evidence endpoint unavailable')
+        if type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=10:
+            raise SessionHeld('held evidence endpoint unavailable')
+        _peer(sock,coordinator_pin,True)
+        deadline=time.monotonic()+timeout_seconds
+        request=_read(sock,deadline)
+        if (type(request) is not dict or set(request)!={'version','nonce','operationId'}
+                or type(request['version']) is not int or request['version']!=1
+                or type(request['nonce']) is not str or len(request['nonce'])!=64
+                or any(c not in '0123456789abcdef' for c in request['nonce'])):
+            raise SessionHeld('held evidence request invalid')
+        report=inspect_prior_node_state(engine_id,request['operationId'],secret)
+        if (type(node_certificate_pin) is not str or len(node_certificate_pin)!=64
+                or report['identity'].get('version')!=2
+                or report['identity'].get('nodeCertificateSha256')!=node_certificate_pin):
+            raise SessionHeld('held evidence node identity unavailable')
+        _write(sock,{'version':1,'nonce':request['nonce'],'report':report},deadline)
+    except Exception:
+        raise SessionHeld('held evidence endpoint unavailable') from None
+    finally:sock.close()
+
+
+def request_held_evidence(sock, *, queue, witness, operation_id, node_id, engine_id,
+                          authority_id, node_certificate_pin, secret, timeout_seconds=5):
+    from .node_mutation_broker import inspect_coordinator_held_grant
+    try:
+        if HELD_EVIDENCE_ENDPOINT_QUALIFIED is not True:
+            raise SessionHeld('held evidence endpoint unavailable')
+        if type(timeout_seconds) not in (int,float) or not 0<timeout_seconds<=10:
+            raise SessionHeld('held evidence endpoint unavailable')
+        _peer(sock,node_certificate_pin,False)
+        before=inspect_coordinator_held_grant(queue,witness,operation_id,secret)
+        deadline=time.monotonic()+timeout_seconds;nonce=secrets.token_hex(32)
+        _write(sock,{'version':1,'nonce':nonce,'operationId':operation_id},deadline)
+        response=_read(sock,deadline)
+        if (type(response) is not dict or set(response)!={'version','nonce','report'}
+                or type(response['version']) is not int or response['version']!=1 or response['nonce']!=nonce):
+            raise SessionHeld('held evidence response invalid')
+        report=response['report']
+        if (type(report) is not dict or set(report)!={'identity','grant','operationState','observationPresent','authorizesRelease'}
+                or report['operationState']!='started' or type(report['observationPresent']) is not bool
+                or report['authorizesRelease'] is not False or type(report['identity']) is not dict):
+            raise SessionHeld('held evidence response invalid')
+        identity=report['identity'];grant=report['grant']
+        if (identity.get('version')!=2 or identity.get('nodeCertificateSha256')!=node_certificate_pin
+                or (identity.get('nodeId'),identity.get('engineId'),identity.get('authorityId'))!=(node_id,engine_id,authority_id)
+                or grant!=before['grant']):
+            raise SessionHeld('held evidence identity differs')
+        after=inspect_coordinator_held_grant(queue,witness,operation_id,secret)
+        if after!=before:raise SessionHeld('held evidence coordinator changed')
+        return {'operationId':operation_id,'coordinatorState':'held','nodeState':'reported-held',
+                'nodeIdentity':'pinned-certificate','engineTaskState':'unverified','authorizesRelease':False}
+    except Exception:
+        raise SessionHeld('held evidence endpoint unavailable') from None
+    finally:sock.close()
+
+
 class RemoteAuthoritySession:
     """Node-side single-use mTLS stream witness, tied to one init claim."""
     def __init__(self,sock,*,authority,epoch,claim_token,peer_sha256,timeout_seconds=5):

@@ -621,7 +621,10 @@ def inspect_prior_node_state(engine_id, operation_id, secret):
             raise BrokerHeld('node identity requires inspection')
         manifest=json.loads(os.read(manifestfd,8193))
         fields={'version','nodeId','engineId','authorityId','coordinatorOrigin','generation','coordinatorEpoch','gateRoot','gateLock','journal'}
-        if (type(manifest) is not dict or set(manifest)!=fields or manifest['version']!=1
+        if (type(manifest) is dict and manifest.get('version')==2):fields=fields|{'nodeCertificateSha256'}
+        if (type(manifest) is not dict or set(manifest)!=fields or type(manifest['version']) is not int or manifest['version'] not in (1,2)
+                or (manifest['version']==2 and (type(manifest['nodeCertificateSha256']) is not str
+                    or not re.fullmatch('[a-f0-9]{64}',manifest['nodeCertificateSha256'])))
                 or manifest['engineId']!=engine_id or not _uuid(manifest['authorityId'])
                 or not _uuid(manifest['coordinatorEpoch']) or manifest['nodeId'] not in ('main','cluster')
                 or type(manifest['generation']) is not int or manifest['generation']<1

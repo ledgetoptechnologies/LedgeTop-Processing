@@ -22,6 +22,67 @@ from tests.test_node_mutation_broker import NodeMutationBrokerTests
 
 @unittest.skipUnless(shutil.which('openssl'), 'synthetic openssl fixture required')
 class NodeAuthoritySessionTests(NodeMutationBrokerTests):
+    def test_held_evidence_mtls_after_coordinator_and_node_close(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from processing.authority_lease import acquire
+        from processing import node_mutation_broker as b
+        key=self.root/'held-node.key';cert=self.root/'held-node.crt'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=10)
+        pin=hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(cert,key);server_context.load_verify_locations(cafile=str(cert));server_context.verify_mode=ssl.CERT_REQUIRED
+        client_context=ssl.create_default_context(cafile=str(cert));client_context.load_cert_chain(cert,key)
+        grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.broker.witness._check;checks=[]
+        def lost():
+            checks.append(True)
+            if len(checks)==2:raise b.BrokerHeld('synthetic authority lost')
+            return original()
+        with patch.object(self.broker.witness,'_check',side_effect=lost):
+            with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.broker.close();root=self.root/'gate';journal=root/'mutation-broker'/'node-broker.sqlite3'
+        a=root.stat();l=(root/'gate.lock').stat();j=journal.stat()
+        manifest={'version':2,'nodeId':self.node,'engineId':self.engine,'authorityId':self.authority,
+                  'coordinatorOrigin':self.origin,'generation':1,'coordinatorEpoch':self.epoch,
+                  'gateRoot':[a.st_dev,a.st_ino],'gateLock':[l.st_dev,l.st_ino],
+                  'journal':[j.st_dev,j.st_ino],'nodeCertificateSha256':pin}
+        identity=root/'mutation-broker'/'identity.json';identity.write_bytes(b._json(manifest));identity.chmod(0o600)
+        before=journal.read_bytes();self.owner_lease.close();self.owner_queue.close()
+        lease=acquire(self.root/'owner-lease',self.root/'owner-queue')
+        restarted=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        self.addCleanup(lease.close);self.addCleanup(restarted.close);restarted.authority_lease=lease
+        witness=LocalCoordinatorAuthority(restarted);errors=[];raw_client,raw_server=socket.socketpair()
+        raw_client.settimeout(5);raw_server.settimeout(5)
+        self.addCleanup(raw_client.close);self.addCleanup(raw_server.close)
+        def serve():
+            try:
+                channel=server_context.wrap_socket(raw_server,server_side=True)
+                authority_session.serve_held_evidence(channel,engine_id=self.engine,coordinator_pin=pin,
+                    node_certificate_pin=pin,secret=self.secret)
+            except Exception as exc:errors.append(type(exc).__name__)
+        thread=threading.Thread(target=serve)
+        try:
+            with patch.object(authority_session,'HELD_EVIDENCE_ENDPOINT_QUALIFIED',True):
+                thread.start()
+                channel=client_context.wrap_socket(raw_client,server_hostname='localhost')
+                result=authority_session.request_held_evidence(channel,queue=restarted,witness=witness,
+                    operation_id=grant['operationId'],node_id=self.node,engine_id=self.engine,
+                    authority_id=self.authority,node_certificate_pin=pin,secret=self.secret)
+            self.assertFalse(result['authorizesRelease']);self.assertEqual(result['nodeIdentity'],'pinned-certificate')
+            self.assertEqual(restarted.get(self.job)['status'],'held');self.assertEqual(before,journal.read_bytes())
+        finally:
+            raw_client.close();raw_server.close();thread.join(5)
+        self.assertFalse(thread.is_alive());self.assertEqual(errors,[])
+
+    def test_held_evidence_endpoint_disabled_closes_socket(self):
+        channel=Mock()
+        with self.assertRaises(SessionHeld):
+            authority_session.serve_held_evidence(channel,engine_id=self.engine,coordinator_pin='0'*64,
+                node_certificate_pin='0'*64,secret=self.secret)
+        channel.close.assert_called_once_with()
+
     def test_invalid_server_binding_closes_owned_socket(self):
         channel=Mock()
         with self.assertRaises(SessionHeld):
