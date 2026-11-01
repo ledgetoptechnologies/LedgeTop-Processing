@@ -341,13 +341,13 @@ class EngineIngressGuard:
                 with self.queue._db() as db:
                     if OwnerPin.capture(self.queue) != self.owner_pin:
                         raise AdmissionError('canonical owner lease changed')
-                    if bound_id is not None:
-                        from .transfer_fence import attest
-                        attest(db)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0: raise AdmissionError('deadline exceeded')
                     db.execute('PRAGMA busy_timeout=' + str(max(1, int(remaining * 1000))))
                     db.execute('BEGIN IMMEDIATE')
+                    if bound_id is not None:
+                        from .transfer_fence import attest
+                        attest(db)
                     self.queue._refresh_nodes(db)
                     row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
                     task = db.execute('SELECT * FROM viewer_tasks WHERE job_id=?', (job_id,)).fetchone()
@@ -416,6 +416,9 @@ class EngineIngressGuard:
                         # upstream request is issued; gate and lifecycle remain held.
                         db.commit()
                         _resume_upload_transaction(db, deadline)
+                        if bound_id is not None:
+                            from .transfer_fence import attest
+                            attest(db)
                         if OwnerPin.capture(self.queue) != self.owner_pin:
                             raise AdmissionError('canonical owner lease changed')
                         current = db.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
