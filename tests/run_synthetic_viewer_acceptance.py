@@ -140,7 +140,21 @@ try:
                      'node','tests/synthetic_viewer_acceptance_sender.js')
     print('OWNED_SENDER',sender_id,flush=True)
     docker('start',sender_id)
-    deadline=time.monotonic()+45
+    deadline=time.monotonic()+15
+    while time.monotonic()<deadline:
+        first_state=state(sender_id)
+        if not first_state['Running']: break
+        time.sleep(.2)
+    else: raise RuntimeError('first owned sender exceeded deadline')
+    first_log=docker('logs',sender_id)
+    if first_state['ExitCode']!=0 or 'FIRST_SEND_RETRY_HELD synthetic-only' not in first_log:
+        raise RuntimeError('first sender did not retain a retryable receipt')
+    if not state(server_id)['Running']:raise RuntimeError('server exited before sender restart')
+    print('FIRST_SENDER_STOPPED',sender_id,first_state['ExitCode'],flush=True)
+    # A second docker start creates a new Node process while retaining the
+    # same container filesystem and SQLite database. No fresh receipt is made.
+    docker('start',sender_id)
+    deadline=time.monotonic()+30
     while time.monotonic()<deadline:
         current_states=[state(cid) for cid in containers]
         if all(not item['Running'] for item in current_states): break
@@ -149,8 +163,11 @@ try:
     sender_log=docker('logs',sender_id);server_log=docker('logs',server_id)
     print('SENDER_LOG',sender_log,flush=True);print('SERVER_LOG',server_log,flush=True)
     if any(item['ExitCode']!=0 for item in current_states): raise RuntimeError('container failed')
-    if ('VIEWER_SEND_AND_REPLAY_OK held=true synthetic-only' not in sender_log
+    if ('FIRST_SEND_RETRY_HELD synthetic-only' not in sender_log
+        or 'SYNTHETIC_RESTART_EXACT_PAYLOAD_OK' not in sender_log
+        or 'VIEWER_RESTART_REPLAY_OK held=true synthetic-only' not in sender_log
         or 'ACCEPTANCE_RESULT 200 True' not in server_log
+        or 'SYNTHETIC_FIRST_REPLY_DISCARDED_AFTER_COMMIT' not in server_log
         or 'ACCEPTANCE_RESULT 200 False' not in server_log
         or 'RETAINED_RECEIPTS 1' not in server_log):
         raise RuntimeError('rehearsal assertions incomplete')

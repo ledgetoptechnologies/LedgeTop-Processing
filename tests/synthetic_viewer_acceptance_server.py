@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import sqlite3
+import socket
 import ssl
 import threading
 import uuid
@@ -66,6 +67,20 @@ def main():
                     threading.Thread(target=server.shutdown).start()
             return result
     server = create_reference_http_server(CountedAPI(), host='127.0.0.1', port=17864, ssl_context=context, request_timeout=5)
+    original_reply = server.RequestHandlerClass._reply
+    reply_lock = threading.Lock()
+    lost = [False]
+    def discard_first_reply(handler, response):
+        with reply_lock:
+            if not lost[0] and response.status == 200 and response.body.get('created') is True:
+                lost[0] = True
+                print('SYNTHETIC_FIRST_REPLY_DISCARDED_AFTER_COMMIT',flush=True)
+                handler.close_connection = True
+                try: handler.connection.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+                return
+        return original_reply(handler, response)
+    server.RequestHandlerClass._reply = discard_first_reply
     print('READY synthetic loopback 17864', flush=True)
     timer = threading.Timer(35, server.shutdown); timer.start()
     try: server.serve_forever(poll_interval=.05)
