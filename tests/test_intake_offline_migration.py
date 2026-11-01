@@ -34,6 +34,27 @@ class IntakeOfflineMigrationTests(unittest.TestCase):
         legacy.close()
         self.db.execute('DROP TRIGGER viewer_intake_guard_viewer_tasks_update_v1')
         with self.assertRaises(migration.MigrationUnavailable):migration.attest(self.db)
+    def test_cross_name_collisions_held_with_recursive_triggers_both_modes(self):
+        self.install()
+        record=('op','task',1,'photo','directory','temp','final',1,None,'prepared')
+        self.db.execute('INSERT INTO viewer_intake_journal_v1 VALUES(?,?,?,?,?,?,?,?,?,?)',record)
+        for recursive in (0,1):
+            self.db.execute('PRAGMA recursive_triggers='+str(recursive))
+            for temporary,final in (('temp','different'),('final','different'),('different','temp'),('different','final')):
+                with self.subTest(recursive=recursive,temporary=temporary,final=final):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        self.db.execute('INSERT OR REPLACE INTO viewer_intake_journal_v1 VALUES(?,?,?,?,?,?,?,?,?,?)',
+                            ('other','task',1,'other','directory',temporary,final,1,None,'prepared'))
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM viewer_intake_journal_v1').fetchone()[0],1)
+
+    def test_ten_thousand_actual_guarded_journal_inserts(self):
+        import time
+        self.install();start=time.monotonic()
+        self.db.executemany('INSERT INTO viewer_intake_journal_v1 VALUES(?,?,?,?,?,?,?,?,?,?)',
+            ((str(n),'task',1,str(n),'directory','temp'+str(n),'final'+str(n),1,None,'prepared') for n in range(10000)))
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM viewer_intake_journal_v1').fetchone()[0],10000)
+        print('synthetic 10000 guarded journal inserts seconds:',round(time.monotonic()-start,4),flush=True)
+
     def test_only_ordered_immutable_journal_transitions_and_no_replace(self):
         self.install()
         record=('op','task',1,'photo','directory','temp','final',1,None,'prepared')
