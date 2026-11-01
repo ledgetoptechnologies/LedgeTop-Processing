@@ -228,7 +228,8 @@ class ReferenceStore:
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
-    def submit(self, validated):
+    @staticmethod
+    def _validate_submission(validated):
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -238,29 +239,42 @@ class ReferenceStore:
             allowed_odm_options=set(raw["pipeline"]["odm"]["options"]))
         if _json(checked) != _json(validated):
             raise ValueError("normalized submission identity or digest mismatch")
-        encoded = _json(checked)
+        return checked
+
+    def submit(self, validated):
+        checked = self._validate_submission(validated)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
-            old = db.execute("SELECT job_id,request_digest,environment FROM reference_jobs WHERE submission_id=?",
-                             (checked["submissionId"],)).fetchone()
-            if old:
-                if (old["request_digest"], old["environment"]) != (checked["requestDigest"], checked["environment"]):
-                    raise Conflict("submissionId belongs to a different reference request")
-                return self._public(self._row(db, old["job_id"])), False
-            pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
-            if pending >= self.max_queued_jobs:
-                raise Conflict("reference pending job quota reached")
-            self._quota(db, len(encoded.encode("utf-8")))
-            job_id = str(uuid.uuid4())
-            # Namespaced request identity also prevents collisions with ordinary
-            # multipart/legacy submission IDs in the shared jobs table.
-            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
-                       (job_id, "reference:" + checked["submissionId"], checked["environment"], PROFILE))
-            db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,environment,input_json,
-              manifest_sha,pipeline_digest,phase) VALUES(?,?,?,?,?,?,?,'queued')""",
-              (job_id, checked["submissionId"], checked["requestDigest"], checked["environment"], encoded,
-               checked["manifestSha256"], checked["pipelineDigest"]))
-            return self._public(self._row(db, job_id)), True
+            return self._submit_owned_transaction(db, checked)
+
+    def _submit_owned_transaction(self, db, checked):
+        """Internal implementation; only transaction owners may call this.
+
+        A caller must let exceptions abort its entire Queue transaction. This
+        method does not authenticate, check connection ownership, or fence old
+        writers. It is not a public composition interface.
+        """
+        encoded = _json(checked)
+        old = db.execute("SELECT job_id,request_digest,environment FROM reference_jobs WHERE submission_id=?",
+                         (checked["submissionId"],)).fetchone()
+        if old:
+            if (old["request_digest"], old["environment"]) != (checked["requestDigest"], checked["environment"]):
+                raise Conflict("submissionId belongs to a different reference request")
+            return self._public(self._row(db, old["job_id"])), False
+        pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
+        if pending >= self.max_queued_jobs:
+            raise Conflict("reference pending job quota reached")
+        self._quota(db, len(encoded.encode("utf-8")))
+        job_id = str(uuid.uuid4())
+        # Namespaced request identity also prevents collisions with ordinary
+        # multipart/legacy submission IDs in the shared jobs table.
+        db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
+                   (job_id, "reference:" + checked["submissionId"], checked["environment"], PROFILE))
+        db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,environment,input_json,
+          manifest_sha,pipeline_digest,phase) VALUES(?,?,?,?,?,?,?,'queued')""",
+          (job_id, checked["submissionId"], checked["requestDigest"], checked["environment"], encoded,
+           checked["manifestSha256"], checked["pipelineDigest"]))
+        return self._public(self._row(db, job_id)), True
 
     def get(self, job_id, *, private=False):
         with self.queue._db() as db:
