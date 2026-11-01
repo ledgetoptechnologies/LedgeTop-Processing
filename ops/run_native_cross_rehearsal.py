@@ -4,7 +4,7 @@ from pathlib import Path
 
 PROCESSING_BASE='42da801be55b686e43a78e35b88d32de89f8c5b4'
 FIXTURE_COMMIT='ae496a2e5487de00850892348fab97a86ffaab8b'
-VIEWER_COMMIT_PIN=None  # Await corrected owner-confirmed and independently reviewed commit.
+VIEWER_COMMIT_PIN='d2a92648e52d685e0491128fb073b4dd8b4645b0'
 IMAGE='sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668'
 LABEL='org.openai.codex.native-cross'
 MAX_ARCHIVE_BYTES=536870912

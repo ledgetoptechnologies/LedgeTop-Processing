@@ -1,8 +1,7 @@
 # Synthetic Viewer upload-capacity rehearsal
 
-This unrun fixture targets the native coordinator source at PR 242 and a
-pending, independently reviewed Viewer revision. The launcher refuses to run
-until that Viewer commit is pinned. No production or client files are used.
+This fixture targets the native coordinator source at PR 242 and Viewer commit
+`d2a92648e52d685e0491128fb073b4dd8b4645b0`. No production or client files are used.
 
 The isolated fixture changes the coordinator's advertised and enforced limits
 to 30 input bytes and 400 multipart-body bytes. It exercises the real Viewer
@@ -24,4 +23,12 @@ before a requested stop could reach its already-removed owned container. Its
 evidence is retained in
 `C:\Users\fstor\AppData\Local\Temp\codex-native-cross-428fe9a314fcb037932d43b95a3442ca-xbuxhe79`.
 The revised fixture starts from empty state and separates these capacity cases
-from the earlier full-ingest rehearsal; it has not yet been run.
+from the earlier full-ingest rehearsal. It passed with fixture commit
+`ae496a2e5487de00850892348fab97a86ffaab8b` and test image
+`sha256:0bb8832e2ce0cf718ae6b5419fa79501a75f303a82ff4b32200888329f7ef668`.
+It asserted three rejections before init/upload and one resumed three-photo
+submission in two exact-size multipart requests, with source and coordinator
+stored hashes matching. The evidence directory is
+`C:\Users\fstor\AppData\Local\Temp\codex-native-cross-d14151935620af3101d11804691ecb0c-u1exmwd1`;
+the owned container `01613b87fac7da762985048dc0a3488e6f14108f400831c9cf40180f191bc9aa`
+was identity-checked and removed, and a later inspection found it absent.
