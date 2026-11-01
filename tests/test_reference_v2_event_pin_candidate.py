@@ -34,7 +34,7 @@ class EventPinTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM v2_event_pins WHERE operation=?',(self.event['operation'],))
             with self.assertRaises(sqlite3.IntegrityError):db.execute("UPDATE v2_event_pins SET event_sha=? WHERE operation=?",('0'*64,self.event['operation']))
             row=db.execute('SELECT * FROM v2_event_pins WHERE operation=?',(self.event['operation'],)).fetchone()
-            with self.assertRaises(sqlite3.IntegrityError):db.execute('INSERT OR REPLACE INTO v2_event_pins VALUES(?,?,?,?,?,?,?,?,?)',tuple(row))
+            with self.assertRaises(sqlite3.IntegrityError):db.execute('INSERT OR REPLACE INTO v2_event_pins VALUES(?,?,?,?,?,?,?,?,?,?)',tuple(row))
             self.assertNotIn(self.claim['claimToken'],row['local_identity'])
             self.assertNotIn(row['claim_sha'],row['local_identity'])
             self.assertEqual(first['localIdentitySha256'],hashlib.sha256(pin.LOCAL_IDENTITY_DOMAIN+row['local_identity'].encode()).hexdigest())

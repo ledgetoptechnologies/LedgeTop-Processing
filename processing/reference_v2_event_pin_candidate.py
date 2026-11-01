@@ -9,10 +9,13 @@ from . import reference_v2_envelope_candidate as envelope
 from . import reference_v2_attempt_candidate as attempts
 
 QUALIFIED=False
+SIGNED_QUALIFIED=False
 DDL=('CREATE TABLE v2_event_pins (operation TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE, '
      'claim_sha TEXT NOT NULL, claim_binding TEXT NOT NULL, event_bytes BLOB NOT NULL, '
-     'event_sha TEXT NOT NULL, local_identity TEXT NOT NULL, local_identity_sha TEXT NOT NULL, state TEXT NOT NULL CHECK(state=\'held\'))')
+     'event_sha TEXT NOT NULL, local_identity TEXT NOT NULL, local_identity_sha TEXT NOT NULL, signed_binding TEXT NOT NULL, state TEXT NOT NULL CHECK(state=\'held\'))')
 LOCAL_IDENTITY_DOMAIN=b'ltds-v2-local-claim-observation-experiment-v1\0'
+CLAIM_BINDING_DOMAIN=b'ltds-v2-claim-binding-experiment-v1\0'
+EVENT_SIGNATURE_DOMAIN=b'ltds-viewer-ledger-event-envelope-experiment-v3\0'
 TRIGGERS={
  'v2_pin_record_update':"CREATE TRIGGER v2_pin_record_update BEFORE UPDATE ON v2_event_pins BEGIN SELECT RAISE(ABORT,'v2 event pin immutable'); END",
  'v2_pin_record_delete':"CREATE TRIGGER v2_pin_record_delete BEFORE DELETE ON v2_event_pins BEGIN SELECT RAISE(ABORT,'v2 event pin immutable'); END",
@@ -77,7 +80,7 @@ def attest(db):
         row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
         if row is None or row[0]!=sql:raise PinHeld('pin trigger missing')
 
-def pin(store,*,claim,event_raw):
+def pin(store,*,claim,event_raw,_signed_pair=None):
     """Persist an authenticated existing claim's held intent, not event authority."""
     if QUALIFIED is not True or type(store) is not ReferenceStore or type(claim) is not dict or set(claim)!={'jobId','nodeId','workerId','workerInstanceId','claimToken'}:raise PinHeld('unqualified claim')
     if type(event_raw) is not bytes or not 0<len(event_raw)<=4096:raise PinHeld('invalid event')
@@ -115,14 +118,61 @@ def pin(store,*,claim,event_raw):
                     or not total<=transfer['byteBudget']<=min(p.MAX_SAFE_INTEGER,3*total)):raise ValueError()
             reservation=transfer['reservationId']
         except Exception:raise PinHeld('reserved claim required') from None
-        local_identity=dict(schemaVersion=1,scope='local_observation_not_authority',reservationId=reservation,attemptId=attempt['attempt_id'],
+        if _signed_pair is not None:
+            if SIGNED_QUALIFIED is not True or type(_signed_pair) is not dict or set(_signed_pair)!={'intentRaw','intentSignature','receiptRaw','receiptSignature','registry','expectedIntent','expectedReceipt','eventBody','eventEnvelopeRaw','eventSignature','admissionRaw','policyDomain','now'}:
+                raise PinHeld('signed reservation is unqualified')
+            from . import reference_v2_reservation_candidate as signed
+            try:
+                proof=signed.verify_pair(_signed_pair['intentRaw'],_signed_pair['intentSignature'],_signed_pair['receiptRaw'],_signed_pair['receiptSignature'],registry=_signed_pair['registry'],expected_intent=_signed_pair['expectedIntent'],expected_receipt=_signed_pair['expectedReceipt'],now=_signed_pair['now'])
+                intent=_signed_pair['expectedIntent'];receipt=_signed_pair['expectedReceipt']
+                if type(_signed_pair['policyDomain']) is not str or event['domain']!=_signed_pair['policyDomain'] or not envelope.ID.fullmatch(_signed_pair['policyDomain']):raise ValueError('checkpoint domain')
+                # Epoch is still caller-provided; this is an experimental
+                # digest, not proof of a current independently anchored epoch.
+                claim_binding=dict(identity=expected_attempt,attemptId=attempt['attempt_id'],authorityEpoch=intent['coordinatorEpoch'])
+                claim_binding_sha=hashlib.sha256(CLAIM_BINDING_DOMAIN+p.canonical_json(claim_binding)).hexdigest()
+                if ((intent['jobId'],intent['generation'],intent['environment'],intent['attemptId'],intent['inputManifestSha256'],intent['coordinatorAuthorityId'],intent['byteBudget'],intent['objectCount'],intent['totalSourceBytes'],receipt['reservationId']) !=
+                        (snapshot['jobId'],snapshot['generation'],snapshot['environment'],attempt['attempt_id'],snapshot['manifestSha256'],snapshot['authorityId'],transfer['byteBudget'],len(submission['manifest']['objects']),total,reservation)):
+                    raise ValueError('claim mismatch')
+                if intent['claimBindingSha256']!=claim_binding_sha:raise ValueError('claim binding mismatch')
+                from . import reference_v2_event_transition_candidate as transition
+                body_raw=_signed_pair['eventBody'];derived=transition.calculate_receipt_bound(event['previousDigest'],body_raw);body=json.loads(body_raw)
+                envelope_raw=_signed_pair['eventEnvelopeRaw']
+                if type(envelope_raw) is not bytes or not 0<len(envelope_raw)<=4096:raise ValueError('event envelope')
+                event_envelope=json.loads(envelope_raw.decode('ascii'))
+                fields={'version','issuer','keyId','audience','operation','issuedAt','expiresAt','nonce','domain','ledger','epoch','eventOperation','previousRevision','previousDigest','nextRevision','nextDigest','bodySha256','bodyBytes','requestId','requestSha256','deliveryId','claimBindingSha256','receiptBodyDigest'}
+                if type(event_envelope) is not dict or set(event_envelope)!=fields or p.canonical_json(event_envelope)!=envelope_raw or type(event_envelope['version']) is not int or event_envelope['version']!=1:raise ValueError('event envelope')
+                registry_value=_signed_pair['registry'];key=registry_value.entries.get((event_envelope['issuer'],event_envelope['keyId'],'observation'))
+                now=_signed_pair['now']
+                if (type(registry_value) is not envelope.Registry or event_envelope['issuer']!=receipt['issuer'] or key is None or key.revoked
+                        or (key.audience,key.operation,event_envelope['audience'],event_envelope['operation'])!=(intent['coordinatorDeploymentId'],'ledger-event',intent['coordinatorDeploymentId'],'ledger-event')
+                        or type(now) is not int or type(event_envelope['issuedAt']) is not int or type(event_envelope['expiresAt']) is not int
+                        or not key.not_before<=event_envelope['issuedAt']<=now<event_envelope['expiresAt']<=key.not_after
+                        or event_envelope['expiresAt']-event_envelope['issuedAt']>300):raise ValueError('event key')
+                envelope._bytes64(event_envelope['nonce'],32)
+                expected_envelope=dict(domain=event['domain'],ledger=event['ledger'],epoch=event['epoch'],eventOperation=event['operation'],previousRevision=event['previousRevision'],previousDigest=event['previousDigest'],nextRevision=event['nextRevision'],nextDigest=event['nextDigest'],bodySha256=hashlib.sha256(body_raw).hexdigest(),bodyBytes=len(body_raw),requestId=body['requestId'],requestSha256=body['requestSha256'],deliveryId=body['deliveryId'],claimBindingSha256=body['claimLineageSha256'],receiptBodyDigest=body['receiptBodyDigest'])
+                if any(type(event_envelope[k]) is not type(v) or event_envelope[k]!=v for k,v in expected_envelope.items()):raise ValueError('event binding')
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+                Ed25519PublicKey.from_public_bytes(key.public_key).verify(envelope._bytes64(_signed_pair['eventSignature'],64),EVENT_SIGNATURE_DOMAIN+envelope_raw)
+                expected_event=dict(operationId=event['operation'],ledgerId=receipt['viewerLedgerId'],ledgerEpoch=receipt['viewerLedgerEpoch'],previousRevision=event['previousRevision'],nextRevision=event['nextRevision'],jobId=snapshot['jobId'],generation=snapshot['generation'],environment=snapshot['environment'],workerInstanceId=snapshot['workerInstanceId'],attemptId=attempt['attempt_id'],inputManifestSha256=snapshot['manifestSha256'],claimLineageSha256=claim_binding_sha,authorityEpoch=intent['coordinatorEpoch'],trustDomain=intent['trustDomain'],receiptId=receipt['receiptId'],reservationId=receipt['reservationId'],intentDigest=receipt['intentDigest'],receiptBodyDigest=hashlib.sha256(transition.RECEIPT_DIGEST_DOMAIN+_signed_pair['receiptRaw']).hexdigest())
+                if ((event['ledger'],event['epoch'])!=(receipt['viewerLedgerId'],receipt['viewerLedgerEpoch']) or derived!=event['nextDigest'] or any(body[k]!=v or type(body[k]) is not type(v) for k,v in expected_event.items())):raise ValueError('event/receipt mismatch')
+                objects=[obj for obj in submission['manifest']['objects'] if obj['id']==body['objectId']]
+                if len(objects)!=1 or (objects[0]['sha256'],objects[0]['byteSize'])!=(body['objectSha256'],body['objectLength']):raise ValueError('event object mismatch')
+                from . import reference_transfer_v2_contract_candidate as request_contract
+                admission,request_sha=request_contract.parse_admission(_signed_pair['admissionRaw']);request_binding=admission['binding']
+                if ((body['requestId'],body['deliveryId'],body['requestSha256'])!=(admission['requestId'],admission['deliveryId'],request_sha)
+                        or any(request_binding[k]!=v for k,v in dict(jobId=snapshot['jobId'],attemptId=attempt['attempt_id'],generation=snapshot['generation'],environment=snapshot['environment'],manifestSha256=snapshot['manifestSha256'],reservationId=reservation,workerInstanceId=snapshot['workerInstanceId'],claimLineageSha256=claim_binding_sha,authorityId=snapshot['authorityId'],epoch=intent['coordinatorEpoch'],objectId=body['objectId'],objectLength=body['objectLength'],objectSha256=body['objectSha256'],range=body['range']).items())):
+                    raise ValueError('admission binding mismatch')
+            except Exception:raise PinHeld('signed reservation mismatch') from None
+        else:proof=None
+        local_identity=dict(schemaVersion=1,scope='local_observation_not_authority',reservationId=reservation,attemptId=attempt['attempt_id'],signedReservation=proof,
             **{k:snapshot[k] for k in ('authorityId','jobId','generation','environment','nodeId','workerId','workerInstanceId','claimRequestId','manifestSha256','pipelineDigest')})
         local_bytes=p.canonical_json(local_identity);local_sha=hashlib.sha256(LOCAL_IDENTITY_DOMAIN+local_bytes).hexdigest()
         binding=p.canonical_json(snapshot).decode('utf-8');digest=hashlib.sha256(event_raw).hexdigest()
-        prior=db.execute('SELECT job_id,claim_sha,claim_binding,event_bytes,event_sha,local_identity,local_identity_sha,state FROM v2_event_pins WHERE operation=?',(event['operation'],)).fetchone()
-        expected=(claim['jobId'],snapshot['claimTokenSha256'],binding,event_raw,digest,local_bytes.decode(),local_sha,'held')
+        signed_binding=p.canonical_json(None if _signed_pair is None else {k:(_signed_pair[k].decode('ascii') if k.endswith('Raw') or k=='eventBody' else _signed_pair[k]) for k in ('intentRaw','intentSignature','receiptRaw','receiptSignature','eventBody','eventEnvelopeRaw','eventSignature','admissionRaw')}).decode()
+        prior=db.execute('SELECT job_id,claim_sha,claim_binding,event_bytes,event_sha,local_identity,local_identity_sha,signed_binding,state FROM v2_event_pins WHERE operation=?',(event['operation'],)).fetchone()
+        expected=(claim['jobId'],snapshot['claimTokenSha256'],binding,event_raw,digest,local_bytes.decode(),local_sha,signed_binding,'held')
         if prior is None:
             if db.execute('SELECT 1 FROM v2_event_pins WHERE job_id=?',(claim['jobId'],)).fetchone():raise PinHeld('parent already pinned')
-            db.execute('INSERT INTO v2_event_pins VALUES(?,?,?,?,?,?,?,?,?)',(event['operation'],*expected))
+            db.execute('INSERT INTO v2_event_pins VALUES(?,?,?,?,?,?,?,?,?,?)',(event['operation'],*expected))
         elif tuple(prior)!=expected:raise PinHeld('conflicting pinned event')
         return dict(operation=event['operation'],eventSha256=digest,localIdentitySha256=local_sha,state='held',authorization='unqualified')

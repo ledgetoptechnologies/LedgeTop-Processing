@@ -6,6 +6,8 @@ from . import reference_protocol as p
 
 QUALIFIED=False
 DOMAIN=b'ltds-viewer-ledger-transition-v2\0'
+RECEIPT_BOUND_DOMAIN=b'ltds-viewer-ledger-transition-experiment-v3\0'
+RECEIPT_DIGEST_DOMAIN=b'ltds-v2-reservation-receipt-digest-experiment-v1\0'
 MAX_BODY=16384
 FIELDS={'version','type','environment','trustDomain','ledgerId','ledgerEpoch','authorityEpoch','operationId',
         'jobId','attemptId','reservationId','generation','workerInstanceId','claimLineageSha256',
@@ -49,3 +51,25 @@ def calculate(previous_digest,body_raw):
         else:raise ValueError()
         return hashlib.sha256(DOMAIN+bytes.fromhex(previous_digest)+len(body_raw).to_bytes(8,'big')+body_raw).hexdigest()
     except Exception:raise TransitionHeld('invalid transition') from None
+
+def calculate_receipt_bound(previous_digest,body_raw):
+    """Separate provisional v3 encoding, with no trust or custody semantics."""
+    if QUALIFIED is not True:raise TransitionHeld('transition is not qualified')
+    try:
+        if type(body_raw) is not bytes or not 0<len(body_raw)<=MAX_BODY:raise ValueError()
+        def unique(pairs):
+            out={}
+            for key,value in pairs:
+                if key in out:raise ValueError()
+                out[key]=value
+            return out
+        body=json.loads(body_raw.decode('ascii'),object_pairs_hook=unique,parse_float=lambda _: (_ for _ in ()).throw(ValueError()),parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        added={'receiptId','intentDigest','receiptBodyDigest'}
+        if type(body) is not dict or set(body)!=FIELDS|added or p.canonical_json(body)!=body_raw or type(body['version']) is not int or body['version']!=3:raise ValueError()
+        from . import reference_v2_envelope_candidate as e
+        for field in ('receiptId','reservationId'):e._bytes64(body[field],32)
+        for field in ('intentDigest','receiptBodyDigest'):p._hash(body[field],field)
+        base={k:v for k,v in body.items() if k not in added};base['version']=2
+        calculate(previous_digest,p.canonical_json(base))
+        return hashlib.sha256(RECEIPT_BOUND_DOMAIN+bytes.fromhex(previous_digest)+len(body_raw).to_bytes(8,'big')+body_raw).hexdigest()
+    except Exception:raise TransitionHeld('invalid receipt-bound transition') from None
