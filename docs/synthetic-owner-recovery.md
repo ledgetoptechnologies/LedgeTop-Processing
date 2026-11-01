@@ -4,6 +4,8 @@ These files are research fixtures. They are disabled for production and must
 not be installed as a service, connected to client data, or used to authorize a
 live update. They build on `synthetic-streaming-gateway.md` and depend on its
 local, checksum-pinned nftables test extraction; no binaries are committed.
+Set `LEDGETOP_SYNTHETIC_NFT_ROOT` to its absolute canonical directory as
+described there; missing or mismatched tools cause a closed failure.
 
 A disposable user, network and PID namespace hosts a synthetic owner and
 backend. A trusted parent passes an inherited Unix socketpair. The owner checks

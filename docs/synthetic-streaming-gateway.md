@@ -24,9 +24,11 @@ the test; they are not a hardened privileged execution boundary.
 
 Tests use Linux user namespaces, `unshare`, `ip`, `setpriv` and a locally
 extracted nftables tool and dependent libraries. No third-party binaries are
-committed. The integration fixture currently uses the test-owned path
-`/mnt/c/Users/fstor/.codex/worktrees/nonempty-cutover-guard/nft-fixture-packages/extracted`
-and exact SHA-256 pins inside `tests/netfilter_gateway_fixture.py`. The earlier
+committed. Set `LEDGETOP_SYNTHETIC_NFT_ROOT` to the absolute, canonical directory
+containing the independently prepared nftables extraction. The fixtures fail
+closed if it is unset, relative, missing, noncanonical, or if their exact
+SHA-256 tool pins do not match. For example, set it to `/path/to/extracted`
+before invoking the namespace tests. The earlier
 experiment downloaded Debian packages and compared each SHA-256 against the
 local APT index before extraction; this does not establish ongoing provenance or
 protect against replacement between verification and execution. Do not run the

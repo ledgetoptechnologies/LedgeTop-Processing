@@ -24,7 +24,9 @@ if (namespace('self', 'net') == parent_net or namespace('self', 'user') == paren
 if sys.argv[4] == 'check-only':
     raise SystemExit(0)
 
-root = '/mnt/c/Users/fstor/.codex/worktrees/nonempty-cutover-guard/nft-fixture-packages/extracted'
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from ops.synthetic_nft_root import checked_nft_root
+root=checked_nft_root(os.environ.get('LEDGETOP_SYNTHETIC_NFT_ROOT',''))
 env = dict(os.environ, LD_LIBRARY_PATH=root + '/usr/lib/x86_64-linux-gnu')
 nft = root + '/usr/sbin/nft'
 expected = {
