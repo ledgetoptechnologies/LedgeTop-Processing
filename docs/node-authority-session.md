@@ -117,3 +117,22 @@ receipt is retained. Automatic reconciliation, old-worker fencing, epoch
 adoption and independently verified remote receipt signatures are not provided.
 The tests simulate session loss and orderly reopen, not power failure or an
 actual cross-host node crash. This remains disabled.
+
+## Experimental coordinator copy of node receipt
+
+The node now sends its exact canonical receipt over the authenticated authority
+session. After checking the grant and its own durable sender evidence, the
+coordinator stores the receipt and completes the matching intent atomically in
+one SQLite transaction. An exact retry in the same live coordinator epoch can
+recover a lost completion request or acknowledgement without a second engine
+upload. If the epoch changes, the old receipt cannot automatically release the
+held job; independently fenced recovery is still required. The coordinator
+copy survives orderly restart and is immutable through its SQLite triggers.
+
+The receipt is an authenticated assertion by the trusted node, not independent
+cryptographic proof of its stored state and not proof that NodeODM fsynced data.
+This prototype requires a fresh offline-migrated coordinator evidence schema;
+an earlier schema lacking the receipt table is refused, with no automatic
+upgrade or downgrade. The tests simulate TLS loss and orderly restarts using
+local synthetic peers. They do not prove real cross-host, power-loss, malicious
+node, old-writer or physical backend fencing behavior. The path remains disabled.

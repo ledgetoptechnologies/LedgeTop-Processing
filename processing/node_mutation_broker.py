@@ -573,9 +573,9 @@ class NodeMutationBroker:
                 sender_evidence=None
                 if not isinstance(self.witness,LocalCoordinatorAuthority):
                     self.witness.check();sender_evidence=self.witness.sender_verified(grant)
-                _verify_upload_receipt(self.db,grant,reply,sender_evidence)
+                receipt,_=_verify_upload_receipt(self.db,grant,reply,sender_evidence)
                 self.db.commit()
-                if not isinstance(self.witness,LocalCoordinatorAuthority):self.witness.completed(grant)
+                if not isinstance(self.witness,LocalCoordinatorAuthority):self.witness.completed(grant,receipt)
                 return reply
             except BaseException:self.db.rollback();raise
 
@@ -613,15 +613,19 @@ class NodeMutationBroker:
                                     (grant['operationId'],'upload')).fetchone()
                 if row is None or row['grant_hash']!=digest or row['file_key']!=file_key:raise BrokerHeld('upload identity changed')
                 if row['state']=='complete':
-                    _verify_upload_receipt(self.db,grant,json.loads(row['reply']),sender_evidence)
-                    self.db.commit();self.witness.completed(grant);return
+                    receipt,_=_verify_upload_receipt(self.db,grant,json.loads(row['reply']),sender_evidence)
+                    self.db.commit()
+                    if isinstance(self.witness,LocalCoordinatorAuthority):self.witness.completed(grant)
+                    else:self.witness.completed(grant,receipt)
+                    return
                 if row['state']!='awaiting_sender':raise BrokerHeld('upload confirmation unavailable')
                 encoded,receipt_hash=_upload_receipt(grant,json.loads(row['reply']),sender_evidence)
                 self.db.execute('INSERT INTO upload_receipts VALUES(?,?,?,?)',(grant['operationId'],digest,encoded,receipt_hash))
                 self.db.execute("UPDATE operations SET state='complete' WHERE id=? AND state='awaiting_sender'",(grant['operationId'],))
                 self.db.commit()
             except BaseException:self.db.rollback();raise
-            self.witness.completed(grant)
+            if isinstance(self.witness,LocalCoordinatorAuthority):self.witness.completed(grant)
+            else:self.witness.completed(grant,encoded)
 
     def _execute(self, grant, file_key, forward, *, with_replay=False, body=None, signature=None):
         digest=hashlib.sha256(_json(grant)).hexdigest();identity=uuid.UUID(grant['jobId']).hex
@@ -655,8 +659,12 @@ class NodeMutationBroker:
                     if not isinstance(self.witness,LocalCoordinatorAuthority):
                         self.witness.check()
                         if grant['operation']=='upload':sender_evidence=self.witness.sender_verified(grant)
-                    if grant['operation']=='upload':_verify_upload_receipt(self.db,grant,reply,sender_evidence)
-                    self.db.commit();self.witness.completed(grant);return (reply,True) if with_replay else reply
+                    receipt=None
+                    if grant['operation']=='upload':receipt,_=_verify_upload_receipt(self.db,grant,reply,sender_evidence)
+                    self.db.commit()
+                    if receipt is not None and not isinstance(self.witness,LocalCoordinatorAuthority):self.witness.completed(grant,receipt)
+                    else:self.witness.completed(grant)
+                    return (reply,True) if with_replay else reply
                 if self.db.execute("SELECT 1 FROM operations WHERE state!='complete' LIMIT 1").fetchone():
                     raise BrokerHeld('previous operation requires inspection')
                 if grant['operation']=='upload' and not self.db.execute("SELECT 1 FROM operations WHERE operation='init' AND state='complete'").fetchone():

@@ -87,7 +87,7 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
             while True:
                 try:request=_read(sock,min(end,time.monotonic()+idle_seconds))
                 except (OSError,SessionHeld):return
-                if type(request) is not dict or set(request)!={'sequence','nonce','grant','body','action'}:
+                if type(request) is not dict or set(request)!={'sequence','nonce','grant','body','action','receipt'}:
                     raise SessionHeld('invalid challenge')
                 if (type(request['sequence']) is not int or request['sequence']!=sequence+1
                         or type(request['nonce']) is not str or len(request['nonce'])!=64
@@ -95,6 +95,7 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                     raise SessionHeld('invalid challenge')
                 action=request['action']
                 if action not in ('prepare','check','sender_verified','complete'):raise SessionHeld('invalid challenge action')
+                if action!='complete' and request['receipt'] is not None:raise SessionHeld('unexpected receipt')
                 grant=request['grant']
                 if type(grant) is not dict:raise SessionHeld('invalid grant')
                 try:body=base64.b64decode(request['body'],validate=True)
@@ -130,7 +131,11 @@ def _serve_coordinator(sock, *, queue, witness, secret, peer_sha256, session_sec
                         or (action=='complete' and phase!=expected_completion)):
                     raise SessionHeld('session operation order changed')
                 with witness.hold(public,10,create=(action=='prepare')):
-                    if action=='complete':witness.completed(public)
+                    if action=='complete':
+                        if public.get('operation')=='upload':upload_evidence.commit_node_receipt(public,request['receipt'])
+                        else:
+                            if request['receipt'] is not None:raise SessionHeld('unexpected init receipt')
+                            witness.completed(public)
                 active=binding
                 phase={'prepare':'prepared','check':'checked','sender_verified':'verified','complete':'complete'}[action]
                 sequence+=1
@@ -148,12 +153,12 @@ class RemoteAuthoritySession:
         self.sock=sock;self.authority=authority;self.epoch=epoch;self.claim_token=claim_token
         self.timeout=timeout_seconds;self._lock=threading.Lock();self.sequence=0;self.failed=False;self.current=None;self.pid=os.getpid()
 
-    def _challenge(self,grant,body,action):
+    def _challenge(self,grant,body,action,receipt=None):
         if self.failed or os.getpid()!=self.pid:raise SessionHeld('authority session unavailable')
         sequence=self.sequence+1;nonce=secrets.token_hex(32);deadline=time.monotonic()+self.timeout
         try:
             _write(self.sock,{'sequence':sequence,'nonce':nonce,'grant':dict(grant,claimToken=self.claim_token),
-                'body':base64.b64encode(body).decode('ascii'),'action':action},deadline)
+                'body':base64.b64encode(body).decode('ascii'),'action':action,'receipt':receipt},deadline)
             value=_read(self.sock,deadline)
             if (type(value) is not dict or set(value)!={'sequence','nonce','signature'} or value['sequence']!=sequence
                     or value['nonce']!=nonce or value['signature']!=self.current[2]):raise SessionHeld('authority challenge refused')
@@ -182,9 +187,9 @@ class RemoteAuthoritySession:
         from .node_mutation_broker import _json
         return hashlib.sha256(_json(grant)).hexdigest()
 
-    def completed(self, grant):
+    def completed(self, grant, receipt=None):
         if self.current is None or grant!=self.current[0]:raise SessionHeld('authority session not held')
-        self._challenge(self.current[0],self.current[1],'complete')
+        self._challenge(self.current[0],self.current[1],'complete',receipt)
 
     def close(self):
         if os.getpid()!=self.pid:raise SessionHeld('authority session owner changed')
