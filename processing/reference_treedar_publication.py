@@ -192,7 +192,7 @@ class NativeBundlePublication:
         _file(Path(prep['control']),stage.policy.control_budget,expected_bytes=source['controlBytes'],expected_sha=source['controlSha256'])
         return source
 
-    def _qualify(self,intent):
+    def _qualify(self,intent,*,include_admission=False):
         stage=self.stage;intent,plan,prior_intent,prior_proof=stage._intent(intent);parent=intent['parentBinding'];job=parent['jobId']
         stage._guard(parent,False);stage._local(parent);stage._host();stage._provenance(intent,plan);stage.prior.verify(prior_intent,prior_proof)
         row=stage._row(job);require(row is not None and row['intent']==encoded(intent),'native_attempt_changed')
@@ -258,7 +258,8 @@ class NativeBundlePublication:
         reservation=stage._reservation(parent)
         require(reservation['allocated']>=prep['baseline']+control_path.stat().st_size+proof_bytes+total+len(p.canonical_json(evidence)),'native_allocation_not_retained')
         control_bytes,control_sha=_file(control_path,stage.policy.control_budget)
-        return dict(evidenceSha256=evidence['evidenceSha256'],proofSha256=proof_sha,proofBytes=proof_bytes,controlBytes=control_bytes,controlSha256=control_sha,rawRoot=str(Path(prep['output'])/'run'),manifest=manifest)
+        source=dict(evidenceSha256=evidence['evidenceSha256'],proofSha256=proof_sha,proofBytes=proof_bytes,controlBytes=control_bytes,controlSha256=control_sha,rawRoot=str(Path(prep['output'])/'run'),manifest=manifest)
+        return (source,admission) if include_admission else source
 
     def begin(self,intent):
         with self._operation():
@@ -544,6 +545,21 @@ class NativeBundlePublication:
                 return self._new_copy(job)
             if row['phase']=='published':return self.read_receipt(job)
             return self._publish(row)
+
+    def preview_outer_manifest(self,job):
+        """Fresh local-only observation; never a transport or custody receipt."""
+        from .reference_treedar_outer_candidate import make_preview
+        with self._operation():
+            intent=self._intent(job)
+            source,admission=self._qualify(intent,include_admission=True)
+            require(exact(source,self._live(job,mutation=False)),'native_source_changed')
+            row=self._copy(job)
+            require(row is not None and row['phase']=='published','published_native_bundle_required')
+            archive=self._archive(row)
+            require(archive is not None and exact(archive,_private_json(row['receipt'])),'published_receipt_changed')
+            result=make_preview(source,admission,archive,self.stage.policy.config,self.policy.limits)
+            require(exact(source,self._live(job,mutation=False)),'native_source_changed')
+            return result
 
     def read_receipt(self,job):
         """Historical SQL-only read; no authority, Docker or file verification."""

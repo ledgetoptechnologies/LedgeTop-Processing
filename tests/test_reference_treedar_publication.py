@@ -41,7 +41,7 @@ class LargeTreeFixture(unittest.TestCase):
     begin=tree_fixture.TreeStageTests.begin
     actions=tree_fixture.TreeStageTests.actions
     def setUp(self):
-        self.host=odm.NativeODMStageTests();self.host.setUp();self.addCleanup(self.host.doCleanups);h=self.host
+        self.host=odm.NativeODMStageTests();self.addCleanup(self.host.doCleanups);self.host.setUp();h=self.host
         source=h.root/'source';(source/'processing').mkdir(parents=True,mode=0o700);source.chmod(0o700)
         for name in SOURCE_FILES:
             target=source/'processing'/name;shutil.copyfile(Path(__file__).resolve().parents[1]/'processing'/name,target);target.chmod(0o600)
@@ -65,15 +65,16 @@ class PublicationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp=tempfile.TemporaryDirectory();cls.addClassCleanup(cls.tmp.cleanup);root=Path(cls.tmp.name);cls.cert=root/'cert.pem';cls.key=root/'key.pem'
-        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=synthetic-loopback','-addext','subjectAltName=IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE','-keyout',str(cls.key),'-out',str(cls.cert)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=synthetic-loopback','-addext','subjectAltName=IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE','-keyout',str(cls.key),'-out',str(cls.cert)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
 
     def setUp(self):
-        self.fixture=LargeTreeFixture();self.fixture.setUp();self.addCleanup(self.fixture.doCleanups);f=self.fixture;h=f.host;self.host=h
+        self.fixture=LargeTreeFixture();self.addCleanup(self.fixture.doCleanups);self.fixture.setUp();f=self.fixture;h=f.host;self.host=h
         transfer=dict(reservationId='parent-reservation',generation=1,expiresAt=(datetime.now(timezone.utc)+timedelta(seconds=240)).isoformat(timespec='milliseconds').replace('+00:00','Z'),manifestSha256=h.claim['manifestSha256'],byteBudget=h.claim['submission']['manifest']['totalBytes'],nonce='synthetic-transfer')
         h.store.reserve(h.claim['jobId'],transfer,node_id='main');h.store.update_phase(h.claim['jobId'],'fetching');h.store.update_phase(h.claim['jobId'],'processing')
         secret='synthetic-publication-worker-0001';api=ReferenceWorkerAPI(h.store,DeliveryReceiver(h.store),bearer_workers={secret:dict(node_id='main',worker_id='main-worker',worker_instance_id='instance-one')})
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(self.cert,self.key);self.server=create_reference_http_server(api,ssl_context=context)
-        self.thread=threading.Thread(target=self.server.serve_forever);self.thread.start();self.addCleanup(self.stop)
+        self.server.daemon_threads=False;self.server.block_on_close=True
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=False);self.addCleanup(self.stop);self.thread.start()
         trust=ssl.create_default_context(cafile=str(self.cert));policy=guard.ClaimStatePolicy('https://127.0.0.1:'+str(self.server.server_port),h.policy.authority_id,'main','main-worker','instance-one','worker-main',guard.tls_trust_sha256(trust))
         client=guard.ClaimStateClient(policy,guard.WorkerCredential('worker-main',secret),ssl_context=trust)
         driver=h.root/'publication-driver.sqlite';binding=dict(origin=policy.origin,nodeId='main',workerId='main-worker',workerInstanceId='instance-one',authorityId=h.policy.authority_id,engineId=h.policy.engine_id,gateOrigin=h.policy.coordinator_origin,gateGeneration=1,outputBudget=h.policy.odm_output_budget+h.policy.treedar_output_budget,environments=sorted(h.policy.allowed_environments))
@@ -99,7 +100,14 @@ class PublicationTests(unittest.TestCase):
         limits=m.b.BundleLimits(8192,10000,64,8192,2048,100000)
         self.policy=m.PublicationPolicy(limits,control_budget=262144);self.publication=self.open();self.job=h.claim['jobId']
 
-    def stop(self):self.server.shutdown();self.thread.join(5);self.server.server_close()
+    def stop(self):
+        if self.thread.is_alive():
+            shutdown=threading.Thread(target=self.server.shutdown,daemon=True);shutdown.start();shutdown.join(5)
+            self.thread.join(5)
+            if shutdown.is_alive() or self.thread.is_alive():
+                self.server.server_close()
+                raise RuntimeError('synthetic TLS server did not stop')
+        self.server.server_close()
     def open(self):return m.NativeBundlePublication(self.host.root/'publication.sqlite',self.policy,stage=self.fixture.stage)
     def begin(self):return self.publication.begin(self.fixture.intent)
     def assert_retained(self):
@@ -112,6 +120,47 @@ class PublicationTests(unittest.TestCase):
         result=self.begin();self.assertEqual(result['phase'],'published');self.assertFalse(result['parentSettled']);self.assertEqual(result['receipt']['state'],'local_native_bundle_published')
         row=self.publication._copy(self.job);_,_,partial,final=self.publication._paths(row);self.assertFalse(partial.exists());self.assertTrue(final.exists());self.assertEqual(final.stat().st_nlink,1)
         self.assert_retained();self.assertEqual(self.fixture.actions(),['create','start'])
+
+    def test_fresh_outer_preview_binds_actual_bundle_and_preserves_sources(self):
+        from processing import reference_treedar_outer_candidate as outer
+        published=self.begin();before=self.publication.path.read_bytes()
+        preview=self.publication.preview_outer_manifest(self.job)
+        self.assertEqual(preview['state'],'preview_not_custody')
+        self.assertEqual(preview['transportRole'],'unassigned')
+        self.assertEqual(preview['mixedCompletion'],'unqualified')
+        self.assertEqual(preview['binding'],published['receipt']['binding'])
+        self.assertEqual(preview['archive'],published['receipt']['archive'])
+        row=self.publication._copy(self.job);_,_,_,final=self.publication._paths(row)
+        with zipfile.ZipFile(final) as archive:
+            inner=archive.read('treedar-bundle.json')
+        self.assertEqual(preview['inner']['zipEntryByteSize'],len(inner))
+        self.assertEqual(preview['inner']['zipEntrySha256'],hashlib.sha256(inner).hexdigest())
+        self.assertEqual(preview['inner']['manifestSha256WithoutDigestField'],published['receipt']['manifestSha256'])
+        self.assertEqual(preview['nativeFiles'],published['receipt']['nativeFiles'])
+        self.assertEqual(preview['spatial']['definitionStatus'],'digest_only')
+        self.assertIsNone(preview['spatial']['wkt'])
+        self.assertEqual(preview['spatial']['sharedRasterGeometry']['files'],['dtm.tif','chm.tif','chm_raw.tif','crowns.tif'])
+        with self.publication._operation():
+            source,admission=self.publication._qualify(self.publication._intent(self.job),include_admission=True)
+            receipt=self.publication._archive(self.publication._copy(self.job))
+            config=self.fixture.stage.policy.config
+            self.assertEqual(outer.validate_preview(preview,source,admission,receipt,config,self.policy.limits),preview)
+            for mutate in (lambda value:value['binding']['sourceLidar'].update(objectId='other-lidar'),
+                           lambda value:value['nativeFiles'][0].update(role='dem'),
+                           lambda value:value['inner'].update(zipEntrySha256='0'*64),
+                           lambda value:value['spatial'].update(definitionStatus='verified'),
+                           lambda value:value.update(transportRole='odm_archive')):
+                altered=copy.deepcopy(preview);mutate(altered)
+                with self.assertRaises(Exception):outer.validate_preview(altered,source,admission,receipt,config,self.policy.limits)
+        self.assertEqual(self.publication.path.read_bytes(),before)
+        self.assertEqual(self.fixture.actions(),['create','start'])
+        self.assert_retained()
+
+    def test_outer_preview_holds_if_original_native_proof_changes(self):
+        self.begin();proof=self.output/'proof.json';proof.write_bytes(proof.read_bytes()+b' ')
+        with self.assertRaises(Exception):self.publication.preview_outer_manifest(self.job)
+        self.assertEqual(self.fixture.actions(),['create','start'])
+        self.assertEqual(self.host.reservation()['state'],'engine_started')
 
     def test_readback_is_sql_only_and_not_fresh_authorization(self):
         self.begin();before=self.publication.path.read_bytes()
