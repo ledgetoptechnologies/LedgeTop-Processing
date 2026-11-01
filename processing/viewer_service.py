@@ -205,10 +205,22 @@ class ViewerService:
         self._archive_thread = None
         self._archive_cursor = 0
         self._archive_retry = {}
+        self._archive_volatile_holds = set()
         self._archive_status_persistence_failed = False
         self._archive_child_unreaped = threading.Event()
         self._archive_child_lock = threading.Lock()
         self._archive_uncertain_process = None
+
+    def _archive_task_lock(self, identifier):
+        if isinstance(self.store, TaskStore):
+            return self.store.archive_lock(identifier)
+        # Private capture-child stores have no shared durable status writer.
+        with self._downloads_lock:
+            return self._downloads.setdefault(identifier, threading.RLock())
+
+    def _archive_inspection_held(self, task):
+        identity = (task['uuid'], task['generation'], task['job_id'])
+        return task.get('archive_state') == 'inspection' or identity in self._archive_volatile_holds
 
     def _reserve_archive(self, output, size):
         """Reserve output bytes; the free-space floor is a point-in-time check."""
@@ -221,16 +233,15 @@ class ViewerService:
 
     def _archive_once(self, identifier, expected_identity=None):
         """Serialize capture children and refuse after uncertain termination."""
-        with self._archive_child_lock:
-            if self._archive_child_unreaped.is_set():
-                raise RuntimeError('archive capture child termination uncertain')
-            return self._archive_once_locked(identifier,expected_identity=expected_identity)
+        with self._archive_task_lock(identifier):
+            with self._archive_child_lock:
+                if self._archive_child_unreaped.is_set():
+                    raise RuntimeError('archive capture child termination uncertain')
+                return self._archive_once_locked(identifier,expected_identity=expected_identity)
 
     def _archive_once_locked(self, identifier, expected_identity=None):
         """Run file capture in a reaped child that inherits coordinator flocks."""
-        with self._downloads_lock:
-            lock = self._downloads.setdefault(identifier, threading.Lock())
-        with lock:
+        with self._archive_task_lock(identifier):
             if self._stop.is_set():
                 return
             task = self.store.task(identifier)
@@ -238,7 +249,7 @@ class ViewerService:
                 raise ArchiveIdentityChanged()
             # Discovery and capture are separate operations.  An inspection
             # hold established after the scan must still stop this attempt.
-            if task.get('archive_state') == 'inspection':
+            if self._archive_inspection_held(task):
                 raise ArchiveInspectionHeld('archive requires inspection')
             if not task['job'] or task['job']['status'] != 'succeeded' or task['archive_path']:
                 return
@@ -378,56 +389,62 @@ class ViewerService:
                     defer()
                     continue
                 due, failures = (prior[1], prior[2]) if prior is not None and prior[0] is None else (0, 0)
-                try:
-                    task = self.store.task(identifier)
-                    identity = (task['generation'], task['job_id'])
-                    prior = self._archive_retry.get(identifier)
-                    if prior is None or prior[0] != identity:
-                        # A public UUID can be reused. Once identity is readable,
-                        # discard a different incarnation's retry delay.
+                # Keep the per-task lock through persistence of a failed capture.
+                with self._archive_task_lock(identifier):
+                    try:
+                        task = self.store.task(identifier)
+                        identity = (task['generation'], task['job_id'])
+                        prior = self._archive_retry.get(identifier)
+                        if prior is None or prior[0] != identity:
+                            # A public UUID can be reused. Once identity is readable,
+                            # discard a different incarnation's retry delay.
+                            self._archive_retry.pop(identifier, None)
+                            due, failures = 0, 0
+                        else:
+                            _, due, failures = prior
+                        if time.monotonic() < due:
+                            defer()
+                            continue
+                        deferred = 0
+                        self._archive_once(identifier, expected_identity=identity)
                         self._archive_retry.pop(identifier, None)
-                        due, failures = 0, 0
-                    else:
-                        _, due, failures = prior
-                    if time.monotonic() < due:
-                        defer()
-                        continue
-                    deferred = 0
-                    self._archive_once(identifier, expected_identity=identity)
-                    self._archive_retry.pop(identifier, None)
-                except ArchiveIdentityChanged:
-                    # The new incarnation has not been attempted; discover it anew.
-                    self._archive_retry.pop(identifier, None)
-                except ArchiveInspectionHeld:
-                    # Do not downgrade an inspection hold to a retryable error.
-                    self._archive_retry.pop(identifier, None)
-                except Exception as exc:
-                    if self._archive_child_unreaped.is_set():
-                        # Never launch a second writer when an earlier child
-                        # may still own the coordinator's inherited locks.
-                        self._archive_status_persistence_failed = True
-                        return
-                    if identity is None:
-                        # No trustworthy task identity can be associated with this failure.
-                        # Preserve bounded retry for an unavailable metadata store.
-                        self._archive_status_persistence_failed = True
-                        failures += 1
-                        self._archive_retry[identifier] = (None, time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
-                    else:
-                        inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
-                        try:
-                            recorded = self.store.set_archive_status(identifier, *identity,
-                                'inspection' if inspection else 'pending',
-                                'partial_requires_inspection' if inspection else 'capture_failed')
-                            if not recorded:
-                                # The incarnation changed or was removed; do not
-                                # apply its retry delay to the replacement.
-                                self._archive_retry.pop(identifier, None)
-                                continue
-                        except Exception:
+                    except ArchiveIdentityChanged:
+                        # The new incarnation has not been attempted; discover it anew.
+                        self._archive_retry.pop(identifier, None)
+                    except ArchiveInspectionHeld:
+                        # Do not downgrade an inspection hold to a retryable error.
+                        self._archive_retry.pop(identifier, None)
+                    except Exception as exc:
+                        if self._archive_child_unreaped.is_set():
+                            # Never launch a second writer when an earlier child
+                            # may still own the coordinator's inherited locks.
                             self._archive_status_persistence_failed = True
-                        failures += 1
-                        self._archive_retry[identifier] = (identity, time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
+                            return
+                        if identity is None:
+                            # No trustworthy task identity can be associated with this failure.
+                            # Preserve bounded retry for an unavailable metadata store.
+                            self._archive_status_persistence_failed = True
+                            failures += 1
+                            self._archive_retry[identifier] = (None, time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
+                        else:
+                            inspection = isinstance(exc, Conflict) and str(exc) == 'partial_requires_inspection'
+                            try:
+                                recorded = self.store.set_archive_status(identifier, *identity,
+                                    'inspection' if inspection else 'pending',
+                                    'partial_requires_inspection' if inspection else 'capture_failed')
+                                if not recorded:
+                                    # The incarnation changed or was removed; do not
+                                    # apply its retry delay to the replacement.
+                                    self._archive_retry.pop(identifier, None)
+                                    continue
+                            except Exception:
+                                self._archive_status_persistence_failed = True
+                                if inspection:
+                                    # Fail closed within this process if durable
+                                    # hold persistence is unavailable.
+                                    self._archive_volatile_holds.add((identifier, *identity))
+                            failures += 1
+                            self._archive_retry[identifier] = (identity, time.monotonic() + min(300, 2 ** min(failures, 8)), failures)
                 self._stop.wait(.25)
             except Exception:
                 self._archive_status_persistence_failed = True
@@ -771,13 +788,11 @@ class ViewerService:
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
-        with self._downloads_lock:
-            lock = self._downloads.setdefault(identifier, threading.Lock())
-        with lock:
+        with self._archive_task_lock(identifier):
             if self._archive_child_unreaped.is_set():
                 raise Conflict('archive capture child termination uncertain')
             task = self.store.task(identifier)
-            if task.get('archive_state') == 'inspection':
+            if self._archive_inspection_held(task):
                 raise ArchiveInspectionHeld('archive requires inspection')
             if self._archive_registry:
                 lease=getattr(self.queue,'authority_lease',None)

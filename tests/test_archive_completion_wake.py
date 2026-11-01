@@ -33,6 +33,7 @@ class ArchiveCompletionWakeTests(unittest.TestCase):
         service._archive_retry = {}
         service._archive_status_persistence_failed = False
         service._archive_child_unreaped = threading.Event()
+        service._downloads, service._downloads_lock = {}, threading.Lock()
         service.store = Mock()
         service.store.next_unarchived_success.side_effect = [OSError('synthetic outage'), (1, 'task')]
         service.store.task.return_value = {'generation': 1, 'job_id': 'job'}
@@ -53,6 +54,7 @@ class ArchiveCompletionWakeTests(unittest.TestCase):
         service._archive_retry = {}
         service._archive_status_persistence_failed = False
         service._archive_child_unreaped = threading.Event()
+        service._downloads, service._downloads_lock = {}, threading.Lock()
         service.store = Mock()
         scans = []
 

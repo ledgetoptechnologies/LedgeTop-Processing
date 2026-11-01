@@ -86,6 +86,8 @@ class TaskStore:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
         self._lock = threading.RLock()
+        self._archive_locks_lock = threading.Lock()
+        self._archive_locks = {}
         # Claim credentials are stored in this shared database. Tighten the
         # exact existing, owned database before creating or updating secret
         # metadata; future SQLite rollback journals inherit its private mode.
@@ -667,10 +669,15 @@ class TaskStore:
                 if not validate():
                     raise ValueError('archive status schema not installed')
 
+    def archive_lock(self, identifier):
+        """Serialize this store's capture, download and status operations."""
+        with self._archive_locks_lock:
+            return self._archive_locks.setdefault(identifier, threading.RLock())
+
     def set_archive_status(self, identifier, generation, job_id, state, reason):
         if state not in ('pending', 'inspection') or reason not in ('capture_failed', 'partial_requires_inspection'):
             raise ValueError('invalid archive status')
-        with self._lock, self.queue._db() as db:
+        with self.archive_lock(identifier), self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             return db.execute("UPDATE viewer_tasks SET archive_state=?,archive_reason=? WHERE uuid=? AND generation=? AND job_id=? AND removed=0 AND archive_path IS NULL",
                               (state, reason, identifier, generation, job_id)).rowcount == 1

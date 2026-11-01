@@ -988,6 +988,96 @@ finally:s.close();lease.close();q.close()
         self.assertFalse(archive.exists())
         self.assertIsNone(store.task(self.identifier)['archive_path'])
 
+    def test_failed_capture_persists_hold_before_competing_download(self):
+        store = self.service.store
+        store.enable_archive_status()
+        candidate = store.next_unarchived_success()
+        task = store.task(self.identifier)
+        partial = Path(task['directory']) / 'all.zip.partial'
+        partial.write_bytes(b'synthetic interrupted capture')
+        at_persist, allow_persist, download_done = threading.Event(), threading.Event(), threading.Event()
+        result = []
+        original_set = store.set_archive_status
+        def pause_persist(*args, **kwargs):
+            at_persist.set()
+            if not allow_persist.wait(5):
+                raise RuntimeError('test persistence wait timed out')
+            try:
+                return original_set(*args, **kwargs)
+            finally:
+                self.service._stop.set()
+        def compete():
+            try:
+                self.service.download(self.identifier)
+                result.append('unexpected success')
+            except Exception as exc:
+                result.append(exc)
+            finally:
+                download_done.set()
+        with patch.object(store, 'next_unarchived_success', return_value=candidate), \
+             patch.object(store, 'set_archive_status', side_effect=pause_persist), \
+             patch.object(self.service, '_archive_once', side_effect=Conflict('partial_requires_inspection')):
+            worker = threading.Thread(target=self.service._archive_run)
+            worker.start()
+            competitor = None
+            try:
+                self.assertTrue(at_persist.wait(5))
+                competitor = threading.Thread(target=compete)
+                competitor.start()
+                self.assertFalse(download_done.wait(.2), 'download passed an unpersisted hold')
+                allow_persist.set()
+                self.assertTrue(download_done.wait(5))
+            finally:
+                allow_persist.set()
+                worker.join(5)
+                if competitor is not None:
+                    competitor.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(competitor.is_alive())
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], Conflict)
+        self.assertEqual(str(result[0]), 'archive requires inspection')
+        self.assertEqual(store.task(self.identifier)['archive_state'], 'inspection')
+        self.assertEqual(partial.read_bytes(), b'synthetic interrupted capture')
+
+    def test_failed_inspection_persistence_holds_download_in_process(self):
+        store = self.service.store
+        store.enable_archive_status()
+        candidate = store.next_unarchived_success()
+        def fail_status(*args, **kwargs):
+            self.service._stop.set()
+            raise OSError('synthetic database failure')
+        with patch.object(store, 'next_unarchived_success', return_value=candidate), \
+             patch.object(store, 'set_archive_status', side_effect=fail_status), \
+             patch.object(self.service, '_archive_once', side_effect=Conflict('partial_requires_inspection')):
+            self.service._archive_run()
+        self.assertEqual(store.task(self.identifier)['archive_state'], 'pending')
+        self.assertTrue(self.service._archive_status_persistence_failed)
+        with self.assertRaisesRegex(Conflict, 'archive requires inspection'):
+            self.service.download(self.identifier)
+
+    def test_status_setter_uses_same_task_lock_as_download(self):
+        store = self.service.store
+        store.enable_archive_status()
+        task = store.task(self.identifier)
+        entered, completed = threading.Event(), threading.Event()
+        outcomes = []
+        def set_status():
+            entered.set()
+            try:
+                outcomes.append(store.set_archive_status(self.identifier, task['generation'], task['job_id'],
+                                                         'inspection', 'partial_requires_inspection'))
+            finally:
+                completed.set()
+        with self.service._archive_task_lock(self.identifier):
+            setter = threading.Thread(target=set_status)
+            setter.start()
+            self.assertTrue(entered.wait(5))
+            self.assertFalse(completed.wait(.2))
+        setter.join(5)
+        self.assertFalse(setter.is_alive())
+        self.assertEqual(outcomes, [True])
+
     def test_status_store_failure_is_visible_without_error_text(self):
         self.fixture.config.viewer_archive_autocapture = True
         self.fixture.config.viewer_archive_free_floor = 10**18
