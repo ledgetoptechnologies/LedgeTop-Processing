@@ -16,6 +16,18 @@ are held for inspection, while exact replay of an existing receipt still works.
 Existing overlong receipt sets are not rewritten, discarded or automatically
 repaired.
 
+The count limit alone is insufficient: the worker also limits a JSON relay to
+`MAX_BODY_BYTES`. Before inserting a new receipt, this candidate measures the
+entire worker HTTP relay using the listener's exact ASCII JSON encoding and the
+longer `fullyAccepted:false` representation. It holds inserts that exceed the
+wire limit; existing receipts and exact replay are preserved. Existing oversized
+relay sets still require an explicit recovery procedure.
+
+SQLite reports of BUSY or LOCKED on Viewer acceptance or the worker acceptance
+read return sanitized HTTP 503. Other SQLite operational failures remain 500.
+Clients must retry an exact receipt identity and reconcile an uncertain response;
+503 does not prove that no earlier attempt committed.
+
 This tightens the existing v1 API behavior: clients that generate a new receipt
 identity for already-covered objects will receive a conflict and must reconcile
 the original receipt identity instead. Coordinate the rule with Viewer before

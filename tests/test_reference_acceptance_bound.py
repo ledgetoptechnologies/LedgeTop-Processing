@@ -119,6 +119,21 @@ class AcceptanceBoundTests(unittest.TestCase):
         self.assertEqual([row['receipt_id'] for row in rows], ['legacy', 'legacy-excess', 'receipt-1'])
         self.assertEqual(rows[0]['receipt_json'], legacy_json)
 
+    def test_relay_wire_byte_budget_preserves_existing_receipt_and_exact_replay(self):
+        second = dict(self.receipt, receiptId='unicode', storageReceiptId='unicode-storage',
+                      acceptedObjectIds=['result-2'], acceptedAt='2026-10-27🔥12:00:00+00:00')
+        first_wire = json.dumps({'receipts':[self.receipt], 'fullyAccepted':False},
+            ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode()
+        second_wire = json.dumps({'receipts':[self.receipt,second], 'fullyAccepted':False},
+            ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode()
+        self.assertGreater(len(second_wire), len(first_wire))
+        with patch.object(p, 'MAX_BODY_BYTES', len(first_wire)):
+            self.assertTrue(self.store.accept('job-1', self.receipt)['created'])
+            with self.assertRaises(Conflict): self.store.accept('job-1', second)
+            self.assertFalse(self.store.accept('job-1', self.receipt)['created'])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM reference_acceptances').fetchone()[0], 1)
+
     def test_independent_sqlite_connections_conflict_then_exact_replay(self):
         uri = 'file:acceptance-' + uuid.uuid4().hex + '?mode=memory&cache=shared'
         keeper = sqlite3.connect(uri, uri=True, check_same_thread=False)
