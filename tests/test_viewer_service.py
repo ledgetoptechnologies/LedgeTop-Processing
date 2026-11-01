@@ -863,6 +863,56 @@ class ViewerServiceTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0], 'started')
 
+    def test_unrelated_completed_legacy_journal_keeps_submission_visibly_held(self):
+        from processing.engine_ingress_guard import STREAM_DDL
+        identifier = self.submit()
+        with self.queue._db() as db:
+            db.execute(STREAM_DDL)
+            db.execute('INSERT INTO engine_ingress_uploads VALUES (?,?,?,?,?,?)',
+                       ('unrelated-upload', 'unrelated-job', 'unrelated-engine', 1, 'a' * 64, 'complete'))
+        self.engines['cluster'].fail = 'initialize'
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual((task['job']['status'], task['job']['heldReason']), ('held', 'transfer_uncertain'))
+        info = self.service.info(identifier)
+        self.assertEqual((info['ledgetopHeld'], info['ledgetopHoldReason']), (True, 'transfer_uncertain'))
+        self.service.tick()
+        self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+        with self.queue._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT upload_id,state FROM engine_ingress_uploads').fetchone()),
+                             ('unrelated-upload', 'complete'))
+
+    def test_corrupt_transfer_journal_keeps_submission_visibly_held(self):
+        identifier = self.submit()
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
+        self.engines['cluster'].fail = 'initialize'
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual((task['job']['status'], task['job']['heldReason']), ('held', 'transfer_uncertain'))
+        self.assertEqual(self.service.info(identifier)['ledgetopHoldReason'], 'transfer_uncertain')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM engine_ingress_uploads').fetchone()[0], 0)
+
+    def test_corrupt_trigger_preventing_hold_keeps_slot_and_sets_dispatch_warning(self):
+        import time
+        identifier = self.submit()
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE engine_ingress_uploads (synthetic TEXT)')
+            db.execute("CREATE TRIGGER synthetic_reject_hold BEFORE UPDATE ON jobs WHEN NEW.status='held' "
+                       "BEGIN SELECT RAISE(ABORT,'synthetic hold blocked'); END")
+        self.engines['cluster'].fail = 'initialize'
+        self.service.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not self.service.dispatcher_status()['unexpectedFailureObserved'] and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(self.service.dispatcher_status()['unexpectedFailureObserved'])
+            self.assertEqual(self.task(identifier)['job']['status'], 'running')
+            self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+        finally:
+            self.service.close()
+
     def test_contradictory_native_init_ack_holds_photo_job_without_upload(self):
         from processing.viewer_service import NativeEngine
         identifier=self.submit()

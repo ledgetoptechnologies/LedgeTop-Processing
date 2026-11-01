@@ -21,6 +21,10 @@ from datetime import datetime, timezone
 from .maintenance import Conflict, Maintenance
 
 
+class TransferJournalUnqualified(Conflict):
+    """An existing journal is not safe to interpret without inspection."""
+
+
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 PROFILE = "treedar-synthetic-v1"
 PHOTO_PROFILE = "odx-photo-smoke-v1"
@@ -355,29 +359,50 @@ class Queue(Maintenance):
                    (payload["status"], result, identifier))
         return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
 
-    def has_attested_started_transfer(self, identifier):
+    @staticmethod
+    def _has_attested_started_transfer(db, identifier):
         """Recognize a persisted guarded transfer after an unguarded restart.
 
         An older empty journal is not evidence that the newer fence exists.
         Nonempty or malformed unqualified journals remain an operator hold.
         """
+        table = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
+        if not table:
+            return False
+        from .transfer_fence import STREAM_DDL, TransferFenceError, attest
+        try:
+            attest(db)
+        except TransferFenceError:
+            if table[0] != STREAM_DDL or db.execute('SELECT 1 FROM engine_ingress_uploads LIMIT 1').fetchone():
+                raise TransferJournalUnqualified('unqualified transfer journal requires inspection') from None
+            return False
+        return bool(db.execute("SELECT 1 FROM engine_ingress_uploads WHERE job_id=? AND state='started'", (identifier,)).fetchone())
+
+    def has_attested_started_transfer(self, identifier):
         with self._db() as db:
             db.execute('BEGIN')
-            table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
-            if not table:
-                return False
-            from .transfer_fence import TransferFenceError, attest
+            return self._has_attested_started_transfer(db, identifier)
+
+    def hold_unqualified_transfer(self, identifier, token):
+        """Preserve the execution slot without changing transfer evidence."""
+        if type(token) is not str or not 1 <= len(token) <= 128:
+            raise Conflict('unqualified transfer claim requires inspection')
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
             try:
-                attest(db)
-            except TransferFenceError:
-                try:
-                    nonempty = db.execute('SELECT 1 FROM engine_ingress_uploads LIMIT 1').fetchone()
-                except sqlite3.DatabaseError:
-                    raise Conflict('unqualified transfer journal requires inspection') from None
-                if nonempty:
-                    raise Conflict('unqualified transfer journal requires inspection') from None
-                return False
-            return bool(db.execute("SELECT 1 FROM engine_ingress_uploads WHERE job_id=? AND state='started'", (identifier,)).fetchone())
+                self._has_attested_started_transfer(db, identifier)
+            except TransferJournalUnqualified:
+                pass
+            else:
+                raise Conflict('transfer journal qualification changed')
+            row = db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
+            if (not row or not row['claim_hash'] or not hmac.compare_digest(
+                    hashlib.sha256(token.encode()).hexdigest(), row['claim_hash'])):
+                raise Conflict('unqualified transfer claim changed')
+            if row['status'] == 'running':
+                db.execute("UPDATE jobs SET status='held',held_reason='transfer_uncertain',updated_at=CURRENT_TIMESTAMP WHERE id=?", (identifier,))
+                return True
+            return row['status'] == 'held' and row['held_reason'] == 'transfer_uncertain'
 
     def hold_started_transfer(self, identifier, token):
         """Hold a matching unfinished upload without modifying its evidence."""

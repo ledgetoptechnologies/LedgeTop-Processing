@@ -27,7 +27,7 @@ from . import config as runtime_config
 from .odx_smoke_worker import Client, SmokeError, strict_wire_json
 from .options import catalog, discover_node, _NoRedirect
 from .policy import plan
-from .prototype import VIEWER_PROFILE
+from .prototype import TransferJournalUnqualified, VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import ArchiveClaimHeld, TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
@@ -1019,10 +1019,15 @@ class ViewerService:
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])
-        if (task.get('claim_token')
-                and (self._guarded_engines_enabled or self.queue.has_attested_started_transfer(task['job_id']))
-                and self.queue.hold_started_transfer(task['job_id'], task['claim_token'])):
-            return
+        if task.get('claim_token'):
+            try:
+                guarded = self._guarded_engines_enabled or self.queue.has_attested_started_transfer(task['job_id'])
+            except TransferJournalUnqualified:
+                if self.queue.hold_unqualified_transfer(task['job_id'], task['claim_token']):
+                    return
+                raise
+            if guarded and self.queue.hold_started_transfer(task['job_id'], task['claim_token']):
+                return
         if job and (job['status'] == 'running' or
                     (job['status'] == 'held' and job['heldReason'] == 'coordinator_restart')):
             self.queue.operator(task['job_id'], 'hold', {'note': reason})

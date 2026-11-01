@@ -952,6 +952,8 @@ class TaskStore:
         if state == 'held' and code == 20:
             # Fixed marker only: held notes and engine error text can be private.
             info['ledgetopHeld'] = True
+            if job.get('heldReason') == 'transfer_uncertain':
+                info['ledgetopHoldReason'] = 'transfer_uncertain'
             reason='engine_failure_termination_unverified'
             hold=job.get('result') if isinstance(job,dict) else None
             durable_failure_hold=(isinstance(hold,dict)
