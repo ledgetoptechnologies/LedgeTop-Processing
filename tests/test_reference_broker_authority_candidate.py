@@ -45,6 +45,9 @@ class ReferenceBrokerAuthorityCandidateTests(unittest.TestCase):
         TaskStore(self.queue, self.root / 'queue' / 'viewer-tasks')
         with self.queue._db() as db:
             install_offline(db, enabled=True)
+            if getattr(self,'REMOTE_FENCE_REQUIRED',False):
+                from processing.node_reference_remote_fence import install_offline as install_remote_fence
+                install_remote_fence(db,enabled=True)
         fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
         token = 'synthetic-reference-viewer-token'
         api = ReferenceAPI(self.store, bearer_tokens={token:'staging'},

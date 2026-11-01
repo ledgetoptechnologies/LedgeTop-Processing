@@ -258,7 +258,7 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
         self._deadline = None
 
     @contextmanager
-    def hold(self, grant, timeout, *, create=False, body=None, signature=None, _allowed_upload=None, _allowed_commit=None, _delivery=None):
+    def hold(self, grant, timeout, *, create=False, body=None, signature=None, _allowed_upload=None, _allowed_commit=None, _delivery=None, _remote_fenced=False):
         from .reference_store import PROFILE
         from .authority_lease import MARKER_DDL, LeaseUnavailable
         from .broker_intent_fence import attest, IntentFenceError
@@ -300,6 +300,10 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
                                 attest(db)
                             except IntentFenceError:
                                 raise BrokerHeld('broker intent fence unavailable') from None
+                            if _remote_fenced:
+                                from .node_reference_remote_fence import attest as attest_remote, RemoteFenceHeld
+                                try:attest_remote(db)
+                                except RemoteFenceHeld:raise BrokerHeld('reference remote fence unavailable') from None
                             row = db.execute('''SELECT j.status,j.result AS queue_result,j.profile,j.environment AS queue_env,j.node_id AS queue_node,
                                 j.worker_id AS queue_worker,j.claim_hash,r.environment,r.node_id,r.generation,r.phase,
                                 r.manifest_sha,r.pipeline_digest,r.input_json,r.result_json,c.request_id,c.node_id AS claim_node,
@@ -423,7 +427,7 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
         if self._deadline is None or time.monotonic() >= self._deadline:
             raise BrokerHeld('reference authority deadline exceeded')
 
-    def _issue_upload_candidate(self, init_grant, signature, *, object_id, operation_id, secret):
+    def _issue_upload_candidate(self, init_grant, signature, *, object_id, operation_id, secret, timeout=10, remote_fenced=False):
         """Persist a manifest-derived issue under the original live claim.
 
         The issue does not authorize transmission; reference upload remains
@@ -434,7 +438,7 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
                 or not _uuid(operation_id) or operation_id == init_grant.get('operationId')
                 or type(object_id) is not str or not object_id):
             raise BrokerHeld('exact signed issue request required')
-        with self.hold(init_grant, 10, create=False):
+        with self.hold(init_grant, timeout, create=False, _remote_fenced=remote_fenced):
             db = self._active_db
             schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_broker_upload_issue_candidate'").fetchone()
             if schema is None or schema[0] != _REFERENCE_UPLOAD_ISSUE_DDL:
@@ -467,6 +471,25 @@ class ReferenceCoordinatorAuthority(LocalCoordinatorAuthority):
             self.check_deadline()
             return dict(zip(('operationId','jobId','generation','manifestSha256','objectId','fileName',
                              'fileBytes','fileSha256','claimTokenSha256','initOperationId'), issue))
+
+    def _start_upload_candidate(self, init_grant, *, object_id, operation_id, timeout=10, remote_fenced=False):
+        """Coordinator-owned intent creation; caller authenticates the request."""
+        with self.hold(init_grant, timeout, create=False, _remote_fenced=remote_fenced):
+            db = self._active_db
+            issue = db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE operation_id=?', (operation_id,)).fetchone()
+            if (issue is None or issue['object_id'] != object_id or issue['job_id'] != init_grant['jobId']
+                    or issue['generation'] != init_grant['taskGeneration']
+                    or issue['manifest_sha'] != init_grant['inputManifestSha256']
+                    or issue['claim_sha'] != init_grant['claimTokenSha256']
+                    or issue['init_operation_id'] != init_grant['operationId']):
+                raise BrokerHeld('exact issued reference upload required')
+            allowed = (operation_id, init_grant['jobId'], hashlib.sha256(_json(list(issue))).hexdigest())
+            try:
+                db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')", allowed)
+            except sqlite3.IntegrityError:
+                raise BrokerHeld('reference upload requires inspection') from None
+            self.check_deadline()
+            return allowed
 
     def completed(self, grant, reply):
         if self._active_db is None:
@@ -777,11 +800,12 @@ class NodeMutationBroker:
                  coordinator_origin, gate_generation, secret, adapter, authority_witness):
         if QUALIFIED is not True: raise BrokerHeld('node broker is not qualified')
         from .node_authority_session import RemoteAuthoritySession
+        from .node_reference_authority_session import RemoteReferenceInitAuthority
         if (node_id not in ('cluster','main') or not _uuid(authority_id) or not _uuid(coordinator_epoch)
                 or type(engine_id) is not str or not re.fullmatch('[A-Za-z0-9:._-]{1,255}',engine_id)
                 or type(gate_generation) is not int or gate_generation < 1
                 or type(secret) is not bytes or len(secret) < 32 or type(adapter) is not LoopbackNodeODM
-                or adapter.engine_id != engine_id or type(authority_witness) not in (LocalCoordinatorAuthority,ReferenceCoordinatorAuthority,RemoteAuthoritySession)
+                or adapter.engine_id != engine_id or type(authority_witness) not in (LocalCoordinatorAuthority,ReferenceCoordinatorAuthority,RemoteAuthoritySession,RemoteReferenceInitAuthority)
                 or (authority_witness.authority,authority_witness.epoch)!=(authority_id,coordinator_epoch)):
             raise BrokerHeld('invalid local broker binding')
         self.root=Path(root).absolute();self.node=node_id;self.engine=engine_id;self.authority=authority_id
@@ -849,7 +873,9 @@ class NodeMutationBroker:
                 self.db.close()
 
     def _authenticate(self, grant, signature, operation):
-        fields=(_REFERENCE_INIT_FIELDS if type(self.witness) is ReferenceCoordinatorAuthority and operation=='init'
+        from .node_reference_authority_session import RemoteReferenceInitAuthority
+        reference = type(self.witness) in (ReferenceCoordinatorAuthority,RemoteReferenceInitAuthority)
+        fields=(_REFERENCE_INIT_FIELDS if reference and operation=='init'
                 else _UPLOAD_FIELDS if operation=='upload' else _FIELDS)
         if type(grant) is not dict or set(grant)!=fields:
             raise BrokerHeld('invalid bounded grant')
@@ -868,7 +894,7 @@ class NodeMutationBroker:
                 or grant['environment'] not in ('production','staging') or grant['operation']!=operation
                 or type(grant['contentType']) is not str or not re.fullmatch(r'[ -~]{1,256}',grant['contentType'])
                 or not re.fullmatch('[a-f0-9]{64}',grant['bodySha256'])):raise BrokerHeld('grant binding changed')
-        if type(self.witness) is ReferenceCoordinatorAuthority:
+        if reference:
             if (operation != 'init' or grant['profile'] != 'reference-init-v1'
                     or any(not re.fullmatch(r'[a-f0-9]{64}', grant[key]) for key in
                            ('claimTokenSha256','inputManifestSha256','pipelineDigest'))):
@@ -883,6 +909,9 @@ class NodeMutationBroker:
         # Upload is not implemented; never commit an empty or partially uploaded
         # NodeODM task while that stage lacks a durable completion contract.
         if grant['operation']=='commit':raise BrokerHeld('upload stage not qualified')
+        from .node_reference_authority_session import RemoteReferenceInitAuthority
+        if type(self.witness) is RemoteReferenceInitAuthority:
+            return self._remote_reference_init_candidate(grant,signature,body)
         if type(self.witness) is ReferenceCoordinatorAuthority:
             return self._execute(grant,'',lambda:self.adapter.exchange(grant,body,absolute_deadline=self.witness._deadline),body=body,signature=signature)
         return self._execute(grant,'',lambda:self.adapter.exchange(grant,body),body=body,signature=signature)
@@ -898,28 +927,53 @@ class NodeMutationBroker:
         return self.witness._issue_upload_candidate(init_grant, signature, object_id=object_id,
                                                     operation_id=operation_id, secret=self.secret)
 
+    def _remote_reference_init_candidate(self,grant,signature,body):
+        """Node-local gate and journal under a one-shot remote authority."""
+        deadline=time.monotonic()+10
+        identity=uuid.UUID(grant['jobId']).hex
+        job={'id':grant['jobId'],'workerId':grant['workerId'],'nodeId':self.node,'authorityId':self.authority}
+        durable=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
+        digest=hashlib.sha256(_json(grant)).hexdigest()
+        with self._execution_lock(deadline), self.witness.hold(grant,max(0,deadline-time.monotonic()),body=body,signature=signature,create=True), NodeGate(self.engine) as gate:
+            self._check_owner()
+            state=gate.snapshot()
+            expected={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
+            if any(state[k]!=v for k,v in expected.items()):raise BrokerHeld('node ownership changed')
+            reservation=state['reservation']
+            if reservation is None:
+                gate.reserve(self.node,self.origin,self.authority,self.generation,identity)
+                gate.bind(identity,job)
+            elif reservation['receiptId']!=identity or reservation['job']!=job or reservation['completionDigest'] is not None:
+                raise BrokerHeld('another reservation holds node')
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                stored=self.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+                if stored is None:self.db.execute('INSERT INTO reservation VALUES(1,?)',(durable,))
+                elif stored['identity']!=durable:raise BrokerHeld('durable reservation changed')
+                if self.db.execute('SELECT 1 FROM operations WHERE id=? OR state!=\'complete\'',(grant['operationId'],)).fetchone():
+                    raise BrokerHeld('reference init requires inspection')
+                self.db.execute('INSERT INTO operations VALUES(?,?,?,?,?,NULL)',(grant['operationId'],'init','',digest,'started'))
+                self.db.commit()
+            except BaseException:self.db.rollback();raise
+            if time.monotonic()>=self.witness.active[3]:raise BrokerHeld('reference authority deadline exceeded')
+            reply=_reply(self.adapter.exchange(grant,body,absolute_deadline=self.witness.active[3]),grant['engineTaskId'])
+            self._check_owner()
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                if self.db.execute("UPDATE operations SET state='complete',reply=? WHERE id=? AND grant_hash=? AND state='started'",(_json(reply).decode(),grant['operationId'],digest)).rowcount!=1:
+                    raise BrokerHeld('reference init operation changed')
+                self.db.commit()
+            except BaseException:self.db.rollback();raise
+            self.witness.completed(grant,reply)
+            return reply
+
     def start_reference_upload_intent_candidate(self, init_grant, signature, *, object_id, operation_id, issue_signature):
         """Persist an upload intent only; transmission is not enabled."""
         self._authenticate(init_grant, signature, 'init')
         if (type(self.witness) is not ReferenceCoordinatorAuthority or type(issue_signature) is not str
                 or not hmac.compare_digest(sign_reference_issue(init_grant, object_id, operation_id, self.secret), issue_signature)):
             raise BrokerHeld('reference upload issue authentication failed')
-        with self.witness.hold(init_grant, 10, create=False):
-            db = self.witness._active_db
-            issue = db.execute('SELECT * FROM reference_broker_upload_issue_candidate WHERE operation_id=?', (operation_id,)).fetchone()
-            if (issue is None or issue['object_id'] != object_id or issue['job_id'] != init_grant['jobId']
-                    or issue['generation'] != init_grant['taskGeneration']
-                    or issue['manifest_sha'] != init_grant['inputManifestSha256']
-                    or issue['claim_sha'] != init_grant['claimTokenSha256']
-                    or issue['init_operation_id'] != init_grant['operationId']):
-                raise BrokerHeld('exact issued reference upload required')
-            allowed = (operation_id, init_grant['jobId'], hashlib.sha256(_json(list(issue))).hexdigest())
-            try:
-                db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')", allowed)
-            except sqlite3.IntegrityError:
-                raise BrokerHeld('reference upload requires inspection') from None
-            self.witness.check_deadline()
-            return allowed
+        return self.witness._start_upload_candidate(init_grant,object_id=object_id,operation_id=operation_id)
 
     def send_reference_upload_candidate(self, init_grant, signature, *, object_id, operation_id,
                                         issue_signature, worker, reservation_id, relative_path):
@@ -1010,6 +1064,86 @@ class NodeMutationBroker:
             finally:
                 completion.stop()
 
+    def send_remote_reference_upload_candidate(self, init_grant, signature, *, object_id, operation_id,
+            issue_signature, expected_issue, remote, worker, reservation_id, relative_path):
+        """Disabled remote upload: exact pinned session plus local gate/journal."""
+        from .node_reference_authority_session import RemoteReferenceUploadAuthority
+        from .reference_engine_worker import ReferenceEngineWorker
+        from .guarded_native_engine import start_guarded_sender
+        self._authenticate(init_grant,signature,'init')
+        if (type(remote) is not RemoteReferenceUploadAuthority or (remote.authority,remote.epoch)!=(self.authority,self.epoch)
+                or type(worker) is not ReferenceEngineWorker or self._unreaped or type(expected_issue) is not dict
+                or worker.engine_id!=self.engine or worker.node_id!=self.node or worker.worker_id!=init_grant['workerId']
+                or worker.authority_id!=self.authority or worker.origin!=self.origin or worker.gate_generation!=self.generation
+                or type(issue_signature) is not str
+                or not hmac.compare_digest(sign_reference_issue(init_grant,object_id,operation_id,self.secret),issue_signature)):
+            raise BrokerHeld('exact reference upload binding required')
+        expected_keys={'operationId','jobId','generation','manifestSha256','objectId','fileName','fileBytes','fileSha256','claimTokenSha256','initOperationId'}
+        if (set(expected_issue)!=expected_keys or expected_issue['operationId']!=operation_id
+                or expected_issue['jobId']!=init_grant['jobId'] or type(expected_issue['generation']) is not int
+                or expected_issue['generation']!=init_grant['taskGeneration'] or expected_issue['manifestSha256']!=init_grant['inputManifestSha256']
+                or expected_issue['objectId']!=object_id or expected_issue['claimTokenSha256']!=init_grant['claimTokenSha256']
+                or expected_issue['initOperationId']!=init_grant['operationId'] or type(expected_issue['fileBytes']) is not int
+                or not 0<expected_issue['fileBytes']<=MAX_STREAM_BYTES-4096
+                or type(expected_issue['fileSha256']) is not str or not re.fullmatch('[a-f0-9]{64}',expected_issue['fileSha256'])):
+            raise BrokerHeld('exact reference upload issue required')
+        from .viewer_tasks import TaskStore, PHOTO_SUFFIXES
+        try:
+            TaskStore._filename(expected_issue['fileName'])
+            if Path(expected_issue['fileName']).suffix.lower() not in PHOTO_SUFFIXES:raise ValueError()
+        except (ValueError,TypeError):raise BrokerHeld('invalid reference upload name') from None
+        deadline=time.monotonic()+10
+        with self._execution_lock(deadline), remote.hold(init_grant,signature,object_id=object_id,operation_id=operation_id,
+                issue_signature=issue_signature,expected_issue=expected_issue) as held, NodeGate(self.engine) as gate:
+            self._check_owner()
+            state=gate.snapshot();reservation=state['reservation']
+            expected_gate={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
+            job={'id':init_grant['jobId'],'workerId':init_grant['workerId'],'nodeId':self.node,'authorityId':self.authority}
+            if (any(state[k]!=v for k,v in expected_gate.items()) or not reservation
+                    or reservation['receiptId']!=uuid.UUID(init_grant['jobId']).hex or reservation['job']!=job
+                    or reservation['completionDigest'] is not None):raise BrokerHeld('reference node gate changed')
+            durable=_json([init_grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
+            local_reservation=self.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+            local_init=self.db.execute("SELECT state,grant_hash,reply FROM operations WHERE id=? AND operation='init'",(init_grant['operationId'],)).fetchone()
+            if (local_reservation is None or local_reservation['identity']!=durable or local_init is None
+                    or local_init['state']!='complete' or local_init['grant_hash']!=hashlib.sha256(_json(init_grant)).hexdigest()):
+                raise BrokerHeld('reference local init changed')
+            try:init_reply=_reply(json.loads(local_init['reply']),init_grant['engineTaskId'])
+            except (ValueError,TypeError):raise BrokerHeld('reference local init changed') from None
+            if hashlib.sha256(_json(init_reply)).hexdigest()!=held['initReplySha256']:raise BrokerHeld('reference local init proof changed')
+            with worker.ledger._transaction() as ledger_db:
+                reserved=worker.ledger._reservation(ledger_db,reservation_id);settings=json.loads(reserved['settings'])
+            if ((reserved['job'],reserved['generation'],reserved['environment'],settings['manifest_sha256']) !=
+                    (init_grant['jobId'],init_grant['taskGeneration'],init_grant['environment'],init_grant['inputManifestSha256'])):
+                raise BrokerHeld('reference scratch reservation changed')
+            path,_,_=worker._file(reservation_id,relative_path,expected_issue['fileBytes'],expected_issue['fileSha256'])
+            item={'path':str(path),'bytes':expected_issue['fileBytes'],'sha256':expected_issue['fileSha256'],'name':expected_issue['fileName']}
+            digest=held['intentSha256']
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                self.db.execute('INSERT INTO operations VALUES(?,?,?,?,?,NULL)',(operation_id,'upload',item['name'],digest,'started'))
+                self.db.commit()
+            except BaseException:self.db.rollback();raise
+            if time.monotonic()>=remote.active[2]:raise BrokerHeld('reference upload deadline exceeded')
+            completion=start_guarded_sender(item,operation_id,remote.active[2],self)
+            try:
+                upload={'operationId':operation_id,'engineTaskId':init_grant['engineTaskId'],'fileName':item['name'],
+                        'fileBytes':item['bytes'],'bodySha256':item['sha256']}
+                reply=self.adapter.exchange_upload(upload,completion.source,absolute_deadline=remote.active[2])
+                completion.verify(remote.active[2]);self._check_owner()
+                receipt=dict(objectId=object_id,fileName=item['name'],fileBytes=item['bytes'],sha256=item['sha256'],
+                             operationId=operation_id,state='complete',scopeSha256=hashlib.sha256(_json(init_grant)).hexdigest())
+                receipt['signature']=_reference_receipt_signature(receipt,self.secret)
+                self.db.execute('BEGIN IMMEDIATE')
+                try:
+                    if self.db.execute("UPDATE operations SET state='complete',reply=? WHERE id=? AND grant_hash=? AND state='started'",(_json(reply).decode(),operation_id,digest)).rowcount!=1:
+                        raise BrokerHeld('reference upload operation changed')
+                    self.db.commit()
+                except BaseException:self.db.rollback();raise
+                remote.completed(reply,receipt)
+                return receipt
+            finally:completion.stop()
+
     def verify_reference_upload_inventory_candidate(self, init_grant, signature):
         """Cross-check completed reference uploads without authorizing commit."""
         if type(self.witness) is not ReferenceCoordinatorAuthority:
@@ -1018,6 +1152,75 @@ class NodeMutationBroker:
         deadline = time.monotonic() + 10
         with self._execution_lock(deadline), self.witness.hold(init_grant, max(0, deadline-time.monotonic())), NodeGate(self.engine) as gate:
             return self._verify_reference_inventory_locked(init_grant, gate)
+
+    def commit_remote_reference_candidate(self,init_grant,signature,*,operation_id,body,content_type,commit_signature,manifest,remote):
+        """Disabled remote commit with independent local gate/journal checks."""
+        from .node_reference_authority_session import RemoteReferenceCommitAuthority
+        from .reference_protocol import manifest_sha256
+        self._authenticate(init_grant,signature,'init')
+        if (type(remote) is not RemoteReferenceCommitAuthority or (remote.authority,remote.epoch)!=(self.authority,self.epoch)
+                or not _uuid(operation_id) or type(body) is not bytes or len(body)>65536
+                or type(commit_signature) is not str
+                or not hmac.compare_digest(sign_reference_commit(init_grant,operation_id,body,content_type,self.secret),commit_signature)
+                or manifest_sha256(manifest)!=init_grant['inputManifestSha256'] or manifest.get('sha256')!=init_grant['inputManifestSha256']):
+            raise BrokerHeld('exact remote reference commit required')
+        objects=manifest.get('objects')
+        if (type(objects) is not list or not objects or any(type(obj) is not dict or obj.get('kind')!='image' for obj in objects)
+                or len({obj.get('id') for obj in objects})!=len(objects)
+                or len({obj.get('name','').lower() for obj in objects})!=len(objects)):
+            raise BrokerHeld('image-only manifest required')
+        deadline=time.monotonic()+10
+        with self._execution_lock(deadline), remote.hold(init_grant,signature,operation_id=operation_id,body=body,
+                content_type=content_type,commit_signature=commit_signature) as held, NodeGate(self.engine) as gate:
+            self._check_owner()
+            state=gate.snapshot();reservation=state['reservation']
+            expected_gate={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
+            job={'id':init_grant['jobId'],'workerId':init_grant['workerId'],'nodeId':self.node,'authorityId':self.authority}
+            if (any(state[k]!=v for k,v in expected_gate.items()) or not reservation
+                    or reservation['receiptId']!=uuid.UUID(init_grant['jobId']).hex or reservation['job']!=job
+                    or reservation['completionDigest'] is not None):raise BrokerHeld('reference node gate changed')
+            commit=(operation_id,init_grant['jobId'],hashlib.sha256(_json(init_grant)).hexdigest(),hashlib.sha256(body).hexdigest(),content_type)
+            digest=hashlib.sha256(_json(list(commit))).hexdigest()
+            if held['intentSha256']!=digest:raise BrokerHeld('remote commit intent changed')
+            inventory=held['inventory']
+            if type(inventory) is not dict or set(inventory)!={'initReplySha256','uploads'} or type(inventory['uploads']) is not list:
+                raise BrokerHeld('remote commit inventory changed')
+            durable=_json([init_grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration','taskGeneration')]).decode()
+            local_reservation=self.db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+            init=self.db.execute("SELECT state,grant_hash,reply FROM operations WHERE id=? AND operation='init'",(init_grant['operationId'],)).fetchone()
+            if (local_reservation is None or local_reservation['identity']!=durable or init is None or init['state']!='complete'
+                    or init['grant_hash']!=hashlib.sha256(_json(init_grant)).hexdigest()):raise BrokerHeld('reference local init changed')
+            try:init_reply=_reply(json.loads(init['reply']),init_grant['engineTaskId'])
+            except (ValueError,TypeError):raise BrokerHeld('reference local init changed') from None
+            if hashlib.sha256(_json(init_reply)).hexdigest()!=inventory['initReplySha256']:raise BrokerHeld('reference local init proof changed')
+            names={obj['name'] for obj in objects};seen=set()
+            for proof in inventory['uploads']:
+                if (type(proof) is not dict or set(proof)!={'operationId','fileName','issueSha256'}
+                        or proof['fileName'] not in names or proof['fileName'] in seen or not _uuid(proof['operationId'])
+                        or type(proof['issueSha256']) is not str or not re.fullmatch('[a-f0-9]{64}',proof['issueSha256'])):
+                    raise BrokerHeld('remote commit inventory changed')
+                local=self.db.execute('SELECT operation,file_key,grant_hash,state,reply FROM operations WHERE id=?',(proof['operationId'],)).fetchone()
+                if local is None or (local['operation'],local['file_key'],local['grant_hash'],local['state']) != ('upload',proof['fileName'],proof['issueSha256'],'complete'):
+                    raise BrokerHeld('remote local upload proof changed')
+                _upload_reply(json.loads(local['reply']));seen.add(proof['fileName'])
+            if seen!=names or self.db.execute("SELECT COUNT(*) FROM operations WHERE operation='upload'").fetchone()[0]!=len(names):
+                raise BrokerHeld('remote local inventory incomplete')
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                self.db.execute('INSERT INTO operations VALUES(?,?,?,?,?,NULL)',(operation_id,'commit','',digest,'started'));self.db.commit()
+            except BaseException:self.db.rollback();raise
+            if time.monotonic()>=remote.active[2]:raise BrokerHeld('remote commit deadline exceeded')
+            reply=_reply(self.adapter.exchange({'operation':'commit','engineTaskId':init_grant['engineTaskId'],'contentType':content_type},
+                                               body,absolute_deadline=remote.active[2]),init_grant['engineTaskId'])
+            self._check_owner()
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                if self.db.execute("UPDATE operations SET state='complete',reply=? WHERE id=? AND grant_hash=? AND state='started'",(_json(reply).decode(),operation_id,digest)).rowcount!=1:
+                    raise BrokerHeld('remote commit journal changed')
+                self.db.commit()
+            except BaseException:self.db.rollback();raise
+            remote.completed(reply,init_grant['engineTaskId'])
+            return reply
 
     @contextmanager
     def hold_verified_reference_commit_candidate(self, init_grant, signature, *, operation_id, delivery=None):
