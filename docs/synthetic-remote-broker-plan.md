@@ -1,0 +1,27 @@
+# Remote coordinator authority over an isolated synthetic node — review draft
+
+Status: staged for independent review only. No new snapshot, certificates, Docker resources, signals, or test processes have been created for this draft. The prior local-authority rehearsal and its retained resources are separate.
+
+## Rehearsal and scope
+
+Use actual `NodeMutationBroker`, `RemoteAuthoritySession`, `serve_coordinator`, `LocalCoordinatorAuthority`, synthetic Queue, TaskStore, authority lease and durable broker-intent fence from pinned source commit `ad960902e1871a787fb5ad44037bf70be12d78ff`. The separate coordinator process holds the actual Queue/lease. The broker process and synthetic NodeODM-like engine share a Docker `network=none` namespace and communicate only over loopback. A separate coordinator namespace and the broker share a task-owned control volume containing a Unix socket; coordinator and broker authenticate the TLS peer and its exact certificate pin.
+
+A narrowly framed **test-only** bootstrap sends a synthetic signed grant and claim token only after mTLS authentication. The same TLS connection then runs the actual `RemoteAuthoritySession` prepare/check/complete exchange; this bootstrap is not an existing production enrollment API. The no-client-certificate attempt is denied. The actual broker must process one synthetic init, replay it identically without a second engine request, and record `complete` locally; the separate coordinator must record `complete` for that operation's durable intent. The current broker qualification switch and Docker engine/backend identity probes are patched **only inside the isolated broker/coordinator test processes**. Therefore a pass does not qualify node identity, physical access exclusion, production operation or recovery release.
+
+This draft tests one successful init/replay only. It does not test coordinator loss, lost acknowledgement, crash/restart, two-node admission, real NodeODM, upload, commit, results, real credentials, a production broker listener, or host/root/Docker-admin exclusion. A later fault-injection draft must be separately reviewed before introducing process termination or interpreting held state.
+
+## Staged files and data ownership
+
+- `scripts/synthetic-remote-broker/harness.py` — separate coordinator, broker and synthetic engine roles.
+- `scripts/synthetic-remote-broker-snapshot.py` — stages only the `processing/` tree from a full reviewed Git commit plus this harness into a new, retained source directory and emits its digest.
+- `scripts/synthetic-broker-namespace-certs.py` — the previously reviewed fresh-directory synthetic CA and separate leaf certificate generator; issuer private key is never mounted. Synthetic leaf keys are deliberately readable to the non-root test UID in their separately mounted directories and must never contain production credentials.
+- `scripts/synthetic-remote-broker-runner.py` — verifies snapshot digest/certificate layout, stages five exact-labelled containers and three exact-labelled retained volumes; `initializer`, `broker`, `engine`, `probe`, and `coordinator` are per-run names.
+- `scripts/synthetic-remote-broker-watchdog-windows.py` — suspended-child Windows Job Object, bounded wait and owned-process accounting, followed by exact name/full-ID/run-label stop verification. It retains all resources and never deletes containers, volumes, images or files. Late daemon creates, resource identity mismatch, failed stops or uncertain process accounting are inconclusive.
+
+The broker mounts only its node-state volume, shared control volume, read-only synthetic source, and client certificate directory. The coordinator mounts only its separate coordinator-state volume, shared control volume, read-only synthetic source, and server certificate directory. The engine mounts source only and shares the broker's exact network namespace. The isolated probe has no control volume. Initializer uses only CHOWN/FOWNER added capabilities to set UID/GID 65534 ownership on the three synthetic volumes; other containers are unprivileged, read-only-root, no added capabilities, no Docker socket, no published ports, and bounded CPU/memory/pids. Host and Docker administrators remain trusted and can bypass isolation.
+
+Source and certificate staging write only new explicitly named run-owned directories; any already-existing target is refused. Retain both directories. Source digest detects ordinary snapshot change at preflight but does not fence concurrent hostile host writes or parent-path replacement. A `SYNTHETIC-ONLY` label is not proof that certificates are safe; use only freshly generated synthetic material. No production tokens, client data or existing node paths.
+
+## Pre-run review and execution conditions
+
+Independently review the exact harness, snapshot extraction, synthetic key generator, volume permissions, exact-ID and label reconciliation, Job Object ownership/signals, bootstrap framing and authority-session lifecycle before running any staging or Docker operation. The fixed source commit and local immutable image ID must be verified. No deletion or shared-resource modifications are permitted. A successful run must verify all five exact containers stopped, all three exact volumes retained with the run label, and zero active owned Job processes before reporting PASS. Any timeout, uncertain create, missing/changed identity, failed stop, unverified descendants, permission failure, socket/namespace mismatch, TLS mismatch, unknown engine outcome or late Docker daemon activity is inconclusive.
