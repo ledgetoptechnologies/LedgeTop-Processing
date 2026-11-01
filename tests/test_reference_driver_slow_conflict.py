@@ -13,10 +13,17 @@ class SlowConflictTests(unittest.TestCase):
         release=threading.Event();started=threading.Event()
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
-                self.send_response(409)
+                self.send_response(200 if self.path.endswith('/contradiction') else 409)
                 self.send_header('Content-Type','application/json')
                 self.send_header('Content-Length','100')
                 if self.path.endswith('/inspection'):
+                    self.send_header('X-LedgeTop-Reference-Inspection','1')
+                if self.path.endswith('/duplicate'):
+                    self.send_header('X-LedgeTop-Reference-Inspection','1')
+                    self.send_header('X-LedgeTop-Reference-Inspection','1')
+                if self.path.endswith('/malformed'):
+                    self.send_header('X-LedgeTop-Reference-Inspection','unexpected')
+                if self.path.endswith('/contradiction'):
                     self.send_header('X-LedgeTop-Reference-Inspection','1')
                 self.end_headers()
                 try:self.wfile.write(b'{');self.wfile.flush()
@@ -41,6 +48,12 @@ class SlowConflictTests(unittest.TestCase):
             begin=time.monotonic()
             self.assertEqual(driver._request('GET','/ordinary'),(409,None))
             self.assertLess(time.monotonic()-begin,1.5)
+            for path in ('/duplicate','/malformed','/contradiction'):
+                begin=time.monotonic()
+                with self.assertRaises(DriverHeld) as ambiguous:
+                    driver._request('GET',path)
+                self.assertEqual(str(ambiguous.exception),'reference_inspection_protocol_error')
+                self.assertLess(time.monotonic()-begin,1.5)
         finally:
             release.set()
             if server is not None:

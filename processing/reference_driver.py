@@ -32,6 +32,16 @@ from .reference_failure import FailureOutbox, make_failure
 from .reference_terminal import validate_terminal_acceptance
 from .reference_engine_cleanup import EngineCacheCleanup
 from .options import _validate_options
+
+_INSPECTION_HOLDS = frozenset(('stored_reference_inspection', 'reference_inspection_protocol_error'))
+
+
+def _inspection_markers(headers):
+    if headers is None:return []
+    if callable(getattr(headers, 'get_all', None)):
+        return headers.get_all('X-LedgeTop-Reference-Inspection', [])
+    return [value for key,value in headers.items()
+            if isinstance(key,str) and key.lower() == 'x-ledgetop-reference-inspection']
 from .reference_runtime import _UNSAFE
 from .reference_execution import ExecutionRouter, RouteConflict
 from .treedar_engine import TreeDarHeld
@@ -334,12 +344,15 @@ class ReferenceDriver:
         except HTTPError as error:
             status = error.code
             try:
-                markers = error.headers.get_all('X-LedgeTop-Reference-Inspection', []) if error.headers else []
+                markers = _inspection_markers(error.headers)
                 inspection = status == 409 and markers == ['1']
+                ambiguous_inspection = status == 409 and bool(markers) and not inspection
             finally:
                 error.close()
             if inspection:
                 raise DriverHeld('stored_reference_inspection') from None
+            if ambiguous_inspection:
+                raise DriverHeld('reference_inspection_protocol_error') from None
             if status in (400, 401, 403, 404):
                 raise DriverHeld('control_request_rejected') from None
             if status == 409:
@@ -348,6 +361,8 @@ class ReferenceDriver:
         except Exception:
             raise DriverWait('coordinator_unavailable') from None
         try:
+            if _inspection_markers(response.headers):
+                raise DriverHeld('reference_inspection_protocol_error')
             if (response.status != 200 or response.geturl() != url
                     or response.headers.get('Content-Type', '').split(';')[0] != 'application/json'
                     or response.headers.get('Content-Encoding', 'identity') != 'identity'):
@@ -362,7 +377,7 @@ class ReferenceDriver:
             if type(payload) is not dict:
                 raise DriverWait('invalid_control_response')
             return 200, payload
-        except DriverWait:
+        except (DriverWait, DriverHeld):
             raise
         except Exception:
             raise DriverWait('control_response_unavailable') from None
@@ -546,8 +561,8 @@ class ReferenceDriver:
                 try:
                     background = self._background()
                 except DriverHeld as error:
-                    background = ({'state': 'held', 'reason': 'stored_reference_inspection'}
-                                  if str(error) == 'stored_reference_inspection' else {'state': 'background_retry'})
+                    background = ({'state': 'held', 'reason': str(error)}
+                                  if str(error) in _INSPECTION_HOLDS else {'state': 'background_retry'})
                 except Exception:
                     background = {'state': 'background_retry'}
             result = self._step()
@@ -587,8 +602,8 @@ class ReferenceDriver:
             try:
                 status, relayed = self._request('GET', '/jobs/' + row['job'] + '/' + kind, claim_token=claim['claimToken'])
             except DriverHeld as error:
-                if str(error) == 'stored_reference_inspection':
-                    return {'state': 'held', 'reason': 'stored_reference_inspection', 'jobId': row['job']}
+                if str(error) in _INSPECTION_HOLDS:
+                    return {'state': 'held', 'reason': str(error), 'jobId': row['job']}
                 raise
             if status != 409:
                 if kind == 'acceptance':

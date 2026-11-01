@@ -35,6 +35,10 @@ reports a held background job (also alongside active foreground work), and
 keeps its acceptance checkpoint. Other 409 responses retain their existing
 pending/conflict behavior. This is a status observation, not an independently
 durable operator alert; a future poll must re-observe the stored hold.
+For a 409, any present but duplicate or malformed inspection header produces a
+held protocol error; a contradictory marker on HTTP 200 also holds. A 409 with
+no marker retains legacy pending behavior, so an intermediary that strips the
+marker can conceal inspection and needs separate operational checks.
 
 The additional fields are backwards-compatible for consumers that tolerate
 unknown JSON fields. Strict consumers must update before using this candidate.
