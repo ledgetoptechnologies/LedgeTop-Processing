@@ -6,6 +6,7 @@ This does not reserve the Docker Engine against administrators/direct writers.
 """
 import argparse
 from contextlib import contextmanager
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import re
 import subprocess
 import time
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler
 
 
@@ -44,9 +46,35 @@ def locked(root):
         yield
 
 
-def configuration(listen, backend, closed):
+def _allowed_clients(values):
+    """Canonical fixed IPs/CIDRs only; never interpolate names or nginx syntax."""
+    if not isinstance(values, (tuple, list)) or len(values) > 64:
+        raise GateError('bounded fixed client IP/CIDR list required')
+    result = []
+    for value in values:
+        if not isinstance(value, str) or not value or len(value) > 64 or '%' in value:
+            raise GateError('canonical fixed client IP/CIDR required')
+        try:
+            address = (ipaddress.ip_network(value, strict=True) if '/' in value
+                       else ipaddress.ip_address(value))
+        except ValueError:
+            raise GateError('canonical fixed client IP/CIDR required') from None
+        if str(address) != value or value in result:
+            raise GateError('unique canonical fixed client IP/CIDR required')
+        result.append(value)
+    return result
+
+
+def configuration(listen, backend, closed, allowed_clients=()):
     if any(type(p) is not int or not 1024 <= p <= 65535 for p in (listen, backend)) or listen == backend:
         raise GateError('invalid fixed ingress ports')
+    allowed = _allowed_clients(allowed_clients)
+    # Empty preserves the legacy unrestricted gate. Restricted gates use the
+    # actual peer address; neither X-Forwarded-For nor any other header is trusted.
+    access = ''
+    if allowed:
+        addresses = dict.fromkeys(('127.0.0.1', '::1', *allowed))
+        access = '\n        '.join(f'allow {address};' for address in addresses) + '\n        deny all;'
     route = 'return 503;' if closed else f'''
         proxy_pass http://127.0.0.1:{backend};
         proxy_http_version 1.1;
@@ -71,6 +99,7 @@ http {{
     server {{
         listen 0.0.0.0:{listen};
         listen [::]:{listen} ipv6only=on;
+        {access}
         add_header Cache-Control no-store always;
         location / {{ {route} }}
     }}
@@ -92,7 +121,14 @@ class Ingress:
                 raise GateError('invalid owned container identity')
         if not re.fullmatch(r'sha256:[a-f0-9]{64}', self.config['proxyImage']):
             raise GateError('immutable gateway image required')
-        configuration(self.config['listenPort'], self.config['backendPort'], True)
+        configuration(self.config['listenPort'], self.config['backendPort'], True,
+                      self.config.get('allowedClients', ()))
+        if self.config.get('backendEngine', 'odx') not in ('odm', 'odx'):
+            raise GateError('explicit ODM-family backend engine required')
+        token = self.config.get('backendToken', '')
+        if (not isinstance(token, str) or len(token) > 4096
+                or any(ord(character) < 33 or ord(character) > 126 for character in token)):
+            raise GateError('invalid private backend credential')
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
 
     def docker(self, args):
@@ -143,13 +179,17 @@ class Ingress:
 
     def http(self, port):
         try:
-            with self.opener.open(f'http://127.0.0.1:{port}/info', timeout=3) as response:
+            token = self.config.get('backendToken', '')
+            query = '?' + urlencode({'token': token}) if token else ''
+            with self.opener.open(f'http://127.0.0.1:{port}/info' + query, timeout=3) as response:
                 raw = response.read(65537)
                 if len(raw) > 65536:
                     raise GateError('oversized health response')
                 return response.status, json.loads(raw)
         except HTTPError as error:
-            return error.code, None
+            code = error.code
+            error.close()
+            return code, None
 
     def backend(self, expected):
         if not re.fullmatch(r'sha256:[a-f0-9]{64}', expected or ''):
@@ -160,7 +200,8 @@ class Ingress:
                 or bindings != [{'HostIp': '127.0.0.1', 'HostPort': str(self.config['backendPort'])}]):
             raise GateError('backend image/state/private binding mismatch')
         status, info = self.http(self.config['backendPort'])
-        if status != 200 or not isinstance(info, dict) or info.get('engine') != 'odx':
+        if (status != 200 or not isinstance(info, dict)
+                or info.get('engine') != self.config.get('backendEngine', 'odx')):
             raise GateError('backend health refused')
         return info
 
@@ -176,7 +217,8 @@ class Ingress:
                  'oldWorkers': sorted(old_workers), 'expectedBackendImage': expected}
         save(self.root / 'state.json', state)
         save(self.root / 'public-config/nginx.conf',
-             configuration(self.config['listenPort'], self.config['backendPort'], closed), mode=0o644)
+             configuration(self.config['listenPort'], self.config['backendPort'], closed,
+                           self.config.get('allowedClients', ())), mode=0o644)
         self.docker(['exec', item['Id'], 'nginx', '-t', '-c', '/config/nginx.conf'])
         self.docker(['kill', '--signal', 'HUP', item['Id']])
         deadline = time.monotonic() + seconds

@@ -1,0 +1,167 @@
+{
+  "protocol": "ltds-reference-v1",
+  "prefix": "/ltds/v1",
+  "canonicalization": {
+    "encoding": "UTF-8",
+    "keys": "ASCII lexicographic",
+    "whitespace": "none",
+    "numbers": "nonnegative safe integers only; no negative zero",
+    "manifestHashExcludes": [
+      "sha256"
+    ],
+    "manifestArrayOrder": "preserved",
+    "unicode": "ASCII original basenames only; ASCII case-insensitive collision checks",
+    "requestDigest": "server-owned; dynamic option serialization is not a cross-language digest contract",
+    "idGrammar": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$; submissionId is UUID",
+    "resultManifestHashExcludes": [
+      "resultManifestSha256"
+    ],
+    "inputKinds": [
+      "image",
+      "lidar",
+      "auxiliary"
+    ],
+    "auxiliaryMediaTypes": [
+      "application/octet-stream",
+      "application/json",
+      "text/plain",
+      "text/csv"
+    ],
+    "engineVersions": "Nonempty map with odm and/or treedar keys; each version 1-128 printable non-space ASCII characters",
+    "points": "Bounded declared assertion; must be independently verified against actual LAS/LAZ headers"
+  },
+  "capabilities": {
+    "protocol": "ltds-reference-v1",
+    "schemaVersion": 1,
+    "environment": "staging",
+    "capabilityFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "limits": {
+      "metadataBytes": 4194304,
+      "objects": 10000,
+      "integer": 9007199254740991
+    },
+    "engines": {
+      "odm": {
+        "available": true,
+        "optionsFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "treedar": {
+        "available": false,
+        "admissionVersion": "treedar-lidar-v1"
+      },
+      "gaussian_splat": {
+        "available": false,
+        "enabled": false
+      }
+    }
+  },
+  "submission": {
+    "schemaVersion": 1,
+    "submissionId": "56f7e8af-73c7-4a51-9903-c59cc68c033b",
+    "manifest": {
+      "id": "manifest-synthetic-1",
+      "revision": 1,
+      "sha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+      "totalBytes": 3,
+      "objectCount": 1,
+      "inputCounts": {
+        "images": 1,
+        "lidarObjects": 0,
+        "points": 0
+      },
+      "objects": [
+        {
+          "id": "image-1",
+          "name": "Survey_001.JPG",
+          "byteSize": 3,
+          "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "kind": "image",
+          "mediaType": "image/jpeg"
+        }
+      ]
+    },
+    "pipeline": {
+      "odm": {
+        "requested": true,
+        "options": {},
+        "optionsFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "treedar": {
+        "requested": false,
+        "inputObjectIds": [],
+        "provenanceReceiptId": null
+      },
+      "gaussian_splat": {
+        "requested": false
+      }
+    },
+    "capabilityFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "canonicalManifestUtf8": "{\"id\":\"manifest-synthetic-1\",\"inputCounts\":{\"images\":1,\"lidarObjects\":0,\"points\":0},\"objectCount\":1,\"objects\":[{\"byteSize\":3,\"id\":\"image-1\",\"kind\":\"image\",\"mediaType\":\"image/jpeg\",\"name\":\"Survey_001.JPG\",\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"}],\"revision\":1,\"totalBytes\":3}",
+  "manifestSha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+  "transferRequest": {
+    "reservationId": "reservation-1",
+    "generation": 1,
+    "expiresAt": "2030-01-01T00:00:00.000Z",
+    "manifestSha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+    "byteBudget": 3,
+    "nonce": "nonce-synthetic-1"
+  },
+  "transferGrant": {
+    "jobId": "job-1",
+    "generation": 1,
+    "reservationId": "reservation-1",
+    "manifestSha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+    "environment": "staging",
+    "objectIds": [
+      "image-1"
+    ],
+    "nonce": "nonce-synthetic-1",
+    "byteBudget": 3,
+    "expiresAt": "2030-01-01T00:00:00.000Z",
+    "token": "synthetic-non-secret-token"
+  },
+  "resultManifest": {
+    "schemaVersion": 1,
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "objects": [
+      {
+        "id": "result-1",
+        "role": "pointcloud",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      },
+      {
+        "id": "result-2",
+        "role": "report",
+        "byteSize": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "engineVersions": {
+      "odm": "synthetic-1.0.0"
+    },
+    "resultManifestSha256": "b86bd60b480f75338c347d1b1ee28c85217733002fc26c988d017e9f0f6e3926"
+  },
+  "canonicalResultManifestUtf8": "{\"engineVersions\":{\"odm\":\"synthetic-1.0.0\"},\"environment\":\"staging\",\"generation\":1,\"jobId\":\"job-1\",\"objects\":[{\"byteSize\":3,\"id\":\"result-1\",\"role\":\"pointcloud\",\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"},{\"byteSize\":0,\"id\":\"result-2\",\"role\":\"report\",\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}],\"pipelineDigest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"schemaVersion\":1}",
+  "resultManifestSha256": "b86bd60b480f75338c347d1b1ee28c85217733002fc26c988d017e9f0f6e3926",
+  "acceptance": {
+    "schemaVersion": 1,
+    "receiptId": "receipt-1",
+    "storageReceiptId": "storage-1",
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "inputManifestSha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+    "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "resultManifestSha256": "b86bd60b480f75338c347d1b1ee28c85217733002fc26c988d017e9f0f6e3926",
+    "acceptedObjectIds": [
+      "result-1"
+    ],
+    "acceptedAt": "2026-10-27T12:00:00.000Z",
+    "validationVersion": "ltds-reference-v1"
+  }
+}

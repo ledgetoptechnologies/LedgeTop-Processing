@@ -1,8 +1,8 @@
 # LedgeTop Processing
 
-GitHub checks run on `main` pushes and pull requests targeting `main`; feature
-branch pushes do not consume Actions minutes. The guarded manual workflow is
-main-only. Ordinary branch iteration belongs in Engineering Hub when its actual
+GitHub Actions run only on `main`; pull requests and feature-branch pushes do
+not run Actions. The guarded manual workflow is main-only. Ordinary branch
+iteration belongs in Engineering Hub when its actual
 execution path is available. See [repository CI policy](AGENTS.md).
 
 The [package workflow](.github/workflows/processing.yml) checks the existing
@@ -15,8 +15,8 @@ updates a live tag, or gives publishing permissions to processing-node tokens.
 Private, self-hosted coordination service for LedgeTop's processing computers.
 The cluster PC is the single endpoint reached by the TrueNAS Viewer. TrueNAS is
 the durable home for source datasets and completed products. The cluster PC and
-processing nodes use temporary working storage and remove it only after TrueNAS
-has verified and accepted the result.
+processing nodes use working storage. Automated verified Viewer custody and
+cleanup are not yet qualified; retained processing copies require care.
 
 ## Current status
 
@@ -26,12 +26,12 @@ worker container. Its tested local processing commands are available today;
 coordinator submission, scheduling and Viewer integration for that engine are
 still future adapter work.
 
-This repository contains the initial architecture and a Dockerized **routing
-probe**. The probe can inspect fixed ODM-family nodes and plan local/main
-routing. It does not accept datasets, submit engine tasks, store jobs, or return
-results. Keep the existing Viewer processing path in service until a candidate
-passes the compatibility and recovery checks in [the implementation
-plan](docs/architecture.md).
+The default routing probe inspects fixed ODM-family nodes and plans local/main
+routing. An opt-in [Viewer-compatible coordinator](docs/viewer-provider.md)
+also accepts and queues photo tasks and can serve engine results. Those paths
+need the documented state, credentials and authority configuration; a source
+change or package publication does not deploy them. Nonempty coordinator
+upgrade, rollback and end-to-end Viewer custody remain unqualified.
 
 ## Run the probe locally
 
@@ -71,13 +71,13 @@ through that same coordinator, followed by staging work on the cluster PC.
 The [installed main-node maintenance workflow](docs/main-maintenance.md) now
 uses a direct supervised SSH tunnel, a drained ingress and a pinned NodeODX
 2.4.0 / ODX 3.8.5 backend. Production-first and paused-node synthetic dispatch
-have passed across both PCs. Continuous workers and full Viewer task integration
-remain separate work.
+have passed across both PCs. A Viewer-compatible provider is available behind
+explicit configuration; durable end-to-end delivery remains under qualification.
 
 [Dynamic engine option discovery](docs/engine-options.md) fetches current NodeODX
 flags and metadata per request and reports a conservative shared catalog across
-configured engines. This management API does not yet implement the Viewer's
-native provider task lifecycle.
+configured engines. The opt-in Viewer facade implements a separate provider
+task lifecycle.
 
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.
@@ -101,9 +101,10 @@ native provider task lifecycle.
    Viewer; incompatible nodes are marked unavailable.
 
 Run `python -m unittest discover -v` for local checks and `docker compose
-config --quiet` to validate Compose. This first image has no external Python
+config --quiet` to validate Compose. The default probe has no external Python
 packages or writable data volume. Its node selection is a planning result;
-health may change before an eventual real submission.
+health may change before an eventual real submission. Opt-in persistent Viewer
+operation requires separate configuration and a protected state volume.
 
 ## First target
 

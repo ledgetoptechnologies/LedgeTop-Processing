@@ -54,6 +54,23 @@ def exact_origin(value):
     return value.rstrip('/')
 
 
+def strict_wire_json(raw):
+    """Reject ambiguous or non-finite JSON from HTTP peers."""
+    def pairs(items):
+        result={}
+        for key,value in items:
+            if key in result:raise ValueError('duplicate JSON key')
+            result[key]=value
+        return result
+    def number(value):
+        result=float(value)
+        if not math.isfinite(result):raise ValueError('non-finite JSON number')
+        return result
+    def constant(_):raise ValueError('non-finite JSON number')
+    try:return json.loads(raw,object_pairs_hook=pairs,parse_float=number,parse_constant=constant)
+    except RecursionError:raise ValueError('JSON nesting too deep') from None
+
+
 class Client:
     """Direct HTTP connections: no redirects, proxies, request logging or retries."""
 
@@ -105,12 +122,25 @@ class Client:
             response = connection.getresponse()
             if not 200 <= response.status < 300:
                 raise SmokeError('HTTP request rejected or redirected; inspect private receipt')
-            declared = response.getheader('Content-Length')
-            if declared is not None and (int(declared) < 0 or int(declared) > limit):
-                raise SmokeError('HTTP response exceeds limit')
+            headers_received=response.getheaders()
+            lengths=[value.strip() for key,value in headers_received if key.lower()=='content-length']
+            transfers=[value.strip().lower() for key,value in headers_received if key.lower()=='transfer-encoding']
+            if (len(lengths)>1 or len(transfers)>1 or (lengths and transfers)
+                or (transfers and transfers!=['chunked'])
+                or (method.upper() in ('POST','PUT','PATCH','DELETE') and not lengths and not transfers)):
+                raise SmokeError('HTTP response framing uncertain')
+            declared=None
+            if lengths:
+                value=lengths[0]
+                if not value.isascii() or not value.isdecimal():
+                    raise SmokeError('HTTP response framing uncertain')
+                declared=int(value)
+                if declared>limit:raise SmokeError('HTTP response exceeds limit')
             result = response.read(limit + 1)
             if len(result) > limit:
                 raise SmokeError('HTTP response exceeds limit')
+            if declared is not None and len(result)!=declared:
+                raise SmokeError('HTTP response framing uncertain')
             return result
         except SmokeError:
             raise
@@ -138,7 +168,7 @@ class Client:
             body = b''
         raw = self.request(method, route, body, headers, timeout=timeout)
         try:
-            value = json.loads(raw)
+            value = strict_wire_json(raw)
             if isinstance(value, dict) and 'error' in value:
                 raise ValueError()
             if not isinstance(value, (dict, list)):
@@ -156,7 +186,7 @@ class Client:
                            headers={'Content-Type': 'multipart/form-data; boundary=' + boundary},
                            file=path, prefix=prefix, suffix=suffix, expected_hash=digest)
         try:
-            value = json.loads(raw)
+            value = strict_wire_json(raw)
             if not isinstance(value, dict) or 'error' in value or value.get('success') is not True:
                 raise ValueError()
         except Exception:
