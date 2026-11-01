@@ -10,7 +10,16 @@ TRIGGERS = {
  'upload_intent_kind_update': "CREATE TRIGGER upload_intent_kind_update BEFORE UPDATE ON upload_intent_kinds BEGIN SELECT RAISE(ABORT,'upload intent kind immutable'); END",
  'upload_intent_kind_delete': "CREATE TRIGGER upload_intent_kind_delete BEFORE DELETE ON upload_intent_kinds BEGIN SELECT RAISE(ABORT,'upload intent kind immutable'); END",
 }
+# Explicit availability limit; larger histories remain held until an offline
+# compaction or indexed-summary migration is qualified.
+MAX_CENSUS_ROWS = 12000
 class CensusError(ValueError): pass
+
+def _bound(db, *, need_headroom=False):
+    for table in ('broker_intents','upload_intent_kinds','broker_sender_evidence','broker_node_receipts'):
+        rows=db.execute('SELECT 1 FROM '+table+' LIMIT ?', (MAX_CENSUS_ROWS+1,)).fetchall()
+        if len(rows)>MAX_CENSUS_ROWS or (need_headroom and len(rows)>=MAX_CENSUS_ROWS):
+            raise CensusError('upload census capacity exceeded')
 
 def is_enabled(db):
     rows=db.execute("SELECT name FROM sqlite_master WHERE name IN ('upload_census_required','upload_intent_kinds')").fetchall()
@@ -56,25 +65,27 @@ def _bad_completed(db):
             bad.append(row['operation_id']);continue
         if kind=='upload_remote':
             try:
-                found=db.execute('SELECT receipt_json FROM broker_node_receipts WHERE operation_id=?',(row['operation_id'],)).fetchone()
-                if found is None:raise ValueError()
+                found=db.execute('SELECT substr(receipt_json,1,10001) FROM broker_node_receipts WHERE operation_id=?',(row['operation_id'],)).fetchone()
+                if found is None or type(found[0]) is not str or len(found[0])>10000:raise ValueError()
                 grant=json.loads(found[0])['grant']
                 if not _valid_upload_grant(grant,row):raise ValueError()
                 verify_existing_node_receipt(db,grant)
             except (ValueError,TypeError,KeyError,IndexError):bad.append(row['operation_id'])
     return bad
 
-def clear(db):
-    if not is_enabled(db):return True
+def clear(db, *, required=False):
+    if not is_enabled(db):return not required
     try:
-        attest(db)
+        attest(db);_bound(db)
         if db.execute('SELECT 1 FROM upload_intent_kinds k LEFT JOIN broker_intents i ON i.operation_id=k.operation_id WHERE i.operation_id IS NULL LIMIT 1').fetchone():return False
         return not _bad_completed(db)
     except (ValueError,TypeError,KeyError,IndexError,sqlite3.Error):return False
 
-def startup_census(db):
-    if not is_enabled(db):return
-    attest(db)
+def startup_census(db, *, required=False):
+    if not is_enabled(db):
+        if required:raise CensusError('required upload census unavailable')
+        return
+    attest(db);_bound(db)
     for operation_id in _bad_completed(db):
         db.execute("UPDATE broker_intents SET state='receipt_uncertain' WHERE operation_id=? AND state='complete'",(operation_id,))
 
@@ -86,6 +97,7 @@ def register(db, grant, digest, *, remote):
     expected=(grant['jobId'],digest,kind)
     if row is None:
         if db.execute('SELECT 1 FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone():raise CensusError('unclassified intent requires inspection')
+        _bound(db,need_headroom=True)
         db.execute('INSERT INTO upload_intent_kinds VALUES(?,?,?,?)',(grant['operationId'],*expected))
     elif tuple(row)!=expected:raise CensusError('upload intent classification changed')
 
@@ -97,6 +109,10 @@ def install_offline(db, *, enabled=False):
         attest_evidence(db)
         if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():raise CensusError('idle coordinator required')
         if is_enabled(db):raise CensusError('existing census requires inspection')
+        # Bound all legacy source tables before creating or changing anything.
+        for table in ('broker_intents','broker_sender_evidence','broker_node_receipts'):
+            if len(db.execute('SELECT 1 FROM '+table+' LIMIT ?', (MAX_CENSUS_ROWS+1,)).fetchall())>MAX_CENSUS_ROWS:
+                raise CensusError('upload census capacity exceeded')
         db.execute(MARKER);db.execute('INSERT INTO upload_census_required VALUES(1,1)');db.execute(DDL)
         for sql in TRIGGERS.values():db.execute(sql)
         # Exact existing coordinator receipt+sender proof can identify a remote
@@ -106,8 +122,8 @@ def install_offline(db, *, enabled=False):
         for row in db.execute('SELECT operation_id,job_id,grant_hash,state FROM broker_intents').fetchall():
             kind='legacy_unknown'
             try:
-                receipt=db.execute('SELECT receipt_json FROM broker_node_receipts WHERE operation_id=?',(row['operation_id'],)).fetchone()
-                if receipt is None:raise ValueError()
+                receipt=db.execute('SELECT substr(receipt_json,1,10001) FROM broker_node_receipts WHERE operation_id=?',(row['operation_id'],)).fetchone()
+                if receipt is None or type(receipt[0]) is not str or len(receipt[0])>10000:raise ValueError()
                 grant=json.loads(receipt[0])['grant']
                 if not _valid_upload_grant(grant,row):raise ValueError()
                 verify_existing_node_receipt(db,grant);kind='upload_remote'

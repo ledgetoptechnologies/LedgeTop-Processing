@@ -171,3 +171,22 @@ existing qualified evidence schema and has no qualified downgrade or recovery
 for quarantined historical entries. Receipts remain trusted-node assertions,
 not proof of NodeODM fsync. This synthetic prototype is disabled and is not a
 deployment instruction.
+
+## Experimental required mode and bounded history
+
+The inactive Queue constructor accepts `require_upload_census=True`; callers
+that explicitly set it fail startup and admission when the census objects are
+missing, including when both the marker and ledger are removed. Default legacy
+construction remains compatible and does not gain this protection. The setting
+is not wired into an operational service, and must be supplied on every start;
+this is not an automatic deployment qualification or an account-wide fence.
+
+Each relevant census journal is capped at 12,000 rows. Migration and startup
+refuse histories above the cap, admission fails closed, and new classifications
+are refused at capacity. No deletion, compaction, or qualified migration to an
+indexed summary is supplied. A local synthetic scan of 10,000 remote receipts
+took about 1.7 seconds on the development environment; timings vary, and doing
+this repeatedly during a 10,000-photo job could be very slow. The cap can also
+stop later datasets. This bounded implementation is not suitable for production
+workloads until an independently reviewed indexed summary and retention design
+are available. Old or privileged writers are not fenced by this setting.

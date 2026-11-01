@@ -87,11 +87,14 @@ def _require_idle_state(path):
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 require_idle_existing=False):
+                 require_idle_existing=False, require_upload_census=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
             raise ValueError("node_ids must be unique configured slugs including cluster")
+        if type(require_upload_census) is not bool:
+            raise ValueError('require_upload_census must be boolean')
+        self.require_upload_census = require_upload_census
         self._creator_pid = os.getpid()
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
@@ -158,7 +161,7 @@ class Queue(Maintenance):
                 db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
                 self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
                 from .upload_intent_census import startup_census
-                startup_census(db)
+                startup_census(db,required=self.require_upload_census)
                 db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
                 db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
                 self._init_maintenance(db)
@@ -393,15 +396,14 @@ class Queue(Maintenance):
             db.execute('BEGIN')
             return self._has_attested_started_transfer(db, identifier)
 
-    @classmethod
-    def _transfer_admission_clear(cls, db, *, broker_allowed=None):
+    def _transfer_admission_clear(self, db, *, broker_allowed=None):
         """Do not admit new work while any started transfer is unresolved."""
         from .broker_intent_fence import clear as broker_clear
         if not broker_clear(db, broker_allowed): return False
         from .upload_intent_census import clear as census_clear
-        if not census_clear(db): return False
+        if not census_clear(db,required=self.require_upload_census): return False
         try:
-            cls._has_attested_started_transfer(db, None)
+            self._has_attested_started_transfer(db, None)
         except TransferJournalUnqualified:
             return False
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone():
