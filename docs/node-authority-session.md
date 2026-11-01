@@ -143,3 +143,31 @@ remote replay preparation instead persist a `receipt_uncertain` hold, which
 blocks new admission and survives restart. A qualified reconciliation procedure
 for that legacy state is not implemented. This does not attest against an old
 or privileged writer bypassing the installed schema.
+
+## Experimental upload-intent census
+
+An explicitly enabled offline migration installs an operation-kind ledger and
+its required marker. It refuses to run while a job is running or held and must
+only be invoked with the coordinator and all other database writers stopped.
+Legacy intents with an exact qualified coordinator receipt and sender evidence
+are classified as remote uploads; all other old intents are ambiguous and
+completed ambiguous entries are held as `receipt_uncertain`. This deliberately
+can halt an installation with historical init or local-upload entries; it has
+no automatic release procedure. Newly created intents are labeled init, local
+upload or remote upload by the current trusted witness path.
+
+With this migration installed, startup verifies the census schema and turns
+unclassified completed entries or remote completions lacking an exact receipt
+into durable holds. Claim admission also checks for these problems without
+waiting for restart. Known init and local-upload entries do not require remote
+receipts. Missing schema or triggers refuse startup or admission. The checks
+scan completed intents and may add database overhead. This is opt-in only; an
+unmigrated installation does not get this protection.
+
+The distinction between newly created local and remote entries depends on the
+trusted in-process witness call path; old or privileged writers can forge or
+bypass it and must be independently fenced. The migration accepts only the
+existing qualified evidence schema and has no qualified downgrade or recovery
+for quarantined historical entries. Receipts remain trusted-node assertions,
+not proof of NodeODM fsync. This synthetic prototype is disabled and is not a
+deployment instruction.

@@ -125,6 +125,9 @@ class LocalCoordinatorAuthority:
                                 or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
                             raise BrokerHeld('local current task required')
                         if create:
+                            from .upload_intent_census import register, CensusError
+                            try:register(db,grant,digest,remote=require_upload_receipt)
+                            except CensusError:raise BrokerHeld('upload intent classification unavailable') from None
                             row=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()
                             if row is None:
                                 db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(grant['operationId'],grant['jobId'],digest))

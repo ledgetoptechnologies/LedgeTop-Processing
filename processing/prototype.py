@@ -142,23 +142,29 @@ class Queue(Maintenance):
             except BaseException:
                 self._lock.close()
                 raise
-        with self._db() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS jobs (
+        try:
+            with self._db() as db:
+                db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
                 request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,
                 profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,
                 claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            if 'node_id' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
-                db.execute('ALTER TABLE jobs ADD COLUMN node_id TEXT')
-            if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
-                db.execute('ALTER TABLE jobs ADD COLUMN held_reason TEXT')
-            db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
-            db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
-            self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
-            db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
-            db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
-            self._init_maintenance(db)
+                if 'node_id' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                    db.execute('ALTER TABLE jobs ADD COLUMN node_id TEXT')
+                if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                    db.execute('ALTER TABLE jobs ADD COLUMN held_reason TEXT')
+                db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
+                db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
+                self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
+                from .upload_intent_census import startup_census
+                startup_census(db)
+                db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
+                db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
+                self._init_maintenance(db)
+        except BaseException:
+            self._lock.close()
+            raise
 
     def close(self):
         if os.getpid() != self._creator_pid:
@@ -392,6 +398,8 @@ class Queue(Maintenance):
         """Do not admit new work while any started transfer is unresolved."""
         from .broker_intent_fence import clear as broker_clear
         if not broker_clear(db, broker_allowed): return False
+        from .upload_intent_census import clear as census_clear
+        if not census_clear(db): return False
         try:
             cls._has_attested_started_transfer(db, None)
         except TransferJournalUnqualified:
