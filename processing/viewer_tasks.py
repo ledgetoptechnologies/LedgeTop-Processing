@@ -40,6 +40,7 @@ HISTORY_CENSUS_MAX_GENERATIONS = 100000
 HISTORY_CENSUS_MAX_FILES = 1000000
 HISTORY_CENSUS_MAX_BYTES = 100 * 1024 ** 3
 HISTORY_CENSUS_SECONDS = 30
+MAX_TASK_FILES = 100000
 HISTORY_METADATA_MAX_BYTES = 256 * 1024
 HISTORY_FILES_JSON_MAX_BYTES = 64 * 1024 ** 2
 INTAKE_JOURNAL_DDL = """CREATE TABLE viewer_intake_journal_v1 (
@@ -674,7 +675,7 @@ class TaskStore:
                 total,count = self._input_totals(db,row)
                 if existing is None and total + length > self.max_input_bytes:
                     raise InputLimitExceeded('task input ceiling exceeded')
-                if existing is None and count >= 100000:
+                if existing is None and count >= MAX_TASK_FILES:
                     raise ValueError('task file count ceiling exceeded')
             if self.intake_journal and existing is not None:
                 # Never accept a replay solely from stale metadata. Without an
@@ -779,7 +780,7 @@ class TaskStore:
                             raise Conflict('input basename already contains different bytes')
                         return {'success': True, 'uuid': identifier}
                     total,count = self._input_totals(db,row)
-                    if self.intake_journal and count>=100000:raise InputLimitExceeded('task file count ceiling exceeded')
+                    if self.intake_journal and count>=MAX_TASK_FILES:raise InputLimitExceeded('task file count ceiling exceeded')
                     if total + length > self.max_input_bytes:
                         raise InputLimitExceeded('task input ceiling exceeded')
                     if journal_operation:

@@ -255,6 +255,39 @@ class ViewerInputSpaceTests(unittest.TestCase):
         store.remove(self.identifier);store.initialize(self.identifier,'new',[],None,'production')
         with self.q._db() as db:self.assertEqual(tuple(db.execute('SELECT generation,files,bytes FROM viewer_intake_totals_v1').fetchone()),(2,0,0))
 
+    def test_commit_rechecks_count_after_separate_connection_admission(self):
+        from processing import viewer_tasks
+        store=self.journal_store();started=threading.Event();release=threading.Event();errors=[]
+        class BlockedStream(io.BytesIO):
+            def read(self,size=-1):
+                if not started.is_set():
+                    started.set()
+                    if not release.wait(5):raise TimeoutError('synthetic stream wait')
+                return super().read(size)
+        def upload():
+            try:store.upload(self.identifier,'a.jpg',BlockedStream(b'abc'),3)
+            except Exception as exc:errors.append(exc)
+        with patch.object(viewer_tasks,'MAX_TASK_FILES',1):
+            thread=threading.Thread(target=upload);thread.start()
+            try:
+                self.assertTrue(started.wait(5))
+                with self.q._db() as db:
+                    row=store._row(db,self.identifier);directory=store._directory(row)
+                    name='input-'+'c'*32
+                    (directory/name).write_bytes(b'other')
+                    db.execute('BEGIN IMMEDIATE')
+                    db.execute('INSERT INTO viewer_files VALUES(?,?,?,?,?,?,?)',
+                        (self.identifier,'b.jpg','b.jpg',name,5,hashlib.sha256(b'other').hexdigest(),1))
+            finally:
+                release.set();thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors),1);self.assertIsInstance(errors[0],InputLimitExceeded)
+        with self.q._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT files,bytes FROM viewer_intake_totals_v1').fetchone()),(1,5))
+            self.assertEqual(tuple(db.execute('SELECT COUNT(*),SUM(bytes) FROM viewer_files').fetchone()),(1,5))
+            self.assertEqual(db.execute('SELECT state FROM viewer_intake_journal_v1').fetchone()[0],'sealed')
+        self.assertEqual((directory/name).read_bytes(),b'other')
+
     def test_guarded_concurrent_upload_totals_are_exact(self):
         store=self.journal_store();errors=[]
         def upload(name,data):
@@ -635,6 +668,23 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
                 db.execute(intake_offline_migration.TRIGGERS['viewer_intake_totals_file_insert_v1'])
             handler.viewer_service.close();queue.close();queue.authority_lease.close()
             with self.assertRaisesRegex(InputRecoveryRequired,'orphan input metadata'):make_handler(self.settings())
+
+    def test_lost_upload_response_restart_exact_replay_keeps_totals(self):
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue;store=handler.viewer_service.store
+            identifier=str(uuid.uuid4());store.initialize(identifier,'synthetic',[],None,'production')
+            store.upload(identifier,'a.jpg',io.BytesIO(b'abc'),3)  # Response deliberately ignored.
+            path=Path(store.task(identifier)['files'][0]['path'])
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            restarted=make_handler(self.settings());queue=restarted.prototype_queue;store=restarted.viewer_service.store
+            try:
+                store.upload(identifier,'a.jpg',io.BytesIO(b'abc'),3)
+                with queue._db() as db:
+                    self.assertEqual(tuple(db.execute('SELECT files,bytes FROM viewer_intake_totals_v1').fetchone()),(1,3))
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_files').fetchone()[0],1)
+                self.assertEqual(path.read_bytes(),b'abc')
+            finally:
+                restarted.viewer_service.close();queue.close();queue.authority_lease.close()
 
     def test_startup_detects_out_of_band_total_corruption(self):
         import sqlite3
