@@ -20,5 +20,10 @@ download, durable recovery, safe cancellation and node-broker transport remain
 required. Both existing qualification flags remain false. This is not a
 production rollout or authorization to enable dispatch.
 
-The checks use the existing overall operation deadline. Slow Docker inspection
-can therefore refuse even a healthy node; this fails closed and retains work.
+The checks use a fixed Unix-socket Docker HTTP/1.0 client with a shared absolute
+operation deadline and a 48 KiB total/32 KiB body cap. It asks for a filtered
+container summary, never full inspect output with container environment values,
+and launches no subprocess. It refuses chunked responses and ambiguous framing;
+unsupported or oversized daemon responses fail closed. This behavior still needs
+qualification against the installed daemon before any cutover. A slow or
+incompatible daemon can refuse even a healthy node and retains work.

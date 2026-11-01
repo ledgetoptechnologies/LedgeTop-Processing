@@ -22,7 +22,6 @@ import re
 import select
 import socket
 import os
-import subprocess
 import stat
 import sqlite3
 from pathlib import Path
@@ -144,26 +143,89 @@ class BackendPin:
             raise AdmissionError('exact local backend identity required')
 
 
-def local_backend_identity(pin, deadline):
-    """Inspect only the exact local container on the local Unix Docker daemon."""
-    remaining = deadline - time.monotonic()
-    if remaining <= 0: raise AdmissionError('bounded backend probe deadline exceeded')
-    environment = {key: value for key, value in os.environ.items()
-                   if key.upper() not in ('DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH')}
+def _local_docker_json(target, deadline):
+    """Bounded HTTP/1.0 read from the fixed local Unix Docker socket only.
+
+    Close-delimited or exact Content-Length responses are accepted. Chunked
+    responses are refused. No CLI, subprocess, environment or redirects are used.
+    """
+    if (not isinstance(target, str) or not target.isascii() or '\r' in target or '\n' in target
+            or len(target) > 1024): raise AdmissionError('invalid local Docker request')
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        result = subprocess.run(['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock',
-            'inspect', pin.container_id], capture_output=True, text=True,
-            timeout=min(2, remaining), env=environment)
-        if result.returncode or len(result.stdout) > 1024 * 1024: raise ValueError()
-        items = json.loads(result.stdout)
+        sock.setblocking(False)
+        result = sock.connect_ex('/var/run/docker.sock')
+        if result not in (0, errno.EINPROGRESS, errno.EAGAIN, errno.EWOULDBLOCK):
+            raise AdmissionError('local Docker socket unavailable')
+        def ready(reading):
+            left = deadline - time.monotonic()
+            if left <= 0: raise AdmissionError('local Docker deadline exceeded')
+            readable, writable, _ = select.select([sock] if reading else [], [] if reading else [sock], [], left)
+            if not (readable if reading else writable): raise AdmissionError('local Docker deadline exceeded')
+        if result:
+            ready(False)
+            if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR): raise AdmissionError('local Docker socket unavailable')
+        request = ('GET ' + target + ' HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n').encode('ascii')
+        sent = 0
+        while sent < len(request):
+            ready(False)
+            try: count = sock.send(request[sent:])
+            except BlockingIOError: continue
+            if count <= 0: raise AdmissionError('local Docker request incomplete')
+            sent += count
+        data = bytearray()
+        while True:
+            ready(True)
+            try: chunk = sock.recv(8192)
+            except BlockingIOError: continue
+            if not chunk: break
+            data.extend(chunk)
+            if len(data) > 48 * 1024: raise AdmissionError('local Docker response exceeds bound')
+        header, separator, body = bytes(data).partition(b'\r\n\r\n')
+        if not separator or len(header) > 16 * 1024 or len(body) > 32 * 1024:
+            raise AdmissionError('local Docker response invalid')
+        lines = header.split(b'\r\n')
+        if lines[0] not in (b'HTTP/1.0 200 OK', b'HTTP/1.1 200 OK'):
+            raise AdmissionError('local Docker response unavailable')
+        headers = {}
+        for line in lines[1:]:
+            name, sep, value = line.partition(b':')
+            name = name.strip().lower()
+            if not sep or not re.fullmatch(rb'[a-z0-9-]+', name) or name in headers:
+                raise AdmissionError('local Docker response invalid')
+            headers[name] = value.strip()
+        if b'transfer-encoding' in headers:
+            raise AdmissionError('local Docker transfer encoding unsupported')
+        length = headers.get(b'content-length')
+        if length is not None and (not re.fullmatch(rb'[0-9]{1,6}', length) or int(length) != len(body)):
+            raise AdmissionError('local Docker response length invalid')
+        def unique(items):
+            result = {}
+            for key, value in items:
+                if key in result: raise ValueError('duplicate JSON key')
+                result[key] = value
+            return result
+        return json.loads(body.decode('utf-8'), object_pairs_hook=unique,
+                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid JSON')))
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+        raise AdmissionError('local Docker response unavailable') from None
+    finally:
+        sock.close()
+
+
+def local_backend_identity(pin, deadline):
+    """Read one Docker summary, not full inspect data or container environment."""
+    try:
+        query = urlencode({'all': '1', 'filters': json.dumps({'id': [pin.container_id]}, separators=(',', ':'))})
+        items = _local_docker_json('/containers/json?' + query, deadline)
         if type(items) is not list or len(items) != 1: raise ValueError()
         item = items[0]
-        if (item['Id'] != pin.container_id or item['Image'] != pin.image_id
-                or item['State']['Running'] is not True
-                or item['NetworkSettings']['Ports']['3000/tcp'] != [
-                    {'HostIp': '127.0.0.1', 'HostPort': str(pin.backend_port)}]):
+        ports = [p for p in item['Ports'] if p.get('PrivatePort') == 3000 and p.get('Type') == 'tcp']
+        if (item['Id'] != pin.container_id or item['ImageID'] != pin.image_id
+                or item['State'] != 'running' or ports != [
+                    {'IP': '127.0.0.1', 'PrivatePort': 3000, 'PublicPort': pin.backend_port, 'Type': 'tcp'}]):
             raise ValueError()
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         raise AdmissionError('local backend identity unavailable') from None
 
 
@@ -203,17 +265,11 @@ def _file_multipart(upload_id, name):
 
 
 def local_engine_identity(deadline):
-    remaining = deadline - time.monotonic()
-    if remaining <= 0: raise AdmissionError('bounded engine probe deadline exceeded')
-    environment = {key: value for key, value in os.environ.items()
-                   if key.upper() not in ('DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH')}
     try:
-        result = subprocess.run(['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock',
-            'info', '--format', '{{.ID}}'], capture_output=True, text=True,
-            timeout=min(2, remaining), env=environment)
-        if result.returncode or len(result.stdout) > 512: raise ValueError()
-        return result.stdout.strip()
-    except (OSError, ValueError, subprocess.SubprocessError):
+        value = _local_docker_json('/info', deadline)['ID']
+        if type(value) is not str or not 1 <= len(value) <= 512: raise ValueError()
+        return value
+    except (OSError, ValueError, KeyError, TypeError):
         raise AdmissionError('physical Engine probe unavailable') from None
 
 
