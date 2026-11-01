@@ -52,6 +52,28 @@ class OptionMissing(ValueError):
     pass
 
 
+def _automatic_archive_length(headers, maximum):
+    """Require one unambiguous fixed-length response before reserving output."""
+    get_all = getattr(headers, 'get_all', None)
+    if callable(get_all):
+        lengths = get_all('Content-Length', [])
+        transfers = get_all('Transfer-Encoding', [])
+    else:
+        length = headers.get('Content-Length')
+        transfer = headers.get('Transfer-Encoding')
+        lengths = [] if length is None else [length]
+        transfers = [] if transfer is None else [transfer]
+    if len(lengths) != 1 or transfers or not isinstance(lengths[0], str):
+        raise Conflict('archive size unavailable for automatic capture')
+    value = lengths[0].strip()
+    if not value.isascii() or not value.isdecimal() or len(value) > 20:
+        raise Conflict('archive size unavailable for automatic capture')
+    size = int(value)
+    if not 4 <= size <= maximum:
+        raise Conflict('archive size unavailable for automatic capture')
+    return size
+
+
 class NativeEngine:
     def __init__(self, origin, token=''):
         self.origin, self.token = origin, token
@@ -614,6 +636,8 @@ class ViewerService:
                     if media and media not in ('application/zip','application/octet-stream','application/x-zip-compressed'):
                         raise EngineUnavailable('archive_not_ready')
                     declared = response.headers.get('Content-Length')
+                    if automatic and _automatic_archive_length(response.headers, self.config.viewer_max_archive_bytes) != receipt['bytes']:
+                        raise Conflict('archive response differs from retained receipt')
                     if declared is not None and (not declared.isdigit() or int(declared) != receipt['bytes']):
                         raise Conflict('archive response differs from retained receipt')
                     try:
@@ -765,17 +789,16 @@ class ViewerService:
                                                           'application/x-zip-compressed'):
                         raise EngineUnavailable('archive_not_ready')
                     declared = response.headers.get('Content-Length')
+                    automatic_size = _automatic_archive_length(response.headers, self.config.viewer_max_archive_bytes) if automatic else None
                     if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
                         raise Conflict('archive exceeds configured disk allowance')
-                    if automatic and (declared is None or not declared.isdigit() or int(declared) < 4):
-                        raise Conflict('archive size unavailable for automatic capture')
                     with partial.open('xb') as output:
                         os.chmod(partial, 0o600)
                         if automatic:
-                            self._reserve_archive(output, int(declared))
+                            self._reserve_archive(output, automatic_size)
                         while chunk := response.read(1024 ** 2):
                             total += len(chunk)
-                            if total > self.config.viewer_max_archive_bytes or (automatic and total > int(declared)):
+                            if total > self.config.viewer_max_archive_bytes or (automatic and total > automatic_size):
                                 raise Conflict('archive exceeds configured disk allowance')
                             digest.update(chunk)
                             output.write(chunk)

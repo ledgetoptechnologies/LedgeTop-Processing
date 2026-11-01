@@ -1,5 +1,6 @@
 """Synthetic POSIX coverage of bounded, receipt-backed background capture."""
 import json
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -119,6 +120,8 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.release = threading.Event()
         self.release.set()
         self.include_length = True
+        self.duplicate_length = False
+        self.conflicting_transfer = False
         self.engine_http_status = 200
         owner = self
 
@@ -132,6 +135,10 @@ class ViewerAutoCaptureTests(unittest.TestCase):
                 self.send_header('Content-Type', 'application/zip')
                 if owner.include_length:
                     self.send_header('Content-Length', str(len(owner.engine_response)))
+                    if owner.duplicate_length:
+                        self.send_header('Content-Length', str(len(owner.engine_response)))
+                if owner.conflicting_transfer:
+                    self.send_header('Transfer-Encoding','chunked')
                 self.end_headers()
                 owner.ready.set()
                 if owner.release.wait(15):
@@ -251,6 +258,32 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         with self.assertRaises(Exception): self.service._archive_once(self.identifier)
         self.assertEqual(partial.read_bytes(), before)
         self.assertIsNone(self.fixture.task(self.identifier)['archive_path'])
+
+    def test_automatic_capture_rejects_ambiguous_framing_before_partial_and_retries(self):
+        directory=Path(self.fixture.task(self.identifier)['directory'])
+        for setting in ('duplicate_length','conflicting_transfer'):
+            with self.subTest(setting=setting):
+                setattr(self,setting,True)
+                with self.assertRaises(Exception):self.service._archive_once(self.identifier)
+                self.assertFalse((directory/'all.zip.partial').exists())
+                self.assertFalse((directory/'all.zip.receipt').exists())
+                self.assertIsNone(self.fixture.task(self.identifier)['archive_path'])
+                setattr(self,setting,False)
+        self.service._archive_once(self.identifier)
+        self.assertEqual(Path(self.fixture.task(self.identifier)['archive_path']).read_bytes(),self.engine_response)
+        self.assertEqual(self.requests,3)
+
+    def test_preallocation_enospc_keeps_partial_and_refuses_replacement(self):
+        with patch('processing.viewer_service.os.posix_fallocate',side_effect=OSError(errno.ENOSPC,'synthetic')):
+            with self.assertRaises(OSError):self.service.download(self.identifier,automatic=True)
+        task=self.fixture.task(self.identifier);directory=Path(task['directory'])
+        partial=directory/'all.zip.partial';before=partial.read_bytes();identity=partial.stat().st_ino
+        self.assertFalse((directory/'all.zip.receipt').exists())
+        self.assertIsNone(task['archive_path'])
+        with self.assertRaises(Exception):self.service._archive_once(self.identifier)
+        self.assertEqual(partial.stat().st_ino,identity);self.assertEqual(partial.read_bytes(),before)
+        self.assertFalse((directory/'all.zip.receipt').exists())
+        self.assertTrue(self.fixture.engine_for(self.identifier).tasks)
 
     def test_same_incarnation_retains_backoff_then_retries(self):
         self.engine_http_status=503;self.fixture.config.viewer_archive_autocapture=True
@@ -397,6 +430,22 @@ finally:s.close();lease.close();q.close()
         self.assertEqual(pending.read_bytes(),before);self.assertEqual(receipt.read_bytes(),receipt_before)
         self.assertEqual(self.requests,requests_before)
         self.assertTrue(self.fixture.engine_for(self.identifier).tasks)
+
+    def test_automatic_restore_rejects_ambiguous_framing_without_slot(self):
+        self.service._archive_once(self.identifier)
+        task=self.fixture.task(self.identifier);directory=Path(task['directory'])
+        archive=directory/'all.zip';receipt=directory/'all.zip.receipt';before=receipt.read_bytes()
+        archive.unlink()
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET archive_path=NULL WHERE uuid=?',(self.identifier,))
+        self.duplicate_length=True
+        with self.assertRaises(Exception):self.service._archive_once(self.identifier)
+        self.assertFalse((directory/'.all.zip.restore-pending').exists())
+        self.assertEqual(receipt.read_bytes(),before)
+        self.duplicate_length=False
+        self.service._archive_once(self.identifier)
+        self.assertEqual(archive.read_bytes(),self.engine_response)
+        self.assertEqual(receipt.read_bytes(),before)
 
     def test_capture_status_distinguishes_processing_and_custody(self):
         self.fixture.config.viewer_archive_autocapture = True

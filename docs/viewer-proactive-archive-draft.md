@@ -18,6 +18,12 @@ reservation shared with other uploads, services, or users. Thin-provisioned
 storage and external writers may still exhaust the filesystem. Do not enable
 this until an operator has reviewed capacity and concurrent-writer policy.
 
+Automatic capture and automatic receipt-bound restore require exactly one
+ASCII decimal `Content-Length` and reject any `Transfer-Encoding` before
+creating a data slot. An engine or intermediary using other framing will be
+held even if its response could otherwise be valid. Existing manual download
+behavior is unchanged; framing alone does not authenticate archive contents.
+
 The scheduler scans the existing durable task state, so successful unfinished
 captures are rediscovered after restart. A single child performs one capture at
 a time. It inherits both the coordinator state flock and host authority lease;
