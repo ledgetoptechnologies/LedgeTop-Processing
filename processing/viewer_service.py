@@ -37,6 +37,10 @@ class ArchiveIdentityChanged(Exception):
     """Capture candidate no longer denotes the discovered task incarnation."""
 
 
+class ArchiveInspectionHeld(Conflict):
+    """A durable inspection hold forbids automatic or manual archive mutation."""
+
+
 class EngineUnavailable(OSError):
     pass
 
@@ -232,6 +236,10 @@ class ViewerService:
             task = self.store.task(identifier)
             if expected_identity is not None and (task['generation'], task['job_id']) != expected_identity:
                 raise ArchiveIdentityChanged()
+            # Discovery and capture are separate operations.  An inspection
+            # hold established after the scan must still stop this attempt.
+            if task.get('archive_state') == 'inspection':
+                raise ArchiveInspectionHeld('archive requires inspection')
             if not task['job'] or task['job']['status'] != 'succeeded' or task['archive_path']:
                 return
             lease = getattr(self.queue, 'authority_lease', None)
@@ -389,6 +397,9 @@ class ViewerService:
                     self._archive_retry.pop(identifier, None)
                 except ArchiveIdentityChanged:
                     # The new incarnation has not been attempted; discover it anew.
+                    self._archive_retry.pop(identifier, None)
+                except ArchiveInspectionHeld:
+                    # Do not downgrade an inspection hold to a retryable error.
                     self._archive_retry.pop(identifier, None)
                 except Exception as exc:
                     if self._archive_child_unreaped.is_set():
@@ -766,6 +777,8 @@ class ViewerService:
             if self._archive_child_unreaped.is_set():
                 raise Conflict('archive capture child termination uncertain')
             task = self.store.task(identifier)
+            if task.get('archive_state') == 'inspection':
+                raise ArchiveInspectionHeld('archive requires inspection')
             if self._archive_registry:
                 lease=getattr(self.queue,'authority_lease',None)
                 if lease is None or lease._descriptor is None or self.queue._lock.closed:

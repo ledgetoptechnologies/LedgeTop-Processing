@@ -517,7 +517,7 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             for boundary in (after_rowid, 0):
                 row = db.execute('''SELECT t.rowid,t.uuid FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id
-                    WHERE t.rowid>? AND t.removed=0 AND t.archive_path IS NULL
+                    WHERE t.rowid>? AND t.removed=0 AND t.archive_path IS NULL AND t.archive_state='pending'
                       AND t.stage='succeeded' AND t.phase='complete' AND j.status='succeeded'
                     ORDER BY t.rowid LIMIT 1''', (boundary,)).fetchone()
                 if row is not None:

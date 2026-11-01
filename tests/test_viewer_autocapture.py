@@ -921,6 +921,73 @@ finally:s.close();lease.close();q.close()
         self.assertFalse(store.set_archive_status(self.identifier, task['generation'], task['job_id'], 'inspection', 'partial_requires_inspection'))
         self.assertEqual(store.task(self.identifier)['archive_state'], 'pending')
 
+    def test_inspection_hold_excludes_capture_and_stale_scan_after_restart(self):
+        store = self.service.store
+        store.enable_archive_status()
+        task = store.task(self.identifier)
+        selected = store.next_unarchived_success()
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected[1], self.identifier)
+        partial = Path(task['directory']) / 'all.zip.partial'
+        partial.write_bytes(b'synthetic interrupted capture')
+        self.assertTrue(store.set_archive_status(self.identifier, task['generation'], task['job_id'],
+                                                 'inspection', 'partial_requires_inspection'))
+        self.assertIsNone(store.next_unarchived_success())
+        self.assertIsNone(store.next_unarchived_success(selected[0]))
+        other = self.submit_completed_for_registry_test()
+        self.assertEqual(store.next_unarchived_success()[1], other)
+        self.assertEqual(store.next_unarchived_success(selected[0])[1], other)
+        # A stale scan result also cannot start a child after the hold.
+        with patch('processing.viewer_service.subprocess.Popen') as spawn:
+            with self.assertRaisesRegex(Conflict, 'archive requires inspection'):
+                self.service._archive_once(self.identifier, expected_identity=(task['generation'], task['job_id']))
+            spawn.assert_not_called()
+        actual_once = self.service._archive_once
+        def stale_attempt(*args, **kwargs):
+            try:
+                return actual_once(*args, **kwargs)
+            finally:
+                self.service._stop.set()
+        with patch.object(store, 'next_unarchived_success', return_value=selected), \
+             patch.object(self.service, '_archive_once', side_effect=stale_attempt):
+            self.service._archive_run()
+        self.assertEqual(store.task(self.identifier)['archive_state'], 'inspection')
+        self.assertEqual(store.task(self.identifier)['archive_reason'], 'partial_requires_inspection')
+        self.assertNotIn(self.identifier, self.service._archive_retry)
+        self.service.close()
+        restarted = ViewerService(self.queue, self.fixture.config, engines=self.fixture.engines, probe=self.fixture.probe)
+        try:
+            self.assertEqual(restarted.store.next_unarchived_success()[1], other)
+            with patch('processing.viewer_service.subprocess.Popen') as spawn:
+                with self.assertRaisesRegex(Conflict, 'archive requires inspection'):
+                    restarted._archive_once(self.identifier, expected_identity=(task['generation'], task['job_id']))
+                spawn.assert_not_called()
+            self.assertEqual(restarted.store.task(self.identifier)['archive_state'], 'inspection')
+            self.assertEqual(partial.read_bytes(), b'synthetic interrupted capture')
+        finally:
+            restarted.close()
+
+    def test_manual_download_cannot_resolve_inspection_even_with_matching_receipt(self):
+        self.service._archive_once(self.identifier)
+        store = self.service.store
+        store.enable_archive_status()
+        task = store.task(self.identifier)
+        archive = Path(task['archive_path'])
+        partial = archive.with_suffix('.zip.partial')
+        receipt = archive.with_suffix('.zip.receipt')
+        archive.rename(partial)
+        expected, expected_receipt = partial.read_bytes(), receipt.read_bytes()
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET archive_path=NULL WHERE uuid=?', (self.identifier,))
+        self.assertTrue(store.set_archive_status(self.identifier, task['generation'], task['job_id'],
+                                                 'inspection', 'partial_requires_inspection'))
+        with self.assertRaisesRegex(Conflict, 'archive requires inspection'):
+            self.service.download(self.identifier)
+        self.assertEqual(partial.read_bytes(), expected)
+        self.assertEqual(receipt.read_bytes(), expected_receipt)
+        self.assertFalse(archive.exists())
+        self.assertIsNone(store.task(self.identifier)['archive_path'])
+
     def test_status_store_failure_is_visible_without_error_text(self):
         self.fixture.config.viewer_archive_autocapture = True
         self.fixture.config.viewer_archive_free_floor = 10**18
