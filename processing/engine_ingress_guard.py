@@ -158,6 +158,13 @@ def _identifier(value):
     return value
 
 
+def _file_multipart(upload_id, name):
+    boundary='processing-'+uuid.UUID(upload_id).hex
+    prefix=(f'--{boundary}\r\nContent-Disposition: form-data; name="images"; '
+            f'filename="{name}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode('ascii')
+    return boundary,prefix,f'\r\n--{boundary}--\r\n'.encode('ascii')
+
+
 def local_engine_identity(deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0: raise AdmissionError('bounded engine probe deadline exceeded')
@@ -196,8 +203,25 @@ class EngineIngressGuard:
             raise AdmissionError('cancel body binding not qualified')
         raise AdmissionError('unrecognized mutation refused')
 
+    @staticmethod
+    def _bound_file(db, upload_id, job, task, expected_state):
+        from .viewer_tasks import TaskStore
+        intent=db.execute('SELECT * FROM viewer_engine_upload_intents WHERE upload_id=?',(upload_id,)).fetchone()
+        if intent is None:raise AdmissionError('exact file intent required')
+        file=db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',(task['uuid'],intent['name_key'])).fetchone()
+        if (file is None or intent['state']!=expected_state or intent['job_id']!=job['id']
+            or intent['task_uuid']!=task['uuid'] or intent['generation']!=task['generation']
+            or intent['engine_uuid']!=task['engine_uuid'] or intent['claim_hash']!=job['claim_hash']
+            or task['environment']!=job['environment'] or task['node_id']!=job['node_id']
+            or task['removed'] or task['stage']!='running'
+            or tuple(intent[k] for k in ('name_key','name','path','bytes','sha256')) != tuple(file[k] for k in ('name_key','name','path','bytes','sha256'))
+            or TaskStore._filename(intent['name'])!=intent['name_key'] or type(intent['bytes']) is not int
+            or not 0<intent['bytes']<=MAX_STREAM_BYTES or not re.fullmatch('[0-9a-f]{64}',intent['sha256'])):
+            raise AdmissionError('stored file identity changed')
+        return intent
+
     @contextmanager
-    def _owned(self, headers, engine_uuid, action, deadline, permit=None):
+    def _owned(self, headers, engine_uuid, action, deadline, permit=None, bound_id=None):
         binding = self.binding
         job_id = _identifier(headers.get('x-ledgetop-job'))
         token = headers.get('x-ledgetop-claim', '')
@@ -226,6 +250,7 @@ class EngineIngressGuard:
                     active = db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
                     node = self.queue._node(db, binding.node_id)
                     if (row is None or task is None or len(active) != 1 or active[0]['id'] != job_id
+                            or db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE job_id=?',(job_id,)).fetchone()[0]!=1
                             or row['status'] != 'running' or row['node_id'] != binding.node_id
                             or row['profile'] != VIEWER_PROFILE or row['worker_id'] != 'viewer-dispatch'
                             or task['node_id'] != binding.node_id or task['engine_uuid'] != engine_uuid
@@ -248,6 +273,24 @@ class EngineIngressGuard:
                     elif reservation['receiptId'] != receipt_id or reservation['job'] != identity:
                         raise AdmissionError('different physical reservation exists')
                     schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
+                    from . import engine_upload_contract as file_contract
+                    file_schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_engine_upload_intents'").fetchone()
+                    if file_schema is not None and file_schema[0]!=file_contract.DDL:
+                        raise AdmissionError('file intent schema changed')
+                    if file_schema is not None:
+                        pending=db.execute("SELECT upload_id FROM viewer_engine_upload_intents WHERE job_id=? AND state!='complete'",(job_id,)).fetchall()
+                        if pending and not (bound_id is not None and len(pending)==1 and pending[0]['upload_id']==bound_id):
+                            raise AdmissionError('file intent requires inspection')
+                        if action=='upload' and bound_id is None:
+                            raise AdmissionError('bound file upload required')
+                    if bound_id is not None:
+                        if file_contract.QUALIFIED is not True or file_schema is None or action!='upload':
+                            raise AdmissionError('bound file upload not qualified')
+                        record=self._bound_file(db,bound_id,row,task,'prepared')
+                        _,prefix,suffix=_file_multipart(bound_id,record['name'])
+                        if record['bytes']+len(prefix)+len(suffix)>MAX_STREAM_BYTES:
+                            raise AdmissionError('bounded socket upload required')
+                        permit=(bound_id,record['bytes'],record['sha256'])
                     if schema is not None and schema[0] != STREAM_DDL:
                         raise AdmissionError('upload journal requires inspection')
                     if schema is not None and db.execute("SELECT 1 FROM engine_ingress_uploads WHERE job_id=? AND state!='complete'", (job_id,)).fetchone():
@@ -262,6 +305,9 @@ class EngineIngressGuard:
                         if db.execute('SELECT count(*) FROM engine_ingress_uploads').fetchone()[0] >= 100000:
                             raise AdmissionError('upload journal capacity exhausted')
                         db.execute("INSERT INTO engine_ingress_uploads VALUES(?,?,?,?,?,'started')",(upload_id,job_id,engine_uuid,byte_count,sha))
+                        if bound_id is not None:
+                            if db.execute("UPDATE viewer_engine_upload_intents SET state='started' WHERE upload_id=? AND state='prepared'",(bound_id,)).rowcount!=1:
+                                raise AdmissionError('file intent changed')
                         # Intent commits before any source bytes are consumed or
                         # upstream request is issued; gate and lifecycle remain held.
                         db.commit()
@@ -276,6 +322,7 @@ class EngineIngressGuard:
                         journal_schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
                         journal=db.execute('SELECT job_id,engine_uuid,byte_count,sha256,state FROM engine_ingress_uploads WHERE upload_id=?',(upload_id,)).fetchone() if journal_schema is not None and journal_schema[0]==STREAM_DDL else None
                         if (current is None or current_task is None or len(active_now)!=1 or active_now[0]['id']!=job_id
+                            or db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE job_id=?',(job_id,)).fetchone()[0]!=1
                             or current['status']!='running' or current['node_id']!=binding.node_id
                             or current['profile']!=VIEWER_PROFILE or current['worker_id']!='viewer-dispatch'
                             or current_task['node_id']!=binding.node_id or current_task['engine_uuid']!=engine_uuid
@@ -288,6 +335,11 @@ class EngineIngressGuard:
                             or journal is None or tuple(journal)!=(job_id,engine_uuid,byte_count,sha,'started')
                             or self.engine_probe(deadline)!=binding.engine_id):
                             raise AdmissionError('exact active coordinator claim required')
+                        if bound_id is not None:
+                            current_schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_engine_upload_intents'").fetchone()
+                            if current_schema is None or current_schema[0]!=file_contract.DDL:
+                                raise AdmissionError('file intent schema changed')
+                            self._bound_file(db,bound_id,current,current_task,'started')
                         if deadline-time.monotonic() <= 0:
                             raise AdmissionError('deadline exceeded')
                     # Both ownership mechanisms remain held across the bounded
@@ -347,6 +399,39 @@ class EngineIngressGuard:
             db.commit()
             return result
 
+    def stream_bound_upload(self, target, pairs, source):
+        """Stream raw file bytes using a previously persisted TaskStore intent."""
+        from . import engine_upload_contract as contract
+        if contract.QUALIFIED is not True:
+            raise AdmissionError('bound file upload not qualified')
+        headers=_headers(pairs);_authenticate(headers,self.binding.coordinator_secret)
+        action,engine_uuid=self._mutation('POST',target,headers)
+        upload_id=_identifier(headers.get('x-ledgetop-upload-id'))
+        if action!='upload' or type(source) is not socket.socket:
+            raise AdmissionError('bounded socket upload required')
+        deadline=time.monotonic()+self.binding.deadline_seconds
+        with self._owned(headers,engine_uuid,action,deadline,bound_id=upload_id) as db:
+            job=db.execute('SELECT * FROM jobs WHERE id=?',(_identifier(headers.get('x-ledgetop-job')),)).fetchone()
+            task=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job['id'],)).fetchone()
+            record=self._bound_file(db,upload_id,job,task,'started')
+            boundary,prefix,suffix=_file_multipart(upload_id,record['name'])
+            result=self._exchange('POST',target,b'',{'Content-Type':'multipart/form-data; boundary='+boundary},deadline,
+                                  source=source,source_length=record['bytes'],expected_sha=record['sha256'],
+                                  file_prefix=prefix,file_suffix=suffix,forbidden=b'--'+boundary.encode('ascii'))
+            try:
+                from .reference_protocol import decode_submission
+                response=decode_submission(result[1])
+                if result[0]!=200 or type(response) is not dict or response.get('success') is not True or 'error' in response:raise ValueError()
+            except (ValueError,UnicodeError):
+                raise AdmissionError('upstream upload unconfirmed; retain reservation') from None
+            if deadline-time.monotonic()<=0:raise AdmissionError('bounded upstream deadline exceeded')
+            if db.execute("UPDATE engine_ingress_uploads SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
+                raise AdmissionError('upload journal changed')
+            if db.execute("UPDATE viewer_engine_upload_intents SET state='complete' WHERE upload_id=? AND state='started'",(upload_id,)).rowcount!=1:
+                raise AdmissionError('file intent changed')
+            db.commit()
+            return result
+
     def read(self, method, target, pairs):
         headers = _headers(pairs)
         _authenticate(headers, self.binding.management_secret)
@@ -397,7 +482,7 @@ class EngineIngressGuard:
         except (GateError, sqlite3.Error, RuntimeError):
             raise AdmissionError('physical gate refused completion') from None
 
-    def _exchange(self, method, target, body, headers, deadline, *, source=None, source_length=None, expected_sha=None):
+    def _exchange(self, method, target, body, headers, deadline, *, source=None, source_length=None, expected_sha=None, file_prefix=b'', file_suffix=b'', forbidden=None):
         """One nonblocking fixed-loopback exchange; no retries or redirects."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         source_timeout = source.gettimeout() if source is not None else None
@@ -416,18 +501,21 @@ class EngineIngressGuard:
                 if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR): raise AdmissionError('upstream unavailable')
             route = target + '?' + urlencode({'token': self.binding.backend_secret})
             request = (f'{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n'
-                       f'Content-Length: {source_length if source is not None else len(body)}\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in headers.items())
+                       f'Content-Length: {source_length+len(file_prefix)+len(file_suffix) if source is not None else len(body)}\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in headers.items())
                        + '\r\n').encode('ascii') + body
-            offset = 0
-            while offset < len(request):
-                wait(True)
-                try: count = sock.send(request[offset:])
-                except BlockingIOError: continue
-                if not count: raise AdmissionError('upstream exchange uncertain')
-                offset += count
+            def send_bytes(data):
+                offset=0
+                while offset<len(data):
+                    wait(True)
+                    try:count=sock.send(data[offset:])
+                    except BlockingIOError:continue
+                    if not count:raise AdmissionError('upstream exchange uncertain')
+                    offset+=count
+            send_bytes(request)
             if source is not None:
+                send_bytes(file_prefix)
                 source.setblocking(False)
-                remaining_bytes=source_length;digest=hashlib.sha256()
+                remaining_bytes=source_length;digest=hashlib.sha256();tail=b''
                 while remaining_bytes:
                     remaining=deadline-time.monotonic()
                     if remaining<=0:raise AdmissionError('bounded source deadline exceeded')
@@ -436,6 +524,10 @@ class EngineIngressGuard:
                     try: chunk=source.recv(min(65536,remaining_bytes))
                     except BlockingIOError:continue
                     if not chunk:raise AdmissionError('source upload unconfirmed; retain reservation')
+                    if forbidden is not None:
+                        window=tail+chunk
+                        if forbidden in window:raise AdmissionError('multipart boundary collision; retain reservation')
+                        tail=window[-(len(forbidden)-1):]
                     digest.update(chunk);remaining_bytes-=len(chunk);offset=0
                     while offset<len(chunk):
                         wait(True)
@@ -445,6 +537,7 @@ class EngineIngressGuard:
                         offset+=count
                 if not hmac.compare_digest(digest.hexdigest(),expected_sha):
                     raise AdmissionError('source digest differs; retain reservation')
+                send_bytes(file_suffix)
             data = bytearray()
             while b'\r\n\r\n' not in data:
                 wait()

@@ -36,13 +36,14 @@ class GuardTests(unittest.TestCase):
         self.store.update(self.task, stage='running', phase='init_pending', node_id='cluster',
                           engine_uuid=self.engine, claim_token=self.claim['claimToken'])
         self.calls = []
+        self.received_bodies = []
         self.slow = False
         self.response_body = b'{"success":true}'
         self.observer = None
         fixture = self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
-                self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                fixture.received_bodies.append(self.rfile.read(int(self.headers.get('Content-Length', '0'))))
                 fixture.calls.append(self.path.split('?')[0])
                 if fixture.observer: fixture.observer()
                 if fixture.slow:
@@ -309,6 +310,7 @@ class GuardTests(unittest.TestCase):
             writer.sendall(b'ab');writer.shutdown(socket.SHUT_WR)
             with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,headers,source,3,hashlib.sha256(b'abc').hexdigest(),'multipart/form-data; boundary=synthetic')
             with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT status FROM jobs WHERE id=?',(self.claim['id'],)).fetchone()[0],'running')
             self.assertIsNotNone(self.reservation())
             with self.assertRaises(AdmissionError):self.guard.mutate('POST','/task/new/upload/'+self.engine,self.headers(),b'x')
             with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())}),source,1,hashlib.sha256(b'x').hexdigest(),'multipart/form-data; boundary=synthetic')

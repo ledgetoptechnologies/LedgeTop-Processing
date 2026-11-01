@@ -28,7 +28,25 @@ independent writer fence or qualified startup/repair workflow. A crash releases
 the process-held flock; the durable node reservation and pending row do not
 prove the engine stopped. The expected digest is caller-supplied over the whole
 multipart body; it is not yet bound to the coordinator's `viewer_files` record.
-The current coordinator photo sender has not been adapted to supply that hash.
+The hard-disabled internal file-bound candidate adds a trusted TaskStore intent
+for an exact task generation, job, claim and existing `viewer_files` record.
+The guard revalidates that record, constructs the filename and multipart framing
+itself, and hashes the raw file socket as it forwards. It scans incoming file
+bytes for the exact boundary token across chunks before sending each chunk; a
+collision aborts and leaves an uncertain hold. Hash mismatch is detected only
+after bytes may have reached the backend, never a pre-send integrity proof.
+TaskStore and guard share one SQLite database, but physical source inode
+identity, old-writer exclusion, journal migration and recovery are unqualified.
+Once its intent table exists the old unbound upload path is refused. The current
+coordinator sender does not call this method; there is no public route.
+
+Synthetic tests of the earlier unbound whole-multipart method killed the actual guard process before forwarding, after a fake
+backend received a body byte, and after the fake backend's full response. In all
+three, the started journal and gate reservation persisted. Queue restart held the
+job and a manual guarded attempt refused before source consumption; that restart
+refusal was due to the held job. A separate same-process test demonstrates that
+the pending journal blocks retry while the job remains running. No real engine,
+dispatcher restart, physical engine quiescence or power loss was tested.
 No upload route, end-to-end physical isolation, engine storage reservation,
 automatic recovery, or readiness for large photographs is established.
 
