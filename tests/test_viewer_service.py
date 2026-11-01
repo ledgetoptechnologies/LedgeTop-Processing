@@ -941,6 +941,52 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(length,len(expected));self.assertEqual(path.read_bytes(),expected)
         self.assertEqual(self.engines['cluster'].download_calls,2);self.assertEqual(len(self.fleet.commits),1)
 
+    def test_restored_archive_process_death_before_checkpoint(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier)
+        with stream: expected=stream.read()
+        path=Path(self.task(identifier)['archive_path'])
+        self.service.store.update(identifier,archive_path=None);path.unlink()
+        self.service.close();self.queue.close()
+        script='''import os,sys\nfrom pathlib import Path\nfrom types import SimpleNamespace\nfrom tests.test_viewer_service import FakeEngine,FakeFleet\nfrom processing.prototype import Queue\nfrom processing.viewer_service import ViewerService\nroot=Path(sys.argv[1]); identifier=sys.argv[2]\nconfig=SimpleNamespace(prototype_state_dir=str(root/'state'),viewer_max_input_bytes=20*1024**3,viewer_max_archive_bytes=4*1024**2,local_node_url='http://synthetic-cluster.invalid:3000',local_node_token='private-cluster',main_node_url='http://synthetic-main.invalid:3000',main_node_token='private-main',local_max_photos=1000,local_max_input_bytes=20*1024**3)\nfleet=FakeFleet(); engines={n:FakeEngine(n,fleet) for n in ('cluster','main')}\nqueue=Queue(root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)\nservice=ViewerService(queue,config,engines=engines,probe=lambda *a: {'ready':True})\ndef die(*a,**kw): os._exit(23)\nservice.store.update=die\nservice.download(identifier)\nraise RuntimeError('checkpoint not reached')\n'''
+        child=subprocess.run([sys.executable,'-c',script,str(self.root),identifier],stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+        self.assertEqual(child.returncode,23,child.stderr.decode(errors='replace'))
+        self.assertEqual(path.read_bytes(),expected)
+        self.make_queue_service()
+        self.assertIsNone(self.task(identifier)['archive_path'])
+        stream,length=self.service.download(identifier)
+        with stream:self.assertEqual(stream.read(),expected)
+        self.assertEqual(length,len(expected));self.assertEqual(self.task(identifier)['archive_path'],str(path))
+
+    def test_restored_archive_update_failure_retains_file_and_reopens(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier)
+        with stream: expected=stream.read()
+        path=Path(self.task(identifier)['archive_path'])
+        self.service.store.update(identifier,archive_path=None);path.unlink()
+        with patch.object(self.service.store,'update',side_effect=OSError('synthetic checkpoint failure')):
+            with self.assertRaises(OSError):self.service.download(identifier)
+        self.assertEqual(path.read_bytes(),expected)
+        self.assertIsNone(self.task(identifier)['archive_path'])
+        self.service.close();self.queue.close();self.make_queue_service()
+        stream,length=self.service.download(identifier)
+        with stream:self.assertEqual(stream.read(),expected)
+        self.assertEqual(length,len(expected));self.assertEqual(self.task(identifier)['archive_path'],str(path))
+
+    def test_restored_archive_rejects_truncated_and_oversized_stream(self):
+        identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
+        stream,_=self.service.download(identifier);stream.close()
+        path=Path(self.task(identifier)['archive_path'])
+        self.service.store.update(identifier,archive_path=None);path.unlink()
+        original=self.engines['cluster'].archive
+        for body,error in ((original[:-1],EngineUnavailable),(original+b'x',Conflict)):
+            with self.subTest(error=error.__name__):
+                response=DownloadResponse(body);response.headers={}
+                with patch.object(self.engines['cluster'],'download',return_value=response):
+                    with self.assertRaises(error):self.service.download(identifier)
+                self.assertFalse(path.exists());self.assertIsNone(self.task(identifier)['archive_path'])
+
     def test_missing_unrecorded_archive_with_receipt_recovers_after_restart(self):
         identifier=self.submit();self.service.tick();self.finish(identifier);self.service.tick()
         stream,_=self.service.download(identifier)
