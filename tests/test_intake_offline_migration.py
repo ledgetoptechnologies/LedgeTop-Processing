@@ -47,6 +47,16 @@ class IntakeOfflineMigrationTests(unittest.TestCase):
                             ('other','task',1,'other','directory',temporary,final,1,None,'prepared'))
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM viewer_intake_journal_v1').fetchone()[0],1)
 
+    def test_collision_checks_use_full_directory_and_name_indexes(self):
+        self.install()
+        trigger=migration.TRIGGERS['viewer_intake_guard_insert_v1']
+        for column in ('temporary','final'):
+            self.assertIn('directory=NEW.directory AND '+column+' IN (NEW.temporary,NEW.final)',trigger)
+            query='SELECT 1 FROM viewer_intake_journal_v1 WHERE directory=? AND '+column+' IN (?,?)'
+            plan=' '.join(row[3] for row in self.db.execute('EXPLAIN QUERY PLAN '+query,('directory','a','b')))
+            self.assertIn('SEARCH',plan)
+            self.assertIn('directory=? AND '+column+'=?',plan)
+
     def test_ten_thousand_actual_guarded_journal_inserts(self):
         import time
         self.install();start=time.monotonic()
