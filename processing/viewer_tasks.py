@@ -37,7 +37,7 @@ INTAKE_JOURNAL_DDL = """CREATE TABLE viewer_intake_journal_v1 (
     operation TEXT PRIMARY KEY, uuid TEXT NOT NULL, generation INTEGER NOT NULL,
     name_key TEXT NOT NULL, directory TEXT NOT NULL, temporary TEXT NOT NULL,
     final TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT,
-    state TEXT NOT NULL CHECK(state IN ('prepared','sealed','committed')),
+    state TEXT NOT NULL CHECK(state IN ('prepared','sealed','cleanup','committed')),
     UNIQUE(uuid,generation,name_key), UNIQUE(directory,temporary), UNIQUE(directory,final))"""
 
 INTAKE_INDEX_DDL = "CREATE INDEX viewer_intake_unfinished_v1 ON viewer_intake_journal_v1(uuid,generation) WHERE state!='committed'"
@@ -529,6 +529,7 @@ class TaskStore:
             final = directory / ('input-' + secrets.token_hex(16))
             journal_operation = None
             if self.intake_journal:
+                self._intake_reconciled.discard((identifier,row['generation']))
                 journal_operation = secrets.token_hex(16)
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
@@ -599,7 +600,7 @@ class TaskStore:
                         (identifier, key, filename, final.name, length, value,
                          int(Path(filename).suffix.lower() in PHOTO_SUFFIXES)))
                     db.execute('UPDATE viewer_tasks SET updated_at=CURRENT_TIMESTAMP WHERE uuid=?', (identifier,))
-                    if journal_operation and db.execute("UPDATE viewer_intake_journal_v1 SET state='committed' WHERE operation=? AND state='sealed' AND sha256=?",(journal_operation,value)).rowcount!=1:
+                    if journal_operation and db.execute("UPDATE viewer_intake_journal_v1 SET state='cleanup' WHERE operation=? AND state='sealed' AND sha256=?",(journal_operation,value)).rowcount!=1:
                         raise InputRecoveryRequired('input intent changed')
                 if journal_operation:
                     left=temporary.lstat();right=final.lstat()
@@ -607,6 +608,11 @@ class TaskStore:
                         raise InputRecoveryRequired('input publication changed')
                     temporary.unlink()
                     sync_directory(directory)
+                    with self.queue._db() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        if db.execute("UPDATE viewer_intake_journal_v1 SET state='committed' WHERE operation=? AND state='cleanup' AND sha256=?",(journal_operation,value)).rowcount!=1:
+                            raise InputRecoveryRequired('input cleanup intent changed')
+                    self._intake_reconciled.add((identifier,row['generation']))
                 return {'success': True, 'uuid': identifier}
             finally:
                 # Only this invocation's randomly named, explicitly owned tmp file.

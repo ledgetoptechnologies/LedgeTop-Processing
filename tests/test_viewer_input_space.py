@@ -123,6 +123,39 @@ class ViewerInputSpaceTests(unittest.TestCase):
         retry=self.request(body);self.assertTrue(self.facade.handle(retry));self.assertEqual(retry.status,200)
         self.assertEqual(len(store.task(self.identifier)['files']),1)
 
+    def test_post_commit_unlink_failure_holds_same_live_store(self):
+        store=self.journal_store();self.facade.service.store=store
+        body=multipart([('images','a.jpg',b'first')]);req=self.request(body)
+        with patch('pathlib.Path.unlink',side_effect=OSError('synthetic unlink failure')):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503)
+        with self.q._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_intake_journal_v1').fetchone()[0],'cleanup')
+        self.assertEqual([p.read_bytes() for p in self.root.rglob('.incoming-*')],[b'first'])
+        retry=self.request(body);self.assertTrue(self.facade.handle(retry))
+        self.assertEqual(retry.status,503)
+        self.assertEqual(json.loads(retry.wfile.getvalue())['error'],'input_recovery_required')
+        with self.assertRaises(InputRecoveryRequired):store.commit(self.identifier)
+
+    def test_post_commit_directory_sync_failure_holds_same_live_store(self):
+        from processing import viewer_tasks
+        store=self.journal_store();self.facade.service.store=store
+        body=multipart([('images','a.jpg',b'first')]);req=self.request(body)
+        original=viewer_tasks.sync_directory;calls=[0]
+        def fail_third(path):
+            calls[0]+=1
+            if calls[0]==3:raise OSError('synthetic fsync failure')
+            return original(path)
+        with patch('processing.viewer_tasks.sync_directory',side_effect=fail_third):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503);self.assertEqual(calls[0],3)
+        with self.q._db() as db:
+            self.assertEqual(db.execute('SELECT state FROM viewer_intake_journal_v1').fetchone()[0],'cleanup')
+        retry=self.request(body);self.assertTrue(self.facade.handle(retry))
+        self.assertEqual(retry.status,503)
+        self.assertEqual(json.loads(retry.wfile.getvalue())['error'],'input_recovery_required')
+        self.assertEqual([p.read_bytes() for p in self.root.rglob('input-*')],[b'first'])
+
     def test_committed_null_digest_holds_after_reopen(self):
         from processing import viewer_tasks
         store=self.journal_store();self.facade.service.store=store
