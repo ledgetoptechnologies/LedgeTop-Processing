@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import os
 import socket
+import socketserver
 import sqlite3
 import subprocess
 import sys
@@ -32,15 +33,18 @@ class GuardedDispatchTests(unittest.TestCase):
     def setUp(self):
         # Retain task-owned synthetic roots; no recursive cleanup is attempted.
         self.root=Path(tempfile.mkdtemp(prefix='lt-guarded-options-')).resolve()
-        self.paths=patch('processing.node_gate.canonical_gate_path',side_effect=lambda engine:self.root/('gate-'+engine));self.paths.start()
+        self.paths=patch('processing.node_gate.canonical_gate_path',side_effect=lambda engine:self.root/('gate-'+engine));self.paths.start();self.addCleanup(self.paths.stop)
         self.flags=[patch.object(engine_upload_contract,'QUALIFIED',True),patch.object(guarded_native_engine,'QUALIFIED',True)]
-        for flag in self.flags:flag.start()
-        self.calls=[];self.catalog_calls=[];self.bodies=[];self.observer=None;self.large_wire=None;self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;self.early_upload=False;fixture=self
+        for flag in self.flags:flag.start();self.addCleanup(flag.stop)
+        self.calls=[];self.node_calls=[];self.catalog_calls=[];self.bodies=[];self.observer=None;self.large_wire=None;self.drop=False;self.drop_init=False;self.drop_commit=False;self.bad_init=False;self.bad_commit=False;self.early_upload=False;fixture=self
         self.option_failure=set()
         self.node_options={role:[{'name':'dynamic-flag','type':'bool','value':False}] for role in ('cluster','main')}
         class Handler(BaseHTTPRequestHandler):
+            def setup(self):
+                super().setup();self.connection.settimeout(4)
             def do_POST(self):
                 length=int(self.headers['Content-Length']);route=self.path.split('?')[0]
+                fixture.node_calls.append((self.server.node_role,route))
                 if fixture.early_upload and '/upload/' in route:
                     self.rfile.read(1);fixture.calls.append(route);data=b'{"success":true}'
                     try:self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);self.wfile.flush()
@@ -79,10 +83,14 @@ class GuardedDispatchTests(unittest.TestCase):
                 data=json.dumps({'uuid':identifier,'status':{'code':10},'progress':0}).encode()
                 self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
             def log_message(self,*_):pass
-        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.server.daemon_threads=False;self.server.node_role='cluster'
-        self.thread=threading.Thread(target=lambda:self.server.serve_forever(poll_interval=.01));self.thread.start()
-        self.main_server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.main_server.daemon_threads=False;self.main_server.node_role='main'
-        self.main_thread=threading.Thread(target=lambda:self.main_server.serve_forever(poll_interval=.01));self.main_thread.start()
+        self.server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.addCleanup(self.close_server,self.server)
+        self.server.daemon_threads=False;self.server.node_role='cluster'
+        self.thread=threading.Thread(target=lambda:self.server.serve_forever(poll_interval=.01))
+        self.addCleanup(self.stop_server,self.server,self.thread);self.thread.start()
+        self.main_server=ThreadingHTTPServer(('127.0.0.1',0),Handler);self.addCleanup(self.close_server,self.main_server)
+        self.main_server.daemon_threads=False;self.main_server.node_role='main'
+        self.main_thread=threading.Thread(target=lambda:self.main_server.serve_forever(poll_interval=.01))
+        self.addCleanup(self.stop_server,self.main_server,self.main_thread);self.main_thread.start()
         self.config=SimpleNamespace(prototype_state_dir=str(self.root/'state'),viewer_max_input_bytes=20*1024**3,
             viewer_max_archive_bytes=1024*1024,local_node_url='http://127.0.0.1:'+str(self.server.server_port),local_node_token='',
             main_node_url='http://127.0.0.1:'+str(self.main_server.server_port),main_node_token='',local_max_photos=1000,local_max_input_bytes=20*1024**3)
@@ -90,6 +98,7 @@ class GuardedDispatchTests(unittest.TestCase):
 
     def create_service(self):
         self.queue=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        self.addCleanup(self.queue.close)
         store=TaskStore(self.queue,self.root/'state'/'viewer-tasks');pin=OwnerPin.capture(self.queue);guards={}
         from processing.transfer_fence import install_offline, attest
         with self.queue._db() as db:
@@ -97,7 +106,8 @@ class GuardedDispatchTests(unittest.TestCase):
                 attest(db)
             else: install_offline(db,enabled=True)
         for node in ('cluster','main'):
-            binding=Binding('engine-'+node,node,self.queue.authority_id,'http://127.0.0.1:18080',1,self.server.server_port,
+            port=self.server.server_port if node=='cluster' else self.main_server.server_port
+            binding=Binding('engine-'+node,node,self.queue.authority_id,'http://127.0.0.1:18080',1,port,
                 'coordinator-'+'a'*40,'management-'+'b'*40,'backend-'+'c'*40,deadline_seconds=10)
             root=self.root/('gate-'+binding.engine_id)
             if not (root/'gate.json').exists():
@@ -105,12 +115,24 @@ class GuardedDispatchTests(unittest.TestCase):
             guards[node]=EngineIngressGuard(self.queue,binding,owner_pin=pin,backend_pin=BackendPin("a"*64,"sha256:"+"b"*64,binding.backend_port), backend_probe=lambda *_:None,engine_probe=lambda _,eid=binding.engine_id:eid)
         self.service=ViewerService(self.queue,self.config,store=store,guarded_engines=guards,
                                    probe=lambda *args:{'ready':True,'maxImages':None,'taskQueueCount':0})
+        self.addCleanup(self.service.close)
 
-    def tearDown(self):
-        self.service.close();self.queue.close();self.server.shutdown();self.main_server.shutdown();self.server.server_close();self.main_server.server_close();self.thread.join(5);self.main_thread.join(5)
-        self.assertFalse(self.thread.is_alive());self.assertFalse(self.main_thread.is_alive());self.paths.stop()
-        for flag in self.flags:flag.stop()
-        print('Retained synthetic test root:',self.root)
+    def stop_server(self,server,thread):
+        if thread.is_alive():server.shutdown()
+        if thread.ident is not None:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+    def close_server(self,server):
+        handlers=list(server._threads) if isinstance(server._threads,list) else []
+        # Close the listener, then join only these owned handlers under one
+        # deadline instead of ThreadingMixIn's unbounded implicit join.
+        server._threads=socketserver._NoThreads()
+        server.server_close()
+        deadline=time.monotonic()+5
+        for handler in handlers:
+            if handler.ident is not None:handler.join(timeout=max(0,deadline-time.monotonic()))
+        self.assertFalse(any(handler.is_alive() for handler in handlers))
 
     def submit(self,options=None):
         identifier=str(uuid.uuid4());self.service.initialize(identifier,'Synthetic',options or [],None,'production')
@@ -121,6 +143,7 @@ class GuardedDispatchTests(unittest.TestCase):
         identifier=self.submit();self.service.tick();task=self.service.store.task(identifier)
         self.assertEqual((task['node_id'],task['phase'],task['job']['status']),('cluster','processing','running'))
         self.assertEqual(len(self.calls),3);self.assertEqual(self.calls[0],'/task/new/init')
+        self.assertEqual([node for node,_ in self.node_calls],['cluster']*3)
         self.assertIn('/upload/',self.calls[1]);self.assertIn('/commit/',self.calls[2])
         self.assertIn(b'filename="photo.jpg"',self.bodies[1]);self.assertIn(b'synthetic-photo',self.bodies[1])
         with self.queue._db() as db:
@@ -174,6 +197,7 @@ class GuardedDispatchTests(unittest.TestCase):
         task=self.service.store.task(identifier)
         self.assertEqual((task['node_id'],task['phase']),('main','processing'))
         self.assertEqual({role for role,route in self.catalog_calls if route=='/options'},{'main'})
+        self.assertEqual([node for node,_ in self.node_calls],['main']*3)
 
     def test_upload_releases_db_mutex_but_fences_task_and_close(self):
         identifier=self.submit();entered=threading.Event();release=threading.Event();out=[]
@@ -435,3 +459,19 @@ class GuardedDispatchTests(unittest.TestCase):
         self.assertEqual(len(opened),1);self.assertEqual([sock.fileno() for sock in sockets],[-1,-1])
         with self.assertRaises(OSError):os.fstat(opened[0])
         with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM viewer_engine_upload_intents').fetchone()[0],'prepared')
+
+
+class FixtureCleanupTests(unittest.TestCase):
+    def test_second_server_setup_failure_closes_first_and_stops_its_thread(self):
+        real = ThreadingHTTPServer
+        created = []
+        def construct(*args, **kwargs):
+            if created: raise OSError('synthetic second listener failure')
+            server = real(*args, **kwargs); created.append(server); return server
+        fixture = GuardedDispatchTests('test_actual_dispatcher_uses_guarded_file_and_commit')
+        result = unittest.TestResult()
+        with patch(__name__+'.ThreadingHTTPServer',side_effect=construct):
+            fixture.run(result)
+        self.assertEqual(len(result.errors),1)
+        self.assertFalse(fixture.thread.is_alive())
+        self.assertEqual(created[0].socket.fileno(),-1)
