@@ -121,8 +121,14 @@ try:
            '--mount',f'type=bind,src={snapshot},dst=/viewer,readonly']
     common=['--label',f'{LABEL}={run_id}','--pids-limit','32','--memory','384m',
             '--cpus','1','--cap-drop','ALL','--security-opt','no-new-privileges']
+    print('PLANNED_OWNED_NAMESPACE_NAME','synthetic-namespace-'+run_id,flush=True)
+    namespace_id=create_owned('synthetic-namespace-'+run_id,'--network','none',
+                     *common,image_ids[PYTHON_IMAGE], 'python','-c','import time; time.sleep(75)')
+    print('OWNED_NAMESPACE',namespace_id,flush=True)
+    docker('start',namespace_id)
+    if not state(namespace_id)['Running']:raise RuntimeError('isolated namespace did not start')
     print('PLANNED_OWNED_SERVER_NAME','synthetic-processing-'+run_id,flush=True)
-    server_id=create_owned('synthetic-processing-'+run_id,'--network','none',
+    server_id=create_owned('synthetic-processing-'+run_id,'--network','container:'+namespace_id,
                      *common,*binds,'--workdir','/processing',image_ids[PYTHON_IMAGE],
                      'python','-u','-m','tests.synthetic_viewer_acceptance_server')
     print('OWNED_SERVER',server_id,flush=True)
@@ -135,7 +141,7 @@ try:
         time.sleep(.2)
     else: raise RuntimeError('server did not become ready')
     print('PLANNED_OWNED_SENDER_NAME','synthetic-viewer-'+run_id,flush=True)
-    sender_id=create_owned('synthetic-viewer-'+run_id,'--network','container:'+server_id,
+    sender_id=create_owned('synthetic-viewer-'+run_id,'--network','container:'+namespace_id,
                      *common,*binds,'--workdir','/processing',image_ids[NODE_IMAGE],
                      'node','tests/synthetic_viewer_acceptance_sender.js')
     print('OWNED_SENDER',sender_id,flush=True)
@@ -162,6 +168,22 @@ try:
         raise RuntimeError('first server did not durably retain acceptance')
     print('FIRST_SENDER_STOPPED',sender_id,first_state['ExitCode'],flush=True)
     print('FIRST_SERVER_STOPPED',server_id,first_server['ExitCode'],flush=True)
+    # The dedicated owned namespace remains up, but no Processing listener is
+    # running. Restart the sender and require a second real retry exhaustion.
+    if state(server_id)['Running'] or not state(namespace_id)['Running']:
+        raise RuntimeError('offline precondition not met')
+    docker('start',sender_id)
+    deadline=time.monotonic()+12
+    while time.monotonic()<deadline:
+        offline_state=state(sender_id)
+        if not offline_state['Running']:break
+        time.sleep(.2)
+    else:raise RuntimeError('offline sender exceeded deadline')
+    offline_log=docker('logs',sender_id)
+    if offline_state['ExitCode']!=0 or 'OFFLINE_RETRY_HELD synthetic-only' not in offline_log:
+        raise RuntimeError('sender did not retain its receipt during server outage')
+    if state(server_id)['Running']:raise RuntimeError('server was not offline during retry')
+    print('OFFLINE_RETRY_CONFIRMED',sender_id,flush=True)
     # Restart the same owned Processing container with its retained SQLite file.
     docker('start',server_id)
     deadline=time.monotonic()+12
@@ -176,7 +198,7 @@ try:
     docker('start',sender_id)
     deadline=time.monotonic()+30
     while time.monotonic()<deadline:
-        current_states=[state(cid) for cid in containers]
+        current_states=[state(server_id), state(sender_id)]
         if all(not item['Running'] for item in current_states): break
         time.sleep(.2)
     else: raise RuntimeError('owned containers exceeded deadline')
@@ -184,7 +206,8 @@ try:
     print('SENDER_LOG',sender_log,flush=True);print('SERVER_LOG',server_log,flush=True)
     if any(item['ExitCode']!=0 for item in current_states): raise RuntimeError('container failed')
     if ('FIRST_SEND_RETRY_HELD synthetic-only' not in sender_log
-        or 'SYNTHETIC_RESTART_EXACT_PAYLOAD_OK' not in sender_log
+        or 'OFFLINE_RETRY_HELD synthetic-only' not in sender_log
+        or sender_log.count('SYNTHETIC_RESTART_EXACT_PAYLOAD_OK') != 2
         or 'VIEWER_RESTART_REPLAY_OK held=true synthetic-only' not in sender_log
         or 'ACCEPTANCE_RESULT 200 True' not in server_log
         or 'SYNTHETIC_FIRST_REPLY_DISCARDED_AFTER_COMMIT' not in server_log
@@ -193,6 +216,12 @@ try:
         or 'SERVER_START_RECEIPTS 0' not in server_log
         or 'SERVER_START_RECEIPTS 1' not in server_log):
         raise RuntimeError('rehearsal assertions incomplete')
+    if not state(namespace_id)['Running']:
+        raise RuntimeError('owned namespace expired before verification')
+    holder_exit=stop_owned(namespace_id)  # exact owned bounded holder; retain container
+    if holder_exit['Running'] or holder_exit['ExitCode'] != 137:
+        raise RuntimeError('owned namespace did not stop as expected')
+    print('OWNED_NAMESPACE_STOPPED',namespace_id,holder_exit['ExitCode'],flush=True)
     print('REHEARSAL_PASS',flush=True)
 finally:
     failures=[]

@@ -14,7 +14,7 @@ run_id=uuid.uuid4().hex
 root=Path(tempfile.mkdtemp(prefix='ledgetop-acceptance-outer-'))
 print('RETAINED_ROOT',root,'REHEARSAL',run_id,flush=True)
 label='ledgetop.synthetic.rehearsal'
-names=['synthetic-processing-'+run_id,'synthetic-viewer-'+run_id]
+names=['synthetic-namespace-'+run_id,'synthetic-processing-'+run_id,'synthetic-viewer-'+run_id]
 env=os.environ.copy();env.update(LT_SYNTHETIC_RUN_ID=run_id,LT_SYNTHETIC_ROOT=str(root))
 k=ctypes.WinDLL('kernel32',use_last_error=True); n=ctypes.WinDLL('ntdll',use_last_error=True)
 k.CreateJobObjectW.argtypes=(ctypes.c_void_p,wintypes.LPCWSTR);k.CreateJobObjectW.restype=wintypes.HANDLE
