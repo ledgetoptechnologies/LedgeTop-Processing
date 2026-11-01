@@ -16,7 +16,7 @@ import uuid
 
 PROCESSING = Path(__file__).resolve().parents[1]
 VIEWER = Path(r'C:\Projects\viewer-download-retention-20261031')
-VIEWER_COMMIT = '3f150734aa5f5359f004a3984d1df806113ddbf6'
+VIEWER_COMMIT = '0c2ffce69856a9b873bddd77aa660abd8b83897c'
 PYTHON_IMAGE = 'python:3.12-slim'
 NODE_IMAGE = 'node:24-bookworm-slim'
 LABEL = 'ledgetop.synthetic.rehearsal'
@@ -109,6 +109,8 @@ try:
     for name in ('nativeReferenceAcceptanceCandidate.js', 'nativeReferenceReceiptCandidate.js', 'nativeReferenceProtocolCandidate.js', 'nativeReferenceBoundSenderCandidate.js', 'nativeReferenceProviderAuthCandidate.js'):
         path=snapshot/'apps'/'viewer'/'server'/name
         print('VIEWER_MODULE_SHA256',name,hashlib.sha256(path.read_bytes()).hexdigest(),flush=True)
+    schema=snapshot/'apps'/'viewer'/'test'/'fixtures'/'native-reference-schema-46f.json'
+    print('VIEWER_LEGACY_SCHEMA_SHA256',hashlib.sha256(schema.read_bytes()).hexdigest(),flush=True)
     for name in ('reference_api.py','reference_http.py','reference_store.py','reference_protocol.py'):
         path=processing_snapshot/'processing'/name
         print('PROCESSING_MODULE_SHA256',name,hashlib.sha256(path.read_bytes()).hexdigest(),flush=True)
@@ -205,7 +207,8 @@ try:
     sender_log=docker('logs',sender_id);server_log=docker('logs',server_id)
     print('SENDER_LOG',sender_log,flush=True);print('SERVER_LOG',server_log,flush=True)
     if any(item['ExitCode']!=0 for item in current_states): raise RuntimeError('container failed')
-    if ('FIRST_SEND_RETRY_HELD synthetic-only' not in sender_log
+    if ('EMPTY_LEGACY_SCHEMA_UPGRADE_OK synthetic-only' not in sender_log
+        or 'FIRST_SEND_RETRY_HELD synthetic-only' not in sender_log
         or 'OFFLINE_RETRY_HELD synthetic-only' not in sender_log
         or 'OFFLINE_CREDENTIAL_RELOAD_OK' not in sender_log
         or 'AUTH_REVISION v1' not in server_log

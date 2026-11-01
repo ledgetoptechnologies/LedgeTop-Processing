@@ -20,7 +20,16 @@ async function main(){
     db.exec('CREATE TABLE processing_tasks (id TEXT PRIMARY KEY, active_attempt_id TEXT NOT NULL); CREATE TABLE processing_attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL)');
     attempt=crypto.randomUUID();db.prepare('INSERT INTO processing_tasks VALUES (?,?)').run('task-1',attempt);
     db.prepare('INSERT INTO processing_attempts VALUES (?,?)').run(attempt,'task-1');
-    console.log('STAGE install');receipts.install(db,true);
+    console.log('STAGE legacy schema migration');
+    const legacyBytes=fs.readFileSync('/viewer/apps/viewer/test/fixtures/native-reference-schema-46f.json');
+    assert.equal(sha(legacyBytes),'1f48269844fcca486135322b240a7fb94949c354ed046b29ad571d97c299e62a');
+    const legacy=JSON.parse(legacyBytes);
+    for(const [,ddl] of legacy.definitions)db.exec(ddl);
+    for(const [,ddl] of legacy.triggers)db.exec(ddl);
+    db.exec("CREATE TABLE synthetic_unrelated(value TEXT); INSERT INTO synthetic_unrelated VALUES('preserve')");
+    assert.equal(receipts.upgradeEmpty46f(db,true),true);receipts.attest(db);
+    assert.equal(db.prepare('SELECT value FROM synthetic_unrelated').get().value,'preserve');
+    console.log('EMPTY_LEGACY_SCHEMA_UPGRADE_OK synthetic-only');
     const r=fixture.acceptance, manifest=fixture.resultManifest;
     console.log('STAGE bind');receipts.bind(db,{attemptId:attempt,bindingId:crypto.randomUUID(),jobId:r.jobId,generation:r.generation,
       environment:r.environment,inputManifestSha256:r.inputManifestSha256,pipelineDigest:r.pipelineDigest},{authorizeBinding:()=>true});
