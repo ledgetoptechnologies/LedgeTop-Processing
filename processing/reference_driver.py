@@ -524,6 +524,8 @@ class ReferenceDriver:
                 except Exception:
                     background = {'state': 'background_retry'}
             result = self._step()
+            if result['state'] == 'idle' and background['state'] == 'background_retry':
+                return {'state': 'retry_wait', 'reason': 'background_reconciliation_unavailable'}
             return background if result['state'] == 'idle' and background['state'] == 'completed' else result
         except DriverHeld as error:
             return {'state': 'held', 'reason': str(error)}

@@ -344,6 +344,41 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'],'completed')
         self.assertEqual(self.store.acceptance_receipts(job['jobId'])['receipts'],[receipt])
 
+    def test_tree_result_survives_coordinator_outage_until_acceptance_after_restart(self):
+        job=self.submit('treedar')
+        self.advance(job,'executing')
+        self.tree_proof(job)
+        self.advance(job,'awaiting_acceptance')
+        result_before=self.router._row(job['jobId'])['result']
+        identity=json.loads(self.controller._row(job['jobId'])['identity'])
+        output=self.host.root / identity['outputRelativePath'] / 'run'
+        output_before={name:(output/name).read_bytes() for name in REQUIRED_OUTPUTS}
+        creates_before=sum(call[0]=='create' for call in self.docker.calls)
+        with self.driver._db() as db:
+            data=json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?',(job['jobId'],)).fetchone()[0])
+        source=self.ledger.root/next(iter(data['inputPaths'].values()))
+        source_before=source.read_bytes()
+        original_request=self.driver._request
+        def unavailable(method,suffix,*args,**kwargs):
+            if method=='GET' and suffix.endswith('/acceptance'):
+                raise OSError('synthetic coordinator outage')
+            return original_request(method,suffix,*args,**kwargs)
+        self.driver._request=unavailable
+        self.assertEqual(self.driver.step(),{'state':'retry_wait','reason':'background_reconciliation_unavailable'})
+        self.assertEqual(self.router._row(job['jobId'])['result'],result_before)
+        self.assertEqual({name:(output/name).read_bytes() for name in REQUIRED_OUTPUTS},output_before)
+        self.assertEqual(source.read_bytes(),source_before)
+        self.assertFalse(any(call[0]=='rm' for call in self.docker.calls))
+        self.driver=self.open_driver()
+        receipt=self.acceptance(job)
+        self.store.accept(job['jobId'],receipt)
+        self.assertEqual(self.driver.step()['state'],'completed')
+        self.assertEqual(self.router._row(job['jobId'])['result'],result_before)
+        self.assertEqual({name:(output/name).read_bytes() for name in REQUIRED_OUTPUTS},output_before)
+        self.assertEqual(source.read_bytes(),source_before)
+        self.assertEqual(sum(call[0]=='create' for call in self.docker.calls),creates_before)
+        self.assertTrue(self.store.acceptance_receipts(job['jobId'])['fullyAccepted'])
+
     def test_combined_and_unconfigured_tree_refused_before_claim(self):
         self.driver=self.open_driver(path=self.root/'private'/'unconfigured.sqlite',provenance=False)
         for kind in ('combined','treedar'):
