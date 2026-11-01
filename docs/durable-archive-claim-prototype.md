@@ -19,6 +19,12 @@ matching publication check. Public status labels a claim as
 active or unresolved without asserting that its owner has failed or exposing
 claim material. There is no claim resolver.
 
+Each claim binds the task incarnation, node, engine, environment, relative task
+directory, original archive path and capture-or-restore operation. Schema checks
+reject earlier differently shaped prototype tables without changing their data;
+no automatic migration is provided. A claim does not bind a writer epoch or the
+receipt bytes and is therefore insufficient by itself to authorize recovery.
+
 Filesystem publication and the database claim update are separate operations.
 A crash or failed database transaction can therefore leave a published archive
 and receipt alongside an unresolved claim; this is a hold, not proof of Viewer

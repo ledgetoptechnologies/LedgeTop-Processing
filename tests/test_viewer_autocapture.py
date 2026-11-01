@@ -805,6 +805,18 @@ finally:s.close();q.authority_lease.close();q.close()
         restarted = ViewerService(self.queue, self.fixture.config, store=self.service.store)
         self.assertTrue(restarted._durable_archive_claims)
 
+    def test_durable_claim_old_schema_is_refused_without_mutation(self):
+        self.service.store.enable_archive_status()
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_archive_claims_v1 (uuid TEXT NOT NULL, generation INTEGER NOT NULL, '
+                       'job_id TEXT NOT NULL, token_hash TEXT NOT NULL, PRIMARY KEY(uuid,generation))')
+            db.execute("INSERT INTO viewer_archive_claims_v1 VALUES ('synthetic',1,'job','hash')")
+        for method in (self.service.store.require_archive_claim_schema, self.service.store.install_archive_claim_schema):
+            with self.assertRaises(Conflict): method()
+        with self.queue._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT * FROM viewer_archive_claims_v1').fetchone()),
+                             ('synthetic', 1, 'job', 'hash'))
+
     def test_durable_claim_skips_held_task_in_other_service_scanner(self):
         store = self.service.store
         store.enable_archive_status()
@@ -889,6 +901,55 @@ finally:s.close();q.authority_lease.close();q.close()
             with self.subTest(value=value), self.assertRaises(Conflict):
                 other.update(self.identifier, archive_path=value)
         self.assertIsNone(other.task(self.identifier)['archive_path'])
+
+    def test_durable_claim_binds_capture_identity_and_operation(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        task = self.fixture.task(self.identifier)
+        claim = self.service.store.claim_archive(task)
+        archive = Path(task['directory']) / 'all.zip'
+        archive.write_bytes(self.engine_response)
+        fields = {'node_id': 'different-node', 'engine_uuid': 'different-engine',
+                  'environment': 'different-environment', 'directory': 'different-directory',
+                  'archive_path': '/different/archive', 'operation': 'restore'}
+        with self.queue._db() as db:
+            original = dict(db.execute('SELECT * FROM viewer_archive_claims_v1').fetchone())
+        for field, value in fields.items():
+            with self.subTest(field=field):
+                with self.queue._db() as db:
+                    db.execute('UPDATE viewer_archive_claims_v1 SET ' + field + '=? WHERE uuid=?', (value, self.identifier))
+                with self.assertRaises(Conflict):
+                    self.service.store.update(self.identifier, expected_archive_task=task,
+                                              expected_archive_claim=claim, archive_path=str(archive))
+                with self.queue._db() as db:
+                    db.execute('UPDATE viewer_archive_claims_v1 SET ' + field + '=? WHERE uuid=?',
+                               (original[field], self.identifier))
+        self.assertIsNone(self.service.store.task(self.identifier)['archive_path'])
+        self.assertTrue(self.service.store.archive_claim_held(task))
+        self.assertEqual(archive.read_bytes(), self.engine_response)
+
+    def test_durable_claim_refuses_stale_task_directory(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        task = dict(self.fixture.task(self.identifier))
+        task['directory'] = str(self.root / 'other-directory')
+        with self.assertRaises(Conflict):
+            self.service.store.claim_archive(task)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_claims_v1').fetchone()[0], 0)
+
+    def test_durable_restore_claim_rejects_capture_operation_binding(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        token = self.service.store.claim_archive(task, restore=True)
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_archive_claims_v1 SET operation='capture' WHERE uuid=?", (self.identifier,))
+        with Path(task['archive_path']).open('rb') as stream:
+            with self.assertRaises(Conflict): self.service.store.finish_archive_restore(task, token, stream)
+        self.assertTrue(self.service.store.archive_claim_held(task))
 
     def test_archive_inspection_cannot_be_downgraded_by_other_store(self):
         store = self.service.store
