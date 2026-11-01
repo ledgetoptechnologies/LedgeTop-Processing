@@ -6,6 +6,8 @@ from pathlib import Path
 import sqlite3
 import threading
 import unittest
+import uuid
+from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.maintenance import Conflict
@@ -93,6 +95,73 @@ class AcceptanceBoundTests(unittest.TestCase):
         with self.assertRaises(p.ProtocolError):
             p.validate_result_manifest(bad, job_id='job-1', generation=1,
                 environment='staging', pipeline_digest=bad['pipelineDigest'])
+
+    def test_legacy_receipts_consume_capacity_but_exact_replay_still_works(self):
+        legacy = dict(self.receipt, receiptId='legacy', storageReceiptId='legacy-store', acceptedObjectIds=[])
+        legacy_json = p.canonical_json(legacy).decode()
+        with self.queue._db() as db:
+            db.execute('INSERT INTO reference_acceptances VALUES(?,?,?,?)',
+                ('legacy', 'job-1', p.receipt_tombstone_digest(legacy), legacy_json))
+        with patch.object(p, 'MAX_OBJECTS', 2):
+            self.assertTrue(self.store.accept('job-1', self.receipt)['created'])
+            self.assertFalse(self.store.accept('job-1', self.receipt)['created'])
+            final = dict(self.receipt, receiptId='new', storageReceiptId='new-store', acceptedObjectIds=['result-2'])
+            with self.assertRaises(Conflict): self.store.accept('job-1', final)
+            self.assertFalse(self.store.accept('job-1', legacy)['created'])
+            excess = dict(legacy, receiptId='legacy-excess', storageReceiptId='legacy-excess-store')
+            with self.queue._db() as db:
+                db.execute('INSERT INTO reference_acceptances VALUES(?,?,?,?)',
+                    ('legacy-excess', 'job-1', p.receipt_tombstone_digest(excess), p.canonical_json(excess).decode()))
+            with self.assertRaises(Conflict): self.store.accept('job-1', final)
+            self.assertFalse(self.store.accept('job-1', self.receipt)['created'])
+        with self.queue._db() as db:
+            rows = db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances ORDER BY receipt_id').fetchall()
+        self.assertEqual([row['receipt_id'] for row in rows], ['legacy', 'legacy-excess', 'receipt-1'])
+        self.assertEqual(rows[0]['receipt_json'], legacy_json)
+
+    def test_independent_sqlite_connections_conflict_then_exact_replay(self):
+        uri = 'file:acceptance-' + uuid.uuid4().hex + '?mode=memory&cache=shared'
+        keeper = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        keeper.executescript('''CREATE TABLE reference_jobs(job_id TEXT PRIMARY KEY, phase TEXT, updated_at TEXT);
+            CREATE TABLE reference_acceptances(receipt_id TEXT PRIMARY KEY, job_id TEXT, digest TEXT, receipt_json TEXT);
+            INSERT INTO reference_jobs(job_id,phase) VALUES ('job-1','awaiting_acceptance');''')
+        keeper.commit()
+        class IndependentQueue:
+            @contextmanager
+            def _db(inner):
+                db = sqlite3.connect(uri, uri=True, timeout=.2)
+                db.row_factory = sqlite3.Row
+                try:
+                    with db: yield db
+                finally: db.close()
+        self.store.queue = IndependentQueue()
+        entered, release = threading.Event(), threading.Event()
+        original = self.store._row
+        def block(db, job):
+            if threading.current_thread().name == 'first-acceptance' and not entered.is_set():
+                entered.set()
+                if not release.wait(3): raise RuntimeError('test handoff timed out')
+            return original(db, job)
+        self.store._row = block
+        outcomes = []
+        def first():
+            try: outcomes.append(self.store.accept('job-1', self.receipt)['created'])
+            except BaseException as error: outcomes.append(error)
+        thread = threading.Thread(name='first-acceptance', target=first)
+        try:
+            thread.start()
+            self.assertTrue(entered.wait(2))
+            with self.assertRaises(sqlite3.OperationalError):
+                self.store.accept('job-1', self.receipt)
+        finally:
+            release.set(); thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        try:
+            self.assertEqual(outcomes, [True])
+            self.assertFalse(self.store.accept('job-1', self.receipt)['created'])
+            self.assertEqual(keeper.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0], 1)
+        finally:
+            keeper.close()
 
 
 if __name__ == '__main__': unittest.main()

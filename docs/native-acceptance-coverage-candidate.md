@@ -10,8 +10,11 @@ unaccepted result object. Overlap is allowed when the receipt also adds new
 coverage. An exact replay of a previously persisted receipt remains idempotent.
 SQLite serializes competing new receipts. Valid result manifests always contain
 at least one object, so the maximum number of newly recorded receipts is no
-greater than the result's object count. Existing overlong receipt sets are not
-rewritten, discarded or automatically repaired.
+greater than the result's object count when no legacy receipts exist. Legacy
+receipts count against the `MAX_OBJECTS` relay limit: once full, new receipts
+are held for inspection, while exact replay of an existing receipt still works.
+Existing overlong receipt sets are not rewritten, discarded or automatically
+repaired.
 
 This tightens the existing v1 API behavior: clients that generate a new receipt
 identity for already-covered objects will receive a conflict and must reconcile
