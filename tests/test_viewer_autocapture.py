@@ -220,6 +220,52 @@ class ViewerAutoCaptureTests(unittest.TestCase):
         self.lease.close()
         self.fixture.temporary.cleanup()
 
+    def test_real_killed_capture_preserves_partial_and_reports_inspection(self):
+        self.release.clear()
+        children = []
+        errors = []
+        real_popen = subprocess.Popen
+
+        def start_child(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        def capture():
+            try:
+                self.service._archive_once(self.identifier)
+            except Exception as error:
+                errors.append(error)
+
+        partial = Path(self.fixture.task(self.identifier)['directory']) / 'all.zip.partial'
+        thread = threading.Thread(target=capture)
+        with patch('processing.viewer_service.subprocess.Popen', side_effect=start_child):
+            thread.start()
+            try:
+                self.assertTrue(self.ready.wait(10), 'child did not contact synthetic engine')
+                deadline = time.monotonic() + 10
+                while not partial.exists():
+                    if time.monotonic() >= deadline:
+                        self.fail('child did not create archive partial')
+                    time.sleep(.02)
+                self.assertEqual(len(children), 1)
+                before = partial.read_bytes()
+                os.kill(children[0].pid, 9)
+                thread.join(10)
+                self.assertFalse(thread.is_alive(), 'parent did not reap killed capture child')
+                self.assertEqual(children[0].returncode, -9)
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], Conflict)
+                self.assertEqual(str(errors[0]), 'partial_requires_inspection')
+                self.assertEqual(partial.read_bytes(), before)
+                self.assertIsNone(self.fixture.task(self.identifier)['archive_path'])
+                self.assertTrue(self.fixture.engine_for(self.identifier).tasks)
+            finally:
+                self.release.set()
+                if thread.is_alive():
+                    self.service._stop.set()
+                    thread.join(10)
+
     def test_manual_and_automatic_capture_serialize_for_same_task(self):
         entered=threading.Event();release=threading.Event();auto_done=threading.Event();errors=[]
         engine=self.fixture.engines['cluster'];original=engine.download
