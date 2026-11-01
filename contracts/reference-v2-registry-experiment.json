@@ -1,0 +1,8 @@
+{
+  "notice": "PUBLIC TEST ROOT ONLY",
+  "testRootSeedHex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+  "rootPublicKeySpkiDerHex": "302a300506032b6570032100197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+  "domainAsciiWithoutNul": "ltds-v2-registry-experiment-v1",
+  "canonical": "{\"epoch\":\"epoch-1\",\"expiresAt\":1100,\"issuedAt\":1000,\"keys\":[{\"audience\":\"viewer\",\"issuer\":\"coordinator\",\"keyId\":\"test-key-1\",\"notAfter\":1200,\"notBefore\":900,\"operation\":\"admit\",\"publicKey\":\"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo\",\"purpose\":\"grant\",\"revoked\":false}],\"revision\":2,\"version\":1}",
+  "signatureBase64url": "NWpAWEdq7GsPyl7nkBZ389Ww9b-S34xcgm23ABVY1VBGoDHk6tcKWWnBfkYHxozdL0Ytqb6l8NtIArI5ReU-BA"
+}

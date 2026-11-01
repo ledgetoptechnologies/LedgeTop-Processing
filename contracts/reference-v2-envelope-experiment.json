@@ -1,0 +1,21 @@
+{
+  "notice": "PUBLIC TEST KEY ONLY; no trust or authority",
+  "testSeedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "publicKeyRawHex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "publicKeySpkiDerHex": "302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "vectors": [
+    {
+      "kind": "grant",
+      "domainAsciiWithoutNul": "ltds-v2-grant-experiment-v1",
+      "canonical": "{\"actor\":\"worker-1\",\"audience\":\"viewer\",\"deliveryId\":\"delivery-1\",\"epoch\":\"epoch-1\",\"expiresAt\":1100,\"issuedAt\":1000,\"issuer\":\"coordinator\",\"keyId\":\"test-key-1\",\"kind\":\"grant\",\"nonce\":\"test-nonce-1\",\"operation\":\"admit\",\"payloadSha256\":\"babba494ce54eb0a99178c4c2179659bfa02b6a5f9bf8bf6bbf9b665e976a1fb\",\"requestHash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+      "signatureBase64url": "FAPfNAucqQvP1eRP2eziVbZefqfPW6Cp9CAs2ffqDAE6E_Gim2OS2KO0qv6mlwbPEFjwcOAuOxA2WumKyPHFAg"
+    },
+    {
+      "kind": "observation",
+      "domainAsciiWithoutNul": "ltds-v2-observation-experiment-v1",
+      "canonical": "{\"actor\":\"worker-1\",\"audience\":\"processing\",\"deliveryId\":\"delivery-1\",\"epoch\":\"epoch-1\",\"expiresAt\":1100,\"issuedAt\":1000,\"issuer\":\"viewer\",\"keyId\":\"test-key-1\",\"kind\":\"observation\",\"nonce\":\"test-nonce-1\",\"operation\":\"reconcile\",\"payloadSha256\":\"babba494ce54eb0a99178c4c2179659bfa02b6a5f9bf8bf6bbf9b665e976a1fb\",\"requestHash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+      "signatureBase64url": "Z8A5fI9AjP3pXH5zdYPnz9snRADaj81yqvuzp0ht1Gi9i_SHW0y_LARwOuAU4aQp7W3_BdQIdtn5Cn8crJ3sAg"
+    }
+  ],
+  "canonicalPayload": "{\"claimLineageSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"generation\":1,\"jobId\":\"job-1\",\"manifestSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"reservationId\":\"reservation-1\"}"
+}

@@ -1,0 +1,6 @@
+{
+  "notice": "synthetic non-authorizing proposal",
+  "previousDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "canonicalBody": "{\"attemptId\":\"00000000-0000-4000-8000-000000000004\",\"authorityEpoch\":\"authority-epoch-1\",\"chargedBytes\":3,\"claimLineageSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"deliveryId\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"environment\":\"staging\",\"generation\":1,\"inputManifestSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"jobId\":\"00000000-0000-4000-8000-000000000003\",\"ledgerEpoch\":\"ledger-epoch-1\",\"ledgerId\":\"ledger-1\",\"nextRevision\":1,\"objectId\":\"obj-001\",\"objectLength\":3,\"objectSha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",\"operationId\":\"op-1\",\"previousRevision\":0,\"range\":{\"kind\":\"whole\"},\"requestId\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"requestSha256\":\"b4f9ea1524340121cc8495d0779f1304358b6231ebf8587101e1932705aad250\",\"reservationId\":\"res-001\",\"trustDomain\":\"test-domain\",\"type\":\"delivery-admit\",\"version\":2,\"workerInstanceId\":\"worker-001\"}",
+  "nextDigest": "1b82ca5b3bea8970fccd481f7ea5084fc2691683eee5c14369124128dd4c3e28"
+}
