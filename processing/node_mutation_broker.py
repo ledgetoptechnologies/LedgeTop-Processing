@@ -143,7 +143,10 @@ class LocalCoordinatorAuthority:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE');attest(db)
             changed=db.execute("UPDATE broker_intents SET state='complete' WHERE operation_id=? AND job_id=? AND grant_hash=? AND state='started'",(grant['operationId'],grant['jobId'],digest)).rowcount
-            if changed!=1:raise BrokerHeld('broker intent completion changed')
+            if changed!=1:
+                row=db.execute('SELECT job_id,grant_hash,state FROM broker_intents WHERE operation_id=?',(grant['operationId'],)).fetchone()
+                if row is None or tuple(row)!=(grant['jobId'],digest,'complete'):
+                    raise BrokerHeld('broker intent completion changed')
 
 
 def _json(value):

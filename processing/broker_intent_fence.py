@@ -1,9 +1,13 @@
 """Offline-only experimental coordinator intent fence; no production wiring."""
 
+from .transfer_fence import JOBS_DDL
+
+_JOBS_SCHEMA = "(SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs') IS '" + JOBS_DDL.replace("'", "''") + "'"
+
 DDL = "CREATE TABLE broker_intents (operation_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, grant_hash TEXT NOT NULL, state TEXT NOT NULL)"
 MARKER_DDL = "CREATE TABLE broker_intent_required (singleton INTEGER PRIMARY KEY CHECK(singleton=1), required INTEGER NOT NULL CHECK(required=1))"
 TRIGGERS = {
-    'broker_job_update': "CREATE TRIGGER broker_job_update BEFORE UPDATE ON jobs WHEN (EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete' AND (job_id=OLD.id OR job_id=NEW.id)) AND NOT (OLD.status IS 'running' AND NEW.status IS 'held' AND NEW.held_reason IS 'coordinator_restart' AND NEW.id IS OLD.id AND NEW.seq IS OLD.seq AND NEW.request_id IS OLD.request_id AND NEW.environment IS OLD.environment AND NEW.profile IS OLD.profile AND NEW.worker_id IS OLD.worker_id AND NEW.node_id IS OLD.node_id AND NEW.claim_hash IS OLD.claim_hash AND NEW.result IS OLD.result AND NEW.created_at IS OLD.created_at)) OR (NEW.status IS 'running' AND OLD.status IS NOT 'running' AND EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete')) BEGIN SELECT RAISE(ABORT,'broker intent held'); END",
+    'broker_job_update': "CREATE TRIGGER broker_job_update BEFORE UPDATE ON jobs WHEN (EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete' AND (job_id=OLD.id OR job_id=NEW.id)) AND NOT (" + _JOBS_SCHEMA + " AND OLD.status IS 'running' AND NEW.status IS 'held' AND NEW.held_reason IS 'coordinator_restart' AND NEW.id IS OLD.id AND NEW.seq IS OLD.seq AND NEW.request_id IS OLD.request_id AND NEW.environment IS OLD.environment AND NEW.profile IS OLD.profile AND NEW.worker_id IS OLD.worker_id AND NEW.node_id IS OLD.node_id AND NEW.claim_hash IS OLD.claim_hash AND NEW.result IS OLD.result AND NEW.created_at IS OLD.created_at)) OR (NEW.status IS 'running' AND OLD.status IS NOT 'running' AND EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete')) BEGIN SELECT RAISE(ABORT,'broker intent held'); END",
     'broker_job_insert': "CREATE TRIGGER broker_job_insert BEFORE INSERT ON jobs WHEN NEW.status IS 'running' AND EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete') BEGIN SELECT RAISE(ABORT,'broker intent held'); END",
     'broker_job_delete': "CREATE TRIGGER broker_job_delete BEFORE DELETE ON jobs WHEN EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete' AND job_id=OLD.id) BEGIN SELECT RAISE(ABORT,'broker intent held'); END",
     'broker_task_update': "CREATE TRIGGER broker_task_update BEFORE UPDATE ON viewer_tasks WHEN EXISTS (SELECT 1 FROM broker_intents WHERE state IS NOT 'complete' AND (job_id=OLD.job_id OR job_id=NEW.job_id)) BEGIN SELECT RAISE(ABORT,'broker intent held'); END",
@@ -17,7 +21,6 @@ TRIGGERS = {
 class IntentFenceError(ValueError): pass
 
 def attest(db):
-    from .transfer_fence import JOBS_DDL
     jobs=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
     if jobs is None or jobs[0]!=JOBS_DDL: raise IntentFenceError('jobs schema unavailable')
     for table, required in (('viewer_tasks',{'uuid','job_id'}),('viewer_files',{'uuid'})):

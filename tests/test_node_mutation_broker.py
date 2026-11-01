@@ -298,6 +298,16 @@ class NodeMutationBrokerTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):raw.execute("UPDATE jobs SET status='running' WHERE status='queued'")
         finally:raw.close()
 
+    def test_changed_jobs_schema_rejects_restart_exception(self):
+        with self.owner_queue._db() as db:
+            db.execute("INSERT INTO broker_intents VALUES(?,?,?,'started')",(str(uuid.uuid4()),self.job,'a'*64))
+            db.execute('ALTER TABLE jobs ADD COLUMN new_unqualified_column TEXT')
+        raw=sqlite3.connect(self.owner_queue.path,timeout=0)
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                raw.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart' WHERE id=?",(self.job,))
+        finally:raw.close()
+
     def test_missing_fence_trigger_fails_closed(self):
         grant=self.grant()
         with self.owner_queue._db() as db:db.execute('DROP TRIGGER broker_job_update')
@@ -470,6 +480,11 @@ os._exit(27)
         with self.assertRaises(b.BrokerHeld):self.broker.confirm_upload(upload,signature,'0'*64)
         self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'awaiting_sender')
         self.broker.confirm_upload(upload,signature,b._sender_confirmation(upload,self.secret))
+        self.broker.confirm_upload(upload,signature,b._sender_confirmation(upload,self.secret))
+        with self.owner_queue._db() as db:
+            db.execute("UPDATE broker_intents SET grant_hash=? WHERE operation_id=?",('0'*64,upload['operationId']))
+        with self.assertRaises(b.BrokerHeld):
+            self.broker.confirm_upload(upload,signature,b._sender_confirmation(upload,self.secret))
         self.assertEqual(self.broker.db.execute("SELECT state FROM operations WHERE operation='upload'").fetchone()[0],'complete')
         self.broker.db.execute("UPDATE operations SET file_key='changed.jpg' WHERE operation='upload'")
         source,writer=socket.socketpair()
