@@ -22,7 +22,10 @@ class NodeMutationBrokerTests(unittest.TestCase):
     def setUp(self):
         self.root=Path(tempfile.mkdtemp(prefix='lt-node-broker-test-')).resolve()
         self.addCleanup(lambda:print('retained synthetic node broker root:',self.root,flush=True))
-        self.engine='engine-synthetic';self.node='main';self.authority=str(uuid.uuid4());self.epoch=str(uuid.uuid4())
+        self.engine='engine-synthetic';self.node='main'
+        self.owner_queue=Queue(self.root/'owner-queue',node_ids=('cluster','main'),viewer_enabled=True)
+        self.addCleanup(self.owner_queue.close)
+        self.authority=self.owner_queue.authority_id;self.epoch=self.owner_queue.startup_id
         self.origin='http://127.0.0.1:18080';self.secret=b'synthetic-key-'*4;self.calls=[]
         self.drip=False;self.drip_done=threading.Event()
         path=self.root/'gate';self.patches=[patch('processing.node_gate.canonical_gate_path',return_value=path),
@@ -70,11 +73,19 @@ class NodeMutationBrokerTests(unittest.TestCase):
         self.addCleanup(stop_server)
         self.thread.start()
         self.adapter=b.LoopbackNodeODM(self.engine,BackendPin('a'*64,'sha256:'+'b'*64,self.server.server_port),'')
+        self.task=str(uuid.uuid4());self.body=b'synthetic-init'
+        store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
+        store.initialize(self.task,'Synthetic',[],None,'production')
+        store.upload(self.task,'synthetic.jpg',io.BytesIO(b'x'),1);store.commit(self.task)
+        claim=self.owner_queue.claim({'workerId':'viewer-dispatch','nodeId':'main','profiles':[VIEWER_PROFILE]})
+        self.job=claim['id']
+        store.update(self.task,stage='running',phase='init_pending',node_id='main',
+                     engine_uuid=self.task,claim_token=claim['claimToken'])
         self.config=dict(node_id=self.node,engine_id=self.engine,authority_id=self.authority,coordinator_epoch=self.epoch,
-                         coordinator_origin=self.origin,gate_generation=1,secret=self.secret,adapter=self.adapter)
+                         coordinator_origin=self.origin,gate_generation=1,secret=self.secret,adapter=self.adapter,
+                         authority_witness=b.LocalCoordinatorAuthority(self.owner_queue))
         self.broker=b.NodeMutationBroker(state,**self.config)
         self.addCleanup(self.broker.close)
-        self.task=str(uuid.uuid4());self.job=str(uuid.uuid4());self.body=b'synthetic-init'
 
     def grant(self,operation='init',body=None):
         body=self.body if body is None else body
@@ -105,6 +116,45 @@ class NodeMutationBrokerTests(unittest.TestCase):
         grant=self.grant()
         self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
         self.assertEqual(self.calls[0][0],'/task/new/init?token=a%2Bb')
+
+    def test_revoked_local_queue_refuses_previously_signed_grant(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret)
+        self.owner_queue.close()
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.assertEqual(self.calls,[])
+
+    def test_live_queue_rejects_valid_grant_after_task_phase_changes(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret)
+        store=TaskStore(self.owner_queue,self.root/'owner-queue'/'viewer-tasks')
+        store.update(self.task,phase='initialized')
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.assertEqual(self.calls,[])
+
+    def test_queue_close_waits_for_authorized_mutation_then_revokes(self):
+        grant=self.grant();signature=b.sign_grant(grant,self.secret)
+        entered=threading.Event();release=threading.Event();closed=threading.Event();out=[]
+        original=self.adapter.exchange
+        def slow(*args):
+            entered.set()
+            if not release.wait(3):raise RuntimeError('synthetic exchange timed out')
+            return original(*args)
+        def send():
+            try:out.append(self.broker.mutate(grant,signature,self.body))
+            except Exception as error:out.append(error)
+        worker=threading.Thread(target=send)
+        closer=threading.Thread(target=lambda:(self.owner_queue.close(),closed.set()))
+        with patch.object(self.adapter,'exchange',side_effect=slow):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3));closer.start()
+                self.assertFalse(closed.wait(.2))
+            finally:
+                release.set();worker.join(5)
+                if closer.ident is not None:closer.join(5)
+        self.assertFalse(worker.is_alive());self.assertFalse(closer.is_alive());self.assertTrue(closed.is_set())
+        self.assertEqual(out[0]['uuid'],self.task)
+        with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,signature,self.body)
+        self.assertEqual(len(self.calls),1)
 
     def test_lost_response_survives_broker_restart_without_replay(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret);original=self.adapter.exchange
@@ -183,7 +233,7 @@ class NodeMutationBrokerTests(unittest.TestCase):
             with self.assertRaises(b.BrokerHeld):b.issue_init_grant(queue,**kwargs)
         finally:queue.close()
 
-    def test_real_queue_grant_reaches_separate_node_gate_and_loopback_peer(self):
+    def test_other_local_queue_grant_reaches_its_node_gate_and_loopback_peer(self):
         queue=Queue(self.root/'coordinator',node_ids=('cluster','main'),viewer_enabled=True)
         node_path=self.root/'remote-node-gate'
         try:
@@ -197,7 +247,8 @@ class NodeMutationBrokerTests(unittest.TestCase):
                  patch('processing.node_mutation_broker.canonical_gate_path',return_value=node_path):
                 with NodeGate(self.engine) as gate:gate.provision('main',self.origin,queue.authority_id)
                 state=node_path/'mutation-broker';state.mkdir(mode=0o700)
-                remote=b.NodeMutationBroker(state,**dict(self.config,authority_id=queue.authority_id,coordinator_epoch=queue.startup_id))
+                remote=b.NodeMutationBroker(state,**dict(self.config,authority_id=queue.authority_id,coordinator_epoch=queue.startup_id,
+                    authority_witness=b.LocalCoordinatorAuthority(queue)))
                 try:
                     grant,signature=b.issue_init_grant(queue,job_id=claim['id'],claim_token=claim['claimToken'],
                         engine_id=self.engine,gate_generation=1,operation_id=str(uuid.uuid4()),body=self.body,

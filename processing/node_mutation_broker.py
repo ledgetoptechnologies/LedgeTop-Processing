@@ -1,9 +1,10 @@
 """Disabled node-local NodeODM mutation broker; no listener or live wiring.
 
 One signed coordinator epoch and one non-expiring NodeGate reservation are
-bound to an exact physical node and task. Lost responses retain started intents.
-This cooperative prototype does not fence local root, Docker administrators,
-direct backend connections, or a coordinator that retains the signing key.
+bound to an exact physical node and task. A same-process Queue authority witness
+is required; remote brokers are deliberately unsupported. Lost responses retain
+started intents. This cooperative prototype does not fence local root, Docker
+administrators, direct backend connections, or arbitrary code in this process.
 """
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import threading
 import time
 import uuid
 from types import SimpleNamespace
+from contextlib import contextmanager
 
 from .engine_ingress_guard import BackendPin, EngineIngressGuard, local_backend_identity, local_engine_identity
 from .node_gate import NodeGate, canonical_gate_path
@@ -33,6 +35,60 @@ _DDL = {
 
 
 class BrokerHeld(ValueError): pass
+
+
+class LocalCoordinatorAuthority:
+    """Exact same-process Queue owner; never a remote authority assertion."""
+    def __init__(self, queue):
+        from .prototype import Queue
+        if type(queue) is not Queue or queue._creator_pid != os.getpid() or queue._lock.closed:
+            raise BrokerHeld('local coordinator owner required')
+        self.queue=queue; self.pid=os.getpid();self.epoch=queue.startup_id;self.authority=queue.authority_id
+        info=os.fstat(queue._lock.fileno());self.lock_identity=(info.st_dev,info.st_ino)
+        self._check()
+
+    def _check(self):
+        queue=self.queue
+        if (os.getpid()!=self.pid or queue._creator_pid!=self.pid or queue._lock.closed
+                or queue.startup_id!=self.epoch or queue.authority_id!=self.authority):
+            raise BrokerHeld('local coordinator authority unavailable')
+        try:
+            held=os.fstat(queue._lock.fileno());name=(queue.path.parent/'coordinator.lock').lstat()
+            if ((held.st_dev,held.st_ino)!=self.lock_identity or (name.st_dev,name.st_ino)!=self.lock_identity
+                    or not stat.S_ISREG(name.st_mode) or name.st_nlink!=1):
+                raise BrokerHeld('local coordinator lease changed')
+        except OSError:raise BrokerHeld('local coordinator lease unavailable') from None
+
+    @contextmanager
+    def hold(self, grant, timeout):
+        from .prototype import VIEWER_PROFILE
+        if os.getpid()!=self.pid or not self.queue._lifecycle_lock.acquire(timeout=timeout):
+            raise BrokerHeld('local coordinator owner unavailable')
+        try:
+            self._check()
+            if (grant['authorityId'],grant['coordinatorEpoch'])!=(self.authority,self.epoch):
+                raise BrokerHeld('local coordinator epoch differs')
+            with self.queue._db() as db:
+                db.execute('BEGIN')
+                job=db.execute('SELECT * FROM jobs WHERE id=?',(grant['jobId'],)).fetchone()
+                tasks=db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(grant['jobId'],)).fetchall()
+                active=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
+                if (job is None or len(tasks)!=1 or job['status']!='running' or job['profile']!=VIEWER_PROFILE
+                        or len(active)!=1 or active[0]['id']!=grant['jobId']
+                        or job['worker_id']!='viewer-dispatch' or job['node_id']!=grant['nodeId']
+                        or job['environment']!=grant['environment'] or not job['claim_hash']
+                        or not self.queue._transfer_admission_clear(db)):
+                    raise BrokerHeld('local active coordinator claim required')
+                task=tasks[0];token=task['claim_token']
+                if (task['removed'] or task['stage']!='running' or task['phase']!='init_pending'
+                        or task['engine_uuid']!=grant['engineTaskId'] or task['node_id']!=grant['nodeId']
+                        or task['environment']!=grant['environment'] or type(token) is not str
+                        or not 32<=len(token)<=128 or not token.isascii()
+                        or not hmac.compare_digest(job['claim_hash'],hashlib.sha256(token.encode()).hexdigest())):
+                    raise BrokerHeld('local current task required')
+            yield
+            self._check()
+        finally:self.queue._lifecycle_lock.release()
 
 
 def _json(value):
@@ -118,16 +174,19 @@ class LoopbackNodeODM:
 
 class NodeMutationBroker:
     def __init__(self, root, *, node_id, engine_id, authority_id, coordinator_epoch,
-                 coordinator_origin, gate_generation, secret, adapter):
+                 coordinator_origin, gate_generation, secret, adapter, authority_witness):
         if QUALIFIED is not True: raise BrokerHeld('node broker is not qualified')
         if (node_id not in ('cluster','main') or not _uuid(authority_id) or not _uuid(coordinator_epoch)
                 or type(engine_id) is not str or not re.fullmatch('[A-Za-z0-9:._-]{1,255}',engine_id)
                 or type(gate_generation) is not int or gate_generation < 1
                 or type(secret) is not bytes or len(secret) < 32 or type(adapter) is not LoopbackNodeODM
-                or adapter.engine_id != engine_id): raise BrokerHeld('invalid broker binding')
+                or adapter.engine_id != engine_id or type(authority_witness) is not LocalCoordinatorAuthority
+                or (authority_witness.authority,authority_witness.epoch)!=(authority_id,coordinator_epoch)):
+            raise BrokerHeld('invalid local broker binding')
         self.root=Path(root).absolute();self.node=node_id;self.engine=engine_id;self.authority=authority_id
         self.epoch=coordinator_epoch;self.origin=coordinator_origin;self.generation=gate_generation
-        self.secret=secret;self.adapter=adapter;self._mutex=threading.Lock();self._pid=os.getpid();self._closed=False
+        self.secret=secret;self.adapter=adapter;self.witness=authority_witness
+        self._mutex=threading.Lock();self._pid=os.getpid();self._closed=False
         if (self.root != canonical_gate_path(engine_id) / 'mutation-broker'
                 or not self.root.is_dir() or self.root.is_symlink() or self.root.resolve()!=self.root
                 or self.root.stat().st_uid!=os.geteuid() or self.root.stat().st_mode&0o077):
@@ -209,7 +268,7 @@ class NodeMutationBroker:
         digest=hashlib.sha256(_json(grant)).hexdigest();identity=uuid.UUID(grant['jobId']).hex
         durable_identity=_json([grant[k] for k in ('authorityId','nodeId','engineId','coordinatorEpoch','jobId','engineTaskId','environment','gateGeneration')]).decode()
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
-        with self._mutex, NodeGate(self.engine) as gate:
+        with self._mutex, self.witness.hold(grant,10), NodeGate(self.engine) as gate:
             self._check_owner()
             state=gate.snapshot();expected={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
             if any(state[k]!=v for k,v in expected.items()):raise BrokerHeld('node ownership changed')

@@ -10,8 +10,18 @@ authority, epoch, job, engine task, environment, generation, operation and
 body digest. Its NodeGate reservation and SQLite started intent survive an
 uncertain response; exact completed replay does not repeat the mutation.
 
-The Queue check is a point-in-time observation. A signed grant is not revoked
-when the coordinator later changes state or loses authority. Caller-provided
+The broker requires a `LocalCoordinatorAuthority` for the exact same-process
+Queue, checks its creator PID, epoch, authority and lock inode, revalidates the
+current job and task under the Queue lifecycle mutex, and holds that mutex
+across the bounded init. Queue.close waits for the operation; after close an old
+signed grant is refused. Process death also terminates this same-process broker.
+This intentionally cannot operate on the remote main node: no remote witness,
+fallback or claim of cross-host revocation is provided. It assumes the trusted
+Queue implementation retains its flock until close; checking the descriptor and
+inode does not independently attest the kernel lock or prevent other SQLite
+writers, privileged peers or direct backend connections.
+
+Caller-provided
 engine identity is not yet bound to trusted coordinator configuration. No
 qualified handover, reservation reconciliation, grant issuance ledger,
 transport authentication, clock policy or cross-host epoch fencing exists.
