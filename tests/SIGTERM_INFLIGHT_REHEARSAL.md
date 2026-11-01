@@ -27,3 +27,14 @@ root `/tmp/lt-viewer-sigterm-fq5bxkgz` remains retained and the owned child
 was reaped. The entry marker precedes route and gate acquisition; this tests
 the in-flight reservation only and does not establish the admission barrier,
 uploads, downloads, reference listener, or any external writer fencing.
+
+The independently lifecycle-reviewed `test_sigterm_main_owned` also passed
+under unprivileged WSL. It invokes the real `processing.app.main()` signal
+handler and service; a test-only `ThreadingHTTPServer` subclass binds and
+reports an owned ephemeral loopback port and marks accepted handler entry.
+An in-flight synthetic prototype submission completes with 201 after SIGTERM,
+the Queue lock remains held until completion, and the committed job remains
+present on reopen. The child exited zero and was reaped; synthetic state at
+`/tmp/lt-main-sigterm-a_c_3ynn` remains retained. The marker precedes parsing
+and admission, and this covers no Viewer/reference listener, Docker shutdown,
+external fence, power loss, or deployment.
