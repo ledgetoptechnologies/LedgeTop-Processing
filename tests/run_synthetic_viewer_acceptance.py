@@ -16,7 +16,7 @@ import uuid
 
 PROCESSING = Path(__file__).resolve().parents[1]
 VIEWER = Path(r'C:\Projects\viewer-download-retention-20261031')
-VIEWER_COMMIT = '46f3471748ade908773ea6cf60bba02e2568dabf'
+VIEWER_COMMIT = '3f150734aa5f5359f004a3984d1df806113ddbf6'
 PYTHON_IMAGE = 'python:3.12-slim'
 NODE_IMAGE = 'node:24-bookworm-slim'
 LABEL = 'ledgetop.synthetic.rehearsal'
@@ -106,7 +106,7 @@ try:
         if hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(raw).digest():
             raise RuntimeError('fixture snapshot mismatch')
         print('FIXTURE_SHA256', name, hashlib.sha256(raw).hexdigest(), flush=True)
-    for name in ('nativeReferenceAcceptanceCandidate.js', 'nativeReferenceReceiptCandidate.js', 'nativeReferenceProtocolCandidate.js'):
+    for name in ('nativeReferenceAcceptanceCandidate.js', 'nativeReferenceReceiptCandidate.js', 'nativeReferenceProtocolCandidate.js', 'nativeReferenceBoundSenderCandidate.js', 'nativeReferenceProviderAuthCandidate.js'):
         path=snapshot/'apps'/'viewer'/'server'/name
         print('VIEWER_MODULE_SHA256',name,hashlib.sha256(path.read_bytes()).hexdigest(),flush=True)
     for name in ('reference_api.py','reference_http.py','reference_store.py','reference_protocol.py'):
@@ -207,6 +207,9 @@ try:
     if any(item['ExitCode']!=0 for item in current_states): raise RuntimeError('container failed')
     if ('FIRST_SEND_RETRY_HELD synthetic-only' not in sender_log
         or 'OFFLINE_RETRY_HELD synthetic-only' not in sender_log
+        or 'OFFLINE_CREDENTIAL_RELOAD_OK' not in sender_log
+        or 'AUTH_REVISION v1' not in server_log
+        or 'AUTH_REVISION v2' not in server_log
         or sender_log.count('SYNTHETIC_RESTART_EXACT_PAYLOAD_OK') != 2
         or 'VIEWER_RESTART_REPLAY_OK held=true synthetic-only' not in sender_log
         or 'ACCEPTANCE_RESULT 200 True' not in server_log

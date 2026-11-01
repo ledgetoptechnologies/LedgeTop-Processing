@@ -60,7 +60,7 @@ def main():
     if initial_rows not in (0,1): raise RuntimeError('unexpected synthetic receipt history')
     print('SERVER_START_RECEIPTS',initial_rows,flush=True)
     store = object.__new__(ReferenceStore); store.queue = Queue(uri); store.max_metadata_bytes = 1024*1024
-    api = ReferenceAPI(store, bearer_tokens={'synthetic-viewer-token':'staging'},
+    api = ReferenceAPI(store, bearer_tokens={'synthetic-viewer-token-v1':'staging','synthetic-viewer-token-v2':'staging'},
                        capability_fingerprint='a'*64, options_fingerprint='b'*64)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain('/viewer/apps/viewer/test/fixtures/readiness-tls/synthetic-only.crt',
@@ -69,6 +69,10 @@ def main():
         def __init__(self): self.count = 0; self.lock = threading.Lock()
         def handle(self, method, route, headers, body, **kwargs):
             result = api.handle(method, route, headers, body, **kwargs)
+            auth = next((value for name,value in headers.items() if name.lower() == 'authorization'), '')
+            revision = {'Bearer synthetic-viewer-token-v1':'v1',
+                        'Bearer synthetic-viewer-token-v2':'v2'}.get(auth,'unknown')
+            print('AUTH_REVISION',revision,flush=True)
             with self.lock:
                 print('ACCEPTANCE_RESULT',result.status,result.body.get('created'),flush=True)
                 self.count += 1

@@ -8,7 +8,7 @@ const sha=x=>crypto.createHash('sha256').update(x).digest('hex');
 const fixture=JSON.parse(fs.readFileSync('/processing/contracts/reference-v1.contract.json','utf8'));
 const receipts=require(path.join(viewer,'nativeReferenceReceiptCandidate'));
 const {stageAndHold}=require(path.join(viewer,'nativeReferenceConsumerCandidate'));
-const {sendHeld}=require(path.join(viewer,'nativeReferenceAcceptanceCandidate'));
+const {sendBound}=require(path.join(viewer,'nativeReferenceBoundSenderCandidate'));
 
 async function main(){
   const firstRun=!fs.existsSync(root);
@@ -47,9 +47,18 @@ async function main(){
     phase=evidence.phase;assert.ok([0,1,2].includes(phase));
     const dir='/viewer/apps/viewer/test/fixtures/readiness-tls',ca=fs.readFileSync(path.join(dir,'synthetic-only.crt'));
     const pin=sha(new crypto.X509Certificate(ca).raw);
-    const options={db,attemptId:attempt,authorizeBinding:()=>true,authorizeSend:()=>true,port:17864,
-      serverName:'viewer-test.invalid',ca,pin,token:'synthetic-viewer-token',timeoutMs:3000,maxAttempts:1,syntheticOnly:true,enabled:true};
-    console.log('STAGE send');const result=await sendHeld(options);
+    let configLoads=0, resolutions=[];
+    const options={db,attemptId:attempt,authorizeBinding:()=>true,authorizeSend:()=>true,
+      loadConfiguration:async()=>({environment:'staging',origin:'https://viewer-test.invalid:17864',
+        secretRef:'synthetic/credential',revision:phase===1?1+Math.floor(configLoads++/2):phase===0?1:2}),
+      authorizeConfiguration:()=>true,
+      resolveSecret:async(ref,revision)=>{assert.equal(ref,'synthetic/credential');resolutions.push(revision);
+        return {revision,token:revision===1?'synthetic-viewer-token-v1':'synthetic-viewer-token-v2'};},
+      ca,pin,timeoutMs:3000,maxAttempts:phase===1?2:1,syntheticOnly:true,enabled:true};
+    console.log('STAGE send');const result=await sendBound(options);
+    if(phase===1){assert.deepEqual(resolutions,[1,2]);assert.equal(configLoads,4);assert.equal(result.attempts,2);
+      console.log('OFFLINE_CREDENTIAL_RELOAD_OK');}
+    else assert.deepEqual(resolutions,[phase===0?1:2]);
     assert.equal(result.observation,phase<2?'retry_exhausted':'matching_receipt_response');
     assert.equal(result.state,'held');
     assert.equal(db.prepare('SELECT state FROM native_reference_outbox_candidate WHERE attempt_id=?').get(attempt).state,'held');
