@@ -612,7 +612,8 @@ class ReferenceStore:
             if fully:
                 db.execute("UPDATE reference_jobs SET phase='completed',updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
             return {"job": self._public(self._row(db, job_id)), "created": old is None,
-                    "fullyAccepted": fully, "acceptedObjectIds": sorted(accepted)}
+                    "fullyAccepted": fully, "acceptedObjectIds": sorted(accepted),
+                    "receiptId": checked['receiptId'], "receiptSha256": receipt_digest}
 
     def enqueue_outbox(self, kind, identity, payload):
         protocol._slug(kind, "outbox kind")
