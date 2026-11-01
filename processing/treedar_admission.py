@@ -194,10 +194,13 @@ def _header(reader, policy, size, np):
 
 
 def validate_lidar(path, *, job_id, generation, environment, object_id, expected_sha256,
-                   expected_bytes, provenance, verify_provenance, policy=None, allow_synthetic=False):
+                   expected_bytes, provenance, verify_provenance, policy=None, allow_synthetic=False,
+                   include_crs_definition=False):
     policy = AdmissionPolicy() if policy is None else policy
     if not isinstance(policy, AdmissionPolicy):
         raise ValueError('invalid admission policy')
+    if type(include_crs_definition) is not bool:
+        raise ValueError('explicit CRS definition setting required')
     protocol._slug(job_id, 'jobId'); protocol._slug(object_id, 'objectId')
     protocol._integer(generation, 'generation'); protocol._environment(environment)
     protocol._hash(expected_sha256, 'expectedSha256'); protocol._integer(expected_bytes, 'expectedBytes')
@@ -288,17 +291,22 @@ def validate_lidar(path, *, job_id, generation, environment, object_id, expected
             raise AdmissionError('input_changed_during_admission')
         authority = crs.to_authority()
         crs_label = ':'.join(authority) if authority and all(part.isascii() and part.replace('_', '').isalnum() and len(part) <= 32 for part in authority) else None
-        return dict(admissionVersion=protocol.TREEDAR_ADMISSION_VERSION, jobId=job_id,
+        wkt=crs.to_wkt()
+        if type(wkt) is not str or not 0<len(wkt.encode('utf-8'))<=65536 or '\0' in wkt:
+            raise AdmissionError('bounded_crs_definition_required')
+        result = dict(admissionVersion=protocol.TREEDAR_ADMISSION_VERSION, jobId=job_id,
             generation=generation, environment=environment, objectId=object_id,
             objectSha256=expected_sha256, byteSize=expected_bytes, sourceKind=provenance['sourceKind'],
             provenanceReceiptId=provenance['receiptId'],
             genuineAcquisition=provenance['sourceKind'] == 'lidar', pointCount=points,
             groundPointCount=ground_count, groundCoverage=coverage, crs=crs_label,
-            crsWktSha256=hashlib.sha256(crs.to_wkt().encode()).hexdigest(),
+            crsWktSha256=hashlib.sha256(wkt.encode('utf-8')).hexdigest(),
             pointCountAssurance='authenticated_source_count' if header.are_points_compressed else 'uncompressed_byte_layout_and_stream',
             verticalUnits='metre', verticalDatum=provenance['verticalDatum'],
             verticalDatumAssurance='authenticated_declaration_no_conversion',
             rasterGridCells=math.prod(_grid(bounds, policy.raster_cell_m, policy.max_grid_cells)))
+        if include_crs_definition:result['crsWkt']=wkt
+        return result
     except AdmissionError:
         raise
     except ImportError:

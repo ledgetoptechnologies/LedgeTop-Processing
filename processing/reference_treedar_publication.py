@@ -561,6 +561,27 @@ class NativeBundlePublication:
             require(exact(source,self._live(job,mutation=False)),'native_source_changed')
             return result
 
+    def preview_spatial_candidate(self,job,grant,spatial):
+        """Local evidence correlation only; never a custody or execution grant."""
+        from . import reference_treedar_spatial_candidate as s
+        require(s.QUALIFIED is True and type(spatial) is s.LocalSpatialReceipt
+            and spatial.stage is self.stage,'exact_qualified_spatial_observer_required')
+        intent=self._intent(job['jobId'])
+        observation=spatial.qualify(intent,job,grant)
+        preview=self.preview_outer_manifest(job['jobId'])
+        observation_after=spatial.qualify(intent,job,grant)
+        require(exact(observation,observation_after),'spatial_observation_changed')
+        record=observation['record'];admission=dict(record['admission'])
+        wkt=admission.pop('crsWkt',None)
+        require(exact(admission,preview['sourceEvidence']['admission']),'native_spatial_admission_changed')
+        require(type(wkt) is str and hashlib.sha256(wkt.encode('utf-8')).hexdigest()==preview['spatial']['crsWktSha256'],
+            'native_spatial_wkt_changed')
+        preview['spatial']['wkt']=wkt
+        preview['spatial']['definitionStatus']='local_revalidated_not_remote_authority'
+        preview['spatial']['localObservationSha256']=observation['proofSha256']
+        preview['format']='ltds-treedar-spatial-outer-preview-v1'
+        return preview
+
     def read_receipt(self,job):
         """Historical SQL-only read; no authority, Docker or file verification."""
         row=self._copy(job)

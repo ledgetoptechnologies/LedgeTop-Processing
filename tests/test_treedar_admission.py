@@ -145,6 +145,17 @@ class TreeDarAdmissionTests(unittest.TestCase):
                 self.assertEqual(report['pointCountAssurance'], 'authenticated_source_count' if compressed else 'uncompressed_byte_layout_and_stream')
                 self.assertEqual(before, self.path.read_bytes())
 
+    def test_full_crs_definition_is_opt_in_and_hash_bound(self):
+        ordinary=self.validate()
+        detailed=self.validate(include_crs_definition=True)
+        self.assertNotIn('crsWkt',ordinary)
+        self.assertEqual(detailed['sourceKind'],'synthetic_lidar')
+        self.assertFalse(detailed['genuineAcquisition'])
+        self.assertEqual(hashlib.sha256(detailed['crsWkt'].encode('utf-8')).hexdigest(),detailed['crsWktSha256'])
+        self.assertEqual(self.CRS.from_wkt(detailed['crsWkt']).to_authority(),('EPSG','32616'))
+        self.assertEqual({key:value for key,value in detailed.items() if key!='crsWkt'},ordinary)
+        with self.assertRaises(ValueError):self.validate(include_crs_definition=1)
+
     def test_provenance_missing_untrusted_unknown_and_photogrammetry_rejected(self):
         for change, code in (({'provenance': None}, 'invalid_provenance'),
                              ({'verify_provenance': None}, 'trusted_provenance_verifier_required'),

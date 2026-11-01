@@ -93,7 +93,7 @@ class PublicationTests(unittest.TestCase):
             path=run/name;path.write_bytes(base64.b64decode(body));path.chmod(0o600);relative='run/'+name
             objects.append(dict(id='treedar-'+hashlib.sha256(relative.encode()).hexdigest()[:32],role=m.b.NATIVE_FILES[name][0],byteSize=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),relativePath=relative))
         parent=f.intent['parentBinding'];obj=f.intent['stage']['inputObjects'][0]
-        admission=dict(admissionVersion=p.TREEDAR_ADMISSION_VERSION,jobId=parent['jobId'],generation=1,environment='staging',objectId=obj['id'],objectSha256=obj['sha256'],byteSize=obj['byteSize'],sourceKind='lidar',provenanceReceiptId='original-source',genuineAcquisition=True,pointCount=10,groundPointCount=5,groundCoverage=1.0,crs='EPSG:32616',crsWktSha256='a'*64,pointCountAssurance='uncompressed_byte_layout_and_stream',verticalUnits='metre',verticalDatum='navd88',verticalDatumAssurance='authenticated_declaration_no_conversion',rasterGridCells=10)
+        admission=dict(admissionVersion=p.TREEDAR_ADMISSION_VERSION,jobId=parent['jobId'],generation=1,environment='staging',objectId=obj['id'],objectSha256=obj['sha256'],byteSize=obj['byteSize'],sourceKind='lidar',provenanceReceiptId='original-source',genuineAcquisition=True,pointCount=10,groundPointCount=5,groundCoverage=1.0,crs='EPSG:32616',crsWktSha256=hashlib.sha256(b'synthetic-wkt').hexdigest(),pointCountAssurance='uncompressed_byte_layout_and_stream',verticalUnits='metre',verticalDatum='navd88',verticalDatumAssurance='authenticated_declaration_no_conversion',rasterGridCells=10)
         proof=dict(schemaVersion=1,job={k:parent[k] for k in ('jobId','generation','environment','manifestSha256','pipelineDigest')},engineVersion='0.0.1',admission=admission,objects=sorted(objects,key=lambda v:v['relativePath']))
         (self.output/'proof.json').write_bytes(p.canonical_json(proof));(self.output/'proof.json').chmod(0o600)
         f.stage.tick(h.claim['jobId']);self.originals={str(x):x.read_bytes() for x in self.output.rglob('*') if x.is_file()}
@@ -115,6 +115,57 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.host.reservation()['state'],'engine_started')
         with NodeGate(self.host.policy.engine_id) as gate:self.assertIsNone(gate.snapshot()['reservation']['completionDigest'])
         with self.assertRaises(Exception):self.host.journal.final_result(self.job)
+
+    def test_spatial_receipt_requires_fresh_exact_issuer_and_retains_parent(self):
+        import io,time
+        from processing import reference_treedar_spatial_candidate as spatial
+        from processing.reference_transfer import BrokerClient, TransferObject, ValidatedGrant
+        from processing.reference_provenance import LidarProvenanceClient, ProvenanceUnavailable
+        h=self.host;stage=self.fixture.stage;job=h.store.get(self.job,private=True)
+        objects=tuple(TransferObject(item['id'],item['byteSize'],item['sha256']) for item in job['submission']['manifest']['objects'])
+        grant=ValidatedGrant(self.job,'parent-reservation',1,'staging',time.time()+120,objects,'synthetic-private-token')
+        wrapper=dict(schemaVersion=1,inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],provenance=self.fixture.receipt)
+        broker=BrokerClient('https://synthetic.invalid',ssl_context=ssl.create_default_context())
+        class Reply(io.BytesIO):
+            status=200
+            def __init__(self,raw,url):super().__init__(raw);self.url=url;self.headers={'Content-Type':'application/json','Content-Length':str(len(raw))}
+            def geturl(self):return self.url
+        calls=[];revoked=[False]
+        def opener(request,*,timeout):
+            calls.append(request.full_url)
+            if revoked[0]:
+                from urllib.error import HTTPError
+                raise HTTPError(request.full_url,403,'synthetic revoked',{},io.BytesIO())
+            return Reply(p.canonical_json(wrapper),request.full_url)
+        broker._open=opener
+        issuer=LidarProvenanceClient(broker,state_path=h.root/'spatial-issuer.sqlite',policy=stage.policy.admission)
+        stage.journal.verify_provenance=issuer.verify
+        wkt='synthetic-test-wkt-not-a-real-crs'
+        admission=dict(sourceKind='lidar',genuineAcquisition=True,crs='EPSG:32616',crsWkt=wkt,crsWktSha256=hashlib.sha256(wkt.encode()).hexdigest())
+        # The LAS and issuer are synthetic and the scientific validator is mocked;
+        # this test checks orchestration, exact re-reads and retention only.
+        before=self.fixture.actions()[:]
+        with patch.object(spatial,'QUALIFIED',True),patch.object(spatial,'validate_lidar',return_value=admission):
+            receipt=spatial.LocalSpatialReceipt(h.root/'spatial.sqlite',stage=stage,issuer=issuer,enabled=True)
+            value=receipt.qualify(self.fixture.intent,job,grant)
+            self.assertEqual(value['transport'],'held');self.assertFalse(value['parentSettled'])
+            self.assertEqual(value['record']['admission']['crsWkt'],wkt)
+            self.assertEqual(len(calls),2);self.assertEqual(receipt.qualify(self.fixture.intent,job,grant),value)
+            self.assertEqual(len(calls),4)
+            self.assertEqual(self.fixture.actions(),before);self.assert_retained()
+            with patch.object(spatial,'validate_lidar',return_value=dict(admission,crsWkt='changed')):
+                with self.assertRaises(spatial.SpatialHeld):receipt.qualify(self.fixture.intent,job,grant)
+            source=h.ledger.root/self.fixture.inputs.resolve(self.fixture.intent)['original-lidar']
+            source.write_bytes(b'abd')
+            try:
+                with self.assertRaises(Exception):receipt.qualify(self.fixture.intent,job,grant)
+            finally:source.write_bytes(b'abc')
+            def revoke_during_validation(*args,**kwargs):revoked[0]=True;return admission
+            with patch.object(spatial,'validate_lidar',side_effect=revoke_during_validation):
+                with self.assertRaises(ProvenanceUnavailable):receipt.qualify(self.fixture.intent,job,grant)
+            self.assertFalse(issuer.verify(self.fixture.receipt))
+            issuer.broker._open=lambda *args,**kwargs:None
+            with self.assertRaises(spatial.SpatialHeld):receipt.qualify(self.fixture.intent,job,grant)
 
     def test_actual_guard_full_publication_preserves_parent_and_native_sources(self):
         result=self.begin();self.assertEqual(result['phase'],'published');self.assertFalse(result['parentSettled']);self.assertEqual(result['receipt']['state'],'local_native_bundle_published')
@@ -161,6 +212,29 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(Exception):self.publication.preview_outer_manifest(self.job)
         self.assertEqual(self.fixture.actions(),['create','start'])
         self.assertEqual(self.host.reservation()['state'],'engine_started')
+
+    def test_spatial_preview_binds_native_archive_and_rejects_observation_drift(self):
+        from processing import reference_treedar_spatial_candidate as spatial
+        self.begin();job=self.host.store.get(self.job,private=True)
+        native=self.publication.preview_outer_manifest(self.job)
+        admission=dict(native['sourceEvidence']['admission'],crsWkt='synthetic-wkt')
+        observation=dict(record=dict(admission=admission),proofSha256='b'*64,transport='held',parentSettled=False)
+        observer=object.__new__(spatial.LocalSpatialReceipt);observer.stage=self.fixture.stage
+        with patch.object(spatial,'QUALIFIED',True),patch.object(spatial.LocalSpatialReceipt,'qualify',return_value=observation):
+            preview=self.publication.preview_spatial_candidate(job,object(),observer)
+            self.assertEqual(preview['archive'],native['archive'])
+            self.assertEqual(preview['inner'],native['inner'])
+            self.assertEqual(preview['spatial']['wkt'],'synthetic-wkt')
+            self.assertEqual(preview['state'],'preview_not_custody')
+            self.assertEqual(preview['transportRole'],'unassigned')
+            self.assert_retained()
+            for key,value in (('groundPointCount',4),('crs','EPSG:32615'),('verticalDatum','other')):
+                altered=copy.deepcopy(observation);altered['record']['admission'][key]=value
+                with patch.object(spatial.LocalSpatialReceipt,'qualify',return_value=altered):
+                    with self.assertRaises(m.PublicationHeld):self.publication.preview_spatial_candidate(job,object(),observer)
+            changed=copy.deepcopy(observation);changed['proofSha256']='c'*64
+            with patch.object(spatial.LocalSpatialReceipt,'qualify',side_effect=[observation,changed]):
+                with self.assertRaises(m.PublicationHeld):self.publication.preview_spatial_candidate(job,object(),observer)
 
     def test_readback_is_sql_only_and_not_fresh_authorization(self):
         self.begin();before=self.publication.path.read_bytes()
