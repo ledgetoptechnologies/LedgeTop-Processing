@@ -8,9 +8,9 @@ administrators, direct backend connections, or arbitrary code in this process.
 
 Recovery prerequisite limitations: creation interrupted between journal and
 manifest leaves a manual, fail-closed recovery case; there is no migration of
-older journals. Inspection uses pathname-based SQLite and gate state reads,
-which do not pin all parent/file paths against replacement or ABA. SQLite
-read-only WAL access may create shared-memory files. Do not use this snapshot
+older journals. Inspection pins opened node files and rejects SQLite sidecars and WAL;
+it does not establish that a replaced ancestor path is still current or
+prevent arbitrary direct writers from changing files. Do not use this snapshot
 as a no-follow guarantee, admission barrier, or deployable recovery protocol.
 """
 import hashlib
@@ -222,7 +222,7 @@ def inspect_prior_node_state(engine_id):
     if os.name == 'nt':raise BrokerHeld('local inspection requires POSIX locking')
     import fcntl
     root=canonical_gate_path(engine_id); state_root=root/'mutation-broker'
-    lockfd=None; manifestfd=None; db=None
+    rootfd=None; statefd=None; lockfd=None; manifestfd=None; journalfd=None; gatefd=None; db=None
     try:
         rootstat=root.lstat(); brokerstat=state_root.lstat()
         if (not stat.S_ISDIR(rootstat.st_mode) or not stat.S_ISDIR(brokerstat.st_mode)
@@ -230,12 +230,16 @@ def inspect_prior_node_state(engine_id):
                 or rootstat.st_uid!=os.geteuid() or brokerstat.st_uid!=os.geteuid()
                 or rootstat.st_mode&0o077 or brokerstat.st_mode&0o077):
             raise BrokerHeld('node state requires inspection')
-        lockfd=os.open(root/'gate.lock',os.O_RDWR|os.O_NOFOLLOW)
+        rootfd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        if (os.fstat(rootfd).st_dev,os.fstat(rootfd).st_ino)!=(rootstat.st_dev,rootstat.st_ino):raise BrokerHeld('node root changed')
+        statefd=os.open('mutation-broker',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=rootfd)
+        if (os.fstat(statefd).st_dev,os.fstat(statefd).st_ino)!=(brokerstat.st_dev,brokerstat.st_ino):raise BrokerHeld('node state changed')
+        lockfd=os.open('gate.lock',os.O_RDWR|os.O_NOFOLLOW,dir_fd=rootfd)
         lock=os.fstat(lockfd)
         if not stat.S_ISREG(lock.st_mode) or lock.st_uid!=os.geteuid() or lock.st_mode&0o077 or lock.st_nlink!=1:
             raise BrokerHeld('node lock requires inspection')
         fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        manifestfd=os.open(state_root/'identity.json',os.O_RDONLY|os.O_NOFOLLOW)
+        manifestfd=os.open('identity.json',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=statefd)
         info=os.fstat(manifestfd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_size>8192:
             raise BrokerHeld('node identity requires inspection')
@@ -248,19 +252,36 @@ def inspect_prior_node_state(engine_id):
                 or manifest['gateRoot']!=[rootstat.st_dev,rootstat.st_ino]
                 or manifest['gateLock']!=[lock.st_dev,lock.st_ino]):
             raise BrokerHeld('node identity changed')
-        journal=state_root/'node-broker.sqlite3';js=journal.lstat()
+        # No recovery journals or WAL are interpreted from a pathname. Even a
+        # stale sidecar makes this snapshot unknown and requires inspection.
+        for suffix in ('-journal','-wal','-shm'):
+            try:os.stat('node-broker.sqlite3'+suffix,dir_fd=statefd,follow_symlinks=False)
+            except FileNotFoundError:continue
+            raise BrokerHeld('node journal sidecar requires inspection')
+        journalfd=os.open('node-broker.sqlite3',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=statefd)
+        js=os.fstat(journalfd)
         if (not stat.S_ISREG(js.st_mode) or js.st_nlink!=1 or js.st_uid!=os.geteuid() or js.st_mode&0o077
-                or manifest['journal']!=[js.st_dev,js.st_ino]):raise BrokerHeld('node journal changed')
-        gate=NodeGate(engine_id)
-        # The existing lock is already held. Do not call NodeGate.__enter__,
-        # which creates files and adjusts permissions.
-        gate._stream=os.fdopen(os.dup(lockfd),'rb')
-        try:state=gate.snapshot()
-        finally:gate._stream.close();gate._stream=None
+                or not 100<=js.st_size<=16*1024*1024 or manifest['journal']!=[js.st_dev,js.st_ino]):
+            raise BrokerHeld('node journal changed')
+        gatefd=os.open('gate.json',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=rootfd)
+        gs=os.fstat(gatefd)
+        if not stat.S_ISREG(gs.st_mode) or gs.st_nlink!=1 or gs.st_uid!=os.geteuid() or gs.st_mode&0o077 or gs.st_size>16384:
+            raise BrokerHeld('node gate state changed')
+        state=NodeGate(engine_id)._decode(os.read(gatefd,16385))
         for key in ('nodeId','engineId','authorityId','coordinatorOrigin','generation'):
             if state.get(key)!=manifest[key]:raise BrokerHeld('node gate identity changed')
-        db=sqlite3.connect(journal.as_uri()+'?mode=ro',uri=True,timeout=2,isolation_level=None)
-        db.row_factory=sqlite3.Row;db.execute('BEGIN')
+        chunks=[];remaining=js.st_size
+        while remaining:
+            chunk=os.read(journalfd,min(remaining,65536))
+            if not chunk:raise BrokerHeld('node journal changed')
+            chunks.append(chunk);remaining-=len(chunk)
+        data=b''.join(chunks)
+        if data[:16]!=b'SQLite format 3\x00' or data[18:20]!=b'\x01\x01':
+            raise BrokerHeld('node journal mode requires inspection')
+        # Deserialize the pinned bytes in memory. SQLite never opens the node
+        # journal path or creates a rollback, WAL, or shared-memory file.
+        db=sqlite3.connect(':memory:',isolation_level=None)
+        db.deserialize(data);db.execute('PRAGMA query_only=ON');db.row_factory=sqlite3.Row
         for name,ddl in _DDL.items():
             row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
             if row is None or row['sql']!=ddl:raise BrokerHeld('node journal schema changed')
@@ -272,8 +293,8 @@ def inspect_prior_node_state(engine_id):
         operations=[dict(row) for row in db.execute('SELECT id,operation,state FROM operations ORDER BY id')]
         if any(row['state'] not in ('started','complete') or row['operation'] not in ('init','commit') for row in operations):
             raise BrokerHeld('node operation state unknown')
-        after=journal.lstat()
-        if (after.st_dev,after.st_ino)!=(js.st_dev,js.st_ino):raise BrokerHeld('node journal changed')
+        after=os.fstat(journalfd)
+        if (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)!=(js.st_dev,js.st_ino,js.st_size,js.st_mtime_ns):raise BrokerHeld('node journal changed')
         return {'identity':manifest,'gateReservation':state['reservation'],
                 'journalReservation':json.loads(reservation['identity']) if reservation else None,
                 'operations':operations,'authorizesAdmission':False}
@@ -282,8 +303,8 @@ def inspect_prior_node_state(engine_id):
         raise BrokerHeld('node state unavailable') from None
     finally:
         if db is not None:db.close()
-        if manifestfd is not None:os.close(manifestfd)
-        if lockfd is not None:os.close(lockfd)
+        for fd in (gatefd,journalfd,manifestfd,lockfd,statefd,rootfd):
+            if fd is not None:os.close(fd)
 
 
 class NodeMutationBroker:

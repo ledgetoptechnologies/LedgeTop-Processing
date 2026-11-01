@@ -105,6 +105,26 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     operationId=str(uuid.uuid4()),operation=operation,bodySha256=hashlib.sha256(body).hexdigest(),
                     contentType='application/octet-stream')
 
+    def test_prior_inspection_refuses_sidecar_without_mutation(self):
+        self.broker.close()
+        state=self.root/'gate'/'mutation-broker'
+        sidecar=state/'node-broker.sqlite3-wal'
+        sidecar.write_bytes(b'synthetic unresolved WAL')
+        before={p.name:(p.stat().st_size,p.stat().st_mtime_ns) for p in state.iterdir()}
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine)
+        after={p.name:(p.stat().st_size,p.stat().st_mtime_ns) for p in state.iterdir()}
+        self.assertEqual(before,after)
+
+    def test_prior_inspection_refuses_replaced_journal_symlink(self):
+        self.broker.close()
+        state=self.root/'gate'/'mutation-broker'
+        journal=state/'node-broker.sqlite3'
+        original=state/'retained-original.sqlite3'
+        journal.rename(original)
+        journal.symlink_to(original)
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine)
+        self.assertTrue(original.exists())
+
     def test_reopen_missing_binding_preserves_existing_journal(self):
         self.broker.db.execute('DELETE FROM binding')
         self.broker.close()

@@ -162,7 +162,13 @@ class NodeGate:
         try:
             if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
                 raise ValueError()
-            state = json.loads(path.read_bytes())
+            return self._decode(path.read_bytes())
+        except Exception:
+            raise GateError('node gate state requires operator inspection') from None
+
+    def _decode(self, raw):
+        try:
+            state = json.loads(raw)
             if (not isinstance(state, dict) or state.get('schema') != 1
                     or state.get('engineId') != self.engine_id
                     or type(state.get('generation')) is not int or state['generation'] < 1
