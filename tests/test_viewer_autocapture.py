@@ -652,6 +652,116 @@ finally:s.close();q.authority_lease.close();q.close()
             self.assertEqual(stream.read(), self.engine_response)
         self.assertEqual(Path(task['archive_path']).read_bytes(), self.engine_response)
 
+    def test_durable_claim_restores_recorded_archive_and_releases_claim(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        path = Path(task['archive_path'])
+        path.unlink()
+        with self.service.download(self.identifier)[0] as stream:
+            self.assertEqual(stream.read(), self.engine_response)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_archive_claims_v1').fetchone()[0], 0)
+        self.assertEqual(path.read_bytes(), self.engine_response)
+
+    def test_durable_claim_restore_commit_failure_preserves_result_and_blocks_restart(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        path = Path(task['archive_path'])
+        receipt = path.with_suffix('.zip.receipt')
+        receipt_before = receipt.read_bytes()
+        path.unlink()
+        with patch.object(self.service.store, 'finish_archive_restore', side_effect=OSError('synthetic commit failure')):
+            with self.assertRaises(OSError):
+                self.service.download(self.identifier)
+        self.assertEqual(path.read_bytes(), self.engine_response)
+        self.assertEqual(receipt.read_bytes(), receipt_before)
+        other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
+        self.fixture.config.viewer_durable_archive_claims = True
+        restarted = ViewerService(self.queue, self.fixture.config, store=other)
+        with self.assertRaises(ArchiveClaimHeld):
+            restarted.download(self.identifier)
+        self.assertEqual(path.read_bytes(), self.engine_response)
+        self.assertEqual(receipt.read_bytes(), receipt_before)
+
+    def test_durable_claim_restore_mismatched_result_remains_held(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        path = Path(task['archive_path'])
+        receipt = path.with_suffix('.zip.receipt')
+        receipt_before = receipt.read_bytes()
+        path.unlink()
+        self.service.engines['cluster'].archive = b'synthetic mismatched archive'
+        with self.assertRaises(Conflict):
+            self.service.download(self.identifier)
+        self.assertFalse(path.exists())
+        self.assertEqual(receipt.read_bytes(), receipt_before)
+        self.assertTrue(self.service.store.archive_claim_held(task))
+
+    def test_durable_claim_restore_blocks_other_service_until_commit(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        path = Path(task['archive_path'])
+        path.unlink()
+        other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
+        self.fixture.config.viewer_durable_archive_claims = True
+        competing = ViewerService(self.queue, self.fixture.config, store=other)
+        entered, release = threading.Event(), threading.Event()
+        outcome = []
+        original = self.service.store.finish_archive_restore
+        def pause(*args):
+            entered.set()
+            if not release.wait(5): raise RuntimeError('test timed out')
+            return original(*args)
+        def work():
+            try:
+                with self.service.download(self.identifier)[0] as stream: outcome.append(stream.read())
+            except Exception as exc: outcome.append(exc)
+        with patch.object(self.service.store, 'finish_archive_restore', side_effect=pause):
+            worker = threading.Thread(target=work)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaises(ArchiveClaimHeld): competing.download(self.identifier)
+                self.assertEqual(competing.info(self.identifier)['ledgetopArchive'],
+                                 {'state': 'claimed', 'reason': 'capture_active_or_unresolved'})
+            finally:
+                release.set(); worker.join(5)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(outcome, [self.engine_response])
+        with competing.download(self.identifier)[0] as stream:
+            self.assertEqual(stream.read(), self.engine_response)
+
+    def test_durable_restore_does_not_release_claim_after_competing_inspection(self):
+        self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
+        self.service._durable_archive_claims = True
+        self.service._archive_once(self.identifier)
+        task = self.fixture.task(self.identifier)
+        path = Path(task['archive_path'])
+        path.unlink()
+        other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
+        original = self.service.store.finish_archive_restore
+        def inspect_then_finish(*args):
+            other.update(self.identifier, archive_state='inspection', archive_reason='partial_requires_inspection')
+            return original(*args)
+        with patch.object(self.service.store, 'finish_archive_restore', side_effect=inspect_then_finish):
+            with self.assertRaises(Conflict): self.service.download(self.identifier)
+        self.assertEqual(path.read_bytes(), self.engine_response)
+        self.assertTrue(other.archive_claim_held(task))
+        self.assertEqual(other.task(self.identifier)['archive_state'], 'inspection')
+
     def test_durable_claim_recreated_store_refuses_second_writer(self):
         self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
@@ -704,7 +814,7 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(other.next_unarchived_success()[1], next_id)
         self.assertEqual(other.next_unarchived_success(2**62)[1], next_id)
         status = competing.info(self.identifier)['ledgetopArchive']
-        self.assertEqual(status, {'state': 'inspection', 'reason': 'capture_claim_held'})
+        self.assertEqual(status, {'state': 'claimed', 'reason': 'capture_active_or_unresolved'})
         self.assertNotIn(token, repr(status))
         other.claim_archive(other.task(next_id))
         self.assertIsNone(other.next_unarchived_success())

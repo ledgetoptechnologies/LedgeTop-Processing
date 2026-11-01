@@ -713,7 +713,9 @@ class TaskStore:
             return bool(db.execute('SELECT 1 FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
                                    (task['uuid'], task['generation'])).fetchone())
 
-    def claim_archive(self, task):
+    def claim_archive(self, task, *, restore=False):
+        if type(restore) is not bool:
+            raise ValueError('explicit archive claim type required')
         token = uuid_module.uuid4().hex + uuid_module.uuid4().hex
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -721,7 +723,8 @@ class TaskStore:
             job = self._job(db, row)
             if (row['generation'] != task['generation'] or row['job_id'] != task['job_id']
                     or any(row[k] != task[k] for k in ('engine_uuid', 'node_id', 'environment'))
-                    or row['archive_path'] is not None or row['removed']
+                    or (row['archive_path'] != task['archive_path'] if restore else row['archive_path'] is not None)
+                    or (restore and not task['archive_path']) or row['removed']
                     or ('archive_state' in row.keys() and row['archive_state'] != 'pending')
                     or job is None or job['status'] != 'succeeded'):
                 raise Conflict('archive task changed')
@@ -731,6 +734,29 @@ class TaskStore:
             except sqlite3.IntegrityError:
                 raise ArchiveClaimHeld('archive requires inspection') from None
         return token
+
+    def finish_archive_restore(self, task, token, stream):
+        """Release a restore claim only after its verified output is published."""
+        path = Path(task['archive_path'])
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, task['uuid'])
+            if (row['removed'] or row['archive_state'] != 'pending'
+                    or any(row[k] != task[k] for k in ('generation', 'job_id', 'engine_uuid', 'node_id', 'environment', 'archive_path'))
+                    or self._directory(row) != Path(task['directory'])):
+                raise Conflict('archive restore identity changed')
+            job = self._job(db, row)
+            claim = db.execute('SELECT token_hash,job_id FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
+                               (task['uuid'], row['generation'])).fetchone()
+            if (job is None or job['status'] != 'succeeded' or claim is None or claim['job_id'] != row['job_id']
+                    or not hmac.compare_digest(claim['token_hash'], hashlib.sha256(token.encode()).hexdigest())):
+                raise Conflict('archive restore claim changed')
+            opened, current = os.fstat(stream.fileno()), path.lstat()
+            if (path.is_symlink() or not stat.S_ISREG(current.st_mode)
+                    or (opened.st_dev, opened.st_ino, opened.st_size) != (current.st_dev, current.st_ino, current.st_size)):
+                raise Conflict('archive restore output changed')
+            db.execute('DELETE FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
+                       (task['uuid'], row['generation']))
 
     def set_archive_status(self, identifier, generation, job_id, state, reason):
         if state not in ('pending', 'inspection') or reason not in ('capture_failed', 'partial_requires_inspection'):

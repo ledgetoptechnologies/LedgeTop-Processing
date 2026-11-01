@@ -542,7 +542,7 @@ class ViewerService:
         if info['status']['code'] == 40:
             task = self.store.task(identifier)
             if self._durable_archive_claims and self.store.archive_claim_held(task):
-                archive = {'state': 'inspection', 'reason': 'capture_claim_held'}
+                archive = {'state': 'claimed', 'reason': 'capture_active_or_unresolved'}
             elif task['archive_path']:
                 archive = {'state': 'recorded', 'reason': None}
             elif not getattr(self.config, 'viewer_archive_autocapture', False):
@@ -813,6 +813,8 @@ class ViewerService:
             task = self.store.task(identifier)
             if self._archive_inspection_held(task):
                 raise ArchiveInspectionHeld('archive requires inspection')
+            if self._durable_archive_claims and self.store.archive_claim_held(task):
+                raise ArchiveClaimHeld('archive requires inspection')
             claim = self.store.claim_archive(task) if self._durable_archive_claims and not task['archive_path'] else None
             if self._archive_registry:
                 lease=getattr(self.queue,'authority_lease',None)
@@ -925,7 +927,20 @@ class ViewerService:
                 receipt = self._archive_receipt(task, receipt_path)
                 try: path.lstat()
                 except FileNotFoundError:
-                    return self._restore_recorded_archive(task,path,receipt)
+                    if not self._durable_archive_claims:
+                        return self._restore_recorded_archive(task,path,receipt)
+                    restore_claim = self.store.claim_archive(task, restore=True)
+                    stream = None
+                    try:
+                        stream, size = self._restore_recorded_archive(task,path,receipt)
+                        stream.close()
+                        stream = self._verify_archive(path, receipt)
+                        self.store.finish_archive_restore(task, restore_claim, stream)
+                        result = stream; stream = None
+                        return result, size
+                    finally:
+                        if stream is not None:
+                            stream.close()
                 return self._verify_archive(path, receipt), receipt['bytes']
             if self._archive_registry:
                 raise Conflict('archive receipt requires inspection')
