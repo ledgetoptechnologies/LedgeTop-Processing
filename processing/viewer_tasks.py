@@ -251,7 +251,7 @@ class TaskStore:
             if db.execute("""SELECT 1 FROM viewer_intake_journal_v1 j
                 LEFT JOIN viewer_files f ON f.uuid=j.uuid AND f.name_key=j.name_key
                 WHERE j.uuid=? AND j.generation=? AND j.state='committed'
-                  AND (f.uuid IS NULL OR f.path!=j.final OR f.bytes!=j.bytes OR f.sha256!=j.sha256)
+                  AND (f.uuid IS NULL OR typeof(j.final)!='text' OR typeof(j.bytes)!='integer' OR typeof(j.sha256)!='text' OR typeof(f.path)!='text' OR typeof(f.bytes)!='integer' OR typeof(f.sha256)!='text' OR f.path IS NOT j.final OR f.bytes IS NOT j.bytes OR f.sha256 IS NOT j.sha256)
                 LIMIT 1""",(row['uuid'],row['generation'])).fetchone():
                 raise InputRecoveryRequired('committed intake metadata differs')
         directory = self._directory(row)
@@ -483,6 +483,32 @@ class TaskStore:
                 if existing is None and count >= 100000:
                     raise ValueError('task file count ceiling exceeded')
             if self.intake_journal and existing is not None:
+                # Never accept a replay solely from stale metadata. Without an
+                # exclusive writer fence this validation still cannot establish
+                # continuous file identity, so this remains disabled.
+                path=existing['path']
+                if not isinstance(path,str) or not re.fullmatch(r'input-[0-9a-f]{32}',path):
+                    raise InputRecoveryRequired('input path needs inspection')
+                try:
+                    fd=os.open(directory/path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_NONBLOCK',0))
+                    try:
+                        before=os.fstat(fd)
+                        if not stat.S_ISREG(before.st_mode) or before.st_size!=existing['bytes']:
+                            raise InputRecoveryRequired('stored input needs inspection')
+                        saved_hash=hashlib.sha256()
+                        while True:
+                            chunk=os.read(fd,1024*1024)
+                            if not chunk:break
+                            saved_hash.update(chunk)
+                        after=os.fstat(fd); current=(directory/path).lstat()
+                        if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=
+                            (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+                            or (after.st_dev,after.st_ino)!=(current.st_dev,current.st_ino)
+                            or saved_hash.hexdigest()!=existing['sha256']):
+                            raise InputRecoveryRequired('stored input changed')
+                    finally:os.close(fd)
+                except OSError:
+                    raise InputRecoveryRequired('stored input unavailable') from None
                 if existing['bytes'] != length:
                     raise Conflict('input basename already contains different bytes')
                 digest=hashlib.sha256(); remaining=length
@@ -561,7 +587,12 @@ class TaskStore:
                                        (identifier,)).fetchone()[0]
                     if total + length > self.max_input_bytes:
                         raise InputLimitExceeded('task input ceiling exceeded')
-                    os.replace(temporary, final)
+                    if journal_operation:
+                        # Hard link refuses an existing final path. The two names
+                        # identify the same bytes until the DB commit completes.
+                        os.link(temporary,final,follow_symlinks=False)
+                    else:
+                        os.replace(temporary, final)
                     sync_directory(directory)
                     db.execute('''INSERT INTO viewer_files
                         (uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)''',
@@ -570,6 +601,12 @@ class TaskStore:
                     db.execute('UPDATE viewer_tasks SET updated_at=CURRENT_TIMESTAMP WHERE uuid=?', (identifier,))
                     if journal_operation and db.execute("UPDATE viewer_intake_journal_v1 SET state='committed' WHERE operation=? AND state='sealed' AND sha256=?",(journal_operation,value)).rowcount!=1:
                         raise InputRecoveryRequired('input intent changed')
+                if journal_operation:
+                    left=temporary.lstat();right=final.lstat()
+                    if (left.st_dev,left.st_ino)!=(right.st_dev,right.st_ino):
+                        raise InputRecoveryRequired('input publication changed')
+                    temporary.unlink()
+                    sync_directory(directory)
                 return {'success': True, 'uuid': identifier}
             finally:
                 # Only this invocation's randomly named, explicitly owned tmp file.

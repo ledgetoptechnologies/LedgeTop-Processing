@@ -123,6 +123,39 @@ class ViewerInputSpaceTests(unittest.TestCase):
         retry=self.request(body);self.assertTrue(self.facade.handle(retry));self.assertEqual(retry.status,200)
         self.assertEqual(len(store.task(self.identifier)['files']),1)
 
+    def test_committed_null_digest_holds_after_reopen(self):
+        from processing import viewer_tasks
+        store=self.journal_store();self.facade.service.store=store
+        req=self.request(multipart([('images','a.jpg',b'first')]))
+        self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
+        with self.q._db() as db:db.execute("UPDATE viewer_intake_journal_v1 SET sha256=NULL")
+        with patch.object(viewer_tasks,'INTAKE_JOURNAL_QUALIFIED',True):
+            restarted=TaskStore(self.q,self.root/'queue'/'viewer-tasks',input_free_floor=0,intake_journal=True)
+        with self.assertRaises(InputRecoveryRequired):restarted.commit(self.identifier)
+
+    def test_final_collision_preserves_both_files_and_holds(self):
+        store=self.journal_store();self.facade.service.store=store
+        real_link=os.link; collision=[]
+        def collide(source,dest,**kwargs):
+            Path(dest).write_bytes(b'existing');collision.append(Path(dest))
+            return real_link(source,dest,**kwargs)
+        req=self.request(multipart([('images','a.jpg',b'new-data')]))
+        with patch('processing.viewer_tasks.os.link',side_effect=collide):
+            self.assertTrue(self.facade.handle(req))
+        self.assertEqual(req.status,503);self.assertEqual(collision[0].read_bytes(),b'existing')
+        incoming=list(self.root.rglob('.incoming-*'));self.assertEqual(len(incoming),1)
+        self.assertEqual(incoming[0].read_bytes(),b'new-data')
+        with self.assertRaises(InputRecoveryRequired):store.commit(self.identifier)
+
+    def test_retry_holds_changed_stored_file_even_same_length(self):
+        store=self.journal_store();self.facade.service.store=store
+        body=multipart([('images','a.jpg',b'first')]);req=self.request(body)
+        self.assertTrue(self.facade.handle(req));self.assertEqual(req.status,200)
+        Path(store.task(self.identifier)['files'][0]['path']).write_bytes(b'wrong')
+        retry=self.request(body);self.assertTrue(self.facade.handle(retry))
+        self.assertEqual(retry.status,503)
+        self.assertEqual(json.loads(retry.wfile.getvalue())['error'],'input_recovery_required')
+
     def test_opt_in_journal_rename_failure_holds_after_reopen(self):
         from processing import viewer_tasks
         store=self.journal_store();self.facade.service.store=store
