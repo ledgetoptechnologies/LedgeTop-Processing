@@ -391,18 +391,18 @@ class TaskStore:
                                            for key in ('uuid','name_key','name','path','bytes','sha256','is_photo')):
                         raise InputRecoveryRequired('historical input snapshot differs')
                 if found_rows!=len(recorded):raise InputRecoveryRequired('historical input snapshot missing')
-                expected={item['path'] for item in files}
-                if len(expected)!=len(files):raise InputRecoveryRequired('historical input paths differ')
-                observed=set()
-                with os.scandir(folder) as entries:
-                    for n,child in enumerate(entries,1):
-                        if n>INTAKE_CENSUS_MAX_ENTRIES or time.monotonic()>deadline:
-                            raise InputRecoveryRequired('historical intake census exceeds bound')
-                        if child.name.startswith('.incoming-'):raise InputRecoveryRequired('historical incoming file needs inspection')
-                        if child.name.startswith('input-'):
-                            if not child.is_file(follow_symlinks=False):raise InputRecoveryRequired('historical input path unsafe')
-                            observed.add(child.name)
-                if expected!=observed:raise InputRecoveryRequired('historical input paths differ')
+                from .intake_indexed_inventory import compare, InventoryHeld
+                def listing():
+                    with os.scandir(folder) as entries:
+                        for child in entries:
+                            if time.monotonic()>deadline:
+                                raise InputRecoveryRequired('historical intake census exceeds bound')
+                            yield child.name, child.is_file(follow_symlinks=False)
+                try:
+                    compare(((item['name_key'],item['path']) for item in files),listing(),
+                            max_files=INTAKE_CENSUS_MAX_FILES,max_entries=INTAKE_CENSUS_MAX_ENTRIES)
+                except InventoryHeld:
+                    raise InputRecoveryRequired('historical input paths differ') from None
                 for item in files:
                     try:
                         fd=os.open(folder/item['path'],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
