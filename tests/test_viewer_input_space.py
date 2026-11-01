@@ -501,6 +501,37 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
             with self.assertRaisesRegex(InputRecoveryRequired,'historical input paths'):make_handler(self.settings())
             self.assertEqual(moved.read_bytes(),b'first');self.assertEqual(extra.read_bytes(),b'extra')
 
+    def test_startup_holds_oversized_historical_json(self):
+        from processing import viewer_tasks
+        with self.qualify():
+            old=self.historical_fixture()
+            for key in ('HISTORY_METADATA_MAX_BYTES','HISTORY_FILES_JSON_MAX_BYTES'):
+                with patch.object(viewer_tasks,key,4):
+                    with self.assertRaises(InputRecoveryRequired):make_handler(self.settings())
+            self.assertEqual(old.read_bytes(),b'first')
+
+    def test_startup_holds_duplicate_and_wrong_type_historical_json(self):
+        import sqlite3
+        from processing import intake_offline_migration as migration
+        with self.qualify():
+            old=self.historical_fixture()
+            db=sqlite3.connect(self.state/'jobs.sqlite3')
+            try:
+                original=db.execute('SELECT metadata,files FROM viewer_incarnations').fetchone()
+                meta=json.loads(original[0]);files=json.loads(original[1])
+                wrong=[dict(files[0],is_photo=True)]
+                duplicate=original[0][:-1]+',"generation":1}'
+                for metadata,content in ((duplicate,original[1]),(original[0],json.dumps(wrong))):
+                    db.execute('DROP TRIGGER viewer_intake_guard_incarnation_update_v1')
+                    db.execute('UPDATE viewer_incarnations SET metadata=?,files=?',(metadata,content))
+                    db.execute(migration.TRIGGERS['viewer_intake_guard_incarnation_update_v1']);db.commit()
+                    with self.assertRaises(InputRecoveryRequired):make_handler(self.settings())
+                db.execute('DROP TRIGGER viewer_intake_guard_incarnation_update_v1')
+                db.execute('UPDATE viewer_incarnations SET metadata=?,files=?',original)
+                db.execute(migration.TRIGGERS['viewer_intake_guard_incarnation_update_v1']);db.commit()
+            finally:db.close()
+            self.assertEqual(old.read_bytes(),b'first')
+
     def test_startup_holds_when_historical_byte_budget_exceeded(self):
         from processing import viewer_tasks
         with self.qualify():

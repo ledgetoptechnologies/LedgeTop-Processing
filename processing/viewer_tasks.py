@@ -40,6 +40,8 @@ HISTORY_CENSUS_MAX_GENERATIONS = 100000
 HISTORY_CENSUS_MAX_FILES = 1000000
 HISTORY_CENSUS_MAX_BYTES = 100 * 1024 ** 3
 HISTORY_CENSUS_SECONDS = 30
+HISTORY_METADATA_MAX_BYTES = 256 * 1024
+HISTORY_FILES_JSON_MAX_BYTES = 64 * 1024 ** 2
 INTAKE_JOURNAL_DDL = """CREATE TABLE viewer_intake_journal_v1 (
     operation TEXT PRIMARY KEY, uuid TEXT NOT NULL, generation INTEGER NOT NULL,
     name_key TEXT NOT NULL, directory TEXT NOT NULL, temporary TEXT NOT NULL,
@@ -75,6 +77,20 @@ TERMINAL = frozenset(('succeeded', 'failed', 'cancelled'))
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def _strict_history_json(value, maximum):
+    """Bound encoded size and reject duplicate keys before trusting history."""
+    if type(value) is not str or len(value.encode('utf-8'))>maximum:
+        raise ValueError('history JSON exceeds bound')
+    def unique(pairs):
+        result={}
+        for key,item in pairs:
+            if key in result:raise ValueError('duplicate history JSON key')
+            result[key]=item
+        return result
+    return json.loads(value,object_pairs_hook=unique,
+                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid number')))
 
 
 def checked_uuid(value):
@@ -309,13 +325,26 @@ class TaskStore:
                     raise InputRecoveryRequired('task identity needs inspection')
                 owners[identity]=row['directory'];directories.add(row['directory'])
             historical_files=0;historical_bytes=0;deadline=time.monotonic()+HISTORY_CENSUS_SECONDS
-            history=db.execute('SELECT uuid,generation,metadata,files FROM viewer_incarnations LIMIT ?',
-                               (HISTORY_CENSUS_MAX_GENERATIONS+1,))
+            history=db.execute('''SELECT uuid,generation,
+                CASE WHEN length(CAST(metadata AS BLOB))<=? THEN metadata END AS metadata,
+                CASE WHEN length(CAST(files AS BLOB))<=? THEN files END AS files
+                FROM viewer_incarnations LIMIT ?''',
+                (HISTORY_METADATA_MAX_BYTES,HISTORY_FILES_JSON_MAX_BYTES,HISTORY_CENSUS_MAX_GENERATIONS+1))
             for count,entry in enumerate(history,1):
                 if count>HISTORY_CENSUS_MAX_GENERATIONS or time.monotonic()>deadline:
                     raise InputRecoveryRequired('historical intake census exceeds bound')
                 try:
-                    metadata=json.loads(entry['metadata']);files=json.loads(entry['files'])
+                    from .intake_offline_migration import _TASK_SNAPSHOT_COLUMNS
+                    metadata=_strict_history_json(entry['metadata'],HISTORY_METADATA_MAX_BYTES)
+                    files=_strict_history_json(entry['files'],HISTORY_FILES_JSON_MAX_BYTES)
+                    if type(metadata) is not dict or set(metadata)!=set(_TASK_SNAPSHOT_COLUMNS):raise ValueError()
+                    for field in ('uuid','directory','name','options','outputs','environment','stage','phase','output_lines','created_at','updated_at'):
+                        if type(metadata[field]) is not str:raise ValueError()
+                    for field in ('job_id','node_id','engine_uuid','claim_token','error','archive_path'):
+                        if metadata[field] is not None and type(metadata[field]) is not str:raise ValueError()
+                    for field in ('generation','removed','option_evidence_required'):
+                        if type(metadata[field]) is not int:raise ValueError()
+                    if type(metadata['progress']) not in (int,float) or not math.isfinite(metadata['progress']):raise ValueError()
                     identity=(entry['uuid'],entry['generation']);directory=metadata['directory']
                     current=rows_by_uuid.get(identity[0])
                     if (current is None or type(identity[1]) is not int or identity[1]<1
@@ -332,12 +361,18 @@ class TaskStore:
                 owners[identity]=directory;directories.add(directory)
                 recorded={}
                 for item in files:
+                    try:
+                        valid_filename=(type(item) is dict and type(item.get('name')) is str and self._filename(item['name'])==item.get('name_key'))
+                    except ValueError:valid_filename=False
                     if (type(item) is not dict or set(item)!={'uuid','name_key','name','path','bytes','sha256','is_photo'}
                         or item['uuid']!=identity[0] or type(item['name_key']) is not str
                         or item['name_key'] in recorded or type(item['path']) is not str
                         or not re.fullmatch(r'input-[0-9a-f]{32}',item['path'])
                         or type(item['bytes']) is not int or item['bytes']<=0
-                        or type(item['sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}',item['sha256'])):
+                        or type(item['sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}',item['sha256'])
+                        or not valid_filename
+                        or type(item['is_photo']) is not int or item['is_photo'] not in (0,1)
+                        or item['is_photo']!=int(Path(item['name']).suffix.lower() in PHOTO_SUFFIXES)):
                         raise InputRecoveryRequired('historical input metadata needs inspection')
                     recorded[item['name_key']]=item
                     historical_files+=1;historical_bytes+=item['bytes']
@@ -346,7 +381,7 @@ class TaskStore:
                 found_rows=0
                 for snapshot in db.execute('SELECT * FROM viewer_intake_snapshot_files_v1 WHERE uuid=? AND generation=?',identity):
                     found_rows+=1;item=recorded.get(snapshot['name_key'])
-                    if item is None or any(snapshot[key] is None or snapshot[key]!=item[key]
+                    if item is None or any(snapshot[key] is None or type(snapshot[key]) is not type(item[key]) or snapshot[key]!=item[key]
                                            for key in ('uuid','name_key','name','path','bytes','sha256','is_photo')):
                         raise InputRecoveryRequired('historical input snapshot differs')
                 if found_rows!=len(recorded):raise InputRecoveryRequired('historical input snapshot missing')
