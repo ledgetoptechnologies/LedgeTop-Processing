@@ -532,6 +532,23 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
             finally:db.close()
             self.assertEqual(old.read_bytes(),b'first')
 
+    def test_startup_holds_at_zero_audit_deadline(self):
+        from processing import viewer_tasks
+        with self.qualify():
+            old=self.historical_fixture()
+            with patch.object(viewer_tasks,'HISTORY_CENSUS_SECONDS',0):
+                with self.assertRaisesRegex(InputRecoveryRequired,'exceeds bound'):make_handler(self.settings())
+            self.assertEqual(old.read_bytes(),b'first')
+
+    def test_startup_holds_over_existing_task_ceiling(self):
+        with self.qualify():
+            handler=make_handler(self.settings());queue=handler.prototype_queue
+            rows=[(str(uuid.uuid4()),1,'synthetic-'+str(n),'name','[]','null','production') for n in range(1001)]
+            with queue._db() as db:
+                db.executemany('INSERT INTO viewer_tasks(uuid,generation,directory,name,options,outputs,environment) VALUES(?,?,?,?,?,?,?)',rows)
+            handler.viewer_service.close();queue.close();queue.authority_lease.close()
+            with self.assertRaisesRegex(InputRecoveryRequired,'task census exceeds bound'):make_handler(self.settings())
+
     def test_startup_holds_when_historical_byte_budget_exceeded(self):
         from processing import viewer_tasks
         with self.qualify():

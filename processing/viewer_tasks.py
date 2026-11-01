@@ -310,6 +310,12 @@ class TaskStore:
         """Bounded global and per-task checks, before accepting Viewer requests."""
         if not self.intake_journal:raise InputRecoveryRequired('intake journal required')
         with self._lock,self.queue._db() as db:
+            deadline=time.monotonic()+HISTORY_CENSUS_SECONDS
+            if time.monotonic()>=deadline:
+                raise InputRecoveryRequired('historical intake census exceeds bound')
+            # Interrupt SQLite VM work at instruction boundaries. This cannot
+            # interrupt a blocked filesystem syscall inside SQLite or os.read.
+            db.set_progress_handler(lambda: int(time.monotonic()>=deadline),1000)
             rows=db.execute('SELECT * FROM viewer_tasks ORDER BY uuid LIMIT 1001').fetchall()
             if len(rows)>1000:raise InputRecoveryRequired('task census exceeds bound')
             for table in ('viewer_files','viewer_intake_snapshot_files_v1'):
@@ -324,7 +330,7 @@ class TaskStore:
                 if identity in owners or not isinstance(row['directory'],str) or row['directory'] in directories:
                     raise InputRecoveryRequired('task identity needs inspection')
                 owners[identity]=row['directory'];directories.add(row['directory'])
-            historical_files=0;historical_bytes=0;deadline=time.monotonic()+HISTORY_CENSUS_SECONDS
+            historical_files=0;historical_bytes=0
             history=db.execute('''SELECT uuid,generation,
                 CASE WHEN length(CAST(metadata AS BLOB))<=? THEN metadata END AS metadata,
                 CASE WHEN length(CAST(files AS BLOB))<=? THEN files END AS files
