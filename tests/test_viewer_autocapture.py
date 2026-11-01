@@ -146,6 +146,7 @@ store.enable_archive_status()
                 store=object.__new__(TaskStore); store._lock=threading.RLock(); store.queue=Queue(path)
                 with sqlite3.connect(path) as db: before=db.execute('SELECT sql FROM sqlite_master').fetchall()
                 with self.assertRaises(ValueError): store.enable_archive_status()
+                with self.assertRaises(ValueError): store.install_archive_claim_schema()
                 with sqlite3.connect(path) as db: self.assertEqual(db.execute('SELECT sql FROM sqlite_master').fetchall(),before)
 
 
@@ -640,6 +641,7 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(task['job']['status'], 'succeeded')
 
     def test_durable_claim_opt_in_success_and_manual_reuse(self):
+        self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
         self.service._durable_archive_claims = True
         self.service._archive_once(self.identifier)
@@ -651,6 +653,7 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(Path(task['archive_path']).read_bytes(), self.engine_response)
 
     def test_durable_claim_recreated_store_refuses_second_writer(self):
+        self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
         task = self.fixture.task(self.identifier)
         token = self.service.store.claim_archive(task)
@@ -674,6 +677,11 @@ finally:s.close();q.authority_lease.close();q.close()
         self.fixture.config.viewer_durable_archive_claims = True
         with self.assertRaises(Conflict):
             ViewerService(self.queue, self.fixture.config, store=self.service.store)
+        with self.assertRaises(Conflict):
+            self.service.store.install_archive_claim_schema()
+        with self.queue._db() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='viewer_archive_claims_v1'").fetchone())
+        self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
         self.fixture.config.viewer_durable_archive_claims = False
         with self.assertRaisesRegex(RuntimeError, 'durable archive claims configuration required'):
@@ -682,7 +690,27 @@ finally:s.close();q.authority_lease.close();q.close()
         restarted = ViewerService(self.queue, self.fixture.config, store=self.service.store)
         self.assertTrue(restarted._durable_archive_claims)
 
+    def test_durable_claim_skips_held_task_in_other_service_scanner(self):
+        store = self.service.store
+        store.enable_archive_status()
+        store.install_archive_claim_schema()
+        first = store.task(self.identifier)
+        token = store.claim_archive(first)
+        next_id = self.fixture.submit()
+        self.service.tick(); self.fixture.finish(next_id); self.service.tick()
+        other = TaskStore(self.queue, store.root, self.fixture.config.viewer_max_input_bytes)
+        self.fixture.config.viewer_durable_archive_claims = True
+        competing = ViewerService(self.queue, self.fixture.config, store=other)
+        self.assertEqual(other.next_unarchived_success()[1], next_id)
+        self.assertEqual(other.next_unarchived_success(2**62)[1], next_id)
+        status = competing.info(self.identifier)['ledgetopArchive']
+        self.assertEqual(status, {'state': 'inspection', 'reason': 'capture_claim_held'})
+        self.assertNotIn(token, repr(status))
+        other.claim_archive(other.task(next_id))
+        self.assertIsNone(other.next_unarchived_success())
+
     def test_durable_claim_retains_archive_and_receipt_if_publication_fails(self):
+        self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
         self.service._durable_archive_claims = True
         task = self.fixture.task(self.identifier)
@@ -701,8 +729,8 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(receipt.read_bytes(), original_receipt)
 
     def test_durable_claim_publication_rejects_cross_store_inspection_hold(self):
-        self.service.store.install_archive_claim_schema()
         self.service.store.enable_archive_status()
+        self.service.store.install_archive_claim_schema()
         task = self.fixture.task(self.identifier)
         claim = self.service.store.claim_archive(task)
         other = TaskStore(self.queue, self.service.store.root, self.fixture.config.viewer_max_input_bytes)
@@ -719,6 +747,7 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(archive.read_bytes(), self.engine_response)
 
     def test_durable_claim_publication_rejects_cross_store_remove(self):
+        self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
         task = self.fixture.task(self.identifier)
         claim = self.service.store.claim_archive(task)
@@ -735,6 +764,7 @@ finally:s.close();q.authority_lease.close();q.close()
         self.assertEqual(archive.read_bytes(), self.engine_response)
 
     def test_durable_claim_blocks_generic_archive_path_update(self):
+        self.service.store.enable_archive_status()
         self.service.store.install_archive_claim_schema()
         task = self.fixture.task(self.identifier)
         archive = Path(task['directory']) / 'all.zip'
@@ -767,13 +797,13 @@ finally:s.close();q.authority_lease.close();q.close()
         first.enable_archive_status()
         first.install_archive_claim_schema()
         task = first.task(self.identifier)
+        candidate = first.next_unarchived_success()
         claim = first.claim_archive(task)
         other = TaskStore(self.queue, first.root, self.fixture.config.viewer_max_input_bytes)
         with self.assertRaises(ArchiveClaimHeld):
             other.claim_archive(task)
         archive = Path(task['directory']) / 'all.zip'
         archive.write_bytes(self.engine_response)
-        candidate = first.next_unarchived_success()
         self.fixture.config.viewer_durable_archive_claims = True
         second = ViewerService(self.queue, self.fixture.config, store=other)
         def compete(*args, **kwargs):

@@ -541,7 +541,9 @@ class ViewerService:
         info['ledgetopArchiveHealth'] = self._archive_health()
         if info['status']['code'] == 40:
             task = self.store.task(identifier)
-            if task['archive_path']:
+            if self._durable_archive_claims and self.store.archive_claim_held(task):
+                archive = {'state': 'inspection', 'reason': 'capture_claim_held'}
+            elif task['archive_path']:
                 archive = {'state': 'recorded', 'reason': None}
             elif not getattr(self.config, 'viewer_archive_autocapture', False):
                 archive = {'state': 'disabled', 'reason': None}

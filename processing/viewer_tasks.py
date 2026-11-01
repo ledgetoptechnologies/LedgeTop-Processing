@@ -522,11 +522,14 @@ class TaskStore:
     def next_unarchived_success(self, after_rowid=0):
         """Round-robin cursor over durable, nonremoved successful tasks."""
         with self._lock, self.queue._db() as db:
+            has_claims = bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone())
+            claim_filter = (' AND NOT EXISTS (SELECT 1 FROM viewer_archive_claims_v1 c '
+                            'WHERE c.uuid=t.uuid AND c.generation=t.generation)' if has_claims else '')
             for boundary in (after_rowid, 0):
                 row = db.execute('''SELECT t.rowid,t.uuid FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id
                     WHERE t.rowid>? AND t.removed=0 AND t.archive_path IS NULL AND t.archive_state='pending'
-                      AND t.stage='succeeded' AND t.phase='complete' AND j.status='succeeded'
-                    ORDER BY t.rowid LIMIT 1''', (boundary,)).fetchone()
+                      AND t.stage='succeeded' AND t.phase='complete' AND j.status='succeeded' ''' + claim_filter +
+                    ' ORDER BY t.rowid LIMIT 1', (boundary,)).fetchone()
                 if row is not None:
                     return (row[0], row[1])
                 if boundary == 0:
@@ -652,26 +655,28 @@ class TaskStore:
             db.execute('INSERT INTO viewer_archive_registry VALUES (?,?,?,?,?,?)',identity)
             return True
 
+    @staticmethod
+    def _has_exact_archive_status(db):
+        rows = db.execute('PRAGMA table_info(viewer_tasks)').fetchall()
+        columns = [tuple(row) for row in rows if row[1] in ('archive_state', 'archive_reason')]
+        if not columns:
+            return False
+        if len(columns) != 2:
+            raise ValueError('partial archive status schema')
+        n = len(rows) - 2
+        if columns != [(n, 'archive_state', 'TEXT', 1, "'pending'", 0),
+                       (n + 1, 'archive_reason', 'TEXT', 0, None, 0)]:
+            raise ValueError('unrecognized archive status schema')
+        return True
+
     def enable_archive_status(self):
         # Both DDL statements and validation must commit as one transaction.
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            def validate():
-                rows = db.execute('PRAGMA table_info(viewer_tasks)').fetchall()
-                columns = [tuple(row) for row in rows if row[1] in ('archive_state', 'archive_reason')]
-                if not columns:
-                    return False
-                if len(columns) != 2:
-                    raise ValueError('partial archive status schema')
-                n = len(rows) - 2
-                if columns != [(n, 'archive_state', 'TEXT', 1, "'pending'", 0),
-                               (n + 1, 'archive_reason', 'TEXT', 0, None, 0)]:
-                    raise ValueError('unrecognized archive status schema')
-                return True
-            if not validate():
+            if not self._has_exact_archive_status(db):
                 db.execute("ALTER TABLE viewer_tasks ADD COLUMN archive_state TEXT NOT NULL DEFAULT 'pending'")
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_reason TEXT')
-                if not validate():
+                if not self._has_exact_archive_status(db):
                     raise ValueError('archive status schema not installed')
 
     def archive_lock(self, identifier):
@@ -687,6 +692,8 @@ class TaskStore:
         """Explicit offline migration; never invoked implicitly by service startup."""
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if not self._has_exact_archive_status(db):
+                raise Conflict('archive status schema requires explicit migration')
             existing = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
             if existing is None:
                 db.execute(self._ARCHIVE_CLAIM_DDL)
@@ -695,9 +702,16 @@ class TaskStore:
 
     def require_archive_claim_schema(self):
         with self.queue._db() as db:
+            if not self._has_exact_archive_status(db):
+                raise Conflict('archive status schema requires explicit migration')
             row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='viewer_archive_claims_v1'").fetchone()
             if row is None or row[0] != self._ARCHIVE_CLAIM_DDL:
                 raise Conflict('archive claim schema requires explicit migration')
+
+    def archive_claim_held(self, task):
+        with self._lock, self.queue._db() as db:
+            return bool(db.execute('SELECT 1 FROM viewer_archive_claims_v1 WHERE uuid=? AND generation=?',
+                                   (task['uuid'], task['generation'])).fetchone())
 
     def claim_archive(self, task):
         token = uuid_module.uuid4().hex + uuid_module.uuid4().hex
