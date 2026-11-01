@@ -23,7 +23,11 @@ reference adapters, without modifying the affected records. Receipt identities
 are globally reserved across success and terminal outcomes, so accepting a new
 success receipt inspects those global collision records: one corrupt foreign
 row can hold new success acknowledgements across environments until inspected.
-The private worker relay examines the requested job's receipt rows only.
+The private worker relay examines the requested job's receipt rows only. The
+terminal metadata acceptance path applies the same global collision-state
+check, and validates stored terminal receipts and failure metadata before a
+private relay. These checks preserve suspect rows and return the same inspection
+status; they do not authorize artifact cleanup for terminal failures.
 
 The additional fields are backwards-compatible for consumers that tolerate
 unknown JSON fields. Strict consumers must update before using this candidate.

@@ -63,13 +63,20 @@ class TerminalService:
                             (job_id, row["generation"])).fetchone()
         if sealed is None or sealed["delivery_state"] != "awaiting_viewer_failure_acceptance":
             raise Conflict("failure metadata is not ready for terminal acceptance")
-        failure = json.loads(sealed["failure_json"])
-        failure = validate_failure(failure, job_id=job_id, generation=row["generation"],
-            environment=environment, input_manifest_sha256=row["manifest_sha"], pipeline_digest=row["pipeline_digest"])
+        from .reference_store import StoredReferenceCorrupt
+        try:
+            failure = json.loads(sealed["failure_json"])
+            failure = validate_failure(failure, job_id=job_id, generation=row["generation"],
+                environment=environment, input_manifest_sha256=row["manifest_sha"], pipeline_digest=row["pipeline_digest"])
+        except (ValueError, TypeError, KeyError, Conflict):
+            raise StoredReferenceCorrupt('stored failure requires inspection') from None
         queue_row = db.execute("SELECT status,result FROM jobs WHERE id=?", (job_id,)).fetchone()
         expected_result = dict(failureSha256=failure["failureSha256"], terminalState=failure["terminalState"], errorCode=failure["errorCode"])
-        if (queue_row["status"] != "failed" or not queue_row["result"]
-                or json.loads(queue_row["result"]) != expected_result or row["result_json"]
+        try:
+            queue_result = json.loads(queue_row['result']) if queue_row and queue_row['result'] else None
+        except (ValueError, TypeError):
+            raise StoredReferenceCorrupt('stored failure result requires inspection') from None
+        if (not queue_row or queue_row["status"] != "failed" or queue_result != expected_result or row["result_json"]
                 or sealed["failure_sha"] != failure["failureSha256"]):
             raise Conflict("queue has not confirmed this exact terminal engine failure")
         return row, failure
@@ -84,22 +91,30 @@ class TerminalService:
         """Private relay. A terminal metadata ACK grants no artifact cleanup."""
         with self.store.queue._db() as db:
             _, failure = self._outcome(db, job_id, environment)
-            row = db.execute('SELECT receipt_json FROM reference_terminal_acceptances WHERE job_id=? AND generation=?',
+            row = db.execute('SELECT * FROM reference_terminal_acceptances WHERE job_id=? AND generation=?',
                              (job_id, failure['generation'])).fetchone()
             if row is None:
                 return {'receipt': None, 'terminalAccepted': False}
-            receipt = validate_terminal_acceptance(json.loads(row[0]), failure=failure)
+            from .reference_store import StoredReferenceCorrupt
+            try:
+                receipt = validate_terminal_acceptance(json.loads(row['receipt_json']), failure=failure)
+                if (receipt['receiptId'] != row['receipt_id'] or receipt['storageReceiptId'] != row['storage_receipt_id']
+                        or receipt['jobId'] != row['job_id'] or receipt['generation'] != row['generation']
+                        or protocol.canonical_json(receipt).decode() != row['receipt_json']
+                        or protocol.digest(receipt) != row['digest']):
+                    raise ValueError('stored terminal acceptance changed')
+            except (ValueError, TypeError, KeyError, Conflict):
+                raise StoredReferenceCorrupt('stored terminal acceptance requires inspection') from None
             return {'receipt': receipt, 'terminalAccepted': True}
 
-    def _check_ids(self, db, checked):
+    def _check_ids(self, db, checked, *, replay_id=None):
+        from .reference_store import validated_collision_identities
         ids = {checked["receiptId"], checked["storageReceiptId"]}
-        for row in db.execute("SELECT receipt_id,receipt_json FROM reference_acceptances"):
-            old = json.loads(row["receipt_json"])
-            if ids & {row["receipt_id"], old["receiptId"], old["storageReceiptId"]}:
-                raise Conflict("receipt identity already belongs to success acceptance")
-        for row in db.execute("SELECT receipt_id,storage_receipt_id FROM reference_terminal_acceptances"):
-            if ids & {row["receipt_id"], row["storage_receipt_id"]}:
-                raise Conflict("terminal receipt identity already bound")
+        for kind, receipt_id, storage_id in validated_collision_identities(db):
+            if kind == 'terminal' and receipt_id == replay_id:
+                continue
+            if ids & {receipt_id, storage_id}:
+                raise Conflict("receipt identity already bound")
 
     def accept(self, job_id, receipt, environment):
         with self.store.queue._db() as db:
@@ -110,12 +125,12 @@ class TerminalService:
             receipt_digest = protocol.digest(checked)
             old = db.execute("SELECT * FROM reference_terminal_acceptances WHERE job_id=? AND generation=?",
                              (job_id, failure["generation"])).fetchone()
+            self._check_ids(db, checked, replay_id=old['receipt_id'] if old else None)
             if old:
                 if (old["receipt_id"], old["storage_receipt_id"], old["digest"], old["receipt_json"]) != (
                         checked["receiptId"], checked["storageReceiptId"], receipt_digest, encoded):
                     raise Conflict("terminal acceptance already sealed with different receipt")
-            else:
-                self._check_ids(db, checked)
+            if not old:
                 self.store._quota(db, len(encoded.encode()))
                 db.execute("INSERT INTO reference_terminal_acceptances VALUES(?,?,?,?,?,?)",
                     (checked["receiptId"], checked["storageReceiptId"], job_id,

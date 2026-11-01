@@ -38,6 +38,41 @@ class StoredReferenceCorrupt(Conflict):
     """Persisted reference metadata requires inspection; never client input."""
 
 
+def validated_collision_identities(db):
+    """Return globally reserved identities only after validating stored rows."""
+    values = []
+    for row in db.execute('SELECT receipt_id,job_id,digest,receipt_json FROM reference_acceptances'):
+        try:
+            prior = json.loads(row['receipt_json'])
+            protocol._closed(prior, ('schemaVersion','receiptId','storageReceiptId','jobId','generation',
+                'environment','inputManifestSha256','pipelineDigest','resultManifestSha256',
+                'acceptedObjectIds','acceptedAt','validationVersion'), 'stored acceptance')
+            for name in ('receiptId','storageReceiptId','jobId'): protocol._slug(prior[name],name)
+            if (prior['receiptId'] != row['receipt_id'] or prior['jobId'] != row['job_id']
+                    or _json(prior) != row['receipt_json'] or protocol.digest(prior) != row['digest']):
+                raise ValueError('stored acceptance identity changed')
+        except (ValueError, TypeError, KeyError):
+            raise StoredReferenceCorrupt('stored acceptance requires inspection') from None
+        values.append(('success',row['receipt_id'],prior['storageReceiptId']))
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
+        from .reference_terminal import FIELDS
+        for row in db.execute('SELECT receipt_id,storage_receipt_id,job_id,generation,digest,receipt_json FROM reference_terminal_acceptances'):
+            try:
+                prior = json.loads(row['receipt_json'])
+                protocol._closed(prior,FIELDS,'stored terminal acceptance')
+                for name in ('receiptId','storageReceiptId','jobId'): protocol._slug(prior[name],name)
+                protocol._integer(prior['generation'],'generation')
+                if (any(prior[key] != row[column] for key,column in (
+                        ('receiptId','receipt_id'),('storageReceiptId','storage_receipt_id'),
+                        ('jobId','job_id'),('generation','generation')))
+                        or _json(prior) != row['receipt_json'] or protocol.digest(prior) != row['digest']):
+                    raise ValueError('stored terminal acceptance identity changed')
+            except (ValueError,TypeError,KeyError):
+                raise StoredReferenceCorrupt('stored terminal acceptance requires inspection') from None
+            values.append(('terminal',row['receipt_id'],row['storage_receipt_id']))
+    return values
+
+
 def _json(value):
     return protocol.canonical_json(value).decode("utf-8")
 
@@ -145,9 +180,13 @@ class ReferenceStore:
         recovering = row["status"] == "held" and row["held_reason"] == "coordinator_restart"
         phase, status, error = ('held' if recovering else row['phase']), row['status'], ('coordinator_restart' if recovering else row['error'])
         if row['terminal_failure_json'] and row['failure_delivery_state'] == 'awaiting_viewer_failure_acceptance' and status == 'failed':
-            failure = json.loads(row['terminal_failure_json'])
-            expected = {key: failure[key] for key in ('failureSha256', 'terminalState', 'errorCode')}
-            if row['queue_result'] and json.loads(row['queue_result']) == expected:
+            try:
+                failure = json.loads(row['terminal_failure_json'])
+                expected = {key: failure[key] for key in ('failureSha256', 'terminalState', 'errorCode')}
+                queue_result = json.loads(row['queue_result']) if row['queue_result'] else None
+            except (ValueError, TypeError, KeyError):
+                raise StoredReferenceCorrupt('stored failure requires inspection') from None
+            if queue_result == expected:
                 status, error = failure['terminalState'], failure['errorCode']
                 phase = 'completed' if row['phase'] == 'completed' else 'awaiting_acceptance'
         return {"jobId": row["job_id"], "generation": row["generation"],
@@ -604,41 +643,11 @@ class ReferenceStore:
                 input_manifest_sha256=row["manifest_sha"])
             encoded, receipt_digest = _json(checked), protocol.receipt_tombstone_digest(checked)
             identities = {checked['receiptId'], checked['storageReceiptId']}
-            for existing in db.execute('SELECT receipt_id,job_id,digest,receipt_json FROM reference_acceptances'):
-                try:
-                    prior = json.loads(existing['receipt_json'])
-                    protocol._closed(prior, ('schemaVersion','receiptId','storageReceiptId','jobId','generation',
-                        'environment','inputManifestSha256','pipelineDigest','resultManifestSha256',
-                        'acceptedObjectIds','acceptedAt','validationVersion'), 'stored acceptance')
-                    for name in ('receiptId','storageReceiptId','jobId'):
-                        protocol._slug(prior[name],name)
-                    if (prior['receiptId'] != existing['receipt_id'] or prior['jobId'] != existing['job_id']
-                            or _json(prior) != existing['receipt_json']
-                            or protocol.receipt_tombstone_digest(prior) != existing['digest']):
-                        raise ValueError('stored acceptance identity changed')
-                except (ValueError, TypeError, KeyError):
-                    raise StoredReferenceCorrupt('stored acceptance requires inspection') from None
-                if existing['receipt_id'] != checked['receiptId'] and identities & {prior['receiptId'], prior['storageReceiptId']}:
+            for kind, prior_id, prior_storage in validated_collision_identities(db):
+                if kind == 'success' and prior_id == checked['receiptId']:
+                    continue
+                if identities & {prior_id, prior_storage}:
                     raise Conflict('acceptance identity already bound')
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
-                from .reference_terminal import FIELDS
-                for existing in db.execute('SELECT receipt_id,storage_receipt_id,job_id,generation,digest,receipt_json FROM reference_terminal_acceptances'):
-                    try:
-                        prior = json.loads(existing['receipt_json'])
-                        protocol._closed(prior,FIELDS,'stored terminal acceptance')
-                        for name in ('receiptId','storageReceiptId','jobId'):
-                            protocol._slug(prior[name],name)
-                        protocol._integer(prior['generation'],'generation')
-                        if (any(prior[key] != existing[column] for key,column in (
-                                ('receiptId','receipt_id'),('storageReceiptId','storage_receipt_id'),
-                                ('jobId','job_id'),('generation','generation')))
-                                or _json(prior) != existing['receipt_json']
-                                or protocol.digest(prior) != existing['digest']):
-                            raise ValueError('stored terminal acceptance identity changed')
-                    except (ValueError,TypeError,KeyError):
-                        raise StoredReferenceCorrupt('stored terminal acceptance requires inspection') from None
-                    if identities & {existing['receipt_id'], existing['storage_receipt_id']}:
-                        raise Conflict('acceptance identity belongs to terminal metadata')
             old = db.execute("SELECT job_id,digest,receipt_json FROM reference_acceptances WHERE receipt_id=?", (checked["receiptId"],)).fetchone()
             if old and (old["job_id"], old["digest"]) != (job_id, receipt_digest):
                 raise Conflict("receipt ID already belongs to a different acceptance")
