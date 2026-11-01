@@ -92,6 +92,38 @@ class AcceptanceBoundTests(unittest.TestCase):
         self.assertTrue(response['created'])
         self.assertEqual(response['receiptSha256'],p.digest(self.receipt))
 
+    def test_replay_refuses_changed_stored_payload_despite_unchanged_digest(self):
+        original=self.store.accept('job-1',self.receipt)
+        self.assertTrue(original['created'])
+        tampered=dict(self.receipt,acceptedObjectIds=['result-2'])
+        encoded=p.canonical_json(tampered).decode()
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_acceptances SET receipt_json=? WHERE receipt_id=?',
+                       (encoded,self.receipt['receiptId']))
+            before=tuple(db.execute('SELECT receipt_id,job_id,digest,receipt_json FROM reference_acceptances').fetchone())
+            phase=db.execute('SELECT phase FROM reference_jobs').fetchone()[0]
+        with self.assertRaises(Conflict): self.store.accept('job-1',self.receipt)
+        with self.assertRaises(Conflict): self.store.acceptance_receipts('job-1')
+        with self.queue._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT receipt_id,job_id,digest,receipt_json FROM reference_acceptances').fetchone()),before)
+            self.assertEqual(db.execute('SELECT phase FROM reference_jobs').fetchone()[0],phase)
+        self.assertEqual(before[2],p.digest(self.receipt))
+        self.assertEqual(before[3],encoded)
+
+    def test_other_corrupt_receipt_cannot_manufacture_full_coverage(self):
+        self.store.accept('job-1',self.receipt)
+        other=dict(self.receipt,receiptId='other',storageReceiptId='other-storage',acceptedObjectIds=[])
+        corrupt=dict(other,acceptedObjectIds=['result-2'])
+        with self.queue._db() as db:
+            db.execute('INSERT INTO reference_acceptances VALUES(?,?,?,?)',
+                ('other','job-1',p.digest(other),p.canonical_json(corrupt).decode()))
+            before=[tuple(row) for row in db.execute('SELECT receipt_id,digest,receipt_json FROM reference_acceptances ORDER BY receipt_id')]
+        with self.assertRaises(Conflict):self.store.accept('job-1',self.receipt)
+        with self.assertRaises(Conflict):self.store.acceptance_receipts('job-1')
+        with self.queue._db() as db:
+            self.assertEqual([tuple(row) for row in db.execute('SELECT receipt_id,digest,receipt_json FROM reference_acceptances ORDER BY receipt_id')],before)
+            self.assertEqual(db.execute('SELECT phase FROM reference_jobs').fetchone()[0],'awaiting_acceptance')
+
     def test_concurrent_overlapping_receipts_add_coverage_at_most_once(self):
         receipts = [dict(self.receipt, receiptId='receipt-'+str(i), storageReceiptId='storage-'+str(i)) for i in range(2)]
         barrier = threading.Barrier(2); outcomes = []
@@ -139,6 +171,7 @@ class AcceptanceBoundTests(unittest.TestCase):
                     ('legacy-excess', 'job-1', p.receipt_tombstone_digest(excess), p.canonical_json(excess).decode()))
             with self.assertRaises(Conflict): self.store.accept('job-1', final)
             self.assertFalse(self.store.accept('job-1', self.receipt)['created'])
+            with self.assertRaises(Conflict): self.store.acceptance_receipts('job-1')
         with self.queue._db() as db:
             rows = db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances ORDER BY receipt_id').fetchall()
         self.assertEqual([row['receipt_id'] for row in rows], ['legacy', 'legacy-excess', 'receipt-1'])
