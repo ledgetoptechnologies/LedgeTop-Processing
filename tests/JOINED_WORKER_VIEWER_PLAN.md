@@ -96,11 +96,37 @@ The subsequent reproducibility change archives Processing source from its exact
 `a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba`. It reconstructs the previously
 tested line endings and checks the six fixture hashes above. The host runner
 and outer Windows watchdog themselves are not pinned by an independent launcher;
-their current working-tree SHA-256 values are respectively
+their working-tree SHA-256 values at that change were respectively
 `bf5cd180e2d2f0e3927307acd729ec1f89df2bcc0c2a0f6628522751a8925580` and
 `3f94ac0f07e400d991aea430f25566bce8f8bc2a442f84812584cb4784ac3908`.
 The runner resolves local image tags to immutable IDs and reports them, but does
 not require the two IDs from the prior passing run. This change was not rerun.
+
+The updated run pins Viewer PR #402 head
+`82500cfa7f8baa23451d8933fa7fad4e0f971bf2`. Its only change in the
+`nativeReference*` server modules since the previously exercised Viewer head
+is a new derivative-set inspection module, which this fixture does not invoke.
+The fixture stages the actual synthetic archive stream into the Viewer candidate
+storage and exercises its held acceptance receipt. It does not run Viewer
+publication, derivative generation, or production integration. The updated pin
+and ownership paths were independently reviewed before the run.
+
+Run `60bd05e99a524d48addba2f0f541ee7f` passed with Processing source
+`4020f922990bca17598390868a8d378e80615154` and committed fixture blobs from
+`a174b8ae1b00e9f3bb4ab71f517bc80c2fe539ba`. All six reconstructed fixture
+hashes and nine Viewer module hashes matched those listed for the prior pass.
+The local image IDs also matched. Retained root:
+`C:\Users\fstor\AppData\Local\Temp\ledgetop-acceptance-outer-a58_vech`.
+Exact labeled Python container
+`7af2ace8675cbea2fa844de446b0165b88d193a49865804d35b5aa9d63c2be9e`
+and Viewer container
+`85fb104cc9f3917101951fdd3bd60ec8b2881dfb23fc17a11ce5a0a76ff627ba`
+both exited 0; the inner process group exited 0 and outer Job active count was
+0. No ownership uncertainty was reported; containers and root remain retained.
+The worker archive streamed through the actual coordinator result proxy into
+Viewer candidate storage, and its exact acceptance persisted after the first
+coordinator process had been killed and restarted. Node again emitted the
+IP-address TLS server-name deprecation warning.
 Viewer module SHA-256 values, in the runner's order:
 
 * Consumer: `6cad93cd4f7abc24e5d17814a135d121f69e5e6b42c27d694f6fee2c1deb185e`
