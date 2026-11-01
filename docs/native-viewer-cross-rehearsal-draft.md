@@ -15,10 +15,14 @@ and one Viewer model-output row per attempt. Its synthetic ZIP contains
 placeholder geometry and does not prove a renderable model, real ODM output,
 physical storage fencing, Viewer custody, crash recovery, or client readiness.
 
-The fixture is not yet reviewed or qualified for execution. Before running,
-add an independently reviewed wrapper that pins the Viewer source export and
-dependency image, starts only uniquely owned containers with `--network none`,
-limits CPU, memory, PIDs and wall time, and verifies ownership before cleanup.
+The fixture and its launcher are not yet qualified for execution. The launcher
+refuses to run until a reviewed Viewer commit pin is set. It exports Git bytes,
+uses a pinned local dependency image, starts a uniquely labeled container with
+`--network none`, limits CPU, memory, PIDs and wall time, and rechecks ownership
+and daemon identity before cleanup. Uncertain resources are retained and make
+the launcher fail. Evidence and synthetic Git archives remain in a new private
+temporary directory; inspect them before any later cleanup. Git, Docker and
+filesystem timeouts are individual limits, not a global hard deadline.
 The temporary files and fixture control server are synthetic only. Do not point
 the fixture at live services, client data, or existing shared storage; do not
 run it against the Viewer's uncommitted worktree. No remote cleanup or Viewer
