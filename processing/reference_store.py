@@ -245,6 +245,7 @@ class ReferenceStore:
         checked = self._validate_submission(validated)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._assert_v1_unbound(db, submission_id=checked['submissionId'])
             return self._submit_owned_transaction(db, checked)
 
     def _submit_owned_transaction(self, db, checked):
@@ -280,6 +281,34 @@ class ReferenceStore:
         with self.queue._db() as db:
             return self._record(self._row(db, job_id), private)
 
+    @staticmethod
+    def _assert_v1_unbound(db, *, job_id=None, submission_id=None):
+        """Reject v1 access to candidate-bound work within caller transaction.
+
+        This is a same-database guard, not a host writer fence. A candidate
+        schema removed by an old or privileged writer cannot be detected here.
+        """
+        if (job_id is None) == (submission_id is None):
+            raise ValueError('exactly one reference identity required')
+        objects = db.execute("SELECT name FROM sqlite_master WHERE name GLOB 'reference_owned_*_candidate' "
+                             "OR name GLOB 'reference_owned_*_no_*' "
+                             "OR name GLOB 'reference_owned_*_monotonic' "
+                             "OR name='reference_owned_credential_order'").fetchall()
+        if not objects:
+            return
+        from .reference_owned_binding_candidate import _check_schema
+        _check_schema(db)
+        column, value = ('job_id', job_id) if job_id is not None else ('submission_id', submission_id)
+        if db.execute('SELECT 1 FROM reference_owned_binding_candidate WHERE ' + column + '=?', (value,)).fetchone():
+            raise Conflict('bound reference requires another protocol')
+
+    def get_v1(self, job_id, *, private=False):
+        """Read a v1-visible job under the same snapshot as binding check."""
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            self._assert_v1_unbound(db, job_id=job_id)
+            return self._record(self._row(db, job_id), private)
+
     def find_submission_replay(self, submission_id, *, request_digest, environment):
         """Read-only exact replay; never creates a job for an unsupported shape."""
         protocol._uuid(submission_id, 'submission ID')
@@ -292,6 +321,7 @@ class ReferenceStore:
             # indistinguishable; none may create a new unsupported job.
             if row is None or (row['request_digest'],row['environment']) != (request_digest,environment):
                 return None
+            self._assert_v1_unbound(db, submission_id=submission_id)
             return self._public(self._row(db,row['job_id']))
 
     def find_submission(self, submission_id, *, environment):
@@ -299,8 +329,11 @@ class ReferenceStore:
         protocol._uuid(submission_id, 'submission ID')
         protocol._environment(environment)
         with self.queue._db() as db:
+            db.execute('BEGIN')
             row = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=? AND environment=?',
                              (submission_id, environment)).fetchone()
+            if row:
+                self._assert_v1_unbound(db, submission_id=submission_id)
             return self._public(self._row(db, row[0])) if row else None
 
     def list(self, *, private=False):
@@ -333,6 +366,7 @@ class ReferenceStore:
             head = db.execute("SELECT id,profile FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
             if not head or head['profile'] != PROFILE or PROFILE not in self.queue.node_profiles(node_id):
                 return None
+            self._assert_v1_unbound(db, job_id=head['id'])
             row = self._row(db, head['id'])
             submission = json.loads(row['input_json'])
             if self._required_node(submission) != node_id:
@@ -357,6 +391,7 @@ class ReferenceStore:
             if PROFILE not in self.queue.allowed_profiles:raise Conflict('reference profile disabled')
             with self.queue._db() as db:
                 db.execute('BEGIN')
+                self._assert_v1_unbound(db, job_id=job_id)
                 row=self._row(db,job_id)
                 old=db.execute('SELECT * FROM reference_claims WHERE request_id=?',(claim_request_id,)).fetchone()
                 if old is None:return None
@@ -378,6 +413,7 @@ class ReferenceStore:
             raise Conflict("reference profile disabled")
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             old = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if old:
@@ -425,6 +461,7 @@ class ReferenceStore:
         """
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._assert_v1_unbound(db, job_id=job_id)
             return self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
                 worker_instance_id=worker_instance_id, claim_token=claim_token)
 
@@ -489,6 +526,7 @@ class ReferenceStore:
         _reason(error)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             self._transition(row, phase, expected_phase)
             if phase in ("fetching", "processing") and row["status"] != "running":
@@ -534,6 +572,7 @@ class ReferenceStore:
         encoded = _json(transfer_request)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             if row["status"] != "running" or row["node_id"] != node_id or not row["private_claim_token"]:
                 raise Conflict("reservation requires a running reference claim on this node")
@@ -555,6 +594,7 @@ class ReferenceStore:
     def set_result_manifest(self, job_id, result):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             return self._seal_result(db, row, result, allow_recovery=False)
 
@@ -567,6 +607,7 @@ class ReferenceStore:
         from .reference_transfer import validate_grant
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             if row['phase'] != 'awaiting_transfer' or row['status'] != 'running':
                 raise Conflict('job is not awaiting a transfer grant')
@@ -619,6 +660,7 @@ class ReferenceStore:
         """
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             claim = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if (not claim or (claim["job_id"], claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
@@ -649,6 +691,7 @@ class ReferenceStore:
     def accept(self, job_id, receipt):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             if not row["result_json"] or row["phase"] not in ("awaiting_acceptance", "completed"):
                 raise Conflict("result is not ready for acceptance")
@@ -726,6 +769,8 @@ class ReferenceStore:
     def acceptance_receipts(self, job_id):
         """PRIVATE worker relay; metadata receipts grant no unverified deletion."""
         with self.queue._db() as db:
+            db.execute('BEGIN')
+            self._assert_v1_unbound(db, job_id=job_id)
             row = self._row(db, job_id)
             result = self._stored_result(row)
             receipts = sorted(self._validated_acceptances(db, row, result),key=lambda value:value['receiptId'])

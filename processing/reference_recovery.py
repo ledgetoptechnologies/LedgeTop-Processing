@@ -108,6 +108,7 @@ class ClaimRecoveryService:
 
     def _state(self,db,job_id,identity,claim_token):
         self._check(db)
+        self.store._assert_v1_unbound(db, job_id=job_id)
         claim=self.store._claim_snapshot(db,job_id,**identity,claim_token=claim_token)
         node_id=identity['node_id']
         if node_id not in self.bindings:raise Conflict('recovery node is unconfigured')

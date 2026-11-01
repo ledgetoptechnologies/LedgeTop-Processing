@@ -86,7 +86,7 @@ class ReferenceAPI:
 
     def _job(self, job_id, environment, *, private=False):
         try:
-            job = self.store.get(job_id, private=private)
+            job = self.store.get_v1(job_id, private=private)
         except StoredReferenceCorrupt:
             raise
         except Conflict:

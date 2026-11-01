@@ -1,5 +1,6 @@
 import http.client
 import copy
+import concurrent.futures
 import hashlib
 import json
 from pathlib import Path
@@ -7,6 +8,8 @@ import socket
 import tempfile
 import threading
 import unittest
+import uuid
+from unittest.mock import patch
 
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
@@ -223,6 +226,34 @@ class ReferenceHTTPTests(unittest.TestCase):
         status = int(headers.split(b" ", 2)[1])
         return status, json.loads(body), headers
 
+    def synthetic_bound_claim(self):
+        """Set up an otherwise valid claim, patching only the test guard."""
+        from processing import reference_owned_binding_candidate as candidate, reference_protocol as protocol
+        body=self.fixture['submission']
+        submission=protocol.validate_submission(body,environment='staging',
+            capability_fingerprint=body['capabilityFingerprint'],
+            options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],allowed_odm_options=set())
+        with patch.object(candidate,'QUALIFIED',True):
+            candidate.install_empty_candidate(self.store,synthetic_pipeline_digest=submission['pipelineDigest'],
+                synthetic_principal_id=str(uuid.uuid4()),synthetic_environment='staging',synthetic_credential=b'S'*32)
+            result=candidate.submit_bound_candidate(self.store,submission,binding_id=str(uuid.uuid4()),
+                attempt_id=str(uuid.uuid4()),credential=b'S'*32)
+        job=result['binding']
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            claim=self.store.claim(job['jobId'],node_id='cluster',worker_id='worker',
+                worker_instance_id='instance',claim_request_id='synthetic-claim')
+        self.assertIsNotNone(claim)
+        return job,claim
+
+    def worker_claim_get(self,job_id,suffix,claim_token):
+        connection=http.client.HTTPConnection(*self.server.server_address,timeout=2)
+        try:
+            connection.request('GET','/ltds/worker/v1/jobs/'+job_id+'/'+suffix,
+                headers={'Authorization':'Bearer '+WORKER,'X-Claim-Token':claim_token})
+            response=connection.getresponse();body=response.read()
+            return response.status,json.loads(body)
+        finally:connection.close()
+
     def test_real_http_auth_capability_submit_status_replay_and_cross_environment(self):
         self.assertEqual(self.request("GET", "/ltds/v1/capabilities", token=None)[0], 401)
         status, capabilities, headers = self.request("GET", "/ltds/v1/capabilities")
@@ -242,6 +273,288 @@ class ReferenceHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("GET", path + "/results")[0], 409)
         for forbidden in (STAGING, PRODUCTION, "claimToken", "submission", "claim_hash"):
             self.assertNotIn(forbidden, json.dumps(job))
+
+    def test_v1_http_cannot_access_or_mutate_candidate_bound_job(self):
+        from processing import reference_owned_binding_candidate as candidate, reference_protocol as protocol
+        from processing.maintenance import Conflict
+        body=self.fixture['submission']
+        submission=protocol.validate_submission(body,environment='staging',
+            capability_fingerprint=body['capabilityFingerprint'],
+            options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],
+            allowed_odm_options=set())
+        principal,binding,attempt=(str(uuid.uuid4()) for _ in range(3))
+        credential=b'S'*32
+        with patch.object(candidate,'QUALIFIED',True):
+            candidate.install_empty_candidate(self.store,synthetic_pipeline_digest=submission['pipelineDigest'],
+                synthetic_principal_id=principal,synthetic_environment='staging',synthetic_credential=credential)
+            result=candidate.submit_bound_candidate(self.store,submission,binding_id=binding,
+                attempt_id=attempt,credential=credential)
+        job_id=result['binding']['jobId']
+        path='/ltds/v1/jobs/'+job_id
+        # A bound head cannot be dispatched or claimed through old worker v1.
+        self.assertEqual(self.request('GET','/ltds/worker/v1/next',token=WORKER)[0],409)
+        self.assertEqual(self.request('POST','/ltds/worker/v1/claim',
+            {'jobId':job_id,'claimRequestId':'synthetic-claim'},token=WORKER)[0],409)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_claims').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE id=?',(job_id,)).fetchone()[0],'queued')
+        other=copy.deepcopy(body);other['submissionId']=str(uuid.uuid4())
+        status,unbound,_=self.request('POST','/ltds/v1/jobs',other)
+        self.assertEqual(status,201)
+        self.assertEqual(self.request('POST','/ltds/v1/jobs',other)[0],200)
+        self.assertEqual(self.request('GET','/ltds/v1/jobs/'+unbound['jobId'])[0],200)
+        self.assertEqual(self.request('GET','/ltds/worker/v1/next',token=WORKER)[0],409)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_claims').fetchone()[0],0)
+        self.assertEqual(self.request('POST','/ltds/v1/jobs',body)[0],409)
+        self.assertEqual(self.request('GET','/ltds/v1/jobs/by-submission/'+body['submissionId'])[0],409)
+        self.assertEqual(self.request('GET','/ltds/v1/jobs/by-submission/'+body['submissionId'],token=PRODUCTION)[0],404)
+        for method,suffix in (('GET',''),('GET','/results'),('GET','/results/result-1'),
+                              ('GET','/terminal-outcome'),('POST','/transfer-grants'),
+                              ('POST','/acceptance'),('POST','/terminal-acceptance')):
+            with self.subTest(method=method,suffix=suffix):
+                self.assertEqual(self.request(method,path+suffix,{} if method=='POST' else None)[0],404)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.accept(job_id,{})
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.receive_transfer_grant(job_id,{})
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.api.viewer.terminal.accept(job_id,{},'staging')
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.acceptance_receipts(job_id)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.api.worker.terminal.accepted(job_id,'staging')
+        # Deliberately bypass only the guard to create a valid synthetic
+        # historical claim. Current worker v1 must still reject it afterwards.
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            claim=self.store.claim(job_id,node_id='cluster',worker_id='worker',
+                worker_instance_id='instance',claim_request_id='synthetic-claim')
+        self.assertIsNotNone(claim)
+        claim_token=claim['claimToken']
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.reserve(job_id,self.fixture['transferRequest'],node_id='cluster')
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.update_phase(job_id,'fetching')
+        # Negative controls show these requests are otherwise valid: both
+        # succeed when the synthetic guard is disabled.
+        def worker_get(suffix):
+            connection=http.client.HTTPConnection(*self.server.server_address,timeout=2)
+            try:
+                connection.request('GET','/ltds/worker/v1/jobs/'+job_id+'/'+suffix,
+                    headers={'Authorization':'Bearer '+WORKER,'X-Claim-Token':claim_token})
+                response=connection.getresponse();status=response.status;response.read()
+                return status
+            finally:connection.close()
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            self.assertEqual(worker_get('acceptance'),200)
+            self.assertEqual(worker_get('claim-state'),200)
+        for suffix in ('acceptance','terminal-acceptance','claim-state','transfer-grant'):
+            self.assertEqual(worker_get(suffix),409)
+        for suffix,field,value in (('reservation','transferRequest',self.fixture['transferRequest']),
+                                   ('phase','phase','fetching')):
+            payload={'claimToken':claim_token,field:value}
+            self.assertEqual(self.request('POST','/ltds/worker/v1/jobs/'+job_id+'/'+suffix,
+                                          payload,token=WORKER)[0],409)
+        manifest=copy.deepcopy(self.fixture['resultManifest'])
+        manifest.update(jobId=job_id,pipelineDigest=result['binding']['pipelineDigest'])
+        manifest['resultManifestSha256']=digest({k:v for k,v in manifest.items() if k!='resultManifestSha256'})
+        payload=dict(jobId=job_id,generation=1,environment='staging',
+            inputManifestSha256=result['binding']['inputManifestSha256'],
+            pipelineDigest=result['binding']['pipelineDigest'],
+            resultManifestSha256=manifest['resultManifestSha256'],resultManifest=manifest,terminalState='succeeded')
+        binding_keys=('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
+        delivery=dict(outboxId=digest({key:payload[key] for key in binding_keys}),payloadSha256=digest(payload),payload=payload)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.api.worker.receiver.receive(delivery,node_id='cluster',worker_id='worker',
+                worker_instance_id='instance',claim_request_id='synthetic-claim',claim_token=claim_token)
+        self.assertEqual(self.request('POST','/ltds/worker/v1/results',
+            dict(claimRequestId='synthetic-claim',claimToken=claim_token,delivery=delivery),token=WORKER)[0],409)
+        failure=make_failure(job_id=job_id,generation=1,environment='staging',
+            input_manifest_sha256=result['binding']['inputManifestSha256'],
+            pipeline_digest=result['binding']['pipelineDigest'],terminal_state='cancelled',
+            error_code='confirmed_engine_cancelled')
+        failure_payload=dict(failure=failure,engineTerminal=True)
+        failure_keys=('jobId','generation','environment','inputManifestSha256','pipelineDigest','terminalState','failureSha256')
+        envelope=dict(outboxId=digest({key:failure[key] for key in failure_keys}),
+                      payloadSha256=digest(failure_payload),payload=failure_payload)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.api.worker.failure_receiver.receive(envelope,node_id='cluster',worker_id='worker',
+                worker_instance_id='instance',claim_request_id='synthetic-claim',claim_token=claim_token)
+        self.assertEqual(self.request('POST','/ltds/worker/v1/terminal-outcomes',
+            dict(claimRequestId='synthetic-claim',claimToken=claim_token,delivery=envelope),token=WORKER)[0],409)
+        class RecoveryProbe:
+            def _check(self):
+                pass
+            def __getattr__(self,name):
+                raise AssertionError('bound recovery must not reach service')
+        self.api.worker.recovery=RecoveryProbe()
+        for method,suffix in (('GET','recovery-state'),('POST','recover')):
+            connection=http.client.HTTPConnection(*self.server.server_address,timeout=2)
+            try:
+                data=b'{}' if method=='POST' else None
+                connection.request(method,'/ltds/worker/v1/jobs/'+job_id+'/'+suffix,body=data,
+                    headers={'Authorization':'Bearer '+WORKER,'X-Claim-Token':claim_token})
+                response=connection.getresponse()
+                self.assertEqual(response.status,409)
+                response.read()
+            finally:connection.close()
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_terminal_acceptances').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_transfer_grants').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_worker_receipts').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_worker_failures').fetchone()[0],0)
+
+    def test_v1_fails_closed_when_candidate_schema_is_tampered(self):
+        from processing import reference_owned_binding_candidate as candidate, reference_protocol as protocol
+        body=self.fixture['submission']
+        submission=protocol.validate_submission(body,environment='staging',
+            capability_fingerprint=body['capabilityFingerprint'],
+            options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],allowed_odm_options=set())
+        with patch.object(candidate,'QUALIFIED',True):
+            candidate.install_empty_candidate(self.store,synthetic_pipeline_digest=submission['pipelineDigest'],
+                synthetic_principal_id=str(uuid.uuid4()),synthetic_environment='staging',synthetic_credential=b'S'*32)
+        with self.queue._db() as db:
+            db.execute('DROP TRIGGER reference_owned_binding_no_delete')
+        # The unbound legacy path must not bypass an incomplete installed
+        # candidate schema. No job or binding should be created.
+        self.assertEqual(self.request('POST','/ltds/v1/jobs',body)[0],409)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0],0)
+
+    def test_bound_v1_acceptance_denied_for_otherwise_ready_result(self):
+        from processing import reference_owned_binding_candidate as candidate, reference_protocol as protocol
+        from processing.maintenance import Conflict
+        body=self.fixture['submission']
+        submission=protocol.validate_submission(body,environment='staging',
+            capability_fingerprint=body['capabilityFingerprint'],
+            options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],allowed_odm_options=set())
+        with patch.object(candidate,'QUALIFIED',True):
+            candidate.install_empty_candidate(self.store,synthetic_pipeline_digest=submission['pipelineDigest'],
+                synthetic_principal_id=str(uuid.uuid4()),synthetic_environment='staging',synthetic_credential=b'S'*32)
+            result=candidate.submit_bound_candidate(self.store,submission,binding_id=str(uuid.uuid4()),
+                attempt_id=str(uuid.uuid4()),credential=b'S'*32)
+        job=result['binding'];job_id=job['jobId']
+        manifest=copy.deepcopy(self.fixture['resultManifest'])
+        manifest.update(jobId=job_id,pipelineDigest=job['pipelineDigest'])
+        manifest['resultManifestSha256']=digest({k:v for k,v in manifest.items() if k!='resultManifestSha256'})
+        # Build a valid claimed, completed synthetic result only while the
+        # candidate guard is explicitly patched in this test's in-memory code.
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            identity=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_request_id='ready-claim')
+            claim=self.store.claim(job_id,**identity)
+            self.store.reserve(job_id,self.fixture['transferRequest'],node_id='cluster')
+            self.store.update_phase(job_id,'fetching')
+            self.store.update_phase(job_id,'processing')
+            self.store.record_worker_result(job_id,manifest,claim_token=claim['claimToken'],**identity)
+            self.queue.complete(job_id,{'claimToken':claim['claimToken'],'status':'succeeded','result':{}})
+            self.store.update_phase(job_id,'awaiting_acceptance')
+        receipt=copy.deepcopy(self.fixture['acceptance'])
+        receipt.update(jobId=job_id,pipelineDigest=job['pipelineDigest'],
+            resultManifestSha256=manifest['resultManifestSha256'],acceptedObjectIds=[obj['id'] for obj in manifest['objects']])
+        route='/ltds/v1/jobs/'+job_id+'/acceptance'
+        self.assertEqual(self.request('POST',route,receipt)[0],404)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.accept(job_id,receipt)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],0)
+        # Same complete payload is accepted only when the guard is explicitly
+        # removed in this negative control, proving rejection was not caused
+        # by malformed input or an unready result.
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            self.assertEqual(self.request('POST',route,receipt)[0],200)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],1)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.acceptance_receipts(job_id)
+
+    def test_bound_v1_transfer_grant_and_worker_read_denied_when_ready(self):
+        from processing.maintenance import Conflict
+        job,claim=self.synthetic_bound_claim();job_id=job['jobId']
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            self.store.reserve(job_id,self.fixture['transferRequest'],node_id='cluster')
+        grant=copy.deepcopy(self.fixture['transferGrant']);grant['jobId']=job_id
+        route='/ltds/v1/jobs/'+job_id+'/transfer-grants'
+        self.assertEqual(self.request('POST',route,grant)[0],404)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.store.receive_transfer_grant(job_id,grant)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_transfer_grants').fetchone()[0],0)
+        # Positive control: this exact grant is otherwise valid and can be
+        # read by the valid worker claim when the guard is patched only here.
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            status,ack,_=self.request('POST',route,grant)
+            self.assertEqual(status,200);self.assertTrue(ack['accepted'])
+            self.assertEqual(self.worker_claim_get(job_id,'transfer-grant',claim['claimToken'])[0],200)
+        self.assertEqual(self.worker_claim_get(job_id,'transfer-grant',claim['claimToken'])[0],409)
+
+    def test_bound_v1_terminal_acceptance_and_worker_relay_denied_when_ready(self):
+        from processing.maintenance import Conflict
+        job,claim=self.synthetic_bound_claim();job_id=job['jobId']
+        failure=make_failure(job_id=job_id,generation=job['generation'],environment='staging',
+            input_manifest_sha256=job['inputManifestSha256'],pipeline_digest=job['pipelineDigest'],
+            terminal_state='cancelled',error_code='confirmed_engine_cancelled')
+        payload=dict(failure=failure,engineTerminal=True)
+        keys=('jobId','generation','environment','inputManifestSha256','pipelineDigest','terminalState','failureSha256')
+        delivery=dict(outboxId=digest({key:failure[key] for key in keys}),payloadSha256=digest(payload),payload=payload)
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            status,_,_=self.request('POST','/ltds/worker/v1/terminal-outcomes',
+                dict(claimRequestId='synthetic-claim',claimToken=claim['claimToken'],delivery=delivery),token=WORKER)
+            self.assertEqual(status,200)
+        receipt=dict(schemaVersion=1,receiptId='terminal-receipt',storageReceiptId='terminal-storage',
+            jobId=job_id,generation=job['generation'],environment='staging',
+            inputManifestSha256=job['inputManifestSha256'],pipelineDigest=job['pipelineDigest'],
+            failureSha256=failure['failureSha256'],acceptedAt='2026-10-27T00:00:00.000Z',
+            validationVersion='ltds-reference-v1')
+        route='/ltds/v1/jobs/'+job_id+'/terminal-acceptance'
+        self.assertEqual(self.request('POST',route,receipt)[0],404)
+        with self.assertRaisesRegex(Conflict,'bound reference requires another protocol'):
+            self.api.viewer.terminal.accept(job_id,receipt,'staging')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_terminal_acceptances').fetchone()[0],0)
+        # Positive control: otherwise valid failure and exact receipt succeed
+        # only while the guard is explicitly patched within this test.
+        with patch.object(self.store,'_assert_v1_unbound',return_value=None):
+            status,accepted,_=self.request('POST',route,receipt)
+            self.assertEqual(status,200);self.assertTrue(accepted['terminalAccepted'])
+            self.assertEqual(self.worker_claim_get(job_id,'terminal-acceptance',claim['claimToken'])[0],200)
+        self.assertEqual(self.worker_claim_get(job_id,'terminal-acceptance',claim['claimToken'])[0],409)
+
+    def test_bound_create_and_v1_submit_serialize_without_rebinding(self):
+        from processing import reference_owned_binding_candidate as candidate, reference_protocol as protocol
+        from processing.maintenance import Conflict
+        body=self.fixture['submission']
+        submission=protocol.validate_submission(body,environment='staging',
+            capability_fingerprint=body['capabilityFingerprint'],
+            options_fingerprint=body['pipeline']['odm']['optionsFingerprint'],allowed_odm_options=set())
+        principal,binding,attempt=(str(uuid.uuid4()) for _ in range(3))
+        entered,release,legacy_started=threading.Event(),threading.Event(),threading.Event()
+        original=self.store._submit_owned_transaction
+        def blocked(db,checked):
+            entered.set()
+            if not release.wait(5):raise TimeoutError('synthetic transaction timeout')
+            return original(db,checked)
+        def legacy_submit():
+            legacy_started.set()
+            return self.store.submit(submission)
+        with patch.object(candidate,'QUALIFIED',True):
+            candidate.install_empty_candidate(self.store,synthetic_pipeline_digest=submission['pipelineDigest'],
+                synthetic_principal_id=principal,synthetic_environment='staging',synthetic_credential=b'S'*32)
+            with patch.object(self.store,'_submit_owned_transaction',side_effect=blocked):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    bound=pool.submit(candidate.submit_bound_candidate,self.store,submission,
+                        binding_id=binding,attempt_id=attempt,credential=b'S'*32)
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        legacy=pool.submit(legacy_submit)
+                        self.assertTrue(legacy_started.wait(5))
+                        self.assertFalse(legacy.done())
+                    finally:release.set()
+                    self.assertTrue(bound.result(timeout=5)['created'])
+                    with self.assertRaises(Conflict):legacy.result(timeout=5)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_owned_binding_candidate').fetchone()[0],1)
 
     def test_scoped_grant_replay_and_status_recovery_never_expose_secret(self):
         _, job, _ = self.request('POST', '/ltds/v1/jobs', self.fixture['submission'])

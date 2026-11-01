@@ -90,6 +90,8 @@ class TerminalService:
     def accepted(self, job_id, environment):
         """Private relay. A terminal metadata ACK grants no artifact cleanup."""
         with self.store.queue._db() as db:
+            db.execute('BEGIN')
+            self.store._assert_v1_unbound(db, job_id=job_id)
             _, failure = self._outcome(db, job_id, environment)
             row = db.execute('SELECT * FROM reference_terminal_acceptances WHERE job_id=? AND generation=?',
                              (job_id, failure['generation'])).fetchone()
@@ -119,6 +121,7 @@ class TerminalService:
     def accept(self, job_id, receipt, environment):
         with self.store.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self.store._assert_v1_unbound(db, job_id=job_id)
             _, failure = self._outcome(db, job_id, environment)
             checked = validate_terminal_acceptance(receipt, failure=failure)
             encoded = protocol.canonical_json(checked).decode()

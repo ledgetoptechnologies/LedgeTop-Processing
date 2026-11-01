@@ -221,6 +221,8 @@ class RecoveryTests(unittest.TestCase):
         request=self.request()
         with patch('processing.reference_recovery.os.getpid',return_value=os.getpid()+1):
             self.assertEqual(self.call('POST','recover',request).status,409)
+            self.assertEqual(self.call('GET','recovery-state',{'unexpected':True}).status,400)
+            self.assertEqual(self.call('GET','recovery-state').status,409)
         with self.queue._db() as db:db.execute('UPDATE coordinator_identity SET authority_id=?',(str(uuid.uuid4()),))
         self.assertEqual(self.call('POST','recover',request).status,409)
 
