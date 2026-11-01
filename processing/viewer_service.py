@@ -256,6 +256,7 @@ class ViewerService:
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 cwd=str(Path(__file__).resolve().parent.parent), env=env,
                 pass_fds=(self.queue._lock.fileno(), lease._descriptor), start_new_session=True)
+            failure = None
             try:
                 # Do not block shutdown if the child cannot read its input.
                 deadline = time.monotonic() + 6 * 60 * 60
@@ -281,8 +282,6 @@ class ViewerService:
                     # coordinator flocks also remain held by any live child.
                     process.wait()
                     raise RuntimeError('archive capture child not reaped in time') from None
-                if code == 2 and not self._stop.is_set():
-                    raise Conflict('partial_requires_inspection')
                 if code != 0 or self._stop.is_set():
                     raise EngineUnavailable('archive capture incomplete')
                 path = Path(task['directory']) / 'all.zip'
@@ -293,10 +292,15 @@ class ViewerService:
                     raise Conflict('captured archive identity changed')
                 # Bind publication to the captured incarnation in the same DB transaction.
                 self.store.update(identifier, expected_archive_task=task, archive_path=str(path))
+            except Exception as exc:
+                failure = exc
             finally:
                 try:
                     if process.stdin and not process.stdin.closed:
                         process.stdin.close()
+                except Exception as exc:
+                    if failure is None:
+                        failure = exc
                 finally:
                     try:
                         if process.poll() is None:
@@ -309,6 +313,25 @@ class ViewerService:
                         self._archive_uncertain_process = process
                         self._archive_child_unreaped.set()
                         raise RuntimeError('archive capture child termination uncertain') from None
+            if failure is not None:
+                # The child is now reaped even if writing stdin, waiting, or
+                # shutdown failed. Never infer retry safety from an incomplete
+                # writer or modify any partial bytes.
+                uncertain = process.poll() == 2
+                for name in ('all.zip.partial', '.all.zip.restore', '.all.zip.restore-pending'):
+                    try:
+                        (Path(task['directory']) / name).lstat()
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        uncertain = True
+                        break
+                    else:
+                        uncertain = True
+                        break
+                if uncertain:
+                    raise Conflict('partial_requires_inspection') from None
+                raise failure
 
     def _archive_run(self):
         deferred = 0
