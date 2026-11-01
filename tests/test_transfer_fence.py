@@ -10,7 +10,7 @@ import uuid
 
 from processing.prototype import Queue, VIEWER_PROFILE
 from processing.viewer_tasks import TaskStore
-from processing.transfer_fence import install_offline, attest, TransferFenceError
+from processing.transfer_fence import install_offline, attest, TransferFenceError, JOBS_DDL
 
 
 class TransferFenceTests(unittest.TestCase):
@@ -64,18 +64,23 @@ class TransferFenceTests(unittest.TestCase):
     def test_schema_tampering_fails_attestation(self):
         db = sqlite3.connect(':memory:')
         try:
-            db.execute('CREATE TABLE jobs(seq INTEGER,id TEXT PRIMARY KEY,request_id TEXT,environment TEXT,profile TEXT,status TEXT,worker_id TEXT,node_id TEXT,claim_hash TEXT,result TEXT,created_at TEXT,updated_at TEXT,held_reason TEXT)')
+            db.execute(JOBS_DDL)
             db.execute('CREATE TABLE viewer_tasks(job_id TEXT)')
             install_offline(db, enabled=True)
             attest(db)
-            db.execute("INSERT INTO jobs(id,status) VALUES('job','running')")
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES('job','req1','staging','photo','running')")
             db.execute("INSERT INTO viewer_tasks VALUES('job')")
             db.execute("INSERT INTO engine_ingress_uploads VALUES('upload','job','engine',1,?,'started')", ('a' * 64,))
             db.execute("INSERT INTO engine_ingress_uploads VALUES('upload2','missing','engine',1,?,'started')", ('a' * 64,))
-            with self.assertRaises(sqlite3.IntegrityError): db.execute("INSERT INTO jobs(id,status) VALUES('missing','queued')")
-            db.execute("INSERT INTO jobs(id,status) VALUES('other','queued')")
+            with self.assertRaises(sqlite3.IntegrityError): db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES('missing','req2','staging','photo','queued')")
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES('other','req3','staging','photo','queued')")
             with self.assertRaises(sqlite3.IntegrityError): db.execute("UPDATE jobs SET id='missing' WHERE id='other'")
             with self.assertRaises(sqlite3.IntegrityError): db.execute("UPDATE jobs SET status='failed' WHERE id='job'")
+            with self.assertRaises(sqlite3.IntegrityError): db.execute("UPDATE jobs SET status='held',held_reason=NULL WHERE id='job'")
+            with self.assertRaises(sqlite3.IntegrityError): db.execute("UPDATE jobs SET node_id='cluster' WHERE id='job'")
+            db.execute("ALTER TABLE jobs ADD COLUMN future_column TEXT")
+            with self.assertRaises(TransferFenceError): attest(db)
+            with self.assertRaises(sqlite3.IntegrityError): db.execute("UPDATE jobs SET status='held',held_reason='coordinator_restart',future_column='changed' WHERE id='job'")
             with self.assertRaises(sqlite3.IntegrityError): db.execute("DELETE FROM viewer_tasks WHERE job_id='job'")
             with self.assertRaises(sqlite3.IntegrityError): db.execute("INSERT INTO viewer_tasks VALUES('job')")
             db.execute("INSERT INTO viewer_tasks VALUES('other')")

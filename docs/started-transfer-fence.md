@@ -9,6 +9,10 @@ row is `started`. It permits only the exact running-to-coordinator-restart-held
 transition with job identity and claim unchanged; other operator holds and
 progress updates are conservatively blocked. A restarted coordinator can thus
 open and report the job held while retaining the started upload and shared slot.
+A legacy started job with a null node binding cannot take the startup repair
+transition and intentionally prevents startup pending inspection. The migration,
+attestation and startup exception require the exact supported jobs schema; a
+future schema change fails closed instead of silently widening the exception.
 A killed upload leaves `started`, so a cooperating old transaction cannot
 accidentally terminalize the job. The
 migration requires an independent externally fenced idle coordinator; checking
