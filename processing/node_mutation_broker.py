@@ -205,6 +205,80 @@ class LoopbackNodeODM:
         return _reply(value,grant['engineTaskId'])
 
 
+def inspect_prior_node_state(engine_id):
+    """Cooperative, local snapshot only; never adopts an epoch or permits work.
+
+    Requires the existing node gate and identity manifest. A busy, missing or
+    inconsistent node is unknown. This is not an authenticated network endpoint,
+    a continuing fence, or evidence against direct backend writers.
+    """
+    if os.name == 'nt':raise BrokerHeld('local inspection requires POSIX locking')
+    import fcntl
+    root=canonical_gate_path(engine_id); state_root=root/'mutation-broker'
+    lockfd=None; manifestfd=None; db=None
+    try:
+        rootstat=root.lstat(); brokerstat=state_root.lstat()
+        if (not stat.S_ISDIR(rootstat.st_mode) or not stat.S_ISDIR(brokerstat.st_mode)
+                or root.resolve()!=root.absolute() or state_root.resolve()!=state_root.absolute()
+                or rootstat.st_uid!=os.geteuid() or brokerstat.st_uid!=os.geteuid()
+                or rootstat.st_mode&0o077 or brokerstat.st_mode&0o077):
+            raise BrokerHeld('node state requires inspection')
+        lockfd=os.open(root/'gate.lock',os.O_RDWR|os.O_NOFOLLOW)
+        lock=os.fstat(lockfd)
+        if not stat.S_ISREG(lock.st_mode) or lock.st_uid!=os.geteuid() or lock.st_mode&0o077 or lock.st_nlink!=1:
+            raise BrokerHeld('node lock requires inspection')
+        fcntl.flock(lockfd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        manifestfd=os.open(state_root/'identity.json',os.O_RDONLY|os.O_NOFOLLOW)
+        info=os.fstat(manifestfd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o077 or info.st_size>8192:
+            raise BrokerHeld('node identity requires inspection')
+        manifest=json.loads(os.read(manifestfd,8193))
+        fields={'version','nodeId','engineId','authorityId','coordinatorOrigin','generation','coordinatorEpoch','gateRoot','gateLock','journal'}
+        if (type(manifest) is not dict or set(manifest)!=fields or manifest['version']!=1
+                or manifest['engineId']!=engine_id or not _uuid(manifest['authorityId'])
+                or not _uuid(manifest['coordinatorEpoch']) or manifest['nodeId'] not in ('main','cluster')
+                or type(manifest['generation']) is not int or manifest['generation']<1
+                or manifest['gateRoot']!=[rootstat.st_dev,rootstat.st_ino]
+                or manifest['gateLock']!=[lock.st_dev,lock.st_ino]):
+            raise BrokerHeld('node identity changed')
+        journal=state_root/'node-broker.sqlite3';js=journal.lstat()
+        if (not stat.S_ISREG(js.st_mode) or js.st_nlink!=1 or js.st_uid!=os.geteuid() or js.st_mode&0o077
+                or manifest['journal']!=[js.st_dev,js.st_ino]):raise BrokerHeld('node journal changed')
+        gate=NodeGate(engine_id)
+        # The existing lock is already held. Do not call NodeGate.__enter__,
+        # which creates files and adjusts permissions.
+        gate._stream=os.fdopen(os.dup(lockfd),'rb')
+        try:state=gate.snapshot()
+        finally:gate._stream.close();gate._stream=None
+        for key in ('nodeId','engineId','authorityId','coordinatorOrigin','generation'):
+            if state.get(key)!=manifest[key]:raise BrokerHeld('node gate identity changed')
+        db=sqlite3.connect(journal.as_uri()+'?mode=ro',uri=True,timeout=2,isolation_level=None)
+        db.row_factory=sqlite3.Row;db.execute('BEGIN')
+        for name,ddl in _DDL.items():
+            row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
+            if row is None or row['sql']!=ddl:raise BrokerHeld('node journal schema changed')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' LIMIT 1").fetchone():raise BrokerHeld('node journal schema changed')
+        binding=hashlib.sha256(_json([manifest[k] for k in ('nodeId','engineId','authorityId','coordinatorEpoch','coordinatorOrigin','generation')])).hexdigest()
+        row=db.execute('SELECT digest FROM binding WHERE singleton=1').fetchone()
+        if row is None or row['digest']!=binding:raise BrokerHeld('node journal binding changed')
+        reservation=db.execute('SELECT identity FROM reservation WHERE singleton=1').fetchone()
+        operations=[dict(row) for row in db.execute('SELECT id,operation,state FROM operations ORDER BY id')]
+        if any(row['state'] not in ('started','complete') or row['operation'] not in ('init','commit') for row in operations):
+            raise BrokerHeld('node operation state unknown')
+        after=journal.lstat()
+        if (after.st_dev,after.st_ino)!=(js.st_dev,js.st_ino):raise BrokerHeld('node journal changed')
+        return {'identity':manifest,'gateReservation':state['reservation'],
+                'journalReservation':json.loads(reservation['identity']) if reservation else None,
+                'operations':operations,'authorizesAdmission':False}
+    except BrokerHeld:raise
+    except (OSError,ValueError,TypeError,KeyError,sqlite3.Error):
+        raise BrokerHeld('node state unavailable') from None
+    finally:
+        if db is not None:db.close()
+        if manifestfd is not None:os.close(manifestfd)
+        if lockfd is not None:os.close(lockfd)
+
+
 class NodeMutationBroker:
     def __init__(self, root, *, node_id, engine_id, authority_id, coordinator_epoch,
                  coordinator_origin, gate_generation, secret, adapter, authority_witness):
@@ -262,6 +336,41 @@ class NodeMutationBroker:
             elif old['digest'] != binding:raise BrokerHeld('node broker binding changed')
             self.db.commit()
         except BaseException:self.db.rollback();self.db.close();raise
+        try:
+            with NodeGate(self.engine) as gate:self._identity_manifest(gate,not existed)
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _identity_manifest(self, gate, created):
+        state=gate.snapshot()
+        expected={'nodeId':self.node,'engineId':self.engine,'authorityId':self.authority,
+                  'coordinatorOrigin':self.origin,'generation':self.generation}
+        if any(state.get(k)!=v for k,v in expected.items()):
+            raise BrokerHeld('node gate identity changed')
+        root=gate.root.stat(); lock=os.fstat(gate._stream.fileno()); journal=self.path.lstat()
+        manifest={'version':1,**expected,'coordinatorEpoch':self.epoch,
+                  'gateRoot':[root.st_dev,root.st_ino], 'gateLock':[lock.st_dev,lock.st_ino],
+                  'journal':[journal.st_dev,journal.st_ino]}
+        path=self.root/'identity.json'; raw=_json(manifest)
+        flags=os.O_NOFOLLOW | (os.O_WRONLY|os.O_CREAT|os.O_EXCL if created else os.O_RDONLY)
+        try:
+            fd=os.open(path,flags,0o600)
+            try:
+                info=os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid() or info.st_mode&0o077:
+                    raise BrokerHeld('invalid node identity manifest')
+                if created:
+                    with os.fdopen(fd,'wb',closefd=False) as out:
+                        out.write(raw);out.flush();os.fsync(fd)
+                elif info.st_size>8192 or os.read(fd,8193)!=raw:
+                    raise BrokerHeld('node identity manifest changed')
+            finally:os.close(fd)
+            if created:
+                fd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                try:os.fsync(fd)
+                finally:os.close(fd)
+        except OSError:raise BrokerHeld('node identity manifest unavailable') from None
 
     def _check_owner(self):
         if self._closed or self._pid!=os.getpid():raise BrokerHeld('node broker owner changed')
@@ -304,6 +413,7 @@ class NodeMutationBroker:
         job={'id':grant['jobId'],'workerId':'node-broker','nodeId':self.node,'authorityId':self.authority}
         with self._mutex, self.witness.hold(grant,10,body=body,signature=signature), NodeGate(self.engine) as gate:
             self._check_owner()
+            self._identity_manifest(gate,False)
             state=gate.snapshot();expected={'nodeId':self.node,'coordinatorOrigin':self.origin,'authorityId':self.authority,'generation':self.generation}
             if any(state[k]!=v for k,v in expected.items()):raise BrokerHeld('node ownership changed')
             reservation=state['reservation']
@@ -333,6 +443,7 @@ class NodeMutationBroker:
             except BaseException:self.db.rollback();raise
             reply=_reply(self.adapter.exchange(grant,body),grant['engineTaskId'])
             self._check_owner()
+            self._identity_manifest(gate,False)
             self.witness.check()
             raw=_json(reply)
             if len(raw)>4096:raise BrokerHeld('backend response exceeds bound')

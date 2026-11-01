@@ -105,6 +105,27 @@ class NodeMutationBrokerTests(unittest.TestCase):
                     operationId=str(uuid.uuid4()),operation=operation,bodySha256=hashlib.sha256(body).hexdigest(),
                     contentType='application/octet-stream')
 
+    def test_prior_epoch_inspection_preserves_uncertain_state_and_refuses_identity_change(self):
+        self.broker.close()
+        report=b.inspect_prior_node_state(self.engine)
+        self.assertEqual(report['identity']['coordinatorEpoch'],self.epoch)
+        self.assertFalse(report['authorizesAdmission'])
+        self.assertEqual(report['operations'],[])
+        self.broker=b.NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+        grant=self.grant()
+        with patch.object(self.adapter,'exchange',side_effect=RuntimeError('synthetic disconnect')):
+            with self.assertRaises(RuntimeError):self.broker.mutate(grant,b.sign_grant(grant,self.secret),self.body)
+        self.broker.close()
+        report=b.inspect_prior_node_state(self.engine)
+        self.assertEqual(report['operations'][0]['state'],'started')
+        self.assertEqual(report['gateReservation']['job']['id'],self.job)
+        self.assertIsNotNone(report['journalReservation'])
+        manifest=self.root/'gate'/'mutation-broker'/'identity.json'
+        value=json.loads(manifest.read_text());value['coordinatorEpoch']=str(uuid.uuid4())
+        manifest.write_text(json.dumps(value))
+        with self.assertRaises(b.BrokerHeld):b.inspect_prior_node_state(self.engine)
+        with self.assertRaises(b.BrokerHeld):b.NodeMutationBroker(self.root/'gate'/'mutation-broker',**self.config)
+
     def test_signed_local_init_replays_and_binds_job_task_epoch(self):
         grant=self.grant();signature=b.sign_grant(grant,self.secret)
         with self.assertRaises(b.BrokerHeld):self.broker.mutate(grant,'0'*64,self.body)
