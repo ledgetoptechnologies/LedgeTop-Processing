@@ -1,5 +1,6 @@
 """Small synthetic tests for disabled per-input physical reservation."""
 import errno
+import hashlib
 import io
 import http.client
 import threading
@@ -128,7 +129,7 @@ class ViewerInputSpaceTests(unittest.TestCase):
         rows=[]
         for index in range(10000):
             name='input-'+format(index,'032x');os.link(seed,directory/name)
-            rows.append((self.identifier,'photo-%05d.jpg'%index,'photo-%05d.jpg'%index,name,1,'0'*64,1))
+            rows.append((self.identifier,'photo-%05d.jpg'%index,'photo-%05d.jpg'%index,name,1,hashlib.sha256(b'x').hexdigest(),1))
         with self.q._db() as db:
             db.executemany('INSERT INTO viewer_files(uuid,name_key,name,path,bytes,sha256,is_photo) VALUES(?,?,?,?,?,?,?)',rows)
         start=time.monotonic()
@@ -146,6 +147,8 @@ class ViewerInputSpaceTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_intake_snapshot_files_v1 WHERE uuid=? AND generation=1',(self.identifier,)).fetchone()[0],10000)
         print('synthetic 10000 file generation snapshot seconds:',round(elapsed,4),flush=True)
         self.assertEqual((directory/('input-'+format(0,'032x'))).read_bytes(),b'x')
+        start=time.monotonic();store.startup_intake_census()
+        print('synthetic 10000 historical hash census seconds:',round(time.monotonic()-start,4),flush=True)
 
     def test_census_over_bound_fails_closed_preserving_files(self):
         from processing import viewer_tasks
@@ -470,13 +473,41 @@ class IntakeRuntimeStartupTests(unittest.TestCase):
             probe=Queue(self.state,viewer_enabled=True);probe.close()
             lease=authority_lease.acquire(self.leases,self.state);lease.close()
 
-    def test_startup_holds_historical_generation(self):
+    def historical_fixture(self):
+        handler=make_handler(self.settings());queue=handler.prototype_queue;store=handler.viewer_service.store
+        identifier=str(uuid.uuid4());store.initialize(identifier,'old',[],None,'production')
+        store.upload(identifier,'a.jpg',io.BytesIO(b'first'),5)
+        old=Path(store.task(identifier)['files'][0]['path'])
+        store.remove(identifier);store.initialize(identifier,'new',[],None,'production')
+        handler.viewer_service.close();queue.close();queue.authority_lease.close()
+        return old
+
+    def test_startup_audits_valid_historical_generation(self):
         with self.qualify():
-            handler=make_handler(self.settings());queue=handler.prototype_queue;store=handler.viewer_service.store
-            identifier=str(uuid.uuid4());store.initialize(identifier,'old',[],None,'production')
-            store.remove(identifier);store.initialize(identifier,'new',[],None,'production')
-            handler.viewer_service.close();queue.close();queue.authority_lease.close()
-            with self.assertRaisesRegex(InputRecoveryRequired,'historical intake'):make_handler(self.settings())
+            old=self.historical_fixture();handler=make_handler(self.settings())
+            self.assertEqual(old.read_bytes(),b'first')
+            queue=handler.prototype_queue;handler.viewer_service.close();queue.close();queue.authority_lease.close()
+
+    def test_startup_holds_changed_missing_or_extra_historical_inputs(self):
+        with self.qualify():
+            old=self.historical_fixture()
+            old.write_bytes(b'wrong')
+            with self.assertRaisesRegex(InputRecoveryRequired,'historical input bytes'):make_handler(self.settings())
+            old.write_bytes(b'first');extra=old.parent/('input-'+'f'*32);extra.write_bytes(b'extra')
+            with self.assertRaisesRegex(InputRecoveryRequired,'historical input paths'):make_handler(self.settings())
+            # Preserve the extra and simulate a missing expected file by renaming
+            # only this test-owned fixture; no user data is touched.
+            moved=old.with_name('held-synthetic');old.rename(moved)
+            with self.assertRaisesRegex(InputRecoveryRequired,'historical input paths'):make_handler(self.settings())
+            self.assertEqual(moved.read_bytes(),b'first');self.assertEqual(extra.read_bytes(),b'extra')
+
+    def test_startup_holds_when_historical_byte_budget_exceeded(self):
+        from processing import viewer_tasks
+        with self.qualify():
+            old=self.historical_fixture()
+            with patch.object(viewer_tasks,'HISTORY_CENSUS_MAX_BYTES',4):
+                with self.assertRaisesRegex(InputRecoveryRequired,'exceeds bound'):make_handler(self.settings())
+            self.assertEqual(old.read_bytes(),b'first')
 
     def test_startup_holds_orphan_viewer_files(self):
         with self.qualify():

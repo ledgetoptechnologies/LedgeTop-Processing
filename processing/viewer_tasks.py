@@ -17,6 +17,7 @@ import re
 import secrets
 import stat
 import threading
+import time
 import uuid as uuid_module
 import sqlite3
 
@@ -35,6 +36,10 @@ class ArchiveClaimHeld(Conflict):
 INTAKE_JOURNAL_QUALIFIED = False
 INTAKE_CENSUS_MAX_FILES = 100000
 INTAKE_CENSUS_MAX_ENTRIES = 200000
+HISTORY_CENSUS_MAX_GENERATIONS = 100000
+HISTORY_CENSUS_MAX_FILES = 1000000
+HISTORY_CENSUS_MAX_BYTES = 100 * 1024 ** 3
+HISTORY_CENSUS_SECONDS = 30
 INTAKE_JOURNAL_DDL = """CREATE TABLE viewer_intake_journal_v1 (
     operation TEXT PRIMARY KEY, uuid TEXT NOT NULL, generation INTEGER NOT NULL,
     name_key TEXT NOT NULL, directory TEXT NOT NULL, temporary TEXT NOT NULL,
@@ -291,23 +296,92 @@ class TaskStore:
         with self._lock,self.queue._db() as db:
             rows=db.execute('SELECT * FROM viewer_tasks ORDER BY uuid LIMIT 1001').fetchall()
             if len(rows)>1000:raise InputRecoveryRequired('task census exceeds bound')
-            # Historical bytes are not yet independently verified. Do not
-            # silently admit a restarted instance with old generations.
-            if db.execute('SELECT 1 FROM viewer_incarnations LIMIT 1').fetchone():
-                raise InputRecoveryRequired('historical intake needs inspection')
             for table in ('viewer_files','viewer_intake_snapshot_files_v1'):
                 if db.execute(f'SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT 1000001)').fetchone()[0]>1000000:
                     raise InputRecoveryRequired('input ownership census exceeds bound')
             if db.execute('SELECT 1 FROM viewer_files f LEFT JOIN viewer_tasks t ON t.uuid=f.uuid WHERE t.uuid IS NULL LIMIT 1').fetchone():
                 raise InputRecoveryRequired('orphan input metadata needs inspection')
-            if db.execute('SELECT 1 FROM viewer_intake_snapshot_files_v1 LIMIT 1').fetchone():
-                raise InputRecoveryRequired('orphan snapshot metadata needs inspection')
+            rows_by_uuid={row['uuid']:row for row in rows}
             owners={}; directories=set()
             for row in rows:
                 identity=(row['uuid'],row['generation'])
                 if identity in owners or not isinstance(row['directory'],str) or row['directory'] in directories:
                     raise InputRecoveryRequired('task identity needs inspection')
                 owners[identity]=row['directory'];directories.add(row['directory'])
+            historical_files=0;historical_bytes=0;deadline=time.monotonic()+HISTORY_CENSUS_SECONDS
+            history=db.execute('SELECT uuid,generation,metadata,files FROM viewer_incarnations LIMIT ?',
+                               (HISTORY_CENSUS_MAX_GENERATIONS+1,))
+            for count,entry in enumerate(history,1):
+                if count>HISTORY_CENSUS_MAX_GENERATIONS or time.monotonic()>deadline:
+                    raise InputRecoveryRequired('historical intake census exceeds bound')
+                try:
+                    metadata=json.loads(entry['metadata']);files=json.loads(entry['files'])
+                    identity=(entry['uuid'],entry['generation']);directory=metadata['directory']
+                    current=rows_by_uuid.get(identity[0])
+                    if (current is None or type(identity[1]) is not int or identity[1]<1
+                        or identity[1]>=current['generation'] or metadata['uuid']!=identity[0]
+                        or metadata['generation']!=identity[1] or type(directory) is not str
+                        or identity in owners or directory in directories or type(files) is not list):
+                        raise ValueError()
+                    base=identity[0]+'-'+str(identity[1])
+                    if not re.fullmatch(re.escape(base)+r'(?:-[0-9a-f]{16})?',directory):raise ValueError()
+                    folder=self.root/directory
+                    if folder.parent!=self.root or folder.resolve()!=folder or not folder.is_dir() or folder.is_symlink():raise ValueError()
+                except (KeyError,TypeError,ValueError,RecursionError,OSError):
+                    raise InputRecoveryRequired('incarnation identity needs inspection') from None
+                owners[identity]=directory;directories.add(directory)
+                recorded={}
+                for item in files:
+                    if (type(item) is not dict or set(item)!={'uuid','name_key','name','path','bytes','sha256','is_photo'}
+                        or item['uuid']!=identity[0] or type(item['name_key']) is not str
+                        or item['name_key'] in recorded or type(item['path']) is not str
+                        or not re.fullmatch(r'input-[0-9a-f]{32}',item['path'])
+                        or type(item['bytes']) is not int or item['bytes']<=0
+                        or type(item['sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}',item['sha256'])):
+                        raise InputRecoveryRequired('historical input metadata needs inspection')
+                    recorded[item['name_key']]=item
+                    historical_files+=1;historical_bytes+=item['bytes']
+                    if historical_files>HISTORY_CENSUS_MAX_FILES or historical_bytes>HISTORY_CENSUS_MAX_BYTES or time.monotonic()>deadline:
+                        raise InputRecoveryRequired('historical intake census exceeds bound')
+                found_rows=0
+                for snapshot in db.execute('SELECT * FROM viewer_intake_snapshot_files_v1 WHERE uuid=? AND generation=?',identity):
+                    found_rows+=1;item=recorded.get(snapshot['name_key'])
+                    if item is None or any(snapshot[key] is None or snapshot[key]!=item[key]
+                                           for key in ('uuid','name_key','name','path','bytes','sha256','is_photo')):
+                        raise InputRecoveryRequired('historical input snapshot differs')
+                if found_rows!=len(recorded):raise InputRecoveryRequired('historical input snapshot missing')
+                expected={item['path'] for item in files}
+                if len(expected)!=len(files):raise InputRecoveryRequired('historical input paths differ')
+                observed=set()
+                with os.scandir(folder) as entries:
+                    for n,child in enumerate(entries,1):
+                        if n>INTAKE_CENSUS_MAX_ENTRIES or time.monotonic()>deadline:
+                            raise InputRecoveryRequired('historical intake census exceeds bound')
+                        if child.name.startswith('.incoming-'):raise InputRecoveryRequired('historical incoming file needs inspection')
+                        if child.name.startswith('input-'):
+                            if not child.is_file(follow_symlinks=False):raise InputRecoveryRequired('historical input path unsafe')
+                            observed.add(child.name)
+                if expected!=observed:raise InputRecoveryRequired('historical input paths differ')
+                for item in files:
+                    try:
+                        fd=os.open(folder/item['path'],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                        try:
+                            before=os.fstat(fd);digest=hashlib.sha256()
+                            if not stat.S_ISREG(before.st_mode) or before.st_size!=item['bytes']:raise ValueError()
+                            while True:
+                                if time.monotonic()>deadline:raise InputRecoveryRequired('historical intake census exceeds bound')
+                                chunk=os.read(fd,1024*1024)
+                                if not chunk:break
+                                digest.update(chunk)
+                            after=os.fstat(fd);named=(folder/item['path']).lstat()
+                            if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=
+                                (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+                                or (after.st_dev,after.st_ino)!=(named.st_dev,named.st_ino)
+                                or digest.hexdigest()!=item['sha256']):raise ValueError()
+                        finally:os.close(fd)
+                    except (OSError,ValueError):raise InputRecoveryRequired('historical input bytes need inspection') from None
+            if db.execute('SELECT 1 FROM viewer_intake_snapshot_files_v1 s LEFT JOIN viewer_incarnations i ON i.uuid=s.uuid AND i.generation=s.generation WHERE i.uuid IS NULL LIMIT 1').fetchone():
+                raise InputRecoveryRequired('orphan snapshot metadata needs inspection')
             journal=db.execute('SELECT uuid,generation,directory FROM viewer_intake_journal_v1 LIMIT 1000001')
             for count,entry in enumerate(journal,1):
                 if count>1000000:raise InputRecoveryRequired('intake journal census exceeds bound')
