@@ -19,6 +19,8 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if config.admission_drain_enabled and runtime_config.ADMISSION_DRAIN_QUALIFIED is not True:
+        raise RuntimeError('admission_drain_not_qualified')
     if (type(config.viewer_archive_registry) is not bool or
         (config.viewer_archive_registry and (runtime_config.ARCHIVE_REGISTRY_QUALIFIED is not True
           or not config.viewer_enabled or not config.authority_lease_dir))):
@@ -26,7 +28,7 @@ def make_handler(config: Config):
     if (type(config.admission_start_closed) is not bool or
         (config.admission_start_closed and
          (config.admission_drain_enabled is not True or not config.prototype_state_dir or
-          not config.prototype_operator_token or config.reference_config_path))):
+          not config.prototype_operator_token))):
         raise RuntimeError('closed_start_requires_admission_drain')
     reference_settings = None
     if config.reference_config_path:

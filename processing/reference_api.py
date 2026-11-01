@@ -5,11 +5,13 @@ or loopback connection. Forwarded headers never establish this trust. This
 module performs no transfer, execution, token issuance or network requests.
 """
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 import hmac
 import re
 from types import MappingProxyType
 
 from .maintenance import Conflict
+from .admission_drain import AdmissionClosed
 from . import reference_protocol as protocol
 
 
@@ -139,8 +141,10 @@ class ReferenceAPI:
                         pipeline['treedar']['inputObjectIds'] != [objects[0]['id']]):
                     # Reconcile an identical previously admitted request without
                     # creating new work; changed identity remains a conflict.
-                    replay = self.store.find_submission_replay(validated['submissionId'],
-                        request_digest=validated['requestDigest'], environment=environment)
+                    gate = getattr(self.store.queue, 'admission_drain', None)
+                    with gate.admit() if gate is not None else nullcontext():
+                        replay = self.store.find_submission_replay(validated['submissionId'],
+                            request_digest=validated['requestDigest'], environment=environment)
                     return Response(200, replay) if replay is not None else self._error(409, 'treedar_execution_shape_unsupported')
                 job, created = self.store.submit(validated)
                 return Response(201 if created else 200, job)
@@ -172,6 +176,8 @@ class ReferenceAPI:
                 grant = protocol.decode_submission(body)
                 return Response(200, self.store.receive_transfer_grant(job_id, grant))
             return self._error(405, "method_not_allowed")
+        except AdmissionClosed:
+            return self._error(503, 'admission_draining')
         except (protocol.ProtocolError, ValueError, TypeError):
             return self._error(400, "invalid_request")
         except Conflict:

@@ -175,6 +175,12 @@ class ReferenceStore:
             raise Conflict("reference metadata quota reached")
 
     def submit(self, validated):
+        from contextlib import nullcontext
+        gate = getattr(self.queue, 'admission_drain', None)
+        with gate.admit() if gate is not None else nullcontext():
+            return self._submit(validated)
+
+    def _submit(self, validated):
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -187,6 +193,10 @@ class ReferenceStore:
         encoded = _json(checked)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            gate = getattr(self.queue, 'admission_drain', None)
+            if gate is not None and gate._closed(db):
+                from .admission_drain import AdmissionClosed
+                raise AdmissionClosed()
             old = db.execute("SELECT job_id,request_digest,environment FROM reference_jobs WHERE submission_id=?",
                              (checked["submissionId"],)).fetchone()
             if old:

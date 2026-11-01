@@ -28,6 +28,8 @@ STAGE='synthetic-staging-'+'d'*32
 
 class AdmissionTests(unittest.TestCase):
     def setUp(self):
+        qualification=patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True)
+        qualification.start();self.addCleanup(qualification.stop)
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.config=Config(API,'http://127.0.0.1:1','http://127.0.0.1:2',1000,100000,
             prototype_state_dir=self.temp.name, prototype_operator_token=OP,
@@ -126,8 +128,7 @@ class AdmissionTests(unittest.TestCase):
             make_handler(replace(self.config,prototype_state_dir=state,admission_drain_enabled=False,admission_start_closed=True))
         self.assertFalse(os.path.exists(state))
         for bad in (replace(self.config,prototype_state_dir='',admission_start_closed=True),
-                    replace(self.config,prototype_operator_token='',admission_start_closed=True),
-                    replace(self.config,reference_config_path='unqualified',admission_start_closed=True)):
+                    replace(self.config,prototype_operator_token='',admission_start_closed=True)):
             with self.assertRaisesRegex(RuntimeError,'closed_start_requires_admission_drain'):make_handler(bad)
         values={'PROCESSING_API_TOKEN':API,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OP,
                 'PROCESSING_PROTOTYPE_STATE_DIR':self.temp.name,'PROCESSING_ADMISSION_START_CLOSED':'1'}
@@ -238,7 +239,7 @@ class AdmissionTests(unittest.TestCase):
         values={'PROCESSING_API_TOKEN':API,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OP,
                 'PROCESSING_PROTOTYPE_STATE_DIR':self.temp.name,
                 'PROCESSING_ADMISSION_DRAIN_ENABLED':'1','PROCESSING_ADMISSION_START_CLOSED':'1'}
-        with patch.dict(os.environ,values,clear=True):
+        with patch.dict(os.environ,values,clear=True), patch('processing.config.ADMISSION_DRAIN_QUALIFIED',False):
             with self.assertRaisesRegex(ValueError,'not qualified'):from_environment()
             with patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True):
                 configured=from_environment()
@@ -273,8 +274,15 @@ class AdmissionTests(unittest.TestCase):
     def test_runtime_environment_cannot_enable_unqualified_drain(self):
         values={'PROCESSING_API_TOKEN':API,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OP,
                 'PROCESSING_PROTOTYPE_STATE_DIR':self.temp.name,'PROCESSING_ADMISSION_DRAIN_ENABLED':'1'}
-        with patch.dict(os.environ,values,clear=True),self.assertRaisesRegex(ValueError,'not qualified'):
+        with patch.dict(os.environ,values,clear=True),patch('processing.config.ADMISSION_DRAIN_QUALIFIED',False),self.assertRaisesRegex(ValueError,'not qualified'):
             from_environment()
+
+    def test_direct_handler_cannot_enable_unqualified_drain_or_create_state(self):
+        state=os.path.join(self.temp.name,'unqualified-direct')
+        with patch('processing.config.ADMISSION_DRAIN_QUALIFIED',False):
+            with self.assertRaisesRegex(RuntimeError,'admission_drain_not_qualified'):
+                make_handler(replace(self.config,prototype_state_dir=state))
+        self.assertFalse(os.path.exists(state))
 
     def test_delayed_retry_and_stale_reopen_cannot_change_newer_state(self):
         path='/v1/prototype/admission-drain'

@@ -285,7 +285,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
     def test_shared_admission_drain_blocks_real_reference_submission(self):
         config = replace(self.config, reference_config_path=str(self.path), admission_drain_enabled=True)
         first, second = self.tls_patches()
-        with first, second: handler = make_handler(config)
+        with first, second, patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True): handler = make_handler(config)
         self.addCleanup(handler.prototype_queue.close)
         self.addCleanup(handler.viewer_service.close)
         runtime = handler.reference_listener
@@ -309,6 +309,102 @@ class ReferenceRuntimeTests(unittest.TestCase):
         handler.prototype_queue.admission_drain.set_closed(False,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=True,expected_authority=handler.prototype_queue.authority_id)
         self.assertIsNotNone(runtime.store.claim(job_id, **claim))
         runtime.close()
+
+    def test_reference_closed_restart_preserves_job_and_blocks_new_claims(self):
+        self.value['viewerBearers']['production']='reference-production-'+'p'*32
+        self.write_config()
+        config=replace(self.config,reference_config_path=str(self.path),admission_drain_enabled=True,
+                       prototype_operator_token='operator-'+'o'*32)
+        first,second=self.tls_patches()
+        with first,second,patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True):handler=make_handler(config)
+        runtime=handler.reference_listener;runtime.api.discover=lambda:self.snapshot
+        staging={'Authorization':'Bearer '+self.value['viewerBearers']['staging']}
+        caps=runtime.api.handle('GET','/ltds/v1/capabilities',staging,protected_transport=True)
+        fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
+        fixture['capabilityFingerprint']=caps.body['capabilityFingerprint']
+        fixture['pipeline']['odm']['optionsFingerprint']=caps.body['engines']['odm']['optionsFingerprint']
+        body=json.dumps(fixture).encode()
+        with patch.object(runtime.store,'_submit',wraps=runtime.store._submit) as submitted:
+            created=runtime.api.handle('POST','/ltds/v1/jobs',staging,body,protected_transport=True)
+            validated=submitted.call_args.args[0]
+        self.assertEqual(created.status,201);job_id=created.body['jobId']
+        gate=handler.prototype_queue.admission_drain;state=gate.status()
+        gate.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=state['generation'],expected_closed=False,expected_authority=state['authorityId'])
+        runtime.close();handler.viewer_service.close();handler.prototype_queue.close()
+        first,second=self.tls_patches()
+        with first,second,patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True):restarted=make_handler(replace(config,admission_start_closed=True))
+        self.addCleanup(restarted.prototype_queue.close);self.addCleanup(restarted.viewer_service.close)
+        runtime=restarted.reference_listener;self.addCleanup(runtime.close);runtime.api.discover=lambda:self.snapshot
+        self.assertTrue(restarted.prototype_queue.admission_drain.status()['closed'])
+        self.assertEqual(runtime.store.get(job_id)['status'],'queued')
+        from processing.admission_drain import AdmissionClosed
+        with self.assertRaises(AdmissionClosed):runtime.store.submit(validated)
+        with self.assertRaises(AdmissionClosed):runtime.store._submit(validated)
+        for token in (self.value['viewerBearers']['production'],self.value['viewerBearers']['staging']):
+            response=runtime.api.handle('POST','/ltds/v1/jobs',{'Authorization':'Bearer '+token},body,protected_transport=True)
+            self.assertEqual(response.status,503)
+        self.assertEqual(runtime.api.handle('POST','/ltds/v1/jobs',{'Authorization':'Bearer wrong'},body,protected_transport=True).status,401)
+        claim_body=json.dumps({'jobId':job_id,'claimRequestId':'closed-test-claim'}).encode()
+        worker={'Authorization':'Bearer '+self.value['workers']['cluster']['bearer']}
+        self.assertEqual(runtime.api.handle('POST','/ltds/worker/v1/claim',worker,claim_body,protected_transport=True).status,409)
+        self.assertEqual(runtime.api.handle('POST','/ltds/worker/v1/claim',{'Authorization':'Bearer wrong'},claim_body,protected_transport=True).status,401)
+        self.assertEqual(runtime.store.get(job_id)['status'],'queued')
+        self.assertEqual(len(restarted.prototype_queue.list()),1)
+        # A corrupted authority marker also holds admission; no new work is
+        # written even when the listener and credentials remain valid.
+        with restarted.prototype_queue._db() as db:
+            db.execute("UPDATE coordinator_admission SET authority_id='synthetic-wrong-authority'")
+        self.assertEqual(runtime.api.handle('POST','/ltds/v1/jobs',staging,body,protected_transport=True).status,503)
+        self.assertEqual(len(restarted.prototype_queue.list()),1)
+
+    def test_reference_inflight_submission_drains_before_close_receipt(self):
+        config=replace(self.config,reference_config_path=str(self.path),admission_drain_enabled=True,
+                       prototype_operator_token='operator-'+'o'*32)
+        first,second=self.tls_patches()
+        with first,second,patch('processing.config.ADMISSION_DRAIN_QUALIFIED',True):handler=make_handler(config)
+        self.addCleanup(handler.prototype_queue.close);self.addCleanup(handler.viewer_service.close)
+        runtime=handler.reference_listener;self.addCleanup(runtime.close);runtime.api.discover=lambda:self.snapshot
+        headers={'Authorization':'Bearer '+self.value['viewerBearers']['staging']}
+        caps=runtime.api.handle('GET','/ltds/v1/capabilities',headers,protected_transport=True)
+        fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
+        fixture['capabilityFingerprint']=caps.body['capabilityFingerprint']
+        fixture['pipeline']['odm']['optionsFingerprint']=caps.body['engines']['odm']['optionsFingerprint']
+        body=json.dumps(fixture).encode();entered=threading.Event();release=threading.Event();responses=[];closed=[]
+        server=ThreadingHTTPServer(('127.0.0.1',0),handler)
+        server_thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.02})
+        server_thread.start()
+        def native_post(token):
+            connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
+            try:
+                connection.request('POST','/task/new/init?token='+token,body=b'{}',headers={'Content-Type':'application/json'})
+                response=connection.getresponse();response.read();return response.status
+            finally:connection.close()
+        self.addCleanup(server_thread.join,3);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        original=runtime.store._submit
+        def blocked(value):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('synthetic deadline')
+            return original(value)
+        gate=handler.prototype_queue.admission_drain;state=gate.status()
+        def close():
+            closed.append(gate.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=state['generation'],expected_closed=False,expected_authority=state['authorityId']))
+        with patch.object(runtime.store,'_submit',side_effect=blocked):
+            submit=threading.Thread(target=lambda:responses.append(runtime.api.handle('POST','/ltds/v1/jobs',headers,body,protected_transport=True)))
+            submit.start();closer=None
+            try:
+                self.assertTrue(entered.wait(3));closer=threading.Thread(target=close);closer.start()
+                self.assertTrue(gate._closing.wait(3));self.assertTrue(closer.is_alive())
+                denied=runtime.api.handle('POST','/ltds/v1/jobs',headers,body,protected_transport=True)
+                self.assertEqual(denied.status,503)
+                self.assertEqual(native_post(config.viewer_token),503)
+                self.assertEqual(native_post('wrong'),401)
+                release.set();submit.join(5);closer.join(5)
+                self.assertFalse(submit.is_alive());self.assertFalse(closer.is_alive())
+                self.assertEqual(responses[0].status,201);self.assertTrue(closed[0]['closed'])
+                self.assertEqual(len(handler.prototype_queue.list()),1)
+            finally:
+                release.set();submit.join(6)
+                if closer is not None:closer.join(6)
 
     def test_actual_catalog_changes_fingerprints_and_stale_admission_is_rejected(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
