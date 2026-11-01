@@ -1,5 +1,9 @@
 import io
+import hashlib
 import json
+import socket
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import threading
@@ -33,6 +37,7 @@ class GuardTests(unittest.TestCase):
                           engine_uuid=self.engine, claim_token=self.claim['claimToken'])
         self.calls = []
         self.slow = False
+        self.response_body = b'{"success":true}'
         self.observer = None
         fixture = self
         class Handler(BaseHTTPRequestHandler):
@@ -48,9 +53,11 @@ class GuardTests(unittest.TestCase):
                         except OSError: break
                         time.sleep(.025)
                     return
-                body = b'{"success":true}'
-                self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers()
-                self.wfile.write(body)
+                body = fixture.response_body
+                try:
+                    self.send_response(200); self.send_header('Content-Length', str(len(body))); self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError,ConnectionResetError): pass  # Expected on synthetic disconnects.
             def do_GET(self):
                 fixture.calls.append(self.path.split('?')[0])
                 body = b'{"engine":"synthetic"}'
@@ -247,6 +254,145 @@ class GuardTests(unittest.TestCase):
         finally:
             release.set();holder.join(2)
             self.assertFalse(holder.is_alive())
+
+    def test_stream_holds_gate_and_claim_through_bounded_forward(self):
+        import sqlite3
+        self.init();self.store.update(self.task, phase='upload_pending')
+        source,writer=socket.socketpair();payload=b'x'*131072;writer.settimeout(2)
+        first=threading.Event();release=threading.Event();errors=[];result=[]
+        def feed():
+            try:
+                writer.sendall(payload[:1024]);first.set()
+                if release.wait(2):writer.sendall(payload[1024:]);writer.shutdown(socket.SHUT_WR)
+            except OSError as error:errors.append(error)
+        headers=self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())})
+        def transfer():
+            try:result.append(self.guard.stream_upload('/task/new/upload/'+self.engine,headers,source,len(payload),hashlib.sha256(payload).hexdigest(),'multipart/form-data; boundary=synthetic'))
+            except Exception as error:errors.append(error)
+        feeding=threading.Thread(target=feed);streaming=threading.Thread(target=transfer)
+        feeding.start();streaming.start()
+        try:
+            self.assertTrue(first.wait(1));deadline=time.monotonic()+2;started=False
+            while time.monotonic()<deadline:
+                db=sqlite3.connect(self.queue.path,timeout=.1)
+                try:
+                    exists=db.execute("SELECT 1 FROM sqlite_master WHERE name='engine_ingress_uploads'").fetchone()
+                    started=bool(exists and db.execute("SELECT 1 FROM engine_ingress_uploads WHERE state='started'").fetchone())
+                finally:db.close()
+                if started:break
+                time.sleep(.01)
+            self.assertTrue(started)
+            with self.assertRaises(Exception):
+                with NodeGate(self.binding.engine_id):pass
+            self.assertFalse(self.queue._lifecycle_lock.acquire(blocking=False))
+            script=('import sqlite3,sys\n'
+                    'db=sqlite3.connect(sys.argv[1],timeout=.1)\n'
+                    'try:\n db.execute("BEGIN IMMEDIATE");print("unexpected-write")\n'
+                    'except sqlite3.OperationalError:\n print("blocked")\n'
+                    'finally:\n db.close()\n')
+            other=subprocess.run([sys.executable,'-c',script,str(self.queue.path)],capture_output=True,text=True,timeout=2)
+            self.assertEqual((other.returncode,other.stdout.strip()),(0,'blocked'),other.stderr)
+            release.set();feeding.join(3);streaming.join(3)
+            self.assertFalse(feeding.is_alive());self.assertFalse(streaming.is_alive())
+            self.assertEqual(errors,[]);self.assertEqual(result,[(200,b'{"success":true}')])
+            self.assertEqual(source.gettimeout(),None)
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'complete')
+            with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,headers,source,len(payload),hashlib.sha256(payload).hexdigest(),'multipart/form-data; boundary=synthetic')
+        finally:
+            release.set();source.close();writer.close();feeding.join(3);streaming.join(3)
+            self.assertFalse(feeding.is_alive());self.assertFalse(streaming.is_alive())
+
+    def test_partial_stream_and_bad_ack_hold_all_subsequent_mutations(self):
+        self.init();self.store.update(self.task,phase='upload_pending')
+        source,writer=socket.socketpair();headers=self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())})
+        try:
+            writer.sendall(b'ab');writer.shutdown(socket.SHUT_WR)
+            with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,headers,source,3,hashlib.sha256(b'abc').hexdigest(),'multipart/form-data; boundary=synthetic')
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+            self.assertIsNotNone(self.reservation())
+            with self.assertRaises(AdmissionError):self.guard.mutate('POST','/task/new/upload/'+self.engine,self.headers(),b'x')
+            with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())}),source,1,hashlib.sha256(b'x').hexdigest(),'multipart/form-data; boundary=synthetic')
+        finally:source.close();writer.close()
+
+    def test_ambiguous_json_ack_is_held(self):
+        self.init();self.store.update(self.task,phase='upload_pending');self.response_body=b'{"success":false,"success":true}'
+        source,writer=socket.socketpair();headers=self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())})
+        try:
+            writer.sendall(b'abc');writer.shutdown(socket.SHUT_WR)
+            with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,headers,source,3,hashlib.sha256(b'abc').hexdigest(),'multipart/form-data; boundary=synthetic')
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+        finally:source.close();writer.close()
+
+    def test_stream_overlimit_refuses_before_source_and_journal(self):
+        from processing.engine_ingress_guard import MAX_STREAM_BYTES
+        self.init();self.store.update(self.task,phase='upload_pending');source,writer=socket.socketpair()
+        try:
+            with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())}),source,MAX_STREAM_BYTES+1,'a'*64,'multipart/form-data; boundary=synthetic')
+            with self.queue._db() as db:self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='engine_ingress_uploads'").fetchone())
+        finally:source.close();writer.close()
+
+    def test_claim_change_between_intent_and_reacquire_holds_without_reading_body(self):
+        import sqlite3
+        from processing.engine_ingress_guard import _resume_upload_transaction
+        self.init();self.store.update(self.task,phase='upload_pending');source,writer=socket.socketpair()
+        headers=self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())})
+        def interposed(db,deadline):
+            external=sqlite3.connect(self.queue.path,timeout=1)
+            try:
+                external.execute('BEGIN IMMEDIATE')
+                external.execute("UPDATE viewer_tasks SET phase='cancelled' WHERE uuid=?",(self.task,))
+                external.commit()
+            finally:external.close()
+            return _resume_upload_transaction(db,deadline)
+        try:
+            writer.sendall(b'abc')
+            with patch('processing.engine_ingress_guard._resume_upload_transaction',side_effect=interposed):
+                with self.assertRaises(AdmissionError):
+                    self.guard.stream_upload('/task/new/upload/'+self.engine,headers,source,3,hashlib.sha256(b'abc').hexdigest(),'multipart/form-data; boundary=synthetic')
+            self.assertEqual(source.recv(3,socket.MSG_PEEK),b'abc')
+            self.assertEqual(self.calls,['/task/new/init'])
+            with self.queue._db() as db:
+                self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+                self.assertEqual(db.execute('SELECT phase FROM viewer_tasks WHERE uuid=?',(self.task,)).fetchone()[0],'cancelled')
+        finally:source.close();writer.close()
+
+    def test_journal_change_before_reacquire_holds_without_forwarding(self):
+        import sqlite3
+        from processing.engine_ingress_guard import _resume_upload_transaction
+        self.init();self.store.update(self.task,phase='upload_pending');source,writer=socket.socketpair()
+        headers=self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())})
+        def interposed(db,deadline):
+            external=sqlite3.connect(self.queue.path,timeout=1)
+            try:
+                external.execute('BEGIN IMMEDIATE')
+                external.execute("UPDATE engine_ingress_uploads SET sha256=?",('b'*64,))
+                external.commit()
+            finally:external.close()
+            return _resume_upload_transaction(db,deadline)
+        try:
+            writer.sendall(b'abc')
+            with patch('processing.engine_ingress_guard._resume_upload_transaction',side_effect=interposed):
+                with self.assertRaises(AdmissionError):
+                    self.guard.stream_upload('/task/new/upload/'+self.engine,headers,source,3,hashlib.sha256(b'abc').hexdigest(),'multipart/form-data; boundary=synthetic')
+            self.assertEqual(source.recv(3,socket.MSG_PEEK),b'abc');self.assertEqual(self.calls,['/task/new/init'])
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+        finally:source.close();writer.close()
+
+    def test_slow_trickle_hits_absolute_deadline_and_holds(self):
+        from dataclasses import replace
+        self.init();self.store.update(self.task,phase='upload_pending')
+        self.guard=EngineIngressGuard(self.queue,replace(self.binding,deadline_seconds=.15),owner_pin=self.owner_pin,engine_probe=lambda _:self.binding.engine_id)
+        source,writer=socket.socketpair();stop=threading.Event()
+        def feed():
+            while not stop.wait(.035):
+                try:writer.sendall(b'x')
+                except OSError:return
+        feeding=threading.Thread(target=feed);feeding.start();start=time.monotonic()
+        try:
+            with self.assertRaises(AdmissionError):self.guard.stream_upload('/task/new/upload/'+self.engine,self.headers(**{'X-LedgeTop-Upload-ID':str(uuid.uuid4())}),source,100,hashlib.sha256(b'x'*100).hexdigest(),'multipart/form-data; boundary=synthetic')
+            self.assertLess(time.monotonic()-start,1)
+            with self.queue._db() as db:self.assertEqual(db.execute('SELECT state FROM engine_ingress_uploads').fetchone()[0],'started')
+        finally:stop.set();source.close();writer.close();feeding.join(2);self.assertFalse(feeding.is_alive())
 
 
 if __name__ == '__main__': unittest.main()

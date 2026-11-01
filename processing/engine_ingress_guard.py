@@ -1,7 +1,8 @@
 """INACTIVE bounded engine admission candidate; no listener or live wiring.
 
-This control-body prototype deliberately refuses bodies above 64 KiB. It is NOT
-ready for production image uploads or result downloads. The caller must supply
+Control bodies are limited to 64 KiB; a separate socket-backed streaming
+experiment is not wired to a listener and is not qualified for real uploads.
+It is NOT ready for production. The caller must supply
 the actual sole-owner Queue on the same trusted host as the canonical NodeGate.
 A remote auth_request/boolean check cannot preserve this guard's lifetime.
 
@@ -34,6 +35,9 @@ from .prototype import VIEWER_PROFILE
 
 MAX_BODY = 65536
 MAX_HEADERS = 16384
+MAX_STREAM_BYTES = 2 * 1024 ** 3
+STREAM_DDL = '''CREATE TABLE engine_ingress_uploads (upload_id TEXT PRIMARY KEY, job_id TEXT NOT NULL,
+ engine_uuid TEXT NOT NULL, byte_count INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL)'''
 UUID = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 
@@ -56,6 +60,13 @@ def _queue_lifecycle(queue, deadline):
         yield
     finally:
         queue._lifecycle_lock.release()
+
+
+def _resume_upload_transaction(db, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0: raise AdmissionError('deadline exceeded')
+    db.execute('PRAGMA busy_timeout=' + str(max(1, int(remaining * 1000))))
+    db.execute('BEGIN IMMEDIATE')
 
 
 @dataclass(frozen=True)
@@ -186,7 +197,7 @@ class EngineIngressGuard:
         raise AdmissionError('unrecognized mutation refused')
 
     @contextmanager
-    def _owned(self, headers, engine_uuid, action, deadline):
+    def _owned(self, headers, engine_uuid, action, deadline, permit=None):
         binding = self.binding
         job_id = _identifier(headers.get('x-ledgetop-job'))
         token = headers.get('x-ledgetop-claim', '')
@@ -236,9 +247,52 @@ class EngineIngressGuard:
                         gate.bind(receipt_id, identity)
                     elif reservation['receiptId'] != receipt_id or reservation['job'] != identity:
                         raise AdmissionError('different physical reservation exists')
+                    schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
+                    if schema is not None and schema[0] != STREAM_DDL:
+                        raise AdmissionError('upload journal requires inspection')
+                    if schema is not None and db.execute("SELECT 1 FROM engine_ingress_uploads WHERE job_id=? AND state!='complete'", (job_id,)).fetchone():
+                        raise AdmissionError('uncertain upload requires inspection')
+                    if schema is not None and action == 'upload' and permit is None:
+                        raise AdmissionError('journaled upload required')
+                    if permit is not None:
+                        if schema is None: db.execute(STREAM_DDL)
+                        upload_id, byte_count, sha = permit
+                        if db.execute('SELECT 1 FROM engine_ingress_uploads WHERE upload_id=?',(upload_id,)).fetchone():
+                            raise AdmissionError('upload identity already used')
+                        if db.execute('SELECT count(*) FROM engine_ingress_uploads').fetchone()[0] >= 100000:
+                            raise AdmissionError('upload journal capacity exhausted')
+                        db.execute("INSERT INTO engine_ingress_uploads VALUES(?,?,?,?,?,'started')",(upload_id,job_id,engine_uuid,byte_count,sha))
+                        # Intent commits before any source bytes are consumed or
+                        # upstream request is issued; gate and lifecycle remain held.
+                        db.commit()
+                        _resume_upload_transaction(db, deadline)
+                        if OwnerPin.capture(self.queue) != self.owner_pin:
+                            raise AdmissionError('canonical owner lease changed')
+                        current = db.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone()
+                        current_task = db.execute('SELECT * FROM viewer_tasks WHERE job_id=?',(job_id,)).fetchone()
+                        active_now = db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
+                        node_now = self.queue._node(db,binding.node_id)
+                        current_gate = gate.snapshot()
+                        journal_schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='engine_ingress_uploads'").fetchone()
+                        journal=db.execute('SELECT job_id,engine_uuid,byte_count,sha256,state FROM engine_ingress_uploads WHERE upload_id=?',(upload_id,)).fetchone() if journal_schema is not None and journal_schema[0]==STREAM_DDL else None
+                        if (current is None or current_task is None or len(active_now)!=1 or active_now[0]['id']!=job_id
+                            or current['status']!='running' or current['node_id']!=binding.node_id
+                            or current['profile']!=VIEWER_PROFILE or current['worker_id']!='viewer-dispatch'
+                            or current_task['node_id']!=binding.node_id or current_task['engine_uuid']!=engine_uuid
+                            or current_task['claim_token']!=token or not current['claim_hash']
+                            or not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(),current['claim_hash'])
+                            or current_task['phase']!='upload_pending' or node_now['state'] not in ('active','scheduled','draining')
+                            or any(current_gate.get(k)!=v for k,v in expected.items())
+                            or current_gate['reservation'] is None or current_gate['reservation']['receiptId']!=receipt_id
+                            or current_gate['reservation']['job']!=identity
+                            or journal is None or tuple(journal)!=(job_id,engine_uuid,byte_count,sha,'started')
+                            or self.engine_probe(deadline)!=binding.engine_id):
+                            raise AdmissionError('exact active coordinator claim required')
+                        if deadline-time.monotonic() <= 0:
+                            raise AdmissionError('deadline exceeded')
                     # Both ownership mechanisms remain held across the bounded
                     # exchange. Releasing before forwarding would create a race.
-                    yield
+                    yield db
         except (GateError, sqlite3.Error, RuntimeError):
             raise AdmissionError('physical gate refused request') from None
 
@@ -254,6 +308,44 @@ class EngineIngressGuard:
             forwarded = {'Content-Type': content_type}
             if action == 'init': forwarded['Set-UUID'] = engine_uuid
             return self._exchange(method, target, body, forwarded, deadline)
+
+    def stream_upload(self, target, pairs, source, byte_count, sha256, content_type):
+        """One socket-backed upload, guarded and journaled; caller owns source.
+
+        This is unwired experimental code. The caller must supply a dedicated
+        unbuffered connected socket whose next byte begins this exact body.
+        """
+        headers = _headers(pairs)
+        _authenticate(headers, self.binding.coordinator_secret)
+        action, engine_uuid = self._mutation('POST', target, headers)
+        upload_id = _identifier(headers.get('x-ledgetop-upload-id'))
+        if (action != 'upload' or type(source) is not socket.socket
+                or type(byte_count) is not int or not 0 < byte_count <= MAX_STREAM_BYTES
+                or not isinstance(sha256, str) or not re.fullmatch('[0-9a-f]{64}',sha256)
+                or not isinstance(content_type,str)
+                or not re.fullmatch(r'multipart/form-data; boundary=[A-Za-z0-9_-]{1,70}',content_type)):
+            raise AdmissionError('bounded socket upload required')
+        deadline=time.monotonic()+self.binding.deadline_seconds
+        with self._owned(headers,engine_uuid,action,deadline,(upload_id,byte_count,sha256)) as db:
+            result=self._exchange('POST',target,b'',{'Content-Type':content_type},deadline,
+                                  source=source,source_length=byte_count,expected_sha=sha256)
+            if result[0] != 200:
+                raise AdmissionError('upstream upload unconfirmed; retain reservation')
+            try:
+                from .reference_protocol import decode_submission
+                response=decode_submission(result[1])
+                if type(response) is not dict or response.get('success') is not True or 'error' in response:
+                    raise ValueError()
+            except (ValueError,UnicodeError):
+                raise AdmissionError('upstream upload unconfirmed; retain reservation') from None
+            remaining=deadline-time.monotonic()
+            if remaining<=0: raise AdmissionError('bounded upstream deadline exceeded')
+            db.execute('PRAGMA busy_timeout='+str(max(1,int(remaining*1000))))
+            changed=db.execute("UPDATE engine_ingress_uploads SET state='complete' WHERE upload_id=? AND job_id=? AND engine_uuid=? AND byte_count=? AND sha256=? AND state='started'",
+                (upload_id,_identifier(headers.get('x-ledgetop-job')),engine_uuid,byte_count,sha256)).rowcount
+            if changed!=1: raise AdmissionError('upload journal changed')
+            db.commit()
+            return result
 
     def read(self, method, target, pairs):
         headers = _headers(pairs)
@@ -305,9 +397,10 @@ class EngineIngressGuard:
         except (GateError, sqlite3.Error, RuntimeError):
             raise AdmissionError('physical gate refused completion') from None
 
-    def _exchange(self, method, target, body, headers, deadline):
+    def _exchange(self, method, target, body, headers, deadline, *, source=None, source_length=None, expected_sha=None):
         """One nonblocking fixed-loopback exchange; no retries or redirects."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        source_timeout = source.gettimeout() if source is not None else None
         sock.setblocking(False)
         def wait(write=False):
             remaining = deadline - time.monotonic()
@@ -323,7 +416,7 @@ class EngineIngressGuard:
                 if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR): raise AdmissionError('upstream unavailable')
             route = target + '?' + urlencode({'token': self.binding.backend_secret})
             request = (f'{method} {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n'
-                       f'Content-Length: {len(body)}\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in headers.items())
+                       f'Content-Length: {source_length if source is not None else len(body)}\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in headers.items())
                        + '\r\n').encode('ascii') + body
             offset = 0
             while offset < len(request):
@@ -332,6 +425,26 @@ class EngineIngressGuard:
                 except BlockingIOError: continue
                 if not count: raise AdmissionError('upstream exchange uncertain')
                 offset += count
+            if source is not None:
+                source.setblocking(False)
+                remaining_bytes=source_length;digest=hashlib.sha256()
+                while remaining_bytes:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise AdmissionError('bounded source deadline exceeded')
+                    readable,_,_=select.select([source],[],[],remaining)
+                    if not readable:raise AdmissionError('bounded source deadline exceeded')
+                    try: chunk=source.recv(min(65536,remaining_bytes))
+                    except BlockingIOError:continue
+                    if not chunk:raise AdmissionError('source upload unconfirmed; retain reservation')
+                    digest.update(chunk);remaining_bytes-=len(chunk);offset=0
+                    while offset<len(chunk):
+                        wait(True)
+                        try: count=sock.send(chunk[offset:])
+                        except BlockingIOError:continue
+                        if not count:raise AdmissionError('upstream exchange uncertain')
+                        offset+=count
+                if not hmac.compare_digest(digest.hexdigest(),expected_sha):
+                    raise AdmissionError('source digest differs; retain reservation')
             data = bytearray()
             while b'\r\n\r\n' not in data:
                 wait()
@@ -368,3 +481,6 @@ class EngineIngressGuard:
             raise AdmissionError('upstream exchange unconfirmed; retain reservation') from None
         finally:
             sock.close()
+            if source is not None:
+                try: source.settimeout(source_timeout)
+                except OSError: pass

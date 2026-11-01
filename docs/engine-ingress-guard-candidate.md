@@ -1,10 +1,36 @@
 # Inactive engine mutation admission candidate
 
-`processing/engine_ingress_guard.py` is a **source-only, unqualified control-body
-prototype**. Nothing imports it into the running coordinator or nginx ingress.
+`processing/engine_ingress_guard.py` is a **source-only, unqualified prototype**.
+Nothing imports it into the running coordinator or nginx ingress.
 It changes no live route, network, credential, TrueNAS setting or engine data.
-Do not enable it for real photographs: its 64 KiB body bound deliberately refuses
-normal image uploads, and it has no production streaming/download bridge.
+Do not enable it for real photographs. The socket-backed streaming method is
+unwired, has at most a ten-second deadline and has no production download bridge.
+
+The experimental upload method accepts a dedicated unbuffered source socket and
+an exact multipart body length and SHA-256. It holds the existing host gate and
+in-process Queue lifecycle lock throughout, commits a per-upload `started`
+journal row before forwarding, and commits `complete` only after the exact body
+hash and a bounded framed successful response. Partial sends, lost replies,
+errors and timeout retain `started`; later cooperating mutations for that job
+hold. A previously used upload ID cannot be retried, including after success.
+After the intent commit the guard reacquires the SQLite write transaction and
+revalidates the exact claim, task phase, node and gate before sending; it holds
+that transaction throughout forwarding. A process writing directly during the
+small transaction gap can cause a hold, and external physical writer fencing
+remains unqualified. The hash is verified only after forwarding the bytes: a
+mismatch is an ambiguous upstream side effect and retains the hold.
+After the journal exists, the older control-body upload path is refused. The
+buffer is bounded to 64 KiB and the same monotonic deadline covers socket I/O;
+filesystem stalls and OS scheduling do not have a hard deadline.
+
+This journal is in the coordinator DB, with no migration, old-binary exclusion,
+independent writer fence or qualified startup/repair workflow. A crash releases
+the process-held flock; the durable node reservation and pending row do not
+prove the engine stopped. The expected digest is caller-supplied over the whole
+multipart body; it is not yet bound to the coordinator's `viewer_files` record.
+The current coordinator photo sender has not been adapted to supply that hash.
+No upload route, end-to-end physical isolation, engine storage reservation,
+automatic recovery, or readiness for large photographs is established.
 
 ## Current bypass and boundary
 
