@@ -927,6 +927,12 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   trash 10.99 GiB, and data 0.14 GiB. WebODM's `Media/project` tree held
   388.08 GiB. This compares folder contents only; it does not equate the
   applications' accounting or prove broad duplication.
+- Beau's read-only TrueNAS system-shell check resolved the Storage mountpoint
+  to ZFS filesystem `Plugins/App_Data/Model-Viewer`, with 496G used and 1.71T
+  available at the time of the query. Therefore a snapshot/hold for the
+  selected `processing-spool` subfolder would operate at this whole-dataset
+  boundary and coexist with Viewer cache, imports, models and trash. No ZFS
+  configuration, snapshot or directory was changed.
 - The Viewer `imports` and `trash` trees each contain a same-name/same-size
   set of 1,120 JPG files totaling 11,796,893,696 bytes; `datasets` contains
   same-name/same-size matches for all 1,120. A ZIP in imports contains the same
