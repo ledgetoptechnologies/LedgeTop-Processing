@@ -402,3 +402,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   the Reference API, result range/proxy/HTTP paths and related worker recovery
   contracts. It ran against the current shared Windows-mounted worktree and is
   synthetic test evidence only, not runtime acceptance.
+- Lost source-grant acknowledgement follow-up: a separate inactive Viewer
+  broker candidate `codex/viewer-grant-replay-candidate` at `5520c669` and draft
+  stacked PR #408 now allow exact token replay after restart when a stable
+  explicitly injected 32-byte HMAC key is available; only the token hash is
+  stored. The candidate refuses to recover with a missing or wrong key and
+  does not mint a replacement. Its Linux `reference-cumulative-budget` suite
+  passed 24 tests; Windows passed 23 with one Linux-only skip. There is still
+  no production key provisioning or durable dispatch outbox, and Viewer
+  reference dispatch remains hard-off. This is source-level recovery evidence,
+  not an enabled source grant, NAS custody proof, or runtime acceptance.
