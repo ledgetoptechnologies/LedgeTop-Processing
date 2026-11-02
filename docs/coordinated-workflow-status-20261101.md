@@ -378,17 +378,23 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `codex/viewer-range-resume-candidate` contains commits `46986b93`,
   `5dff688c` and `dbb267a6`; draft PR #407 is stacked on
   `codex/viewer-v2-delivery-ledger` at
-  `1e5bfa6b`. Its focused Linux tests passed 26 tests with 2 platform-only
-  skips at that checkpoint, covering exact 206 ranges, complete-object digest
+  `1e5bfa6b`. Its current focused Linux tests passed 27 tests with 2
+  platform-only skips, covering exact 206 ranges, complete-object digest
   before publication, interruption/restart checkpoints, replay after a lost
   acceptance ACK, exact prior-candidate journal migration, zero-byte report
   compatibility, quota enforcement, crash after link, and corrupt-prefix hold
   behavior. Review follow-up `dbb267a6` establishes WAL, FULL synchronous mode,
   foreign-key enforcement and authority before migration, avoids rollback
   after commit, and verifies that committed schema on reopen after an authority
-  failure. The fresh Linux focused run passed 27 tests with 2 platform-only
-  skips. The candidate remains
-  unmounted, has no live authority issuer, and is 34 commits behind/330 ahead
+  failure. The candidate remains unmounted, has no live authority issuer, and
+  is 34 commits behind/332 ahead
   of current Viewer `main`; it must not merge to `main` before prerequisite
   reconciliation. It has no operator repair command for a corrupt saved
   prefix. No live transfer or production runtime acceptance was performed.
+- On 2026-11-02, Processing branch `codex/engine-ingress-guard-candidate` at
+  `d023a81` ran `python3 -m unittest discover -s tests -p
+  'test_reference_*.py'` in Ubuntu 24.04 WSL as `pilot`: 672 tests ran, all
+  passed, with one platform-specific skip (182.934 seconds). The suite includes
+  the Reference API, result range/proxy/HTTP paths and related worker recovery
+  contracts. It ran against the current shared Windows-mounted worktree and is
+  synthetic test evidence only, not runtime acceptance.
