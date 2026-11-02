@@ -81,6 +81,38 @@ class ReferenceDeliveryTests(unittest.TestCase):
         acceptance['acceptedObjectIds'] = [o['id'] for o in self.result['objects']]
         self.assertTrue(self.store.accept(self.job['jobId'], acceptance)['fullyAccepted'])
 
+    def test_lost_viewer_acceptance_response_replays_after_restart_without_cleanup(self):
+        coordinator_receipt = self.receiver.receive(self.envelope, **self.identity)
+        self.outbox.acknowledge(self.outbox_id, coordinator_receipt)
+        acceptance = copy.deepcopy(self.fixture['acceptance'])
+        acceptance.update(jobId=self.job['jobId'], pipelineDigest=self.job['pipelineDigest'],
+            inputManifestSha256=self.job['manifestSha256'],
+            resultManifestSha256=self.result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in self.result['objects']])
+
+        accepted = self.store.accept(self.job['jobId'], acceptance)
+        self.assertTrue(accepted['fullyAccepted'])
+        self.assertTrue(accepted['created'])
+        self.assertEqual(accepted['job']['phase'], 'completed')
+        retained = self.outbox.get(self.outbox_id)
+        self.assertEqual(retained['state'], 'acknowledged')
+        self.assertEqual(set(retained['local_metadata']['localObjects']),
+                         {obj['id'] for obj in self.result['objects']})
+
+        self.restart()  # Viewer committed; the acceptance HTTP response was lost.
+        replay = self.store.accept(self.job['jobId'], acceptance)
+        self.assertTrue(replay['fullyAccepted'])
+        self.assertFalse(replay['created'])
+        self.assertEqual(replay['job']['phase'], 'completed')
+
+        changed = copy.deepcopy(acceptance)
+        changed['acceptedAt'] = '2026-10-29T12:00:00Z'
+        with self.assertRaises(Conflict):
+            self.store.accept(self.job['jobId'], changed)
+        # Even full Viewer acceptance is not a worker-file deletion receipt.
+        self.assertEqual(self.outbox.get(self.outbox_id)['local_metadata'],
+                         retained['local_metadata'])
+
     def test_crash_after_manifest_commit_before_slot_release_replays(self):
         with patch.object(self.queue, 'complete', side_effect=OSError('synthetic crash')):
             with self.assertRaises(OSError):
