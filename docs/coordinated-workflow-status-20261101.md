@@ -85,6 +85,15 @@ No real client data was processed as part of this checkpoint.
   issuance API/schema or an explicitly weaker deterministic reconstruction
   contract. NAS source pinning, writer/purge fencing and issuer authentication
   remain prerequisites; no live lane was enabled.
+- Viewer commit `56cfbe23` adds an isolated, in-memory SQLite/AES-GCM
+  persistence sketch for atomic grant issuance. Its synthetic Node check passed
+  1/1, but the fixture is not the current broker and does not prove process
+  crash durability, restart/unknown-commit recovery, real ACK validation, key
+  rotation/rollback, issuer authentication or NAS fencing. It is useful as a
+  proposed transaction shape only; it does not close the automatic grant
+  handoff or authorize transfer. The existing broker and Viewer journal use
+  separate SQLite databases, so a real atomic contract needs an explicit
+  storage owner/API/schema migration.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
