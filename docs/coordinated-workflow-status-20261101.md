@@ -1336,3 +1336,30 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 - The disposable container exited successfully and was removed by `--rm`.
   No host dataset, client data, running node, or source file was modified by
   this test.
+
+## Viewer integration boundary recheck — 2026-11-02
+
+- Independently inspected Viewer `origin/main` at
+  `dc8cedfe953ce75eb2f65de846de74d076b820f8`. The enabled platform's task
+  workflow is still conditional on `PROCESSING_PLATFORM_ENABLED`; task
+  attempts are created through `POST /api/v1/tasks/:id/attempts` and durable
+  work is persisted by `ProcessingRepository.createAttempt` and handled by
+  the Viewer worker. This is existing task scheduling, not the proposed
+  TrueNAS-backed lightweight queue with a cross-service physical capacity
+  reservation.
+- Main exposes configured storage-backed upload/finalize and dataset-import
+  operations. Those configured mounts alone do not prove NAS identity, a
+  dedicated spool boundary, physical reservation, or custody receipts.
+- No Reference-v2 accepted-copy endpoint or processing-spool-v2 source-release
+  endpoint is wired in this Viewer main revision. PR #409's acceptance ledger
+  and v1 source-release validator, #417's source holds, and #418's unmounted
+  source-copy outbox remain candidates; #421 is test-only. None is yet the
+  cross-language runtime acceptance/release path required by this goal.
+- The Viewer redesign draft #406 currently describes customer/organization →
+  optional group/subcategory → project → task. Beau's example asks for a
+  customer with project/subcategory groupings containing tasks. Confirm the
+  exact hierarchy mapping before changing persisted ownership or migration
+  semantics. The PR remains draft and current Claude ownership is unverified;
+  a historical acknowledgment does not prove present participation.
+- No Viewer files, runtime settings, NAS paths, or task records were modified
+  by this source review.
