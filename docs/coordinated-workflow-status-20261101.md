@@ -653,6 +653,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `a27c4430` adds file/directory identity checks around the walk and a synthetic
   parent-replacement case; the focused Windows test again passed 1/1. This is
   still path-based, not descriptor-pinned, and Windows denied symlink creation.
+  Candidate follow-up `ff52034d` now distinguishes confirmed structural
+  mismatches from read failures and limits: an injected EIO returns generic
+  `UNAVAILABLE read`; the focused Windows test passed 1/1. Linux symlink and
+  deployed-image qualification are still outstanding.
   A 500-GiB sequential scan is possible. This may provide a manually scheduled
   integrity observation after release qualification, but it is not durable
   custody or an accepted-copy ACK. Do not give Beau a production command until
