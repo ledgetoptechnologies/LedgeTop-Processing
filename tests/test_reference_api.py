@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -172,6 +173,65 @@ class ReferenceAPITests(unittest.TestCase):
                                self.request("GET", path + "/results").body])
         for secret in (claim_token, STAGING, PRODUCTION, "claimToken", "executionPhase", "submission"):
             self.assertNotIn(secret, combined)
+
+    def _v1_acceptance_golden_replay(self, case_name, pinned_digest):
+        data=(Path(__file__).resolve().parents[1]/
+            'contracts/reference-v1-acceptance-sender.golden.json').read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(),'5c81c6973a1447efa64cd27dbac68393cea0395111fa087c5bd3c451b18dca41')
+        fixture=json.loads(data);receipt=copy.deepcopy(fixture['acceptance']);result=fixture['resultManifest']
+        if case_name=='bridge_shape':
+            receipt.update(receiptId=fixture['bridgeKeyCandidate']['receiptId'],
+                storageReceiptId=fixture['bridgeKeyCandidate']['storageReceiptId'])
+        else:
+            self.assertEqual(p.canonical_json(receipt).decode('utf8'),fixture['canonicalAcceptanceUtf8'])
+            self.assertEqual(p.digest(receipt),fixture['acceptanceSha256'])
+        self.assertEqual(receipt['acceptedAt'],'2026-10-29T12:00:00.000Z')
+        self.assertEqual(p.digest(receipt),pinned_digest)
+        if case_name=='bridge_shape':
+            obj=result['objects'][0];binding={key:receipt[key] for key in ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')}
+            binding.update(objectId=obj['id'],objectSha256=obj['sha256'],objectBytes=obj['byteSize'])
+            self.assertEqual(receipt['storageReceiptId'],p.digest(binding))
+            self.assertEqual(p.digest(receipt),fixture['bridgeKeyCandidate']['canonicalAcceptanceSha256'])
+        else:
+            self.assertEqual(receipt['storageReceiptId'],'33333333-3333-4333-8333-333333333333')
+        with patch('processing.reference_store.uuid.uuid4',return_value=uuid.UUID(receipt['jobId'])):
+            job=self.submit()
+        self.assertEqual(job['pipelineDigest'],receipt['pipelineDigest'])
+        self.assertEqual(job['manifestSha256'],receipt['inputManifestSha256'])
+        binding=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_request_id='claim-1')
+        claim=self.store.claim(job['jobId'],**binding)
+        self.store.reserve(job['jobId'],self.fixture['transferRequest'],node_id='cluster')
+        self.store.update_phase(job['jobId'],'fetching');self.store.update_phase(job['jobId'],'processing')
+        self.store.record_worker_result(job['jobId'],result,claim_token=claim['claimToken'],**binding)
+        self.queue.complete(job['jobId'],{'claimToken':claim['claimToken'],'status':'succeeded','result':{}})
+        self.store.update_phase(job['jobId'],'awaiting_acceptance')
+        path='/jobs/'+job['jobId']+'/acceptance'
+        first=self.request('POST',path,receipt)
+        self.assertEqual(first.status,200)
+        self.assertTrue(first.body['created']);self.assertTrue(first.body['fullyAccepted'])
+        self.assertEqual(first.body['receiptId'],receipt['receiptId'])
+        self.assertEqual(first.body['receiptSha256'],pinned_digest)
+        # Ignore the committed response and reopen coordinator state; this is
+        # not a simulated network disconnect or machine power loss.
+        self.queue.close()
+        self.queue=Queue(self.directory.name);self.queue.allowed_profiles.add(PROFILE)
+        self.store=ReferenceStore(self.queue);self.api=self.make_api()
+        replay=self.request('POST',path,receipt)
+        self.assertEqual(replay.status,200)
+        self.assertFalse(replay.body['created']);self.assertTrue(replay.body['fullyAccepted'])
+        self.assertEqual(replay.body['receiptId'],first.body['receiptId'])
+        self.assertEqual(replay.body['receiptSha256'],first.body['receiptSha256'])
+        self.assertEqual(replay.body['acceptedObjectIds'],receipt['acceptedObjectIds'])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],1)
+        changed=dict(receipt,acceptedAt='2026-10-29T12:00:00.001Z')
+        self.assertEqual(self.request('POST',path,changed).status,409)
+
+    def test_v1_api_client_receipt_lost_response_replay(self):
+        self._v1_acceptance_golden_replay('api_client','5f2056f679638551e0f00034485bb2600f9d12c4cb5049ff7ea5e081e440b504')
+
+    def test_v1_bridge_shaped_receipt_lost_response_replay(self):
+        self._v1_acceptance_golden_replay('bridge_shape','7f5f61e0b9e1349fed53ba3aa667b42b031fd39e05108e4efce7dab37f61a55f')
 
     def test_explicit_treedar_availability_does_not_prove_file_contents(self):
         api = self.make_api(treedar_available=True)
