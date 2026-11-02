@@ -35,10 +35,12 @@ No real client data was processed as part of this checkpoint.
   a typed TreeDar bundle. This does not prove genuine LiDAR input, TreeDar
   artifacts, NAS custody, Viewer binary ingestion, or runtime acceptance.
 - On 2026-11-02, targeted grant, result-proxy, delivery, worker-API, worker
-  recovery, routing, cleanup and transfer suites ran 112 tests: 64 passed and
-  48 were skipped by the current host/test guards. No runtime acceptance was
-  claimed. The skips include fixed Linux/POSIX behavior that cannot be qualified
-  on this Windows host.
+  recovery, routing, cleanup and transfer suites ran in Ubuntu 24.04 WSL as
+  nonroot user `pilot`: all 112 tests passed. The first WSL attempt ran as root
+  and correctly failed TreeDar's configured nonroot-main-host guard; rerunning
+  under the unprivileged account passed. The Windows run had 48 host-guarded
+  skips, which this rerun covered. These remain synthetic tests, not runtime
+  acceptance.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
