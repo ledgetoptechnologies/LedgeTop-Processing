@@ -311,9 +311,16 @@ successful deletion. Failed/cancelled metadata ACKs authorize no removal.
 `{ "acceptance": ..., "viewerReceipt": ... }` and persists both atomically.
 The Processing API can still accept legacy job-state receipts, but they do not
 mark local outputs eligible for deletion. This is the verification/receiver
-seam only: the bounded Processing transfer client that uploads result objects
-to Viewer and submits the returned pair has not yet been implemented, so this
-change alone does not complete the installed workflow.
+seam for an implemented source-side transfer path. `viewer_acceptance_transfer.py`
+uploads bounded, digest-checked result objects over HTTPS, submits the returned
+acceptance/receipt pair, and verifies the signed Viewer receipt against pinned
+keys. `ReferenceViewerTransferWorker` discovers durable pending transfers,
+claims them with a lease, and records retry state; the runtime starts and stops
+that worker when per-environment Viewer targets and service credentials are
+configured. Accepted coverage and its receipt are committed atomically in the
+Processing store before an attempt is marked complete. This source wiring does
+not establish that the deployed Viewer exposes the matching route or that either
+node has the required credentials/configuration installed.
 
 The worker daemon's `engineCleanupEnabled` is separate from archive
 `cleanupEnabled`, and defaults to false. The driver keeps deferred cleanup proof
