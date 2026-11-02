@@ -4,6 +4,7 @@
 **
 !Dockerfile
 !.dockerignore
+!requirements.txt
 !processing/
 !processing/**/*.py
 

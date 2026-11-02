@@ -432,19 +432,36 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   It is a validator for a different, weaker textual retention claim. The
   Viewer proposal's richer fields must be defined under a new, versioned
   contract and canonicalization; do not silently extend or overclaim v1. A
-  separate signed-v2 proposal and deterministic public vector now exist in
-  the Viewer worktree but remain uncommitted and unagreed. The draft pins ID
-  grammars, path-shaped dataset/snapshot identities, decimal TXG strings,
-  owner/key epochs, strict timestamps, manifest closure and a public Ed25519
-  vector. The Processing serializer independently reproduced its canonical
-  bytes and digests, while Node reports a valid Ed25519 signature. Processing
-  signature verification was not run because `cryptography` is absent and the
-  production Dockerfile is stdlib-only. Remaining prerequisites include exact owner-side
-  object-to-path derivation, trusted key/epoch registry and rollback anchor,
-  authority/release lifecycle semantics, and a maintained Processing Ed25519
-  verifier dependency. Matching v2 validators and committed cross-language
-  fixtures remain pending exact schema agreement. No receipt or live custody
-  proof exists.
+  separate v2 wire proposal and deterministic public vector are frozen
+  between the Viewer and Processing sessions **for fixture-only validation**.
+  Viewer committed and pushed them at
+  `f4a6ba037ffde506c93930892bc5fb61e6205acc` on
+  `codex/viewer-atomic-grant-fixture`; its Node vector test passed 1/1. The
+  Processing fixture copy has the same SHA-256
+  `b00f4163029c83aa6266dcc813d78bb3074177e00a21dd30a34bdbb1e2f3aff1`.
+  This fixture agreement does not define a live authority. The proposal pins
+  ID grammars, dataset/snapshot identities, decimal TXG strings, owner/key
+  epochs, strict timestamps, manifest closure,
+  source-intent snapshot derivation and Ed25519 signed bytes. Processing's
+  Python candidate validator verifies the exact signature against the public
+  fixture key, manifest digest/full closure, source-intent snapshot derivation,
+  context, key-record binding and injected lineage result. The candidate checks
+  that the receipt timestamp falls inside the key's signing-validity window;
+  this is historical signature validation, not a claim that the key is
+  currently valid for new issuance. Tests independently compare every
+  published canonical-byte vector and digest. Processing v1 and v2 retention
+  tests passed 18/18 together both on the host and inside the
+  locally built Linux image. The image imported the verifier under its
+  non-root UID 10001 with `cryptography` 50.0.2; its temporary tag was removed
+  after the run. The candidate requires pinned
+  `cryptography` 50.0.2 plus its `cffi` 2.1.1 and `pycparser` 3.12 runtime
+  dependencies, is guarded to `synthetic-only`, has no
+  production import/call site, and installs neither the trusted key registry
+  nor rollback-resistant lineage. Remaining prerequisites include authenticated
+  owner-side object-to-path derivation and file hashing, real TrueNAS pin/hold
+  and mount isolation, trusted key/epoch registry and rollback anchor, durable
+  release/cleanup authority, and restart/recovery integration. No receipt or
+  live custody proof exists.
 - Beau's follow-up read-only metadata check matched the same saved task and
   provider attempt. It confirmed `3d-tiles` is a boolean `true`, the recorded
   v1 archive inventory has 71 entries and a valid digest, and the mesh tileset

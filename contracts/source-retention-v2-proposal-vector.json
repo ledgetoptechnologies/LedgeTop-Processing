@@ -1,0 +1,101 @@
+{
+  "status": "PUBLIC_SYNTHETIC_UNAGREED_NOT_AUTHORITY",
+  "inputManifest": {
+    "id": "manifest-1",
+    "revision": 1,
+    "sha256": "0ec68a1011ee877f321dd061a34e44350c9a5cb8c8d9b086012dfa444c775157",
+    "totalBytes": 6,
+    "objectCount": 2,
+    "inputCounts": {
+      "images": 2,
+      "lidarObjects": 0,
+      "points": 0
+    },
+    "objects": [
+      {
+        "id": "image-a",
+        "name": "a.jpg",
+        "byteSize": 3,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "kind": "image",
+        "mediaType": "image/jpeg"
+      },
+      {
+        "id": "Image-B",
+        "name": "b.jpg",
+        "byteSize": 3,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "image",
+        "mediaType": "image/jpeg"
+      }
+    ]
+  },
+  "sourceIntent": {
+    "operationId": "operation-1",
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "manifestSha256": "0ec68a1011ee877f321dd061a34e44350c9a5cb8c8d9b086012dfa444c775157",
+    "objects": [
+      {
+        "id": "Image-B",
+        "byteSize": 3,
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      {
+        "id": "image-a",
+        "byteSize": 3,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ]
+  },
+  "testPrivateSeedHex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "publicKeySpkiDerBase64": "MCowBQYDK2VwAyEA6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=",
+  "objectsCanonicalUtf8Base64": "W3siYnl0ZVNpemUiOjMsImlkIjoiSW1hZ2UtQiIsInNoYTI1NiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIifSx7ImJ5dGVTaXplIjozLCJpZCI6ImltYWdlLWEiLCJzaGEyNTYiOiJjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjIn1d",
+  "closureMessageBase64": "TFREUy1TT1VSQ0UtQ0xPU1VSRS1WMgBbeyJieXRlU2l6ZSI6MywiaWQiOiJJbWFnZS1CIiwic2hhMjU2IjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiJ9LHsiYnl0ZVNpemUiOjMsImlkIjoiaW1hZ2UtYSIsInNoYTI1NiI6ImNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MifV0=",
+  "closureSha256": "cbba110f532cd477aadc335ca254fb5d1938600c161d039241760e109fa44c20",
+  "payloadCanonicalUtf8Base64": "eyJkYXRhc2V0SWQiOiJ0YW5rL3Byb2Nlc3Npbmctc3Bvb2wiLCJlbnZpcm9ubWVudCI6InN0YWdpbmciLCJnZW5lcmF0aW9uIjoxLCJob2xkSWQiOiJ0cnVlbmFzIiwiaW5wdXRNYW5pZmVzdFNoYTI1NiI6IjBlYzY4YTEwMTFlZTg3N2YzMjFkZDA2MWEzNGU0NDM1MGM5YTVjYjhjOGQ5YjA4NjAxMmRmYTQ0NGM3NzUxNTciLCJpc3N1ZXJJZCI6Imlzc3Vlci0xIiwiam9iSWQiOiJqb2ItMSIsImtleUVwb2NoIjoxLCJrZXlJZCI6ImtleS0xIiwibGVkZ2VyRXBvY2giOiJlcG9jaC0xIiwib2JqZWN0cyI6W3siYnl0ZVNpemUiOjMsImlkIjoiSW1hZ2UtQiIsInNoYTI1NiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIifSx7ImJ5dGVTaXplIjozLCJpZCI6ImltYWdlLWEiLCJzaGEyNTYiOiJjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjIn1dLCJvcGVyYXRpb25JZCI6Im9wZXJhdGlvbi0xIiwib3duZXJJbnN0YW5jZUlkIjoib3duZXItMSIsInBpcGVsaW5lRGlnZXN0IjoiZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZCIsInJlY2VpcHRJZCI6InJlY2VpcHQtMSIsInJlY2VpcHRUeXBlIjoic291cmNlX3JldGVudGlvbl92MiIsInJldGFpbmVkQXQiOiIyMDI2LTEwLTI4VDEyOjAwOjAwLjAwMFoiLCJyZXRlbnRpb25HdWFyYW50ZWUiOiJ1bnRpbF9leHBsaWNpdF9yZWxlYXNlX2Fja192MiIsInNjaGVtYVZlcnNpb24iOjIsInNuYXBzaG90Q3JlYXRlVHhnIjoiMTg0NDY3NDQwNzM3MDk1NTE2MTUiLCJzbmFwc2hvdElkIjoidGFuay9wcm9jZXNzaW5nLXNwb29sQGx0ZHMtNGExZDMzNDkxNDk3OWJlZmI5MjY5Y2JiMzQ4NzU4N2IiLCJzb3VyY2VDbG9zdXJlU2hhMjU2IjoiY2JiYTExMGY1MzJjZDQ3N2FhZGMzMzVjYTI1NGZiNWQxOTM4NjAwYzE2MWQwMzkyNDE3NjBlMTA5ZmE0NGMyMCIsInN0b3JhZ2VSZWNlaXB0SWQiOiJzdG9yYWdlLTEiLCJ2YWxpZGF0aW9uVmVyc2lvbiI6ImNhbmRpZGF0ZS12MiJ9",
+  "signedMessageBase64": "TFREUy1TT1VSQ0UtUkVURU5USU9OLVYyAHsiZGF0YXNldElkIjoidGFuay9wcm9jZXNzaW5nLXNwb29sIiwiZW52aXJvbm1lbnQiOiJzdGFnaW5nIiwiZ2VuZXJhdGlvbiI6MSwiaG9sZElkIjoidHJ1ZW5hcyIsImlucHV0TWFuaWZlc3RTaGEyNTYiOiIwZWM2OGExMDExZWU4NzdmMzIxZGQwNjFhMzRlNDQzNTBjOWE1Y2I4YzhkOWIwODYwMTJkZmE0NDRjNzc1MTU3IiwiaXNzdWVySWQiOiJpc3N1ZXItMSIsImpvYklkIjoiam9iLTEiLCJrZXlFcG9jaCI6MSwia2V5SWQiOiJrZXktMSIsImxlZGdlckVwb2NoIjoiZXBvY2gtMSIsIm9iamVjdHMiOlt7ImJ5dGVTaXplIjozLCJpZCI6IkltYWdlLUIiLCJzaGEyNTYiOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIn0seyJieXRlU2l6ZSI6MywiaWQiOiJpbWFnZS1hIiwic2hhMjU2IjoiY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYyJ9XSwib3BlcmF0aW9uSWQiOiJvcGVyYXRpb24tMSIsIm93bmVySW5zdGFuY2VJZCI6Im93bmVyLTEiLCJwaXBlbGluZURpZ2VzdCI6ImRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJyZWNlaXB0SWQiOiJyZWNlaXB0LTEiLCJyZWNlaXB0VHlwZSI6InNvdXJjZV9yZXRlbnRpb25fdjIiLCJyZXRhaW5lZEF0IjoiMjAyNi0xMC0yOFQxMjowMDowMC4wMDBaIiwicmV0ZW50aW9uR3VhcmFudGVlIjoidW50aWxfZXhwbGljaXRfcmVsZWFzZV9hY2tfdjIiLCJzY2hlbWFWZXJzaW9uIjoyLCJzbmFwc2hvdENyZWF0ZVR4ZyI6IjE4NDQ2NzQ0MDczNzA5NTUxNjE1Iiwic25hcHNob3RJZCI6InRhbmsvcHJvY2Vzc2luZy1zcG9vbEBsdGRzLTRhMWQzMzQ5MTQ5NzliZWZiOTI2OWNiYjM0ODc1ODdiIiwic291cmNlQ2xvc3VyZVNoYTI1NiI6ImNiYmExMTBmNTMyY2Q0NzdhYWRjMzM1Y2EyNTRmYjVkMTkzODYwMGMxNjFkMDM5MjQxNzYwZTEwOWZhNDRjMjAiLCJzdG9yYWdlUmVjZWlwdElkIjoic3RvcmFnZS0xIiwidmFsaWRhdGlvblZlcnNpb24iOiJjYW5kaWRhdGUtdjIifQ==",
+  "signedMessageSha256": "39a86f285568412ede8fd4644a3b2ff559fddb268ce27d05cef09bdfa0896dcd",
+  "envelope": {
+    "payload": {
+      "schemaVersion": 2,
+      "receiptType": "source_retention_v2",
+      "receiptId": "receipt-1",
+      "storageReceiptId": "storage-1",
+      "operationId": "operation-1",
+      "issuerId": "issuer-1",
+      "keyId": "key-1",
+      "keyEpoch": 1,
+      "ownerInstanceId": "owner-1",
+      "ledgerEpoch": "epoch-1",
+      "jobId": "job-1",
+      "generation": 1,
+      "environment": "staging",
+      "inputManifestSha256": "0ec68a1011ee877f321dd061a34e44350c9a5cb8c8d9b086012dfa444c775157",
+      "pipelineDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "datasetId": "tank/processing-spool",
+      "snapshotId": "tank/processing-spool@ltds-4a1d334914979befb9269cbb3487587b",
+      "snapshotCreateTxg": "18446744073709551615",
+      "holdId": "truenas",
+      "objects": [
+        {
+          "id": "Image-B",
+          "byteSize": 3,
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        {
+          "id": "image-a",
+          "byteSize": 3,
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "sourceClosureSha256": "cbba110f532cd477aadc335ca254fb5d1938600c161d039241760e109fa44c20",
+      "retainedAt": "2026-10-28T12:00:00.000Z",
+      "validationVersion": "candidate-v2",
+      "retentionGuarantee": "until_explicit_release_ack_v2"
+    },
+    "signatureAlgorithm": "Ed25519",
+    "signature": "n4gWVQU387B-lqURDnJSQ3jquotNjA1VezpsL5XWDEOA5-iB0RS4bnRcV6S7sQYMkWees5YryWJ6ct1zNNIzBA"
+  }
+}

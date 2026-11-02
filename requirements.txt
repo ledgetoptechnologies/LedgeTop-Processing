@@ -1,0 +1,6 @@
+# Runtime dependency for the fixture-only source-retention-v2 Ed25519 verifier.
+# Keep the exact version pinned; activation still requires the reviewed key
+# registry, rollback anchor, storage authority and production integration.
+cryptography==50.0.2
+cffi==2.1.1
+pycparser==3.12
