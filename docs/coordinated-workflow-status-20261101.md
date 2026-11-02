@@ -1088,3 +1088,34 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   death only. It is not evidence that the worker service is installed or that
   Docker/NodeODM descendants can be fenced; the live user service remains
   absent on both processing PCs.
+
+## Large-manifest broker admission review — 2026-11-02
+
+- Viewer draft PR #414 (`codex/viewer-broker-admission-vectors`, based on
+  #409) adds synthetic evidence that the inactive broker rejects an object
+  above its default 16 MiB response cap, charges an aborted response against
+  cumulative bytes, and defaults to 100 requests per grant. Its 10,000-object
+  comparison is arithmetic, not a load test. No runtime limits or mounts were
+  changed.
+- The Viewer proposal for cross-language review is 16 MiB max response,
+  256 MiB/object, 10,000 objects, 64 GiB total, two concurrent responses,
+  32 MiB concurrent response reservation, and an integer-derived request plan
+  with cumulative retry headroom. It is not yet an agreed or deployed
+  contract. Processing's existing `MAX_OBJECTS` is 10,000, but v1 currently
+  accepts transfer `byteBudget` up to 3x the manifest and has no persisted
+  request-count ledger or range-resume cursor; a 1.5x retry policy therefore
+  cannot be adopted by changing the downloader alone.
+- A 50 GB decimal input is about 46.6 GiB and fits under the proposed 64 GiB
+  arithmetic ceiling. This is not capacity qualification: the small node's
+  last observed root free space was about 111 GiB and no reference worker
+  service is installed on either node; the existing size policy routes this
+  case to main `.88`, whose last observed root had about 1.4 TiB free. Engine
+  workspace expansion, actual object-size distribution, NAS throughput, and
+  retry/resume behavior remain unmeasured. Do not treat the proposal or the
+  arithmetic as authorization to enable live dispatch.
+- Required before a compatible implementation: lock the budget fields and
+  ceiling arithmetic in shared vectors; persist request/byte charges across
+  replacement grants and generations for the same immutable job/input; define
+  exact 206 range validation and zero-byte behavior; and define durable range
+  progress or fail-closed retry behavior after ambiguous aborts. No Processing
+  code or live service was changed during this review.
