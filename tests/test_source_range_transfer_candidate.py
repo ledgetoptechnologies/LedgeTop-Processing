@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import closing
+from unittest.mock import patch
 
 from processing.source_range_transfer import (
     CHUNK_BYTES, OBJECT_PREFIX, REQUEST_HEADER, SourceIdentity, SourceObject,
@@ -249,6 +250,33 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
         self.assertEqual(len(second_range), 2)
         self.assertEqual(second_range[0][0].get_header("X-processing-request-id"),
                          second_range[1][0].get_header("X-processing-request-id"))
+
+    def test_publish_before_partial_unlink_crash_is_cleaned_on_retry(self):
+        target = self.root / "photo.bin"
+        original_unlink = Path.unlink
+        interrupted = False
+
+        def fail_after_publish(path, *args, **kwargs):
+            nonlocal interrupted
+            if path.name.endswith(".part") and not interrupted:
+                interrupted = True
+                raise OSError("simulated crash after publish")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", fail_after_publish):
+            with self.assertRaises(TransferError):
+                self.make_client().download_object(grant=self.grant(), object_id=self.obj.id,
+                                                    destination=target)
+        partial = next(self.root.glob(".source-range-*.part"))
+        self.assertEqual(target.read_bytes(), self.body)
+        self.assertEqual(os.stat(partial).st_ino, os.stat(target).st_ino)
+
+        result = self.make_client().download_object(grant=self.grant("rotated"), object_id=self.obj.id,
+                                                    destination=target)
+        self.assertEqual(result.read_bytes(), self.body)
+        self.assertFalse(partial.exists())
+        with closing(sqlite3.connect(self.root / "progress.sqlite")) as db:
+            self.assertEqual(db.execute("SELECT published FROM source_objects").fetchone()[0], 1)
 
     def test_response_must_match_range_validator_and_request_echo(self):
         def bad_response(request, *, timeout):

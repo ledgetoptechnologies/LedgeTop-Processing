@@ -570,9 +570,11 @@ class SourceRangeClient:
         committed, published, part_device, part_inode = self._ensure_state(key, identity_json, obj, part, grant)
         if published:
             self._verify_target(target, obj)
+            self._remove_published_partial(part, target, part_device, part_inode)
             return target
         if os.path.lexists(target):
             self._verify_target(target, obj)
+            self._remove_published_partial(part, target, part_device, part_inode)
             self._mark_published(key, obj.id)
             return target
         part_device, part_inode = self._reconcile(key, obj, part, committed, part_device, part_inode)
@@ -646,6 +648,21 @@ class SourceRangeClient:
         self._fsync_dir(target.parent)
         self._mark_published(key, obj.id)
         return target
+
+    def _remove_published_partial(self, part, target, expected_device, expected_inode):
+        """Finish cleanup after a crash between no-clobber publish and partial unlink."""
+        try:
+            part_info = os.lstat(part)
+        except FileNotFoundError:
+            return
+        target_info = os.stat(target, follow_symlinks=False)
+        if (not stat.S_ISREG(part_info.st_mode) or not stat.S_ISREG(target_info.st_mode)
+                or part_info.st_nlink != 2
+                or (str(part_info.st_dev), str(part_info.st_ino)) != (str(expected_device), str(expected_inode))
+                or (part_info.st_dev, part_info.st_ino) != (target_info.st_dev, target_info.st_ino)):
+            raise TransferError("published source partial identity changed")
+        part.unlink()
+        self._fsync_dir(part.parent)
 
     def _verify_file(self, path, obj):
         digest = hashlib.sha256()
