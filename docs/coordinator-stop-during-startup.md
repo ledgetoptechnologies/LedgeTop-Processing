@@ -33,6 +33,9 @@ before the serving thread starts. A synthetic ephemeral-listener test injects
 thread construction failure and checks that the listener closes and the queued
 job remains. A server factory that raises before returning must clean up its own
 resources.
+Native thread construction is also covered by the service cleanup path. A
+synthetic failure closes the already-bound listener and releases the Queue,
+whose queued job remains available to a new owner.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.

@@ -153,6 +153,23 @@ class ReferenceRuntimeTests(unittest.TestCase):
         replacement=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
         replacement.close()
 
+    def test_native_thread_construction_failure_releases_listener_and_queue(self):
+        from processing import app
+        handler=make_handler(self.config)
+        self.addCleanup(handler.prototype_queue.close)
+        self.addCleanup(handler.viewer_service.close)
+        job,_=handler.prototype_queue.submit({'requestId':'native-thread-failure','environment':'staging',
+                                             'profile':'treedar-synthetic-v1'})
+        native=ThreadingHTTPServer(('127.0.0.1',0),handler)
+        self.addCleanup(native.server_close)
+        service=CoordinatorService(native,handler);stop=threading.Event()
+        with patch.object(app.threading,'Thread',side_effect=RuntimeError('synthetic thread failure')):
+            self.assertEqual(service.run(stop),2)
+        self.assertEqual(native.fileno(),-1)
+        replacement=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:self.assertEqual(replacement.get(job['id'])['status'],'queued')
+        finally:replacement.close()
+
     def test_stop_during_real_dispatcher_start_prevents_first_tick(self):
         handler=make_handler(self.config);native=ThreadingHTTPServer(('127.0.0.1',0),handler)
         service=CoordinatorService(native,handler);stop=threading.Event();start=handler.viewer_service.start

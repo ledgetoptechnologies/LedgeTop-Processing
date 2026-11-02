@@ -390,9 +390,9 @@ class CoordinatorService:
             except BaseException:
                 self._failed('native_listener_failed', stop)
 
-        self._native_thread = threading.Thread(target=serve_native, name='processing-native-http', daemon=False)
         native_started = False
         try:
+            self._native_thread = threading.Thread(target=serve_native, name='processing-native-http', daemon=False)
             if self.handler.viewer_service and hasattr(self.handler.viewer_service,'bind_coordinator_stop'):
                 self.handler.viewer_service.bind_coordinator_stop(stop)
             if self.handler.viewer_service and not stop.is_set():
