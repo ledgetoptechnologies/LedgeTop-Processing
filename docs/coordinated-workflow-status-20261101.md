@@ -432,19 +432,19 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   It is a validator for a different, weaker textual retention claim. The
   Viewer proposal's richer fields must be defined under a new, versioned
   contract and canonicalization; do not silently extend or overclaim v1. A
-  separate signed-v2 proposal now exists in the Viewer worktree but remains
-  uncommitted and unagreed; exact ID grammars, path binding, decimal TXG,
-  owner/key epoch semantics, strict timestamps, golden vectors and rollback-
-  resistant issuer/key registry policy still need agreement before a consumer.
-  The Viewer draft now includes a deterministic public test vector. An
-  independent one-off Processing check reproduced its payload/closure
-  canonical UTF-8 bytes, domain-prefixed messages, and SHA-256 digests. The
-  Node generator reports a valid Ed25519 signature; Processing-side signature
-  verification was not run because `cryptography` is absent and the current
-  production Dockerfile is stdlib-only. Retaining Ed25519 therefore requires
-  an explicit pinned crypto dependency or separately reviewed verification
-  boundary. Matching v2 validators and committed cross-language fixtures
-  remain pending exact schema agreement. No receipt is currently issued.
+  separate signed-v2 proposal and deterministic public vector now exist in
+  the Viewer worktree but remain uncommitted and unagreed. The draft pins ID
+  grammars, path-shaped dataset/snapshot identities, decimal TXG strings,
+  owner/key epochs, strict timestamps, manifest closure and a public Ed25519
+  vector. The Processing serializer independently reproduced its canonical
+  bytes and digests, while Node reports a valid Ed25519 signature. Processing
+  signature verification was not run because `cryptography` is absent and the
+  production Dockerfile is stdlib-only. Remaining prerequisites include exact owner-side
+  object-to-path derivation, trusted key/epoch registry and rollback anchor,
+  authority/release lifecycle semantics, and a maintained Processing Ed25519
+  verifier dependency. Matching v2 validators and committed cross-language
+  fixtures remain pending exact schema agreement. No receipt or live custody
+  proof exists.
 - Beau's follow-up read-only metadata check matched the same saved task and
   provider attempt. It confirmed `3d-tiles` is a boolean `true`, the recorded
   v1 archive inventory has 71 entries and a valid digest, and the mesh tileset
