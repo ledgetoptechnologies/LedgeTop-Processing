@@ -76,6 +76,17 @@ No real client data was processed as part of this checkpoint.
   removed output option. `test_provider_nodeodm3` passed 7/7, including two
   fresh `/info` and `/options` GETs per probe; no option catalog is cached.
   This remains synthetic API evidence, not a fresh live-engine request.
+- A fresh read-only `GET /v1/options` on the healthy `.89` prototype returned
+  `mode=engine_option_discovery`, `executesWork=false`, `ready=true`, and
+  `snapshotConsistency=best_effort_read_only`. It fetched the actual engine
+  catalogs: local NodeODM 3.6.2 (`odm`) had 82 options and `maxImages=1000`;
+  main NodeODM API 2.4.0 / engine 3.8.5 (`odx`) had 80 options and
+  `maxImages=null`. Both queues were empty and both exposed `pc-ept`, `gltf`,
+  and `3d-tiles`; the intersection contained 74 dynamically discovered
+  options. Credentials were used from the container configuration but were
+  not printed. This verifies the live read-only discovery endpoint and the
+  requested 1,000-photo small-node cap; it does not verify Viewer rendering,
+  job submission, task exclusivity under load, or processing completion.
 - A fresh read-only `df -B1` on 2026-11-02 reports root-filesystem free space
   of 118,186,557,440 bytes on `.89` and 1,490,274,271,232 bytes on `.88`.
   These are root filesystem values; the installed worker scratch mount/config
