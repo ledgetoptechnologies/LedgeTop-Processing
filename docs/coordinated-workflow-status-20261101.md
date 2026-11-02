@@ -1289,6 +1289,12 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `2.4.0`, engine `odx` version `3.8.5`, `taskQueueCount=0`,
   `maxParallelTasks=1`, and `maxImages=null`. This is engine metadata only; it
   does not show the deployed Viewer scheduler or test actual image handling.
+- A separate read-only `GET /options` returned 80 option definitions,
+  including `pc-ept`, `gltf`, and `3d-tiles`. The current Processing probe
+  implementation fetches `/info` and `/options` dynamically. This confirms the
+  running main engine advertises those outputs; it does not prove that the
+  deployed Viewer flow submits or validates them. Cluster option discovery
+  remains untested while its NodeODM container is stopped.
 - The full Processing `unittest` suite on this Windows host ran 1,366 tests:
   all passed, with 578 skipped for Linux/POSIX behavior or unavailable
   geospatial dependencies. This is broad synthetic coverage, not end-to-end
