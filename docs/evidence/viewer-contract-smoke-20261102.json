@@ -1,0 +1,38 @@
+{
+  "recordedAt": "2026-11-02",
+  "test": "actual Viewer NodeOdmProvider against isolated Processing synthetic engines",
+  "processingCommit": "b50057a91215211b723fc4d25e8705036fa31cd9",
+  "viewerRef": "codex/viewer-v2-delivery-ledger",
+  "viewerCommit": "1e5bfa6b9565a10d30154a17e0093d8d0af4c14e",
+  "viewerMainBase": "dc8cedfe953ce75eb2f65de846de74d076b820f8",
+  "adapterSha256": "167b7bbd66e36fdba3255ca165877e1b821308d2fc9054f1d9ba3a3b77b3c86b",
+  "uploads": 62,
+  "cancelled": 1,
+  "completed": 3,
+  "executionOrder": [
+    {"job": "production-small", "node": "cluster"},
+    {"job": "production-large", "node": "main"},
+    {"job": "staging-small", "node": "cluster"}
+  ],
+  "localCommits": 2,
+  "mainCommits": 1,
+  "checks": {
+    "smallNodeFirst": true,
+    "globalTreeDarExclusion": true,
+    "stagingIsolation": true,
+    "repeatedCommitIdempotent": true,
+    "outputCursorPreserved": true,
+    "repeatedDownloadSha256": "b98f0c40e7bb03030ff8d446f11c4ba94904d4c04df8a05905530ac6a56e0877"
+  },
+  "syntheticOnly": true,
+  "clientDataUsed": false,
+  "liveNodesTouched": false,
+  "realViewerIngestionValidated": false,
+  "limits": [
+    "Uses invented synthetic bytes and isolated in-process HTTP engines.",
+    "Uses the Viewer candidate adapter from the recorded branch, not the current main adapter.",
+    "Does not run photogrammetry or a live worker container.",
+    "Does not test production Viewer archive ingestion or NAS custody.",
+    "Does not test TreeDar v2 acceptance, authenticated custody or cleanup ACK."
+  ]
+}

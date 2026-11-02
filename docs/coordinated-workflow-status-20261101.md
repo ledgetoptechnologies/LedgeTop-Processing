@@ -315,3 +315,16 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   including Edge desktop and 390px/320px browser checks. No workflows changed,
   and the original Claude branch and PR #347 remain untouched. This is review
   evidence only, not a Viewer deployment or live Processing acceptance.
+- Re-ran `scripts/viewer_contract_smoke.py` on 2026-11-02 at Processing commit
+  `b50057a` against the Viewer candidate `NodeOdmProvider` from
+  `codex/viewer-v2-delivery-ledger` commit
+  `1e5bfa6b9565a10d30154a17e0093d8d0af4c14e` (based on Viewer main
+  `dc8cedfe`). The actual adapter and Processing coordinator passed the
+  synthetic 62-upload/3-completion/1-cancellation flow: production small first
+  on cluster, production large on main, then staging small on cluster; global
+  TreeDar slot exclusion, staging isolation, duplicate commit, output cursor
+  and repeat-download hash checks passed. The adapter hash is recorded with
+  the run in `docs/evidence/viewer-contract-smoke-20261102.json`. This validates
+  the candidate adapter against in-process synthetic engines only; it does not
+  validate current Viewer `main`, a live worker/container, NAS custody,
+  photogrammetry, Viewer archive ingestion, or TreeDar acceptance.
