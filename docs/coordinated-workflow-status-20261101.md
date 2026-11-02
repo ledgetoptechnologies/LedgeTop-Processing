@@ -21,11 +21,14 @@ No real client data was processed as part of this checkpoint.
 - The Viewer pinned-vector test accepted its two exact synthetic Processing
   fixtures and rejected modified bytes. It is an exact-vector inspector, not a
   general v2 parser, LiDAR validator, or artifact acceptance implementation.
-- The active Viewer coordination thread has now drafted
+- Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
+  `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
   proposed typed TreeDar bundle, original LAS/LAZ custody, accepted-copy
   receipt, replayable ACK, and separate publication/cleanup authorities. The
-  document is uncommitted in the Viewer worktree and explicitly unagreed and
+  proposal explicitly preserves raw Emlid CSV files through failure/cancel/
+  rollback, requires worker and child writer quiescence before heavy-slot
+  release, and requires explicit per-stage coverage. It remains unagreed and
   inactive; it is review progress, not a wire contract or runtime behavior.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
@@ -59,11 +62,10 @@ No real client data was processed as part of this checkpoint.
    not be deleted based on download or remove alone.
 4. **TreeDar:** the source candidate requires a genuine-LiDAR admission and a
    12-artifact native output closure. Current Viewer bridge accepts one ODM
-   archive and does not accept this typed closure. A detailed Viewer-side seam
-   proposal is now in its worktree, but Processing and Viewer still need paired
-   owner agreement and then implementation of the mapping, provenance binding,
-   durable custody record and exact acceptance ACK. No TreeDar job was run
-   against real LiDAR.
+   archive and does not accept this typed closure. Viewer has pushed a detailed
+   seam proposal, but Processing and Viewer still need paired owner agreement
+   and then implementation of the mapping, provenance binding, durable custody
+   record and exact acceptance ACK. No TreeDar job was run against real LiDAR.
 5. **Credential hygiene:** prior tool output exposed the active candidate
    NodeODM startup token. The user was advised to rotate it and update the
    matching private Processing credential through an approved maintenance
@@ -71,8 +73,12 @@ No real client data was processed as part of this checkpoint.
    client processing until the replacement is confirmed.
 6. **Viewer redesign and Claude:** the Viewer chat has historical redesign
    work and a candidate customer → project → task hierarchy. Current Claude
-   acknowledgement/ownership is not verified; the internal message-bus MCP
-   is unavailable in this chat. The UI work is not verified deployed.
+   acknowledgement or active participation is not verified; the internal
+   message-bus MCP is unavailable in this chat. Historical design notes assign
+   frontend ownership and specify Operations-matched dark accents. The concrete
+   Greenleaf → New Build / Project Y → tasks example fits the candidate
+   `groupId=null` structure, but this is not an authorization boundary. The UI
+   work is not verified deployed.
 7. **Runtime acceptance:** no real end-to-end small job has been submitted
    through Viewer during the current verification. The previously discussed
    10,000-photo client dataset (estimated ~50 GB) remains unprocessed.
