@@ -404,6 +404,18 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   put such a key in chat or a Processing node; keep it on the storage-owner
   host if this design proceeds. References: [25.10 RBAC](https://api.truenas.com/v25.10/rbac.html),
   [TrueNAS API-key guidance](https://www.truenas.com/docs/scale/api/).
+- Least-privilege follow-up from current OpenZFS documentation: `zfs allow`
+  can scope delegated snapshot/hold/release operations to a dataset, and CLI
+  `zfs release <tag>` removes only the named hold. However, `snapshot` also
+  requires the `mount` ability, which OpenZFS says cannot be delegated on
+  Linux. Therefore a direct unprivileged ZFS owner is not yet a verified
+  option for TrueNAS SCALE. A root-owned helper constrained to the dedicated
+  spool dataset may be narrower than a TrueNAS API key carrying global
+  `SNAPSHOT_WRITE`, but must be designed and verified on the actual host before
+  adoption. Do not grant any ZFS permissions or install a helper as part of
+  this research. References: [OpenZFS delegated administration](https://openzfs.github.io/openzfs-docs/Basic%20Concepts/Operations/Delegated%20Administration.html),
+  [zfs-allow permission requirements](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-allow.8.html),
+  [zfs hold/release tag behavior](https://openzfs.github.io/openzfs-docs/man/master/8/zfs-hold.8.html).
 - Current Processing source inspection confirms
   `processing/reference_source_retention.py` is only a receipt validator: it
   explicitly supplies no authentication or cleanup and has no production call
