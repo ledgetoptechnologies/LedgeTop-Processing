@@ -1212,7 +1212,8 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   separate closed schema profile with `schemaVersion: 2`, the existing record
   markers, no spool protocol field, and its
   `LTDS-PARTIAL-ACCEPTANCE-V2\0` digest domain; the current Viewer serializer
-  reproduced the sample acceptance digest
+  reproduced the sample acceptance digest from
+  `contracts/reference-v2-candidate/valid/odm_only.json` as
   `64bfa129f873615a1a6be9250db5784affe4f58cabefbf41d17cbe59749124a5`.
 - Renamed the custody guarantee to
   `explicit_source_release_ack_ltds_processing_spool_v2` so it cannot be read
