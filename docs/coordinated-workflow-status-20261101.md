@@ -1247,6 +1247,16 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   intentionally retains records and grants no cleanup. It is not yet joined
   to Viewer `PartialAcceptance` / `AcceptedCopyAck`, the proposed spool-v2
   custody ledger, or an independently authenticated NAS deletion service.
+- The Viewer chat has an unmounted strict-metadata decoder candidate at local
+  commit `a3e86404`. Its five focused Node tests pass; this includes exact
+  hashes and rejection for 14 Processing lexical-invalid fixtures, shared
+  canonical roundtrip/hash vectors, size/depth/member boundaries, and v1/v2
+  marker checks. A separate Processing run verified that `_decode` plus
+  `canonical_metadata` rejects all 14 same raw fixture bytes. This is limited
+  differential evidence, not fuzzing, runtime endpoint validation, or full
+  schema/auth review. The Viewer branch currently starts at draft PR #409's
+  head `7b8e9271`; the strict decoder appears independent of that PR, so the
+  Viewer agent was asked to isolate/rebase it before opening a reviewable PR.
 - Therefore the production/staging admission flow, NAS spool reservation and
   transfer, live Viewer acceptance, cross-service recovery, and bounded safe
   cleanup remain implementation and runtime-acceptance gates. No task or NAS
