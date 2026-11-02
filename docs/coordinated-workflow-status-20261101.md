@@ -1148,3 +1148,7 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   consume the updated exact fixture and verify the same proof. This establishes
   parity only for the supplied synthetic vectors, not an agreed wire contract
   or runtime implementation.
+- After the fixture/proof update, local Processing unittest discovery passes
+  1,356 tests with 578 platform skips. The Viewer proposal suite passed 17
+  focused tests at `c462f81b`; neither result is live broker or worker runtime
+  acceptance.
