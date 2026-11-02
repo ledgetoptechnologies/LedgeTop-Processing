@@ -202,6 +202,18 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   separate receipt. No NAS broker service or mounted Viewer accepted-copy
   ingest is implemented. This mapping is an existing-source audit, not a new
   cross-language contract.
+- Grant lifecycle audit: the worker claims a queued job, reserves local scratch,
+  then polls the claim-bound `/transfer-grant` endpoint; while no grant exists,
+  it stays in `awaiting_grant` and does not fetch inputs. An environment-scoped
+  Viewer bearer posts the grant to `/transfer-grants`; Processing checks the
+  reserved job, exact manifest/object closure and expiry, then seals the first
+  grant digest and returns a nonsecret acknowledgement. Processing does not
+  mint the broker token. Viewer has broker mint/post helpers, but source review
+  found no service call sites connecting them to a durable automatic handoff.
+  Expired/replacement grants cannot be silently rotated because the first grant
+  is sealed. This is the immediate integration gap: jointly implement and test
+  the Viewer-owned durable grant handoff and explicit expiry/replay recovery
+  before treating the worker path as schedulable.
 - Viewer independently reviewed paired rehearsal commit `59bafc9` against its
   acceptance proposal and confirmed the scoped claims are consistent. Viewer
   corrected its range-transfer description in commit `b0c376b6`; this makes
