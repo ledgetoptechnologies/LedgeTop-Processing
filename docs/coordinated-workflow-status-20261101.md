@@ -12,7 +12,9 @@ No real client data was processed as part of this checkpoint.
   `/mnt/Plugins/App_Data/Model-Viewer/Storage/processing-spool` and
   `/app/storage/processing-spool`. This is a design decision only: the folder,
   NAS route, permissions, reservation protocol and retention behavior have not
-  been created or activated. The containing ZFS dataset is shared with Viewer
+  been created or activated. Read-only SMB verification on 2026-11-02 confirmed
+  the parent Storage path is readable and `processing-spool` does not yet
+  exist. The containing ZFS dataset is shared with Viewer
   storage, so a snapshot/hold would cover the dataset, not only this folder;
   retention design must account for that boundary and avoid claiming
   folder-scoped snapshot isolation.
