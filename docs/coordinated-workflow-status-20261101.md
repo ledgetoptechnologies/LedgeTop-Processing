@@ -647,3 +647,22 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   this is not end-to-end runtime acceptance. Do not admit client work on this
   evidence alone. The full receipt, storage-owner, dispatch and durable ACK
   gates above remain in force.
+
+## Local candidate validation — 2026-11-02
+
+- Commit `68c9d4b` on `codex/accepted-copy-ack-candidate` adds the fixture-only
+  v2 verifier, pinned crypto requirements, and an install step in the existing
+  main-only GitHub check job. It is pushed to the existing draft PR #335, which
+  remains stacked on `codex/engine-ingress-guard-candidate`. The feature push
+  started no GitHub Actions runs. The main-branch checks still require a later
+  review/merge to execute on GitHub.
+- The full local Processing unittest discovery completed 1,334 tests with
+  578 platform skips and no failures on Python 3.13. This included the current
+  untracked host-supervisor experiment test file, which is not part of the
+  commit. TreeDar prototype-worker tests passed 36/36; package-publication
+  boundary tests passed 5/5. The focused v1/v2 retention suite passed 18/18
+  both on the host and inside the rebuilt Linux image as UID 10001. The
+  temporary image tag was removed after the run.
+- These are local synthetic/code checks; GitHub's Python 3.10 job has not run
+  for this branch, and no live dispatch, NAS write, client processing, Viewer
+  acceptance, or cleanup path was exercised.
