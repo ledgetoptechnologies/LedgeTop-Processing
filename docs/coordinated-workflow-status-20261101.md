@@ -102,6 +102,18 @@ No real client data was processed as part of this checkpoint.
   registry is not production key management and does not prove nonce history
   across databases/restores, real process or power failure, a trusted
   anti-rollback authority, or an atomic transaction with the existing broker.
+- Viewer isolated candidate commits `0fd81ce0` and `50a4f506` now exercise a
+  new synthetic-only broker method that composes real grant/usage writes and
+  an AES-GCM sealed grant row inside the broker's existing `BEGIN IMMEDIATE`.
+  The original `mintGrant` path remains unchanged. The candidate checks a
+  closed operation binding and runs its injected reservation/source-pin
+  verifiers inside the DB transaction; its regression confirms a changed
+  verifier outcome leaves grant, usage and sealed-row counts at zero. The
+  Viewer chat reports 3/3 focused tests passed, including insert-failure
+  rollback and exact close/reopen replay. This is not a production migration,
+  key authority, reservation issuer or NAS pin: the new table is fixture-only,
+  and unknown commit/restore rollback, durable ACK/reconciliation, global key
+  and nonce governance, and NAS writer/purge fencing remain unimplemented.
 - The Viewer chat rechecked Claude participation on 2026-11-02: the saved
   Viewer link is historical (last updated October 28, with no current session
   binding), and no Engineering Hub message-bus tool is available there to
