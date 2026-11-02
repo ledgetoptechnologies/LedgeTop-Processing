@@ -35,3 +35,14 @@ ingress, DCGM and node-exporter containers. No jobs were submitted and no host
 or container state was changed. These inventory results do not establish that
 the reference listener, worker, transfer broker or Viewer acceptance path is
 running.
+
+The same read-only check confirmed the installed coordinator is healthy, with 17
+historical successes, 2 failures, and no queued, running, or held jobs. Its photo
+smoke profile is disabled. Fresh option discovery reported the local engine as
+ODM 3.6.2 and main as ODX 3.8.5, with 74 common options. Authenticated
+`/v1/plan` probes selected `local` for 50 photos / 250 MiB and `main` for 10,000
+photos / 50 GiB. These are routing decisions only: no job was created, and they
+do not prove that the Viewer can submit or receive artifacts. The existing
+photo worker remains an isolated staging smoke path, not the production data
+plane. A full local Processing unittest run passed 161 tests with 13
+platform-specific skips.
