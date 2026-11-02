@@ -23,3 +23,15 @@ not verify that an object belongs to a manifest. The real Viewer integration
 must supply those properties before any runtime activation. Existing v1
 transfer reservations still allow up to 3× manifest bytes; this candidate does
 not reinterpret that rule.
+
+## Processing host discovery — 2026-11-02
+
+Read-only SSH confirmed that `ledgetop-processing-reference-worker.service` is
+`LoadState=not-found`, inactive and dead on both processing nodes. Cluster
+`.89` reports a 295 GiB root filesystem with 111 GiB available and the healthy
+Processing prototype, ingress and TLS/migration candidate containers. Main
+`.88` reports a 1.8 TiB root filesystem with 1.4 TiB available and NodeODM,
+ingress, DCGM and node-exporter containers. No jobs were submitted and no host
+or container state was changed. These inventory results do not establish that
+the reference listener, worker, transfer broker or Viewer acceptance path is
+running.
