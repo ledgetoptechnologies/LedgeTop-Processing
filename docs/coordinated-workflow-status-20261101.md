@@ -114,6 +114,10 @@ No real client data was processed as part of this checkpoint.
   key authority, reservation issuer or NAS pin: the new table is fixture-only,
   and unknown commit/restore rollback, durable ACK/reconciliation, global key
   and nonce governance, and NAS writer/purge fencing remain unimplemented.
+  The changes are staged in draft PR #409 at head `50a4f506`, based on the
+  Viewer candidate branch `codex/viewer-v2-delivery-ledger` rather than `main`;
+  GitHub reports no status checks. It is reviewable candidate work, not a
+  release or installable package.
 - The Viewer chat rechecked Claude participation on 2026-11-02: the saved
   Viewer link is historical (last updated October 28, with no current session
   binding), and no Engineering Hub message-bus tool is available there to
