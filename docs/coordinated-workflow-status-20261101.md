@@ -301,3 +301,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   121 behind `origin/main`, with no matching
   `origin/claude/viewer-hierarchy-controls` ref. It also is not in production.
   Grouping remains separate from client access.
+- GitHub reports Processing PR #264 (`Draft inactive bounded engine ingress
+  admission guard`) as an open draft targeting `codex/nodeodm3-provider`, not
+  `main`. A read-only lookup found no PR for that base branch. The PR is a
+  stacked review item and is not directly mergeable into `main`; retargeting it
+  would pull a much larger unrelated candidate tree into the diff. Keep the
+  current review boundary until the parent work is split or a deliberate
+  main-based review plan is prepared.
