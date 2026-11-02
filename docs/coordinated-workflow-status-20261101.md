@@ -1402,6 +1402,12 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   enforcement, corrupted-byte quarantine and signed cross-language receipt
   verification. This is receiver-side synthetic coverage, not Processing
   client-to-deployed-Viewer acceptance.
+- The complete Processing unittest discovery suite passed on PR #339 head
+  `871f606f95c458de52ac955134c258871c4c2a5b`: 1,400 tests passed, 572
+  optional/platform cases skipped, zero failures (106.3 seconds). This broad
+  Windows run supplements the focused transfer tests; skipped Linux-only
+  filesystem/HTTP cases remain covered separately by the Viewer Linux suite,
+  not by this result.
 - Both PRs remain open drafts. No Actions ran, consistent with the main-only
   policy. No runtime deployment, Viewer release, TrueNAS spool, queue
   reservation, real job, or cleanup was performed. The source contract is
