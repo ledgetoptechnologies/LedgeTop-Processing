@@ -1380,7 +1380,7 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 
 ## Processing and Viewer v2 accepted-copy bridge — 2026-11-02
 
-- Processing draft PR #339 is open at head `536cd8e` on
+- Processing draft PR #339 is open on
   `codex/viewer-acceptance-receipt-verify-20261102`. Its bounded HTTPS transfer
   client, durable leased retry worker, atomic accepted-receipt persistence and
   signed-receipt verification are implemented in source. The focused Processing
@@ -1402,12 +1402,37 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   enforcement, corrupted-byte quarantine and signed cross-language receipt
   verification. This is receiver-side synthetic coverage, not Processing
   client-to-deployed-Viewer acceptance.
+- A separate local loopback test then ran Processing's actual Python
+  `ViewerAcceptanceTransfer` from snapshot `89058ea` against Viewer PR #424's
+  actual `ReferenceAcceptanceApi` and `ReferenceAcceptanceLedger` at
+  `bca50f0440bc34719631e35387122fe99577abc7`. It used ephemeral TLS/service/
+  receipt keys and synthetic result bytes over loopback. The run deliberately
+  dropped one chunk response after staging and one commit response after the
+  Viewer ledger commit. Processing resumed at the durable Viewer offset, then
+  recovered and verified the signed receipt from status without re-upload or a
+  duplicate commit: six upload requests, one commit, receipt verified. The
+  server ran in a disposable Linux Node 24 container and used a minimal HTTP
+  router adapter, so the real API handlers and ledger were exercised but not
+  production Express mounting, body-parser middleware or complete startup
+  validation. The container exited. The harness remains temporary and needs a
+  checked-in regression owner in Processing PR #339; this does not establish
+  deployed TrueNAS storage, production credentials or live acceptance.
+- Viewer enablement requires `PROCESSING_PLATFORM_ENABLED=true`,
+  `VIEWER_REFERENCE_ACCEPTANCE_ENABLED=true`, absolute durable Linux database
+  and managed-root paths (database outside the managed root), a dedicated
+  `SERVICE_AUTH_KEYS_JSON` entry, an Ed25519 receipt private key on Viewer and
+  its public key pinned by Processing, plus reviewed byte/chunk budgets. The
+  Viewer API currently derives production-versus-staging acceptance environment
+  from `NODE_ENV`; that may reject staging if the optimized staging container
+  also sets `NODE_ENV=production`. Viewer PR #424 needs an explicit environment
+  regression/fix before staging enablement. No TrueNAS config was inspected or
+  changed.
 - The complete Processing unittest discovery suite passed on code head
   `871f606f95c458de52ac955134c258871c4c2a5b`: 1,400 tests passed, 572
-  optional/platform cases skipped, zero failures (106.3 seconds). The current
-  PR head `536cd8e` adds documentation-only follow-ups after that code-tested
-  head. Skipped Linux-only filesystem/HTTP cases remain covered separately by
-  the Viewer Linux suite, not by this result.
+  optional/platform cases skipped, zero failures (106.3 seconds). The later
+  PR commits are documentation-only follow-ups after that code-tested head.
+  Skipped Linux-only filesystem/HTTP cases remain covered separately by the
+  Viewer Linux suite, not by this result.
 - Both PRs remain open drafts. No Actions ran, consistent with the main-only
   policy. No runtime deployment, Viewer release, TrueNAS spool, queue
   reservation, real job, or cleanup was performed. The source contract is
@@ -1419,3 +1444,7 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   fresh peer-message delivery after reconnect has not been tested. The Viewer
   chat was asked to report the current redesign and hierarchy PR status; Claude
   ownership remains unverified.
+- Automatic command review blocked recursive deletion of the Viewer chat's
+  ephemeral local E2E harness directory. Its disposable container has been
+  removed; the leftover folder contains only the synthetic source snapshot,
+  test scripts and ephemeral certificates and remains outside the repo.
