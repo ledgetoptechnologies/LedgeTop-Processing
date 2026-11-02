@@ -91,6 +91,14 @@ No real client data was processed as part of this checkpoint.
   oracle skipped. This confirms only the shared synthetic canonicalization
   and fixture cross-record checks; the payload remains inactive, unauthenticated
   and unwired to either runtime.
+- Additional offline source-boundary tests on 2026-11-02 passed in Viewer
+  Node (`source-retention-v2-proposal-vector` and
+  `reference-source-release-ack`, 6/6) and Processing Ubuntu 24.04 WSL
+  (`test_reference_source_retention_v2_candidate` and
+  `test_reference_v2_candidate`, 37 tests, one optional schema skip). These
+  verify signed-vector, exact-byte, binding and negative-vector behavior for
+  candidate contracts only; no NAS filesystem, snapshot authority or release
+  was exercised, and the v2 receipt remains a proposal.
 - The Viewer chat confirmed the production reference lane remains hard-disabled:
   the worker's production call returns without dispatch, and no production
   transfer adapter, broker route or authenticated issuer is wired. The broker
