@@ -947,6 +947,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   Docker. Main `.88` root has 1.8 TiB total / 1.4 TiB available; its NodeODM
   data directory is on that filesystem. A 50-GB-class dataset should route to
   `.88` under the verified size policy. No disk or LVM changes were made.
+- Refreshed read-only SSH `systemctl show` on both `.89` and `.88` reports
+  `ledgetop-processing-reference-worker.service` as `LoadState=not-found`,
+  `ActiveState=inactive`, `SubState=dead`. `docker ps` still shows the
+  Processing prototype healthy on `.89` and NodeODM plus monitoring on `.88`.
+  Thus there is currently no installed reference worker service to claim,
+  execute or return jobs. No service or container was started or changed; no
+  credentials, engine endpoints, workload state or client data were read.
 
 ## Cross-repo grant ACK audit — 2026-11-02
 
