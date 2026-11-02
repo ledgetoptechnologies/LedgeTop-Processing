@@ -839,3 +839,30 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 - These are local synthetic/code checks; GitHub's Python 3.10 job has not run
   for this branch, and no live dispatch, NAS write, client processing, Viewer
   acceptance, or cleanup path was exercised.
+
+## Read-only Viewer storage inventory — 2026-11-02
+
+- Read-only SMB metadata enumeration found 497.95 GiB across Viewer Storage:
+  cache 104.93 GiB, datasets 174.27 GiB, imports 33.57 GiB, models 174.06 GiB,
+  trash 10.99 GiB, and data 0.14 GiB. WebODM's `Media/project` tree held
+  388.08 GiB. This compares folder contents only; it does not equate the
+  applications' accounting or prove broad duplication.
+- The Viewer `imports` and `trash` trees each contain a same-name/same-size
+  set of 1,120 JPG files totaling 11,796,893,696 bytes; `datasets` contains
+  same-name/same-size matches for all 1,120. A ZIP in imports contains the same
+  1,120 JPG basenames and uncompressed sizes. Windows SMB file identities for
+  all imported JPGs differ from matching files in both trash and datasets,
+  establishing separate file objects, not byte-identical content. No payload
+  hashes were computed and no files were changed or removed.
+- The ZIP in imports also has 2 TIFF, 118 PNG, 4,559 LAZ, and other entries.
+  Five `.zip` files in models (16.76 GiB each) start with a ZIP local-file
+  header but lack an end-of-central-directory or ZIP64 locator in the last
+  65,557 bytes; `ZipArchive.OpenRead` could not parse the first archive. Their
+  producer/database ownership and intended lifecycle are unknown. Do not purge
+  them based on extension or size alone.
+- Current Viewer source (`dc8cedfe`) schedules `purgeExpiredTrash` from the
+  worker maintenance loop; manual assets receive a 14-day trash retention
+  deadline and automatic output retirement receives 7 days. The live DB
+  retention row and due state for the 1,120-file trash folder were not read,
+  so whether it will be automatically purged is unverified. No manual cleanup
+  was performed.
