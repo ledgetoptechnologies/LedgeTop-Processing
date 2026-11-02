@@ -1229,3 +1229,25 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   skip. This verifies the current synthetic profile and vectors only; it does
   not establish an agreed deployed endpoint, physical source custody, or live
   result acceptance/cleanup.
+
+## Processing queue and outbox baseline — 2026-11-02
+
+- Re-ran the current dispatcher, native Viewer service, worker outbox, Viewer
+  HTTP facade, and Viewer task-store suites at `4075d7c`: 89 tests passed with
+  two platform skips. These cover the existing synthetic/local workflows,
+  not a NAS-backed end-to-end job.
+- The native facade currently advertises one parallel task and routes to fixed
+  cluster/main NodeODM engine origins. `ViewerService.download()` downloads a
+  completed engine archive into its configured local task directory, validates
+  and retains it, and leaves the engine source intact. This is useful for the
+  existing small local flow but is not just-in-time reserved transfer from the
+  NAS queue.
+- `WorkerOutbox` persists terminal result manifests and retry state in local
+  SQLite and requires an explicit durable receipt before acknowledgment; it
+  intentionally retains records and grants no cleanup. It is not yet joined
+  to Viewer `PartialAcceptance` / `AcceptedCopyAck`, the proposed spool-v2
+  custody ledger, or an independently authenticated NAS deletion service.
+- Therefore the production/staging admission flow, NAS spool reservation and
+  transfer, live Viewer acceptance, cross-service recovery, and bounded safe
+  cleanup remain implementation and runtime-acceptance gates. No task or NAS
+  data was created, changed, or deleted by these checks.
