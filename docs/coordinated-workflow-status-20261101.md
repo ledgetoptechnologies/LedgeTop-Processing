@@ -856,6 +856,32 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   data directory is on that filesystem. A 50-GB-class dataset should route to
   `.88` under the verified size policy. No disk or LVM changes were made.
 
+## Cross-repo grant ACK audit — 2026-11-02
+
+- Processing v1 defines a closed transfer-grant ACK containing
+  `reservationId`, `generation`, `manifestSha256`, `nonce`, `accepted: true`,
+  and `grantSha256`; the latter hashes the canonical exact grant, including
+  its bearer token. The Processing shared-fixture test passes for this shape
+  and its token canonicalization vector.
+- The Viewer candidate at `codex/viewer-atomic-grant-fixture` commit `5cc4b177`
+  initially accepted only the five legacy fields and its fixture omitted the
+  ACK/vector. The Viewer working diff now requires and compares
+  `grantSha256`, imports the Processing fixture fields, and has synthetic
+  provider tests for wrong hashes, changed tokens, and status reconciliation.
+  I independently ran `reference-grant-ack-lockstep.test.js` with
+  `reference-app-dispatch.test.js`: 26 passed, 1 skipped (Linux descriptor and
+  directory barriers unavailable on this host), 0 failed. The Viewer changes
+  remain uncommitted in that candidate worktree as of this review.
+- This does **not** yet provide durable lost-ACK recovery. The actual
+  `referenceAppDispatch` builds its status binding without `grantSha256`, and
+  neither the application journal nor dispatcher persists and reloads an
+  immutable grant digest before sending the grant. Consequently a status
+  response containing the six-field ACK fails closed with
+  `BINDING_REQUIRED` unless the caller supplies an intent digest. Provider
+  unit tests do not establish restart or owner-handoff recovery. Viewer has
+  been asked to implement and test that production-path persistence, or mark
+  the recovery path incomplete. No live deployment or data operation occurred.
+
 ## Local candidate validation — 2026-11-02
 
 - Commit `68c9d4b` on `codex/accepted-copy-ack-candidate` adds the fixture-only
