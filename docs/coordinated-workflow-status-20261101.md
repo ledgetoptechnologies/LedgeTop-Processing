@@ -649,11 +649,14 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   mutation, missing/extra files and ambiguous/unresolved identity. Windows
   denied symlink creation, so that case was not exercised. The candidate is
   not in the deployed image; Node/runtime/mount equivalence and Linux
-  symlink/ancestor-race behavior are unverified. A 500-GiB sequential scan is
-  possible. This may provide a manually scheduled integrity observation after
-  release qualification, but it is not durable custody or an accepted-copy
-  ACK. Do not give Beau a production command until the exact installed build
-  is matched and bounded Linux tests pass.
+  symlink/ancestor-race behavior are unverified. Follow-up candidate commit
+  `a27c4430` adds file/directory identity checks around the walk and a synthetic
+  parent-replacement case; the focused Windows test again passed 1/1. This is
+  still path-based, not descriptor-pinned, and Windows denied symlink creation.
+  A 500-GiB sequential scan is possible. This may provide a manually scheduled
+  integrity observation after release qualification, but it is not durable
+  custody or an accepted-copy ACK. Do not give Beau a production command until
+  the exact installed build is matched and bounded Linux tests pass.
 
 ## Live host observation — 2026-11-02
 
