@@ -82,7 +82,7 @@ class TreeDarFactoryMigrationTests(unittest.TestCase):
         controller=driver.execution_router.treedar_worker.controller
         controller.runner=runner or engine_fixture.FakeDocker(controller.config)
         controller.runner.id=hashlib.sha256(str(controller.path).encode()).hexdigest()
-        driver._request=self.control;driver.sender._open=self.sender;driver.broker._open=self.broker
+        driver._request=self.control;driver.sender._open=self.sender;driver.broker._open=self.broker;driver.broker._custom_opener=True
         return driver,server
 
     def submit(self,kind='treedar'):
