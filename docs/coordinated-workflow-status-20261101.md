@@ -43,11 +43,14 @@ No real client data was processed as part of this checkpoint.
   that inventory, not that the files are still present on disk or that a live
   orchestrator-to-Viewer ingestion was completed. The absent path does not
   prove no EPT output exists elsewhere.
-- Follow-up audit confirms the installed/reference worker supports explicit
+- Follow-up audit confirms the foreground synthetic prototype documents
   completion-only resume from the exact saved receipt: it resends the recorded
-  completion and does not claim or rerun the job. Automatic process/boot
-  supervision is explicitly not installed. After abrupt worker death, stale
-  read pins and uncertain execution still require inspection before recovery.
+  completion and does not claim or rerun the job. Separately, the newer
+  reference driver persists execution and delivery stages and reconciles them
+  on a same-state restart, but is not installed as a host service. Automatic
+  process/boot supervision is not installed. After abrupt worker death, stale
+  read pins and uncertain engine state still require inspection before safe
+  recovery.
 - An untracked Linux pidfd host-launcher experiment is present in
   `ops/host_supervisor.py` with bounded synthetic leaf-process tests. It
   deliberately leaves every launched epoch held because direct-child pidfd
