@@ -214,6 +214,14 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   is sealed. This is the immediate integration gap: jointly implement and test
   the Viewer-owned durable grant handoff and explicit expiry/replay recovery
   before treating the worker path as schedulable.
+- Added `test_worker_waits_for_exact_viewer_transfer_grant_before_fetching_inputs`
+  to the Processing driver suite. It verifies an ungranted job remains in
+  `awaiting_grant` with no local input, broker download or engine initialization;
+  the authenticated existing Viewer API can then post a synthetic grant, exact
+  grant replay returns the same nonsecret ACK, changed-token reuse conflicts,
+  and exactly one input download follows. The focused test passed. This closes
+  a Processing-side regression gap only; it does not implement or prove the
+  missing automatic Viewer grant issuer/handoff.
 - Viewer independently reviewed paired rehearsal commit `59bafc9` against its
   acceptance proposal and confirmed the scoped claims are consistent. Viewer
   corrected its range-transfer description in commit `b0c376b6`; this makes

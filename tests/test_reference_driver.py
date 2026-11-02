@@ -219,6 +219,38 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.driver._db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM driver_jobs WHERE stage='awaiting_acceptance'").fetchone()[0], 2)
 
+    def test_worker_waits_for_exact_viewer_transfer_grant_before_fetching_inputs(self):
+        job = self.submit(contents=(b'queued-photo',))
+        original_download = self.broker.download_object
+        with patch.object(self.broker, 'download_object', wraps=original_download) as download:
+            self.assertEqual(self.driver.step()['state'], 'claim_pending')
+            self.driver.step()  # Persist the claim.
+            self.assertEqual(self.driver.step()['state'], 'awaiting_grant')
+            self.assertEqual(self.driver.step()['state'], 'awaiting_grant')
+            self.assertEqual(download.call_count, 0)
+            self.assertEqual(list(self.scratch.glob('jobs/*/*.input')), [])
+            self.assertFalse(any(call[0] == 'initialize' for call in self.transport.calls))
+
+            private = self.store.get(job['jobId'], private=True)
+            request = private['transferRequest']
+            grant = dict(request, jobId=job['jobId'], environment=job['environment'],
+                objectIds=[obj['id'] for obj in private['submission']['manifest']['objects']],
+                token='synthetic-transfer-token')
+            response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
+                {'Authorization': 'Bearer ' + VIEWER}, json.dumps(grant).encode(), protected_transport=True)
+            self.assertEqual(response.status, 200)
+            self.assertTrue(response.body['accepted'])
+            replay = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
+                {'Authorization': 'Bearer ' + VIEWER}, json.dumps(grant).encode(), protected_transport=True)
+            self.assertEqual(replay.status, 200)
+            self.assertEqual(replay.body, response.body)
+            changed = dict(grant, token='different-synthetic-transfer-token')
+            conflict = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
+                {'Authorization': 'Bearer ' + VIEWER}, json.dumps(changed).encode(), protected_transport=True)
+            self.assertEqual(conflict.status, 409)
+            self.advance(job, 'awaiting_acceptance')
+            self.assertEqual(download.call_count, 1)
+
     def test_authority_version_and_active_native_tasks_prevent_claim(self):
         job = self.submit()
         self.transport.version = 'unapproved-engine-version'
