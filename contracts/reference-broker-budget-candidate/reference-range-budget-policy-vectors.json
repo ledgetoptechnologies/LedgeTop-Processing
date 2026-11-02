@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "status": "synthetic-proposal-not-wire-contract",
+  "policy": {"chunkBytes":16777216,"maxObjectBytes":268435456,"maxObjects":10000,"maxManifestBytes":68719476736,"maxBaseRequests":20000,"maxRequests":30000,"headroomNumerator":3,"headroomDenominator":2},
+  "plans": [
+    {"name":"empty object rejected by current v1","objects":[{"bytes":0,"count":1}],"accepted":false},
+    {"name":"exact chunk","objects":[{"bytes":16777216,"count":1}],"accepted":true,"baseRequests":1,"requestBudget":2,"byteBudget":25165824},
+    {"name":"one byte past chunk","objects":[{"bytes":16777217,"count":1}],"accepted":true,"baseRequests":2,"requestBudget":3,"byteBudget":25165826},
+    {"name":"max object","objects":[{"bytes":268435456,"count":1}],"accepted":true,"baseRequests":16,"requestBudget":24,"byteBudget":402653184},
+    {"name":"over max object","objects":[{"bytes":268435457,"count":1}],"accepted":false},
+    {"name":"ten thousand five million byte objects","objects":[{"bytes":5000000,"count":10000}],"accepted":true,"baseRequests":10000,"requestBudget":15000,"byteBudget":75000000000},
+    {"name":"over object count","objects":[{"bytes":1,"count":10001}],"accepted":false},
+    {"name":"over manifest limit","objects":[{"bytes":268435456,"count":257}],"accepted":false},
+    {"name":"over planned requests","objects":[{"bytes":33554433,"count":6667}],"accepted":false},
+    {"name":"integer precision hazard","objects":[{"bytes":9007199254740992,"count":1}],"accepted":false}
+  ],
+  "recovery": [
+    {"name":"fresh range first attempt","identity":"job-a:manifest-a","generation":1,"grant":"grant-a","range":"0-9","action":"send","expected":"charged","offset":0},
+    {"name":"verified first range","identity":"job-a:manifest-a","generation":1,"grant":"grant-a","range":"0-9","action":"verify","expected":"verified","offset":10},
+    {"name":"verified offset survives restart","identity":"job-a:manifest-a","generation":1,"grant":"grant-a","range":"0-9","action":"restart","expected":"verified","offset":10},
+    {"name":"next range charged","identity":"job-a:manifest-a","generation":1,"grant":"grant-a","range":"10-19","action":"send","expected":"charged","offset":10},
+    {"name":"aborted range held across restart","identity":"job-a:manifest-a","generation":1,"grant":"grant-a","range":"10-19","action":"restart","expected":"hold","offset":10},
+    {"name":"replacement grant cannot reset charge","identity":"job-a:manifest-a","generation":2,"grant":"grant-b","range":"10-19","action":"send","expected":"hold","offset":10}
+  ]
+}

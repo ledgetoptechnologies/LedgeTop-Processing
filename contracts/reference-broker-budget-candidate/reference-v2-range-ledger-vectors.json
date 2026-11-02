@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "status": "synthetic-proposal-not-wire-contract",
+  "reservation": {"version":2,"environment":"staging","jobId":"job-1","manifestSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"reservationId":"reservation-1","policy":{"version":1,"chunkBytes":4,"requestBudget":2,"byteBudget":8}},
+  "grants": [{"generation":1,"reservationId":"reservation-1","grantId":"grant-1"},{"generation":2,"reservationId":"reservation-2","grantId":"grant-2"}],
+  "events": [
+    {"action":"charge","grant":0,"objectId":"object-1","start":0,"length":4,"expected":"charged","requests":1,"bytes":4,"rangeState":"uncertain"},
+    {"action":"reopen","grant":0,"objectId":"object-1","start":0,"expected":"uncertain","requests":1,"bytes":4,"rangeState":"uncertain"},
+    {"action":"charge","grant":1,"objectId":"object-1","start":0,"length":4,"expected":"rejected","requests":1,"bytes":4,"rangeState":"uncertain"},
+    {"action":"verify-invalid","grant":1,"objectId":"object-1","start":0,"content":"abcd","expected":"rejected","requests":1,"bytes":4,"rangeState":"uncertain"},
+    {"action":"verify-valid","grant":0,"objectId":"object-1","start":0,"content":"abcd","proof":"a99a9cfc4e29ee8d463feaa42c5035977cf924d9dd8cb972cd74e807000decc9","expected":"verified","requests":1,"bytes":4,"rangeState":"verified"},
+    {"action":"reopen","grant":1,"objectId":"object-1","start":0,"expected":"verified","requests":1,"bytes":4,"rangeState":"verified"},
+    {"action":"charge","grant":1,"objectId":"object-1","start":4,"length":4,"reorderPolicy":true,"expected":"charged","requests":2,"bytes":8,"rangeState":"uncertain"},
+    {"action":"charge","grant":1,"objectId":"object-1","start":8,"length":1,"expected":"rejected","requests":2,"bytes":8,"rangeState":null}
+  ]
+}
