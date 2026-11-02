@@ -149,7 +149,7 @@ class ReferenceRangeLedgerCandidateTests(unittest.TestCase):
         raw = fixture_path.read_bytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "032d559770c9a5d2aa4181c9595d7192531e19bb9b0aa57205ce58de0a6a246a",
+            "ffe1aef6c0d8b4114bcaa52aea4587cb50843a0bb2783724f3dba7f8b3d02d85",
         )
         fixture = json.loads(raw)
         self.assertEqual(fixture["status"], "synthetic-proposal-not-wire-contract")
@@ -169,6 +169,10 @@ class ReferenceRangeLedgerCandidateTests(unittest.TestCase):
                 reservation = reservations[event["grant"]]
                 grant = grants[event["grant"]]
                 object_id, start = event["objectId"], event["start"]
+                if event.get("reorderPolicy"):
+                    policy = dict(reversed(list(reservation["policy"].items())))
+                    reservation = {**reservation, "policy": policy}
+                    grant = {**grant, "policy": policy}
                 with self.subTest(event=event):
                     if event["action"] == "reopen":
                         ledger.close()
@@ -187,6 +191,7 @@ class ReferenceRangeLedgerCandidateTests(unittest.TestCase):
                     elif event["action"] == "verify-valid":
                         body = event["content"].encode("utf-8")
                         proof = range_proof(proof_key, reservation, object_id, start, body)
+                        self.assertEqual(proof, event["proof"])
                         ledger.verify(reservation, object_id, start, body, proof)
                     else:
                         self.fail("unknown shared fixture event")

@@ -1133,18 +1133,18 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 - Viewer draft PR #416 adds a disposable SQLite event fixture, now shared at
   `contracts/reference-broker-budget-candidate/reference-v2-range-ledger-vectors.json`
   with Git blob SHA-256
-  `032d559770c9a5d2aa4181c9595d7192531e19bb9b0aa57205ce58de0a6a246a`. The
-  Processing SQLite model passes 6 focused tests while consuming the exact
+  `ffe1aef6c0d8b4114bcaa52aea4587cb50843a0bb2783724f3dba7f8b3d02d85`. The
+  Processing SQLite model passes 8 focused tests while consuming the exact
   event sequence, including close/reopen, replacement generation, overlap,
   wrong proof, verified sample bytes and budget exhaustion. This still uses an
   injected test HMAC key and disposable local database; it does not prove
   broker authentication, production offset persistence, rollback/restore,
   source custody or a live endpoint.
-- Cross-language review found Viewer #416's candidate policy persistence uses
-  insertion-order `JSON.stringify`, while the Processing mirror uses sorted
-  canonical policy JSON. The HMAC sample proof itself matches exactly across
-  runtimes (`a99a9cfc...000decc9`) and is now pinned in Processing tests; a
-  Processing test also requires reordered-but-equal policy fields to reuse the
-  same budget ledger. Viewer has been asked to canonicalize this policy and
-  add the same order-independent replay vector; until then, generalized
-  cross-language policy parity is not established.
+- Cross-language review found Viewer #416's original insertion-order policy
+  serialization diverged from Processing's canonical serializer. Viewer
+  corrected this in commit `c462f81b`; the shared fixture now pins the HMAC
+  proof `a99a9cfc4e29ee8d463feaa42c5035977cf924d9dd8cb972cd74e807000decc9`
+  and replays a reordered-but-equal policy across grants. Processing's 8 tests
+  consume the updated exact fixture and verify the same proof. This establishes
+  parity only for the supplied synthetic vectors, not an agreed wire contract
+  or runtime implementation.
