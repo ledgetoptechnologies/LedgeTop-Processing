@@ -102,6 +102,12 @@ No real client data was processed as part of this checkpoint.
   execution. The pipeline-selection request remains incomplete: the Viewer
   submission schema has no TreeDar/LiDAR opt-in or Gaussian-splat-disabled
   scaffold, and the live facade executes only NodeODM work.
+- At Viewer PR #406 head `b489c4bf`, I ran the focused
+  `workspace-task-options.test.mjs`, `provider-selection.test.mjs`, and
+  `task-submission.test.js` suite: 17 passed, 0 skipped, 0 failed. This covers
+  typed capability-driven ODM options, selection freshness and task-submission
+  validation using synthetic fixtures; it does not feed the live 74-option
+  payload into a browser or exercise TreeDar/Gaussian pipeline selection.
 - A fresh read-only `df -B1` on 2026-11-02 reports root-filesystem free space
   of 118,186,557,440 bytes on `.89` and 1,490,274,271,232 bytes on `.88`.
   These are root filesystem values; the installed worker scratch mount/config
