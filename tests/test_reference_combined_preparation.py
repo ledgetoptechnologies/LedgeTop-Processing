@@ -24,6 +24,7 @@ from processing.reference_odm_stage import NativeRuntimePolicy,NativeRuntimeProb
 from processing.reference_driver import ReferenceDriver
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_tls import verified_client_context
 from processing.reference_delivery import DeliveryReceiver
 from processing.reference_recovery import RecoveryNodeBinding
 from processing.reference_http import create_reference_http_server
@@ -86,7 +87,7 @@ class CombinedPreparationTests(unittest.TestCase):
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(self.cert,self.key)
         self.server=create_reference_http_server(Endpoint(),ssl_context=context);thread=threading.Thread(target=self.server.serve_forever);thread.start()
         def stop():self.server.shutdown();thread.join(5);self.server.server_close()
-        self.stack.callback(stop);self.origin='https://127.0.0.1:'+str(self.server.server_port);self.tls=ssl.create_default_context(cafile=str(self.cert))
+        self.stack.callback(stop);self.origin='https://127.0.0.1:'+str(self.server.server_port);self.tls=verified_client_context(str(self.cert))
         self.broker=BrokerClient(self.origin,ssl_context=self.tls)
         self.driver=self.make_driver()
         raw=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']

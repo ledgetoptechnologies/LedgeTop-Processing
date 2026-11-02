@@ -100,3 +100,47 @@ production-before-staging ordering. It does not establish large-dataset capacity
 GPU processing, direct NodeODX integration, permanent node connectivity, automatic
 worker boot recovery or TrueNAS artifact-byte delivery. See
 [sanitized cross-node evidence](evidence/main-pair-20261026.json).
+
+## November 1 synthetic queue follow-up
+
+Two explicitly synthetic TreeDar jobs were queued to check the current cluster
+dispatcher. It correctly refused the TreeDar profile on `cluster` with
+`node_ineligible`; no worker container was launched there. The jobs remained in
+the shared coordinator queue. After confirming `main` was active, its canonical
+gate had no outstanding reservation, and the main NodeODX task list was empty,
+the existing main-node dispatcher ran both jobs serially. The production-labeled
+synthetic fixture ran before the earlier staging-labeled fixture. Both completed
+with the expected three-tree output using the pinned synthetic image, and both
+worker containers exited successfully. The NodeODX task census remained empty;
+the main gate returned to no reservation and the shared queue has no queued,
+running, or held jobs. The synthetic receipts and scratch are retained on main.
+
+This checks queue priority and TreeDar placement on main only. The fixtures do
+not contain photos or genuine LiDAR, and they did not exercise the Viewer result
+acceptance path. The cluster refusal is expected under the current main-only
+TreeDar policy; the cluster CLI still lacks a safe native command for main-node
+dispatch, and synthetic queued-work cancellation is not implemented. See
+[sanitized follow-up evidence](evidence/main-priority-synthetic-20261101.json).
+
+## November 1 provider readiness observation
+
+Read-only checks over SSH found the coordinator healthy on `.89`, with zero
+queued, running or held jobs (17 prior successes and 2 prior failures). Its
+options endpoint reported `viewerProviderReady=true`, 74 common options, local
+ODM 3.6.2 available, and main ODX 3.8.5 available. The main NodeODX container on
+`.88` was running. The old cluster `node-odx-gpu` container was stopped, while
+the coordinator's local ODM endpoint remained discoverable and available; do
+not infer endpoint health from that old container's name alone. Health reported
+the legacy `photoSmokeEnabled` flag false, which is distinct from the Viewer
+provider readiness result.
+
+A read-only `/v1/plan` request for 25 photos and 125,000,000 input bytes returned
+`decision=local`, `reason=local_within_limits`, and `executesWork=false`; the
+local NodeODM advertised `maxImages=1000`, while main ODX had no photo-count
+cap. This verifies small-node-first planning at the probe endpoint, not an
+atomic reservation, queue dispatch or completed image-processing job.
+
+This verifies provider discovery and idle queue state, not a submitted photo
+job, small-node-first dispatch, image-cap enforcement during real processing,
+or result acceptance by Viewer. These readiness checks submitted or mutated no
+jobs.

@@ -22,6 +22,7 @@ from unittest.mock import patch
 from processing import reference_treedar_publication as m,reference_protocol as p,reference_parent_guard as guard
 from processing.reference_http import create_reference_http_server
 from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_tls import verified_client_context
 from processing.reference_delivery import DeliveryReceiver
 from processing.reference_odm_stage import NativeODMStage,NativeRuntimeProbe
 from processing.node_gate import NodeGate
@@ -74,7 +75,7 @@ class PublicationTests(unittest.TestCase):
         secret='synthetic-publication-worker-0001';api=ReferenceWorkerAPI(h.store,DeliveryReceiver(h.store),bearer_workers={secret:dict(node_id='main',worker_id='main-worker',worker_instance_id='instance-one')})
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(self.cert,self.key);self.server=create_reference_http_server(api,ssl_context=context)
         self.thread=threading.Thread(target=self.server.serve_forever);self.thread.start();self.addCleanup(self.stop)
-        trust=ssl.create_default_context(cafile=str(self.cert));policy=guard.ClaimStatePolicy('https://127.0.0.1:'+str(self.server.server_port),h.policy.authority_id,'main','main-worker','instance-one','worker-main',guard.tls_trust_sha256(trust))
+        trust=verified_client_context(str(self.cert));policy=guard.ClaimStatePolicy('https://127.0.0.1:'+str(self.server.server_port),h.policy.authority_id,'main','main-worker','instance-one','worker-main',guard.tls_trust_sha256(trust))
         client=guard.ClaimStateClient(policy,guard.WorkerCredential('worker-main',secret),ssl_context=trust)
         driver=h.root/'publication-driver.sqlite';binding=dict(origin=policy.origin,nodeId='main',workerId='main-worker',workerInstanceId='instance-one',authorityId=h.policy.authority_id,engineId=h.policy.engine_id,gateOrigin=h.policy.coordinator_origin,gateGeneration=1,outputBudget=h.policy.odm_output_budget+h.policy.treedar_output_budget,environments=sorted(h.policy.allowed_environments))
         with closing(sqlite3.connect(driver)) as db,db:

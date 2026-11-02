@@ -23,6 +23,7 @@ from processing.reference_delivery import DeliveryReceiver
 from processing.reference_http import create_reference_http_server
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_tls import verified_client_context
 from ops.reference_worker_daemon import DaemonStateLock
 from tests import test_reference_pipeline as fixtures
 
@@ -55,7 +56,7 @@ class ParentGuardTests(unittest.TestCase):
         serverctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);serverctx.load_cert_chain(self.cert,self.key)
         self.server=create_reference_http_server(self.api,ssl_context=serverctx)
         self.thread=threading.Thread(target=self.server.serve_forever);self.thread.start();self.addCleanup(self.stop)
-        self.context=ssl.create_default_context(cafile=str(self.cert))
+        self.context=verified_client_context(str(self.cert))
         self.policy=m.ClaimStatePolicy('https://127.0.0.1:'+str(self.server.server_port),h.policy.authority_id,'main','main-worker','instance-one','worker-main',m.tls_trust_sha256(self.context))
         self.client=m.ClaimStateClient(self.policy,m.WorkerCredential('worker-main',WORKER),ssl_context=self.context)
         binding=dict(origin=self.policy.origin,nodeId='main',workerId='main-worker',workerInstanceId='instance-one',authorityId=h.policy.authority_id,

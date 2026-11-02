@@ -104,3 +104,15 @@ neither was committed, no photogrammetry ran, and exact owned tmp files were
 verified removed. One earlier Windows-only smoke temp directory remains after
 automatic approval review rejected its explicit deletion; other successful smoke
 directories clean themselves after releasing the queue lock.
+
+The same actual-adapter harness was rerun on November 1 against Viewer commit
+`54556f9a34b330bd21c93813441c5c67385aeae2` (`NodeOdmProvider` source SHA-256
+`167b7bbd66e36fdba3255ca165877e1b821308d2fc9054f1d9ba3a3b77b3c86b`). It
+completed 62 invented uploads, one cancellation and three tasks in this order:
+small production on cluster, large production on main, then small staging on
+cluster. Global TreeDar-slot exclusion, staging isolation, idempotent commit,
+repeatable download and output cursor preservation passed. No live PC, client
+dataset or production Viewer storage was used. This remains transport/workflow
+evidence for the actual adapter and synthetic coordinator only; it does not
+validate real photogrammetry or Viewer result ingestion. See
+[November 1 synthetic adapter evidence](evidence/viewer-contract-smoke-20261101.json).

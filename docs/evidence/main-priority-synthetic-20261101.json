@@ -1,0 +1,54 @@
+{
+  "recordedAt": "2026-11-01",
+  "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+  "workload": {
+    "kind": "built-in synthetic TreeDar fixture",
+    "clientDataUsed": false,
+    "profile": "treedar-synthetic-v1",
+    "pinnedImage": "sha256:f22ac13e70dbbabbc7d59f56d4eca8ec04476e711e2dd96354ba273011b3e029"
+  },
+  "clusterAttempt": {
+    "completed": 0,
+    "reason": "node_ineligible",
+    "workerLaunched": false
+  },
+  "mainDispatch": {
+    "nodeId": "main",
+    "workerId": "codex-reconcile-20261101",
+    "maxJobs": 2,
+    "completionOrder": [
+      "a2a72338-6379-4afc-85e7-e0f403442011",
+      "14f15c12-c56b-4ed7-81a0-b5ffce9d6f6d"
+    ],
+    "results": [
+      {
+        "jobId": "a2a72338-6379-4afc-85e7-e0f403442011",
+        "environment": "production",
+        "status": "succeeded",
+        "trees": 3,
+        "workerContainer": "treedar-prototype-6bbb4e25c11244b796cb60485f283b3a",
+        "containerExit": 0
+      },
+      {
+        "jobId": "14f15c12-c56b-4ed7-81a0-b5ffce9d6f6d",
+        "environment": "staging",
+        "status": "succeeded",
+        "trees": 3,
+        "workerContainer": "treedar-prototype-a623193cdf7b42299fe5fa24208c3d5d",
+        "containerExit": 0
+      }
+    ]
+  },
+  "postChecks": {
+    "coordinatorHealth": "ok",
+    "queued": 0,
+    "running": 0,
+    "held": 0,
+    "succeeded": 17,
+    "failedHistorical": 2,
+    "mainGateReservation": null,
+    "mainNodeOdxTaskCount": 0,
+    "viewerResultAcceptanceTested": false,
+    "syntheticScratchAndReceiptsRetained": true
+  }
+}

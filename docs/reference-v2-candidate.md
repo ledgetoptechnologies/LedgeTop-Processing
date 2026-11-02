@@ -136,3 +136,22 @@ Offline structural evaluation used the existing MCP connector environment's
 vectors passed that scoped evaluation. This did not execute lexical, hash,
 cross-record, issuer/actor authority, archive or scientific conformance checks;
 the separately described artifact/codec QA has its own narrower scope.
+
+## Paired Viewer fixture inspection (November 1, 2026)
+
+Viewer added a test-only exact-vector inspector in commit
+`54556f9a34b330bd21c93813441c5c67385aeae2` on
+`codex/viewer-v2-delivery-ledger`. Its bounded one-CPU container run inspected
+the pinned `treedar_only.json` and `combined.json` vectors from Processing
+commit `15d053ac976da6aabc6e3759f40620778bad8f6b`; Viewer reported that the
+Processing candidate subtree was byte-unchanged before and after. The check
+verified those fixtures' bundle hashes, listed member closure, native vocabulary
+and selected source/result bindings, rejected byte tampering, accepted the v1
+positive fixture and confirmed that the unchanged closed v1 validator rejects
+the v2 TreeDar record. All successful candidate results remain `hold`.
+
+This is paired evidence for those exact public synthetic fixtures only. It is
+not general v2 schema or lexical conformance, arbitrary untrusted ZIP safety,
+genuine LAS provenance, authenticated custody, Viewer acceptance/ACK/outbox,
+capability negotiation or runtime qualification. Viewer production remains on
+the existing v1 bridge until those separate gates are paired and implemented.

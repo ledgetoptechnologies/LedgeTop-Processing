@@ -218,7 +218,11 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(m.CandidateError) as error:m.validate_candidate(wire(value),record_type='Binding')
         self.assertNotIn('SENSITIVE',str(error.exception))
 
-    @unittest.skipUnless(importlib.util.find_spec('jsonschema') is not None,'optional existing standard evaluator is test-only')
+    @unittest.skipUnless(
+        importlib.util.find_spec('jsonschema') is not None
+        and importlib.util.find_spec('referencing') is not None,
+        'optional JSON Schema evaluator dependencies are test-only',
+    )
     def test_existing_draft202012_oracle_confirms_all_typed_samples_goldens_and_schema_negatives(self):
         from jsonschema import Draft202012Validator,FormatChecker
         from referencing import Registry

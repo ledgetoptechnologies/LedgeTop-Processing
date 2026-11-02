@@ -21,6 +21,7 @@ from processing.reference_delivery import DeliveryReceiver
 from processing.reference_recovery import RecoveryNodeBinding
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_tls import verified_client_context
 from processing.reference_parent_guard import ClaimStatePolicy,ClaimStateClient,WorkerCredential,DriverClaimTokens,ProductionParentGuard,tls_trust_sha256
 from processing.reference_pipeline import PipelineJournal,PipelinePolicy
 from processing.reference_http import create_reference_http_server
@@ -85,7 +86,7 @@ class LargeRecoveryFixture:
         serverctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);serverctx.load_cert_chain(cert,key)
         self.server=create_reference_http_server(self.api,ssl_context=serverctx);thread=threading.Thread(target=self.server.serve_forever);thread.start()
         def stop():self.server.shutdown();thread.join(5);self.server.server_close()
-        self.stack.callback(stop);context=ssl.create_default_context(cafile=str(cert))
+        self.stack.callback(stop);context=verified_client_context(str(cert))
         self.policy=ClaimStatePolicy('https://127.0.0.1:'+str(self.server.server_port),h.policy.authority_id,'main','main-worker','instance-one','worker-main',tls_trust_sha256(context))
         self.client=ClaimStateClient(self.policy,WorkerCredential('worker-main',fixtures.WORKER),ssl_context=context)
         binding=dict(origin=self.policy.origin,nodeId='main',workerId='main-worker',workerInstanceId='instance-one',authorityId=h.policy.authority_id,engineId=h.policy.engine_id,gateOrigin=h.policy.coordinator_origin,gateGeneration=1,outputBudget=output,environments=sorted(h.policy.allowed_environments))

@@ -72,6 +72,43 @@ root cannot bypass that reservation. All Docker writers must use the same host
 account/state location and gate. This is not protection against direct Docker
 administrators or an exactly-once claim API.
 
+## Reviewable per-node control wrapper
+
+`ops/processingctl.py` is the source for a node-local wrapper. Install a copy in
+each host's private installation root beside `installation.json` and
+`runtime.env`. The metadata identifies that host's local `nodeId`, Docker
+`engineId`, gate `generation`, pinned `workerImage`, and paths for the matching
+source, scratch, and dispatcher state. The directories must already exist,
+belong to the service account, be private, and remain under the installation
+root. The wrapper reads `PROCESSING_API_TOKEN` from the private environment
+file and passes a small OS/Docker environment allowlist plus that one token to
+the dispatcher child.
+
+The wrapper refuses non-loopback coordinator origins and non-digest image IDs.
+It derives the worker policy from the installed node identity: cluster uses the
+bounded fixture policy, main uses `main-unrestricted`. It does not accept a
+remote node override; Docker operations run on the same host whose Engine and
+gate are recorded. Example invocations are:
+
+```sh
+python3 /private/processing/processingctl.py --root /private/processing status
+python3 /private/processing/processingctl.py --root /private/processing dispatch --max-jobs 2
+```
+
+This refactor is reviewable source only. It has not been installed on `.88` or
+`.89`; the November 1 main-node acceptance used the existing one-shot dispatcher.
+The wrapper is still a foreground command, not a supervised polling worker, and
+does not provide automatic recovery after an uncertain child result. Do not
+describe it as unattended production dispatch.
+
+The complete repository suite was run on November 1, 2026, in WSL Ubuntu 24.04
+as an unprivileged user: `python3 -B -m unittest discover -s tests -q` reported
+1,313 tests passed and 22 skipped. The skips are platform/optional-dependency
+gates. This is local repository evidence; it does not install the wrapper,
+activate the v2 TreeDar contract or prove Viewer acceptance. The optional
+Draft 2020-12 oracle was skipped because `referencing` is not installed in that
+WSL environment.
+
 ## Recovery
 
 1. Stop dispatching. Inspect the saved launch record, child process, private worker
