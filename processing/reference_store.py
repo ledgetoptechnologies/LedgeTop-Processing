@@ -140,8 +140,7 @@ class ReferenceStore:
                 "manifestSha256": row["manifest_sha"], "pipelineDigest": row["pipeline_digest"],
                 "status": status, "nodeId": row["node_id"],
                 "transferRequest": json.loads(row["transfer_json"]) if row["transfer_json"] else None,
-                "transferGrantAcknowledgement": ({key: grant[key] for key in
-                    ('reservationId', 'generation', 'manifestSha256', 'nonce')} | {'accepted': True}) if grant else None,
+                "transferGrantAcknowledgement": self._transfer_grant_ack(grant) if grant else None,
                 "error": error,
                 "resultManifestSha256": result["resultManifestSha256"] if result else None}
 
@@ -470,7 +469,16 @@ class ReferenceStore:
             if not old:
                 self._quota(db, len(encoded.encode()))
                 db.execute('INSERT INTO reference_transfer_grants VALUES(?,?,?)', (job_id, encoded, digest))
-            return {key: grant[key] for key in ('reservationId', 'generation', 'manifestSha256', 'nonce')} | {'accepted': True}
+            return self._transfer_grant_ack(grant)
+
+    @staticmethod
+    def _transfer_grant_ack(grant):
+        # Echo the canonical digest so an authenticated Viewer can reconcile a
+        # lost POST response against this exact sealed grant, not only the
+        # reservation fields (which would also match a changed bearer token).
+        return ({key: grant[key] for key in
+                 ('reservationId', 'generation', 'manifestSha256', 'nonce')} |
+                {'accepted': True, 'grantSha256': protocol.digest(grant)})
 
     def private_transfer_grant(self, job_id):
         """PRIVATE worker boundary; never serialize as part of public status."""

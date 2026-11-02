@@ -121,6 +121,14 @@
     "expiresAt": "2030-01-01T00:00:00.000Z",
     "token": "synthetic-non-secret-token"
   },
+  "transferGrantAcknowledgement": {
+    "reservationId": "reservation-1",
+    "generation": 1,
+    "manifestSha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+    "nonce": "nonce-synthetic-1",
+    "accepted": true,
+    "grantSha256": "0cf95dbd65410483f531501bd024c84202728e351912eae07fd98d54a87b78a1"
+  },
   "resultManifest": {
     "schemaVersion": 1,
     "jobId": "job-1",

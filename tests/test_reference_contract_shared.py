@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from processing.reference_protocol import (canonical_json, validate_submission,
+from processing.reference_protocol import (canonical_json, digest, validate_submission,
     validate_result_manifest, validate_acceptance)
 
 
@@ -13,8 +13,14 @@ class SharedReferenceContractTests(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json'
         raw = path.read_bytes()
         self.assertEqual(hashlib.sha256(raw.replace(b'\r\n', b'\n')).hexdigest(),
-                         '2c49ff86b8e20384c400ff56c8365418e643108aa9e6c29b46e938554e989b37')
+                         'c2870ecd73d34721f602f49e2b34c92865d8f4cf1f03ec735e853c4e3bdb083a')
         fixture = json.loads(raw)
+        self.assertEqual(fixture['transferGrantAcknowledgement']['grantSha256'],
+                         digest(fixture['transferGrant']))
+        self.assertEqual({key: fixture['transferGrantAcknowledgement'][key] for key in
+                          ('reservationId', 'generation', 'manifestSha256', 'nonce', 'accepted')},
+                         {key: fixture['transferGrant'][key] for key in
+                          ('reservationId', 'generation', 'manifestSha256', 'nonce')} | {'accepted': True})
         submission = validate_submission(fixture['submission'], environment='staging',
             capability_fingerprint=fixture['capabilities']['capabilityFingerprint'],
             options_fingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'])

@@ -75,7 +75,10 @@ test counts below describe their named source checkpoints.
 - `reference_transfer.py` verifies scoped grants and streams bounded HTTPS input
   objects with checksum verification, sync and exclusive publication. Redirects
   and caller-selected origins are refused. The store persists grants privately
-  and returns only a safe binding acknowledgement for lost-response recovery.
+  and returns a binding acknowledgement with the canonical grant digest, so a
+  lost response can be reconciled against the exact sealed grant rather than
+  reservation fields alone. Recovery must still use the authenticated status
+  route and never rotate the grant or infer success from a timeout.
 - `worker_outbox.py` persists immutable terminal results separately from local
   file paths. `reference_delivery.py` authenticates the durable execution claim,
   commits completion and returns a replayable coordinator metadata receipt.
@@ -105,8 +108,9 @@ test counts below describe their named source checkpoints.
   expose confirmed terminal outcomes and exact durable metadata acceptance.
   Cancelled jobs retain their actual public outcome; terminal ACKs accept no files.
 - `contracts/reference-v1.contract.json` is the identical Python/Viewer fixture.
+  It includes a transfer grant ACK vector bound to the canonical grant digest.
   Its SHA-256 with LF line endings is
-  `2c49ff86b8e20384c400ff56c8365418e643108aa9e6c29b46e938554e989b37`.
+  `c2870ecd73d34721f602f49e2b34c92865d8f4cf1f03ec735e853c4e3bdb083a`.
 
 ## Remaining integration and acceptance
 

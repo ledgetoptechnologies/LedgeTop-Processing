@@ -256,6 +256,7 @@ class ReferenceHTTPTests(unittest.TestCase):
         status, ack, _ = self.request('POST', path + '/transfer-grants', grant)
         self.assertEqual(status, 200)
         self.assertTrue(ack['accepted'])
+        self.assertEqual(ack['grantSha256'], digest(grant))
         self.assertEqual(self.request('POST', path + '/transfer-grants', grant)[:2], (200, ack))
         status, current, _ = self.request('GET', path)
         self.assertEqual(current['transferGrantAcknowledgement'], ack)
