@@ -168,6 +168,24 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   retaining both the local archive and input. The focused driver suite passed
   20 tests with one platform-specific cleanup test skipped on Windows. This is
   in-process synthetic coverage, not the missing TrueNAS/Viewer runtime path.
+- Viewer commit `3c5528c6` on `codex/viewer-v2-delivery-ledger` adds
+  `apps/viewer/docs/reference-nas-broker-seam-proposal.md` and a synthetic
+  SQLite identity fixture. Viewer reports 2/2 tests passing in one bounded
+  CPU-1/512-MiB/no-network run; the test container is gone. The proposal keeps
+  v1 and TreeDar v2 unchanged and calls out that its accept record only checks
+  reservation existence, and that its declared-size counter is not a physical
+  byte/request meter. It is design evidence, not an agreed wire protocol or a
+  NAS custody/issuer implementation.
+- Cross-source boundary review: the Processing broker client expects a scoped
+  HTTPS GET at `/api/processing/reference/v1/objects/{objectId}`, checks the
+  full object size/hash and publishes a private fsynced local object, but has no
+  range resume or physical request/byte meter; failed object transfers restart
+  from byte zero. Worker result bytes are exposed separately by an authenticated
+  result GET bound to generation/object/result-manifest hashes and durable read
+  pins. The worker's `/results` POST is a metadata completion receipt, not an
+  archive upload; Viewer acceptance is a later, separate receipt. No NAS broker
+  service or mounted Viewer accepted-copy ingest is implemented. This mapping
+  is an existing-source audit, not a new cross-language contract.
 - Read-only SSH to cluster `.89` reported coordinator health `ok`, zero queued,
   running or held jobs, and both logical nodes `active`. The active NodeODM
   candidate is the `nodeodm` service in a separate root-owned migration Compose
