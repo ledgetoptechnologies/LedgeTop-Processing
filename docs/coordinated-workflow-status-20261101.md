@@ -52,6 +52,12 @@ No real client data was processed as part of this checkpoint.
   two skipped. These use mocked engine responses and local HTTP fixtures; they
   do not upload to a processing PC, prove NAS-backed queueing or permit the
   current 50 GB estimate through the live 20 GiB intake cap.
+- A manifest-only regression now builds 10,000 synthetic image records totaling
+  50,000,000,000 bytes. The full `test_reference_store` module passed 20/20;
+  the new case confirms the large job is offered to the main-node slot and not
+  the small cluster slot. It writes no image payloads and proves routing only;
+  live Viewer admission still rejects the same estimated size at its 20 GiB
+  cap, with no end-to-end transfer demonstrated.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a

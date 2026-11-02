@@ -119,6 +119,28 @@ class ReferenceStoreTests(unittest.TestCase):
         store.submit(other)
         self.assertEqual(len(self.queue.list()), 2)
 
+    def test_fifty_gigabyte_ten_thousand_photo_manifest_routes_to_main(self):
+        raw = copy.deepcopy(self.fixture["submission"])
+        raw["submissionId"] = str(uuid.uuid4())
+        manifest = raw["manifest"]
+        manifest["objects"] = [
+            {"id": f"image-{index:05d}", "name": f"image-{index:05d}.jpg",
+             "byteSize": 5_000_000, "sha256": "a" * 64,
+             "kind": "image", "mediaType": "image/jpeg"}
+            for index in range(10_000)
+        ]
+        manifest.update(totalBytes=50_000_000_000, objectCount=10_000,
+                        inputCounts={"images": 10_000, "lidarObjects": 0, "points": 0})
+        manifest["sha256"] = p.manifest_sha256(manifest)
+        checked = p.validate_submission(raw, environment="staging",
+            capability_fingerprint=raw["capabilityFingerprint"])
+        self.assertEqual(checked["manifest"]["totalBytes"], 50_000_000_000)
+        job, created = self.store.submit(checked)
+        self.assertTrue(created)
+        self.assertEqual(self.store._required_node(checked), "node-2")
+        self.assertIsNone(self.store.next_for_node("cluster"))
+        self.assertEqual(self.store.next_for_node("node-2")["jobId"], job["jobId"])
+
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)
         with self.assertRaises(Conflict):
