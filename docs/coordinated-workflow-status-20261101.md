@@ -403,7 +403,7 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   contracts. It ran against the current shared Windows-mounted worktree and is
   synthetic test evidence only, not runtime acceptance.
 - Lost source-grant acknowledgement follow-up: a separate inactive Viewer
-  broker candidate `codex/viewer-grant-replay-candidate` at `50665ad0` and draft
+  broker candidate `codex/viewer-grant-replay-candidate` and draft
   stacked PR #408 allow exact token replay after restart when a stable
   explicitly injected 32-byte HMAC key is available; only the token hash is
   stored. `tokenRecoverable` now reflects whether the broker can derive the
@@ -419,10 +419,15 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   attempt, environment, reservation, manifest, broker identity digest, exact
   serialized grant digest and ACK digest without storing the bearer. Changed
   grant/ACK identities conflict; a `sending` row left by a process failure
-  remains held. This is persistence only: there is no production broker adapter,
+  remains held. Viewer head `c1f74710` further hardens that candidate: the
+  object list is derived from the immutable journaled request; `sending` and
+  `uncertain` states cannot be resent under a later lease; and only the active
+  sender generation can acknowledge using a provider-validated response.
+  Synthetic regression coverage now rejects a forged ACK DTO and stale-sender
+  replay. This is persistence only: there is no production broker adapter,
   process-fence/recovery authority, automatic replay loop, key provisioning,
   or live dispatch wiring; Viewer reference dispatch remains hard-off.
-- On current Viewer head (outbox candidate), focused migration, dispatch and
+- On Viewer head `c1f74710` (outbox candidate), focused migration, dispatch and
   cumulative-budget suites passed 76/76 on Linux in a disposable Node 24
   container with the required ZIP dependency installed only in its temporary
   filesystem. The same suites passed 74 tests on Windows with two
