@@ -730,6 +730,16 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   command was not listed. This confirms stored receipt metadata only; it does
   not establish that no point-cloud artifact exists under another path,
   independently verify archived NAS bytes, or prove LiDAR execution.
+- Follow-up against LedgeTop-Ops `main` at `dc8cedfe953ce75eb2f65de846de74d076b820f8`:
+  `apps/viewer/server/processingWorker.js` discovers EPT at
+  `entwine_pointcloud/ept.json` and point-cloud source files at
+  `odm_georeferencing/odm_georeferenced_model.laz` or `.ply`. Current ingest
+  requires EPT and a complete textured mesh closure; generating the EPT
+  derivative also requires a LAS/LAZ source. The saved receipt check did not
+  report whether EPT or the LAZ source appears in its inventory, so the prior
+  result cannot yet establish whether this attempt had the point-cloud inputs
+  Viewer requires. No deployed Viewer behavior or current on-disk artifact was
+  checked by this source review.
 - Viewer isolated candidate `38f1e4a8` adds
   `apps/viewer/scripts/verify-archive-readonly.cjs`, a path-free, read-only
   point-in-time check that uses the app config and stored receipt to compare
