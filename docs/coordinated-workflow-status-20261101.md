@@ -417,6 +417,12 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   provisioning, or durable dispatch outbox, and Viewer reference dispatch
   remains hard-off. This is source-level recovery evidence, not an enabled
   source grant, NAS custody proof, or runtime acceptance.
+- On current Viewer head `7addbac9`, the Linux `reference-app-dispatch` and
+  `reference-cumulative-budget` suites passed 51/51 in a disposable Node 24
+  container with the required ZIP dependency installed only in its temporary
+  filesystem. This confirms the existing lost-ACK hold behavior and broker
+  replay primitive on Linux; it does not implement or verify an automatic
+  durable transfer outbox.
 - Beau's read-only Viewer metadata check for task
   `a8a93a98-2740-4341-8dc6-0043ef86c72f` and provider task
   `d5463e33-aeed-4136-a81f-a9a7d233da0f` returned a matching attempt, enabled
