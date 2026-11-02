@@ -868,6 +868,14 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   establishing three separate sets of file objects, not byte-identical
   content. No payload hashes were computed and no files were changed or
   removed.
+- A read-only Viewer API SQLite query on 2026-11-02 matched one live
+  `dataset` trash record of exactly 11,796,893,696 bytes, with a purge deadline
+  of `2026-11-18T03:23:59.389Z`; it is not overdue. The corrected query joined
+  through a mutation whose destination root is `trash`, because `root_key`
+  stores the original root. The size and type strongly suggest this record
+  corresponds to the inspected folder, but its stored relative path was not
+  compared to the on-disk folder; this is not yet an exact path-to-record
+  reconciliation. No data was changed or removed.
 - The ZIP in imports also has 2 TIFF, 118 PNG, 4,559 LAZ, and other entries.
   Five `.zip` files in models (16.76 GiB each) start with a ZIP local-file
   header but lack an end-of-central-directory or ZIP64 locator in the last
