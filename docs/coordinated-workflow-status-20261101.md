@@ -102,6 +102,18 @@ No real client data was processed as part of this checkpoint.
   execution. The pipeline-selection request remains incomplete: the Viewer
   submission schema has no TreeDar/LiDAR opt-in or Gaussian-splat-disabled
   scaffold, and the live facade executes only NodeODM work.
+- The shared Processing reference-v1 candidate already models the intended
+  future choice: ODM options, a TreeDar request bound to explicit LAS/LAZ
+  object IDs and a provenance receipt, and `gaussian_splat.requested=false`.
+  Its validator rejects TreeDar unless the engine is advertised and LAS/LAZ
+  inputs plus provenance are present. However, the deployed-style
+  `ViewerReferenceRuntime` currently constructs `ReferenceAPI` with
+  `treedar_available=false`, and the live-compatible facade's executor handles
+  NodeODM tasks only. The normal Viewer `/api/v1/task-submissions` schema does
+  not accept a pipeline field. So this contract is a tested candidate shape,
+  not an enabled user workflow; the required work is capability advertisement,
+  Viewer pipeline persistence/validation, TreeDar dispatch/result contract and
+  integration tests while keeping Gaussian splats disabled.
 - At Viewer PR #406 head `b489c4bf`, I ran the focused
   `workspace-task-options.test.mjs`, `provider-selection.test.mjs`, and
   `task-submission.test.js` suite: 17 passed, 0 skipped, 0 failed. This covers
