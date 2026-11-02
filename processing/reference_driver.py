@@ -122,7 +122,8 @@ class ReferenceDriver:
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
-                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None):
+                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
+                 source_range_v2_enabled=False):
         self._combined_policy=combined_policy;self._combined_policy_initial=combined_policy;self.combined_preparation=None;self._combined_preparation_initial=None;self._active_step=None
         if combined_policy is not None:
             from .reference_combined_preparation import CombinedPreparationPolicy
@@ -182,6 +183,14 @@ class ReferenceDriver:
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
         self.path = Path(state_path).absolute()
+        if type(source_range_v2_enabled) is not bool:
+            raise ValueError('explicit source-range-v2 enablement required')
+        self.source_range_v2_enabled = source_range_v2_enabled
+        self.source_range_client = None
+        if source_range_v2_enabled:
+            from .source_range_transfer import SourceRangeClient
+            self.source_range_client = SourceRangeClient(broker.origin,
+                self.path.parent / 'source-range-progress.sqlite', clock=clock)
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(path.is_symlink() for path in (self.path, *self.path.parents)):
             raise ValueError('private worker journal required')
@@ -223,6 +232,9 @@ class ReferenceDriver:
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
+            if source_range_v2_enabled:
+                settings['sourceTransfer'] = dict(protocol='source-range-v2',
+                    progressPath=str(self.path.parent / 'source-range-progress.sqlite'))
             binding = p.canonical_json(settings).decode()
             old = db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
             if execution_router is not None and old is None and db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
@@ -406,6 +418,18 @@ class ReferenceDriver:
     def _kind(self, job_id):
         if self.combined_preparation is not None and self.combined_preparation.is_combined(job_id):return 'combined'
         return self.execution_router.kind_for(job_id) if self.execution_router else 'odm'
+
+    def _new_transfer_request(self, claim):
+        reservation_id = 'driver-' + secrets.token_hex(16)
+        expires_at = datetime.fromtimestamp(self.clock() + self.transfer_ttl, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        nonce = secrets.token_hex(16)
+        if self.source_range_v2_enabled:
+            from .source_range_transfer import build_source_transfer_request
+            return build_source_transfer_request(claim, reservation_id=reservation_id,
+                expires_at=expires_at, nonce=nonce, clock=self.clock)
+        return dict(reservationId=reservation_id, generation=claim['generation'],
+            expiresAt=expires_at, manifestSha256=claim['manifestSha256'],
+            byteBudget=min(p.MAX_SAFE_INTEGER, 3 * claim['submission']['manifest']['totalBytes']), nonce=nonce)
 
     def _apply_acceptance(self, job_id, receipts):
         source = self.execution_router if self.execution_router is not None else self.worker
@@ -698,7 +722,7 @@ class ReferenceDriver:
                 if 'originalCombinedClaim' in data and p.canonical_json(data['originalCombinedClaim'])!=p.canonical_json(original):raise DriverHeld('original_combined_claim_response_changed')
                 data['originalCombinedClaim']=original
                 if 'reservation' not in data:
-                    data['reservation']=dict(reservationId='driver-'+secrets.token_hex(16),generation=claim['generation'],expiresAt=datetime.fromtimestamp(self.clock()+self.transfer_ttl,timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z'),manifestSha256=claim['manifestSha256'],byteBudget=min(p.MAX_SAFE_INTEGER,3*claim['submission']['manifest']['totalBytes']),nonce=secrets.token_hex(16))
+                    data['reservation']=self._new_transfer_request(claim)
                     if len(p.canonical_json(data))>self._combined_policy.max_intent_bytes:raise DriverHeld('bounded_combined_claim_intent_required')
                     self._save(job_id,'claim_pending',data)
                 self.ledger.reserve(job_id=job_id,generation=claim['generation'],reservation_id=data['reservation']['reservationId'],manifest_sha256=claim['manifestSha256'],input_bytes=claim['submission']['manifest']['totalBytes'],output_budget=self.output_budget,environment=claim['environment'],ttl_seconds=self.transfer_ttl,worker_ready=True)
@@ -712,10 +736,7 @@ class ReferenceDriver:
         suffix = '/jobs/' + job_id
         if stage in ('claimed', 'reservation_pending'):
             if stage == 'claimed':
-                reservation = 'driver-' + secrets.token_hex(16)
-                data['reservation'] = dict(reservationId=reservation, generation=claim['generation'],
-                    expiresAt=datetime.fromtimestamp(self.clock() + self.transfer_ttl, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
-                    manifestSha256=claim['manifestSha256'], byteBudget=min(p.MAX_SAFE_INTEGER, 3 * claim['submission']['manifest']['totalBytes']), nonce=secrets.token_hex(16))
+                data['reservation'] = self._new_transfer_request(claim)
                 self._save(job_id, 'reservation_pending', data)
             request = data['reservation']
             self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
@@ -731,7 +752,13 @@ class ReferenceDriver:
             status, grant = self._request('GET', suffix + '/transfer-grant', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_grant', 'jobId': job_id}
-            validated = validate_grant(grant, job=claim, clock=self.clock)
+            if (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
+                if self.source_range_client is None:
+                    raise DriverHeld('source_range_client_not_enabled')
+                from .source_range_transfer import validate_source_grant
+                validated = validate_source_grant(grant, job=claim, clock=self.clock)
+            else:
+                validated = validate_grant(grant, job=claim, clock=self.clock)
             if self._kind(job_id) == 'treedar':
                 data['provenance'] = self._fetch_provenance(claim, validated)
             data['grant'] = grant
@@ -746,7 +773,14 @@ class ReferenceDriver:
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
         if stage == 'fetching':
-            grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+            source_range_v2 = (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2'
+            if source_range_v2:
+                if self.source_range_client is None:
+                    raise DriverHeld('source_range_client_not_enabled')
+                from .source_range_transfer import validate_source_grant
+                grant = validate_source_grant(data['grant'], job=claim, clock=self.clock)
+            else:
+                grant = validate_grant(data['grant'], job=claim, clock=self.clock)
             reservation = data['reservation']['reservationId']
             directory = self.ledger.root / 'jobs' / reservation
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -765,7 +799,10 @@ class ReferenceDriver:
                         raise DriverHeld('worker_fetch_attempt_budget_exhausted')
                     data['fetchAttempts'][obj['id']] = attempts + 1
                     self._save(job_id, stage, data)
-                    self.broker.download_object(grant, obj['id'], target)
+                    if source_range_v2:
+                        self.source_range_client.download_object(grant=grant, object_id=obj['id'], destination=target)
+                    else:
+                        self.broker.download_object(grant, obj['id'], target)
                 paths[obj['id']] = relative
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from contextlib import closing, contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -50,6 +50,61 @@ def source_version_for_manifest(manifest):
             or type(digest) is not str or not re.fullmatch(r"[a-f0-9]{64}", digest)):
         raise TransferError("invalid source manifest identity")
     return f"dataset:{manifest_id[len(dataset_prefix):]}:{digest}"
+
+
+def build_source_transfer_request(job, *, reservation_id, expires_at, nonce, clock=time.time):
+    """Build the immutable v2 reservation envelope persisted by the queue."""
+    if type(job) is not dict or type(job.get('submission')) is not dict:
+        raise TransferError('invalid source job')
+    try:
+        manifest = job['submission']['manifest']
+        if (type(manifest) is not dict or set(manifest) != {
+                'id', 'revision', 'sha256', 'totalBytes', 'objectCount', 'inputCounts', 'objects'}
+                or type(manifest['objects']) is not list or not manifest['objects']
+                or type(manifest['totalBytes']) is not int or manifest['totalBytes'] < 1
+                or type(manifest['objectCount']) is not int or manifest['objectCount'] != len(manifest['objects'])
+                or p.manifest_sha256(manifest) != manifest['sha256']):
+            raise ValueError()
+        for item in manifest['objects']:
+            if (type(item) is not dict or set(item) != {'id', 'name', 'byteSize', 'sha256', 'kind', 'mediaType'}
+                    or type(item['byteSize']) is not int or item['byteSize'] < 0):
+                raise ValueError()
+            p._slug(item['id'], 'source object ID')
+            p._hash(item['sha256'], 'source object SHA-256')
+            p._basename(item['name'])
+        if sum(item['byteSize'] for item in manifest['objects']) != manifest['totalBytes']:
+            raise ValueError()
+        if (job['manifestSha256'] != manifest['sha256']
+                or job['environment'] not in ('production', 'staging')
+                or type(job['generation']) is not int or job['generation'] < 1):
+            raise ValueError()
+        source_version = source_version_for_manifest(manifest)
+        p._slug(reservation_id, 'reservation ID')
+        p._slug(nonce, 'source transfer nonce')
+        p._string(expires_at, 'source transfer expiry', 24)
+        expiry = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+        if (not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z', expires_at)
+                or expiry.utcoffset() != timezone.utc.utcoffset(None)
+                or expiry.isoformat(timespec='milliseconds').replace('+00:00', 'Z') != expires_at
+                or expiry.timestamp() <= _now(clock)):
+            raise ValueError()
+        total_bytes = manifest['totalBytes']
+        minimum_requests = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES
+                               for item in manifest['objects'])
+        if not minimum_requests:
+            raise ValueError()
+        byte_budget = min(p.MAX_SAFE_INTEGER, total_bytes * 3)
+        attempt_budget = min(p.MAX_SAFE_INTEGER, minimum_requests * 3)
+        return {
+            'protocol': 'source-range-v2', 'reservationId': reservation_id,
+            'generation': job['generation'], 'expiresAt': expires_at,
+            'manifestSha256': manifest['sha256'], 'sourceVersion': source_version,
+            'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
+            'requestBudget': minimum_requests, 'byteBudget': byte_budget,
+            'nonce': nonce, 'attemptBudget': attempt_budget,
+        }
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise TransferError('invalid source transfer request') from None
 
 
 @dataclass(frozen=True)
@@ -205,7 +260,7 @@ def validate_source_grant(grant, *, job, clock=time.time):
     lease_expires = timestamp(transfer["expiresAt"], "source reservation expiry")
     if expires <= _now(clock):
         raise TransferError("source grant expired")
-    if expires > lease_expires or lease_expires <= _now(clock):
+    if expires >= lease_expires or lease_expires <= _now(clock):
         raise TransferError("source grant exceeds reservation lease")
     return ValidatedSourceGrant(identity, expires, tuple(objects), grant["chunkBytes"],
                                 grant["requestBudget"], grant["byteBudget"], grant["attemptBudget"], token)

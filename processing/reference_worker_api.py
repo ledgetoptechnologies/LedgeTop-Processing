@@ -87,7 +87,11 @@ class ReferenceWorkerAPI:
         if grant is None:
             raise Conflict("transfer grant not ready")
         try:
-            validate_grant(grant, job=job)
+            if (job.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
+                from .source_range_transfer import validate_source_grant
+                validate_source_grant(grant, job=job)
+            else:
+                validate_grant(grant, job=job)
         except ValueError:
             raise Conflict("persisted transfer grant is unavailable") from None
         return grant

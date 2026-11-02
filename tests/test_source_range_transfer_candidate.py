@@ -11,7 +11,8 @@ from contextlib import closing
 
 from processing.source_range_transfer import (
     CHUNK_BYTES, OBJECT_PREFIX, REQUEST_HEADER, SourceIdentity, SourceObject,
-    SourceRangeClient, TransferError, _request_id, _validator, source_version_for_manifest, validate_source_grant,
+    SourceRangeClient, TransferError, _request_id, _validator, build_source_transfer_request,
+    source_version_for_manifest, validate_source_grant,
 )
 from processing import reference_protocol as p
 
@@ -329,6 +330,22 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
                     {"id": "dataset-1", "sha256": "not-a-hash"}):
             with self.subTest(bad=bad), self.assertRaises(TransferError):
                 source_version_for_manifest(bad)
+
+    def test_reservation_builder_emits_closed_bounded_v2_identity(self):
+        job = {"jobId": "job-1", "generation": 4, "environment": "production",
+            "manifestSha256": self.manifest['sha256'], "submission": {"manifest": self.manifest}}
+        request = build_source_transfer_request(job, reservation_id='reserve-v2',
+            expires_at='2035-01-01T00:00:00.000Z', nonce='nonce-v2')
+        self.assertEqual(request, {"protocol": "source-range-v2", "reservationId": "reserve-v2",
+            "generation": 4, "expiresAt": "2035-01-01T00:00:00.000Z",
+            "manifestSha256": self.manifest['sha256'], "sourceVersion": self.source_version,
+            "objectIds": [self.obj.id], "chunkBytes": CHUNK_BYTES,
+            "requestBudget": 3, "byteBudget": len(self.body) * 3,
+            "nonce": "nonce-v2", "attemptBudget": 9})
+        for invalid_expiry in ('2035-01-01T00:00:00Z', '2035-99-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z'):
+            with self.subTest(expiry=invalid_expiry), self.assertRaises(TransferError):
+                build_source_transfer_request(job, reservation_id='reserve-v2',
+                    expires_at=invalid_expiry, nonce='nonce-v2')
 
     def test_second_process_transfer_is_rejected_while_object_lock_is_held(self):
         entered, release = threading.Event(), threading.Event()
