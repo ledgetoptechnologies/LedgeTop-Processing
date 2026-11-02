@@ -4,7 +4,7 @@ This module is deliberately not wired into the Processing runtime. It requires
 the matching versioned endpoint contract and explicit operator activation.
 The v2 queued job adds a closed ``transferRequest`` envelope containing
 ``protocol, reservationId, generation, expiresAt, manifestSha256, sourceVersion,
-objectIds, chunkBytes, requestBudget, byteBudget, nonce``. The short-lived v2
+objectIds, chunkBytes, requestBudget, byteBudget, nonce, attemptBudget``. The short-lived v2
 grant echoes the reservation identity and budgets, adds jobId, environment, and
 token, and has a shorter ``expiresAt`` than the reservation lease. The
 ``attemptBudget`` caps all HTTP attempts, including retries, and is charged
