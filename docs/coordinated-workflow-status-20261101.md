@@ -517,11 +517,16 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `main` with 28 files. Its production build and 117 focused tests passed,
   including Edge desktop and 390px/320px browser checks. No workflows changed,
   and the original Claude branch and PR #347 remain untouched. Current GitHub
-  state still shows #406 as a draft with no recorded review, approval, or PR
-  comment. The Viewer chat also reports no current Claude acknowledgement or
-  owner assignment for the refreshed branch; historical co-authorship on #347
-  does not verify active participation. This is review evidence only, not a
-  Viewer deployment or live Processing acceptance.
+  state reports head `839e5173eacaaf0ac549072527ce20b9501aa8ef`, still draft,
+  with no recorded review or reviewer request. Recent branch commits
+  `85038499` and `9eb655da` are co-authored by Claude and Beau; the newest
+  hierarchy paging/contrast fix `839e5173` is by Beau. This verifies Claude
+  co-authored the current-main redesign work, but does not establish continuing
+  ownership or approval of the draft. The implemented hierarchy is
+  organization/customer → optional project group/subcategory → project →
+  existing tasks; group metadata does not grant access. The redesign keeps a
+  dark theme with Operations-aligned tokens. These are review and test results,
+  not a Viewer deployment or live Processing acceptance.
 - Re-ran `scripts/viewer_contract_smoke.py` on 2026-11-02 at Processing commit
   `b50057a` against the Viewer candidate `NodeOdmProvider` from
   `codex/viewer-v2-delivery-ledger` commit
