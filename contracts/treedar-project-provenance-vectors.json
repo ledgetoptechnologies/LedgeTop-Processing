@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "purpose": "Synthetic policy examples; no assertion proves real provenance",
+  "base": {
+    "capability": { "advertised": true, "current": true },
+    "request": { "projectId": "project-a", "assetId": "asset-a", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "receiptId": "receipt-a", "treedar": true, "gaussianSplat": false },
+    "resolver": { "authenticated": true, "projectId": "project-a", "assetId": "asset-a", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "receiptId": "receipt-a", "immutable": true, "genuineSensorLidar": true, "photogrammetryDerived": false }
+  },
+  "vectors": [
+    { "name": "matching trusted sensor source", "patch": {}, "accept": true },
+    { "name": "capability unavailable", "patch": { "capability": { "advertised": false } }, "accept": false },
+    { "name": "capability stale", "patch": { "capability": { "current": false } }, "accept": false },
+    { "name": "no explicit opt in", "patch": { "request": { "treedar": false } }, "accept": false },
+    { "name": "gaussian splat requested", "patch": { "request": { "gaussianSplat": true } }, "accept": false },
+    { "name": "caller evidence is not authenticated", "patch": { "resolver": { "authenticated": false } }, "accept": false },
+    { "name": "another project", "patch": { "resolver": { "projectId": "project-b" } }, "accept": false },
+    { "name": "another asset", "patch": { "resolver": { "assetId": "asset-b" } }, "accept": false },
+    { "name": "changed asset bytes", "patch": { "resolver": { "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } }, "accept": false },
+    { "name": "another receipt", "patch": { "resolver": { "receiptId": "receipt-b" } }, "accept": false },
+    { "name": "mutable evidence", "patch": { "resolver": { "immutable": false } }, "accept": false },
+    { "name": "inconclusive source", "patch": { "resolver": { "genuineSensorLidar": null } }, "accept": false },
+    { "name": "photogrammetry derived", "patch": { "resolver": { "photogrammetryDerived": true } }, "accept": false },
+    { "name": "missing receipt", "patch": { "request": { "receiptId": null } }, "accept": false },
+    { "name": "malformed hash", "patch": { "request": { "sha256": "not-a-hash" }, "resolver": { "sha256": "not-a-hash" } }, "accept": false }
+  ]
+}

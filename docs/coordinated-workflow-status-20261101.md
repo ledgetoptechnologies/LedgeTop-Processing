@@ -390,6 +390,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   0 failed. These are local synthetic/source tests; the skips are reported by
   the suites and do not establish live TreeDar availability. The runtime still
   constructs the Viewer reference API with TreeDar unavailable.
+- Mirrored the Viewer draft PR #411 synthetic TreeDar provenance vectors into
+  `contracts/treedar-project-provenance-vectors.json` and pinned the source
+  digest in the Processing-side Python policy-oracle test. Shared-vector,
+  reference protocol and authenticated-provenance tests pass 30/30. This is
+  cross-language policy-vector parity only, not wire/runtime interoperability
+  or proof of genuine LiDAR custody. The Viewer draft itself is based on main
+  commit `dc8cedfe` and remains design/fixture-only.
 - Staged the exact reviewed source archive from commit `465f382` on both
   processing PCs at
   `/home/bkoltz/.local/share/ledgetop-processing-reference/reference-465f382/`.
