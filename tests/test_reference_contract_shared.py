@@ -13,7 +13,7 @@ class SharedReferenceContractTests(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json'
         raw = path.read_bytes()
         self.assertEqual(hashlib.sha256(raw.replace(b'\r\n', b'\n')).hexdigest(),
-                         'c2870ecd73d34721f602f49e2b34c92865d8f4cf1f03ec735e853c4e3bdb083a')
+                         'fad338cc40b56fce9f571fa0b34a9041983a3868e830a0a90d6242cde5729210')
         fixture = json.loads(raw)
         self.assertEqual(fixture['transferGrantAcknowledgement']['grantSha256'],
                          digest(fixture['transferGrant']))
@@ -21,6 +21,9 @@ class SharedReferenceContractTests(unittest.TestCase):
                           ('reservationId', 'generation', 'manifestSha256', 'nonce', 'accepted')},
                          {key: fixture['transferGrant'][key] for key in
                           ('reservationId', 'generation', 'manifestSha256', 'nonce')} | {'accepted': True})
+        for vector in fixture['transferGrantCanonicalizationVectors']:
+            grant = {**fixture['transferGrant'], 'token': vector['token']}
+            self.assertEqual(digest(grant), vector['grantSha256'])
         submission = validate_submission(fixture['submission'], environment='staging',
             capability_fingerprint=fixture['capabilities']['capabilityFingerprint'],
             options_fingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'])

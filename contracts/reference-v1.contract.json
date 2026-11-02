@@ -129,6 +129,12 @@
     "accepted": true,
     "grantSha256": "0cf95dbd65410483f531501bd024c84202728e351912eae07fd98d54a87b78a1"
   },
+  "transferGrantCanonicalizationVectors": [
+    {
+      "token": "synthetic-quote\"-slash/-backslash\\",
+      "grantSha256": "7f876f617d12ea90628bb83d8bedd6ba733f1107b0f3c61e70c1f11bc8ffd566"
+    }
+  ],
   "resultManifest": {
     "schemaVersion": 1,
     "jobId": "job-1",

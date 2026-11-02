@@ -115,7 +115,7 @@ test counts below describe their named source checkpoints.
 - `contracts/reference-v1.contract.json` is the identical Python/Viewer fixture.
   It includes a transfer grant ACK vector bound to the canonical grant digest.
   Its SHA-256 with LF line endings is
-  `c2870ecd73d34721f602f49e2b34c92865d8f4cf1f03ec735e853c4e3bdb083a`.
+  `fad338cc40b56fce9f571fa0b34a9041983a3868e830a0a90d6242cde5729210`.
 
 ## Remaining integration and acceptance
 
