@@ -385,6 +385,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 
 ## Evidence update — 2026-11-02
 
+- Fresh read-only SSH inventory on 2026-11-02 confirms
+  `ledgetop-processing-reference-worker.service` remains `LoadState=not-found`
+  on both `.89` and `.88`. The cluster still has the healthy prototype,
+  migration NodeODM candidate and ingress containers; the main PC has its
+  NodeODM, ingress, DCGM exporter and node exporter containers. No worker
+  service/config was installed or activated, and no credentials were read.
+  Container presence alone does not prove queue dispatch or result return.
 - Re-ran the combined reference workflow suites across admission, API, queue,
   production/staging and node routing, transfer, worker recovery, Viewer result
   delivery, result proxy, source retention, pipeline and TreeDar: 364 passed,
