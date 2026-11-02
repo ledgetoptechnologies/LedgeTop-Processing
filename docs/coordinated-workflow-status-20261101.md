@@ -94,6 +94,14 @@ No real client data was processed as part of this checkpoint.
   handoff or authorize transfer. The existing broker and Viewer journal use
   separate SQLite databases, so a real atomic contract needs an explicit
   storage owner/API/schema migration.
+- Viewer fixture follow-up commit `ed601472` binds its envelope version and
+  immutable key ID into AEAD associated data and rejects key-ID tampering,
+  aliases/remaps and nonce-row replacement within the synthetic local
+  registry. The Viewer chat reports the file-backed and memory tests passed
+  2/2. This strengthens the example contract but remains test-only: the local
+  registry is not production key management and does not prove nonce history
+  across databases/restores, real process or power failure, a trusted
+  anti-rollback authority, or an atomic transaction with the existing broker.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
