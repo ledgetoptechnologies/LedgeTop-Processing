@@ -977,6 +977,12 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   hierarchy UI/test files. No conflict was resolved or committed, and original
   PRs were not changed. A real combined runtime needs deliberate migration and
   dependency review; none of these draft bases is a verified production base.
+- Viewer draft PR #412 (`codex/viewer-v1-selective-integration-map`, head
+  `552275ee`) records this dependency and migration map as one docs-only file,
+  based on #406. It includes the exact 11 conflict paths from the deliberately
+  unmerged trial. The PR is open and draft with no checks (feature-branch
+  Actions remain disabled); it is a review aid, not an integrated candidate or
+  runtime evidence.
 
 ## Local candidate validation — 2026-11-02
 
