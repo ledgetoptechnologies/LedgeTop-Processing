@@ -227,6 +227,19 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   separate receipt. No NAS broker service or mounted Viewer accepted-copy
   ingest is implemented. This mapping is an existing-source audit, not a new
   cross-language contract.
+- Viewer cross-review of Processing head `b20a804` confirmed the HTTP range
+  adapter casing fix and its tests, but found no result client or bridge on
+  Viewer `main`; the dormant Viewer candidate only accepts complete `200`
+  bodies and checks the whole-object digest before its separate acceptance
+  receipt. Therefore the Processing `206` route has no current-main consumer.
+  A future resumable receiver must bind each exact range to the same object
+  and result manifest, retain offset-safe pieces, then verify the entire
+  assembled object before durable acceptance or ACK. No Viewer candidate files
+  were changed during this review because that worktree has an unrelated
+  uncommitted edit. Claude's current ownership or acknowledgement for the
+  workspace redesign and hierarchy remains unverified. Processing PR #264 is
+  open at `b20a804` against `codex/nodeodm3-provider`, not `main`; this is a
+  staged candidate and not an integrated release.
 - Grant lifecycle audit: the worker claims a queued job, reserves local scratch,
   then polls the claim-bound `/transfer-grant` endpoint; while no grant exists,
   it stays in `awaiting_grant` and does not fetch inputs. An environment-scoped
