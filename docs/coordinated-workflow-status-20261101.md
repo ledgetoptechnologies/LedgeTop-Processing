@@ -641,6 +641,19 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   command was not listed. This confirms stored receipt metadata only; it does
   not establish that no point-cloud artifact exists under another path,
   independently verify archived NAS bytes, or prove LiDAR execution.
+- Viewer isolated candidate `38f1e4a8` adds
+  `apps/viewer/scripts/verify-archive-readonly.cjs`, a path-free, read-only
+  point-in-time check that uses the app config and stored receipt to compare
+  exact expanded archive paths, sizes and hashes. I independently reran its
+  bounded synthetic test on Windows: 1/1 passed for the 71-file match,
+  mutation, missing/extra files and ambiguous/unresolved identity. Windows
+  denied symlink creation, so that case was not exercised. The candidate is
+  not in the deployed image; Node/runtime/mount equivalence and Linux
+  symlink/ancestor-race behavior are unverified. A 500-GiB sequential scan is
+  possible. This may provide a manually scheduled integrity observation after
+  release qualification, but it is not durable custody or an accepted-copy
+  ACK. Do not give Beau a production command until the exact installed build
+  is matched and bounded Linux tests pass.
 
 ## Live host observation — 2026-11-02
 
