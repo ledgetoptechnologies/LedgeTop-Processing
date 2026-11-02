@@ -36,6 +36,9 @@ resources.
 Native thread construction is also covered by the service cleanup path. A
 synthetic failure closes the already-bound listener and releases the Queue,
 whose queued job remains available to a new owner.
+If starting the Viewer dispatcher thread fails before the thread starts, cleanup
+does not join that unstarted thread; a synthetic failure checks listener closure,
+Queue reacquisition and preservation of the queued job.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.

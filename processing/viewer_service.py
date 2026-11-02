@@ -704,5 +704,5 @@ class ViewerService:
 
     def close(self):
         self._stop.set()
-        if self._thread:
+        if self._thread and self._thread.ident is not None:
             self._thread.join(timeout=10)

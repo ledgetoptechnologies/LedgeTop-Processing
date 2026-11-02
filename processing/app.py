@@ -445,7 +445,7 @@ class CoordinatorService:
                 except BaseException:
                     self._failed('dispatcher_drain_failed', stop)
                 thread = getattr(service, '_thread', None)
-                if thread is not None:
+                if thread is not None and thread.ident is not None:
                     thread.join()  # close()'s legacy ten-second join is insufficient.
             if self.handler.prototype_queue:
                 self.handler.prototype_queue.close()
