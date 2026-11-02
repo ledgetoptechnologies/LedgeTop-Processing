@@ -61,6 +61,30 @@ class ReferenceAPITests(unittest.TestCase):
         self.store.update_phase(job["jobId"], "awaiting_acceptance")
         return job, result, claim["claimToken"]
 
+    def test_result_range_header_lookup_is_case_insensitive_and_rejects_duplicates(self):
+        job, _result, _claim_token = self.ready()
+        calls = []
+        class Stream:
+            status = 200
+            headers = {"Content-Type": "application/zip", "Content-Length": "3"}
+        class Proxy:
+            def open(self, public, manifest, object_id, *, range_header=None):
+                calls.append(range_header)
+                return Stream()
+        self.api.result_proxy = Proxy()
+        route = "/ltds/v1/jobs/" + job["jobId"] + "/results/result-1"
+        for name in ("Range", "range", "rAnGe"):
+            response = self.api.handle("GET", route,
+                {"Authorization": "Bearer " + STAGING, name: "bytes=0-9"},
+                protected_transport=True)
+            self.assertEqual(response.status, 200)
+        self.assertEqual(calls, ["bytes=0-9"] * 3)
+        duplicate = self.api.handle("GET", route,
+            {"Authorization": "Bearer " + STAGING, "Range": "bytes=0-9",
+             "range": "bytes=10-19"}, protected_transport=True)
+        self.assertEqual((duplicate.status, duplicate.body), (400, {"error": "duplicate_header"}))
+        self.assertEqual(calls, ["bytes=0-9"] * 3)
+
     def test_transport_auth_and_capabilities(self):
         self.assertEqual(self.request("GET", "/capabilities", protected=False).status, 503)
         spoofed = {"Authorization": "Bearer " + STAGING, "X-Forwarded-Proto": "https"}

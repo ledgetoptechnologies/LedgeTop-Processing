@@ -115,9 +115,16 @@ class ReferenceAPI:
                     return self._error(409, 'result_not_ready')
                 if binary[2] not in {obj['id'] for obj in job['resultManifest']['objects']}:
                     return self._error(404, 'not_found')
+                range_values = [value for name, value in headers.items()
+                                if type(name) is str and name.lower() == 'range']
+                if len(range_values) > 1:
+                    return self._error(400, 'duplicate_header')
+                range_header = range_values[0] if range_values else None
+                if range_header is not None and type(range_header) is not str:
+                    return self._error(400, 'invalid_request')
                 public = self._job(binary[1], environment)
                 stream = self.result_proxy.open(public, job['resultManifest'], binary[2],
-                                                range_header=headers.get('Range'))
+                                                range_header=range_header)
                 from .reference_binary import BinaryResponse
                 return BinaryResponse(stream, status=stream.status, headers=stream.headers)
             lookup = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/by-submission/([0-9a-f-]{36})', path)
