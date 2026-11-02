@@ -328,3 +328,14 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   the candidate adapter against in-process synthetic engines only; it does not
   validate current Viewer `main`, a live worker/container, NAS custody,
   photogrammetry, Viewer archive ingestion, or TreeDar acceptance.
+- Re-ran the synthetic TreeDar/admission/publication suites on 2026-11-02 in
+  Ubuntu 24.04 WSL as nonroot `pilot`, after installing the test-only LAS/CRS
+  dependencies into a dedicated local venv. The admission, engine, delivery,
+  runtime, reference API/protocol, bundle and publication suites passed all
+  135 tests with zero skips. The generated LAS/LAZ fixtures exercise projected
+  CRS, provenance/hash checks, genuine-LiDAR admission rules, delivery/runtime
+  custody, bundle closure and publication controls. The Reference API test
+  keeps Gaussian splats unavailable/disabled and rejects enabled requests.
+  Results and exact dependency versions are in
+  `docs/evidence/treedar-synthetic-acceptance-20261102.json`. This is synthetic
+  source evidence only, not real-data accuracy or live-node/runtime acceptance.

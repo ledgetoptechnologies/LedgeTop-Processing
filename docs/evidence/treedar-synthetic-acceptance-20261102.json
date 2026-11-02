@@ -1,0 +1,34 @@
+{
+  "recordedAt": "2026-11-02",
+  "processingCommit": "c610ee9b890cbc3a75cf5c90efa68c33506c83b9",
+  "environment": "Ubuntu 24.04 WSL, nonroot user pilot",
+  "python": "3.12",
+  "testDependencies": {
+    "laspy": "2.7.0",
+    "lazrs": "0.8.2",
+    "numpy": "2.5.4",
+    "pyproj": "3.8.0"
+  },
+  "command": "python -B -m unittest discover -s tests -p <suite> -q",
+  "suites": {
+    "test_treedar_admission.py": {"passed": 18, "skipped": 0},
+    "test_treedar_engine.py": {"passed": 14, "skipped": 0},
+    "test_treedar_delivery.py": {"passed": 17, "skipped": 0},
+    "test_treedar_runtime.py": {"passed": 16, "skipped": 0},
+    "test_reference_api.py": {"passed": 8, "skipped": 0},
+    "test_reference_protocol.py": {"passed": 15, "skipped": 0},
+    "test_reference_treedar_bundle.py": {"passed": 23, "skipped": 0},
+    "test_reference_treedar_publication.py": {"passed": 24, "skipped": 0}
+  },
+  "totalPassed": 135,
+  "gaussianSplats": {"advertisedAvailable": false, "advertisedEnabled": false, "requestsRejected": true},
+  "syntheticOnly": true,
+  "clientDataUsed": false,
+  "liveNodesTouched": false,
+  "limits": [
+    "LiDAR LAS/LAZ fixtures are generated test inputs and are not client data or field-validated acquisitions.",
+    "Does not validate forestry accuracy on real LiDAR or establish all CRS/datum assumptions for client data.",
+    "Does not validate deployed node services, NAS custody, Viewer acceptance, unattended crash recovery or cleanup authority.",
+    "Gaussian splats remain scaffold-only and disabled."
+  ]
+}
