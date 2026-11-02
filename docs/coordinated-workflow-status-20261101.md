@@ -136,6 +136,23 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 
 ## Evidence update — 2026-11-02
 
+- Staged the exact reviewed source archive from commit `465f382` on both
+  processing PCs at
+  `/home/bkoltz/.local/share/ledgetop-processing-reference/reference-465f382/`.
+  The archive SHA256 is
+  `0c41f0407b7fc57723c4278d790c902270ac13c98c97bacefe909c8194e8cf5f`; all 90
+  extracted regular-file contents matched the archive, no symlinks were
+  present, the source directory is mode `0700`, and the retained archive is
+  mode `0600`. The prior staged versions remain intact.
+- Read-only checks on both hosts show
+  `ledgetop-processing-reference-worker.service` is not installed or active
+  (`LoadState=not-found`), the `bkoltz` user manager has linger enabled, and
+  the candidate private config file at
+  `~/.config/ledgetop-processing/reference-worker.json` is absent. No unit was
+  installed, enabled, or started; no credentials/configuration were created.
+  The staged unit also points at a `current/source` path that has not been
+  created, so the host copy is intentionally inert until a reviewed atomic
+  activation binds a specific source version and correct config/state paths.
 - Read-only SSH to cluster `.89` reported coordinator health `ok`, zero queued,
   running or held jobs, and both logical nodes `active`. The active NodeODM
   candidate is the `nodeodm` service in a separate root-owned migration Compose
