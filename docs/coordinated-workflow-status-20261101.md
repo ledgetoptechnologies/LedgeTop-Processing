@@ -240,6 +240,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   workspace redesign and hierarchy remains unverified. Processing PR #264 is
   open at `b20a804` against `codex/nodeodm3-provider`, not `main`; this is a
   staged candidate and not an integrated release.
+- Ran the existing Viewer candidate's `reference-result-wire-binding`,
+  `reference-result-bridge` and `reference-joint-harness` Node tests from
+  `C:\Projects\viewer-v2-delivery-ledger` at `1e5bfa6b`: 9 passed, 1 skipped
+  because Linux descriptor and directory-barrier semantics are unavailable on
+  this Windows host. These tests qualify full-body identity/hash validation
+  and synthetic ACK replay on the candidate only; they contain no range
+  consumer and do not qualify Viewer `main`, NAS custody or live ingestion.
 - Grant lifecycle audit: the worker claims a queued job, reserves local scratch,
   then polls the claim-bound `/transfer-grant` endpoint; while no grant exists,
   it stays in `awaiting_grant` and does not fetch inputs. An environment-scoped
