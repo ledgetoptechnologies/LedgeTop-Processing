@@ -172,15 +172,15 @@ class ViewerAcceptanceTransferTests(unittest.TestCase):
 
     def test_service_auth_matches_viewer_node_golden_vector(self):
         headers = _service_auth_headers(SECRET.encode(), "synthetic-service", "PUT",
-            "/api/v1/reference/v1/acceptances/receipt-test?offset=7",
-            b'{"contract":"viewer-transfer-v1"}', timestamp=1793620800,
+            "/api/v1/reference/v1/acceptances/receipt-test/objects/result-test?offset=7",
+            b"synthetic chunk bytes", timestamp=1793620800,
             nonce="nonce_20261102_0000000000000000")
         self.assertEqual(headers, {
             "X-LTDS-Key-Id": "synthetic-service",
             "X-LTDS-Timestamp": "1793620800",
             "X-LTDS-Nonce": "nonce_20261102_0000000000000000",
-            "X-LTDS-Content-SHA256": "b3ead6fac9d0b0c1ffef75e74fa1654b81a756d571479b6c8a885483fa8138d8",
-            "X-LTDS-Signature": "OGS3kafRYDOPXsKT37fHiozTEH3eR3ijz_HH6GNOzcU",
+            "X-LTDS-Content-SHA256": "cb20255c9267446562175b1bd8518aeaa4aa6538e85371dc6725eef474f0dd3d",
+            "X-LTDS-Signature": "U71Kj7RkLd3IwyLLuWiJo-eGRrDJnsohjtJl-4FveNA",
         })
 
     def test_full_transfer_is_chunked_and_returns_verified_receipt_pair(self):

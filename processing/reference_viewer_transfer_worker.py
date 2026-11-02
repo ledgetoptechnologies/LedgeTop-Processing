@@ -69,5 +69,3 @@ class ReferenceViewerTransferWorker:
         except Exception:
             return {'state': 'retry_wait', 'jobId': job_id}
         return {'state': 'retry_wait', 'jobId': job_id, 'reason': reason}
-
-\n

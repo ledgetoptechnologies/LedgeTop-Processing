@@ -324,5 +324,3 @@ class ViewerAcceptanceTransfer:
                 offset = new_offset
         _status, committed = self._request("POST", receipt_path + "/commit", b"", allowed=(200, 201))
         return self._accepted(committed, job, acceptance, result_manifest)
-
-\n
