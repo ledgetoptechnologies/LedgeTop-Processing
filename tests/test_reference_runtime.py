@@ -760,7 +760,7 @@ raise SystemExit(app.main())
     def test_shutdown_waits_for_actual_partial_viewer_upload(self):
         from processing import viewer_http
         from tests.test_viewer_http import multipart, BOUNDARY
-        for mode in ('complete','half_close','reset','stall_then_reset'):
+        for mode in ('complete','half_close','reset','stall_then_reset','partial_then_reset'):
             with self.subTest(mode=mode):
                 handler=make_handler(self.config)
                 input_root=handler.viewer_service.store.root
@@ -772,19 +772,26 @@ raise SystemExit(app.main())
                 service=CoordinatorService(native,handler);stop=threading.Event();exits=[]
                 running=threading.Thread(target=lambda:exits.append(service.run(stop)))
                 entered=threading.Event();fill=viewer_http._Body.fill
+                committed=threading.Event();upload=handler.viewer_service.upload
+                def observed_upload(*args,**kwargs):
+                    result=upload(*args,**kwargs);committed.set();return result
                 def observed_fill(body):
                     entered.set()
                     return fill(body)
                 client=None
                 try:
-                    with patch.object(viewer_http._Body,'fill',observed_fill):
+                    with patch.object(viewer_http._Body,'fill',observed_fill), \
+                            patch.object(handler.viewer_service,'upload',observed_upload):
                         running.start();self.wait_for(service.healthy)
                         client=socket.create_connection(native.server_address,timeout=4);client.settimeout(4)
-                        body=multipart([('images','owned.jpg',b'synthetic-photo')])
+                        parts=[('images','owned.jpg',b'synthetic-photo')]
+                        if mode=='partial_then_reset':parts.append(('images','second.jpg',b'x'*131072))
+                        body=multipart(parts)
                         headers=(f'POST /task/new/upload/{identifier}?token={self.config.viewer_token} HTTP/1.1\r\n'
                                  f'Host: localhost\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\n'
                                  f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode()
-                        client.sendall(headers+body[:8]);self.assertTrue(entered.wait(3))
+                        client.sendall(headers+body[:65536 if mode=='partial_then_reset' else 8]);self.assertTrue(entered.wait(3))
+                        if mode=='partial_then_reset':self.assertTrue(committed.wait(3))
                         stop.set();self.wait_for(lambda:service.health()['state']=='draining')
                         self.assertTrue(running.is_alive())
                         unexpected=None
@@ -796,7 +803,7 @@ raise SystemExit(app.main())
                         if mode=='stall_then_reset':
                             threading.Event().wait(0.3)
                             self.assertTrue(running.is_alive())
-                        if mode in ('reset','stall_then_reset'):
+                        if mode in ('reset','stall_then_reset','partial_then_reset'):
                             client.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
                             client.close();client=None
                         else:
@@ -815,8 +822,15 @@ raise SystemExit(app.main())
                         self.assertEqual(replacement.get(job['id'])['status'],'queued')
                         from processing.viewer_tasks import TaskStore
                         task=TaskStore(replacement,input_root).task(identifier)
-                        self.assertEqual(len(task['files']),1 if mode=='complete' else 0)
-                        if mode=='complete':self.assertEqual(Path(task['files'][0]['path']).read_bytes(),b'synthetic-photo')
+                        self.assertEqual(len(task['files']),1 if mode in ('complete','partial_then_reset') else 0)
+                        if mode in ('complete','partial_then_reset'):
+                            self.assertEqual(Path(task['files'][0]['path']).read_bytes(),b'synthetic-photo')
+                        if mode=='partial_then_reset':
+                            from processing.maintenance import Conflict
+                            store=TaskStore(replacement,input_root)
+                            self.assertTrue(store.upload(identifier,'owned.jpg',io.BytesIO(b'synthetic-photo'),15)['success'])
+                            with self.assertRaises(Conflict):store.upload(identifier,'owned.jpg',io.BytesIO(b'different-bytes'),15)
+                            self.assertEqual(len(store.task(identifier)['files']),1)
                     finally:replacement.close()
                 finally:
                     if client is not None:client.close()

@@ -48,6 +48,10 @@ cases leave no input file and preserve the queued job; shutdown remains waiting
 during the observed stall. This is an in-process fixture, not a deadline for
 stalled clients, a process-crash test, or host ingress fencing. Socket inactivity
 timeouts do not impose an absolute deadline on a client that keeps sending.
+In a synthetic two-file request, the first file commits before a reset during
+the second; the first survives reopening, an identical direct store retry is
+accepted, and different bytes under that name conflict. This does not establish
+that a real Viewer automatically retries an ambiguous response.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.
