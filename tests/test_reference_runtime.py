@@ -756,6 +756,71 @@ raise SystemExit(app.main())
             for client in clients:
                 client.join(timeout=7)
 
+    def test_shutdown_waits_for_actual_partial_viewer_upload(self):
+        from processing import viewer_http
+        from tests.test_viewer_http import multipart, BOUNDARY
+        for disconnect in (False, True):
+            with self.subTest(disconnect=disconnect):
+                handler=make_handler(self.config)
+                input_root=handler.viewer_service.store.root
+                identifier=str(uuid.uuid4())
+                handler.viewer_service.store.initialize(identifier,'synthetic',[],None,'production')
+                job,_=handler.prototype_queue.submit({'requestId':str(uuid.uuid4()),'environment':'staging',
+                                                     'profile':'treedar-synthetic-v1'})
+                native=ThreadingHTTPServer(('127.0.0.1',0),handler)
+                service=CoordinatorService(native,handler);stop=threading.Event();exits=[]
+                running=threading.Thread(target=lambda:exits.append(service.run(stop)))
+                entered=threading.Event();fill=viewer_http._Body.fill
+                def observed_fill(body):
+                    entered.set()
+                    return fill(body)
+                client=None
+                try:
+                    with patch.object(viewer_http._Body,'fill',observed_fill):
+                        running.start();self.wait_for(service.healthy)
+                        client=socket.create_connection(native.server_address,timeout=4);client.settimeout(4)
+                        body=multipart([('images','owned.jpg',b'synthetic-photo')])
+                        headers=(f'POST /task/new/upload/{identifier}?token={self.config.viewer_token} HTTP/1.1\r\n'
+                                 f'Host: localhost\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\n'
+                                 f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode()
+                        client.sendall(headers+body[:8]);self.assertTrue(entered.wait(3))
+                        stop.set();self.wait_for(lambda:service.health()['state']=='draining')
+                        self.assertTrue(running.is_alive())
+                        unexpected=None
+                        try:
+                            with self.assertRaises(RuntimeError):
+                                unexpected=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'))
+                        finally:
+                            if unexpected is not None:unexpected.close()
+                        if disconnect:client.shutdown(socket.SHUT_WR)
+                        else:client.sendall(body[8:])
+                        response=b''
+                        while True:
+                            data=client.recv(4096)
+                            if not data:break
+                            response+=data
+                        running.join(5);self.assertFalse(running.is_alive());self.assertEqual(exits,[0])
+                        self.assertIn(b' 400 ' if disconnect else b' 200 ',response.split(b'\r\n',1)[0])
+                    replacement=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),
+                                      treedar_node_ids=('main',),viewer_enabled=True)
+                    try:
+                        self.assertEqual(replacement.get(job['id'])['status'],'queued')
+                        from processing.viewer_tasks import TaskStore
+                        task=TaskStore(replacement,input_root).task(identifier)
+                        self.assertEqual(len(task['files']),0 if disconnect else 1)
+                        if not disconnect:self.assertEqual(Path(task['files'][0]['path']).read_bytes(),b'synthetic-photo')
+                    finally:replacement.close()
+                finally:
+                    if client is not None:client.close()
+                    stop.set()
+                    if running.ident is not None:running.join(8)
+                    if running.is_alive():
+                        self._cleanups=[item for item in self._cleanups if item[0] != self.temp.cleanup]
+                        self.temp._finalizer.detach()
+                        self.fail('owned coordinator thread did not exit; resources retained')
+                    native.server_close()
+                    handler.viewer_service.close();handler.prototype_queue.close()
+
     def test_reference_listener_failure_fails_supervision_without_healthy_native_endpoint(self):
         handler = self.supervised_handler()
         fail = threading.Event()

@@ -39,6 +39,12 @@ whose queued job remains available to a new owner.
 If starting the Viewer dispatcher thread fails before the thread starts, cleanup
 does not join that unstarted thread; a synthetic failure checks listener closure,
 Queue reacquisition and preservation of the queued job.
+A real loopback Viewer multipart upload test pauses in the server's body read,
+then requests graceful stop. Shutdown waits until the client either completes
+the body or closes its write side; the former receives 200 and retains exact
+input bytes, and the latter receives 400 with no input file. A separate queued
+job survives both cases. This is an in-process fixture with a cooperative client,
+not a deadline for stalled clients, a process-crash test, or host ingress fencing.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.
