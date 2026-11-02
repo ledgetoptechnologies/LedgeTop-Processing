@@ -1,4 +1,4 @@
-# Coordinated Processing and Viewer status — 2026-11-01
+# Coordinated Processing and Viewer status — 2026-11-02
 
 This is a current evidence checkpoint for the Processing + Viewer delivery goal.
 It distinguishes local/synthetic evidence from installed or production behavior.
@@ -378,6 +378,73 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   dataset boundaries, snapshot/hold owner and recovery, mount visibility,
   queued-snapshot capacity and cleanup/release authority still need proof.
   No TrueNAS state was changed.
+- TrueNAS API research for the installed 25.10 line confirms
+  `pool.snapshot.create`, `pool.snapshot.hold`, and `pool.snapshot.release`
+  are available. Holds require the `SNAPSHOT_WRITE` role. The hold API adds a
+  TrueNAS tag, while release removes **all** hold tags from the selected
+  snapshot, so sharing one job snapshot with unrelated hold owners would make
+  automated release unsafe. A viable candidate design needs a dedicated,
+  uniquely owned snapshot per frozen submission (or a separately tested
+  job-specific ZFS hold mechanism), one authoritative retention owner, and
+  explicit readback before issuing a source-retention receipt. ZFS snapshots
+  are read-only point-in-time views and ordinarily do not duplicate the full
+  dataset, but that property does not establish atomicity with Viewer upload
+  manifests or protect against every privileged administrator/purge path.
+  References: [TrueNAS 25.10 snapshot create API](https://api.truenas.com/v25.10/api_methods_pool.snapshot.create.html),
+  [hold API](https://api.truenas.com/v25.10/api_methods_pool.snapshot.hold.html),
+  [release API](https://api.truenas.com/v25.10/api_methods_pool.snapshot.release.html),
+  and [snapshot behavior](https://www.truenas.com/docs/scale/25.10/printpreview/).
+- The 25.10 RBAC docs describe custom privileges composed from individual
+  method roles; snapshot create/hold/release require `SNAPSHOT_WRITE`. The
+  published schema does not document a dataset-scoped role, so the owner
+  service must enforce an exact configured dataset and name namespace, and
+  Beau should review the actual user/privilege grant before any API key is
+  provisioned. TrueNAS describes user-linked API keys as password-equivalent
+  access for their user and requires HTTPS for API-key authentication. Do not
+  put such a key in chat or a Processing node; keep it on the storage-owner
+  host if this design proceeds. References: [25.10 RBAC](https://api.truenas.com/v25.10/rbac.html),
+  [TrueNAS API-key guidance](https://www.truenas.com/docs/scale/api/).
+- Current Processing source inspection confirms
+  `processing/reference_source_retention.py` is only a receipt validator: it
+  explicitly supplies no authentication or cleanup and has no production call
+  site. `ReferenceStore` currently persists jobs, Viewer acceptance receipts,
+  delivery outbox, claims, worker receipts and transfer grants, but no source
+  retention receipt. Therefore a validated-looking v1 payload cannot yet pin
+  queued inputs, authorize grant issuance, or prevent their cleanup.
+- Viewer candidate branch `codex/viewer-atomic-grant-fixture` is pushed at
+  `9c77363ae61578d8f6263d30240ec9981108a234`. Its
+  `referenceStorageOwnerGate.issueAtomicGrant` deliberately fails closed and
+  remains unmounted. `referenceSnapshotOwnerCandidate` records an exact
+  synthetic intent, models TrueNAS 25.10 snapshot create/hold/query calls
+  through an injected client, and persists ambiguous outcomes before modeled
+  mutations. Its focused Node suite passed 4/4, including file-backed
+  close/reopen after a lost create response. The candidate is guarded to
+  `synthetic-only`, cannot issue a custody receipt or release a hold, and does
+  not open a WebSocket, verify bytes/mount boundaries, authenticate an issuer,
+  prove purge fencing, or provide hardened migrations and rollback lineage.
+  This is not a NAS issuer, physical pin, guarded production migration, or
+  accepted-copy receipt/ACK endpoint. No dispatch was enabled.
+- Cross-repository contract review found Processing's existing
+  `source-retention-v1` (the validator and
+  `contracts/source-retention-v1.contract.json`) does not contain authenticated
+  issuer/key epoch, immutable dataset/snapshot identity and transaction group,
+  source-closure digest, hold identity, or signed per-object custody evidence.
+  It is a validator for a different, weaker textual retention claim. The
+  Viewer proposal's richer fields must be defined under a new, versioned
+  contract and canonicalization; do not silently extend or overclaim v1. A
+  separate signed-v2 proposal now exists in the Viewer worktree but remains
+  uncommitted and unagreed; exact ID grammars, path binding, decimal TXG,
+  owner/key epoch semantics, strict timestamps, golden vectors and rollback-
+  resistant issuer/key registry policy still need agreement before a consumer.
+  The Viewer draft now includes a deterministic public test vector. An
+  independent one-off Processing check reproduced its payload/closure
+  canonical UTF-8 bytes, domain-prefixed messages, and SHA-256 digests. The
+  Node generator reports a valid Ed25519 signature; Processing-side signature
+  verification was not run because `cryptography` is absent and the current
+  production Dockerfile is stdlib-only. Retaining Ed25519 therefore requires
+  an explicit pinned crypto dependency or separately reviewed verification
+  boundary. Matching v2 validators and committed cross-language fixtures
+  remain pending exact schema agreement. No receipt is currently issued.
 - Beau's follow-up read-only metadata check matched the same saved task and
   provider attempt. It confirmed `3d-tiles` is a boolean `true`, the recorded
   v1 archive inventory has 71 entries and a valid digest, and the mesh tileset
@@ -541,3 +608,25 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   command was not listed. This confirms stored receipt metadata only; it does
   not establish that no point-cloud artifact exists under another path,
   independently verify archived NAS bytes, or prove LiDAR execution.
+
+## Live host observation — 2026-11-02
+
+- Read-only SSH `docker ps` to cluster PC `192.168.50.89` showed the Processing
+  prototype container healthy, the migration NodeODM candidate running, and
+  the ingress and TLS helper containers running. The snapshot did not inspect
+  the candidate's readiness endpoint, active job state, credentials, storage
+  custody or result handoff.
+- Read-only SSH `docker ps` to main PC `192.168.50.88` showed its NodeODM,
+  ingress, DCGM exporter, and node exporter containers running. This snapshot
+  did not verify NodeODM authentication/health, current workload, TreeDar
+  availability or Viewer delivery.
+- A read-only, non-disclosing comparison on `.89` found both the coordinator's
+  `LOCAL_NODE_TOKEN` and the migration NodeODM `--token` present and matching;
+  no token or digest was emitted. This does not establish that the matching
+  credential is a newly rotated value. The planned rotation and old-token
+  rejection check remain outstanding, so do not treat credential hygiene as
+  closed.
+- Therefore the two nodes are reachable and their listed containers are up;
+  this is not end-to-end runtime acceptance. Do not admit client work on this
+  evidence alone. The full receipt, storage-owner, dispatch and durable ACK
+  gates above remain in force.
