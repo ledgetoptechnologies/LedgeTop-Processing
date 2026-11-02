@@ -1,8 +1,10 @@
 import copy
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest.mock import patch
@@ -11,6 +13,7 @@ from processing import reference_protocol as p
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
 from processing.reference_store import ReferenceStore, PROFILE
+from processing.reference_http import create_reference_http_server
 
 
 STAGING = "synthetic-staging-token-0001"
@@ -205,32 +208,47 @@ class ReferenceAPITests(unittest.TestCase):
         self.store.record_worker_result(job['jobId'],result,claim_token=claim['claimToken'],**binding)
         self.queue.complete(job['jobId'],{'claimToken':claim['claimToken'],'status':'succeeded','result':{}})
         self.store.update_phase(job['jobId'],'awaiting_acceptance')
-        path='/jobs/'+job['jobId']+'/acceptance'
-        first=self.request('POST',path,receipt)
-        self.assertEqual(first.status,200)
-        self.assertTrue(first.body['created']);self.assertTrue(first.body['fullyAccepted'])
-        self.assertEqual(first.body['receiptId'],receipt['receiptId'])
-        self.assertEqual(first.body['receiptSha256'],pinned_digest)
+        path='/ltds/v1/jobs/'+job['jobId']+'/acceptance'
+        def loopback_post(value):
+            server=create_reference_http_server(self.api,request_timeout=2)
+            thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':0.02})
+            thread.start()
+            try:
+                connection=http.client.HTTPConnection(*server.server_address,timeout=3)
+                try:
+                    connection.request('POST',path,body=json.dumps(value).encode('utf8'),
+                        headers={'Authorization':'Bearer '+STAGING,'Content-Type':'application/json'})
+                    response=connection.getresponse()
+                    return response.status,json.loads(response.read())
+                finally:connection.close()
+            finally:
+                server.shutdown();server.server_close();thread.join(timeout=3)
+                self.assertFalse(thread.is_alive(),'owned loopback listener did not stop')
+        first_status,first=loopback_post(receipt)
+        self.assertEqual(first_status,200)
+        self.assertTrue(first['created']);self.assertTrue(first['fullyAccepted'])
+        self.assertEqual(first['receiptId'],receipt['receiptId'])
+        self.assertEqual(first['receiptSha256'],pinned_digest)
         # Ignore the committed response and reopen coordinator state; this is
         # not a simulated network disconnect or machine power loss.
         self.queue.close()
         self.queue=Queue(self.directory.name);self.queue.allowed_profiles.add(PROFILE)
         self.store=ReferenceStore(self.queue);self.api=self.make_api()
-        replay=self.request('POST',path,receipt)
-        self.assertEqual(replay.status,200)
-        self.assertFalse(replay.body['created']);self.assertTrue(replay.body['fullyAccepted'])
-        self.assertEqual(replay.body['receiptId'],first.body['receiptId'])
-        self.assertEqual(replay.body['receiptSha256'],first.body['receiptSha256'])
-        self.assertEqual(replay.body['acceptedObjectIds'],receipt['acceptedObjectIds'])
+        replay_status,replay=loopback_post(receipt)
+        self.assertEqual(replay_status,200)
+        self.assertFalse(replay['created']);self.assertTrue(replay['fullyAccepted'])
+        self.assertEqual(replay['receiptId'],first['receiptId'])
+        self.assertEqual(replay['receiptSha256'],first['receiptSha256'])
+        self.assertEqual(replay['acceptedObjectIds'],receipt['acceptedObjectIds'])
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],1)
         changed=dict(receipt,acceptedAt='2026-10-29T12:00:00.001Z')
-        self.assertEqual(self.request('POST',path,changed).status,409)
+        self.assertEqual(loopback_post(changed)[0],409)
 
-    def test_v1_api_client_receipt_lost_response_replay(self):
+    def test_v1_api_client_receipt_http_reopen_replay(self):
         self._v1_acceptance_golden_replay('api_client','5f2056f679638551e0f00034485bb2600f9d12c4cb5049ff7ea5e081e440b504')
 
-    def test_v1_bridge_shaped_receipt_lost_response_replay(self):
+    def test_v1_bridge_shaped_receipt_http_reopen_replay(self):
         self._v1_acceptance_golden_replay('bridge_shape','7f5f61e0b9e1349fed53ba3aa667b42b031fd39e05108e4efce7dab37f61a55f')
 
     def test_explicit_treedar_availability_does_not_prove_file_contents(self):
