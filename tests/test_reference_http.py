@@ -261,6 +261,11 @@ class ReferenceHTTPTests(unittest.TestCase):
         status, current, _ = self.request('GET', path)
         self.assertEqual(current['transferGrantAcknowledgement'], ack)
         self.assertNotIn(grant['token'], json.dumps(current))
+        self.store.update_phase(job['jobId'], 'fetching')
+        self.store.update_phase(job['jobId'], 'processing')
+        self.assertEqual(self.request('POST', path + '/transfer-grants', grant)[:2], (200, ack))
+        self.assertEqual(self.store.receive_transfer_grant(job['jobId'], grant,
+            clock=lambda: 2_000_000_000), ack)
         changed = {**grant, 'token': 'different-synthetic-grant-token'}
         self.assertEqual(self.request('POST', path + '/transfer-grants', changed)[0], 409)
         self.assertEqual(self.store.private_transfer_grant(job['jobId']), grant)

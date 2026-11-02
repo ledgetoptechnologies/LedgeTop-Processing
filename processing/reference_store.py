@@ -453,19 +453,26 @@ class ReferenceStore:
         """Persist a private scoped grant; safe binding is the only public ACK.
 
         This never starts a transfer. Worker must revalidate expiry on use.
-        Lost ACKs replay the same binding; unknown tokens are not auto-rotated.
+        Lost ACKs replay the same binding even after phase advance/expiry;
+        unknown tokens are not auto-rotated.
         """
         from .reference_transfer import validate_grant
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, job_id)
+            encoded, digest = _json(grant), protocol.digest(grant)
+            old = db.execute('SELECT digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
+            if old:
+                if old[0] != digest:
+                    raise Conflict('transfer grant already sealed')
+                # The ACK means this exact canonical grant was sealed earlier,
+                # not that its bearer is still usable or that work succeeded.
+                # This idempotent read is safe after execution advances or the
+                # bearer expires and closes the lost-POST-response window.
+                return self._transfer_grant_ack(grant)
             if row['phase'] != 'awaiting_transfer' or row['status'] != 'running':
                 raise Conflict('job is not awaiting a transfer grant')
             validate_grant(grant, job=self._record(row, True), clock=clock or time.time)
-            encoded, digest = _json(grant), protocol.digest(grant)
-            old = db.execute('SELECT digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
-            if old and old[0] != digest:
-                raise Conflict('transfer grant already sealed')
             if not old:
                 self._quota(db, len(encoded.encode()))
                 db.execute('INSERT INTO reference_transfer_grants VALUES(?,?,?)', (job_id, encoded, digest))

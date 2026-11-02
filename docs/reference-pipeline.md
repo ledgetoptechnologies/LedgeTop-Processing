@@ -78,7 +78,10 @@ test counts below describe their named source checkpoints.
   and returns a binding acknowledgement with the canonical grant digest, so a
   lost response can be reconciled against the exact sealed grant rather than
   reservation fields alone. Recovery must still use the authenticated status
-  route and never rotate the grant or infer success from a timeout.
+  route or exact identical POST and never rotate the grant or infer success from
+  a timeout. An identical POST replays its historical ACK even after the worker
+  phase advances or the grant expires; this does not make the bearer usable or
+  assert that processing succeeded. A changed grant still conflicts.
   This changes the closed ACK shape while the candidate route still identifies
   as reference-v1: the new Viewer and Processing candidates must be released in
   lockstep. Mixed old/new candidates reject the other's ACK; do not deploy a
