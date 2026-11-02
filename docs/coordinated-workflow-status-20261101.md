@@ -178,6 +178,10 @@ No real client data was processed as part of this checkpoint.
   separate ceiling. No limit was changed and no data was submitted; the
   deployment's local-spool admission cannot safely be raised until capacity and
   NAS-backed queueing are addressed.
+- Viewer recorded the same live-cap observation in its candidate planning doc
+  at `5668f9a5`, preserving the deployed configuration pending NAS queue,
+  capacity and coexistence-budget design. No host, upload or runtime change
+  occurred.
 - Beau's read-only Viewer metadata query matched the saved test task and
   provider task. The recorded schema v1 archive receipt has matching identity,
   a 71-file bounded inventory and matching manifest digest; `3d-tiles` was a
