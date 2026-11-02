@@ -1387,7 +1387,9 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `final_test_predictions` and required outputs), routes v2 transfers through
   `/api/v1/reference/v2/acceptances`, and verifies the signed full-closure
   receipt before marking the durable outbox complete. ODM-only v1 remains on
-  its existing route. The staged change is at `7b9541d` on
+  its existing route. Processing now matches Viewer’s `TREEDAR_MAX_OBJECTS + 2`
+  result cap (102); the targeted manifest, acceptance-transfer, and worker
+  tests pass 27/27. The correction is at `bc33a5f` on
   `codex/viewer-acceptance-receipt-verify-20261102`.
 - Viewer draft PR #424 now has the matching private v2 receiver. Its current
   head is `85f252ef` on `codex/viewer-processing-acceptance-v1-20261102`.
@@ -1409,8 +1411,9 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   closes a source-level wire-contract mismatch and synthetic HTTP coverage,
   but does not prove NAS custody or a deployed worker→orchestrator→Viewer
   acceptance chain.
-- The Engineering Hub bus tools remain absent from this Codex session, so an
-  EH disconnect/reconnect and current Claude session acknowledgment are not
-  verified. The Viewer chat was asked to report the current redesign and
-  hierarchy PR status; pending response, Claude ownership remains
-  unverified.
+- The Engineering Hub MCP tools remain absent from this Codex session. Its
+  native listener was reconnected using the existing credential helper and
+  currently reports `subscribed` with the new process identity verified. A
+  fresh peer-message delivery after reconnect has not been tested. The Viewer
+  chat was asked to report the current redesign and hierarchy PR status; Claude
+  ownership remains unverified.
