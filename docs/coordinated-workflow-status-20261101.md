@@ -25,14 +25,20 @@ No real client data was processed as part of this checkpoint.
 - On 2026-11-02, the paired Python/Node wire probe was run against the current
   Viewer validator source (`referenceProtocol.js`, normalized SHA-256
   `17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159`). The
-  actual synthetic Processing pipeline emitted a combined ODM/TreeDar result;
-  Viewer accepted its two-object manifest, then rejected five negative cases:
-  missing/duplicate ODM archive, zero-byte archive, unsupported stage role,
-  and missing TreeDar version. Fixture generation ran under Ubuntu 24.04 WSL
-  because Processing intentionally holds this fixed pipeline on non-POSIX
-  hosts. This proves the paired manifest validator seam only; it does not prove
-  genuine LiDAR input, output artifacts, NAS custody, Viewer binary ingestion,
-  or runtime acceptance.
+  synthetic Processing manifest requested ODM and TreeDar but contained only
+  the ODM archive and report objects; Viewer accepted it, then rejected five
+  negative cases: missing/duplicate ODM archive, zero-byte archive, unsupported
+  stage role, and missing TreeDar version. Fixture generation ran under Ubuntu
+  24.04 WSL because Processing intentionally holds this fixed pipeline on
+  non-POSIX hosts. Viewer's follow-up review confirms this is only a v1 manifest
+  validator seam: its current bridge accepts one ODM archive and does not ingest
+  a typed TreeDar bundle. This does not prove genuine LiDAR input, TreeDar
+  artifacts, NAS custody, Viewer binary ingestion, or runtime acceptance.
+- On 2026-11-02, targeted grant, result-proxy, delivery, worker-API, worker
+  recovery, routing, cleanup and transfer suites ran 112 tests: 64 passed and
+  48 were skipped by the current host/test guards. No runtime acceptance was
+  claimed. The skips include fixed Linux/POSIX behavior that cannot be qualified
+  on this Windows host.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
