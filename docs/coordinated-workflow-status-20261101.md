@@ -962,6 +962,21 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `Bkoltz` and `claude`, which verifies Claude-authored contributions to the
   candidate hierarchy/UI work; it does not verify a current Claude session,
   review sign-off, deployed UI, or client permission propagation.
+- An ancestry and commit-subject comparison against Claude branch PR #347
+  confirms that #406 replays, in the same order, the 13 core redesign commits
+  from #347, then adds current-main hierarchy API, revision-safe assignment,
+  paging and contrast work. The branch histories diverge (merge-base
+  `8fe25966`), so this is a replay/continuation rather than direct ancestry.
+  PR #347 is open, non-draft, last updated 2026-10-29, with no review or checks;
+  Claude authorship is confirmed, current participation is not.
+- Viewer PRs #407 and #408 are sibling drafts based on delivery-ledger
+  `1e5bfa6b`; #409 is based on later ledger `9d2766aa`, two commits later.
+  #407 covers dormant result range resume; #408 covers transfer outbox/replay;
+  #409 adds the atomic grant and ACK candidate. An isolated merge trial of
+  #409 onto #406 has 11 conflicts across migration, repository/API and
+  hierarchy UI/test files. No conflict was resolved or committed, and original
+  PRs were not changed. A real combined runtime needs deliberate migration and
+  dependency review; none of these draft bases is a verified production base.
 
 ## Local candidate validation — 2026-11-02
 
