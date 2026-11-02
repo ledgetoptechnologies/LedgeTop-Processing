@@ -403,7 +403,7 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   contracts. It ran against the current shared Windows-mounted worktree and is
   synthetic test evidence only, not runtime acceptance.
 - Lost source-grant acknowledgement follow-up: a separate inactive Viewer
-  broker candidate `codex/viewer-grant-replay-candidate` at `7addbac9` and draft
+  broker candidate `codex/viewer-grant-replay-candidate` at `50665ad0` and draft
   stacked PR #408 allow exact token replay after restart when a stable
   explicitly injected 32-byte HMAC key is available; only the token hash is
   stored. `tokenRecoverable` now reflects whether the broker can derive the
@@ -412,8 +412,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   at close. A proposed dispatch retry seam was reviewed and reverted because
   its string error marker did not prove durable grant identity or fence an old
   sender. The lost-ACK path remains held for reconciliation. Linux synthetic
-  broker + joint-harness suites passed 28/28; Windows passed 27 with one
-  Linux-only skip. There is still no production transfer adapter, key
+  broker + joint-harness suites passed 28/28. The exact-replay test now compares
+  full serialized grant bytes across a broker restart. Windows cumulative-budget
+  tests passed 24 with one Linux-only skip; Linux cumulative-budget passed
+  25/25. There is still no production transfer adapter, key
   provisioning, or durable dispatch outbox, and Viewer reference dispatch
   remains hard-off. This is source-level recovery evidence, not an enabled
   source grant, NAS custody proof, or runtime acceptance.
