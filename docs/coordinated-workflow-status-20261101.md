@@ -22,6 +22,17 @@ No real client data was processed as part of this checkpoint.
 - The Viewer pinned-vector test accepted its two exact synthetic Processing
   fixtures and rejected modified bytes. It is an exact-vector inspector, not a
   general v2 parser, LiDAR validator, or artifact acceptance implementation.
+- On 2026-11-02, the paired Python/Node wire probe was run against the current
+  Viewer validator source (`referenceProtocol.js`, normalized SHA-256
+  `17d505c268b53ff5e17c61bd6f89fff8081b9089d35ca00cef6d96906d934159`). The
+  actual synthetic Processing pipeline emitted a combined ODM/TreeDar result;
+  Viewer accepted its two-object manifest, then rejected five negative cases:
+  missing/duplicate ODM archive, zero-byte archive, unsupported stage role,
+  and missing TreeDar version. Fixture generation ran under Ubuntu 24.04 WSL
+  because Processing intentionally holds this fixed pipeline on non-POSIX
+  hosts. This proves the paired manifest validator seam only; it does not prove
+  genuine LiDAR input, output artifacts, NAS custody, Viewer binary ingestion,
+  or runtime acceptance.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
