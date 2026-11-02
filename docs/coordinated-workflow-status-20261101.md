@@ -153,6 +153,21 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   The staged unit also points at a `current/source` path that has not been
   created, so the host copy is intentionally inert until a reviewed atomic
   activation binds a specific source version and correct config/state paths.
+- The prior private coordinator provisioning receipt exists on `.89` and reports
+  `brokerConfigured=false`, `workerIntakeConfigured=false`, and
+  `servicesActivated=false`; `.88` has no matching receipt. This confirms the
+  NAS-backed worker intake route and per-node worker configs are not staged.
+  Do not enable the candidate worker unit until that route, private configs,
+  storage reservation semantics, and Viewer acceptance endpoint are configured
+  and verified.
+- Added a reference-driver crash-window regression: after the coordinator
+  durably accepts a synthetic successful completion but the response is lost,
+  a fresh outbox, worker journal and driver replay the byte-identical completion,
+  record only one durable coordinator receipt, and do not initialize the engine
+  again. Synthetic Viewer acceptance then completes the driver record while
+  retaining both the local archive and input. The focused driver suite passed
+  20 tests with one platform-specific cleanup test skipped on Windows. This is
+  in-process synthetic coverage, not the missing TrueNAS/Viewer runtime path.
 - Read-only SSH to cluster `.89` reported coordinator health `ok`, zero queued,
   running or held jobs, and both logical nodes `active`. The active NodeODM
   candidate is the `nodeodm` service in a separate root-owned migration Compose

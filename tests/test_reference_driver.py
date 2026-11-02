@@ -252,6 +252,64 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.store.get(job['jobId'], private=True)['claimToken'], token)
         self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
 
+    def test_restart_after_durable_completion_response_loss_replays_same_receipt_without_rerun(self):
+        job = self.submit(contents=(b'synthetic-photo-for-completion-replay',))
+        self.advance(job, 'delivering')
+        delivery_time = 1_800_000_000
+        self.outbox.clock = lambda: delivery_time
+        self.outbox.random = lambda: 0
+        attempted = []
+
+        def coordinator_accepts_then_connection_drops(request, timeout):
+            envelope = json.loads(request.data)['delivery']
+            attempted.append(envelope)
+            self.sender_open(request, timeout)
+            raise OSError('synthetic lost durable-receipt response')
+
+        self.driver.sender._open = coordinator_accepts_then_connection_drops
+        self.assertEqual(self.driver.step()['state'], 'delivering')
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'succeeded')
+        self.assertEqual(len(attempted), 1)
+        outbox_id = attempted[0]['outboxId']
+        due = self.outbox.get(outbox_id)['next_at']
+        self.assertGreater(due, delivery_time)
+
+        # Reopen the durable outbox, engine journal, and driver journal as a
+        # replacement process would; only the synthetic transport remains shared.
+        self.outbox = WorkerOutbox(self.root / 'outbox.sqlite',
+            clock=lambda: due + 1, random_source=lambda: 0)
+        self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger,
+            outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
+            authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
+            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+        self.driver = self.make_driver()
+        replayed = []
+
+        def record_replay(request, timeout):
+            replayed.append(json.loads(request.data)['delivery'])
+            return self.sender_open(request, timeout)
+
+        self.driver.sender._open = record_replay
+        self.advance(job, 'awaiting_acceptance')
+        self.assertEqual(replayed, attempted)
+        self.assertEqual(self.outbox.get(outbox_id)['state'], 'acknowledged')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+        with self.outbox._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM durable_receipts').fetchone()[0], 1)
+
+        private = self.store.get(job['jobId'], private=True)
+        result = private['resultManifest']
+        receipt = dict(schemaVersion=1, receiptId='restart-viewer-receipt',
+            storageReceiptId='restart-viewer-storage', jobId=job['jobId'], generation=1,
+            environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']],
+            acceptedAt='2026-11-02T00:00:00Z', validationVersion='ltds-reference-v1')
+        self.store.accept(job['jobId'], receipt)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
+
     def test_uncertain_initialize_is_held_and_never_replayed_after_restart(self):
         job = self.submit()
         self.transport.fail_initialize = True
