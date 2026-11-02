@@ -1130,3 +1130,21 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   held. This remains a mock proposal: the Python ledger is in-memory, the
   grant has no matching closed policy fields, and no object transfer or crash
   recovery has been implemented or enabled.
+- Viewer draft PR #416 adds a disposable SQLite event fixture, now shared at
+  `contracts/reference-broker-budget-candidate/reference-v2-range-ledger-vectors.json`
+  with Git blob SHA-256
+  `032d559770c9a5d2aa4181c9595d7192531e19bb9b0aa57205ce58de0a6a246a`. The
+  Processing SQLite model passes 6 focused tests while consuming the exact
+  event sequence, including close/reopen, replacement generation, overlap,
+  wrong proof, verified sample bytes and budget exhaustion. This still uses an
+  injected test HMAC key and disposable local database; it does not prove
+  broker authentication, production offset persistence, rollback/restore,
+  source custody or a live endpoint.
+- Cross-language review found Viewer #416's candidate policy persistence uses
+  insertion-order `JSON.stringify`, while the Processing mirror uses sorted
+  canonical policy JSON. The HMAC sample proof itself matches exactly across
+  runtimes (`a99a9cfc...000decc9`) and is now pinned in Processing tests; a
+  Processing test also requires reordered-but-equal policy fields to reuse the
+  same budget ledger. Viewer has been asked to canonicalize this policy and
+  add the same order-independent replay vector; until then, generalized
+  cross-language policy parity is not established.
