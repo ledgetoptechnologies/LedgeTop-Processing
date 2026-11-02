@@ -64,6 +64,30 @@ class ScratchPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.reserve(job_id='_invalid')
 
+    def test_fifty_gigabyte_job_respects_worker_free_space_and_output_budget(self):
+        input_bytes = 50_000_000_000
+        output_budget = 100 * 1024 ** 3
+        safety_floor = 1024 ** 3
+        capacities = {
+            'cluster': 111 * 1024 ** 3,
+            'main': int(1.4 * 1024 ** 4),
+        }
+        for node, free_bytes in capacities.items():
+            root = self.root / node
+            ledger = ScratchLedger(root / 'private' / 'ledger.sqlite', root / 'scratch',
+                capacity_probe=lambda _, value=free_bytes: value, clock=lambda: self.now,
+                safety_floor_bytes=safety_floor, cleanup_grace_seconds=10)
+            request = dict(job_id='large-photo-job', generation=1,
+                reservation_id='large-' + node, manifest_sha256='a' * 64,
+                input_bytes=input_bytes, output_budget=output_budget,
+                environment='production', ttl_seconds=20, worker_ready=True)
+            if node == 'cluster':
+                with self.assertRaises(PolicyConflict):
+                    ledger.reserve(**request)
+            else:
+                reservation = ledger.reserve(**request)
+                self.assertEqual(reservation['remaining'], input_bytes + output_budget)
+
     def control(self,**changes):
         values=dict(charge_id='control-one',scope_sha256='b'*64,parent_binding_sha256='c'*64,expected_allocated=100,allowance_bytes=50,maximum_scope_charges=8)
         values.update(changes);return self.ledger.prepare_control_charge('r1',**values)
