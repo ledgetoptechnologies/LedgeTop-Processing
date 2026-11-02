@@ -1119,3 +1119,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   exact 206 range validation and zero-byte behavior; and define durable range
   progress or fail-closed retry behavior after ambiguous aborts. No Processing
   code or live service was changed during this review.
+- Viewer corrected the v1 proposal to reject zero-byte objects and opened draft
+  PR #415 (`codex/viewer-range-budget-contract`, commit `e593a85e`); the shared
+  fixture Git blob SHA-256 is
+  `ca46a7e0aeda6cc6c945880b477b4799acc509d8a39f16f5603870022fc2ee68`. A
+  Processing-side pure arithmetic/recovery oracle now consumes that exact
+  fixture and passes 6 focused tests, including all request/byte plan vectors,
+  integer safety, the 10,000 × 5 MB arithmetic case, and hold-after-uncertain
+  range across restart/replacement grant. This remains a mock proposal: the
+  Python ledger is in-memory, the grant has no matching closed policy fields,
+  and no object transfer or crash recovery has been implemented or enabled.
