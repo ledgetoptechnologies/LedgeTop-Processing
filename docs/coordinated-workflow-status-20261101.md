@@ -878,9 +878,20 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   immutable grant digest before sending the grant. Consequently a status
   response containing the six-field ACK fails closed with
   `BINDING_REQUIRED` unless the caller supplies an intent digest. Provider
-  unit tests do not establish restart or owner-handoff recovery. Viewer has
-  been asked to implement and test that production-path persistence, or mark
-  the recovery path incomplete. No live deployment or data operation occurred.
+  unit tests do not establish restart or owner-handoff recovery. Viewer traced
+  the wider path and confirmed a journal-only hash callback would still be
+  unsafe: grant minting commits in a separate broker SQLite transaction, so a
+  crash or unknown commit can occur before the Viewer journal records the hash;
+  the callback is not an enforceable pre-POST boundary when the dispatcher
+  hands the provider directly to `dispatchOnce`; and an expired lease is not
+  safely reclaimable without fencing the physical writer. The broker-owned
+  encrypted same-transaction issuance fixture remains disconnected from
+  dispatch and lacks production authentication, rollback lineage, source
+  fencing and trusted receiver reconciliation. A safe recovery design needs
+  broker-owned atomic issuance plus durable exact-grant outbox, authenticated
+  binding, and fenced recovery; a Viewer journal hash alone is insufficient.
+  The production reference lane remains hard-disabled. No live deployment or
+  data operation occurred.
 
 ## Local candidate validation — 2026-11-02
 
