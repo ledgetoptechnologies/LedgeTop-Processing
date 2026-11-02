@@ -616,6 +616,20 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   existing tasks; group metadata does not grant access. The redesign keeps a
   dark theme with Operations-aligned tokens. These are review and test results,
   not a Viewer deployment or live Processing acceptance.
+- Rechecked Viewer PR #406 on 2026-11-02: it remains open, draft, and mergeable
+  against current `main` `dc8cedfe`; GitHub reports no reviews or checks. The
+  Viewer chat confirms the saved Claude link does not prove an active Claude
+  session and no supported message-bus tool is available there, so current
+  Claude review/ownership remains unverified. A duplicate subset PR #410 was
+  briefly created during reconciliation, then closed and its branch deleted
+  after finding #406 already includes the same redesign plus hierarchy API and
+  controls. The subset's local build and 76 focused tests passed, but they are
+  not evidence for #406. Its broader suite was stopped after unrelated
+  cleanup/derivative/LOD failures and a browser test reported 3.9 GiB peak
+  memory; the complete Viewer suite is not qualified by that run. The test
+  browser processes were stopped; automatic review rejected recursive cleanup
+  of the remaining task-created temporary browser profiles, which were left in
+  place. No Viewer runtime was changed.
 - Re-ran `scripts/viewer_contract_smoke.py` on 2026-11-02 at Processing commit
   `b50057a` against the Viewer candidate `NodeOdmProvider` from
   `codex/viewer-v2-delivery-ledger` commit
