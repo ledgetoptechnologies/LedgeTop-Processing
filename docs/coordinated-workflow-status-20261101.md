@@ -43,6 +43,19 @@ No real client data was processed as part of this checkpoint.
   that inventory, not that the files are still present on disk or that a live
   orchestrator-to-Viewer ingestion was completed. The absent path does not
   prove no EPT output exists elsewhere.
+- Follow-up audit confirms the installed/reference worker supports explicit
+  completion-only resume from the exact saved receipt: it resends the recorded
+  completion and does not claim or rerun the job. Automatic process/boot
+  supervision is explicitly not installed. After abrupt worker death, stale
+  read pins and uncertain execution still require inspection before recovery.
+- An untracked Linux pidfd host-launcher experiment is present in
+  `ops/host_supervisor.py` with bounded synthetic leaf-process tests. It
+  deliberately leaves every launched epoch held because direct-child pidfd
+  exit cannot prove descendants, detached containers, engine jobs or I/O have
+  stopped. It refuses dirty-journal restart and is not a restart/recovery
+  solution or deployment artifact. Do not install it or treat its tests as
+  unattended resilience qualification. A reviewed kernel process-tree
+  containment and daemon fencing design is still required.
 
 ## Still required for the requested end state
 
@@ -52,9 +65,10 @@ No real client data was processed as part of this checkpoint.
    transfer resume and queue/capacity integration are not verified as
    operational.
 2. **Per-node control and unattended resilience:** the source has node admission,
-   maintenance and durable worker receipt mechanisms, but current host wrapper
-   is local reviewable code. It is not installed as a supervised service on
-   both nodes. No reboot-safe automatic claim/retry service is verified.
+   maintenance and durable worker receipt mechanisms, but the current host
+   wrapper is local reviewable code. Exact completion-only resume exists, but
+   reboot-safe automatic claim/retry is not installed or verified on either
+   node. Uncertain claims stay held pending inspection.
 3. **Full result acceptance and cleanup:** a worker completion ACK records
    metadata/hashes, not durable Viewer artifact custody. Viewer v1 receipt
    metadata is present for the inspected ODM task, but live worker-to-Viewer
