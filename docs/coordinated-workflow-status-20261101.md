@@ -1236,6 +1236,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   HTTP facade, and Viewer task-store suites at `4075d7c`: 89 tests passed with
   two platform skips. These cover the existing synthetic/local workflows,
   not a NAS-backed end-to-end job.
+- The resilience, Reference runtime, worker recovery, delivery, execution and
+  engine-worker suites ran 99 tests on Windows with 54 Linux/POSIX cases
+  skipped. Reran the same six suites in Ubuntu 24.04 WSL as nonroot `pilot`;
+  all 99 passed without skips. The root-default WSL attempt hit the fixture's
+  intentional nonroot-host guard, so it was rerun under the available nonroot
+  account. These are synthetic HTTP/SQLite/restart and mocked execution
+  scenarios, not live NodeODM, NAS, Viewer acceptance, or client-data runs.
 - The native facade currently advertises one parallel task and routes to fixed
   cluster/main NodeODM engine origins. `ViewerService.download()` downloads a
   completed engine archive into its configured local task directory, validates
