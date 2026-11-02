@@ -58,6 +58,11 @@ No real client data was processed as part of this checkpoint.
   the small cluster slot. It writes no image payloads and proves routing only;
   live Viewer admission still rejects the same estimated size at its 20 GiB
   cap, with no end-to-end transfer demonstrated.
+- The NodeODM 3 provider probe test now changes the synthetic `/options`
+  catalog between successive probes and confirms the second probe sees the
+  removed output option. `test_provider_nodeodm3` passed 7/7, including two
+  fresh `/info` and `/options` GETs per probe; no option catalog is cached.
+  This remains synthetic API evidence, not a fresh live-engine request.
 - A fresh read-only `df -B1` on 2026-11-02 reports root-filesystem free space
   of 118,186,557,440 bytes on `.89` and 1,490,274,271,232 bytes on `.88`.
   These are root filesystem values; the installed worker scratch mount/config

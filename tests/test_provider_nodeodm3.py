@@ -87,6 +87,14 @@ class NodeODM3ProviderTests(unittest.TestCase):
         self.assertEqual(self.probe()['reason'], 'viewer_outputs_missing')
         self.assertEqual(self.route(self.probe())['decision'], 'wait')
 
+    def test_option_catalog_is_refreshed_on_each_probe(self):
+        self.assertTrue(self.probe()['ready'])
+        self.options[:] = [item for item in self.options if item['name'] != '3d-tiles']
+        refreshed = self.probe()
+        self.assertFalse(refreshed['ready'])
+        self.assertEqual(refreshed['reason'], 'viewer_outputs_missing')
+        self.assertEqual(self.paths, ['/info', '/options', '/info', '/options'])
+
     def test_unknown_engine_or_inconsistent_version_stays_unready(self):
         for engine, version in [('unknown', '3.6.2'), ('odx', '3.6.2'), ('ODM', '3.6.2'),
                                 ('odm', '3.8.5'), ('odm', 'malformed')]:
