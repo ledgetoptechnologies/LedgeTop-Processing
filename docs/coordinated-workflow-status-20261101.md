@@ -419,18 +419,22 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   attempt, environment, reservation, manifest, broker identity digest, exact
   serialized grant digest and ACK digest without storing the bearer. Changed
   grant/ACK identities conflict; a `sending` row left by a process failure
-  remains held. Viewer head `c1f74710` further hardens that candidate: the
+  remains held. Viewer head `f0da57de` further hardens that candidate: the
   object list is derived from the immutable journaled request; `sending` and
   `uncertain` states cannot be resent under a later lease; and only the active
-  sender generation can acknowledge using a provider-validated response.
-  Synthetic regression coverage now rejects a forged ACK DTO and stale-sender
-  replay. This is persistence only: there is no production broker adapter,
+  sender generation can acknowledge using an unchanged response object bound
+  to the sending provider instance, job, environment and grant digest. ACK
+  evidence is process-local and cannot reconcile a restart. Migration 57 stays
+  immutable; migration 58 tightens its transition guard forward-only, and a
+  regression upgrades an already-applied v57 schema. Synthetic regression
+  coverage rejects forged ACK DTOs and stale-sender replay. This is persistence
+  only: there is no production broker adapter,
   process-fence/recovery authority, automatic replay loop, key provisioning,
   or live dispatch wiring; Viewer reference dispatch remains hard-off.
-- On Viewer head `c1f74710` (outbox candidate), focused migration, dispatch and
-  cumulative-budget suites passed 76/76 on Linux in a disposable Node 24
+- On Viewer head `f0da57de` (outbox candidate), focused migration, dispatch and
+  cumulative-budget suites passed 77/77 on Linux in a disposable Node 24
   container with the required ZIP dependency installed only in its temporary
-  filesystem. The same suites passed 74 tests on Windows with two
+  filesystem. The same suites passed 75 tests on Windows with two
   platform-specific skips. This is synthetic schema/state evidence, not
   production key provisioning, NAS custody, enabled dispatch or runtime
   acceptance.
