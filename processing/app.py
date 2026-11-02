@@ -395,6 +395,8 @@ class CoordinatorService:
         self._native_thread = threading.Thread(target=serve_native, name='processing-native-http', daemon=False)
         native_started = False
         try:
+            if self.handler.viewer_service and hasattr(self.handler.viewer_service,'bind_coordinator_stop'):
+                self.handler.viewer_service.bind_coordinator_stop(stop)
             if self.handler.viewer_service and not stop.is_set():
                 self.handler.viewer_service.start()
             if not stop.is_set():
@@ -456,6 +458,25 @@ class CoordinatorService:
         return 2 if failed else 0
 
 
+def _close_unstarted_handler(handler):
+    """Close all constructed components when native listener creation fails."""
+    failures=[]
+    for component in (handler.reference_listener,handler.viewer_service):
+        if component is not None:
+            try:component.close()
+            except BaseException as error:failures.append(error)
+    queue=handler.prototype_queue
+    if queue is not None:
+        try:queue.close()
+        except BaseException as error:failures.append(error)
+        else:
+            lease=getattr(queue,'authority_lease',None)
+            if lease is not None:
+                try:lease.close()
+                except BaseException as error:failures.append(error)
+    if failures:raise RuntimeError('startup resource cleanup failed') from failures[0]
+
+
 def main():
     stop = threading.Event()
     previous = {}
@@ -467,7 +488,11 @@ def main():
                 signal.signal(number, lambda *_args: stop.set())
         config = from_environment()
         handler = make_handler(config)
-        server = ThreadingHTTPServer((config.bind_host, config.port), handler)
+        try:
+            server = ThreadingHTTPServer((config.bind_host, config.port), handler)
+        except BaseException:
+            _close_unstarted_handler(handler)
+            raise
         print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
         service = CoordinatorService(server, handler)
         result = service.run(stop)

@@ -119,6 +119,7 @@ class ViewerService:
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._coordinator_stop = None
         self._thread = None
         self._backoff = {}
         self._downloads = {}
@@ -684,8 +685,15 @@ class ViewerService:
         self._thread = threading.Thread(target=self._run, name='viewer-dispatch', daemon=True)
         self._thread.start()
 
+    def bind_coordinator_stop(self, event):
+        if self._thread is not None or self._coordinator_stop is not None:
+            raise RuntimeError('dispatcher stop already bound or started')
+        if not isinstance(event, threading.Event):
+            raise ValueError('coordinator stop event required')
+        self._coordinator_stop = event
+
     def _run(self):
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not (self._coordinator_stop and self._coordinator_stop.is_set()):
             try:
                 self.tick()
             except Exception:

@@ -49,6 +49,44 @@ class FakeServer:
 
 
 class ReferenceRuntimeTests(unittest.TestCase):
+    def test_listener_construction_failure_releases_actual_queue(self):
+        from processing import app
+        original=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:job,_=original.submit({'requestId':'queued-before-bind','environment':'staging','profile':'treedar-synthetic-v1'})
+        finally:original.close()
+        with patch.object(app,'from_environment',return_value=self.config), \
+                patch.object(app,'ThreadingHTTPServer',side_effect=OSError('synthetic bind failure')):
+            with self.assertRaisesRegex(OSError,'synthetic bind failure'):app.main()
+        replacement=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:self.assertEqual(replacement.get(job['id'])['status'],'queued')
+        finally:replacement.close()
+
+    def test_listener_failure_still_closes_queue_if_viewer_cleanup_fails(self):
+        from processing import app
+        from processing.viewer_service import ViewerService
+        with patch.object(app,'from_environment',return_value=self.config), \
+                patch.object(app,'ThreadingHTTPServer',side_effect=OSError('synthetic bind failure')), \
+                patch.object(ViewerService,'close',side_effect=RuntimeError('synthetic cleanup failure')):
+            with self.assertRaisesRegex(RuntimeError,'startup resource cleanup failed'):app.main()
+        replacement=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        replacement.close()
+
+    def test_stop_during_real_dispatcher_start_prevents_first_tick(self):
+        handler=make_handler(self.config);native=ThreadingHTTPServer(('127.0.0.1',0),handler)
+        service=CoordinatorService(native,handler);stop=threading.Event();start=handler.viewer_service.start
+        def stop_then_start():
+            stop.set();start()
+        try:
+            with patch.object(handler.viewer_service,'start',side_effect=stop_then_start), \
+                    patch.object(handler.viewer_service,'tick') as tick:
+                self.assertEqual(service.run(stop),0)
+                tick.assert_not_called()
+            self.assertFalse(handler.viewer_service._thread.is_alive())
+            self.assertEqual(native.fileno(),-1)
+            replacement=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            replacement.close()
+        finally:native.server_close()
+
     def test_main_restores_signal_handlers_after_configuration_error(self):
         from processing import app
         numbers=[getattr(signal,name) for name in ('SIGINT','SIGTERM') if hasattr(signal,name)]

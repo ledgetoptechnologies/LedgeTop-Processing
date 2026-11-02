@@ -8,9 +8,15 @@ configuration fails. A synthetic child self-SIGTERM test exercises `main`, and
 two owned real-Queue/ViewerService/listener tests exercise observed stop before
 startup and immediately after Viewer start.
 
-The stop check is not atomic with a component's individual start call; a signal
-inside that call can still race with initialization or a dispatcher turn. The
-existing case where handler construction succeeds but listener construction
-fails also requires separate resource-cleanup work. These tests do not fence
+The dispatcher shares the coordinator's stop event and checks it before each
+turn; a synthetic stop during its actual start prevents its first tick. This
+check is not atomic with a tick, so a signal immediately after the check can
+still race with work already entering the turn.
+
+If native listener creation fails after handler construction, the entrypoint
+attempts to close the unstarted reference runtime, Viewer service, queue and
+authority lease. Cleanup errors are reported, and a synthetic queued job is
+preserved in the bind-failure test. Failures *inside* `make_handler` before it
+returns require separate lifecycle review. These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.
