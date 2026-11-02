@@ -385,6 +385,16 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 
 ## Evidence update — 2026-11-02
 
+- Re-ran the combined reference workflow suites across admission, API, queue,
+  production/staging and node routing, transfer, worker recovery, Viewer result
+  delivery, result proxy, source retention, pipeline and TreeDar: 364 passed,
+  200 skipped, 0 failed. Pinned test dependencies were supplied from an
+  automatically cleaned temporary directory. This remains local synthetic
+  evidence; it does not exercise the installed host worker or TrueNAS custody.
+- Re-ran the exact current Viewer draft heads: #406 (`b489c4bf`) hierarchy,
+  branding, load and migration suite passed 34/34; #411 (`fa492634`) synthetic
+  TreeDar provenance policy suite passed 16/16 (15 vectors plus parent test).
+  Neither is runtime interoperability or deployment evidence.
 - Re-ran the focused shared-contract, authenticated provenance, TreeDar
   admission/publication, pipeline and runtime suites: 127 passed, 93 skipped,
   0 failed. These are local synthetic/source tests; the skips are reported by
