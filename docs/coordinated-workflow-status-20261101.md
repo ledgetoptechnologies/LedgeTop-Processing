@@ -1152,3 +1152,38 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   1,356 tests with 578 platform skips. The Viewer proposal suite passed 17
   focused tests at `c462f81b`; neither result is live broker or worker runtime
   acceptance.
+
+## Result acceptance and source release contract proposal — 2026-11-02
+
+- Added `contracts/reference-v2-candidate/result-acceptance-release-proposal.json`
+  and the Processing-only `reference_acceptance_release_candidate` checker.
+  The proposal reuses the existing v2 `PartialAcceptance` and
+  `AcceptedCopyAck` records, adds closed source-release authorization/ACK
+  shapes, binds five job identity fields, exact result/source inventories,
+  custody and terminal receipts, storage/root generations, policy digest,
+  operation IDs, expiry, and canonical closure/custody/authorization digests.
+- The result checker compares the accepted inventory with the caller's expected
+  immutable result manifest and requires the ACK issuer/role to come from an
+  external authenticated transport context. The release checker requires
+  separate Viewer-retention and storage-executor identities, exact source and
+  terminal bindings, exact deletion inventory, and requires the effect and
+  durable ACK commit before authorization expiry. Post-expiry replay is a
+  separate read-only lookup of an identical ACK in the authenticated durable
+  storage ledger; it cannot start a new deletion. Viewer authorization and
+  storage execution require distinct principals. Exact replay persistence and
+  actual physical deletion remain storage-service responsibilities.
+- The proposal explicitly scopes deletion to the processing-spool copy, keeps
+  Viewer originals, accepted results and permanent Emlid CSVs out of scope, and
+  holds on stale identity, unknown state, untrusted issuer, or ambiguous ACK.
+  It is synthetic and unagreed: it proves no mTLS identity, source custody,
+  writer fence, capacity reservation, filesystem durability, or cleanup.
+- TrueNAS inspection established that the approved `processing-spool` path is
+  a subfolder under the existing `Plugins/App_Data/Model-Viewer` ZFS dataset.
+  A ZFS snapshot at that dataset boundary includes the broader Viewer dataset;
+  it is not a subfolder-only pin or capacity reservation. The new proposal uses
+  opaque spool-root/file identities and does not treat the existing v2 dataset
+  snapshot fields as proof of this subfolder's custody. No TrueNAS or runtime
+  changes were made.
+- Focused Processing checks passed: acceptance/release candidate, existing v2
+  acceptance, and signed source-retention suites ran 45 tests with one
+  platform-specific skip. These are local synthetic checks only.

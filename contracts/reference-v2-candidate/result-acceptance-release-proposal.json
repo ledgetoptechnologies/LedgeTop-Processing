@@ -1,0 +1,124 @@
+{
+  "status": "UNAGREED_SYNTHETIC_CANDIDATE_NOT_AUTHORITY",
+  "version": 1,
+  "sourceRootConstraint": "The configured processing-spool is a subfolder of the existing Model-Viewer ZFS dataset. A whole-dataset snapshot is not a subfolder-only pin or capacity reservation. No dataset, snapshot, path, ACL, endpoint, key or service is created by this proposal.",
+  "authentication": {
+    "mode": "mutually authenticated service transport with an externally configured principal-to-role map",
+    "bodyIssuerRule": "issuerId is only a label; it must equal the authenticated peer principal resolved to the expected role. A body field, self-digest, SQLite row, bearer supplied by a caller, or local lock is not authentication.",
+    "roles": {
+      "resultAcceptanceIssuer": "authorized Viewer/NAS accepted-copy service; never a worker",
+      "sourceReleaseAuthorizer": "authorized Viewer retention authority; never a worker or processing coordinator",
+      "sourceStorageExecutor": "independently configured storage service with exclusive spool-root ownership and writer/deletion fencing"
+    }
+  },
+  "hashDomains": {
+    "spoolClosureSha256": "SHA256(ASCII(LTDS-PROCESSING-SPOOL-CLOSURE-V1) || 0x00 || canonicalUTF8(ASCII-objectId-ordered exact objects array))",
+    "spoolCustodyReceiptSha256": "SHA256(ASCII(LTDS-PROCESSING-SPOOL-CUSTODY-RECEIPT-V1) || 0x00 || canonicalUTF8(complete closed processing_spool_custody record))",
+    "sourceReleaseAck.authorizationSha256": "SHA256(ASCII(LTDS-SOURCE-RELEASE-AUTHORIZATION-V1) || 0x00 || canonicalUTF8(complete closed authorization record))",
+    "canonicalMetadata": "UTF-8 JSON, ASCII lexicographic keys, array order preserved, no whitespace, booleans distinct from integers, nonnegative safe integer fields, valid scalar Unicode"
+  },
+  "records": {
+    "resultAcceptance": {
+      "existingRecords": ["PartialAcceptance", "AcceptedCopyAck"],
+      "binding": ["binding.jobId", "binding.generation", "binding.environment", "binding.inputManifestSha256", "binding.pipelineDigest", "resultSetId", "resultManifestSha256", "acceptedArtifacts"],
+      "verification": "The issuer must verify the received bytes, exact size and digest, required product closure, and exclusive accepted-copy custody before committing PartialAcceptance. AcceptedCopyAck echoes the exact operation, receipt, canonical acceptance digest, binding, result-set identity, manifest digest, accepted artifact IDs in order, and storage receipt ID.",
+      "replay": "Idempotency is keyed by authenticated issuer principal plus ackOperationId. Exact canonical request replay returns the original byte-identical receipt/ack. Reusing the operation ID with any changed identity, payload, inventory or digest conflicts. Unknown response or missing receipt leaves worker and scheduler holds in place.",
+      "cleanup": "AcceptedCopyAck proves only the authenticated issuer's recorded acceptance. It does not authorize source-input deletion, producer-output deletion, heavy-slot release, publication, or job terminalization by itself. The coordinator must persist the exact ack in its durable outbox/acceptance journal before changing its own state."
+    },
+    "spoolCustodyReceipt": {
+      "closedFields": ["schemaVersion", "receiptType", "receiptId", "issuerId", "storageReceiptId", "binding", "spoolRootId", "spoolRootGeneration", "sourceClosureSha256", "objects", "writerFenceReceiptId", "capacityReservationReceiptId", "reservedBytes", "retainedAt", "retentionGuarantee"],
+      "objects": "Exact ASCII-objectId-ordered inventory of physical spool-copy identities: objectId, physicalObjectId, objectGeneration, byteSize, sha256 and custodyReceiptId.",
+      "authority": "A trusted storage executor returns this only after independently resolving the exact attempt and re-reading every opened source byte under a fenced writer/purge boundary. The external principal must map to sourceStorageExecutor; the receipt and hashes alone are not custody.",
+      "capacity": "capacityReservationReceiptId must resolve to an independently checked reservation with sufficient remaining space for source copies, concurrent result transfer/expansion and any retained result copy. A logical counter, statvfs sample, field named reservedBytes, or a snapshot of the parent Model-Viewer dataset alone is not a physical reservation.",
+      "retention": "No time-based deletion. Objects remain held until an explicit sourceReleaseAuthorization and durable sourceReleaseAck both reconcile."
+    },
+    "sourceReleaseAuthorization": {
+      "closedFields": ["schemaVersion", "receiptType", "authorizationId", "operationId", "issuerId", "binding", "sourceCustodyReceiptId", "sourceCustodyReceiptSha256", "storageReceiptId", "spoolRootId", "spoolRootGeneration", "sourceClosureSha256", "objects", "terminalReceiptId", "terminalReceiptSha256", "acceptedCopyAckIds", "policySha256", "authorizedAt", "expiresAt"],
+      "binding": ["binding.jobId", "binding.generation", "binding.environment", "binding.inputManifestSha256", "binding.pipelineDigest"],
+      "objects": "Exact ordered immutable inventory from the authenticated spool custody receipt. Each object binds objectId, physicalObjectId, objectGeneration, byteSize, sha256 and per-object custodyReceiptId.",
+      "authority": "Only the configured Viewer retention-authority principal may issue this record after it independently confirms the exact attempt is terminal, no retry or downstream stage can read the spool copy, delivery is resolved or explicitly not required, and the configured retention policy permits release. The authorization is limited to the exact processing-spool copy; it never names the Viewer source dataset, permanent raw Emlid CSVs, or accepted result copies.",
+      "freshness": "For a new release operation, authorization must be unexpired and bound to the current spool-root generation, custody receipt, terminal receipt and policy revision. An exact already-committed operation may be queried/replayed after expiry solely to recover its prior outcome. Expiry, stale generation, unknown terminal state, policy rollback, unknown ACK or uncertain writer state means retain/hold.",
+      "effect": "Authorization permits the storage executor to reconcile and delete only the exact listed spool-copy objects after it independently verifies the writer fence and file identities. It does not authorize deleting original Viewer inputs or results."
+    },
+    "sourceReleaseAck": {
+      "closedFields": ["schemaVersion", "receiptType", "ackId", "operationId", "authorizationId", "authorizationSha256", "issuerId", "binding", "sourceCustodyReceiptId", "sourceCustodyReceiptSha256", "storageReceiptId", "spoolRootId", "spoolRootGeneration", "sourceClosureSha256", "deletedObjects", "deletedAt", "acknowledgedAt"],
+      "deletedObjects": "Exact inventory from the authorization, each paired with a unique durable filesystem deletion receipt ID. The executor records intent before unlink, verifies the file identity/size/hash and no active writer under its independent fence, unlinks only listed objects, synchronizes affected directories, then commits the immutable ACK. Partial or uncertain deletion remains held and reconciles the same operation; missing paths alone never prove deletion success.",
+      "replay": "Idempotency is keyed by authenticated storage-executor principal plus operationId. Exact replay returns the immutable prior ACK; changed authorization or inventory conflicts. No second deletion pass is inferred from a missing file.",
+      "expiry": "For a new operation, both deletedAt and the durable ACK commit time acknowledgedAt must be no later than authorization expiresAt. After expiry, only a read-only replay of a byte-identical ACK already present in the authenticated durable operation ledger is permitted. An incomplete or partially applied operation that cannot finish before expiry stays held; recovery requires a fenced new spool generation and fresh authorization, or operator review. Original Viewer inputs remain untouched.",
+      "scope": "This ACK reports deletion of the processing-spool copy only. It is not a ZFS snapshot deletion, result acceptance, producer cleanup receipt, Viewer source deletion, or permission to purge original client data."
+    }
+  },
+  "globalInvariants": [
+    "All record schemas are closed; identities and all five job binding fields compare exactly.",
+    "Accepted artifact IDs, result manifest digest, source object inventory, source closure digest and storage receipt identities are exact, immutable and non-empty where required.",
+    "Receipt IDs, physical object IDs, per-object custody receipts, deletion receipt IDs and operation IDs are unique within their issuer/hold scope.",
+    "A stale worker, worker self-claim, untrusted issuer string, timeout, lost ACK, missing receipt, DB rollback/restore or ambiguous process state cannot release data or capacity.",
+    "Only an independently authenticated storage executor with actual file writer fencing may perform the authorized unlink; candidate validation does not establish that implementation or authority.",
+    "No TTL, status label, completion callback, accepted-copy ACK or SQLite flock substitutes for explicit release authorization plus durable storage ACK."
+  ],
+  "releaseVector": {
+    "status": "synthetic-only",
+    "authorization": {
+      "schemaVersion": 1,
+      "receiptType": "source_release_authorization",
+      "authorizationId": "release-auth-1",
+      "operationId": "release-op-1",
+      "issuerId": "viewer-retention-service",
+      "binding": {"jobId": "job-1", "generation": 3, "environment": "production", "inputManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      "sourceCustodyReceiptId": "spool-custody-1",
+      "sourceCustodyReceiptSha256": "58b5464720b63964beeadb0da648a83facb151725a75c00b5f1e7e8ac2ed52ef",
+      "storageReceiptId": "spool-storage-1",
+      "spoolRootId": "processing-spool",
+      "spoolRootGeneration": 7,
+      "sourceClosureSha256": "d0433492f8ff0175103c0792aee9ff45332f76e673a0492cdaa98fbcdc981008",
+      "objects": [{"objectId": "source-1", "physicalObjectId": "physical-1", "objectGeneration": 4, "byteSize": 12, "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "custodyReceiptId": "object-custody-1"}],
+      "terminalReceiptId": "terminal-1",
+      "terminalReceiptSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "acceptedCopyAckIds": ["accepted-copy-1"],
+      "policySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "authorizedAt": "2026-11-02T12:00:00.000Z",
+      "expiresAt": "2026-11-02T12:05:00.000Z"
+    },
+    "acknowledgement": {
+      "schemaVersion": 1,
+      "receiptType": "source_release_ack",
+      "ackId": "release-ack-1",
+      "operationId": "release-op-1",
+      "authorizationId": "release-auth-1",
+      "authorizationSha256": "d49e3a373e0f22c75ec5ff3e8286b5c6121650515d921e1e9088953e32123e03",
+      "issuerId": "nas-spool-executor",
+      "binding": {"jobId": "job-1", "generation": 3, "environment": "production", "inputManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      "sourceCustodyReceiptId": "spool-custody-1",
+      "sourceCustodyReceiptSha256": "58b5464720b63964beeadb0da648a83facb151725a75c00b5f1e7e8ac2ed52ef",
+      "storageReceiptId": "spool-storage-1",
+      "spoolRootId": "processing-spool",
+      "spoolRootGeneration": 7,
+      "sourceClosureSha256": "d0433492f8ff0175103c0792aee9ff45332f76e673a0492cdaa98fbcdc981008",
+      "deletedObjects": [{"objectId": "source-1", "physicalObjectId": "physical-1", "objectGeneration": 4, "byteSize": 12, "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "custodyReceiptId": "object-custody-1", "deletionReceiptId": "delete-1"}],
+      "deletedAt": "2026-11-02T12:00:01.000Z",
+      "acknowledgedAt": "2026-11-02T12:00:02.000Z"
+    },
+    "spoolCustodyReceipt": {
+      "schemaVersion": 1,
+      "receiptType": "processing_spool_custody",
+      "receiptId": "spool-custody-1",
+      "issuerId": "nas-spool-executor",
+      "storageReceiptId": "spool-storage-1",
+      "binding": {"jobId": "job-1", "generation": 3, "environment": "production", "inputManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      "spoolRootId": "processing-spool",
+      "spoolRootGeneration": 7,
+      "sourceClosureSha256": "d0433492f8ff0175103c0792aee9ff45332f76e673a0492cdaa98fbcdc981008",
+      "objects": [{"objectId": "source-1", "physicalObjectId": "physical-1", "objectGeneration": 4, "byteSize": 12, "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "custodyReceiptId": "object-custody-1"}],
+      "writerFenceReceiptId": "writer-fence-1",
+      "capacityReservationReceiptId": "capacity-reservation-1",
+      "reservedBytes": 12,
+      "retainedAt": "2026-11-02T11:59:00.000Z",
+      "retentionGuarantee": "until_explicit_source_release_ack_v1"
+    },
+    "authenticatedContexts": {
+      "authorizationPeer": {"principal": "viewer-retention-service", "role": "sourceReleaseAuthorizer"},
+      "acknowledgementPeer": {"principal": "nas-spool-executor", "role": "sourceStorageExecutor"}
+    },
+    "expected": "synthetic binding pass only; this vector does not prove signatures, mTLS, NAS custody, capacity, writer fences, filesystem durability, or deletion"
+  }
+}
