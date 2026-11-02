@@ -9,6 +9,7 @@ from copy import deepcopy
 from . import reference_protocol as protocol
 
 TREEDAR_PROTOCOL = "ltds-reference-result-v2"
+TREEDAR_MAX_RESULT_OBJECTS = 102
 TREEDAR_ROLES = frozenset((
     "ground_model", "canopy_height", "canopy_height_unfiltered", "crown_labels",
     "area_labels", "orthophoto_point_colour", "crowns", "tree_table", "tree_features",
@@ -64,7 +65,7 @@ def derive_viewer_result_manifest(result_manifest, *, job_id, generation, enviro
         return source
     _need(engines in ({"treedar"}, {"odm", "treedar"}), "unsupported_viewer_engine_set")
     objects = source["objects"]
-    _need(0 < len(objects) <= 100, "viewer_v2_object_count_invalid")
+    _need(0 < len(objects) <= TREEDAR_MAX_RESULT_OBJECTS, "viewer_v2_object_count_invalid")
     roles = [item["role"] for item in objects]
     _validate_v2_roles(roles, engines)
     payload = {
@@ -114,7 +115,7 @@ def validate_viewer_result_manifest(payload, *, job_id, generation, environment,
     engines = set(checked["engineVersions"])
     _need(engines in ({"treedar"}, {"odm", "treedar"}), "unsupported_viewer_engine_set")
     objects = checked["objects"]
-    _need(0 < len(objects) <= 100, "viewer_v2_object_count_invalid")
+    _need(0 < len(objects) <= TREEDAR_MAX_RESULT_OBJECTS, "viewer_v2_object_count_invalid")
     _need(all(type(item["byteSize"]) is int and item["byteSize"] > 0 for item in objects),
           "viewer_v2_object_size_invalid")
     roles = [item["role"] for item in objects]

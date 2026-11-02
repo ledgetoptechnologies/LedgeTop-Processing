@@ -5,6 +5,7 @@ import unittest
 
 from processing import reference_protocol as protocol
 from processing.viewer_result_manifest import (
+    TREEDAR_MAX_RESULT_OBJECTS,
     ViewerManifestRejected,
     derive_viewer_result_manifest,
     validate_viewer_acceptance,
@@ -55,6 +56,7 @@ class ViewerResultManifestTests(unittest.TestCase):
             acceptedAt='2026-11-02T12:00:00.000Z', validationVersion=protocol.VALIDATION_VERSION)
 
     def test_combined_job_derives_closed_v2_manifest_without_reordering(self):
+        self.assertEqual(TREEDAR_MAX_RESULT_OBJECTS, 102)
         self.assertEqual(self.viewer['protocol'], 'ltds-reference-result-v2')
         self.assertEqual(self.viewer['schemaVersion'], 2)
         self.assertEqual(self.viewer['engineVersions'], {'odm': 'odm-test', 'treedar': 'treedar-test'})
