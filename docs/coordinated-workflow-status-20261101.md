@@ -87,6 +87,21 @@ No real client data was processed as part of this checkpoint.
   not printed. This verifies the live read-only discovery endpoint and the
   requested 1,000-photo small-node cap; it does not verify Viewer rendering,
   job submission, task exclusivity under load, or processing completion.
+- I also invoked the live NodeODM-compatible Viewer facade's authenticated
+  read-only `GET /info` and `GET /options` from inside `.89`, using its
+  configured Viewer credential without printing it. The facade reported
+  `engine=ledgetop-processing`, `version=2.4.0`, `maxImages=null`,
+  `maxParallelTasks=1`, an empty queue, and the same 74 common option
+  definitions. Source review at current Viewer redesign head `b489c4bf`
+  confirms `nodeOdmProvider.js` probes this facade and stores its capability
+  options; the new-task editor renders those options and the Viewer API
+  validates overrides against them. Therefore the intended ODM flag path is
+  dynamically connected through the provider facade; the Viewer does not call
+  the prototype's separate `/v1/options` route. This read-only verification
+  does not prove a browser rendered the just-probed live catalog or any task
+  execution. The pipeline-selection request remains incomplete: the Viewer
+  submission schema has no TreeDar/LiDAR opt-in or Gaussian-splat-disabled
+  scaffold, and the live facade executes only NodeODM work.
 - A fresh read-only `df -B1` on 2026-11-02 reports root-filesystem free space
   of 118,186,557,440 bytes on `.89` and 1,490,274,271,232 bytes on `.88`.
   These are root filesystem values; the installed worker scratch mount/config
