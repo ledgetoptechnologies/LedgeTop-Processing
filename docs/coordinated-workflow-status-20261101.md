@@ -1276,3 +1276,40 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   transfer, live Viewer acceptance, cross-service recovery, and bounded safe
   cleanup remain implementation and runtime-acceptance gates. No task or NAS
   data was created, changed, or deleted by these checks.
+
+## Live host and Viewer UI recheck — 2026-11-02
+
+- Read-only SSH inspection found the cluster `.89` Processing prototype
+  running and `GET /healthz` returning `status=ok`,
+  `mode=routing_probe`, `syntheticPrototypeEnabled=true`,
+  `photoSmokeEnabled=false`, and `viewerEnabled=true`. The cluster
+  `node-odx-gpu` container is stopped. The separate legacy `clusterodx`
+  container is also stopped. No container or job was started.
+- On the main `.88` NodeODM endpoint, read-only `GET /info` returned version
+  `2.4.0`, engine `odx` version `3.8.5`, `taskQueueCount=0`,
+  `maxParallelTasks=1`, and `maxImages=null`. This is engine metadata only; it
+  does not show the deployed Viewer scheduler or test actual image handling.
+- The full Processing `unittest` suite on this Windows host ran 1,366 tests:
+  all passed, with 578 skipped for Linux/POSIX behavior or unavailable
+  geospatial dependencies. This is broad synthetic coverage, not end-to-end
+  runtime acceptance.
+- Viewer workspace tests were rerun on draft PR #406's head
+  `b489c4bf738befcad4c7867869117c9cab41b5e3`. The selected changed-file runs
+  passed 27 and 85 tests respectively, including hierarchy controls, desktop
+  rendering and mobile viewport checks. The hierarchy-controls test file was
+  included in both invocations, so the combined 112 passes include repeated
+  tests; they are not a whole-PR or operator-acceptance result. GitHub still
+  reports #406 as an open draft by Bkoltz, without reviews or comments.
+- The Viewer chat reports only a historical Claude acknowledgment and no
+  verified current Claude session binding. The current app session could not
+  be inspected from this environment; Claude's active ownership of #406 remains
+  unverified.
+- Viewer draft PR #420 documents the queue/transfer/acceptance boundaries.
+  Draft PR #421 adds an isolated fake-authority SQLite handoff rehearsal;
+  independently rerunning its seven tests passed. Neither PR has production
+  wiring or proves NAS reservation, physical custody, service authentication,
+  accepted-copy integration, or safe release.
+- No Viewer submission or processing task was sent. The `.89` photo smoke
+  remains disabled, the cluster NodeODM container remains stopped, and the
+  system state still does not support a claim that client scheduling and
+  result return are ready.
