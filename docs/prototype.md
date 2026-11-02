@@ -51,6 +51,7 @@ Request bodies use `Content-Type: application/json` and are limited to 8 KiB.
 | POST `/v1/prototype/jobs/<id>/complete` | `{claimToken,status,result}` | `{job}`; status succeeded or failed, compact result up to 4096 bytes |
 | POST `/v1/prototype/jobs/<id>/hold` | `{note}` | running becomes held; does not stop a worker or release capacity |
 | POST `/v1/prototype/jobs/<id>/resolve` | `{note,workerStopped:true}` | held becomes failed after operator inspection |
+| POST `/v1/prototype/jobs/<id>/cancel` | `{note}` | queued becomes cancelled; an identical retry returns the same terminal record |
 
 `requestId` and `workerId` are ASCII slugs of 1–64 characters. Environment is
 explicitly `production` or `staging`; it cannot change on an existing request.
@@ -61,7 +62,10 @@ The queue has one global execution slot and retains up to 1000 jobs. Production
 is selected before staging, FIFO within each class. Running staging is **not
 preempted** if production arrives; production is next after that run finishes.
 This is an explicit first-prototype limitation. There is no automatic dispatch,
-retry, cancellation, cleanup, promotion or downstream ODM submission.
+retry, cleanup, promotion or downstream ODM submission. An operator may cancel a
+queued job with the separate operator credential; the transaction refuses if a
+worker has already claimed it. Cancellation does not stop running work, release a
+running claim or delete the audit row.
 
 Worker completion delivery now retries durably while the foreground worker runs;
 this never retries engine execution. See [ownership and resilience](resilience.md).

@@ -1,6 +1,7 @@
-from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 from processing.prototype import Queue, Conflict, PROFILE
 
@@ -133,3 +134,48 @@ class QueueTests(unittest.TestCase):
         self.queue.operator(claim["id"], "resolve", {"note": "verified no worker remains", "workerStopped": True})
         self.assertEqual(self.queue.get(claim["id"])["status"], "failed")
         self.assertIsNotNone(self.queue.claim({"workerId": "worker"}))
+
+    def test_operator_cancel_is_queued_only_idempotent_and_preserves_fifo(self):
+        cancelled, _ = self.queue.submit(submission("cancel-me"))
+        next_job, _ = self.queue.submit(submission("next"))
+        first = self.queue.operator(cancelled["id"], "cancel", {"note": "wrong node profile"})
+        self.assertEqual(first["status"], "cancelled")
+        self.assertEqual(first["result"]["operatorAction"], "cancel")
+        self.assertEqual(self.queue.operator(cancelled["id"], "cancel", {"note": "retry"}), first)
+        self.assertEqual(self.queue.claim({"workerId": "worker"})["id"], next_job["id"])
+        with self.assertRaises(Conflict):
+            self.queue.operator(next_job["id"], "cancel", {"note": "already claimed"})
+
+    def test_cancel_and_claim_race_has_one_terminal_winner(self):
+        for index in range(20):
+            job, _ = self.queue.submit(submission(f"cancel-claim-race-{index}"))
+            barrier = Barrier(3)
+
+            def cancel():
+                barrier.wait()
+                try:
+                    return ("cancelled", self.queue.operator(
+                        job["id"], "cancel", {"note": "concurrent operator action"}))
+                except Conflict:
+                    return ("conflict", None)
+
+            def claim():
+                barrier.wait()
+                return ("claimed", self.queue.claim({"workerId": "worker"}))
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                cancel_future = pool.submit(cancel)
+                claim_future = pool.submit(claim)
+                barrier.wait()
+                cancel_outcome, cancel_row = cancel_future.result()
+                _, claimed = claim_future.result()
+
+            if cancel_outcome == "cancelled":
+                self.assertEqual(cancel_row["status"], "cancelled")
+                self.assertIsNone(claimed)
+            else:
+                self.assertIsNotNone(claimed)
+                self.assertEqual(claimed["id"], job["id"])
+                self.assertEqual(self.queue.get(job["id"])["status"], "running")
+                self.queue.complete(job["id"], {
+                    "claimToken": claimed["claimToken"], "status": "failed", "result": {}})

@@ -120,3 +120,18 @@ class PrototypeHTTPTests(unittest.TestCase):
         _, resolved = self.request(f"/v1/prototype/jobs/{identifier}/resolve",
                                    {"note": "confirmed worker stopped", "workerStopped": True}, OPERATOR_TOKEN)
         self.assertEqual(resolved["job"]["status"], "failed")
+
+    def test_only_operator_can_cancel_queued_job_and_retry_is_safe(self):
+        _, submitted = self.request('/v1/prototype/jobs', submission('cancel-http'))
+        identifier = submitted['job']['id']
+        with self.assertRaises(HTTPError) as caught:
+            self.request(f'/v1/prototype/jobs/{identifier}/cancel', {'note': 'wrong profile'})
+        self.assertEqual(caught.exception.code, 401)
+        _, cancelled = self.request(f'/v1/prototype/jobs/{identifier}/cancel',
+                                    {'note': 'wrong node profile'}, OPERATOR_TOKEN)
+        self.assertEqual(cancelled['job']['status'], 'cancelled')
+        _, retry = self.request(f'/v1/prototype/jobs/{identifier}/cancel',
+                                {'note': 'lost response retry'}, OPERATOR_TOKEN)
+        self.assertEqual(retry['job'], cancelled['job'])
+        _, claim = self.request('/v1/prototype/claim', {'workerId': 'worker'})
+        self.assertIsNone(claim['job'])

@@ -9,6 +9,7 @@ from ops import processingctl
 
 
 TOKEN = 'synthetic-coordinator-token-' + 'x' * 32
+OPERATOR_TOKEN = 'synthetic-operator-token-' + 'y' * 32
 ENGINE = '45bc889d-d645-442b-8fb9-d78b77b14fe9'
 IMAGE = 'sha256:' + 'a' * 64
 
@@ -71,6 +72,11 @@ class ProcessingCtlTests(unittest.TestCase):
     def test_dispatch_passes_only_api_token_and_returns_child_status(self):
         self.metadata['nodeId'] = 'main'
         self.write_metadata()
+        (self.root / 'runtime.env').write_text(
+            'PROCESSING_API_TOKEN=' + TOKEN + '\n'
+            'PROCESSING_PROTOTYPE_OPERATOR_TOKEN=' + OPERATOR_TOKEN + '\n')
+        if processingctl.os.name != 'nt':
+            (self.root / 'runtime.env').chmod(0o600)
         args = processingctl.parser().parse_args(['--root', str(self.root), 'dispatch', '--max-jobs', '3'])
         observed = {}
 
@@ -79,7 +85,7 @@ class ProcessingCtlTests(unittest.TestCase):
             return SimpleNamespace(returncode=7)
 
         with patch.dict(processingctl.os.environ,
-                        {'PROCESSING_PROTOTYPE_OPERATOR_TOKEN': 'operator-secret',
+                        {'PROCESSING_PROTOTYPE_OPERATOR_TOKEN': OPERATOR_TOKEN,
                          'PROCESSING_PROTOTYPE_OBSERVER_TOKEN': 'observer-secret',
                          'MAIN_NODE_TOKEN': 'node-secret',
                          'PROCESSING_VIEWER_TOKEN': 'viewer-secret',
@@ -97,6 +103,40 @@ class ProcessingCtlTests(unittest.TestCase):
             self.assertNotIn(name, observed['env'])
         self.assertEqual(observed['env']['DOCKER_CONFIG'], '/private/docker-config')
         self.assertNotIn(TOKEN, ' '.join(observed['command']))
+
+    def test_cancel_queued_uses_private_operator_credential_and_prints_no_secret(self):
+        (self.root / 'runtime.env').write_text(
+            'PROCESSING_API_TOKEN=' + TOKEN + '\n'
+            'PROCESSING_PROTOTYPE_OPERATOR_TOKEN=' + OPERATOR_TOKEN + '\n')
+        if processingctl.os.name != 'nt':
+            (self.root / 'runtime.env').chmod(0o600)
+        identifier = 'a8a93a98-2740-4341-8dc6-0043ef86c72f'
+        args = processingctl.parser().parse_args([
+            '--root', str(self.root), 'cancel-queued', '--job-id', identifier,
+            '--note', 'synthetic queue test'])
+        with patch.object(processingctl, 'api_request', return_value={
+                'job': {'id': identifier, 'status': 'cancelled'}}) as request:
+            with patch('builtins.print') as output:
+                self.assertEqual(processingctl.run(args), 0)
+        installation = processingctl.load_installation(self.root)
+        request.assert_called_once_with(
+            installation,
+            f'/v1/prototype/jobs/{identifier}/cancel',
+            {'note': 'synthetic queue test'}, operator=True)
+        self.assertNotIn(TOKEN, repr(installation))
+        self.assertNotIn(OPERATOR_TOKEN, repr(installation))
+        rendered = output.call_args.args[0]
+        self.assertIn('cancelled', rendered)
+        self.assertNotIn(TOKEN, rendered)
+        self.assertNotIn(OPERATOR_TOKEN, rendered)
+
+    def test_cancel_queued_requires_the_private_operator_credential(self):
+        identifier = 'a8a93a98-2740-4341-8dc6-0043ef86c72f'
+        args = processingctl.parser().parse_args([
+            '--root', str(self.root), 'cancel-queued', '--job-id', identifier,
+            '--note', 'synthetic queue test'])
+        with self.assertRaisesRegex(processingctl.ControlError, 'operator credential'):
+            processingctl.run(args)
 
     def test_non_loopback_origin_is_refused(self):
         self.metadata['origin'] = 'http://192.168.50.89:18080'

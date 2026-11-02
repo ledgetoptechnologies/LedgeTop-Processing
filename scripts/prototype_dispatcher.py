@@ -166,7 +166,7 @@ def queue(base, token):
         for job in jobs:
             if (not isinstance(job, dict) or str(uuid.UUID(job['id'])) != job['id']
                     or job['id'] in seen or job['environment'] not in ('production', 'staging')
-                    or job['status'] not in ('queued', 'running', 'held', 'succeeded', 'failed')
+                    or job['status'] not in ('queued', 'running', 'held', 'succeeded', 'failed', 'cancelled')
                     or not isinstance(job['profile'], str) or not SLUG.fullmatch(job['profile'])
                     or (job.get('nodeId') is not None and
                         (not isinstance(job['nodeId'], str) or not SLUG.fullmatch(job['nodeId'])))):

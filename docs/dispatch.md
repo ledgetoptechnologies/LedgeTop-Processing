@@ -82,7 +82,9 @@ source, scratch, and dispatcher state. The directories must already exist,
 belong to the service account, be private, and remain under the installation
 root. The wrapper reads `PROCESSING_API_TOKEN` from the private environment
 file and passes a small OS/Docker environment allowlist plus that one token to
-the dispatcher child.
+the dispatcher child. An optional, separate
+`PROCESSING_PROTOTYPE_OPERATOR_TOKEN` enables `cancel-queued`; it is used only by
+the local wrapper for that operator request and is never passed to a child.
 
 The wrapper refuses non-loopback coordinator origins and non-digest image IDs.
 It derives the worker policy from the installed node identity: cluster uses the
@@ -93,7 +95,14 @@ gate are recorded. Example invocations are:
 ```sh
 python3 /private/processing/processingctl.py --root /private/processing status
 python3 /private/processing/processingctl.py --root /private/processing dispatch --max-jobs 2
+python3 /private/processing/processingctl.py --root /private/processing cancel-queued --job-id UUID --note 'wrong node profile'
 ```
+
+`cancel-queued` requires the separate operator token and only transitions a job
+that is still queued. If a worker wins the atomic claim race, cancellation
+returns a conflict and does not stop that worker. Retrying cancellation after a
+successful response loss returns the same terminal audit record. It does not
+delete the job or any input/output data.
 
 This refactor is reviewable source only. It has not been installed on `.88` or
 `.89`; the November 1 main-node acceptance used the existing one-shot dispatcher.

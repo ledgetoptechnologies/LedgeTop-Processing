@@ -6,7 +6,7 @@ node and run Docker against the wrong host.
 """
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -40,7 +40,8 @@ class ControlError(Exception):
 class Installation:
     root: Path
     origin: str
-    api_token: str
+    api_token: str = field(repr=False)
+    operator_token: str = field(repr=False)
     node_id: str
     engine_id: str
     generation: int
@@ -132,6 +133,11 @@ def load_installation(root):
     if (len(token) < 32 or len(token) > 4096
             or any(ord(char) < 33 or ord(char) > 126 for char in token)):
         raise ControlError('private coordinator credential is invalid')
+    operator_token = env.get('PROCESSING_PROTOTYPE_OPERATOR_TOKEN', '')
+    if (operator_token and (len(operator_token) < 32 or len(operator_token) > 4096
+            or operator_token == token
+            or any(ord(char) < 33 or ord(char) > 126 for char in operator_token))):
+        raise ControlError('private operator credential is invalid')
 
     # Older installations predate nodeId and are the cluster-only wrapper.
     node_id = metadata.get('nodeId', 'cluster')
@@ -160,7 +166,7 @@ def load_installation(root):
     if not isinstance(worker_id, str) or not SLUG.fullmatch(worker_id):
         raise ControlError('invalid local worker identity')
     resource_policy = 'main-unrestricted' if node_id == 'main' else 'bounded-fixture'
-    return Installation(root, origin, token, node_id, engine_id, generation,
+    return Installation(root, origin, token, operator_token, node_id, engine_id, generation,
                         image, source, scratch, state, worker_id, resource_policy)
 
 
@@ -169,10 +175,13 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def api_request(installation, path, payload=None):
+def api_request(installation, path, payload=None, *, operator=False):
+    token = installation.operator_token if operator else installation.api_token
+    if not token:
+        raise ControlError('private operator credential is unavailable')
     request = Request(installation.origin + path,
         data=None if payload is None else json.dumps(payload).encode(),
-        headers={'Authorization': 'Bearer ' + installation.api_token,
+        headers={'Authorization': 'Bearer ' + token,
                  'Content-Type': 'application/json'})
     opener = build_opener(ProxyHandler({}), NoRedirect())
     try:
@@ -193,6 +202,9 @@ def parser():
     submit = commands.add_parser('submit-synthetic')
     submit.add_argument('--environment', choices=('production', 'staging'), default='staging')
     submit.add_argument('--request-id', help='Stable unique slug; reuse only for an identical retry')
+    cancel = commands.add_parser('cancel-queued')
+    cancel.add_argument('--job-id', required=True)
+    cancel.add_argument('--note', required=True)
     dispatch = commands.add_parser('dispatch')
     dispatch.add_argument('--max-jobs', type=int, choices=range(1, 11), default=2)
     return cli
@@ -223,7 +235,7 @@ def run(args, *, process_runner=subprocess.run):
         authority = api_request(installation, '/v1/prototype/authority')['authorityId']
         print(json.dumps({'health': health, 'authorityId': authority,
             'jobCounts': {state: sum(job['status'] == state for job in jobs)
-                          for state in ('queued', 'running', 'held', 'succeeded', 'failed')},
+                          for state in ('queued', 'running', 'held', 'succeeded', 'failed', 'cancelled')},
             'nodes': [{key: node[key] for key in ('id', 'state')} for node in nodes]}))
     elif args.command == 'options':
         discovered = api_request(installation, '/v1/options')
@@ -240,6 +252,19 @@ def run(args, *, process_runner=subprocess.run):
             'profile': 'treedar-synthetic-v1'})['job']
         print(json.dumps({'id': job['id'], 'environment': job['environment'],
                           'status': job['status']}))
+    elif args.command == 'cancel-queued':
+        try:
+            identifier = str(uuid.UUID(args.job_id))
+        except (ValueError, AttributeError):
+            raise ControlError('job ID must be a UUID') from None
+        if identifier != args.job_id or not 1 <= len(args.note) <= 256:
+            raise ControlError('invalid queued-job cancellation request')
+        result = api_request(installation, f'/v1/prototype/jobs/{identifier}/cancel',
+                             {'note': args.note}, operator=True).get('job')
+        if (not isinstance(result, dict) or result.get('id') != identifier
+                or result.get('status') != 'cancelled'):
+            raise ControlError('coordinator did not confirm queued-job cancellation')
+        print(json.dumps({'id': result['id'], 'status': result['status']}))
     else:
         environment = child_environment(installation, os.environ)
         result = process_runner(dispatch_command(installation, args.max_jobs),

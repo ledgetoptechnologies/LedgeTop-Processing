@@ -262,6 +262,8 @@ class Queue(Maintenance):
         Holding never kills a worker; resolution is an explicit attestation after
         the operator independently verifies no old worker/container remains.
         """
+        if action not in ("hold", "resolve", "cancel"):
+            raise Conflict("operator transition not allowed")
         self.fields(payload, ("note", "workerStopped") if action == "resolve" else ("note",))
         if not isinstance(payload["note"], str) or not 1 <= len(payload["note"]) <= 256:
             raise ValueError("operator inspection note required")
@@ -272,7 +274,11 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             if not row:
                 raise Conflict("unknown job")
-            if action == "hold" and (row["status"] == "running" or
+            if action == "cancel" and row["status"] == "cancelled":
+                return self.public(row)
+            if action == "cancel" and row["status"] == "queued":
+                status = "cancelled"
+            elif action == "hold" and (row["status"] == "running" or
                                      (row["status"] == "held" and row['held_reason'] == 'coordinator_restart')):
                 status = "held"
             elif action == "resolve" and row["status"] == "held":

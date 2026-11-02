@@ -161,7 +161,7 @@ def make_handler(config: Config):
             if self.path != "/v1/plan" and not prototype:
                 self._reply(404, {"error": "not_found"})
                 return
-            operator = prototype and (self.path.endswith(("/hold", "/resolve"))
+            operator = prototype and (self.path.endswith(("/hold", "/resolve", "/cancel"))
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return

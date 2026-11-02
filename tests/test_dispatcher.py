@@ -25,6 +25,7 @@ SPEC = importlib.util.spec_from_file_location(
 dispatcher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(dispatcher)
 IMAGE = 'sha256:' + 'a' * 64
+OPERATOR_TOKEN = 'separate-operator-token-for-dispatch-tests'
 
 
 class DispatcherTests(unittest.TestCase):
@@ -38,7 +39,8 @@ class DispatcherTests(unittest.TestCase):
         self.handler = make_handler(Config(TOKEN, '', '', 800, 20000,
                                           prototype_state_dir=str(self.root / 'coordinator'),
                                           photo_smoke_enabled=True,
-                                          prototype_node_ids=('cluster', 'main')))
+                                          prototype_node_ids=('cluster', 'main'),
+                                          prototype_operator_token=OPERATOR_TOKEN))
         self.server = start_server(self.handler)
         self.base = f'http://127.0.0.1:{self.server.server_port}'
         self.launched = []
@@ -56,10 +58,10 @@ class DispatcherTests(unittest.TestCase):
         values.update(changes)
         return argparse.Namespace(**values)
 
-    def request(self, route, payload=None):
+    def request(self, route, payload=None, token=TOKEN):
         data = json.dumps(payload).encode() if payload is not None else None
         request = Request(self.base + route, data=data, headers={
-            'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'})
+            'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
         with urlopen(request, timeout=5) as response:
             return json.load(response)
 
@@ -136,6 +138,17 @@ class DispatcherTests(unittest.TestCase):
         self.assertFalse(list(self.state.glob('dispatch-*.json')))
         for job in (staging, production):
             self.assertEqual(self.request('/v1/prototype/jobs/' + job['id'])['job']['status'], 'queued')
+
+    def test_cancelled_queue_history_is_valid_and_does_not_block_later_work(self):
+        cancelled = self.submit('cancelled-head')
+        self.request('/v1/prototype/jobs/' + cancelled['id'] + '/cancel',
+                     {'note': 'synthetic fixture was routed to an unavailable node'},
+                     token=OPERATOR_TOKEN)
+        next_job = self.submit('next-eligible-job')
+        jobs = dispatcher.queue(self.base, TOKEN)
+        head, reason = dispatcher.select_head(jobs)
+        self.assertIsNone(reason)
+        self.assertEqual(head['id'], next_job['id'])
 
     def test_allowed_role_launches_and_absent_metadata_remains_compatible(self):
         self.submit('eligible-role')

@@ -38,9 +38,10 @@ A queued photo job blocks later staging TreeDar jobs when no matching worker is
 available. Do not disable the photo profile until its queue is empty. If disabled
 with queued work, restore the flag and the appropriate worker, or retire this
 isolated test stack after stopping all its workers/engine and exporting evidence.
-There is no queued-job cancel/delete API; hold/resolve applies only to running or
-held jobs. Do not edit SQLite or falsely attest that an executing worker stopped
-to bypass a blocked head job.
+The coordinator has an operator-only queued-job cancel route. It applies only to
+a still-queued job and preserves a terminal audit row. Hold/resolve still applies
+only to running or held jobs. Never edit SQLite or falsely attest that an
+executing worker stopped to bypass a blocked head job.
 
 The queue accepts no paths or URLs. The operator supplies the worker with an
 isolated read-only directory and a manifest of 10–50 JPEGs, at most 512 MiB total:
