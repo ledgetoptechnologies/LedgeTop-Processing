@@ -299,9 +299,9 @@ def validate_source_release_pair(authorization_raw, acknowledgement_raw, *,
     deleted_at, acknowledged_at = map(_timestamp, (ack["deletedAt"], ack["acknowledgedAt"]))
     _need(authorized_at <= current and authorized_at < expires_at,
           "authorization time invalid")
-    _need(current <= expires_at, "expired authorization")
+    _need(current < expires_at, "expired authorization")
     _need(deleted_at >= authorized_at and deleted_at <= acknowledged_at
-          and acknowledged_at <= current and acknowledged_at <= expires_at,
+          and acknowledged_at <= current and acknowledged_at < expires_at,
           "deletion or durable ACK time invalid")
     _need(ack["operationId"] == auth["operationId"]
           and ack["authorizationId"] == auth["authorizationId"]

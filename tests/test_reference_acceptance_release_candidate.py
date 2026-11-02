@@ -142,10 +142,18 @@ class ResultAcceptanceReleaseCandidateTests(unittest.TestCase):
         late = "2026-11-02T12:06:00.000Z"
         with self.assertRaises(CandidateRejected):
             self.validate_pair(now=late)
+        with self.assertRaises(CandidateRejected):
+            self.validate_pair(now="2026-11-02T12:05:00.000Z")
+        self.validate_pair(now="2026-11-02T12:04:59.999Z")
         changed = copy.deepcopy(self.ack)
         changed["deletedAt"] = "2026-11-02T12:05:01.000Z"
         with self.assertRaises(CandidateRejected):
             self.validate_pair(ack=changed, now="2026-11-02T12:05:30.000Z")
+        changed = copy.deepcopy(self.ack)
+        changed["deletedAt"] = "2026-11-02T12:05:00.000Z"
+        changed["acknowledgedAt"] = "2026-11-02T12:05:00.000Z"
+        with self.assertRaises(CandidateRejected):
+            self.validate_pair(ack=changed, now="2026-11-02T12:05:00.000Z")
         changed = copy.deepcopy(self.ack)
         changed["acknowledgedAt"] = "2026-11-02T12:05:01.000Z"
         with self.assertRaises(CandidateRejected):

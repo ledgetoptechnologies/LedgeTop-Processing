@@ -1167,7 +1167,8 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   external authenticated transport context. The release checker requires
   separate Viewer-retention and storage-executor identities, exact source and
   terminal bindings, exact deletion inventory, and requires the effect and
-  durable ACK commit before authorization expiry. Post-expiry replay is a
+  durable ACK commit strictly before authorization expiry (the exact expiry
+  instant is expired). Post-expiry replay is a
   separate read-only lookup of an identical ACK in the authenticated durable
   storage ledger; it cannot start a new deletion. Viewer authorization and
   storage execution require distinct principals. Exact replay persistence and
