@@ -1380,37 +1380,33 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 
 ## Processing and Viewer v2 accepted-copy bridge — 2026-11-02
 
-- Processing draft PR #339 now derives and persists a separate Viewer wire
-  manifest for TreeDar-only and combined ODM→TreeDar jobs. It uses the exact
-  Viewer discriminator `ltds-reference-result-v2`, preserves Processing object
-  order, requires the Viewer TreeDar role closure (including optional
-  `final_test_predictions` and required outputs), routes v2 transfers through
-  `/api/v1/reference/v2/acceptances`, and verifies the signed full-closure
-  receipt before marking the durable outbox complete. ODM-only v1 remains on
-  its existing route. Processing now matches Viewer’s `TREEDAR_MAX_OBJECTS + 2`
-  result cap (102); the targeted manifest, acceptance-transfer, and worker
-  tests pass 27/27. The correction is at `bc33a5f` on
-  `codex/viewer-acceptance-receipt-verify-20261102`.
-- Viewer draft PR #424 now has the matching private v2 receiver. Its current
-  head is `85f252ef` on `codex/viewer-processing-acceptance-v1-20261102`.
-  The focused Linux Node 24 HTTP/ledger suite passed 21/21 against that head,
-  including combined v2 reserve, chunk transfer, commit, status replay,
-  restart recovery, quota enforcement and tampered-byte hold. The fixture
-  uses a distinct job identity when exercising v1 and v2 in the same ledger,
-  preserving the generation-binding guard.
-- Processing focused tests passed 83 tests with four Windows-only skips;
-  the same 83 passed without skips in a disposable Python 3.12 Linux
-  container. The complete Windows suite passed 1,400 tests with 572
-  platform-specific skips. Three cross-repository fixture digest tests first
-  exposed Windows CRLF checkout bytes; the pinned fixture content itself was
-  unchanged. Explicit LF attributes now keep the shared fixtures byte-stable,
-  and the complete suite passes without changing expected hashes.
-- Both PRs are open drafts. Branch Actions checks are absent under the
-  main-only Actions policy. No runtime deployment, Viewer release, TrueNAS
-  spool, queue reservation, real job, or cleanup was performed. Thus this
-  closes a source-level wire-contract mismatch and synthetic HTTP coverage,
-  but does not prove NAS custody or a deployed worker→orchestrator→Viewer
-  acceptance chain.
+- Processing draft PR #339 is open at head `82f8f78` on
+  `codex/viewer-acceptance-receipt-verify-20261102`. Its bounded HTTPS transfer
+  client, durable leased retry worker, atomic accepted-receipt persistence and
+  signed-receipt verification are implemented in source. The focused Processing
+  transfer/runtime/API/cleanup/store suites passed 117 tests with five
+  optional/platform skips.
+- A source comparison against current Viewer draft PR #424 head
+  `bca50f0440bc34719631e35387122fe99577abc7` found no transfer/acceptance wire
+  mismatch: v1/v2 routes, service-auth signing inputs, reservation identity,
+  offset/chunk upload, commit/status replay, ordered v2 closure and signed
+  receipt verification align. The cross-language receipt fixture SHA-256 is
+  identical in both repositories. The Viewer receiver remains default-off
+  (`VIEWER_REFERENCE_ACCEPTANCE_ENABLED=false`) and needs explicit service and
+  receipt keys, durable storage, Linux directory-fsync support and an
+  environment-matched configuration before any runtime test.
+- On the exact Viewer #424 head, the Linux Node 24 receiver API/ledger suite
+  passed 17/18; the only skip was Express middleware coverage because Express
+  is not installed in the disposable test image. The passing cases include
+  chunk resume/replay, concurrent commit, restart/status recovery, quota
+  enforcement, corrupted-byte quarantine and signed cross-language receipt
+  verification. This is receiver-side synthetic coverage, not Processing
+  client-to-deployed-Viewer acceptance.
+- Both PRs remain open drafts. No Actions ran, consistent with the main-only
+  policy. No runtime deployment, Viewer release, TrueNAS spool, queue
+  reservation, real job, or cleanup was performed. The source contract is
+  aligned, but this does not prove NAS custody or a deployed
+  worker→orchestrator→Viewer acceptance chain.
 - The Engineering Hub MCP tools remain absent from this Codex session. Its
   native listener was reconnected using the existing credential helper and
   currently reports `subscribed` with the new process identity verified. A
