@@ -79,6 +79,11 @@ test counts below describe their named source checkpoints.
   lost response can be reconciled against the exact sealed grant rather than
   reservation fields alone. Recovery must still use the authenticated status
   route and never rotate the grant or infer success from a timeout.
+  This changes the closed ACK shape while the candidate route still identifies
+  as reference-v1: the new Viewer and Processing candidates must be released in
+  lockstep. Mixed old/new candidates reject the other's ACK; do not deploy a
+  partial rollout. The digest enables exact status comparison but does not yet
+  add a durable outbox transition for reconciliation after restart.
 - `worker_outbox.py` persists immutable terminal results separately from local
   file paths. `reference_delivery.py` authenticates the durable execution claim,
   commits completion and returns a replayable coordinator metadata receipt.
