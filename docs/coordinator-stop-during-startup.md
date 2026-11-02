@@ -16,7 +16,12 @@ still race with work already entering the turn.
 If native listener creation fails after handler construction, the entrypoint
 attempts to close the unstarted reference runtime, Viewer service, queue and
 authority lease. Cleanup errors are reported, and a synthetic queued job is
-preserved in the bind-failure test. Failures *inside* `make_handler` before it
-returns require separate lifecycle review. These tests do not fence
+preserved in the bind-failure test. If `make_handler` fails after a component
+was returned, it also attempts cleanup of the known components, Queue and
+authority lease. A constructor that acquires a resource and then raises before
+returning its object still requires its own cleanup; this helper cannot see that
+resource. Synthetic tests cover failure after ViewerService construction and a
+cleanup failure, with Queue and authority lease reacquired afterward.
+These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.

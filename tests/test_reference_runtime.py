@@ -49,6 +49,40 @@ class FakeServer:
 
 
 class ReferenceRuntimeTests(unittest.TestCase):
+    @unittest.skipUnless(os.name=='posix','POSIX authority lease required')
+    def test_partial_handler_failure_releases_queue_and_authority_lease(self):
+        from processing import authority_lease
+        state=self.root/'state';leases=self.root/'leases';leases.mkdir(mode=0o700)
+        original=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:job,_=original.submit({'requestId':'queued-before-handler','environment':'staging','profile':'treedar-synthetic-v1'})
+        finally:original.close()
+        config=replace(self.config,authority_lease_dir=str(leases))
+        with patch('processing.viewer_http.ViewerFacade',side_effect=OSError('synthetic facade failure')):
+            with self.assertRaisesRegex(OSError,'synthetic facade failure'):make_handler(config)
+        lease=authority_lease.acquire(leases,state)
+        try:
+            replacement=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            try:self.assertEqual(replacement.get(job['id'])['status'],'queued')
+            finally:replacement.close()
+        finally:lease.close()
+
+    @unittest.skipUnless(os.name=='posix','POSIX authority lease required')
+    def test_partial_handler_cleanup_attempts_queue_and_lease_after_service_error(self):
+        from processing import authority_lease
+        from processing.viewer_service import ViewerService
+        state=self.root/'state';leases=self.root/'leases';leases.mkdir(mode=0o700)
+        original=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        original.close()
+        config=replace(self.config,authority_lease_dir=str(leases))
+        with patch('processing.viewer_http.ViewerFacade',side_effect=OSError('synthetic facade failure')), \
+                patch.object(ViewerService,'close',side_effect=RuntimeError('synthetic cleanup failure')):
+            with self.assertRaisesRegex(RuntimeError,'startup resource cleanup failed'):make_handler(config)
+        lease=authority_lease.acquire(leases,state)
+        try:
+            replacement=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            replacement.close()
+        finally:lease.close()
+
     def test_listener_construction_failure_releases_actual_queue(self):
         from processing import app
         original=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)

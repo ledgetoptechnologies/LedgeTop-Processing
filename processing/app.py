@@ -17,6 +17,22 @@ from .options import catalog
 MAX_BODY = 8192
 
 
+def _close_startup_resources(reference,service,queue,lease):
+    failures=[]
+    for component in (reference,service):
+        if component is not None:
+            try:component.close()
+            except BaseException as error:failures.append(error)
+    queue_closed=queue is None
+    if queue is not None:
+        try:queue.close();queue_closed=True
+        except BaseException as error:failures.append(error)
+    if queue_closed and lease is not None:
+        try:lease.close()
+        except BaseException as error:failures.append(error)
+    if failures:raise RuntimeError('startup resource cleanup failed') from failures[0]
+
+
 def make_handler(config: Config):
     reference_settings = None
     if config.reference_config_path:
@@ -35,6 +51,7 @@ def make_handler(config: Config):
             lease = authority_lease.acquire(config.authority_lease_dir, config.prototype_state_dir)
         elif authority_lease.required(config.prototype_state_dir):
             raise RuntimeError('authority_lease_configuration_required')
+    queue=service=facade=reference_runtime=None
     try:
         queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
                       node_ids=config.prototype_node_ids,
@@ -42,53 +59,34 @@ def make_handler(config: Config):
                       viewer_enabled=config.viewer_enabled,
                       reference_enabled=reference_settings is not None,
                       require_idle_existing=config.viewer_production_held) if config.prototype_state_dir else None
-    except BaseException:
+        if config.viewer_production_held and queue is None:
+            raise RuntimeError('production_hold_idle_state_unavailable')
         if lease is not None:
-            lease.close()
-        raise
-    if config.viewer_production_held and queue is None:
-        raise RuntimeError('production_hold_idle_state_unavailable')
-    if lease is not None:
-        try:
             authority_lease.record_required(queue, lease)
-        except Exception:
-            queue.close()
-            raise
-        queue.authority_lease = lease  # held, by this process, until it exits
-    if queue is not None and config.admission_drain_enabled:
-        from .admission_drain import AdmissionDrain
-        try:
+            queue.authority_lease = lease  # held, by this process, until it exits
+        if queue is not None and config.admission_drain_enabled:
+            from .admission_drain import AdmissionDrain
             queue.admission_drain = AdmissionDrain(queue)
-        except Exception:
-            queue.close()
-            raise
-    elif queue is not None:
-        # Never silently bypass a previously enabled persistent barrier.
-        with queue._db() as db:
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
-        if exists:
-            queue.close()
-            raise RuntimeError('admission_drain_configuration_required')
-    service = facade = None
-    if config.viewer_enabled:
-        from .viewer_service import ViewerService
-        from .viewer_http import ViewerFacade
-        service = ViewerService(queue, config)
-        spool = Path(config.prototype_state_dir) / 'viewer-spool'
-        spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
-                              production_held=config.viewer_production_held)
-    reference_runtime = None
-    if reference_settings is not None:
-        from .reference_runtime import ReferenceRuntime
-        try:
+        elif queue is not None:
+            # Never silently bypass a previously enabled persistent barrier.
+            with queue._db() as db:
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
+            if exists:
+                raise RuntimeError('admission_drain_configuration_required')
+        if config.viewer_enabled:
+            from .viewer_service import ViewerService
+            from .viewer_http import ViewerFacade
+            service = ViewerService(queue, config)
+            spool = Path(config.prototype_state_dir) / 'viewer-spool'
+            spool.mkdir(mode=0o700, exist_ok=True)
+            facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
+                                  production_held=config.viewer_production_held)
+        if reference_settings is not None:
+            from .reference_runtime import ReferenceRuntime
             reference_runtime = ReferenceRuntime(queue, config, reference_settings, viewer_service=service)
-        except Exception:
-            if service:
-                service.close()
-            if queue:
-                queue.close()
-            raise
+    except BaseException:
+        _close_startup_resources(reference_runtime,service,queue,lease)
+        raise
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"
@@ -460,21 +458,9 @@ class CoordinatorService:
 
 def _close_unstarted_handler(handler):
     """Close all constructed components when native listener creation fails."""
-    failures=[]
-    for component in (handler.reference_listener,handler.viewer_service):
-        if component is not None:
-            try:component.close()
-            except BaseException as error:failures.append(error)
     queue=handler.prototype_queue
-    if queue is not None:
-        try:queue.close()
-        except BaseException as error:failures.append(error)
-        else:
-            lease=getattr(queue,'authority_lease',None)
-            if lease is not None:
-                try:lease.close()
-                except BaseException as error:failures.append(error)
-    if failures:raise RuntimeError('startup resource cleanup failed') from failures[0]
+    _close_startup_resources(handler.reference_listener,handler.viewer_service,queue,
+                             getattr(queue,'authority_lease',None) if queue else None)
 
 
 def main():
