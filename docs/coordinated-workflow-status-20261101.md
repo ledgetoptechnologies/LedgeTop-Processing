@@ -1319,3 +1319,20 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   remains disabled, the cluster NodeODM container remains stopped, and the
   system state still does not support a claim that client scheduling and
   result return are ready.
+
+## TreeDar Linux package validation — 2026-11-02
+
+- Ran the complete `engines/treedar/tests` suite against the digest-pinned
+  Python 3.13.16 Debian Trixie base from `engines/treedar/Dockerfile`. The
+  locked dependencies installed from `requirements-test.lock`, the TreeDar
+  wheel built and installed, and pytest ran as nonroot against an ephemeral
+  writable copy while the repository mount stayed read-only. Result:
+  **248 passed, 14 skipped, 35 subtests passed**.
+- The 14 skips are for Docker CLI, optional Node runtime, and Git+Bash staging
+  checks unavailable inside this minimal test container. This validates the
+  package suite on Linux and its synthetic fixtures; it does not qualify the
+  live NodeODM engine, a genuine client LiDAR dataset, orchestrator scheduling,
+  Viewer acceptance, NAS custody, or cleanup.
+- The disposable container exited successfully and was removed by `--rm`.
+  No host dataset, client data, running node, or source file was modified by
+  this test.
