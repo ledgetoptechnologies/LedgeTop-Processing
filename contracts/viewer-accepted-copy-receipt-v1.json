@@ -1,0 +1,70 @@
+{
+  "status": "synthetic_cross_language_fixture_not_for_production",
+  "protocol": "ltds-viewer-accepted-copy-v1",
+  "schemaVersion": 1,
+  "issuerId": "viewer-test-issuer",
+  "keyId": "viewer-test-key-2026",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAds4OiO+Nch6lgnm0iv+K+2XmmKyeA9KkD7kQbgbJEMo=\n-----END PUBLIC KEY-----\n",
+  "expected": {
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "inputManifestSha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+    "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "resultManifestSha256": "b86bd60b480f75338c347d1b1ee28c85217733002fc26c988d017e9f0f6e3926"
+  },
+  "resultManifest": {
+    "schemaVersion": 1,
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "objects": [
+      {
+        "id": "result-1",
+        "role": "pointcloud",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      },
+      {
+        "id": "result-2",
+        "role": "report",
+        "byteSize": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "engineVersions": {
+      "odm": "synthetic-1.0.0"
+    },
+    "resultManifestSha256": "b86bd60b480f75338c347d1b1ee28c85217733002fc26c988d017e9f0f6e3926"
+  },
+  "acceptedObjectIds": [
+    "result-1"
+  ],
+  "receipt": {
+    "protocol": "ltds-viewer-accepted-copy-v1",
+    "schemaVersion": 1,
+    "issuerId": "viewer-test-issuer",
+    "keyId": "viewer-test-key-2026",
+    "receiptId": "5fd14c71-7c95-4a94-acca-dcb49b0eb0e1",
+    "storageReceiptId": "be36a455-a978-4434-a045-dfbe158d8d6d",
+    "jobId": "job-1",
+    "generation": 1,
+    "environment": "staging",
+    "inputManifestSha256": "a36797c80ca1b6bb9a65fe385bd9c84589f0a3483e28b67cff02e7532e81a59b",
+    "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "resultManifestSha256": "b86bd60b480f75338c347d1b1ee28c85217733002fc26c988d017e9f0f6e3926",
+    "acceptedObjectIds": [
+      "result-1"
+    ],
+    "objects": [
+      {
+        "id": "result-1",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      }
+    ],
+    "acceptedAt": "2026-11-02T18:12:22.089Z",
+    "signature": "Pv5Tnk8s6EOcgqo7dtK5v1WHyGXs2Ut22P4QpgGMOPC723mdFj4qvzJAaaM7YYwxRchapeNrk6H0UbiTYAC_AA"
+  }
+}
