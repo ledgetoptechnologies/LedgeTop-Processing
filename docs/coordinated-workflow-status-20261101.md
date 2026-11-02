@@ -768,6 +768,19 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   result is in `docs/evidence/viewer-contract-smoke-20261102-rerun.json`. This
   does not validate the live Viewer, source custody, accepted-copy receipt/ACK
   or cleanup authority.
+- Re-ran the same smoke on the current Processing checkout at `f7be820` against
+  Viewer candidate `codex/viewer-v2-delivery-ledger` commit `ac1bff1f`. It again
+  passed 62 synthetic uploads, one cancellation and three completions with
+  production-small → production-large → staging-small order, 2 cluster commits
+  and 1 main commit. The adapter SHA-256 remained
+  `167b7bbd66e36fdba3255ca165877e1b821308d2fc9054f1d9ba3a3b77b3c86b`.
+  Complete output is in
+  `docs/evidence/viewer-contract-smoke-20261102-f7be820.json`. The Viewer
+  worktree had an unrelated modified documentation path; the tested adapter
+  source hash matches the previously recorded candidate. This remains a
+  synthetic API/coordinator test and does not prove NAS source custody, live
+  worker execution, Viewer archive acceptance, durable receipt/ACK recovery,
+  or cleanup authority.
 - Re-ran the synthetic TreeDar/admission/publication suites on 2026-11-02 in
   Ubuntu 24.04 WSL as nonroot `pilot`, after installing the test-only LAS/CRS
   dependencies into a dedicated local venv. The admission, engine, delivery,
