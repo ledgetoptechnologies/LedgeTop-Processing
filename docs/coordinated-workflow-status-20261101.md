@@ -655,8 +655,7 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   still path-based, not descriptor-pinned, and Windows denied symlink creation.
   Candidate follow-up `ff52034d` now distinguishes confirmed structural
   mismatches from read failures and limits: an injected EIO returns generic
-  `UNAVAILABLE read`; the focused Windows test passed 1/1. Linux symlink and
-  deployed-image qualification are still outstanding. I independently ran
+  `UNAVAILABLE read`; the focused Windows test passed 1/1. I independently ran
   that exact test on Linux using ephemeral Node 24 image
   `sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c`;
   1/1 passed, including symlink rejection and injected EIO classification.
