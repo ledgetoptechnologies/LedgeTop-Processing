@@ -6,6 +6,17 @@ No real client data was processed as part of this checkpoint.
 
 ## Verified in the current work
 
+- Beau selected a `processing-spool` subfolder in the existing Model-Viewer
+  Storage dataset for future NAS-backed job inputs, rather than a separate
+  dataset. Intended host/container paths are
+  `/mnt/Plugins/App_Data/Model-Viewer/Storage/processing-spool` and
+  `/app/storage/processing-spool`. This is a design decision only: the folder,
+  NAS route, permissions, reservation protocol and retention behavior have not
+  been created or activated. The containing ZFS dataset is shared with Viewer
+  storage, so a snapshot/hold would cover the dataset, not only this folder;
+  retention design must account for that boundary and avoid claiming
+  folder-scoped snapshot isolation.
+
 - Processing branch `codex/engine-ingress-guard-candidate` contains commit
   `b8b08c8` (`Stage processing wrapper and integration evidence`) and the
   subsequent evidence checkpoints. The branch is published to origin for

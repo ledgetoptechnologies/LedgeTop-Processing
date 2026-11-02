@@ -123,7 +123,14 @@ test counts below describe their named source checkpoints.
 ## Remaining integration and acceptance
 
 1. Mount the implemented Viewer storage broker on the actual NAS HTTPS route and
-   connect reservation-scoped transfers. Waiting jobs retain metadata only.
+   connect reservation-scoped transfers. Beau selected a `processing-spool`
+   subfolder under the existing Model-Viewer Storage mount
+   (`/app/storage/processing-spool` in Viewer; host path
+   `/mnt/Plugins/App_Data/Model-Viewer/Storage/processing-spool`). This selection
+   does not create the folder or activate a route. Waiting jobs retain metadata
+   only. Because the folder shares its containing ZFS dataset with Viewer
+   storage, any snapshot/hold protects the dataset boundary, not only the spool;
+   retention and capacity behavior must be designed and verified accordingly.
 2. Install the private worker daemon with persistent scratch and exact existing
    engine/gate bindings. Never replay uncertain engine mutations automatically.
 3. Connect the qualified Viewer acceptance/receipt components to the production
