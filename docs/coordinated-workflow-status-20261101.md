@@ -8,8 +8,8 @@ No real client data was processed as part of this checkpoint.
 
 - Processing branch `codex/engine-ingress-guard-candidate` contains commit
   `b8b08c8` (`Stage processing wrapper and integration evidence`) and the
-  subsequent evidence checkpoints. Its current tip, `868a04f`, is pushed to
-  the feature branch and is not merged to `main`.
+  subsequent evidence checkpoints. The branch is published to origin for
+  review and is not merged to `main`.
 - The Linux repository suite reported 1,313 passed and 22 skipped. Targeted
   Windows checks passed; these are source-level checks and do not constitute
   deployment acceptance.
