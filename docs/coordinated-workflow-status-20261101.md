@@ -712,6 +712,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   presence and one Docker healthcheck only; no task was submitted, no engine
   API/options or active-work state was read, and no worker→Viewer completion
   was exercised.
+- Same read-only host check found cluster `.89` root filesystem at 295 GiB
+  total / 111 GiB available. Its underlying LVM PV is 929.51 GiB, with
+  629.51 GiB free in the volume group and only a 300 GiB root LV. This explains
+  why the reported 1-TB SSD does not currently appear as 1 TB available to
+  Docker. Main `.88` root has 1.8 TiB total / 1.4 TiB available; its NodeODM
+  data directory is on that filesystem. A 50-GB-class dataset should route to
+  `.88` under the verified size policy. No disk or LVM changes were made.
 
 ## Local candidate validation — 2026-11-02
 
