@@ -176,6 +176,19 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   reservation existence, and that its declared-size counter is not a physical
   byte/request meter. It is design evidence, not an agreed wire protocol or a
   NAS custody/issuer implementation.
+- A paired bridge rehearsal is now available in the clean, pushed Processing
+  branch `codex/paired-v1-http-rehearsal`, commit `59bafc9`, with runbook
+  `docs/paired-bridge-drop-plan-DRAFT.md`. Its recorded bounded synthetic pass
+  exercised the actual Processing ReferenceAPI/ResultProxy and Viewer
+  ReferenceProvider/ReferenceResultJournal/ReferenceAcceptanceBridge around a
+  synthetic ZIP. It dropped the first acceptance response after one byte,
+  restarted the Viewer process, replayed the same receipt, and recorded one
+  coordinator acceptance while transferring the result only once. This proves
+  that manually re-entering the bridge can replay this synthetic acceptance
+  path; it does not prove a production retry scheduler, real worker TLS/read
+  pins, NAS custody, catalog publication, cleanup authority or real data
+  acceptance. The named container exited successfully; its volume and outer
+  temporary root were retained for review. No runtime was activated.
 - Cross-source boundary review: the Processing broker client expects a scoped
   HTTPS GET at `/api/processing/reference/v1/objects/{objectId}`, checks the
   full object size/hash and publishes a private fsynced local object, but has no
@@ -186,6 +199,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   archive upload; Viewer acceptance is a later, separate receipt. No NAS broker
   service or mounted Viewer accepted-copy ingest is implemented. This mapping
   is an existing-source audit, not a new cross-language contract.
+- Beau's follow-up read-only metadata check matched the same saved task and
+  provider attempt. It confirmed `3d-tiles` is a boolean `true`, the recorded
+  v1 archive inventory has 71 entries and a valid digest, and the mesh tileset
+  is listed. The queried `3d_tiles/pointcloud/tileset.json` path is not listed.
+  That observation does not establish whether another point-cloud format (for
+  example EPT) is present elsewhere in the recorded inventory, nor prove
+  current on-disk custody or Viewer acceptance.
 - Read-only SSH to cluster `.89` reported coordinator health `ok`, zero queued,
   running or held jobs, and both logical nodes `active`. The active NodeODM
   candidate is the `nodeodm` service in a separate root-owned migration Compose
