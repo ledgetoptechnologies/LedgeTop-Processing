@@ -298,14 +298,17 @@ No real client data was processed as part of this checkpoint.
    matching private Processing credential through an approved maintenance
    route. Rotation is not verified. Do not use the exposed value or start
    client processing until the replacement is confirmed.
-6. **Viewer redesign and Claude:** the Viewer chat has historical redesign
-   work and a candidate customer → project → task hierarchy. Current Claude
-   acknowledgement or active participation is not verified; the internal
-   message-bus MCP is unavailable in this chat. Historical design notes assign
-   frontend ownership and specify Operations-matched dark accents. The concrete
-   Greenleaf → New Build / Project Y → tasks example fits the candidate
-   `groupId=null` structure, but this is not an authorization boundary. The UI
-   work is not verified deployed.
+6. **Viewer redesign and Claude:** current-main draft PR #406 contains the
+   customer → optional group/subcategory → project → task hierarchy and
+   Operations-aligned dark styling. GitHub commit authorship verifies Claude
+   co-authored most of the current-main redesign, branding and hierarchy-control
+   commits. Ongoing Claude ownership/review is not verified; the internal
+   message-bus MCP is unavailable in this chat. The concrete Greenleaf → New
+   Build / Project Y → tasks example fits the candidate group structure, but it
+   is not an authorization boundary. PR #406 remains draft, has no recorded
+   reviews or checks, and its UI is not verified deployed; the latest focused
+   run also exposed stale hierarchy mocks and a missing local `express`
+   dependency, as recorded above.
 7. **Runtime acceptance:** no real end-to-end small job has been submitted
    through Viewer during the current verification. The previously discussed
    10,000-photo client dataset (estimated ~50 GB) remains unprocessed.
@@ -643,6 +646,16 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   browser processes were stopped; automatic review rejected recursive cleanup
   of the remaining task-created temporary browser profiles, which were left in
   place. No Viewer runtime was changed.
+- Fresh targeted verification of exact PR #406 head `839e5173` in its clean
+  dedicated worktree on 2026-11-02 passed branding (3/3), hierarchy controls
+  (6/6), and pure hierarchy grouping/schema tests (7/7). The combined focused
+  run returned 22 passes and 6 failures: five workspace-load-error tests still
+  stub the pre-hierarchy API and do not provide a valid
+  `/api/v1/workspace/hierarchy` response; the remaining server hierarchy test
+  could not load `express` because dependencies are absent in that worktree.
+  These results are local source evidence only. The failures were sent to the
+  Viewer chat for fixture repair; no files in its worktree were changed, and no
+  deployment or GitHub Actions run occurred.
 - Re-ran `scripts/viewer_contract_smoke.py` on 2026-11-02 at Processing commit
   `b50057a` against the Viewer candidate `NodeOdmProvider` from
   `codex/viewer-v2-delivery-ledger` commit
