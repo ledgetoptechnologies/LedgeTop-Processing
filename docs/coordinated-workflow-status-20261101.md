@@ -114,7 +114,12 @@ No real client data was processed as part of this checkpoint.
   key authority, reservation issuer or NAS pin: the new table is fixture-only,
   and unknown commit/restore rollback, durable ACK/reconciliation, global key
   and nonce governance, and NAS writer/purge fencing remain unimplemented.
-  The changes are staged in draft PR #409 at head `50a4f506`, based on the
+  Follow-up `71e3dbf8` adds a file-backed synthetic Processing receiver that
+  reopens its ACK store, replays an already-accepted exact grant after expiry,
+  and holds an expired grant the receiver never accepted. The Viewer chat
+  reports 3/3 focused tests passed. This remains simulated state/transport, not
+  a real Processing HTTP/authentication path or concurrent sender test.
+  The changes are staged in draft PR #409 at head `71e3dbf8`, based on the
   Viewer candidate branch `codex/viewer-v2-delivery-ledger` rather than `main`;
   GitHub reports no status checks. It is reviewable candidate work, not a
   release or installable package.
