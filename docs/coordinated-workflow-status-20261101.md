@@ -403,12 +403,22 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   contracts. It ran against the current shared Windows-mounted worktree and is
   synthetic test evidence only, not runtime acceptance.
 - Lost source-grant acknowledgement follow-up: a separate inactive Viewer
-  broker candidate `codex/viewer-grant-replay-candidate` at `5520c669` and draft
-  stacked PR #408 now allow exact token replay after restart when a stable
+  broker candidate `codex/viewer-grant-replay-candidate` at `85df850b` and draft
+  stacked PR #408 allow exact token replay after restart when a stable
   explicitly injected 32-byte HMAC key is available; only the token hash is
-  stored. The candidate refuses to recover with a missing or wrong key and
-  does not mint a replacement. Its Linux `reference-cumulative-budget` suite
-  passed 24 tests; Windows passed 23 with one Linux-only skip. There is still
-  no production key provisioning or durable dispatch outbox, and Viewer
-  reference dispatch remains hard-off. This is source-level recovery evidence,
-  not an enabled source grant, NAS custody proof, or runtime acceptance.
+  stored. `tokenRecoverable` now reflects whether the broker can derive the
+  bearer, including for new grants; random legacy grants remain unrecoverable
+  if no key existed at creation. The key is held in a private field and cleared
+  at close. Linux synthetic broker + joint-harness suites passed 28/28; Windows
+  passed 27 with one Linux-only skip. There is still no production key
+  provisioning or durable dispatch outbox, and Viewer reference dispatch
+  remains hard-off. This is source-level recovery evidence, not an enabled
+  source grant, NAS custody proof, or runtime acceptance.
+- Beau's read-only Viewer metadata check for task
+  `a8a93a98-2740-4341-8dc6-0043ef86c72f` and provider task
+  `d5463e33-aeed-4136-a81f-a9a7d233da0f` returned a matching attempt, enabled
+  `3d-tiles` option, and schema-v1 receipt with matching identity, 71-file
+  inventory within limits, and matching inventory digest. The mesh tileset
+  path was listed; a point-cloud tileset was not. This confirms the stored
+  receipt metadata and that this job did not report a point-cloud tileset; it
+  does not independently verify archived NAS bytes or prove LiDAR execution.
