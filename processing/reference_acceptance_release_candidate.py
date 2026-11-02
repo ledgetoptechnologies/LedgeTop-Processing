@@ -116,7 +116,7 @@ def validate_spool_custody_receipt(receipt_raw, *, authenticated_peer, expected_
           "invalid reserved capacity")
     retained_at, current = map(_timestamp, (receipt["retainedAt"], now))
     _need(retained_at <= current, "source custody receipt is from the future")
-    _need(receipt["retentionGuarantee"] == "until_explicit_source_release_ack_v1",
+    _need(receipt["retentionGuarantee"] == "explicit_source_release_ack_ltds_processing_spool_v2",
           "unsupported source retention guarantee")
     return CandidateBindingCheck(
         "ProcessingSpoolCustodyReceipt", receipt["receiptId"],

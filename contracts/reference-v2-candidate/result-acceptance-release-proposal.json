@@ -5,7 +5,8 @@
     "protocol": "ltds-processing-spool-v2",
     "recordMarker": "Every new custody, release authorization and release ACK requires protocol=ltds-processing-spool-v2, schemaVersion=2, and its *_v2 receiptType.",
     "endpointNamespace": "/api/v2/processing-spool",
-    "compatibility": "This is not the existing Viewer v1 source-release ACK. Preserve v1 unchanged. The v1 endpoint/verifier must reject this protocol, schema version and receipt type; the v2 endpoint/verifier must reject v1 records. No fallback, downgrade or cross-profile replay is allowed."
+    "compatibility": "This is not the existing Viewer v1 source-release ACK. Preserve v1 unchanged. The v1 endpoint/verifier must reject this protocol, schema version and receipt type; the v2 endpoint/verifier must reject v1 records. No fallback, downgrade or cross-profile replay is allowed.",
+    "resultAcceptance": "Result acceptance remains on the separately specified existing Reference v2 contract; it is not wrapped in this spool profile. Use its closed schemaVersion=2 PartialAcceptance (receiptType=partial_result_acceptance) and AcceptedCopyAck (receiptType=accepted_copy_ack) records, with no added protocol field, and its exact LTDS-PARTIAL-ACCEPTANCE-V2\u0000 canonical acceptance digest. The resultAcceptanceIssuer role comes from authenticated transport configuration. The candidate does not assign or implement that endpoint route; it must not be silently treated as /api/v2/processing-spool."
   },
   "sourceRootConstraint": "The configured processing-spool is a subfolder of the existing Model-Viewer ZFS dataset. A whole-dataset snapshot is not a subfolder-only pin or capacity reservation. No dataset, snapshot, path, ACL, endpoint, key or service is created by this proposal.",
   "authentication": {
@@ -26,6 +27,8 @@
   "records": {
     "resultAcceptance": {
       "existingRecords": ["PartialAcceptance", "AcceptedCopyAck"],
+      "wireProfile": "Reference v2 contract only: schemaVersion=2, exact receiptType markers partial_result_acceptance and accepted_copy_ack, closed schemas from contracts/reference-v2-candidate/contract.schema.json, and no ltds-processing-spool-v2 protocol field. Do not downgrade to the colliding Viewer source-release v1 ACK profile.",
+      "acceptanceDigest": "AcceptedCopyAck.acceptanceSha256 = SHA256(ASCII(LTDS-PARTIAL-ACCEPTANCE-V2) || 0x00 || canonicalUTF8(complete PartialAcceptance record)); no fields omitted. Canonical metadata rules come from the Reference v2 contract.",
       "binding": ["binding.jobId", "binding.generation", "binding.environment", "binding.inputManifestSha256", "binding.pipelineDigest", "resultSetId", "resultManifestSha256", "acceptedArtifacts"],
       "verification": "The issuer must verify the received bytes, exact size and digest, required product closure, and exclusive accepted-copy custody before committing PartialAcceptance. AcceptedCopyAck echoes the exact operation, receipt, canonical acceptance digest, binding, result-set identity, manifest digest, accepted artifact IDs in order, and storage receipt ID.",
       "replay": "Idempotency is keyed by authenticated issuer principal plus ackOperationId. Exact canonical request replay returns the original byte-identical receipt/ack. Reusing the operation ID with any changed identity, payload, inventory or digest conflicts. Unknown response or missing receipt leaves worker and scheduler holds in place.",
@@ -48,9 +51,10 @@
     },
     "sourceReleaseAck": {
       "closedFields": ["protocol", "schemaVersion", "receiptType", "ackId", "operationId", "authorizationId", "authorizationSha256", "issuerId", "binding", "sourceCustodyReceiptId", "sourceCustodyReceiptSha256", "storageReceiptId", "spoolRootId", "spoolRootGeneration", "sourceClosureSha256", "deletedObjects", "deletedAt", "acknowledgedAt"],
-      "deletedObjects": "Exact inventory from the authorization, each paired with a unique durable filesystem deletion receipt ID. The executor records the full intent before unlink, verifies the file identity/size/hash and no active writer under its independent fence, unlinks only listed objects, synchronizes affected directories, then commits the immutable ACK. Partial or uncertain effects stay in that operation's durable journal and remain held; missing paths alone never prove deletion success. Reconcile only the exact journal while authorization is valid. After expiry, a partial operation requires a fenced fresh spool generation and new authorization or operator-reviewed recovery; never silently discard old-generation objects.",
+      "deletedObjects": "Exact inventory from the authorization, each paired with a unique durable filesystem deletion receipt ID that resolves to the operation's immutable per-object journal. The executor records the full intent before unlink, verifies file identity/size/hash and no active writer under its independent fence, unlinks only listed objects, synchronizes affected directories, then commits the immutable ACK. Partial or uncertain effects stay in that durable journal and remain held; missing paths alone never prove deletion success. Reconcile the exact old journal and old-generation custody after restart. After expiry, do not perform new destructive effects with the expired authorization; any remaining or uncertain objects require operator-reviewed recovery and a fresh custody receipt that accounts for the old journal before a new authorization. Never silently discard old-generation objects.",
       "replay": "Idempotency is keyed by authenticated storage-executor principal plus operationId. Exact replay returns the immutable prior ACK; changed authorization or inventory conflicts. No second deletion pass is inferred from a missing file.",
-      "expiry": "For a new operation, current time, deletedAt and durable ACK commit time acknowledgedAt must be strictly earlier than authorization expiresAt. At the exact expiry instant the authorization is expired. After expiry, only a read-only replay of a byte-identical ACK already present in the authenticated durable operation ledger is permitted. An incomplete or partially applied operation that cannot finish before expiry stays held; recovery requires a fenced new spool generation and fresh authorization, or operator review. Original Viewer inputs remain untouched.",
+      "expiry": "For a new operation, current time, every per-object unlink effect and required directory synchronization, and durable ACK commit must be strictly earlier than authorization expiresAt. At the exact expiry instant the authorization is expired. Check trusted time before each irreversible step and again after each effect/sync; require a bounded operation-time budget before starting. If any operation can cross the deadline or its completion time is uncertain, persist outcome_unknown and hold; do not issue a success ACK. After expiry, only read-only replay of a byte-identical ACK already committed in the authenticated durable operation ledger is permitted.",
+      "crashRecovery": "Persist exact operation intent and per-object state before unlink; persist each observed unlink and directory-sync effect before advancing. After crash, first reconcile the exact old operation journal and old-generation custody under the writer fence. Never infer deletion from an absent path or create a receipt for an unobserved effect. Keep every extant or uncertain object held under its original identity. After authorization expiry, no new destructive effect may use that authorization. Any remaining objects require operator-reviewed recovery and a fresh custody receipt that explicitly accounts for the old-generation journal and every retained/uncertain object before a new authorization; rotating the spool generation alone never drops old custody.",
       "scope": "This ACK reports deletion of the processing-spool copy only. It is not a ZFS snapshot deletion, result acceptance, producer cleanup receipt, Viewer source deletion, or permission to purge original client data."
     }
   },
@@ -73,7 +77,7 @@
       "issuerId": "viewer-retention-service",
       "binding": {"jobId": "job-1", "generation": 3, "environment": "production", "inputManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
       "sourceCustodyReceiptId": "spool-custody-1",
-      "sourceCustodyReceiptSha256": "451a6a162c12b9f43679586c3d42d3f958fb5e5674b76639cbeef5b498be916a",
+      "sourceCustodyReceiptSha256": "5b5db75f46c336e00f5ff15a96b8108c9e3b9325777ddc6535b264389e1ba342",
       "storageReceiptId": "spool-storage-1",
       "spoolRootId": "processing-spool",
       "spoolRootGeneration": 7,
@@ -93,11 +97,11 @@
       "ackId": "release-ack-1",
       "operationId": "release-op-1",
       "authorizationId": "release-auth-1",
-      "authorizationSha256": "52001cc62453843a79e80a1240853fee397c84a55b23c06988dfbb129cfdb792",
+      "authorizationSha256": "d42d3bc09e5137ab5e54e68d611cc4cf613a81e09b6cc1511b73db657b378d5b",
       "issuerId": "nas-spool-executor",
       "binding": {"jobId": "job-1", "generation": 3, "environment": "production", "inputManifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "pipelineDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
       "sourceCustodyReceiptId": "spool-custody-1",
-      "sourceCustodyReceiptSha256": "451a6a162c12b9f43679586c3d42d3f958fb5e5674b76639cbeef5b498be916a",
+      "sourceCustodyReceiptSha256": "5b5db75f46c336e00f5ff15a96b8108c9e3b9325777ddc6535b264389e1ba342",
       "storageReceiptId": "spool-storage-1",
       "spoolRootId": "processing-spool",
       "spoolRootGeneration": 7,
@@ -122,7 +126,7 @@
       "capacityReservationReceiptId": "capacity-reservation-1",
       "reservedBytes": 12,
       "retainedAt": "2026-11-02T11:59:00.000Z",
-      "retentionGuarantee": "until_explicit_source_release_ack_v1"
+      "retentionGuarantee": "explicit_source_release_ack_ltds_processing_spool_v2"
     },
     "authenticatedContexts": {
       "authorizationPeer": {"principal": "viewer-retention-service", "role": "sourceReleaseAuthorizer"},

@@ -1205,11 +1205,26 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   implementation and the current Viewer `referenceProtocol.canonicalBytes`
   implementation: closure
   `ca76a1cce7d85f3a722a9b01724bcd0e62cf09c73fb79eabc94f0ac82d5dbf76`, custody
-  `451a6a162c12b9f43679586c3d42d3f958fb5e5674b76639cbeef5b498be916a`, and
+  `5b5db75f46c336e00f5ff15a96b8108c9e3b9325777ddc6535b264389e1ba342`, and
   authorization
-  `52001cc62453843a79e80a1240853fee397c84a55b23c06988dfbb129cfdb792`.
+  `d42d3bc09e5137ab5e54e68d611cc4cf613a81e09b6cc1511b73db657b378d5b`. The
+  existing Reference v2 `PartialAcceptance` / `AcceptedCopyAck` remains a
+  separate closed schema profile with `schemaVersion: 2`, the existing record
+  markers, no spool protocol field, and its
+  `LTDS-PARTIAL-ACCEPTANCE-V2\0` digest domain; the current Viewer serializer
+  reproduced the sample acceptance digest
+  `64bfa129f873615a1a6be9250db5784affe4f58cabefbf41d17cbe59749124a5`.
+- Renamed the custody guarantee to
+  `explicit_source_release_ack_ltds_processing_spool_v2` so it cannot be read
+  as a reference to the colliding v1 ACK. The proposal now requires a durable
+  per-object journal, bounded time remaining before each destructive step,
+  strict expiry checks around effects and directory sync, and read-only exact
+  old-generation reconciliation after restart. Expired or uncertain operations
+  retain all unresolved custody; a new generation alone cannot clear it. These
+  are contract requirements and test obligations, not implemented executor
+  behavior.
 - The focused Processing acceptance/release, existing v2 acceptance, and
-  signed source-retention suites now run 46 tests with one platform-specific
+  signed source-retention suites now run 47 tests with one platform-specific
   skip. This verifies the current synthetic profile and vectors only; it does
   not establish an agreed deployed endpoint, physical source custody, or live
   result acceptance/cleanup.

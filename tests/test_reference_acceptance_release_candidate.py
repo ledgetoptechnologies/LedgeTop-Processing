@@ -173,6 +173,22 @@ class ResultAcceptanceReleaseCandidateTests(unittest.TestCase):
                     expected_capacity_reservation_receipt_id="capacity-reservation-1",
                     expected_reserved_bytes=12, now="2026-11-02T12:00:00.000Z")
 
+    def test_retention_guarantee_is_specific_to_the_v2_release_ack(self):
+        changed = copy.deepcopy(self.custody)
+        changed["retentionGuarantee"] = "until_explicit_source_release_ack_v1"
+        with self.assertRaises(CandidateRejected):
+            validate_spool_custody_receipt(
+                json.dumps(changed, separators=(",", ":")).encode(),
+                authenticated_peer={"role": "sourceStorageExecutor", "principal": changed["issuerId"]},
+                expected_binding=self.auth["binding"],
+                expected_spool_root_id=self.auth["spoolRootId"],
+                expected_spool_root_generation=self.auth["spoolRootGeneration"],
+                expected_source_objects=self.auth["objects"],
+                expected_custody_receipt_sha256=canonical_digest(changed, CUSTODY_RECEIPT_DOMAIN),
+                expected_writer_fence_receipt_id="writer-fence-1",
+                expected_capacity_reservation_receipt_id="capacity-reservation-1",
+                expected_reserved_bytes=12, now="2026-11-02T12:00:00.000Z")
+
     def test_expired_authority_or_late_physical_effect_cannot_start_or_complete_release(self):
         late = "2026-11-02T12:06:00.000Z"
         with self.assertRaises(CandidateRejected):
