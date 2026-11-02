@@ -137,6 +137,13 @@ No real client data was processed as part of this checkpoint.
   redesign refresh is separately tracked in draft PR #406; its current owner
   and design review remain unconfirmed. The original #347/shared branch was
   left untouched.
+- Follow-up Viewer-chat evidence on 2026-11-02 confirms redesign PR #406 is
+  still draft at `839e5173` on base `dc8cedfe`, with zero recorded reviews or
+  comments. The candidate includes customer → optional grouping → project →
+  task and dark/orange workspace styling, but does not establish client
+  permission propagation. No fresh Claude acknowledgement or supported
+  message-bus evidence is available. The isolated Viewer candidate branch was
+  clean at `06685dd5`; these are review candidates, not deployed behavior.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
