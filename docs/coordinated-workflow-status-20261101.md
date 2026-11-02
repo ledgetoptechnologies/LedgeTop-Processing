@@ -265,13 +265,19 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   transition and a managed coordinator recreate that preserves the state volume.
 - Claude's Viewer redesign worktree is on
   `claude/viewer-workspace-redesign`, three commits ahead of its remote branch
-  at the time checked and not merged into the checked production revision. Its
-  focused workspace suite passed 60/60 tests, including real headless Edge
-  desktop and mobile browser assertions for hierarchy, layout, load failures,
-  task navigation and permission behavior. The suite left three test-owned
-  browser profiles/process trees; exact Edge process trees were stopped and the
-  test profile paths were verified absent afterward. This verifies the branch's
-  candidate behavior, not Claude's current participation or production rollout.
-  The separate hierarchy-controls candidate contains the customer/group and
-  project controls and tests, but that commit also is not an ancestor of the
-  checked production revision. Grouping remains separate from client access.
+  at the time previously checked and not merged into the checked production
+  revision. A fresh ancestry check on 2026-11-02 shows that branch is now 17
+  commits ahead and 116 commits behind the current `origin/main`; it is not an
+  ancestor of the current production branch and must be reconciled on a fresh
+  main-based review branch before it can ship. Its focused workspace suite
+  passed 60/60 tests, including real headless Edge desktop and mobile browser
+  assertions for hierarchy, layout, load failures, task navigation and
+  permission behavior. The suite left three test-owned browser profiles/process
+  trees; exact Edge process trees were stopped and the test profile paths were
+  verified absent afterward. This verifies the branch's candidate behavior,
+  not Claude's current participation or production rollout. The separate
+  hierarchy-controls candidate contains the customer/group and project
+  controls and tests; current ancestry checks show it is 18 commits ahead and
+  121 behind `origin/main`, with no matching
+  `origin/claude/viewer-hierarchy-controls` ref. It also is not in production.
+  Grouping remains separate from client access.
