@@ -1260,8 +1260,11 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   independent check confirmed current main is an ancestor and the focused
   suite passes 5/5. The canonicalizer in those tests is an explicitly labeled
   test-only snapshot because main has no real protocol-v2 canonicalizer export.
-  The Viewer agent was asked to push an isolated draft PR; it remains local and
-  unpushed until that happens.
+  The isolated candidate is now draft PR #419 against `main` at
+  `7e1dd43b16c16e8129a93b8137c0ca208cfeeca5`; the remote branch matches and
+  GitHub reports no checks, consistent with main-only Actions. It remains
+  unmounted and requires actual endpoint integration, schema/auth work, reverse
+  v1 rejection, broader fuzzing, and runtime qualification.
 - Therefore the production/staging admission flow, NAS spool reservation and
   transfer, live Viewer acceptance, cross-service recovery, and bounded safe
   cleanup remain implementation and runtime-acceptance gates. No task or NAS
