@@ -58,12 +58,15 @@ No real client data was processed as part of this checkpoint.
   the small cluster slot. It writes no image payloads and proves routing only;
   live Viewer admission still rejects the same estimated size at its 20 GiB
   cap, with no end-to-end transfer demonstrated.
-- A synthetic scratch-admission case models the earlier `.89` 111 GiB and `.88`
-  1.4 TiB free-space observations. With a 50 GB input, 100 GiB output budget
-  and 1 GiB safety floor, the ledger rejects cluster admission and reserves
-  the same request on main. `test_scratch_policy` passed 36 tests with one
-  optional skip. This is a capacity-policy simulation, not a fresh disk probe,
-  a live reservation or proof that the installed worker uses this ledger.
+- A fresh read-only `df -B1` on 2026-11-02 reports root-filesystem free space
+  of 118,186,557,440 bytes on `.89` and 1,490,274,271,232 bytes on `.88`.
+  These are root filesystem values; the installed worker scratch mount/config
+  was not confirmed. A synthetic scratch-admission case models those exact
+  capacities. With a 50 GB input, 100 GiB output budget and 1 GiB safety floor,
+  the ledger rejects cluster admission and reserves the same request on main.
+  `test_scratch_policy` passed 36 tests with one optional skip. This remains a
+  capacity-policy simulation, not a live reservation or proof the installed
+  worker uses this ledger.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a

@@ -69,8 +69,8 @@ class ScratchPolicyTests(unittest.TestCase):
         output_budget = 100 * 1024 ** 3
         safety_floor = 1024 ** 3
         capacities = {
-            'cluster': 111 * 1024 ** 3,
-            'main': int(1.4 * 1024 ** 4),
+            'cluster': 118_186_557_440,
+            'main': 1_490_274_271_232,
         }
         for node, free_bytes in capacities.items():
             root = self.root / node
