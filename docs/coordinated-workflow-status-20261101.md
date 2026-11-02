@@ -108,3 +108,32 @@ No real client data was processed as part of this checkpoint.
 Gaussian splats remain scaffold-only and disabled. Production stays ahead of
 staging; a running task is not preempted; small-photo routing prefers cluster;
 TreeDar remains main-node-only; the shared global execution slot remains one.
+
+## Evidence update — 2026-11-02
+
+- Read-only SSH to cluster `.89` reported coordinator health `ok`, zero queued,
+  running or held jobs, and both logical nodes `active`. The active NodeODM
+  candidate is the `nodeodm` service in a separate root-owned migration Compose
+  project, bound to `127.0.0.1:13001` with its persistent `/var/www/data`
+  volume. Its command token matches `LOCAL_NODE_TOKEN` in the coordinator's
+  private runtime environment; no credential value was emitted.
+- The candidate Compose file is mode `0600`, owned by root. The installed
+  prototype source has no `ops/node_maintenance.py` or node maintenance config.
+  The fixed reference-coordinator updater is bound to a different legacy
+  container/project. The generic source updater takes one node token for both
+  pre- and post-replacement health checks, so it cannot safely rotate this
+  credential while the engine changes from old to new token. Rotation remains
+  unperformed; client processing must wait for a reviewed dual-token transition
+  and a managed coordinator reload.
+- Claude's Viewer redesign worktree is on
+  `claude/viewer-workspace-redesign`, three commits ahead of its remote branch
+  at the time checked and not merged into the checked production revision. Its
+  focused workspace suite passed 60/60 tests, including real headless Edge
+  desktop and mobile browser assertions for hierarchy, layout, load failures,
+  task navigation and permission behavior. The suite left three test-owned
+  browser profiles/process trees; exact Edge process trees were stopped and the
+  test profile paths were verified absent afterward. This verifies the branch's
+  candidate behavior, not Claude's current participation or production rollout.
+  The separate hierarchy-controls candidate contains the customer/group and
+  project controls and tests, but that commit also is not an ancestor of the
+  checked production revision. Grouping remains separate from client access.
