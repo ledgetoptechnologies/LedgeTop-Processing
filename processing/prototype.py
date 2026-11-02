@@ -108,6 +108,13 @@ class Queue(Maintenance):
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
+        try:
+            self._initialize_owned(root,require_idle_existing)
+        except BaseException:
+            self._lock.close()
+            raise
+
+    def _initialize_owned(self,root,require_idle_existing):
         self._lock.seek(0)
         if os.name == "nt":
             import msvcrt

@@ -22,6 +22,12 @@ authority lease. A constructor that acquires a resource and then raises before
 returning its object still requires its own cleanup; this helper cannot see that
 resource. Synthetic tests cover failure after ViewerService construction and a
 cleanup failure, with Queue and authority lease reacquired afterward.
+Queue now closes its own coordinator lock if initialization raises after opening
+it. AuthorityLease closes its own descriptor if flock is interrupted or the
+diagnostic write/sync fails; the diagnostic file can remain truncated and is not
+the authority. Synthetic tests inject those failures, immediately reacquire the
+owned lock/lease, and check a queued job. Other constructors and ambiguous OS
+close failures have not been comprehensively qualified.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.

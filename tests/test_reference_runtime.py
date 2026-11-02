@@ -49,6 +49,36 @@ class FakeServer:
 
 
 class ReferenceRuntimeTests(unittest.TestCase):
+    def test_queue_constructor_failure_releases_lock_and_preserves_queued_job(self):
+        state=self.root/'queue-constructor-state'
+        original=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:job,_=original.submit({'requestId':'constructor-queued','environment':'staging','profile':'treedar-synthetic-v1'})
+        finally:original.close()
+        with patch.object(Queue,'_init_maintenance',side_effect=RuntimeError('synthetic schema failure')):
+            with self.assertRaisesRegex(RuntimeError,'synthetic schema failure'):
+                Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        replacement=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:self.assertEqual(replacement.get(job['id'])['status'],'queued')
+        finally:replacement.close()
+
+    @unittest.skipUnless(os.name=='posix','POSIX authority lease required')
+    def test_authority_constructor_fsync_failure_releases_owned_lease(self):
+        from processing import authority_lease
+        state=self.root/'lease-constructor-state';leases=self.root/'lease-constructor-locks';leases.mkdir(mode=0o700)
+        queue=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:job,_=queue.submit({'requestId':'lease-queued','environment':'staging','profile':'treedar-synthetic-v1'})
+        finally:queue.close()
+        with patch('fcntl.flock',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):authority_lease.acquire(leases,state)
+        with patch('processing.authority_lease.os.fsync',side_effect=OSError('synthetic sync failure')):
+            with self.assertRaisesRegex(OSError,'synthetic sync failure'):authority_lease.acquire(leases,state)
+        lease=authority_lease.acquire(leases,state)
+        try:
+            replacement=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            try:self.assertEqual(replacement.get(job['id'])['status'],'queued')
+            finally:replacement.close()
+        finally:lease.close()
+
     @unittest.skipUnless(os.name=='posix','POSIX authority lease required')
     def test_partial_handler_failure_releases_queue_and_authority_lease(self):
         from processing import authority_lease

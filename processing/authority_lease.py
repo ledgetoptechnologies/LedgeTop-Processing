@@ -60,16 +60,22 @@ class AuthorityLease:
             raise LeaseUnavailable('authority_lease_unavailable') from None
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except BaseException as error:
             os.close(descriptor)
-            raise LeaseUnavailable('authority_lease_held') from None
+            if isinstance(error,OSError):
+                raise LeaseUnavailable('authority_lease_held') from None
+            raise
+        try:
+            # Diagnostic only; the flock, not this content, is the lease.
+            record = json.dumps({'authorityId': authority, 'pid': os.getpid(), 'host': os.uname().nodename,
+                                 'acquiredAt': int(time.time())}).encode() + b'\n'
+            os.ftruncate(descriptor, 0)
+            os.pwrite(descriptor, record, 0)
+            os.fsync(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            raise
         self._descriptor = descriptor
-        # Diagnostic only; the flock, not this content, is the lease.
-        record = json.dumps({'authorityId': authority, 'pid': os.getpid(), 'host': os.uname().nodename,
-                             'acquiredAt': int(time.time())}).encode() + b'\n'
-        os.ftruncate(descriptor, 0)
-        os.pwrite(descriptor, record, 0)
-        os.fsync(descriptor)
 
     def close(self):
         descriptor, self._descriptor = getattr(self, '_descriptor', None), None
