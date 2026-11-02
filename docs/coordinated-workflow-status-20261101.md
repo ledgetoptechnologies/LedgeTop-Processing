@@ -68,6 +68,23 @@ No real client data was processed as part of this checkpoint.
   replay storage/endpoints,
   NAS physical custody, full typed TreeDar acceptance and deployment remain
   unagreed and unimplemented.
+- On 2026-11-02, the Viewer chat added a fixture-only cross-record
+  `AcceptedCopyAck` check at commit `9d2766aa`. It uses Viewer's canonicalizer
+  and checks exact closed keys, operation/receipt/full-hash/binding/result/
+  storage/ordered-artifact bindings, modified acceptance, ordering and NUL
+  domain handling. Its bounded Node tests passed 2/2. This still does not
+  authenticate issuer identity or prove NAS custody. The saved live-task
+  receipt check Beau ran matched the task and receipt, validated its 71-file
+  inventory digest and listed the mesh tileset; it did not list a point-cloud
+  tileset. This is ledger metadata, not a current on-disk custody check.
+- The Viewer chat confirmed the production reference lane remains hard-disabled:
+  the worker's production call returns without dispatch, and no production
+  transfer adapter, broker route or authenticated issuer is wired. The broker
+  currently stores only a token hash, so an encrypted exact-grant outbox cannot
+  close the crash-after-mint-before-persist window without a paired atomic
+  issuance API/schema or an explicitly weaker deterministic reconstruction
+  contract. NAS source pinning, writer/purge fencing and issuer authentication
+  remain prerequisites; no live lane was enabled.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
