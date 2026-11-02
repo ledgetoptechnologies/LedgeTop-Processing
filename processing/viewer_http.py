@@ -250,14 +250,24 @@ class ViewerFacade:
                                     '/task/new/init', '/task/cancel', '/task/remove') or
                     re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path))
                 gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
-                if guarded and gate is not None:
-                    from .admission_drain import AdmissionClosed
-                    try:
-                        with gate.admit(): self._post(handler, path, environment)
-                    except AdmissionClosed:
-                        raise RequestError(503, 'admission_draining')
-                else:
-                    self._post(handler, path, environment)
+                lifecycle = getattr(handler, 'lifecycle_service', None)
+                upload = re.fullmatch(r'/task/new/upload/[^/]+', path)
+                registered = False
+                try:
+                    if upload and lifecycle is not None and getattr(handler, 'stop_upload_reads', False):
+                        if not lifecycle.begin_upload(handler.connection):
+                            raise RequestError(503, 'coordinator_stopping')
+                        registered = True
+                    if guarded and gate is not None:
+                        from .admission_drain import AdmissionClosed
+                        try:
+                            with gate.admit(): self._post(handler, path, environment)
+                        except AdmissionClosed:
+                            raise RequestError(503, 'admission_draining')
+                    else:
+                        self._post(handler, path, environment)
+                finally:
+                    if registered:lifecycle.end_upload(handler.connection)
             else:
                 raise RequestError(405, 'method_not_allowed')
         except RequestError as error:
