@@ -310,10 +310,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   remains unperformed; client processing must wait for a reviewed dual-token
   transition and a managed coordinator recreate that preserves the state volume.
 - Claude's Viewer redesign worktree is on
-  `claude/viewer-workspace-redesign`, three commits ahead of its remote branch
-  at the time previously checked and not merged into the checked production
-  revision. A fresh ancestry check on 2026-11-02 shows that branch is now 17
-  commits ahead and 116 commits behind the current `origin/main`; it is not an
+  `claude/viewer-workspace-redesign`, with Claude-coauthored redesign,
+  branding/accessibility and hierarchy commits in open PR #347. A current
+  GitHub compare on 2026-11-02 shows that branch 16 commits ahead and 118
+  commits behind `main` (`dc8cedfe`); it is not an
   ancestor of the current production branch and must be reconciled on a fresh
   main-based review branch before it can ship. Its focused workspace suite
   passed 60/60 tests, including real headless Edge desktop and mobile browser
@@ -375,8 +375,9 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   not substitute for live NAS custody, actual Viewer acceptance, or host
   restart/power-loss acceptance.
 - Viewer range-resume candidate follow-up: isolated LedgeTop-Ops branch
-  `codex/viewer-range-resume-candidate` contains commits `46986b93` and
-  `5dff688c`; draft PR #407 is stacked on `codex/viewer-v2-delivery-ledger` at
+  `codex/viewer-range-resume-candidate` contains commits `46986b93`,
+  `5dff688c` and `dbb267a6`; draft PR #407 is stacked on
+  `codex/viewer-v2-delivery-ledger` at
   `1e5bfa6b`. Its focused Linux tests passed 26 tests with 2 platform-only
   skips at that checkpoint, covering exact 206 ranges, complete-object digest
   before publication, interruption/restart checkpoints, replay after a lost
