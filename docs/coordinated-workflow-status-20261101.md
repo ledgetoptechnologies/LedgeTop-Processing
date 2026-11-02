@@ -195,10 +195,19 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   range resume or physical request/byte meter; failed object transfers restart
   from byte zero. Worker result bytes are exposed separately by an authenticated
   result GET bound to generation/object/result-manifest hashes and durable read
-  pins. The worker's `/results` POST is a metadata completion receipt, not an
-  archive upload; Viewer acceptance is a later, separate receipt. No NAS broker
-  service or mounted Viewer accepted-copy ingest is implemented. This mapping
-  is an existing-source audit, not a new cross-language contract.
+  pins, and the worker endpoint accepts ranges. The coordinator's current
+  `ResultProxy.open` requests the whole object and requires HTTP 200, so there
+  is no end-to-end range resume. The worker's `/results` POST is a metadata
+  completion receipt, not an archive upload; Viewer acceptance is a later,
+  separate receipt. No NAS broker service or mounted Viewer accepted-copy
+  ingest is implemented. This mapping is an existing-source audit, not a new
+  cross-language contract.
+- Viewer independently reviewed paired rehearsal commit `59bafc9` against its
+  acceptance proposal and confirmed the scoped claims are consistent. Viewer
+  corrected its range-transfer description in commit `b0c376b6`; this makes
+  clear that range support exists at the worker endpoint but is not forwarded
+  by the current coordinator proxy. This is documentation review only; no test
+  was rerun and no runtime behavior changed.
 - Beau's follow-up read-only metadata check matched the same saved task and
   provider attempt. It confirmed `3d-tiles` is a boolean `true`, the recorded
   v1 archive inventory has 71 entries and a valid digest, and the mesh tileset
