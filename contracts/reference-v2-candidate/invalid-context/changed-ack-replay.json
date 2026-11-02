@@ -1,0 +1,13 @@
+{
+  "base": "valid/combined.json",
+  "expected": "conflict",
+  "issuerId": "fixture-viewer-accepted-copy-issuer",
+  "originalAcceptanceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "originalAckOperationId": "acceptance-ack-odm",
+  "priorState": "committed",
+  "replayAcceptanceSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "replayAckOperationId": "acceptance-ack-odm",
+  "retainDiskHold": true,
+  "retainProducerBytes": true,
+  "status": "SYNTHETIC_NEGATIVE_CONTEXT"
+}

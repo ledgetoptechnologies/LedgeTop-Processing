@@ -8,6 +8,7 @@
   "schema": "contract.schema.json",
   "semanticReviewQuestions": [
     "Approve technical candidate constants/grammars and requestedProductsDigest domain?",
+    "Confirm AcceptedCopyAck operation-ID echo, canonical hash vector and exact replay conflict semantics across languages?",
     "Remove superseded compact reauthorization summary type or explicitly pair a non-authoritative view?",
     "Pair ODM closure descriptor transport and exact EPT/mesh dependency semantics without mandatory standalone duplicates?",
     "Confirm preupload worker ProductOutcome evidence and producer custody are distinct from NAS accepted-copy validation/custody?",
@@ -25,6 +26,7 @@
     "NOTACTIVATED"
   ],
   "technicalCandidateChoices": {
+    "acceptedCopyAck": "AcceptedCopyAck is a proposed closed fixture record. Its ackOperationId echoes PartialAcceptance.ackOperationId; its acceptanceSha256 hashes the complete canonical PartialAcceptance with the LTDS-PARTIAL-ACCEPTANCE-V2 NUL domain prefix. Replay is keyed by authenticated issuerId plus operation ID.",
     "archiveMemberPathCharacters": 1024,
     "metadataMaximumDepth": 32,
     "odmClosureDescriptor": "ltds-odm-closure-v1-proposed sidecar supplied in fixture context; actual transport unresolved",

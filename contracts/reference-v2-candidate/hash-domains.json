@@ -8,7 +8,19 @@
     "unicode": "valid scalar values; no normalization; standard JSON escaping",
     "whitespace": false
   },
+  "crossMessageDigests": [
+    {
+      "field": "acceptanceSha256",
+      "formula": "SHA256(ASCII(prefix) || 0x00 || canonicalUTF8(value))",
+      "omission": "none",
+      "prefixAscii": "LTDS-PARTIAL-ACCEPTANCE-V2",
+      "prefixTerminatorHex": "00",
+      "type": "AcceptedCopyAck",
+      "value": "complete PartialAcceptance record"
+    }
+  ],
   "newCandidateTechnicalChoice": {
+    "AcceptedCopyAck.acceptanceSha256": "SHA256(ASCII(LTDS-PARTIAL-ACCEPTANCE-V2) || 0x00 || canonicalUTF8(complete PartialAcceptance)); no fields omitted. Fixture contract only; issuer/endpoints remain unagreed.",
     "ParentCompletion.requestedProductsDigest": "Canonical array in original stage order of closed {stageId,engine,requestedProducts}; no ODM option values included. Still requires paired acceptance."
   },
   "opaqueAuthenticatedReferences": [

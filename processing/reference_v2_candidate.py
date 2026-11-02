@@ -22,12 +22,13 @@ MAX_ARRAY=10000
 MAX_OBJECT=256  # Largest object permitted anywhere by the pinned used schema.
 MAX_INTEGER=9007199254740991
 STATUS='UNAGREED_INACTIVE_STRUCTURAL_ONLY'
+ACCEPTANCE_HASH_PREFIX=b'LTDS-PARTIAL-ACCEPTANCE-V2\x00'
 ROOT=Path(__file__).resolve().parents[1]/'contracts'/'reference-v2-candidate'
 PINS=MappingProxyType({
-    'contract.schema.json':'61467d589c36efae9b130fc179a454868ea1242a96918d8143ca949c79ed933c',
-    'hash-domains.json':'906cfb3655d433bf48211d9a2772df7e886b28083c3f40b93983ffe5370dcfef',
-    'semantic-rules.json':'197ace13195fda2f191c7740ff2b6f48afd4bea4f8f2cd0d71892029e9ebe43b',
-    'invalid/index.json':'4b321bb739f50102e6c593b3ea6964f8b92225b6a5b7cf8abfab7e6e96480d5f'})
+    'contract.schema.json':'850b38441911a518fd6b3add9b74b4f7e2e6d8607cca50372c38f785a01c6412',
+    'hash-domains.json':'0ae9dda18cf7f2d77eb359e5a373221562f95397e82de0dbd1167799af67bc85',
+    'semantic-rules.json':'873306dc707a63954dd6b0ad329a5ec1d20641f87dad0bb8cde774d9267667f2',
+    'invalid/index.json':'9de96a65367f76e752d05993136e5fd2e897bc9f37bd8ea08eccdc00fb3a978a'})
 SELF_DIGESTS=MappingProxyType({'InputManifest':'sha256','ResultManifest':'resultManifestSha256',
     'ParentCompletion':'completionSha256','PointcloudZipManifest':'manifestSha256',
     'OdmArchiveClosureManifest':'manifestSha256','ImmutableMetadataIntent':'intentSha256',
@@ -298,7 +299,8 @@ def _bundle():
             domains=_decode(_read_pinned('hash-domains.json'));rules=_decode(_read_pinned('semantic-rules.json'))
             actual={v['type']:v['field'] for v in domains['selfDigests']}
             _require(actual==dict(SELF_DIGESTS),'NAMED_DIGEST_DOMAINS_CHANGED')
-            _require(len(schema['$defs'])==60,'PINNED_SCHEMA_DEFINITIONS_CHANGED')
+            _require(domains.get('crossMessageDigests')==[dict(type='AcceptedCopyAck',field='acceptanceSha256',prefixAscii='LTDS-PARTIAL-ACCEPTANCE-V2',prefixTerminatorHex='00',value='complete PartialAcceptance record',omission='none',formula='SHA256(ASCII(prefix) || 0x00 || canonicalUTF8(value))')],'CROSS_MESSAGE_DIGEST_DOMAINS_CHANGED')
+            _require(len(schema['$defs'])==61,'PINNED_SCHEMA_DEFINITIONS_CHANGED')
             deferred=tuple(rule['id'] for rule in rules['rules'] if rule['phase'] not in ('lexical','schema') and rule['id']!='STRUCTURED_DIGEST')
             _CACHE=(schema,deferred)
         return _CACHE
@@ -350,6 +352,27 @@ def validate_candidate(raw,*,record_type):
     node=defs[record_type];_evaluate(node,value,defs)
     checked=_check_digests(node,value,defs,record_type=record_type)
     return StructuralCandidateRecord(record_type,raw,checked,deferred)
+
+
+def validate_accepted_copy_ack(acceptance_raw,ack_raw):
+    """Check the proposed ACK's cross-record binding, never issuer authority."""
+    acceptance=validate_candidate(acceptance_raw,record_type='PartialAcceptance').value
+    ack=validate_candidate(ack_raw,record_type='AcceptedCopyAck')
+    value=ack.value
+    expected_hash=hashlib.sha256(ACCEPTANCE_HASH_PREFIX+canonical_metadata(acceptance)).hexdigest()
+    checks=(
+        (value['ackOperationId']==acceptance['ackOperationId'],'ACCEPTANCE_ACK_OPERATION_MISMATCH','$.ackOperationId'),
+        (value['acceptanceReceiptId']==acceptance['receiptId'],'ACCEPTANCE_ACK_RECEIPT_MISMATCH','$.acceptanceReceiptId'),
+        (value['acceptanceSha256']==expected_hash,'ACCEPTANCE_ACK_DIGEST_MISMATCH','$.acceptanceSha256'),
+        (value['binding']==acceptance['binding'],'ACCEPTANCE_ACK_BINDING_MISMATCH','$.binding'),
+        (value['resultSetId']==acceptance['resultSetId'],'ACCEPTANCE_ACK_RESULT_SET_MISMATCH','$.resultSetId'),
+        (value['resultManifestSha256']==acceptance['resultManifestSha256'],'ACCEPTANCE_ACK_MANIFEST_MISMATCH','$.resultManifestSha256'),
+        (value['acceptedArtifactIds']==[item['id'] for item in acceptance['acceptedArtifacts']],
+         'ACCEPTANCE_ACK_ARTIFACTS_MISMATCH','$.acceptedArtifactIds'),
+        (value['storageReceiptId']==acceptance['storageReceiptId'],'ACCEPTANCE_ACK_STORAGE_MISMATCH','$.storageReceiptId'),
+    )
+    for valid,code,path in checks:_require(valid,code,path)
+    return ack
 
 
 def candidate_definitions():return tuple(sorted(_bundle()[0]['$defs']))

@@ -50,6 +50,24 @@ No real client data was processed as part of this checkpoint.
   rollback, requires worker and child writer quiescence before heavy-slot
   release, and requires explicit per-stage coverage. It remains unagreed and
   inactive; it is review progress, not a wire contract or runtime behavior.
+- On 2026-11-02, Processing and Viewer agreed only the disabled fixture seam
+  for `AcceptedCopyAck`: it echoes `PartialAcceptance.ackOperationId` and binds
+  the full acceptance through
+  `SHA256(ASCII("LTDS-PARTIAL-ACCEPTANCE-V2") || 0x00 ||
+  canonicalUTF8(complete PartialAcceptance))`. The candidate now includes the
+  closed record, cross-message hash domain, positive/changed-value vector and
+  synthetic binding checks. The Processing candidate suite passed 25 tests in
+  both Windows Python and Ubuntu 24.04 WSL; one optional JSON Schema oracle
+  test skipped because its test-only dependencies are not installed in either
+  default environment. A separate Node check matched the agreed positive
+  vector and confirmed a changed acceptance produces a different digest.
+  Viewer commit `6b33119f` adds a fixture-only test using Viewer’s real
+  canonicalizer; its bounded Node test passed 1/1 against the exact packet.
+  The
+  schema remains marked unagreed/inactive overall. Issuer authentication,
+  replay storage/endpoints,
+  NAS physical custody, full typed TreeDar acceptance and deployment remain
+  unagreed and unimplemented.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
@@ -61,7 +79,19 @@ No real client data was processed as part of this checkpoint.
   the candidate point-cloud tileset path. This proves the database recorded
   that inventory, not that the files are still present on disk or that a live
   orchestrator-to-Viewer ingestion was completed. The absent path does not
-  prove no EPT output exists elsewhere.
+  prove no EPT output exists elsewhere; Viewer discovers EPT separately at
+  `entwine_pointcloud/ept.json`.
+- The Viewer chat reviewed the read path: `getAttemptTransferProvenance` reads
+  stored receipt JSON, and `getVerifiedAttemptProducerReceipt` validates
+  stored attempt/input/initialization/provider-result/archive bindings. Neither
+  establishes current NAS file existence or hashes. The ingestion worker hashes
+  the downloaded archive and inventory during initial capture, and a specific
+  archive-receipt recovery path re-hashes the expanded destination tree. That
+  point-in-time recovery verification does not prove this saved task followed
+  that path or that bytes remain unchanged now; historical unreceipted jobs
+  may use a legacy path. The original ZIP hash is recorded but the directory
+  verifier does not re-hash an archived copy of the ZIP. This narrows the
+  existing evidence to ledger metadata only.
 - Follow-up audit confirms the foreground synthetic prototype documents
   completion-only resume from the exact saved receipt: it resends the recorded
   completion and does not claim or rerun the job. Separately, the newer

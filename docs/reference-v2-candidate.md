@@ -11,6 +11,8 @@ and metadata addendum v1, SHA
 `502491feee2f8e52df49e87ce51e0f26a2fa3c2e0b6ed9431b8423f794358242`.
 Pinned copies are in `contracts/reference-v2-candidate/sources/`. The generator
 asserts exact field coverage for all 31 outer and eight addendum record types.
+`AcceptedCopyAck` is one additional proposed closed record, not part of the
+source field sets and not a currently negotiated runtime message.
 
 ## Contents and limits
 
@@ -23,7 +25,14 @@ private/support records remain available through `$defs`.
 `semantic-rules.json` supplies required lexical, cross-record, authentication,
 budget and lifecycle rules that JSON Schema cannot enforce by itself.
 `hash-domains.json` distinguishes exact physical bytes, named structured
-self-digests and opaque authenticated references. The general pipeline digest
+self-digests, cross-message acceptance digest and opaque authenticated
+references. The candidate `AcceptedCopyAck` echoes the stable
+`PartialAcceptance.ackOperationId`; its `acceptanceSha256` hashes the complete
+canonical acceptance record prefixed by ASCII `LTDS-PARTIAL-ACCEPTANCE-V2`
+and one NUL byte. A generated positive/changed-value vector records exact bytes
+and hashes. Viewer and Processing agreed to this disabled fixture-only seam;
+replay service, issuer identity, endpoints, NAS custody and runtime behavior
+remain unimplemented and unagreed. The general pipeline digest
 remains server-owned and opaque; there is no new cross-language algorithm for
 dynamic option floats. Structured metadata digest domains preserve nested hashes
 and omit only their designated own top-level digest field. A proposed products

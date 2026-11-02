@@ -6,29 +6,49 @@
       "sha256": "705fd4d6451a31d36b3df7de96f83f30ac976c9b4a6d1e51671d8e2f33e2d0da"
     },
     {
-      "byteSize": 3175,
+      "byteSize": 3625,
       "path": "candidate.json",
-      "sha256": "d642d8296d4486dd0f004a54955c9e9f80265fe1145f5d32980b5ecccefb3563"
+      "sha256": "45d35ac2ba5ce8f49b376ff69a6598a36ada9e5bfb893679338551268410bc94"
     },
     {
-      "byteSize": 1342,
+      "byteSize": 5969,
       "path": "canonical-vectors.json",
-      "sha256": "dc50a7eaf919dc97e900a7af2d7a6424622272435d7c19a5813619cce36bb96d"
+      "sha256": "19a1b673bd9f1b88aea74a2c324936d9fdecb639ec579ca9286b406904d14e9a"
     },
     {
-      "byteSize": 73371,
+      "byteSize": 74898,
       "path": "contract.schema.json",
-      "sha256": "61467d589c36efae9b130fc179a454868ea1242a96918d8143ca949c79ed933c"
+      "sha256": "850b38441911a518fd6b3add9b74b4f7e2e6d8607cca50372c38f785a01c6412"
     },
     {
-      "byteSize": 69074,
+      "byteSize": 73715,
       "path": "generate.py",
-      "sha256": "e64dec63cda3b3aeaecc8b5c458fb6c3d2b61b3ddc6956b3fd2fb9528c98503f"
+      "sha256": "89f6d757f47934c6f7cfcddeafd693db70a0895e3bf7ac8dc2fbf8310d1d3dff"
     },
     {
-      "byteSize": 3638,
+      "byteSize": 4202,
       "path": "hash-domains.json",
-      "sha256": "906cfb3655d433bf48211d9a2772df7e886b28083c3f40b93983ffe5370dcfef"
+      "sha256": "0ae9dda18cf7f2d77eb359e5a373221562f95397e82de0dbd1167799af67bc85"
+    },
+    {
+      "byteSize": 827,
+      "path": "invalid/accepted-copy-ack-artifact-set-mismatch.json",
+      "sha256": "bd473415952bd9d46e87a54916b844dcd3fcbc6a65c758cdf4e903138fc62e13"
+    },
+    {
+      "byteSize": 819,
+      "path": "invalid/accepted-copy-ack-changed-payload-replay.json",
+      "sha256": "ea184c50f2c8107e4ff57045f79dfe318e70b0914c7f1deddb78e2779d9b7a96"
+    },
+    {
+      "byteSize": 819,
+      "path": "invalid/accepted-copy-ack-digest-mismatch.json",
+      "sha256": "c71a7744b104aa290cd5f569bf4a01f9498cbb20a42c3ab0cab59090c775d3f1"
+    },
+    {
+      "byteSize": 818,
+      "path": "invalid/accepted-copy-ack-operation-mismatch.json",
+      "sha256": "4e865f42deefc7c430400783c0bfab9035e4d414dad66ec42e1d7c20efbdd15f"
     },
     {
       "byteSize": 2785,
@@ -131,9 +151,9 @@
       "sha256": "e989d9c02f22194c176a84421752620737cf2a5ca8a70377cb5ec6cfab39f55b"
     },
     {
-      "byteSize": 25365,
+      "byteSize": 27354,
       "path": "invalid/index.json",
-      "sha256": "4b321bb739f50102e6c593b3ea6964f8b92225b6a5b7cf8abfab7e6e96480d5f"
+      "sha256": "9de96a65367f76e752d05993136e5fd2e897bc9f37bd8ea08eccdc00fb3a978a"
     },
     {
       "byteSize": 1306,
@@ -321,6 +341,11 @@
       "sha256": "338d9a8694059253fa19063a5a9124e9b836e93ec52dbb89df5837ea364083e7"
     },
     {
+      "byteSize": 535,
+      "path": "invalid-context/changed-ack-replay.json",
+      "sha256": "6c4c4108874667292c8b44408a06736eb4a092e7e8426cd314ac65841dbe64fe"
+    },
+    {
       "byteSize": 151,
       "path": "invalid-context/control-counter-rollback.json",
       "sha256": "187fd65607b48d23cfd1936777e7c5719683985c48897d911e62e6894d3e36be"
@@ -341,9 +366,9 @@
       "sha256": "ed918245c2ba6266a30ca631c9ee8370bac73550405bbfc100c8c6b865aabfc1"
     },
     {
-      "byteSize": 12540,
+      "byteSize": 13510,
       "path": "semantic-rules.json",
-      "sha256": "197ace13195fda2f191c7740ff2b6f48afd4bea4f8f2cd0d71892029e9ebe43b"
+      "sha256": "873306dc707a63954dd6b0ad329a5ec1d20641f87dad0bb8cde774d9267667f2"
     },
     {
       "byteSize": 41716,
@@ -361,24 +386,24 @@
       "sha256": "0b11c0b8958fbfcb170b42fe6e61a07d95b17a7140d905137f760e74d6ec8b34"
     },
     {
-      "byteSize": 81515,
+      "byteSize": 83753,
       "path": "valid/combined.json",
-      "sha256": "2259fc94ba972bdbd98aa965f9c3663421ee0746447f124fc506d6acffa4e2d6"
+      "sha256": "0bc5d5307ea52d7fdd63322100d38bb3c76081eeedc0dc14f85a5904b2479d91"
     },
     {
-      "byteSize": 28427,
+      "byteSize": 29536,
       "path": "valid/odm_only.json",
-      "sha256": "6a50f973a2294024abd88b93b7777e7d44c2eb572624c4fba63644eb1a918372"
+      "sha256": "03f5cac11d2007579536412f1e2f8e859431d6df67ad68110a13933b1d617c50"
     },
     {
-      "byteSize": 28959,
+      "byteSize": 30068,
       "path": "valid/odm_optional_unavailable.json",
-      "sha256": "71e6812a44d3c75eb718bc379f94f1b8ad0bff570f0cf3ee83392691c4d6f324"
+      "sha256": "9a63cdcea7996ef0e56cb3e212232aa5799e0030898d518edfe86476f496fbc5"
     },
     {
-      "byteSize": 28499,
+      "byteSize": 29608,
       "path": "valid/odm_pointcloud_only.json",
-      "sha256": "ff32ced30fbe8f6810449e7bf0b6230ee8a0109742ec6ab6b4216b3f16f72008"
+      "sha256": "51c90851ea74cc5fb99ff1e4016eed9759174e35c7ba8b6f7246a9101fd3f3df"
     },
     {
       "byteSize": 18277,
@@ -386,11 +411,11 @@
       "sha256": "e6a1e40339acf90689150d276a5152975e1b5a31f94fef64078baeaf7598bb24"
     },
     {
-      "byteSize": 64254,
+      "byteSize": 65387,
       "path": "valid/treedar_only.json",
-      "sha256": "5d161bb1f56cc72d20123f5c63ae6c741e5e50683bb5b6c9ec7f89126c2f5b4d"
+      "sha256": "bab161ed80a6cd8586becb83ea3bf003da2305f116ec9772786cd6a1940992d0"
     }
   ],
-  "inventoryDigest": "2fe96315e1fbd357e4d7f9495cf4d6c61a3cb0c48d667e92ce3aa43b548661f0",
+  "inventoryDigest": "b53e11dbb3a97fc1bfb064d231144e6353c98e82e68bddc9302d792f18b1fb77",
   "status": "REVIEW_INVENTORY_NOT_NEGOTIATED_CONTRACT_FINGERPRINT"
 }

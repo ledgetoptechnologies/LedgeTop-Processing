@@ -409,6 +409,54 @@
       "rule": "PARTIAL_SAME_MANIFEST"
     },
     {
+      "byteSize": 819,
+      "documentType": "AcceptedCopyAck",
+      "expected": "reject",
+      "expectedContext": "valid/combined.json",
+      "id": "accepted-copy-ack-digest-mismatch",
+      "inputFile": "invalid/accepted-copy-ack-digest-mismatch.json",
+      "inputSha256": "c71a7744b104aa290cd5f569bf4a01f9498cbb20a42c3ab0cab59090c775d3f1",
+      "note": "",
+      "phase": "semantic",
+      "rule": "ACCEPTED_COPY_ACK_BINDING"
+    },
+    {
+      "byteSize": 818,
+      "documentType": "AcceptedCopyAck",
+      "expected": "reject",
+      "expectedContext": "valid/combined.json",
+      "id": "accepted-copy-ack-operation-mismatch",
+      "inputFile": "invalid/accepted-copy-ack-operation-mismatch.json",
+      "inputSha256": "4e865f42deefc7c430400783c0bfab9035e4d414dad66ec42e1d7c20efbdd15f",
+      "note": "",
+      "phase": "semantic",
+      "rule": "ACCEPTED_COPY_ACK_BINDING"
+    },
+    {
+      "byteSize": 827,
+      "documentType": "AcceptedCopyAck",
+      "expected": "reject",
+      "expectedContext": "valid/combined.json",
+      "id": "accepted-copy-ack-artifact-set-mismatch",
+      "inputFile": "invalid/accepted-copy-ack-artifact-set-mismatch.json",
+      "inputSha256": "bd473415952bd9d46e87a54916b844dcd3fcbc6a65c758cdf4e903138fc62e13",
+      "note": "",
+      "phase": "semantic",
+      "rule": "ACCEPTED_COPY_ACK_BINDING"
+    },
+    {
+      "byteSize": 819,
+      "documentType": "AcceptedCopyAck",
+      "expected": "reject",
+      "expectedContext": "invalid-context/changed-ack-replay.json",
+      "id": "accepted-copy-ack-changed-payload-replay",
+      "inputFile": "invalid/accepted-copy-ack-changed-payload-replay.json",
+      "inputSha256": "ea184c50f2c8107e4ff57045f79dfe318e70b0914c7f1deddb78e2779d9b7a96",
+      "note": "An already committed issuerId+ackOperationId is replayed with a changed acceptanceSha256; reject as conflict and retain producer bytes and disk hold.",
+      "phase": "lifecycle",
+      "rule": "ACCEPTED_COPY_ACK_REPLAY"
+    },
+    {
       "byteSize": 2785,
       "documentType": "ResultManifest",
       "expected": "reject",

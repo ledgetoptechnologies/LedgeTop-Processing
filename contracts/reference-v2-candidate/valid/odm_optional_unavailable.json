@@ -288,6 +288,32 @@
       }
     },
     {
+      "type": "AcceptedCopyAck",
+      "value": {
+        "acceptanceReceiptId": "acceptance-odm",
+        "acceptanceSha256": "236a0df8c2ca7599d85a7bf2487f01df1a8c8ce132f9864ab0cf33ea933f597c",
+        "acceptedArtifactIds": [
+          "odm-file"
+        ],
+        "ackOperationId": "acceptance-ack-odm",
+        "acknowledgedAt": "2026-10-28T14:00:00.000Z",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "5f6b5adb71321bf17fe5123c3b7cfeb27c2ab966e24f17d371c1f8a756966977",
+          "jobId": "00000000-0000-4000-8000-000000000004",
+          "parentClaimId": "original-parent-claim-odm_only",
+          "pipelineDigest": "89930e8cca460bb2f65393666ee443985a6cb9665689e6e0a5772f15d14e75ca"
+        },
+        "issuerId": "fixture-viewer-accepted-copy-issuer",
+        "receiptType": "accepted_copy_ack",
+        "resultManifestSha256": "38465be5cf489069685140b1c5144dbac7abd554df63afb3b714393dfbedd93c",
+        "resultSetId": "results-odm",
+        "schemaVersion": 2,
+        "storageReceiptId": "nas-storage-odm"
+      }
+    },
+    {
       "type": "ExecutionSettledReceipt",
       "value": {
         "binding": {

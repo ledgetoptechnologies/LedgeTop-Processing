@@ -9,6 +9,7 @@
     "durable lifecycle/replay state"
   ],
   "requiredOrdering": {
+    "AcceptedCopyAck.acceptedArtifactIds": "exact PartialAcceptance.acceptedArtifacts order",
     "allOtherIdentitySets": "ASCII full identity",
     "custodyObjects": "ASCII objectId",
     "eptEntries": "ASCII relativePath",
@@ -125,6 +126,16 @@
       "id": "PARTIAL_SAME_MANIFEST",
       "phase": "semantic",
       "requirement": "Partial acceptance references one exact binding/resultSetId/resultManifestSha256. Every accepted ID/hash/size/stage/worker/reservation matches that manifest and original producer receipt. Never union receipts from different result manifests/stages to invent closure."
+    },
+    {
+      "id": "ACCEPTED_COPY_ACK_BINDING",
+      "phase": "semantic",
+      "requirement": "AcceptedCopyAck echoes PartialAcceptance.ackOperationId exactly and binds the exact acceptanceReceiptId, domain-separated acceptanceSha256, binding, resultSetId, resultManifestSha256, storageReceiptId, and acceptedArtifactIds in the exact PartialAcceptance.acceptedArtifacts order. The issuer and accepted-copy physical receipts must resolve through authenticated trusted Viewer/NAS services."
+    },
+    {
+      "id": "ACCEPTED_COPY_ACK_REPLAY",
+      "phase": "lifecycle",
+      "requirement": "The authenticated issuer durably keys ACK replay by issuerId and ackOperationId. Exact same operation and payload returns byte-identical ACK; changed acceptance identity or payload conflicts. Unknown delivery remains held and cannot authorize cleanup or release a disk hold."
     },
     {
       "id": "ACCEPTANCE_AUTHORITY",

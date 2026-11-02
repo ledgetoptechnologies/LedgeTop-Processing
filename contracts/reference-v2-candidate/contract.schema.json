@@ -44,6 +44,68 @@
       ],
       "type": "object"
     },
+    "AcceptedCopyAck": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptanceReceiptId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "acceptanceSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "acceptedArtifactIds": {
+          "items": {
+            "$ref": "#/$defs/Slug"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "ackOperationId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "acknowledgedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "issuerId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "receiptType": {
+          "const": "accepted_copy_ack"
+        },
+        "resultManifestSha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resultSetId": {
+          "$ref": "#/$defs/Slug"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "storageReceiptId": {
+          "$ref": "#/$defs/Slug"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "receiptType",
+        "ackOperationId",
+        "acceptanceReceiptId",
+        "acceptanceSha256",
+        "binding",
+        "resultSetId",
+        "resultManifestSha256",
+        "acceptedArtifactIds",
+        "storageReceiptId",
+        "issuerId",
+        "acknowledgedAt"
+      ],
+      "type": "object"
+    },
     "ArchiveAdmissionLimits": {
       "additionalProperties": false,
       "properties": {
@@ -3111,6 +3173,9 @@
     },
     {
       "$ref": "#/$defs/PartialAcceptance"
+    },
+    {
+      "$ref": "#/$defs/AcceptedCopyAck"
     },
     {
       "$ref": "#/$defs/ParentCompletion"

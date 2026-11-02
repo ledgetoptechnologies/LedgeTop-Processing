@@ -41,6 +41,7 @@ def samples():
         Artifact=result['objects'][0],ProductOutcome=result['products'][0],ProductTarget=result['products'][0]['targets'][0],
         ArchiveMemberReference=result['products'][0]['targets'][0]['memberRefs'][0],
         AcceptedArtifact=document('PartialAcceptance')['acceptedArtifacts'][0],StageResultReference=document('ParentCompletion')['stageResults'][0],
+        AcceptedCopyAck=document('AcceptedCopyAck'),
         EptClosureEntry=values['PointcloudZipManifest']['files'][0],
         OdmArchiveClosureManifest=copy.deepcopy(COMBINED['closureDescriptors'][0]['descriptor']),OdmArchiveClosureEntry=copy.deepcopy(COMBINED['closureDescriptors'][0]['descriptor']['files'][0]),
         SettledStage=document('ExecutionSettledReceipt')['settledStages'][0],OriginalReceiptIdentity=request['originalAcquisition'],OriginalObject=request['originalObjects'][0],
@@ -51,16 +52,16 @@ def samples():
 
 
 class CandidateTests(unittest.TestCase):
-    def test_all_58_typed_goldens_and_all_60_definitions_are_supported(self):
+    def test_all_64_typed_goldens_and_all_61_definitions_are_supported(self):
         count=0
         for fixture in GOLDENS:
             for entry in fixture['documents']:
                 result=m.validate_candidate(wire(entry['value']),record_type=entry['type'])
                 self.assertEqual(result.value,entry['value']);self.assertEqual(result.status,m.STATUS);count+=1
-        self.assertEqual(count,58)
+        self.assertEqual(count,64)
         for kind,value in samples().items():
             with self.subTest(kind=kind):self.assertEqual(m.validate_candidate(wire(value),record_type=kind).value,value)
-        self.assertEqual(len(m.candidate_definitions()),60)
+        self.assertEqual(len(m.candidate_definitions()),61)
 
     def test_every_declared_lexical_and_schema_rejection_vector_is_executed(self):
         count=0
@@ -73,7 +74,7 @@ class CandidateTests(unittest.TestCase):
 
     def test_semantic_authority_and_archive_vectors_stay_explicit_unimplemented_gates(self):
         report=m.coverage_report();coverage={v['id']:v for v in report['cases']}
-        self.assertEqual(len(coverage),57)
+        self.assertEqual(len(coverage),61)
         for case in INDEX['cases']:
             expected='APPLICABLE_LEXICAL_STRUCTURAL' if case['phase'] in ('lexical','schema') else 'UNIMPLEMENTED_GATE'
             self.assertEqual(coverage[case['id']]['coverage'],expected)
@@ -205,6 +206,40 @@ class CandidateTests(unittest.TestCase):
         for vector in vectors:
             data=m.canonical_metadata(vector['value']);self.assertEqual(data,base64.b64decode(vector['canonicalUtf8Base64']));self.assertEqual(hashlib.sha256(data).hexdigest(),vector['sha256'])
         with self.assertRaises(m.CandidateError):m.canonical_metadata({'non-ascii-key-é':1})
+
+    def test_accepted_copy_ack_domain_vector_and_cross_record_bindings(self):
+        vector=json.loads((ROOT/'canonical-vectors.json').read_bytes())['domainSeparatedRecords'][0]
+        acceptance=vector['value'];canonical=m.canonical_metadata(acceptance)
+        self.assertEqual(canonical,base64.b64decode(vector['canonicalUtf8Base64']))
+        calculated=hashlib.sha256(b'LTDS-PARTIAL-ACCEPTANCE-V2\x00'+canonical).hexdigest()
+        self.assertEqual(calculated,vector['sha256'])
+        self.assertNotEqual(calculated,hashlib.sha256(b'LTDS-PARTIAL-ACCEPTANCE-V2\\0'+canonical).hexdigest())
+        ack=copy.deepcopy(next(v['value'] for v in COMBINED['documents'] if v['type']=='AcceptedCopyAck'))
+        result=m.validate_accepted_copy_ack(wire(acceptance),wire(ack))
+        self.assertEqual(result.record_type,'AcceptedCopyAck')
+        changed=copy.deepcopy(ack);changed['acceptanceSha256']='f'*64
+        with self.assertRaisesRegex(m.CandidateError,'ACCEPTANCE_ACK_DIGEST_MISMATCH'):
+            m.validate_accepted_copy_ack(wire(acceptance),wire(changed))
+        changed=copy.deepcopy(ack);changed['ackOperationId']='changed-operation'
+        with self.assertRaisesRegex(m.CandidateError,'ACCEPTANCE_ACK_OPERATION_MISMATCH'):
+            m.validate_accepted_copy_ack(wire(acceptance),wire(changed))
+        two_artifacts=copy.deepcopy(acceptance)
+        second=copy.deepcopy(two_artifacts['acceptedArtifacts'][0]);second['id']='second-artifact'
+        two_artifacts['acceptedArtifacts'].append(second)
+        two_ack=copy.deepcopy(ack);two_ack['acceptanceSha256']=hashlib.sha256(b'LTDS-PARTIAL-ACCEPTANCE-V2\x00'+m.canonical_metadata(two_artifacts)).hexdigest()
+        two_ack['acceptedArtifactIds']=[item['id'] for item in two_artifacts['acceptedArtifacts']]
+        changed=copy.deepcopy(two_ack);changed['acceptedArtifactIds'].reverse()
+        with self.assertRaisesRegex(m.CandidateError,'ACCEPTANCE_ACK_ARTIFACTS_MISMATCH'):
+            m.validate_accepted_copy_ack(wire(two_artifacts),wire(changed))
+        changed_acceptance=copy.deepcopy(acceptance);changed_acceptance['acceptedAt']='2026-10-28T14:00:01.000Z'
+        with self.assertRaisesRegex(m.CandidateError,'ACCEPTANCE_ACK_DIGEST_MISMATCH'):
+            m.validate_accepted_copy_ack(wire(changed_acceptance),wire(ack))
+
+    def test_changed_ack_operation_replay_is_documented_as_deferred_lifecycle(self):
+        ack=copy.deepcopy(document('AcceptedCopyAck'))
+        record=m.validate_candidate(wire(ack),record_type='AcceptedCopyAck')
+        self.assertIn('ACCEPTED_COPY_ACK_REPLAY',record.unimplemented_gates)
+        self.assertIn('ACCEPTED_COPY_ACK_BINDING',record.unimplemented_gates)
 
     def test_no_caller_value_is_treated_as_a_file_path_or_network_reference(self):
         m._bundle();seen=[];original=m.os.open

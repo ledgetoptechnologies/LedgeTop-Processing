@@ -585,6 +585,32 @@
       }
     },
     {
+      "type": "AcceptedCopyAck",
+      "value": {
+        "acceptanceReceiptId": "acceptance-treedar",
+        "acceptanceSha256": "c718570417660d6462893db4df16bf35e247e8311a9bde894e9df2ab30defeac",
+        "acceptedArtifactIds": [
+          "treedar-file"
+        ],
+        "ackOperationId": "acceptance-ack-treedar",
+        "acknowledgedAt": "2026-10-28T14:00:00.000Z",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "33392735f4b39da4d47224c89f4cd01a76c1aa8b45bc854a800a861423bf74e0",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "parentClaimId": "original-parent-claim-treedar_only",
+          "pipelineDigest": "e0effe4fced1ad14400223ae0ed042172da6c158c4345f1b6c6f7d4e7d7ea060"
+        },
+        "issuerId": "fixture-viewer-accepted-copy-issuer",
+        "receiptType": "accepted_copy_ack",
+        "resultManifestSha256": "2330016c1451d64fd673990d3c1fe381a2d5e57b2003981b5e16575ee1e0e696",
+        "resultSetId": "results-treedar",
+        "schemaVersion": 2,
+        "storageReceiptId": "nas-storage-treedar"
+      }
+    },
+    {
       "type": "OriginalLidarCustodyProof",
       "value": {
         "binding": {
