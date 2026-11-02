@@ -395,13 +395,15 @@ class CoordinatorService:
         self._native_thread = threading.Thread(target=serve_native, name='processing-native-http', daemon=False)
         native_started = False
         try:
-            if self.handler.viewer_service:
+            if self.handler.viewer_service and not stop.is_set():
                 self.handler.viewer_service.start()
-            self._start_reference(stop)
-            self._native_thread.start()
-            native_started = True
+            if not stop.is_set():
+                self._start_reference(stop)
+            if not stop.is_set():
+                self._native_thread.start()
+                native_started = True
             with self._lock:
-                if self._state != 'failed':
+                if self._state != 'failed' and native_started:
                     self._state = 'ready'
             while not stop.wait(0.1):
                 if not self._native_thread.is_alive():
@@ -455,19 +457,26 @@ class CoordinatorService:
 
 
 def main():
-    config = from_environment()
-    handler = make_handler(config)
-    server = ThreadingHTTPServer((config.bind_host, config.port), handler)
     stop = threading.Event()
-    for name in ('SIGINT','SIGTERM'):
-        if hasattr(signal, name):
-            signal.signal(getattr(signal, name), lambda *_args: stop.set())
-    print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
-    service = CoordinatorService(server, handler)
-    result = service.run(stop)
-    if result:
-        print('LedgeTop Processing unavailable: ' + service.health()['reason'], file=sys.stderr, flush=True)
-    return result
+    previous = {}
+    try:
+        for name in ('SIGINT','SIGTERM'):
+            if hasattr(signal, name):
+                number=getattr(signal, name)
+                previous[number]=signal.getsignal(number)
+                signal.signal(number, lambda *_args: stop.set())
+        config = from_environment()
+        handler = make_handler(config)
+        server = ThreadingHTTPServer((config.bind_host, config.port), handler)
+        print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
+        service = CoordinatorService(server, handler)
+        result = service.run(stop)
+        if result:
+            print('LedgeTop Processing unavailable: ' + service.health()['reason'], file=sys.stderr, flush=True)
+        return result
+    finally:
+        for number, old in previous.items():
+            signal.signal(number,old)
 
 
 if __name__ == "__main__":

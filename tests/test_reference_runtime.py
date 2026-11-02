@@ -49,6 +49,72 @@ class FakeServer:
 
 
 class ReferenceRuntimeTests(unittest.TestCase):
+    def test_main_restores_signal_handlers_after_configuration_error(self):
+        from processing import app
+        numbers=[getattr(signal,name) for name in ('SIGINT','SIGTERM') if hasattr(signal,name)]
+        before={number:signal.getsignal(number) for number in numbers}
+        with patch.object(app,'from_environment',side_effect=ValueError('synthetic config')):
+            with self.assertRaisesRegex(ValueError,'synthetic config'):app.main()
+        self.assertEqual({number:signal.getsignal(number) for number in numbers},before)
+
+    @unittest.skipUnless(os.name=='posix','POSIX signal fixture')
+    def test_main_signal_during_configuration_skips_dispatch_start(self):
+        state=self.root/'signal-state'
+        code='''import os,signal,sys
+from processing import app
+from processing.config import Config
+from processing.viewer_service import ViewerService
+def stopped_config():
+    os.kill(os.getpid(),signal.SIGTERM)
+    return Config(api_token='synthetic-api',local_node_url='http://127.0.0.1:1',
+        main_node_url='http://127.0.0.1:2',local_max_photos=1000,local_max_input_bytes=1000,
+        bind_host='127.0.0.1',port=0,prototype_state_dir=sys.argv[1],
+        prototype_node_ids=('cluster','main'),treedar_node_ids=('main',),
+        viewer_enabled=True,viewer_token='synthetic-viewer')
+def unexpected(_):
+    raise RuntimeError('dispatcher must not start')
+app.from_environment=stopped_config
+ViewerService.start=unexpected
+raise SystemExit(app.main())
+'''
+        result=subprocess.run([sys.executable,'-B','-c',code,str(state)],capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,msg=result.stderr.decode(errors='replace'))
+        replacement=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        replacement.close()
+
+    def test_preexisting_stop_skips_real_viewer_and_listeners(self):
+        handler=make_handler(self.config)
+        native=ThreadingHTTPServer(('127.0.0.1',0),handler)
+        service=CoordinatorService(native,handler);stop=threading.Event();stop.set()
+        try:
+            self.assertEqual(service.run(stop),0)
+            self.assertIsNone(handler.viewer_service._thread)
+            self.assertFalse(service.healthy())
+            self.assertEqual(native.fileno(),-1)
+            replacement=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            replacement.close()
+        finally:native.server_close()
+
+    def test_stop_after_real_viewer_start_skips_reference_and_native_start(self):
+        config=replace(self.config,reference_config_path=str(self.path))
+        first,second=self.tls_patches()
+        with first,second:handler=make_handler(config)
+        native=ThreadingHTTPServer(('127.0.0.1',0),handler)
+        service=CoordinatorService(native,handler);stop=threading.Event()
+        start=handler.viewer_service.start
+        def start_then_stop():
+            start();stop.set()
+        try:
+            with patch.object(handler.viewer_service,'start',side_effect=start_then_stop):
+                self.assertEqual(service.run(stop),0)
+            self.assertIsNotNone(handler.viewer_service._thread)
+            self.assertFalse(handler.viewer_service._thread.is_alive())
+            self.assertIsNone(handler.reference_listener._thread)
+            self.assertEqual(native.fileno(),-1)
+            replacement=Queue(self.root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+            replacement.close()
+        finally:native.server_close()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
