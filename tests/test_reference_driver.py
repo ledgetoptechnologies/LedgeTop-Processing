@@ -236,6 +236,16 @@ class ReferenceDriverTests(unittest.TestCase):
             grant = dict(request, jobId=job['jobId'], environment=job['environment'],
                 objectIds=[obj['id'] for obj in private['submission']['manifest']['objects']],
                 token='synthetic-transfer-token')
+            production_viewer = 'synthetic-production-viewer-token'
+            production_api = ReferenceControlAPI(self.store,
+                viewer_bearers={VIEWER: 'staging', production_viewer: 'production'},
+                worker_bearers={TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
+                capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
+                options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'])
+            cross_environment = production_api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
+                {'Authorization': 'Bearer ' + production_viewer}, json.dumps(grant).encode(), protected_transport=True)
+            self.assertEqual(cross_environment.status, 404)
+            self.assertIsNone(self.store.private_transfer_grant(job['jobId']))
             response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
                 {'Authorization': 'Bearer ' + VIEWER}, json.dumps(grant).encode(), protected_transport=True)
             self.assertEqual(response.status, 200)

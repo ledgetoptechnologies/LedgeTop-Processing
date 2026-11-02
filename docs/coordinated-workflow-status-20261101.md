@@ -219,8 +219,9 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `awaiting_grant` with no local input, broker download or engine initialization;
   the authenticated existing Viewer API can then post a synthetic grant, exact
   grant replay returns the same nonsecret ACK, changed-token reuse conflicts,
-  and exactly one input download follows. The focused test passed. This closes
-  a Processing-side regression gap only; it does not implement or prove the
+  a production-scoped Viewer token cannot grant access to a staging job, and
+  exactly one input download follows. The focused test passed. This closes a
+  Processing-side regression gap only; it does not implement or prove the
   missing automatic Viewer grant issuer/handoff.
 - Viewer independently reviewed paired rehearsal commit `59bafc9` against its
   acceptance proposal and confirmed the scoped claims are consistent. Viewer
