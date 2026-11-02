@@ -6,6 +6,25 @@ No real client data was processed as part of this checkpoint.
 
 ## Verified in the current work
 
+- A follow-up source-spool review found that the canonical Processing candidate
+  already defines `ltds-processing-spool-v2` under
+  `/api/v2/processing-spool`; the newly drafted v1 route was discarded before
+  commit because it would conflict with that profile and an existing Viewer
+  ACK. The v2 candidate remains synthetic/unagreed and is not deployed. Current
+  Viewer `main` still lacks the paired endpoint, and the Viewer owner has been
+  asked to confirm implementation ownership and current branch. No runtime,
+  NAS, Viewer source, or client data was changed by this review.
+- Read-only comparison of Viewer PR #418 at `0baeff3e` confirms it implements
+  only a durable source-hold/request outbox stub: claim fails without a writer
+  fence, and completion fails without independent byte verification. Its v1
+  claim and derived seal are not Processing's v2 custody receipt. Processing
+  requires authenticated storage-executor identity, physical object identity,
+  writer-fence and capacity-reservation receipts, and independently reread
+  bytes. The Viewer chat has been sent this mismatch and the paired boundary;
+  no route rename or receipt substitution is safe. Added a Processing
+  regression that rejects PR #418's exact synthetic v1 claim and derived seal
+  as v2 custody; the focused candidate suite passes 11 tests.
+
 - Beau selected a `processing-spool` subfolder in the existing Model-Viewer
   Storage dataset for future NAS-backed job inputs, rather than a separate
   dataset. Intended host/container paths are

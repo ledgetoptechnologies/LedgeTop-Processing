@@ -173,6 +173,42 @@ class ResultAcceptanceReleaseCandidateTests(unittest.TestCase):
                     expected_capacity_reservation_receipt_id="capacity-reservation-1",
                     expected_reserved_bytes=12, now="2026-11-02T12:00:00.000Z")
 
+    def test_viewer_source_copy_claim_and_seal_are_not_processing_custody_receipts(self):
+        # Viewer PR #418's request/derived-seal candidate can initiate a future
+        # copy operation, but it has no physical identities, independent writer
+        # fence, capacity receipt, or authenticated executor evidence. Never
+        # reinterpret its `sealed` flag as a v2 custody receipt.
+        claim = {
+            "version": 1, "operationId": "attempt-1-g1", "directoryId": "attempt-1-g1",
+            "attemptId": "attempt-1", "generation": 1, "datasetId": "dataset-1",
+            "rootKey": "datasets", "datasetRelativePath": "project/source",
+            "manifestSha256": "c2f79030defb612b25f597ce66a68b2d5caf3af51d219122927cec0a963f13a9",
+            "sourceInventorySha256": "fd7b0705aca5c4a8f21bcd97aba1f6fe83d9adbfc7746de0df766b5335cbc2bb",
+            "fileCount": 1, "byteSize": 3,
+            "files": [{"id": "file-1", "relativePath": "photos/a.jpg", "byteSize": 3,
+                       "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}],
+        }
+        derived_seal = {
+            "version": 1, "operationId": "attempt-1-g1", "directoryId": "attempt-1-g1",
+            "attemptId": "attempt-1", "generation": 1, "datasetId": "dataset-1",
+            "manifestSha256": claim["manifestSha256"], "sourceInventorySha256": claim["sourceInventorySha256"],
+            "sealSha256": "84dd50598ed3428c8a63006eaaefb78b99b8125c5d1c7b91c624d69a0cf5ae89",
+            "fileCount": 1, "byteSize": 3, "sealed": True,
+        }
+        for candidate in (claim, derived_seal):
+            with self.subTest(candidate="claim" if "files" in candidate else "derived seal"), \
+                    self.assertRaises(CandidateRejected):
+                validate_spool_custody_receipt(
+                    json.dumps(candidate, separators=(",", ":")).encode(),
+                    authenticated_peer={"role": "sourceStorageExecutor", "principal": "candidate-worker"},
+                    expected_binding=self.auth["binding"], expected_spool_root_id=self.auth["spoolRootId"],
+                    expected_spool_root_generation=self.auth["spoolRootGeneration"],
+                    expected_source_objects=self.auth["objects"],
+                    expected_custody_receipt_sha256=self.expected["expected_custody_receipt_sha256"],
+                    expected_writer_fence_receipt_id="writer-fence-1",
+                    expected_capacity_reservation_receipt_id="capacity-reservation-1",
+                    expected_reserved_bytes=12, now="2026-11-02T12:00:00.000Z")
+
     def test_retention_guarantee_is_specific_to_the_v2_release_ack(self):
         changed = copy.deepcopy(self.custody)
         changed["retentionGuarantee"] = "until_explicit_source_release_ack_v1"
