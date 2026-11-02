@@ -1355,11 +1355,25 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   and v1 source-release validator, #417's source holds, and #418's unmounted
   source-copy outbox remain candidates; #421 is test-only. None is yet the
   cross-language runtime acceptance/release path required by this goal.
-- The Viewer redesign draft #406 currently describes customer/organization →
-  optional group/subcategory → project → task. Beau's example asks for a
-  customer with project/subcategory groupings containing tasks. Confirm the
-  exact hierarchy mapping before changing persisted ownership or migration
-  semantics. The PR remains draft and current Claude ownership is unverified;
-  a historical acknowledgment does not prove present participation.
+- Verified the Viewer draft PR #406 at head
+  `b489c4bf738befcad4c7867869117c9cab41b5e` on
+  `codex/viewer-workspace-main-refresh-20261102`. Its additive hierarchy API
+  stores customer/organization and optional project-group display metadata;
+  projects carry the assignments, and tasks stay attached to their existing
+  projects. The metadata does not grant access or change shares. This supports
+  the Greenleaf example directly: Greenleaf as customer, “New Build” and
+  “Project Y” as separate projects, and each project's tasks beneath it. An
+  optional group is a level above projects and is only needed to organize
+  several projects together.
+- The exact #406 hierarchy API/migration, grouping, and control-helper tests
+  passed 18/18. Existing project creation currently makes an unassigned
+  project; staff then set its customer from the project menu. The browser
+  fixture demonstrates a “New Build” group containing a project, which is a
+  different shape than using “New Build” as the project itself. Viewer has
+  been asked to consider a direct “create project for this customer” action.
+- #406 remains an open draft by Bkoltz. Its selected browser checks were
+  previously recorded above, but full operator acceptance remains outstanding.
+  The separate Claude redesign branch has historical commits; a current Claude
+  session binding or present ownership acknowledgment is still unverified.
 - No Viewer files, runtime settings, NAS paths, or task records were modified
   by this source review.
