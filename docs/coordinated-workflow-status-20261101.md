@@ -656,6 +656,15 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   These results are local source evidence only. The failures were sent to the
   Viewer chat for fixture repair; no files in its worktree were changed, and no
   deployment or GitHub Actions run occurred.
+- Follow-up verification of exact pushed PR #406 head `b489c4bf` supersedes
+  those fixture failures: the hierarchy URL normalization was corrected in the
+  load-error test fixture. The same five-module focused command now passes
+  34/34 with zero skips or failures, including server migration/API tests.
+  `express` and other production dependencies were installed in the dedicated
+  Viewer worktree using `npm ci --omit=dev --ignore-scripts`; no background
+  process remains. The PR is still open and draft with no GitHub checks. This
+  is focused source evidence only, not the broad suite, browser acceptance or
+  deployed Viewer behavior.
 - Re-ran `scripts/viewer_contract_smoke.py` on 2026-11-02 at Processing commit
   `b50057a` against the Viewer candidate `NodeOdmProvider` from
   `codex/viewer-v2-delivery-ledger` commit
