@@ -47,6 +47,11 @@ No real client data was processed as part of this checkpoint.
   platform guards. This confirms the current Windows candidate behavior only;
   the Linux-only cases remain covered by the separate WSL run above, and no
   live runtime acceptance is implied.
+- On 2026-11-02, the local synthetic Viewer compatibility path passed
+  `test_viewer_service`, `test_viewer_tasks` and `test_viewer_http`: 51 passed,
+  two skipped. These use mocked engine responses and local HTTP fixtures; they
+  do not upload to a processing PC, prove NAS-backed queueing or permit the
+  current 50 GB estimate through the live 20 GiB intake cap.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
