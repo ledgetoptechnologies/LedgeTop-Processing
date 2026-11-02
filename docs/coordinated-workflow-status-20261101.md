@@ -411,21 +411,24 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   if no key existed at creation. The key is held in a private field and cleared
   at close. A proposed dispatch retry seam was reviewed and reverted because
   its string error marker did not prove durable grant identity or fence an old
-  sender. The lost-ACK path remains held for reconciliation. Linux synthetic
-  broker + joint-harness suites passed 28/28. The exact-replay test now compares
-  full serialized grant bytes across a broker restart. Windows cumulative-budget
-  tests passed 24 with one Linux-only skip; Linux cumulative-budget passed
-  25/25. There is still no production transfer adapter, key
-  provisioning, or durable dispatch outbox, and Viewer reference dispatch
-  remains hard-off. This is source-level recovery evidence, not an enabled
-  source grant, NAS custody proof, or runtime acceptance.
-- On current Viewer head `7addbac9`, the Linux `reference-app-dispatch` and
-  `reference-cumulative-budget` suites passed 51/51 in a disposable Node 24
+  sender. The lost-ACK path remains held for reconciliation. Viewer head
+  `7c9ff0af` returns a digest of the broker's exact stored identity and tests
+  byte-identical serialized grant recovery across broker restart. Draft PR #408
+  now also contains a
+  dormant migration-57 transfer outbox and repository module: it binds job,
+  attempt, environment, reservation, manifest, broker identity digest, exact
+  serialized grant digest and ACK digest without storing the bearer. Changed
+  grant/ACK identities conflict; a `sending` row left by a process failure
+  remains held. This is persistence only: there is no production broker adapter,
+  process-fence/recovery authority, automatic replay loop, key provisioning,
+  or live dispatch wiring; Viewer reference dispatch remains hard-off.
+- On current Viewer head (outbox candidate), focused migration, dispatch and
+  cumulative-budget suites passed 76/76 on Linux in a disposable Node 24
   container with the required ZIP dependency installed only in its temporary
-  filesystem. This confirms the existing lost-ACK hold behavior and broker
-  replay primitive on Linux; it does not implement or verify an automatic
-  durable transfer outbox. The same combined suites passed 49 tests on Windows
-  with two Linux-only/platform-specific skips.
+  filesystem. The same suites passed 74 tests on Windows with two
+  platform-specific skips. This is synthetic schema/state evidence, not
+  production key provisioning, NAS custody, enabled dispatch or runtime
+  acceptance.
 - Beau's read-only Viewer metadata check for task
   `a8a93a98-2740-4341-8dc6-0043ef86c72f` and provider task
   `d5463e33-aeed-4136-a81f-a9a7d233da0f` returned a matching attempt, enabled
