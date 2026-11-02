@@ -96,10 +96,13 @@ configured Viewer origins and credentials.
 
 This sender is an additive source capability: schemas 1 through 3 remain
 readable and do not activate outbound transfer. Schema 4 does not itself
-configure a deployed host. The current Viewer acceptance route accepts only
-single-engine ODM results; TreeDar manifests and roles are held by the sender
-until the Viewer-side result contract explicitly supports them. Neither
-Gaussian splats nor TreeDar is enabled by this setting.
+configure a deployed host. Viewer draft PR #424 adds matching v2 acceptance
+support for TreeDar-only and combined ODM→TreeDar manifests alongside v1 ODM.
+That route remains disabled by default, and branch support is not deployed
+capability. The Processing runtime currently constructs its Viewer reference
+API with TreeDar unavailable; genuine-LiDAR execution, host-driver selection
+and full TreeDar cleanup qualification remain separate gates. Gaussian splats
+remain scaffold-only and disabled.
 
 ```json
 {
