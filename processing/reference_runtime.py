@@ -307,10 +307,15 @@ class ReferenceRuntime:
             return
         listener = self.settings.listener
         server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
-        # Join active requests before releasing the shared queue's authority lock.
-        server.daemon_threads, server.block_on_close = False, True
-        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1},
-                                  name="processing-reference-tls", daemon=True)
+        try:
+            # Join active requests before releasing the shared queue's authority lock.
+            server.daemon_threads, server.block_on_close = False, True
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1},
+                                      name="processing-reference-tls", daemon=True)
+        except BaseException:
+            # This server has been created, but no serving thread exists yet.
+            server.server_close()
+            raise
         self._server, self._thread = server, thread
         try:
             thread.start()

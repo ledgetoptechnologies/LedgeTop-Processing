@@ -49,6 +49,24 @@ class FakeServer:
 
 
 class ReferenceRuntimeTests(unittest.TestCase):
+    def test_reference_thread_constructor_failure_closes_created_listener(self):
+        from processing import reference_runtime
+        handler=self.supervised_handler();runtime=handler.reference_listener
+        job,_=handler.prototype_queue.submit({'requestId':'listener-queued','environment':'staging',
+                                             'profile':'treedar-synthetic-v1'})
+        servers=[]
+        class Adapter:
+            def handle(self,*_args,**_kwargs):raise AssertionError('listener never serves')
+        def factory(*_args,**_kwargs):
+            server=create_reference_http_server(Adapter());self.addCleanup(server.server_close)
+            servers.append(server);return server
+        runtime._server_factory=factory
+        with patch.object(reference_runtime.threading,'Thread',side_effect=RuntimeError('synthetic thread constructor failure')):
+            with self.assertRaisesRegex(RuntimeError,'synthetic thread constructor failure'):runtime.start()
+        self.assertEqual(len(servers),1);self.assertEqual(servers[0].fileno(),-1)
+        self.assertIsNone(runtime._server);self.assertIsNone(runtime._thread)
+        self.assertEqual(handler.prototype_queue.get(job['id'])['status'],'queued')
+
     def test_queue_constructor_failure_releases_lock_and_preserves_queued_job(self):
         state=self.root/'queue-constructor-state'
         original=Queue(state,node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)

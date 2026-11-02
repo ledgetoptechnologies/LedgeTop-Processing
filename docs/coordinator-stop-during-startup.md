@@ -28,6 +28,11 @@ diagnostic write/sync fails; the diagnostic file can remain truncated and is not
 the authority. Synthetic tests inject those failures, immediately reacquire the
 owned lock/lease, and check a queued job. Other constructors and ambiguous OS
 close failures have not been comprehensively qualified.
+Reference listener startup now closes a returned server if thread setup fails
+before the serving thread starts. A synthetic ephemeral-listener test injects
+thread construction failure and checks that the listener closes and the queued
+job remains. A server factory that raises before returning must clean up its own
+resources.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.
