@@ -21,6 +21,12 @@ No real client data was processed as part of this checkpoint.
 - The Viewer pinned-vector test accepted its two exact synthetic Processing
   fixtures and rejected modified bytes. It is an exact-vector inspector, not a
   general v2 parser, LiDAR validator, or artifact acceptance implementation.
+- The active Viewer coordination thread has now drafted
+  `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
+  proposed typed TreeDar bundle, original LAS/LAZ custody, accepted-copy
+  receipt, replayable ACK, and separate publication/cleanup authorities. The
+  document is uncommitted in the Viewer worktree and explicitly unagreed and
+  inactive; it is review progress, not a wire contract or runtime behavior.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
@@ -53,9 +59,11 @@ No real client data was processed as part of this checkpoint.
    not be deleted based on download or remove alone.
 4. **TreeDar:** the source candidate requires a genuine-LiDAR admission and a
    12-artifact native output closure. Current Viewer bridge accepts one ODM
-   archive and does not accept this typed closure. Processing and Viewer still
-   need an agreed mapping, provenance binding, durable custody record and exact
-   acceptance ACK. No TreeDar job was run against real LiDAR.
+   archive and does not accept this typed closure. A detailed Viewer-side seam
+   proposal is now in its worktree, but Processing and Viewer still need paired
+   owner agreement and then implementation of the mapping, provenance binding,
+   durable custody record and exact acceptance ACK. No TreeDar job was run
+   against real LiDAR.
 5. **Credential hygiene:** prior tool output exposed the active candidate
    NodeODM startup token. The user was advised to rotate it and update the
    matching private Processing credential through an approved maintenance
