@@ -397,6 +397,12 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   cross-language policy-vector parity only, not wire/runtime interoperability
   or proof of genuine LiDAR custody. The Viewer draft itself is based on main
   commit `dc8cedfe` and remains design/fixture-only.
+- Re-ran the source-retention-v2 candidate plus queue-store, worker-recovery
+  and routing tests using the repository-pinned crypto dependencies in a
+  temporary, automatically cleaned directory: 78 passed, 47 skipped, 0 failed.
+  A separate delivery, result-proxy, recovery and terminal-state run passed
+  102 with 67 skipped and 0 failures. Both runs are synthetic/source tests;
+  they do not exercise TrueNAS snapshots or an installed worker service.
 - Staged the exact reviewed source archive from commit `465f382` on both
   processing PCs at
   `/home/bkoltz/.local/share/ledgetop-processing-reference/reference-465f382/`.
