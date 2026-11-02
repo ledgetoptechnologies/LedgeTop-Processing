@@ -540,6 +540,17 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   the candidate adapter against in-process synthetic engines only; it does not
   validate current Viewer `main`, a live worker/container, NAS custody,
   photogrammetry, Viewer archive ingestion, or TreeDar acceptance.
+- Repeated the actual-adapter smoke on Processing commit `0efb6f0` against
+  `apps/viewer/server/nodeOdmProvider.js` from Viewer candidate commit
+  `ac1bff1f34e2b095ca36b61e6f055cae6e4f6e6e`. The adapter hash remained
+  `167b7bbd66e36fdba3255ca165877e1b821308d2fc9054f1d9ba3a3b77b3c86b`; 62
+  synthetic uploads, one cancellation and three completions passed with
+  production-small → production-large → staging-small order. The run again
+  verified small-node-first routing, global TreeDar exclusion, staging
+  isolation, idempotent commit, repeat-download digest and output cursor. Full
+  result is in `docs/evidence/viewer-contract-smoke-20261102-rerun.json`. This
+  does not validate the live Viewer, source custody, accepted-copy receipt/ACK
+  or cleanup authority.
 - Re-ran the synthetic TreeDar/admission/publication suites on 2026-11-02 in
   Ubuntu 24.04 WSL as nonroot `pilot`, after installing the test-only LAS/CRS
   dependencies into a dedicated local venv. The admission, engine, delivery,

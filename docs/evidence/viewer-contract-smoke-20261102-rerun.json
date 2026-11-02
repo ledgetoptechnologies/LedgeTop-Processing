@@ -1,0 +1,38 @@
+{
+  "recordedAt": "2026-11-02T10:14:10Z",
+  "test": "actual Viewer NodeOdmProvider against isolated Processing synthetic engines",
+  "processingCommit": "0efb6f01e87fda11f08f4afa20d2cfe6b282935b",
+  "viewerRef": "codex/viewer-v2-delivery-ledger",
+  "viewerCommit": "ac1bff1f34e2b095ca36b61e6f055cae6e4f6e6e",
+  "viewerWorktreeHadUnrelatedModifiedPath": "apps/viewer/docs/coordinator-anchor-staging-proposal.md",
+  "adapterPath": "apps/viewer/server/nodeOdmProvider.js",
+  "adapterSha256": "167b7bbd66e36fdba3255ca165877e1b821308d2fc9054f1d9ba3a3b77b3c86b",
+  "uploads": 62,
+  "cancelled": 1,
+  "completed": 3,
+  "executionOrder": [
+    {"job": "production-small", "node": "cluster"},
+    {"job": "production-large", "node": "main"},
+    {"job": "staging-small", "node": "cluster"}
+  ],
+  "localCommits": 2,
+  "mainCommits": 1,
+  "checks": {
+    "smallNodeFirst": true,
+    "globalTreeDarExclusion": true,
+    "stagingIsolation": true,
+    "repeatedCommitIdempotent": true,
+    "outputCursorPreserved": true,
+    "repeatedDownloadSha256": "e76e746c5c0f03d8f5cda797fee92ac3f2d22fc72157716c23df177326c2e4d6"
+  },
+  "syntheticOnly": true,
+  "clientDataUsed": false,
+  "liveNodesTouched": false,
+  "realViewerIngestionValidated": false,
+  "limitations": [
+    "Uses invented bytes and isolated in-process HTTP engines.",
+    "Does not run photogrammetry or a live worker container.",
+    "Does not test NAS source custody or accepted-copy storage.",
+    "Does not test a Viewer receipt/ACK round trip or cleanup authority."
+  ]
+}
