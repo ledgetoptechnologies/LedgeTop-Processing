@@ -156,7 +156,8 @@ No real client data was processed as part of this checkpoint.
   bound on aggregate source object bytes before snapshot intent persistence.
   Its overflow regression passed 1/1 using an in-memory database. This guards
   integer accounting in the candidate only; it does not establish an approved
-  spool location, snapshot custody or a running storage owner.
+  spool location, snapshot custody or a running storage owner. The Viewer chat
+  reviewed the narrow change and found no issue; it did not rerun the test.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
