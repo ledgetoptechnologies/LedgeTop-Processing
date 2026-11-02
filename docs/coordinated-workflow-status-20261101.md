@@ -339,3 +339,12 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   Results and exact dependency versions are in
   `docs/evidence/treedar-synthetic-acceptance-20261102.json`. This is synthetic
   source evidence only, not real-data accuracy or live-node/runtime acceptance.
+- On the same source commit, ran the remaining worker/reference failure suites
+  (`test_reference_driver`, `test_reference_worker_recovery`, `test_worker_outbox`,
+  `test_reference_http`, `test_reference_execution`, `test_reference_pipeline`,
+  `test_reference_transfer`, and `test_reference_results`). Together with the
+  135 TreeDar/API tests above, 290 tests across 16 focused suites passed with
+  zero skips in WSL. Exact per-suite counts and bounds are recorded in
+  `docs/evidence/coordinated-boundary-synthetic-20261102.json`. These runs do
+  not substitute for live NAS custody, actual Viewer acceptance, or host
+  restart/power-loss acceptance.

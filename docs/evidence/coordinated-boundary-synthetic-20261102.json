@@ -1,0 +1,44 @@
+{
+  "recordedAt": "2026-11-02",
+  "processingCommit": "c5d9a37139efe71c9206968b6de9aaedc43639a8",
+  "environment": "Ubuntu 24.04 WSL, nonroot user pilot",
+  "python": "3.12",
+  "testDependencies": {
+    "laspy": "2.7.0",
+    "lazrs": "0.8.2",
+    "numpy": "2.5.4",
+    "pyproj": "3.8.0"
+  },
+  "command": "python -B -m unittest discover -s tests -p <suite> -q",
+  "suites": {
+    "test_treedar_admission.py": 18,
+    "test_treedar_engine.py": 14,
+    "test_treedar_delivery.py": 17,
+    "test_treedar_runtime.py": 16,
+    "test_reference_api.py": 8,
+    "test_reference_protocol.py": 15,
+    "test_reference_treedar_bundle.py": 23,
+    "test_reference_treedar_publication.py": 24,
+    "test_reference_driver.py": 21,
+    "test_reference_worker_recovery.py": 37,
+    "test_worker_outbox.py": 11,
+    "test_reference_http.py": 17,
+    "test_reference_execution.py": 12,
+    "test_reference_pipeline.py": 28,
+    "test_reference_transfer.py": 19,
+    "test_reference_results.py": 10
+  },
+  "totalSuites": 16,
+  "totalPassed": 290,
+  "skipped": 0,
+  "gaussianSplats": {"advertisedAvailable": false, "advertisedEnabled": false, "requestsRejected": true},
+  "syntheticOnly": true,
+  "clientDataUsed": false,
+  "liveNodesTouched": false,
+  "limits": [
+    "LiDAR LAS/LAZ files are generated fixtures, not client data or field-validated acquisitions.",
+    "The suites exercise local queue, worker, broker, result and reference contracts with synthetic inputs; they do not start the deployed host service stack.",
+    "No live NAS custody, Viewer accepted-copy receipt, independent issuer, unattended power-loss recovery or production cleanup authority was exercised.",
+    "Gaussian splats remain scaffold-only and disabled."
+  ]
+}
