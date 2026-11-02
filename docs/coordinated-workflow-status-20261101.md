@@ -102,6 +102,14 @@ No real client data was processed as part of this checkpoint.
   registry is not production key management and does not prove nonce history
   across databases/restores, real process or power failure, a trusted
   anti-rollback authority, or an atomic transaction with the existing broker.
+- The Viewer chat rechecked Claude participation on 2026-11-02: the saved
+  Viewer link is historical (last updated October 28, with no current session
+  binding), and no Engineering Hub message-bus tool is available there to
+  verify fresh delivery or request an acknowledgement. Do not infer active
+  Claude ownership from the historical link or branch name. The current-main
+  redesign refresh is separately tracked in draft PR #406; its current owner
+  and design review remain unconfirmed. The original #347/shared branch was
+  left untouched.
 - Read-only live probes on `.89` showed the coordinator healthy, provider
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
