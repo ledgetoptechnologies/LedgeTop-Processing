@@ -20,8 +20,10 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 
 from . import reference_protocol as protocol
 from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+from .viewer_result_manifest import derive_viewer_result_manifest, validate_viewer_acceptance
 
 PATH = "/api/v1/reference/v1/acceptances"
+PATH_V2 = "/api/v1/reference/v2/acceptances"
 MAX_JSON_BYTES = protocol.MAX_BODY_BYTES
 DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024
 MAX_CHUNK_BYTES = 16 * 1024 * 1024
@@ -141,7 +143,7 @@ class ViewerAcceptanceTransfer:
             timestamp=timestamp, nonce=nonce) | {"Accept-Encoding": "identity", "Accept": "application/json"}
 
     def _request(self, method, path, body=b"", *, content_type="application/json", allowed=(200,)):
-        if type(path) is not str or not path.startswith(PATH + "/") or "#" in path:
+        if type(path) is not str or not any(path.startswith(prefix + "/") for prefix in (PATH, PATH_V2)) or "#" in path:
             raise ViewerTransferUnavailable("viewer_path_invalid")
         headers = self._headers(method, path, body)
         headers["Content-Type"] = content_type
@@ -216,7 +218,7 @@ class ViewerAcceptanceTransfer:
     def _accepted(self, body, job, acceptance, result_manifest):
         receipt = body.get("acceptance")
         signed = body.get("viewerReceipt")
-        checked = protocol.validate_acceptance(receipt, result_manifest=result_manifest,
+        checked = validate_viewer_acceptance(receipt, result_manifest=result_manifest,
                                                input_manifest_sha256=job["manifestSha256"])
         if (checked != acceptance or body.get("state") != "accepted"
                 or body.get("receiptId") != acceptance["receiptId"]
@@ -226,6 +228,7 @@ class ViewerAcceptanceTransfer:
         expected = {key: job[key] if key not in ("inputManifestSha256",) else job["manifestSha256"]
                     for key in ("jobId", "generation", "environment", "inputManifestSha256",
                                 "pipelineDigest", "resultManifestSha256")}
+        expected["resultManifestSha256"] = result_manifest["resultManifestSha256"]
         try:
             verify_viewer_acceptance_receipt(signed, trusted_keys=self.trusted_receipt_keys,
                 expected=expected, result_manifest=result_manifest,
@@ -234,7 +237,7 @@ class ViewerAcceptanceTransfer:
             raise ViewerTransferUnavailable("viewer_signed_receipt_rejected") from None
         return {"acceptance": checked, "viewerReceipt": signed}
 
-    def transfer(self, job, acceptance):
+    def transfer(self, job, acceptance, *, viewer_result_manifest=None):
         """Resume or commit one transfer; return a verified receipt pair only.
 
         ``job`` must be the private durable coordinator record. ``acceptance``
@@ -246,32 +249,38 @@ class ViewerAcceptanceTransfer:
             raise ViewerTransferUnavailable("viewer_job_binding_unavailable")
         if job["environment"] not in ("production", "staging"):
             raise ViewerTransferUnavailable("viewer_job_binding_unavailable")
-        submission, result_manifest = job["submission"], job["resultManifest"]
+        submission, source_result_manifest = job["submission"], job["resultManifest"]
         if (type(submission) is not dict or type(submission.get("manifest")) is not dict
                 or submission["manifest"].get("sha256") != job["manifestSha256"]
                 or protocol.manifest_sha256(submission["manifest"]) != job["manifestSha256"]):
             raise ViewerTransferUnavailable("viewer_job_manifest_unavailable")
         try:
-            result_manifest = protocol.validate_result_manifest(result_manifest, job_id=job["jobId"],
+            source_result_manifest = protocol.validate_result_manifest(source_result_manifest, job_id=job["jobId"],
                 generation=job["generation"], environment=job["environment"],
                 pipeline_digest=job["pipelineDigest"])
         except (TypeError, ValueError):
             raise ViewerTransferUnavailable("viewer_result_manifest_invalid") from None
-        # The current Viewer acceptance route implements the ODM artifact schema.
-        # Hold other engine results without pretending their files were accepted.
-        if set(result_manifest["engineVersions"]) != {"odm"}:
-            raise ViewerTransferUnavailable("viewer_engine_not_supported")
+        try:
+            result_manifest = derive_viewer_result_manifest(source_result_manifest,
+                job_id=job["jobId"], generation=job["generation"], environment=job["environment"],
+                pipeline_digest=job["pipelineDigest"])
+        except (TypeError, ValueError):
+            raise ViewerTransferUnavailable("viewer_result_manifest_invalid") from None
+        if viewer_result_manifest is not None and viewer_result_manifest != result_manifest:
+            raise ViewerTransferUnavailable("viewer_result_manifest_changed")
         if type(acceptance) is not dict:
             raise ViewerTransferUnavailable("viewer_acceptance_invalid")
         try:
-            acceptance = protocol.validate_acceptance(acceptance, result_manifest=result_manifest,
+            acceptance = validate_viewer_acceptance(acceptance, result_manifest=result_manifest,
                 input_manifest_sha256=job["manifestSha256"])
         except (TypeError, ValueError):
             raise ViewerTransferUnavailable("viewer_acceptance_invalid") from None
         expected_ids = [item["id"] for item in result_manifest["objects"]]
-        if set(acceptance["acceptedObjectIds"]) != set(expected_ids):
+        if (acceptance["acceptedObjectIds"] != expected_ids if result_manifest["schemaVersion"] == 2
+                else set(acceptance["acceptedObjectIds"]) != set(expected_ids)):
             raise ViewerTransferUnavailable("viewer_acceptance_closure_incomplete")
-        receipt_path = PATH + "/" + quote(acceptance["receiptId"], safe="")
+        route = PATH_V2 if result_manifest["schemaVersion"] == 2 else PATH
+        receipt_path = route + "/" + quote(acceptance["receiptId"], safe="")
         status, current = self._request("GET", receipt_path, allowed=(200, 202, 404))
         if status == 200 and current.get("state") == "accepted":
             return self._accepted(current, job, acceptance, result_manifest)
@@ -291,7 +300,7 @@ class ViewerAcceptanceTransfer:
         for obj in result_manifest["objects"]:
             offset = by_id[obj["id"]]["receivedBytes"]
             if obj["byteSize"] == 0 and by_id[obj["id"]]["state"] != "complete":
-                with self.result_proxy.open(job, result_manifest, obj["id"]) as source:
+                with self.result_proxy.open(job, source_result_manifest, obj["id"]) as source:
                     if source.read(1):
                         raise ViewerTransferUnavailable("worker_result_range_overrun")
                 path = receipt_path + "/objects/" + quote(obj["id"], safe="") + "?" + urlencode({"offset": 0})
@@ -303,7 +312,7 @@ class ViewerAcceptanceTransfer:
             while offset < obj["byteSize"]:
                 count = min(self.chunk_bytes, obj["byteSize"] - offset)
                 range_header = f"bytes={offset}-{offset + count - 1}"
-                with self.result_proxy.open(job, result_manifest, obj["id"],
+                with self.result_proxy.open(job, source_result_manifest, obj["id"],
                                             range_header=range_header) as source:
                     pieces, actual = [], 0
                     while actual < count:

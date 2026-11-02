@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import reference_protocol as protocol
+from .viewer_result_manifest import validate_viewer_result_manifest
 
 PROTOCOL = "ltds-viewer-accepted-copy-v1"
 SIGNATURE_DOMAIN = b"LTDS-VIEWER-ACCEPTED-COPY-ACK-V1\0"
@@ -134,15 +135,18 @@ def verify_viewer_acceptance_receipt(receipt: object, *, trusted_keys: dict,
           and len(set(accepted_object_ids)) == len(accepted_object_ids),
           "invalid_expected_objects")
     try:
-        validated_manifest = protocol.validate_result_manifest(
+        validated_manifest = validate_viewer_result_manifest(
             result_manifest,
             job_id=expected["jobId"], generation=expected["generation"],
             environment=expected["environment"], pipeline_digest=expected["pipelineDigest"],
         )
-    except (protocol.ProtocolError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         raise ViewerReceiptRejected("invalid_expected_result_manifest") from None
     object_map = {item["id"]: item for item in validated_manifest["objects"]}
     _need(set(accepted_object_ids) <= set(object_map), "unexpected_expected_object")
+    if validated_manifest["schemaVersion"] == 2:
+        _need(accepted_object_ids == [item["id"] for item in validated_manifest["objects"]],
+              "incomplete_or_reordered_v2_acceptance")
     expected_sorted_ids = sorted(accepted_object_ids)
     expected_objects = [
         {"id": object_id, "byteSize": object_map[object_id]["byteSize"],

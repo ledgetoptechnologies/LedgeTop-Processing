@@ -297,11 +297,11 @@ class ReferenceRuntime:
 
                 class EnvironmentSender:
                     def __init__(self, targets): self.targets = targets
-                    def transfer(self, job, acceptance):
+                    def transfer(self, job, acceptance, *, viewer_result_manifest=None):
                         sender = self.targets.get(job.get("environment"))
                         if sender is None:
                             raise ViewerTransferUnavailable("viewer_environment_not_configured")
-                        return sender.transfer(job, acceptance)
+                        return sender.transfer(job, acceptance, viewer_result_manifest=viewer_result_manifest)
 
                 senders = {environment: ViewerAcceptanceTransfer(target["origin"],
                     key_id=target["keyId"], secret=target["secret"],

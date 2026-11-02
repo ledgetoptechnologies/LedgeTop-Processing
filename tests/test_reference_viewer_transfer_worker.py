@@ -1,5 +1,8 @@
 """Durable retry/lease integration for the Viewer acceptance outbox."""
+import copy
+import hashlib
 import unittest
+import uuid
 
 from processing.reference_store import ReferenceStore
 from processing.reference_viewer_transfer_worker import ReferenceViewerTransferWorker
@@ -10,12 +13,12 @@ from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 class FakeSender:
     def __init__(self, signer): self.signer, self.calls, self.fail = signer, [], False
-    def transfer(self, job, acceptance):
+    def transfer(self, job, acceptance, *, viewer_result_manifest=None):
         self.calls.append((job['jobId'], acceptance['receiptId'], acceptance['acceptedAt']))
         if self.fail:
             self.fail = False
             raise ViewerTransferUnavailable('viewer_transport_unavailable')
-        return self.signer.envelope(acceptance, job['resultManifest'])
+        return self.signer.envelope(acceptance, viewer_result_manifest or job['resultManifest'])
 
 
 class ReferenceViewerTransferWorkerTests(unittest.TestCase):
@@ -60,10 +63,74 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             accepted_at='2026-11-02T12:00:00.000Z')
         lease = self.store.claim_viewer_transfer(now=100, lease_seconds=10)
         self.assertEqual(lease['acceptance'], acceptance)
+        self.assertEqual(lease['viewerResultManifest'], self.result)
         self.assertIsNone(self.store.claim_viewer_transfer(now=109, lease_seconds=10))
         recovered = self.store.claim_viewer_transfer(now=110, lease_seconds=10)
         self.assertEqual(recovered['acceptance'], acceptance)
+        self.assertEqual(recovered['viewerResultManifest'], lease['viewerResultManifest'])
         self.assertNotEqual(recovered['leaseToken'], lease['leaseToken'])
+
+    def test_combined_job_persists_v2_manifest_and_completes_exact_viewer_closure(self):
+        from tempfile import TemporaryDirectory
+        from processing.prototype import Queue
+        temp = TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        queue = Queue(temp.name, node_ids=('cluster', 'main'), treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        store = ReferenceStore(queue, main_node_id='main')
+        request = copy.deepcopy(self.fixture.fixture['submission'])
+        request['submissionId'] = str(uuid.uuid4())
+        manifest = request['manifest']
+        lidar = {"id": "lidar-1", "name": "Cloud.las", "byteSize": 4,
+            "sha256": hashlib.sha256(b"LAS!").hexdigest(), "kind": "lidar",
+            "mediaType": "application/octet-stream"}
+        manifest['objects'].append(lidar)
+        manifest['totalBytes'] += lidar['byteSize']
+        manifest['objectCount'] += 1
+        manifest['inputCounts']['lidarObjects'] = 1
+        manifest['sha256'] = __import__('processing.reference_protocol', fromlist=['manifest_sha256']).manifest_sha256(manifest)
+        request['pipeline']['treedar'].update(requested=True, inputObjectIds=['lidar-1'],
+            provenanceReceiptId='provenance-test')
+        api = self.fixture.make_api(store=store, treedar_available=True)
+        created = self.fixture.request('POST', '/jobs', request, api=api)
+        self.assertEqual(created.status, 201)
+        job = created.body
+        binding = dict(node_id='main', worker_id='worker', worker_instance_id='instance',
+            claim_request_id='claim-combined')
+        claim = store.claim(job['jobId'], **binding)
+        transfer_request = copy.deepcopy(self.fixture.fixture['transferRequest'])
+        transfer_request.update(manifestSha256=manifest['sha256'], byteBudget=manifest['totalBytes'])
+        store.reserve(job['jobId'], transfer_request, node_id='main')
+        store.update_phase(job['jobId'], 'fetching')
+        store.update_phase(job['jobId'], 'processing')
+        roles = ['ground_model', 'canopy_height', 'canopy_height_unfiltered', 'crown_labels',
+            'crowns', 'tree_table', 'tree_features', 'run_summary', 'report', 'preview',
+            'area_map_preview', 'engine_manifest']
+        payloads = {f'treedar-{role}': f'synthetic {role}'.encode() for role in roles}
+        payloads['odm-archive'] = b'synthetic odm archive'
+        result = dict(schemaVersion=1, jobId=job['jobId'], generation=job['generation'],
+            environment=job['environment'], pipelineDigest=job['pipelineDigest'],
+            engineVersions={'odm': 'odm-test', 'treedar': 'treedar-test'},
+            objects=[*[
+                dict(id=f'treedar-{role}', role=role, byteSize=len(payloads[f'treedar-{role}']),
+                    sha256=hashlib.sha256(payloads[f'treedar-{role}']).hexdigest()) for role in roles],
+                dict(id='odm-archive', role='odm_archive', byteSize=len(payloads['odm-archive']),
+                    sha256=hashlib.sha256(payloads['odm-archive']).hexdigest())])
+        result['resultManifestSha256'] = __import__('processing.reference_protocol', fromlist=['digest']).digest(result)
+        store.record_worker_result(job['jobId'], result, claim_token=claim['claimToken'], **binding)
+        store.queue.complete(job['jobId'], {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}})
+        store.update_phase(job['jobId'], 'awaiting_acceptance')
+        sender = FakeSender(self.signer)
+        worker = ReferenceViewerTransferWorker(store, sender,
+            trusted_receipt_keys=self.signer.trusted_keys, clock=lambda: self.clock_value)
+        outcome = worker.run_once()
+        self.assertEqual(outcome, {'state': 'accepted', 'jobId': job['jobId']})
+        self.assertEqual(store.get(job['jobId'])['phase'], 'completed')
+        self.assertTrue(store.viewer_transfer_status(job['jobId'])['completed'])
+        receipts = store.acceptance_receipts(job['jobId'])['receipts']
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]['acceptance']['acceptedObjectIds'],
+            [obj['id'] for obj in result['objects']])
 
 
 if __name__ == '__main__': unittest.main()

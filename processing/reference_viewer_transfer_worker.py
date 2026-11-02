@@ -51,7 +51,8 @@ class ReferenceViewerTransferWorker:
         job_id, lease_token = claim['jobId'], claim['leaseToken']
         try:
             job = self.store.get(job_id, private=True)
-            pair = self.sender.transfer(job, claim['acceptance'])
+            pair = self.sender.transfer(job, claim['acceptance'],
+                viewer_result_manifest=claim.get('viewerResultManifest'))
             accepted = self.store.accept(job_id, pair['acceptance'],
                 viewer_receipt=pair['viewerReceipt'],
                 trusted_viewer_receipt_keys=self.trusted_receipt_keys)

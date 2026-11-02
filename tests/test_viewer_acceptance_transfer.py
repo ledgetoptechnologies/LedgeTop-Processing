@@ -61,7 +61,8 @@ class FakeViewer:
         assert h["x-ltds-content-sha256"] == digest
         assert h["x-ltds-signature"] == expected_signature
         self.calls.append((method, path))
-        base = "/api/v1/reference/v1/acceptances/receipt-test"
+        api_version = "v2" if "/reference/v2/" in parsed.path else "v1"
+        base = f"/api/v1/reference/{api_version}/acceptances/receipt-test"
 
         def response(status, value):
             code, data = self._json(status, value)
@@ -215,15 +216,45 @@ class ViewerAcceptanceTransferTests(unittest.TestCase):
                     "issuerId": "synthetic-viewer-issuer", "publicKeyPem": "not-a-public-key"}},
                 result_proxy=self.proxy, opener=self.viewer, chunk_bytes=2)
 
-    def test_tree_dar_result_is_held_without_any_viewer_request(self):
-        self.job["resultManifest"]["engineVersions"] = {"treedar": "test"}
-        self.job["resultManifest"]["resultManifestSha256"] = protocol.digest(
-            {k: v for k, v in self.job["resultManifest"].items() if k != "resultManifestSha256"})
-        self.job["resultManifestSha256"] = self.job["resultManifest"]["resultManifestSha256"]
-        self.acceptance["resultManifestSha256"] = self.job["resultManifestSha256"]
-        with self.assertRaisesRegex(ViewerTransferUnavailable, "viewer_engine_not_supported"):
-            self.client.transfer(self.job, self.acceptance)
-        self.assertEqual(self.viewer.calls, [])
+    def test_combined_odm_treedar_transfer_preserves_ordered_private_closure(self):
+        roles = ["ground_model", "canopy_height", "canopy_height_unfiltered", "crown_labels",
+            "crowns", "tree_table", "tree_features", "run_summary", "report", "preview",
+            "area_map_preview", "engine_manifest"]
+        self.objects = {f"treedar-{role}": f"synthetic {role}".encode() for role in roles}
+        self.objects["odm-archive"] = b"synthetic odm archive"
+        self.proxy = FakeResultProxy(self.objects)
+        self.client = ViewerAcceptanceTransfer("https://viewer.synthetic", key_id="synthetic-service",
+            secret=SECRET, trusted_receipt_keys=self.signer.trusted_keys, result_proxy=self.proxy,
+            opener=self.viewer, chunk_bytes=7)
+        self.result = {
+            "schemaVersion": 1, "jobId": "job-test", "generation": 1, "environment": "staging",
+            "pipelineDigest": "c" * 64,
+            "engineVersions": {"odm": "synthetic-odm", "treedar": "synthetic-treedar"},
+            "objects": [
+                *[{"id": f"treedar-{role}", "role": role, "byteSize": len(self.objects[f"treedar-{role}"]),
+                   "sha256": hashlib.sha256(self.objects[f"treedar-{role}"]).hexdigest()} for role in roles],
+                {"id": "odm-archive", "role": "odm_archive", "byteSize": len(self.objects["odm-archive"]),
+                 "sha256": hashlib.sha256(self.objects["odm-archive"]).hexdigest()},
+            ],
+        }
+        self.result["resultManifestSha256"] = protocol.digest(self.result)
+        self.job["resultManifest"] = self.result
+        self.job["resultManifestSha256"] = self.result["resultManifestSha256"]
+        from processing.viewer_result_manifest import derive_viewer_result_manifest
+        viewer_manifest = derive_viewer_result_manifest(self.result, job_id=self.job["jobId"],
+            generation=self.job["generation"], environment=self.job["environment"],
+            pipeline_digest=self.job["pipelineDigest"])
+        acceptance = dict(self.acceptance, resultManifestSha256=viewer_manifest["resultManifestSha256"],
+            acceptedObjectIds=[item["id"] for item in viewer_manifest["objects"]])
+        pair = self.client.transfer(self.job, acceptance, viewer_result_manifest=viewer_manifest)
+        self.assertEqual(pair["acceptance"], acceptance)
+        self.assertTrue(self.viewer.accepted["fullyAccepted"])
+        self.assertEqual(self.viewer.payload["resultManifest"], viewer_manifest)
+        expected_ids = [item["id"] for item in viewer_manifest["objects"]]
+        self.assertEqual(self.viewer.payload["expected"]["objectIds"], expected_ids)
+        self.assertEqual(self.viewer.payload["acceptance"]["acceptedObjectIds"], expected_ids)
+        self.assertTrue(all("/api/v1/reference/v2/acceptances/" in path for _, path in self.viewer.calls))
+        self.assertEqual({key: bytes(value) for key, value in self.viewer.buffers.items()}, self.objects)
 
 
 if __name__ == "__main__": unittest.main()
