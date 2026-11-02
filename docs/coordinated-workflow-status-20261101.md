@@ -83,6 +83,14 @@ No real client data was processed as part of this checkpoint.
   receipt check Beau ran matched the task and receipt, validated its 71-file
   inventory digest and listed the mesh tileset; it did not list a point-cloud
   tileset. This is ledger metadata, not a current on-disk custody check.
+- Fresh cross-worktree verification on 2026-11-02 passed Viewer Node tests
+  `reference-v2-acceptance-hash-packet` and
+  `reference-v2-accepted-copy-fixture` (2/2) against Processing's current
+  `contracts/reference-v2-candidate` files. Processing's corresponding Python
+  `test_reference_v2_candidate` passed 26 tests with one optional schema
+  oracle skipped. This confirms only the shared synthetic canonicalization
+  and fixture cross-record checks; the payload remains inactive, unauthenticated
+  and unwired to either runtime.
 - The Viewer chat confirmed the production reference lane remains hard-disabled:
   the worker's production call returns without dispatch, and no production
   transfer adapter, broker route or authenticated issuer is wired. The broker
