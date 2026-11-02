@@ -701,6 +701,17 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   this is not end-to-end runtime acceptance. Do not admit client work on this
   evidence alone. The full receipt, storage-owner, dispatch and durable ACK
   gates above remain in force.
+- Refreshed read-only SSH check later on 2026-11-02: `.89` reports the
+  Processing prototype container healthy at image
+  `sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004`
+  and the migration NodeODM candidate running at image
+  `sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6`.
+  `.88` reports its NodeODM container running at image
+  `sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde`,
+  with DCGM and node exporters also running. This verifies current container
+  presence and one Docker healthcheck only; no task was submitted, no engine
+  API/options or active-work state was read, and no worker→Viewer completion
+  was exercised.
 
 ## Local candidate validation — 2026-11-02
 
