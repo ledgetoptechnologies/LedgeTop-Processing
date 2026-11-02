@@ -67,6 +67,11 @@ No real client data was processed as part of this checkpoint.
   `test_scratch_policy` passed 36 tests with one optional skip. This remains a
   capacity-policy simulation, not a live reservation or proof the installed
   worker uses this ledger.
+- Fresh read-only `systemctl --user show` checks on both `.89` and `.88` report
+  `ledgetop-processing-reference-worker.service` as `LoadState=not-found`,
+  inactive/dead; the expected private `reference-worker.json` is absent on both
+  nodes. The source daemon, scratch ledger, and outbox are therefore not active
+  runtime components on these machines. No unit was installed or started.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
