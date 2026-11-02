@@ -41,6 +41,12 @@ No real client data was processed as part of this checkpoint.
   under the unprivileged account passed. The Windows run had 48 host-guarded
   skips, which this rerun covered. These remain synthetic tests, not runtime
   acceptance.
+- On 2026-11-02, the current Windows worktree reran six focused delivery and
+  recovery modules (`test_worker_outbox`, reference delivery, transfer, worker
+  recovery, worker API and scratch cleanup): 98 tests passed, 51 skipped by
+  platform guards. This confirms the current Windows candidate behavior only;
+  the Linux-only cases remain covered by the separate WSL run above, and no
+  live runtime acceptance is implied.
 - Viewer commit `dc48016073d2d37a759b7f753fcfbe0cd16f9fea` on
   `codex/viewer-v2-delivery-ledger` adds
   `apps/viewer/docs/reference-v2-acceptance-seam-proposal.md`. It scopes a
