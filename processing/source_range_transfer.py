@@ -38,6 +38,20 @@ OBJECT_PREFIX = "/api/processing/source-range/v2/objects/"
 REQUEST_HEADER = "X-Processing-Request-ID"
 
 
+def source_version_for_manifest(manifest):
+    """Return the cross-service immutable identity for a Viewer dataset input."""
+    if type(manifest) is not dict:
+        raise TransferError("invalid source manifest identity")
+    dataset_prefix = "dataset-"
+    manifest_id = manifest.get("id")
+    digest = manifest.get("sha256")
+    if (type(manifest_id) is not str or not manifest_id.startswith(dataset_prefix)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", manifest_id[len(dataset_prefix):])
+            or type(digest) is not str or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+        raise TransferError("invalid source manifest identity")
+    return f"dataset:{manifest_id[len(dataset_prefix):]}:{digest}"
+
+
 @dataclass(frozen=True)
 class SourceIdentity:
     environment: str
@@ -137,6 +151,8 @@ def validate_source_grant(grant, *, job, clock=time.time):
         if (manifest["sha256"] != identity.manifest_sha256
                 or p.manifest_sha256(manifest) != identity.manifest_sha256):
             raise TransferError("source grant manifest mismatch")
+        if identity.source_version != source_version_for_manifest(manifest):
+            raise TransferError("source grant revision mismatch")
     except (KeyError, TypeError, ValueError, AttributeError):
         raise TransferError("invalid queued source job") from None
     if type(grant["chunkBytes"]) is not int or grant["chunkBytes"] != CHUNK_BYTES:

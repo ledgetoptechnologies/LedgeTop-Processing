@@ -11,7 +11,7 @@ from contextlib import closing
 
 from processing.source_range_transfer import (
     CHUNK_BYTES, OBJECT_PREFIX, REQUEST_HEADER, SourceIdentity, SourceObject,
-    SourceRangeClient, TransferError, _request_id, _validator, validate_source_grant,
+    SourceRangeClient, TransferError, _request_id, _validator, source_version_for_manifest, validate_source_grant,
 )
 from processing import reference_protocol as p
 
@@ -32,19 +32,20 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.body = b"a" * CHUNK_BYTES + b"b" * CHUNK_BYTES + b"xyz"
         self.obj = SourceObject("photo-1", len(self.body), hashlib.sha256(self.body).hexdigest())
-        self.manifest = {"id": "manifest-1", "revision": 1, "totalBytes": self.obj.byte_size,
+        self.manifest = {"id": "dataset-fixture-1", "revision": 1, "totalBytes": self.obj.byte_size,
             "objectCount": 1, "inputCounts": {"images": 1, "lidarObjects": 0, "points": 0},
             "objects": [{"id": self.obj.id, "name": "photo-1.jpg", "byteSize": self.obj.byte_size,
                          "sha256": self.obj.sha256, "kind": "image", "mediaType": "image/jpeg"}]}
         self.manifest["sha256"] = p.manifest_sha256(self.manifest)
+        self.source_version = source_version_for_manifest(self.manifest)
         self.identity = SourceIdentity("staging", "job-1", "reservation-1", 1,
-                                        self.manifest["sha256"], "source-rev-1")
+                                        self.manifest["sha256"], self.source_version)
         self.job = {"jobId": "job-1", "generation": 1, "environment": "staging",
                     "manifestSha256": self.manifest["sha256"],
                     "submission": {"manifest": self.manifest}}
         self.transfer = {"protocol": "source-range-v2", "reservationId": "reservation-1",
             "generation": 1, "expiresAt": "2036-01-01T00:00:00Z", "manifestSha256": self.manifest["sha256"],
-            "sourceVersion": "source-rev-1", "objectIds": [self.obj.id], "chunkBytes": CHUNK_BYTES,
+            "sourceVersion": self.source_version, "objectIds": [self.obj.id], "chunkBytes": CHUNK_BYTES,
             "requestBudget": 3, "byteBudget": len(self.body), "attemptBudget": 5, "nonce": "nonce-1"}
         self.job["transferRequest"] = self.transfer
         self.calls = []
@@ -314,6 +315,20 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(TransferError):
                 validate_source_grant(raw, job=self.job, clock=lambda: 100)
             self.job["transferRequest"][field] = transfer_value
+
+    def test_source_version_is_derived_from_immutable_dataset_manifest_identity(self):
+        self.assertEqual(self.source_version,
+            f"dataset:fixture-1:{self.manifest['sha256']}")
+        raw = self.raw_grant()
+        forged = "dataset:fixture-1:" + "0" * 64
+        self.job["transferRequest"]["sourceVersion"] = forged
+        raw["sourceVersion"] = forged
+        with self.assertRaises(TransferError):
+            validate_source_grant(raw, job=self.job, clock=lambda: 100)
+        for bad in ({"id": "manifest-1", "sha256": "a" * 64},
+                    {"id": "dataset-1", "sha256": "not-a-hash"}):
+            with self.subTest(bad=bad), self.assertRaises(TransferError):
+                source_version_for_manifest(bad)
 
     def test_second_process_transfer_is_rejected_while_object_lock_is_held(self):
         entered, release = threading.Event(), threading.Event()
