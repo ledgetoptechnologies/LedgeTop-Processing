@@ -120,11 +120,14 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 - The candidate Compose file is mode `0600`, owned by root. The installed
   prototype source has no `ops/node_maintenance.py` or node maintenance config.
   The fixed reference-coordinator updater is bound to a different legacy
-  container/project. The generic source updater takes one node token for both
-  pre- and post-replacement health checks, so it cannot safely rotate this
-  credential while the engine changes from old to new token. Rotation remains
-  unperformed; client processing must wait for a reviewed dual-token transition
-  and a managed coordinator reload.
+  container/project (`node-odx-gpu`). The generic source updater can select a
+  Compose project, but takes one node token for both pre- and post-replacement
+  health checks, so it cannot safely rotate this credential while the engine
+  changes from old to new token. The cluster's private `runtime.env` matches all
+  24 of its keys in the running coordinator container, so changing the file
+  alone would not change the coordinator's in-memory configuration. Rotation
+  remains unperformed; client processing must wait for a reviewed dual-token
+  transition and a managed coordinator recreate that preserves the state volume.
 - Claude's Viewer redesign worktree is on
   `claude/viewer-workspace-redesign`, three commits ahead of its remote branch
   at the time checked and not merged into the checked production revision. Its
