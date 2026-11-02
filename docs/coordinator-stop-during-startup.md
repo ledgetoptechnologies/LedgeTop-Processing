@@ -43,8 +43,11 @@ A real loopback Viewer multipart upload test pauses in the server's body read,
 then requests graceful stop. Shutdown waits until the client either completes
 the body or closes its write side; the former receives 200 and retains exact
 input bytes, and the latter receives 400 with no input file. A separate queued
-job survives both cases. This is an in-process fixture with a cooperative client,
-not a deadline for stalled clients, a process-crash test, or host ingress fencing.
+job survives both cases. Additional client-reset and 300 ms stall-then-reset
+cases leave no input file and preserve the queued job; shutdown remains waiting
+during the observed stall. This is an in-process fixture, not a deadline for
+stalled clients, a process-crash test, or host ingress fencing. Socket inactivity
+timeouts do not impose an absolute deadline on a client that keeps sending.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.

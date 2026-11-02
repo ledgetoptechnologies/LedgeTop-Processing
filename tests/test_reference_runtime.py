@@ -9,6 +9,7 @@ from pathlib import Path
 import ssl
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -759,8 +760,8 @@ raise SystemExit(app.main())
     def test_shutdown_waits_for_actual_partial_viewer_upload(self):
         from processing import viewer_http
         from tests.test_viewer_http import multipart, BOUNDARY
-        for disconnect in (False, True):
-            with self.subTest(disconnect=disconnect):
+        for mode in ('complete','half_close','reset','stall_then_reset'):
+            with self.subTest(mode=mode):
                 handler=make_handler(self.config)
                 input_root=handler.viewer_service.store.root
                 identifier=str(uuid.uuid4())
@@ -792,23 +793,30 @@ raise SystemExit(app.main())
                                 unexpected=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'))
                         finally:
                             if unexpected is not None:unexpected.close()
-                        if disconnect:client.shutdown(socket.SHUT_WR)
-                        else:client.sendall(body[8:])
-                        response=b''
-                        while True:
-                            data=client.recv(4096)
-                            if not data:break
-                            response+=data
+                        if mode=='stall_then_reset':
+                            threading.Event().wait(0.3)
+                            self.assertTrue(running.is_alive())
+                        if mode in ('reset','stall_then_reset'):
+                            client.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
+                            client.close();client=None
+                        else:
+                            if mode=='half_close':client.shutdown(socket.SHUT_WR)
+                            else:client.sendall(body[8:])
+                            response=b''
+                            while True:
+                                data=client.recv(4096)
+                                if not data:break
+                                response+=data
+                            self.assertIn(b' 400 ' if mode=='half_close' else b' 200 ',response.split(b'\r\n',1)[0])
                         running.join(5);self.assertFalse(running.is_alive());self.assertEqual(exits,[0])
-                        self.assertIn(b' 400 ' if disconnect else b' 200 ',response.split(b'\r\n',1)[0])
                     replacement=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),
                                       treedar_node_ids=('main',),viewer_enabled=True)
                     try:
                         self.assertEqual(replacement.get(job['id'])['status'],'queued')
                         from processing.viewer_tasks import TaskStore
                         task=TaskStore(replacement,input_root).task(identifier)
-                        self.assertEqual(len(task['files']),0 if disconnect else 1)
-                        if not disconnect:self.assertEqual(Path(task['files'][0]['path']).read_bytes(),b'synthetic-photo')
+                        self.assertEqual(len(task['files']),1 if mode=='complete' else 0)
+                        if mode=='complete':self.assertEqual(Path(task['files'][0]['path']).read_bytes(),b'synthetic-photo')
                     finally:replacement.close()
                 finally:
                     if client is not None:client.close()
