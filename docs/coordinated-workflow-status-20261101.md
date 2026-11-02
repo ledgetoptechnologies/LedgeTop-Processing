@@ -228,6 +228,17 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   clear that range support exists at the worker endpoint but is not forwarded
   by the current coordinator proxy. This is documentation review only; no test
   was rerun and no runtime behavior changed.
+- Viewer commit `1e5bfa6b` documents why the source broker is not safe to mount
+  yet: current database pins and file scans do not fence old app writers,
+  external NAS clients or purge/move paths; no authenticated custody issuer,
+  protected source epoch or paired physical-retry accounting scheme is wired.
+  Viewer and Processing both leave the active NodeODM route unchanged. A
+  TrueNAS ZFS snapshot plus hold, exposed read-only to a narrowly scoped broker,
+  is being evaluated as a possible immutable source pin. This is only an
+  architecture option: atomicity with the Viewer dataset manifest, actual
+  dataset boundaries, snapshot/hold owner and recovery, mount visibility,
+  queued-snapshot capacity and cleanup/release authority still need proof.
+  No TrueNAS state was changed.
 - Beau's follow-up read-only metadata check matched the same saved task and
   provider attempt. It confirmed `3d-tiles` is a boolean `true`, the recorded
   v1 archive inventory has 71 entries and a valid digest, and the mesh tileset
