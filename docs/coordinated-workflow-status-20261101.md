@@ -851,9 +851,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   set of 1,120 JPG files totaling 11,796,893,696 bytes; `datasets` contains
   same-name/same-size matches for all 1,120. A ZIP in imports contains the same
   1,120 JPG basenames and uncompressed sizes. Windows SMB file identities for
-  all imported JPGs differ from matching files in both trash and datasets,
-  establishing separate file objects, not byte-identical content. No payload
-  hashes were computed and no files were changed or removed.
+  all 1,120 matches differ pairwise across imports, trash and datasets,
+  establishing three separate sets of file objects, not byte-identical
+  content. No payload hashes were computed and no files were changed or
+  removed.
 - The ZIP in imports also has 2 TIFF, 118 PNG, 4,559 LAZ, and other entries.
   Five `.zip` files in models (16.76 GiB each) start with a ZIP local-file
   header but lack an end-of-central-directory or ZIP64 locator in the last
@@ -866,3 +867,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   retention row and due state for the 1,120-file trash folder were not read,
   so whether it will be automatically purged is unverified. No manual cleanup
   was performed.
+- Read-only review of the untracked host-supervisor candidate confirmed its
+  header's inactive scope: no installed service or deployment wiring, no
+  kernel descendant containment proof, and no safe restart after an uncertain
+  child epoch. Its synthetic tests cover one direct Python leaf and parent
+  death only. It is not evidence that the worker service is installed or that
+  Docker/NodeODM descendants can be fenced; the live user service remains
+  absent on both processing PCs.
