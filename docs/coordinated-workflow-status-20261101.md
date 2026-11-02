@@ -871,7 +871,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   I independently ran `reference-grant-ack-lockstep.test.js` with
   `reference-app-dispatch.test.js`: 26 passed, 1 skipped (Linux descriptor and
   directory barriers unavailable on this host), 0 failed. The Viewer changes
-  remain uncommitted in that candidate worktree as of this review.
+  are now committed at `7b8e9271` and pushed to draft PR #409. GitHub reports
+  the PR remains open and draft, based on `codex/viewer-v2-delivery-ledger`,
+  with no checks or review decision. This is a candidate compatibility fix,
+  not a released or deployed build.
 - This does **not** yet provide durable lost-ACK recovery. The actual
   `referenceAppDispatch` builds its status binding without `grantSha256`, and
   neither the application journal nor dispatcher persists and reloads an
@@ -892,6 +895,11 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   binding, and fenced recovery; a Viewer journal hash alone is insufficient.
   The production reference lane remains hard-disabled. No live deployment or
   data operation occurred.
+- The current-main workspace redesign PR #406 remains open and draft at
+  `b489c4bf` with no status checks or reviews. Its commit authors include
+  `Bkoltz` and `claude`, which verifies Claude-authored contributions to the
+  candidate hierarchy/UI work; it does not verify a current Claude session,
+  review sign-off, deployed UI, or client permission propagation.
 
 ## Local candidate validation — 2026-11-02
 
