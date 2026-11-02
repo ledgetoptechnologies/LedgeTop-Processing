@@ -1124,8 +1124,9 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   fixture Git blob SHA-256 is
   `ca46a7e0aeda6cc6c945880b477b4799acc509d8a39f16f5603870022fc2ee68`. A
   Processing-side pure arithmetic/recovery oracle now consumes that exact
-  fixture and passes 6 focused tests, including all request/byte plan vectors,
-  integer safety, the 10,000 × 5 MB arithmetic case, and hold-after-uncertain
-  range across restart/replacement grant. This remains a mock proposal: the
-  Python ledger is in-memory, the grant has no matching closed policy fields,
-  and no object transfer or crash recovery has been implemented or enabled.
+  fixture and passes 8 focused tests, including all request/byte plan vectors,
+  integer safety, the 10,000 × 5 MB arithmetic case, and cumulative request and
+  byte charging when duplicate in-flight ranges or replacement grants are
+  held. This remains a mock proposal: the Python ledger is in-memory, the
+  grant has no matching closed policy fields, and no object transfer or crash
+  recovery has been implemented or enabled.

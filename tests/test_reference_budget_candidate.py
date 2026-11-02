@@ -50,10 +50,33 @@ class ReferenceBudgetCandidateTests(unittest.TestCase):
     def test_recovery_vectors_preserve_verified_offset_and_hold_uncertain_ranges(self):
         outcomes = replay_recovery(self.fixture["recovery"])
         self.assertEqual(
-            [(item["result"], item["offset"]) for item in outcomes],
-            [("charged", 0), ("verified", 10), ("verified", 10),
-             ("charged", 10), ("hold", 10), ("hold", 10)],
+            [(item["result"], item["offset"], item["requests"], item["bytes"])
+             for item in outcomes],
+            [("charged", 0, 1, 10), ("verified", 10, 1, 10),
+             ("verified", 10, 1, 10), ("charged", 10, 2, 20),
+             ("hold", 10, 2, 20), ("hold", 10, 2, 20)],
         )
+
+    def test_recovery_does_not_charge_a_duplicate_inflight_range(self):
+        event = {"identity": "job-a:manifest-a", "range": "0-9"}
+        outcomes = replay_recovery([
+            dict(event, action="send", generation=1, grant="grant-a"),
+            dict(event, action="send", generation=1, grant="grant-a"),
+            dict(event, action="restart", generation=1, grant="grant-a"),
+            dict(event, action="send", generation=2, grant="grant-b"),
+        ])
+        self.assertEqual([item["result"] for item in outcomes],
+                         ["charged", "hold", "hold", "hold"])
+        self.assertEqual([(item["requests"], item["bytes"]) for item in outcomes],
+                         [(1, 10)] * 4)
+
+    def test_unknown_restart_is_held_and_separate_input_has_separate_ledger(self):
+        outcomes = replay_recovery([
+            {"identity": "job-a:manifest-a", "range": "0-9", "action": "restart"},
+            {"identity": "job-b:manifest-b", "range": "0-9", "action": "send"},
+        ])
+        self.assertEqual([(item["result"], item["requests"], item["bytes"])
+                          for item in outcomes], [("hold", 0, 0), ("charged", 1, 10)])
 
     def test_boolean_and_unsafe_numbers_are_not_integers(self):
         policy = dict(self.fixture["policy"])

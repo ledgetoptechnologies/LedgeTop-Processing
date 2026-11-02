@@ -84,16 +84,20 @@ def replay_recovery(vectors):
             return None
         if start < 0 or end < start or end >= MAX_SAFE_INTEGER:
             return None
-        ledger = ledgers.setdefault(identity, {})
+        state = ledgers.setdefault(identity, {"ranges": {}, "requests": 0, "bytes": 0})
+        ledger = state["ranges"]
         status = ledger.get(range_key)
         action = event["action"]
         if action == "send":
-            result = "hold" if status == "uncertain" else ("verified" if status == "verified" else "charged")
+            result = ("verified" if status == "verified" else
+                      ("charged" if status is None else "hold"))
             if result == "charged":
                 ledger[range_key] = "charged"
+                state["requests"] += 1
+                state["bytes"] += end - start + 1
         elif action == "verify":
-            result = "verified" if status == "charged" else "hold"
-            if result == "verified":
+            result = "verified" if status in {"charged", "verified"} else "hold"
+            if status == "charged":
                 ledger[range_key] = "verified"
         else:
             if status == "charged":
@@ -110,5 +114,6 @@ def replay_recovery(vectors):
             if lo != offset:
                 break
             offset = hi
-        outcomes.append({"result": result, "offset": offset})
+        outcomes.append({"result": result, "offset": offset,
+                         "requests": state["requests"], "bytes": state["bytes"]})
     return outcomes
