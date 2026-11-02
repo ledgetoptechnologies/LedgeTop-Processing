@@ -385,6 +385,11 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 
 ## Evidence update — 2026-11-02
 
+- Re-ran the focused shared-contract, authenticated provenance, TreeDar
+  admission/publication, pipeline and runtime suites: 127 passed, 93 skipped,
+  0 failed. These are local synthetic/source tests; the skips are reported by
+  the suites and do not establish live TreeDar availability. The runtime still
+  constructs the Viewer reference API with TreeDar unavailable.
 - Staged the exact reviewed source archive from commit `465f382` on both
   processing PCs at
   `/home/bkoltz/.local/share/ledgetop-processing-reference/reference-465f382/`.
