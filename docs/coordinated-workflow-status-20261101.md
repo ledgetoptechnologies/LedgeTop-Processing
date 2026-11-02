@@ -1377,3 +1377,40 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   session binding or present ownership acknowledgment is still unverified.
 - No Viewer files, runtime settings, NAS paths, or task records were modified
   by this source review.
+
+## Processing and Viewer v2 accepted-copy bridge — 2026-11-02
+
+- Processing draft PR #339 now derives and persists a separate Viewer wire
+  manifest for TreeDar-only and combined ODM→TreeDar jobs. It uses the exact
+  Viewer discriminator `ltds-reference-result-v2`, preserves Processing object
+  order, requires the Viewer TreeDar role closure (including optional
+  `final_test_predictions` and required outputs), routes v2 transfers through
+  `/api/v1/reference/v2/acceptances`, and verifies the signed full-closure
+  receipt before marking the durable outbox complete. ODM-only v1 remains on
+  its existing route. The staged change is at `7b9541d` on
+  `codex/viewer-acceptance-receipt-verify-20261102`.
+- Viewer draft PR #424 now has the matching private v2 receiver. Its current
+  head is `85f252ef` on `codex/viewer-processing-acceptance-v1-20261102`.
+  The focused Linux Node 24 HTTP/ledger suite passed 21/21 against that head,
+  including combined v2 reserve, chunk transfer, commit, status replay,
+  restart recovery, quota enforcement and tampered-byte hold. The fixture
+  uses a distinct job identity when exercising v1 and v2 in the same ledger,
+  preserving the generation-binding guard.
+- Processing focused tests passed 83 tests with four Windows-only skips;
+  the same 83 passed without skips in a disposable Python 3.12 Linux
+  container. The complete Windows suite passed 1,400 tests with 572
+  platform-specific skips. Three cross-repository fixture digest tests first
+  exposed Windows CRLF checkout bytes; the pinned fixture content itself was
+  unchanged. Explicit LF attributes now keep the shared fixtures byte-stable,
+  and the complete suite passes without changing expected hashes.
+- Both PRs are open drafts. Branch Actions checks are absent under the
+  main-only Actions policy. No runtime deployment, Viewer release, TrueNAS
+  spool, queue reservation, real job, or cleanup was performed. Thus this
+  closes a source-level wire-contract mismatch and synthetic HTTP coverage,
+  but does not prove NAS custody or a deployed worker→orchestrator→Viewer
+  acceptance chain.
+- The Engineering Hub bus tools remain absent from this Codex session, so an
+  EH disconnect/reconnect and current Claude session acknowledgment are not
+  verified. The Viewer chat was asked to report the current redesign and
+  hierarchy PR status; pending response, Claude ownership remains
+  unverified.
