@@ -28,6 +28,7 @@ from processing.reference_runtime import (
     ReferenceRuntime, ReferenceSettings, RuntimeConfigurationError, discovered_policy, load_reference_settings,
 )
 from processing.reference_recovery import RecoveryNodeBinding
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 class FakeServer:
@@ -128,9 +129,75 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.value['recoveryBindings']['main']['outputBudget']=2
         self.assertEqual(loaded.recovery_bindings['main'].output_budget,1000)
 
+    def test_schema3_pins_public_viewer_receipt_keys_and_rejects_malformed_pin(self):
+        signer = SyntheticViewerSigner()
+        self.value = self.recovery_config()
+        self.value.update(schemaVersion=3, viewerReceiptKeys=signer.trusted_keys)
+        self.write_config()
+        loaded = self.settings()
+        self.assertEqual(loaded.viewer_receipt_keys, signer.trusted_keys)
+        self.value.pop('recoveryBindings')
+        self.write_config()
+        self.assertIsNone(self.settings().recovery_bindings)
+        self.value = self.recovery_config()
+        self.value.update(schemaVersion=3, viewerReceiptKeys=signer.trusted_keys)
+        self.value['viewerReceiptKeys'][signer.key_id]['publicKeyPem'] = 'not-a-public-key'
+        self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):
+            self.settings()
+
+    def test_schema4_loads_private_environment_scoped_viewer_transfer_credentials(self):
+        signer = SyntheticViewerSigner()
+        secret_path = self.root / 'viewer-service-key.txt'
+        secret_path.write_text('synthetic-viewer-service-key-material\n')
+        if os.name != 'nt': secret_path.chmod(0o600)
+        self.value = self.recovery_config()
+        self.value.update(schemaVersion=4, viewerReceiptKeys=signer.trusted_keys,
+            viewerAcceptance={'production': {'origin': 'https://viewer.example',
+                'keyId': 'viewer-service-v1', 'secretFile': str(secret_path)}})
+        self.value.pop('recoveryBindings')
+        self.write_config()
+        loaded = self.settings()
+        self.assertEqual(loaded.viewer_acceptance_targets, {'production': {
+            'origin': 'https://viewer.example', 'keyId': 'viewer-service-v1',
+            'secret': 'synthetic-viewer-service-key-material'}})
+        self.assertEqual(loaded.viewer_receipt_keys, signer.trusted_keys)
+        queue = Queue(str(self.root / 'state'), node_ids=('cluster', 'main'), reference_enabled=True)
+        queue.allowed_profiles.add('reference-pipeline-v1')
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        self.assertIsNotNone(runtime._viewer_transfer_worker)
+        self.assertIsNone(runtime._viewer_transfer_thread)
+
+    def test_schema4_rejects_untrusted_or_incomplete_viewer_targets(self):
+        signer = SyntheticViewerSigner()
+        secret_path = self.root / 'viewer-service-key.txt'
+        secret_path.write_text('synthetic-viewer-service-key-material')
+        if os.name != 'nt': secret_path.chmod(0o600)
+        original = self.recovery_config()
+        original.update(schemaVersion=4, viewerReceiptKeys=signer.trusted_keys,
+            viewerAcceptance={'production': {'origin': 'https://viewer.example',
+                'keyId': 'viewer-service-v1', 'secretFile': str(secret_path)}})
+        bad_values = []
+        for mutation in (
+            lambda value: value['viewerAcceptance']['production'].update(origin='http://viewer.example'),
+            lambda value: value['viewerAcceptance']['production'].update(extra='no'),
+            lambda value: value['viewerAcceptance']['production'].update(keyId='bad id'),
+            lambda value: value['viewerAcceptance']['production'].update(secretFile=str(self.root / 'missing.key')),
+            lambda value: value.update(viewerReceiptKeys={}),
+        ):
+            value = copy.deepcopy(original); mutation(value); bad_values.append(value)
+        short_secret = self.root / 'short-key.txt'; short_secret.write_text('short')
+        if os.name != 'nt': short_secret.chmod(0o600)
+        value = copy.deepcopy(original); value['viewerAcceptance']['production']['secretFile'] = str(short_secret)
+        bad_values.append(value)
+        for value in bad_values:
+            self.value = value; self.write_config()
+            with self.subTest(value=value), self.assertRaises(RuntimeConfigurationError): self.settings()
+
     def test_schema2_configuration_rejects_unknown_missing_coverage_versions_and_types(self):
         original=self.recovery_config()
-        changes=[lambda v:v.update(schemaVersion=True),lambda v:v.update(schemaVersion=2.0),lambda v:v.update(schemaVersion=3),
+        changes=[lambda v:v.update(schemaVersion=True),lambda v:v.update(schemaVersion=2.0),lambda v:v.update(schemaVersion=5),
             lambda v:v.pop('recoveryBindings'),lambda v:v.update(recoveryBindings=None),lambda v:v.update(recoveryBindings={}),
             lambda v:v['recoveryBindings'].pop('main'),lambda v:v['recoveryBindings'].update(other=v['recoveryBindings']['main']),
             lambda v:v.update(extra=True),lambda v:v['recoveryBindings']['main'].update(nodeId='main'),

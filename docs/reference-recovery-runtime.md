@@ -41,6 +41,88 @@ opened. All nodes must name the same single coordinator authority. Boolean/float
 integers, unknown fields, partial coverage and a recovery
 field under schema 1 are rejected.
 
+## Schema version 3: pin Viewer accepted-copy receipt issuers
+
+Schema 3 retains every schema 2 field and adds a closed `viewerReceiptKeys`
+map. It contains only public Ed25519 PEM keys, keyed by the exact Viewer key ID
+and bound to its issuer ID. The Processing coordinator validates each key at
+startup and verifies signed accepted-copy receipts before persisting the
+legacy acceptance and signed sibling in one database transaction. Workers use
+the same public pins before recording local acceptance, and engine-cache
+cleanup requires signed receipts that cover the complete result-object closure.
+Schema 1 and 2 remain readable but have no receipt pins; their unsigned
+acceptances cannot authorize this cleanup.
+
+```json
+{
+  "schemaVersion": 3,
+  "viewerReceiptKeys": {
+    "viewer-prod-key-2026": {
+      "issuerId": "ledgetop-viewer-production",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n"
+    }
+  }
+}
+```
+
+This is an abbreviated fragment, not a deployable configuration. Schema 3
+requires the complete schema 1 listener, credential, worker and stream budget
+fields; `recoveryBindings` remains optional and is validated when present. Do not place a private signing key in Processing;
+the corresponding signer remains in Viewer. An empty key map is accepted for
+configurations that do not use signed result cleanup, but it leaves that cleanup
+held.
+
+## Schema version 4: durable outbound Viewer acceptance
+
+Schema 4 retains the schema 3 fields and adds `viewerAcceptance`, an environment
+map with one or both of `production` and `staging`. Each entry has exactly an
+HTTPS Viewer `origin`, the Viewer service-auth `keyId`, and an absolute
+`secretFile` path. The referenced key file must be a single-link regular file
+owned and private to the runtime account on POSIX; Windows ACL privacy remains
+the provisioner's responsibility. The key is read into process memory only and
+is never serialized in statuses or delivery records. Distinct service keys are
+required for each configured environment, and the public Ed25519 receipt pins
+must be non-empty.
+
+When configured, `ReferenceRuntime` runs one bounded background transfer at a
+time. It persists a stable acceptance envelope and lease in the same SQLite
+database as job metadata, resumes Viewer object offsets after interruption,
+replays commit/status after a lost response, verifies the signed accepted-copy
+receipt and only then stores the receipt pair. It streams result bytes through
+the coordinator's existing `ResultProxy`; it does not create another complete
+local archive copy. If Viewer is unavailable, transfer metadata and worker
+source results remain for retry. Production and staging use their separately
+configured Viewer origins and credentials.
+
+This sender is an additive source capability: schemas 1 through 3 remain
+readable and do not activate outbound transfer. Schema 4 does not itself
+configure a deployed host. The current Viewer acceptance route accepts only
+single-engine ODM results; TreeDar manifests and roles are held by the sender
+until the Viewer-side result contract explicitly supports them. Neither
+Gaussian splats nor TreeDar is enabled by this setting.
+
+```json
+{
+  "schemaVersion": 4,
+  "viewerReceiptKeys": {
+    "viewer-prod-key-2026": {
+      "issuerId": "ledgetop-viewer-production",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----\\n"
+    }
+  },
+  "viewerAcceptance": {
+    "production": {
+      "origin": "https://viewer.example",
+      "keyId": "processing-transfer-v1",
+      "secretFile": "/private/processing/viewer-production.key"
+    }
+  }
+}
+```
+
+This is an abbreviated fragment, not a deployable configuration. The complete
+schema 1 listener, credentials, workers and stream budget remain required.
+
 Bindings are operator-provisioned expectations about existing physical nodes;
 requests cannot choose them. The authority must be the actual persistent Queue
 authority already shared by the nodes' gates. The origin is the gate's configured

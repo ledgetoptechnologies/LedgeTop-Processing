@@ -41,7 +41,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting'))
+                      'executionRouting','viewerReceiptKeys'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -360,6 +360,10 @@ def load_config(path):
         # each new claim. This compatibility key cannot install a static list.
         if config.get('allowedOdmOptions', []) != []:
             raise ValueError('static ODM allowlists are not supported')
+        from processing.viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
+        config['viewerReceiptKeys'] = validate_trusted_viewer_receipt_keys(config.get('viewerReceiptKeys', {}))
+        if (config['cleanupEnabled'] or config['engineCleanupEnabled']) and not config['viewerReceiptKeys']:
+            raise ValueError('signed Viewer copy proof pins required for cleanup')
         for field in ('caFile','serverCertFile','serverKeyFile'):
             _file(config[field], private=field == 'serverKeyFile')
         return config
@@ -419,7 +423,8 @@ def _build_worker(config,owner,resources):
     worker = ReferenceEngineWorker(root / 'worker.sqlite', ledger=ledger, outbox=outbox, engine=engine,
         engine_id=config['engineId'], node_id=config['nodeId'], authority_id=config['authorityId'],
         coordinator_origin=config['gateCoordinatorOrigin'], gate_generation=config['gateGeneration'],
-        worker_id=config['workerId'], engine_version=config['engineVersion'])
+        worker_id=config['workerId'], engine_version=config['engineVersion'],
+        viewer_receipt_keys=config['viewerReceiptKeys'])
     broker = BrokerClient(config['brokerOrigin'], ssl_context=client_tls)
     router = provenance = None
     if routing is not None:
@@ -470,7 +475,8 @@ def _build_worker(config,owner,resources):
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
         execution_router=router, provenance_client=provenance,state_owner=owner,
-        engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
+        engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite',
+            viewer_receipt_keys=config['viewerReceiptKeys'])
             if config['engineCleanupEnabled'] else None,
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
     permitted = frozenset(config['allowedEnvironments'])

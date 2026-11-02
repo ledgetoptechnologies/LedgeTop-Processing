@@ -15,6 +15,7 @@ from processing.reference_results import ReferenceResults, ResultAuthorization, 
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.worker_outbox import WorkerOutbox
 from tests.test_reference_engine_worker import FakeNativeEngine
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 class ResultsFixture:
@@ -47,6 +48,8 @@ class ResultsFixture:
         (self.directory / 'image-1.jpg').write_bytes(b'abc')
         self.ledger.record_allocated('reservation-1', 3)
         self.worker = self.make_worker()
+        self.viewer_signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = self.viewer_signer.trusted_keys
         self.worker.start(self.job, reservation_id='reservation-1', input_paths={'image-1': 'jobs/reservation-1/image-1.jpg'})
         self.worker.poll(self.job['jobId'])
         self.results = ReferenceResults(self.worker)
@@ -81,7 +84,9 @@ class ResultsFixture:
             jobId=self.job['jobId'], generation=1, environment='staging', inputManifestSha256=self.job['manifestSha256'],
             pipelineDigest=self.job['pipelineDigest'], resultManifestSha256=self.metadata['resultManifestSha256'],
             acceptedObjectIds=[self.object['id']], acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
-        self.worker.apply_viewer_acceptance(self.job['jobId'], [receipt])
+        result = json.loads(self.worker._row(self.job['jobId'])['result'])
+        self.worker.apply_viewer_acceptance(self.job['jobId'], [
+            self.viewer_signer.envelope(receipt, result)])
 
 
 class ReferenceResultsTests(ResultsFixture, unittest.TestCase):

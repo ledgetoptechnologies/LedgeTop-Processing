@@ -14,7 +14,7 @@ import secrets
 import stat
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .maintenance import Conflict
 from . import reference_protocol as protocol
@@ -91,6 +91,17 @@ class ReferenceStore:
                 CREATE TABLE IF NOT EXISTS reference_acceptances (
                   receipt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES reference_jobs(job_id),
                   digest TEXT NOT NULL, receipt_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS reference_viewer_receipts (
+                  receipt_id TEXT PRIMARY KEY, storage_receipt_id TEXT NOT NULL UNIQUE,
+                  acceptance_receipt_id TEXT NOT NULL UNIQUE REFERENCES reference_acceptances(receipt_id),
+                  job_id TEXT NOT NULL REFERENCES reference_jobs(job_id), digest TEXT NOT NULL,
+                  receipt_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS reference_viewer_transfers (
+                  job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id),
+                  receipt_id TEXT UNIQUE NOT NULL, acceptance_json TEXT NOT NULL,
+                  attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+                  lease_token TEXT, lease_until REAL, last_error TEXT,
+                  completed_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS reference_outbox (
                   identity TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
                   digest TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
@@ -157,6 +168,8 @@ class ReferenceStore:
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
+                              ("reference_viewer_receipts", "receipt_json"),
+                              ("reference_viewer_transfers", "acceptance_json"),
                               ("reference_worker_receipts", "receipt_json"),
                               ("reference_transfer_grants", "grant_json")):
             used += db.execute(f"SELECT COALESCE(SUM(length(CAST({column} AS BLOB))),0) FROM {table}").fetchone()[0]
@@ -536,7 +549,7 @@ class ReferenceStore:
                 raise Conflict("operator-held worker results require explicit resolution")
             return self._seal_result(db, row, result, allow_recovery=True)
 
-    def accept(self, job_id, receipt):
+    def accept(self, job_id, receipt, *, viewer_receipt=None, trusted_viewer_receipt_keys=None):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
@@ -545,12 +558,32 @@ class ReferenceStore:
             result = json.loads(row["result_json"])
             checked = protocol.validate_acceptance(receipt, result_manifest=result,
                 input_manifest_sha256=row["manifest_sha"])
+            identities = {checked['receiptId'], checked['storageReceiptId']}
+            viewer_checked = None
+            if viewer_receipt is not None:
+                from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+                expected = dict(jobId=job_id, generation=row['generation'], environment=row['environment'],
+                    inputManifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'],
+                    resultManifestSha256=result['resultManifestSha256'])
+                try:
+                    verified = verify_viewer_acceptance_receipt(viewer_receipt,
+                        trusted_keys=trusted_viewer_receipt_keys, expected=expected,
+                        result_manifest=result, accepted_object_ids=checked['acceptedObjectIds'])
+                except (TypeError, ValueError):
+                    raise Conflict('Viewer accepted-copy signature or binding is invalid') from None
+                viewer_checked = verified.receipt
+                viewer_identities = {viewer_checked['receiptId'], viewer_checked['storageReceiptId']}
+                if len(viewer_identities) != 2 or viewer_identities & identities:
+                    raise Conflict('Viewer receipt identities must be independent')
             encoded, receipt_digest = _json(checked), protocol.receipt_tombstone_digest(checked)
             identities = {checked['receiptId'], checked['storageReceiptId']}
             for existing in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances'):
                 prior = json.loads(existing['receipt_json'])
                 if existing['receipt_id'] != checked['receiptId'] and identities & {prior['receiptId'], prior['storageReceiptId']}:
                     raise Conflict('acceptance identity already bound')
+            for existing in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_viewer_receipts'):
+                if identities & {existing['receipt_id'], existing['storage_receipt_id']}:
+                    raise Conflict('acceptance identity belongs to a Viewer receipt')
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
                 for existing in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_terminal_acceptances'):
                     if identities & {existing['receipt_id'], existing['storage_receipt_id']}:
@@ -562,14 +595,136 @@ class ReferenceStore:
                 self._quota(db, len(encoded.encode("utf-8")))
                 db.execute("INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)",
                            (checked["receiptId"], job_id, receipt_digest, encoded))
+            if viewer_checked is not None:
+                viewer_encoded = _json(viewer_checked)
+                viewer_digest = protocol.digest(viewer_checked)
+                existing_viewer = db.execute('SELECT * FROM reference_viewer_receipts WHERE acceptance_receipt_id=?',
+                    (checked['receiptId'],)).fetchone()
+                if existing_viewer and (existing_viewer['job_id'], existing_viewer['digest'], existing_viewer['receipt_json']) != (
+                        job_id, viewer_digest, viewer_encoded):
+                    raise Conflict('Viewer accepted-copy receipt changed on replay')
+                if not existing_viewer:
+                    identities = {viewer_checked['receiptId'], viewer_checked['storageReceiptId']}
+                    for prior in db.execute('SELECT receipt_json FROM reference_acceptances'):
+                        prior_value = json.loads(prior[0])
+                        if identities & {prior_value['receiptId'], prior_value['storageReceiptId']}:
+                            raise Conflict('Viewer receipt identity belongs to another acceptance')
+                    for prior in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_viewer_receipts'):
+                        if identities & {prior['receipt_id'], prior['storage_receipt_id']}:
+                            raise Conflict('Viewer receipt identity already bound')
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
+                        for prior in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_terminal_acceptances'):
+                            if identities & {prior['receipt_id'], prior['storage_receipt_id']}:
+                                raise Conflict('Viewer receipt identity belongs to terminal metadata')
+                    self._quota(db, len(viewer_encoded.encode('utf-8')))
+                    db.execute('INSERT INTO reference_viewer_receipts(receipt_id,storage_receipt_id,acceptance_receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?,?,?)',
+                        (viewer_checked['receiptId'], viewer_checked['storageReceiptId'], checked['receiptId'],
+                         job_id, viewer_digest, viewer_encoded))
             accepted = set()
             for item in db.execute("SELECT receipt_json FROM reference_acceptances WHERE job_id=?", (job_id,)):
                 accepted.update(json.loads(item[0])["acceptedObjectIds"])
             fully = accepted == {obj["id"] for obj in result["objects"]}
             if fully:
                 db.execute("UPDATE reference_jobs SET phase='completed',updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
+            transfer = db.execute('SELECT receipt_id,acceptance_json FROM reference_viewer_transfers WHERE job_id=?',
+                                  (job_id,)).fetchone()
+            if transfer and transfer['receipt_id'] == checked['receiptId']:
+                db.execute('UPDATE reference_viewer_transfers SET completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP),'
+                           'lease_token=NULL,lease_until=NULL,last_error=NULL WHERE job_id=?', (job_id,))
             return {"job": self._public(self._row(db, job_id)), "created": old is None,
                     "fullyAccepted": fully, "acceptedObjectIds": sorted(accepted)}
+
+    def ensure_viewer_transfer(self, job_id, *, accepted_at=None):
+        """Durably create one stable Viewer acceptance request for a sealed result."""
+        accepted_at = accepted_at or datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        if type(accepted_at) is not str:
+            raise ValueError('invalid acceptance time')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, job_id)
+            if not row['result_json'] or row['phase'] not in ('awaiting_acceptance', 'completed'):
+                raise Conflict('result is not ready for Viewer transfer')
+            result = json.loads(row['result_json'])
+            acceptance = dict(schemaVersion=1, receiptId=str(uuid.uuid4()),
+                storageReceiptId=str(uuid.uuid4()), jobId=job_id, generation=row['generation'],
+                environment=row['environment'], inputManifestSha256=row['manifest_sha'],
+                pipelineDigest=row['pipeline_digest'], resultManifestSha256=result['resultManifestSha256'],
+                acceptedObjectIds=sorted(obj['id'] for obj in result['objects']),
+                acceptedAt=accepted_at, validationVersion=protocol.VALIDATION_VERSION)
+            checked = protocol.validate_acceptance(acceptance, result_manifest=result,
+                                                   input_manifest_sha256=row['manifest_sha'])
+            encoded = _json(checked)
+            existing = db.execute('SELECT receipt_id,acceptance_json FROM reference_viewer_transfers WHERE job_id=?',
+                                  (job_id,)).fetchone()
+            if existing:
+                previous = json.loads(existing['acceptance_json'])
+                if (previous['jobId'], previous['generation'], previous['environment'],
+                    previous['inputManifestSha256'], previous['pipelineDigest'],
+                    previous['resultManifestSha256'], previous['acceptedObjectIds']) != (
+                    checked['jobId'], checked['generation'], checked['environment'],
+                    checked['inputManifestSha256'], checked['pipelineDigest'],
+                    checked['resultManifestSha256'], checked['acceptedObjectIds']):
+                    raise Conflict('Viewer transfer binding changed')
+                return previous
+            self._quota(db, len(encoded.encode('utf-8')))
+            db.execute('INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json) VALUES(?,?,?)',
+                       (job_id, checked['receiptId'], encoded))
+            return checked
+
+    def pending_viewer_transfer_jobs(self, *, limit=20):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('invalid Viewer transfer discovery limit')
+        with self.queue._db() as db:
+            rows = db.execute('''SELECT r.job_id FROM reference_jobs r
+                WHERE r.phase='awaiting_acceptance' AND r.result_json IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id)
+                ORDER BY r.created_at,r.job_id LIMIT ?''', (limit,)).fetchall()
+            return [row['job_id'] for row in rows]
+
+    def claim_viewer_transfer(self, *, now, lease_seconds=120):
+        """Lease one due Viewer transfer; expired leases are safe to resume."""
+        if type(now) not in (int, float) or now < 0 or type(lease_seconds) is not int or not 1 <= lease_seconds <= 3600:
+            raise ValueError('invalid Viewer transfer lease')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('''SELECT job_id,receipt_id,acceptance_json,attempts FROM reference_viewer_transfers
+                WHERE completed_at IS NULL AND next_attempt<=? AND (lease_until IS NULL OR lease_until<=?)
+                ORDER BY next_attempt,created_at,job_id LIMIT 1''', (now, now)).fetchone()
+            if row is None:
+                return None
+            token = secrets.token_urlsafe(24)
+            db.execute('UPDATE reference_viewer_transfers SET attempts=attempts+1,lease_token=?,lease_until=? WHERE job_id=?',
+                       (token, now + lease_seconds, row['job_id']))
+            return {'jobId': row['job_id'], 'receiptId': row['receipt_id'],
+                    'acceptance': json.loads(row['acceptance_json']), 'attempt': row['attempts'] + 1,
+                    'leaseToken': token}
+
+    def fail_viewer_transfer(self, job_id, lease_token, *, now, reason):
+        """Schedule bounded exponential retry without storing transport detail."""
+        _reason(reason)
+        if type(now) not in (int, float) or now < 0:
+            raise ValueError('invalid Viewer transfer time')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT attempts,lease_token,completed_at FROM reference_viewer_transfers WHERE job_id=?',
+                             (job_id,)).fetchone()
+            if not row or row['completed_at'] is not None or not lease_token or row['lease_token'] != lease_token:
+                return False
+            delay = min(3600, 2 ** min(row['attempts'], 12))
+            db.execute('UPDATE reference_viewer_transfers SET next_attempt=?,lease_token=NULL,lease_until=NULL,last_error=? WHERE job_id=?',
+                       (now + delay, reason, job_id))
+            return True
+
+    def viewer_transfer_status(self, job_id):
+        """Secret-free durable status for tests and operator diagnostics."""
+        with self.queue._db() as db:
+            row = db.execute('SELECT receipt_id,attempts,next_attempt,last_error,completed_at FROM reference_viewer_transfers WHERE job_id=?',
+                             (job_id,)).fetchone()
+            if not row:
+                return None
+            return {'receiptId': row['receipt_id'], 'attempts': row['attempts'],
+                    'nextAttempt': row['next_attempt'], 'lastError': row['last_error'],
+                    'completed': row['completed_at'] is not None}
 
     def enqueue_outbox(self, kind, identity, payload):
         protocol._slug(kind, "outbox kind")
@@ -596,11 +751,15 @@ class ReferenceStore:
             return True
 
     def acceptance_receipts(self, job_id):
-        """PRIVATE worker relay; metadata receipts grant no unverified deletion."""
+        """PRIVATE worker relay; only signed Viewer receipts may prove accepted copies."""
         with self.queue._db() as db:
             row = self._row(db, job_id)
-            receipts = [json.loads(item[0]) for item in db.execute(
-                'SELECT receipt_json FROM reference_acceptances WHERE job_id=? ORDER BY receipt_id', (job_id,))]
+            receipts = []
+            for item in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances WHERE job_id=? ORDER BY receipt_id', (job_id,)):
+                acceptance = json.loads(item['receipt_json'])
+                signed = db.execute('SELECT receipt_json FROM reference_viewer_receipts WHERE acceptance_receipt_id=?',
+                    (item['receipt_id'],)).fetchone()
+                receipts.append(dict(acceptance=acceptance, viewerReceipt=json.loads(signed[0])) if signed else acceptance)
             return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed'}
 
     def pending_outbox(self, *, now=None, limit=100):

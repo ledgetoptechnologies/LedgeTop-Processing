@@ -25,7 +25,7 @@ class Response:
 class ReferenceAPI:
     def __init__(self, store, *, bearer_tokens, capability_fingerprint,
                  options_fingerprint, allowed_odm_options=(), treedar_available=False,
-                 result_proxy=None):
+                 result_proxy=None, viewer_receipt_keys=None):
         protocol._hash(capability_fingerprint, "capability fingerprint")
         protocol._hash(options_fingerprint, "options fingerprint")
         if type(bearer_tokens) is not dict or not bearer_tokens:
@@ -47,6 +47,12 @@ class ReferenceAPI:
         self.allowed_odm_options = options
         self.treedar_available = treedar_available
         self.result_proxy = result_proxy
+        from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
+        try:
+            self.viewer_receipt_keys = validate_trusted_viewer_receipt_keys(
+                {} if viewer_receipt_keys is None else viewer_receipt_keys)
+        except ValueError:
+            raise ValueError("invalid pinned Viewer receipt keys") from None
         from .reference_terminal import TerminalService
         self.terminal = TerminalService(store)
 
@@ -162,8 +168,16 @@ class ReferenceAPI:
                     return self._error(409, "result_not_ready")
                 return Response(200, private["resultManifest"])
             if method == "POST" and suffix == "/acceptance":
-                receipt = protocol.decode_submission(body)
-                return Response(200, self.store.accept(job_id, receipt))
+                payload = protocol.decode_submission(body)
+                viewer_receipt = None
+                if type(payload) is dict and set(payload) == {"acceptance", "viewerReceipt"}:
+                    receipt, viewer_receipt = payload["acceptance"], payload["viewerReceipt"]
+                    if not self.viewer_receipt_keys:
+                        raise Conflict("signed Viewer receipt verification is not configured")
+                else:
+                    receipt = payload
+                return Response(200, self.store.accept(job_id, receipt, viewer_receipt=viewer_receipt,
+                    trusted_viewer_receipt_keys=self.viewer_receipt_keys))
             if method == 'POST' and suffix == '/transfer-grants':
                 grant = protocol.decode_submission(body)
                 return Response(200, self.store.receive_transfer_grant(job_id, grant))

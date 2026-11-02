@@ -40,6 +40,8 @@ class ReferenceSettings:
     workers: dict
     stream_budget: dict
     recovery_bindings: dict | None = None
+    viewer_receipt_keys: dict | None = None
+    viewer_acceptance_targets: dict | None = None
 
 
 def _file(path, *, private):
@@ -73,10 +75,19 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()), "runtime configuration")
+        if value["schemaVersion"] in (3, 4):
+            required = set(fields) | {"viewerReceiptKeys"}
+            if value["schemaVersion"] == 4:
+                required.add("viewerAcceptance")
+            allowed = required | {"recoveryBindings"}
+            if not required <= set(value) or set(value) - allowed:
+                raise RuntimeConfigurationError("runtime configuration fields differ")
+        else:
+            p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()),
+                "runtime configuration")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -124,7 +135,7 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError("invalid stream concurrency budget")
         p._integer(budget["maxObjectBytes"], "stream object budget")
         recovery = None
-        if value["schemaVersion"] == 2:
+        if value["schemaVersion"] == 2 or "recoveryBindings" in value:
             configured=value["recoveryBindings"]
             if type(configured) is not dict or set(configured)!=set(config.prototype_node_ids):
                 raise RuntimeConfigurationError("recovery bindings must exactly cover configured nodes")
@@ -135,8 +146,53 @@ def load_reference_settings(path, config):
                     physical["coordinatorOrigin"],physical["gateGeneration"],physical["outputBudget"])
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
+        viewer_keys = {}
+        if value["schemaVersion"] in (3, 4):
+            from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
+            viewer_keys = validate_trusted_viewer_receipt_keys(value["viewerReceiptKeys"])
+        viewer_targets = {}
+        if value["schemaVersion"] == 4:
+            configured = value["viewerAcceptance"]
+            if (type(configured) is not dict or not configured
+                    or not set(configured) <= {"production", "staging"}):
+                raise RuntimeConfigurationError("explicit environment-scoped Viewer targets required")
+            target_secrets = []
+            from .reference_result_proxy import _origin as validate_https_origin
+            for environment, target in configured.items():
+                p._environment(environment)
+                p._closed(target, ("origin", "keyId", "secretFile"), "Viewer acceptance target")
+                origin = validate_https_origin(target["origin"])
+                key_id = target["keyId"]
+                p._slug(key_id, "Viewer service key ID")
+                secret_path, initial_secret = _file(target["secretFile"], private=True)
+                descriptor = os.open(secret_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    observed = os.fstat(descriptor)
+                    if (observed.st_dev, observed.st_ino) != (initial_secret.st_dev, initial_secret.st_ino):
+                        raise RuntimeConfigurationError("Viewer service key identity changed")
+                    with os.fdopen(descriptor, "rb", closefd=False) as source:
+                        secret_bytes = source.read(4097)
+                finally:
+                    os.close(descriptor)
+                if secret_bytes.endswith(b"\r\n"):
+                    secret_bytes = secret_bytes[:-2]
+                elif secret_bytes.endswith(b"\n"):
+                    secret_bytes = secret_bytes[:-1]
+                try:
+                    secret = secret_bytes.decode("ascii")
+                except UnicodeError:
+                    raise RuntimeConfigurationError("invalid Viewer service key file") from None
+                if (not 32 <= len(secret) <= 4096 or any(ord(char) < 33 or ord(char) > 126 for char in secret)
+                        or secret in credentials):
+                    raise RuntimeConfigurationError("invalid Viewer service key file")
+                credentials.append(secret)
+                target_secrets.append(secret)
+                viewer_targets[environment] = {"origin": origin, "keyId": key_id, "secret": secret}
+            if len(set(target_secrets)) != len(target_secrets) or not viewer_keys:
+                raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
-                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery)
+                                 {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
+                                 viewer_keys, viewer_targets or None)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -187,7 +243,8 @@ class _DynamicAPI:
                 api = ReferenceAPI(self.control.viewer.store, bearer_tokens=self.settings.viewer_bearers,
                     capability_fingerprint=capability, options_fingerprint=options,
                     allowed_odm_options=allowed, treedar_available=False,
-                    result_proxy=self.control.viewer.result_proxy)
+                    result_proxy=self.control.viewer.result_proxy,
+                    viewer_receipt_keys=self.settings.viewer_receipt_keys)
             except Exception:
                 return Response(503, {"error": "engine_catalog_unavailable"})
             return api.handle(method, path, headers, body, protected_transport=protected_transport)
@@ -200,6 +257,8 @@ class ReferenceRuntime:
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
+        self._viewer_transfer_worker, self._viewer_transfer_thread = None, None
+        self._viewer_transfer_stop = threading.Event()
         try:
             recovery=settings.recovery_bindings
             if recovery is not None:
@@ -231,7 +290,25 @@ class ReferenceRuntime:
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
-                recovery_bindings=recovery)
+                recovery_bindings=recovery, viewer_receipt_keys=settings.viewer_receipt_keys)
+            if settings.viewer_acceptance_targets:
+                from .reference_viewer_transfer_worker import ReferenceViewerTransferWorker
+                from .viewer_acceptance_transfer import ViewerAcceptanceTransfer, ViewerTransferUnavailable
+
+                class EnvironmentSender:
+                    def __init__(self, targets): self.targets = targets
+                    def transfer(self, job, acceptance):
+                        sender = self.targets.get(job.get("environment"))
+                        if sender is None:
+                            raise ViewerTransferUnavailable("viewer_environment_not_configured")
+                        return sender.transfer(job, acceptance)
+
+                senders = {environment: ViewerAcceptanceTransfer(target["origin"],
+                    key_id=target["keyId"], secret=target["secret"],
+                    trusted_receipt_keys=settings.viewer_receipt_keys, result_proxy=proxy)
+                    for environment, target in settings.viewer_acceptance_targets.items()}
+                self._viewer_transfer_worker = ReferenceViewerTransferWorker(self.store,
+                    EnvironmentSender(senders), trusted_receipt_keys=settings.viewer_receipt_keys)
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))
@@ -251,6 +328,7 @@ class ReferenceRuntime:
     def start(self):
         if self._server is not None:
             return
+        self._viewer_transfer_stop.clear()
         listener = self.settings.listener
         server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
         # Join active requests before releasing the shared queue's authority lock.
@@ -260,12 +338,35 @@ class ReferenceRuntime:
         self._server, self._thread = server, thread
         try:
             thread.start()
+            if self._viewer_transfer_worker is not None:
+                self._viewer_transfer_thread = threading.Thread(target=self._viewer_transfer_loop,
+                    name="processing-viewer-acceptance", daemon=True)
+                self._viewer_transfer_thread.start()
         except Exception:
+            self._viewer_transfer_stop.set()
+            if self._viewer_transfer_thread is not None and self._viewer_transfer_thread.is_alive():
+                self._viewer_transfer_thread.join()
+            if thread.is_alive():
+                server.shutdown()
+                server.server_close()
+                thread.join()
+            else:
+                server.server_close()
             self._server, self._thread = None, None
-            server.server_close()
             raise RuntimeConfigurationError("reference listener start failed") from None
 
+    def _viewer_transfer_loop(self):
+        while not self._viewer_transfer_stop.is_set():
+            result = self._viewer_transfer_worker.run_once()
+            wait = 0 if result.get("state") == "accepted" else (2 if result.get("state") == "idle" else 1)
+            if self._viewer_transfer_stop.wait(wait):
+                return
+
     def close(self):
+        self._viewer_transfer_stop.set()
+        if self._viewer_transfer_thread is not None:
+            self._viewer_transfer_thread.join()
+            self._viewer_transfer_thread = None
         if self._server is None:
             return
         server, thread = self._server, self._thread

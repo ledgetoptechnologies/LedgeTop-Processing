@@ -143,7 +143,7 @@ def build_operational_fixture(root, tls, queue, store, engine_id, origin):
         resultReadBearer=READ_TOKEN,caFile=str(tls/'cert.pem'),serverCertFile=str(tls/'cert.pem'),
         serverKeyFile=str(tls/'key.pem'),listenHost='0.0.0.0',listenPort=9445,outputBudget=1024*1024,
         safetyFloor=1024*1024,transferTtl=240,cleanupGrace=0,pollSeconds=0.1,
-        engineVersion='synthetic-transport-only',shareResults=True,allowedEnvironments=['staging'],cleanupEnabled=True)
+        engineVersion='synthetic-transport-only',shareResults=True,allowedEnvironments=['staging'],cleanupEnabled=False)
     def private_json(path, value):
         descriptor = os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
         with os.fdopen(descriptor,'w') as target:

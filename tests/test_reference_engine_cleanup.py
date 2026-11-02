@@ -6,8 +6,10 @@ import uuid
 
 from processing.node_gate import NodeGate, GateBusy
 from processing.reference_engine_cleanup import EngineCacheCleanup
+from processing.reference_engine_worker import WorkerHeld
 from processing.viewer_service import NativeEngine
 from tests.test_reference_results import ResultsFixture
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 class EngineCacheCleanupFixture(ResultsFixture):
@@ -17,13 +19,17 @@ class EngineCacheCleanupFixture(ResultsFixture):
         self.fail_remove, self.remove_calls, self.active_foreign = None, [], False
         self.native = NativeEngine('http://127.0.0.1:3001')
         self.worker.engine = self.native
+        self.viewer_signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = self.viewer_signer.trusted_keys
+        self.signed_result_manifest = json.loads(self.worker._row(self.job['jobId'])['result'])
         self.read_patch = patch.object(self.native, 'read', side_effect=self.read)
         self.action_patch = patch.object(self.native, 'action', side_effect=self.action)
         self.read_patch.start()
         self.action_patch.start()
         self.addCleanup(self.read_patch.stop)
         self.addCleanup(self.action_patch.stop)
-        self.cleanup = EngineCacheCleanup(self.worker, path=self.root / 'engine-cleanup.sqlite')
+        self.cleanup = EngineCacheCleanup(self.worker, path=self.root / 'engine-cleanup.sqlite',
+            viewer_receipt_keys=self.viewer_signer.trusted_keys)
 
     def read(self, route, *, missing=False):
         if route == '/info':
@@ -71,8 +77,9 @@ class EngineCacheCleanupFixture(ResultsFixture):
             generation=1, environment='staging', inputManifestSha256=self.job['manifestSha256'], pipelineDigest=self.job['pipelineDigest'],
             resultManifestSha256=self.metadata['resultManifestSha256'], acceptedObjectIds=[self.object['id']] if full else [],
             acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
-        self.worker.apply_viewer_acceptance(self.job['jobId'], [receipt])
-        return [receipt]
+        envelope = self.viewer_signer.envelope(receipt, self.signed_result_manifest)
+        self.worker.apply_viewer_acceptance(self.job['jobId'], [envelope])
+        return [envelope]
 
     def admitted(self):
         self.metadata_ack()
@@ -80,6 +87,18 @@ class EngineCacheCleanupFixture(ResultsFixture):
 
 
 class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
+    def test_invalid_signature_or_unpinned_cleanup_never_removes_engine_cache(self):
+        self.metadata_ack()
+        valid = self.viewer_acceptance()
+        envelope = copy.deepcopy(valid[0])
+        envelope['viewerReceipt']['signature'] = 'A' * 86
+        with self.assertRaises(WorkerHeld):
+            self.worker.apply_viewer_acceptance(self.job['jobId'], [envelope])
+        unpinned = EngineCacheCleanup(self.worker, path=self.root / 'unpinned-cleanup.sqlite')
+        result = unpinned.remove(self.job['jobId'], viewer_receipts=valid)
+        self.assertEqual(result['reason'], 'viewer_receipt_keys_not_configured')
+        self.assertEqual(self.remove_calls, [])
+
     def test_success_exact_owned_cache_removed_once_worker_files_retained(self):
         proof = self.admitted()
         before = self.archive.read_bytes()
@@ -95,16 +114,16 @@ class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
         proof = self.viewer_acceptance()
         self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['state'], 'held')
         self.metadata_ack()
-        partial = copy.deepcopy(proof)
-        partial[0]['acceptedObjectIds'] = []
-        self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=partial)['reason'], 'full_viewer_acceptance_required')
+        partial = [self.viewer_signer.envelope(
+            dict(proof[0]['acceptance'], acceptedObjectIds=[]), self.signed_result_manifest)]
+        self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=partial)['state'], 'held')
         self.assertEqual(self.remove_calls, [])
 
     def test_relay_boolean_or_unapplied_receipt_cannot_authorize_removal(self):
         self.metadata_ack()
         self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts={'fullyAccepted': True})['state'], 'held')
         proof = self.viewer_acceptance()
-        proof[0]['receiptId'] = 'not-durable'
+        proof[0]['acceptance']['receiptId'] = 'not-durable'
         self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['reason'], 'viewer_receipt_not_durable_locally')
         self.assertEqual(self.remove_calls, [])
 
@@ -136,7 +155,8 @@ class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
         proof = self.admitted()
         self.fail_remove = 'after'
         self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['state'], 'uncertain')
-        self.cleanup = EngineCacheCleanup(self.worker, path=self.root / 'engine-cleanup.sqlite')
+        self.cleanup = EngineCacheCleanup(self.worker, path=self.root / 'engine-cleanup.sqlite',
+            viewer_receipt_keys=self.viewer_signer.trusted_keys)
         self.assertEqual(self.cleanup.remove(self.job['jobId'])['state'], 'removed')
         self.assertEqual(len(self.remove_calls), 1)
 
@@ -182,7 +202,7 @@ class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
         (self.directory / 'image-1.jpg').write_bytes(b'bad')
         self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['reason'], 'retained_inputs_not_verified')
         (self.directory / 'image-1.jpg').write_bytes(b'abc')
-        proof[0]['environment'] = 'production'
+        proof[0]['acceptance']['environment'] = 'production'
         self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)['state'], 'held')
         self.assertEqual(self.remove_calls, [])
 

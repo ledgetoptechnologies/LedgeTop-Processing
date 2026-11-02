@@ -327,7 +327,8 @@ os._exit(0)
     def test_cleanup_fence_blocks_pin_without_phantom_handle(self):
         self.ledger.set_engine_state('r1','terminal',terminal_attested=True)
         self.ledger.accept_receipt('r1',receipt_id='ack',storage_receipt_id='nas',job_id='j1',generation=1,
-            manifest_sha256='a'*64,pipeline_sha256='b'*64,result_manifest_sha256='c'*64,accepted_object_ids=['o1'])
+            manifest_sha256='a'*64,pipeline_sha256='b'*64,result_manifest_sha256='c'*64,accepted_object_ids=['o1'],
+            viewer_receipt={'synthetic': 'signature-verified-by-fixture'},verified_copy=True)
         self.ledger.begin_cleanup('r1','o1',generation=1,sha256=self.sha)
         with ReaderSession(self.ledger) as session:
             with self.assertRaisesRegex(ReaderSessionError,'reader_object_unavailable'):session.pin('r1','o1')

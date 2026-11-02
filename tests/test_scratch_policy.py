@@ -46,9 +46,19 @@ class ScratchPolicyTests(unittest.TestCase):
     def accept(self, **kwargs):
         values = dict(receipt_id='ack1', storage_receipt_id='nas1', job_id='j1',
             generation=1, manifest_sha256='a'*64, pipeline_sha256='b'*64,
-            result_manifest_sha256='c'*64, accepted_object_ids=['o1'])
+            result_manifest_sha256='c'*64, accepted_object_ids=['o1'],
+            viewer_receipt={'synthetic': 'signature-verified-by-fixture'}, verified_copy=True)
         values.update(kwargs)
         self.ledger.accept_receipt('r1', **values)
+
+    def test_unsigned_processing_acceptance_does_not_make_outputs_cleanup_eligible(self):
+        self.register()
+        self.ledger.accept_receipt('r1', receipt_id='legacy-ack', storage_receipt_id='legacy-storage',
+            job_id='j1', generation=1, manifest_sha256='a'*64, pipeline_sha256='b'*64,
+            result_manifest_sha256='c'*64, accepted_object_ids=['o1', 'o2'])
+        self.ledger.set_engine_state('r1', 'terminal', terminal_attested=True)
+        self.now = 10000
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
 
     def test_readiness_identity_and_environment(self):
         with self.assertRaises(PolicyConflict):

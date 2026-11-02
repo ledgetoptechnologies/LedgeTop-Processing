@@ -46,6 +46,22 @@ class VerifiedViewerReceipt:
     issuer_id: str
 
 
+def validate_trusted_viewer_receipt_keys(value: object) -> dict:
+    """Validate and detach a bounded public-key pin registry."""
+    _need(type(value) is dict and len(value) <= 32, "invalid_trusted_receipt_keys")
+    clean = {}
+    for key_id, record in value.items():
+        _identifier(key_id, "invalid_trusted_key_id")
+        _need(type(record) is dict and set(record) == {"issuerId", "publicKeyPem"},
+              "invalid_trusted_key_record")
+        _identifier(record["issuerId"], "invalid_trusted_issuer_id")
+        pem = record["publicKeyPem"]
+        _need(type(pem) is str and 1 <= len(pem) <= 8192, "invalid_trusted_public_key")
+        _load_key(pem)
+        clean[key_id] = {"issuerId": record["issuerId"], "publicKeyPem": pem}
+    return clean
+
+
 def _need(condition: bool, code: str) -> None:
     if not condition:
         raise ViewerReceiptRejected(code)

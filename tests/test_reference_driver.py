@@ -36,6 +36,7 @@ from processing.reference_api import Response
 from tests.test_reference_results import ResultsFixture
 from processing.reference_engine_cleanup import EngineCacheCleanup
 from ops.native_node_fixture import NativeNodeFixture
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 TOKEN = 'synthetic-operational-worker-token'
 VIEWER = 'synthetic-operational-viewer-token'
@@ -406,7 +407,7 @@ class ReferenceDriverTests(unittest.TestCase):
         self.driver.step()
         with self.driver._db() as db:
             self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], 'completed')
-        self.assertEqual(len(self.ledger.cleanup_candidates()), 1)
+        self.assertEqual(self.ledger.cleanup_candidates(), [])  # Legacy acceptance has no signed copy proof.
         self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
 
     def test_dynamic_local_options_refresh_and_strict_scalar_types(self):
@@ -504,6 +505,16 @@ class ReferenceDriverTests(unittest.TestCase):
         settings = load_config(str(path))
         self.assertFalse(settings['cleanupEnabled'])
         self.assertEqual(settings['allowedEnvironments'], ['production','staging'])
+        config['cleanupEnabled'] = True
+        path.write_text(json.dumps(config))
+        with self.assertRaises(ValueError):
+            load_config(str(path))
+        signer = SyntheticViewerSigner()
+        config['viewerReceiptKeys'] = signer.trusted_keys
+        path.write_text(json.dumps(config))
+        self.assertEqual(load_config(str(path))['viewerReceiptKeys'], signer.trusted_keys)
+        config.pop('viewerReceiptKeys')
+        config['cleanupEnabled'] = False
         config['allowedOdmOptions'] = ['numeric-limit']
         path.write_text(json.dumps(config))
         with self.assertRaises(ValueError) as observed:
@@ -516,11 +527,15 @@ class ReferenceDriverTests(unittest.TestCase):
         self.advance(job, 'awaiting_acceptance')
         private = self.store.get(job['jobId'], private=True)
         result = private['resultManifest']
+        signer = SyntheticViewerSigner()
+        self.api.viewer.viewer_receipt_keys = signer.trusted_keys
+        self.worker.viewer_receipt_keys = signer.trusted_keys
         receipt = dict(schemaVersion=1, receiptId='cleanup-viewer', storageReceiptId='cleanup-storage',
             jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
             pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
             acceptedObjectIds=[obj['id'] for obj in result['objects']], acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
-        self.store.accept(job['jobId'], receipt)
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+            trusted_viewer_receipt_keys=signer.trusted_keys)
         self.driver.cleanup_executor = ScratchCleanupExecutor(self.ledger)
         self.driver.step()
         self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 0)
@@ -543,11 +558,15 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
         ReferenceDriverTests.setUp(self)
         self.node_fixture = NativeNodeFixture(self.root / 'native-http.sqlite', engine_version='pinned-engine-1', synthetic_enabled=True).start()
         self.native = NativeEngine(self.node_fixture.origin)
+        self.viewer_signer = SyntheticViewerSigner()
+        self.api.viewer.viewer_receipt_keys = self.viewer_signer.trusted_keys
         self.worker = ReferenceEngineWorker(self.root / 'actual-native-worker.sqlite', ledger=self.ledger,
             outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
             authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
-            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
-        self.engine_cleanup = EngineCacheCleanup(self.worker, path=self.root / 'actual-engine-cleanup.sqlite')
+            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1',
+            viewer_receipt_keys=self.viewer_signer.trusted_keys)
+        self.engine_cleanup = EngineCacheCleanup(self.worker, path=self.root / 'actual-engine-cleanup.sqlite',
+            viewer_receipt_keys=self.viewer_signer.trusted_keys)
         self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
             'https://coordinator.invalid:9443', TOKEN, state_path=self.root / 'actual-driver.sqlite', ssl_context=self.context,
             output_budget=1024 * 1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
@@ -569,6 +588,24 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             acceptedObjectIds=[obj['id'] for obj in result['objects']] if full else [],
             acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
 
+    def accept_viewer_copy(self, job, *, full):
+        acceptance = self.acceptance(job, full=full)
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        payload = dict(acceptance=acceptance, viewerReceipt=self.viewer_signer.receipt(acceptance, result))
+        response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/acceptance',
+            {'Authorization': 'Bearer ' + VIEWER}, json.dumps(payload).encode(), protected_transport=True)
+        if response.status != 200:
+            raise AssertionError('synthetic Viewer acceptance was rejected')
+        return response.body
+
+    def accept_legacy_receipt(self, job, *, full):
+        response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/acceptance',
+            {'Authorization': 'Bearer ' + VIEWER}, json.dumps(self.acceptance(job, full=full)).encode(),
+            protected_transport=True)
+        if response.status != 200:
+            raise AssertionError('synthetic legacy Viewer acceptance was rejected')
+        return response.body
+
     def test_actual_native_http_cache_removed_once_only_after_full_viewer_ack_with_inputs_retained(self):
         job = self.submit(contents=(b'abc',))
         self.advance(job, 'awaiting_acceptance')
@@ -576,10 +613,10 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             self.driver.step()
         self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
         self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 40)
-        self.store.accept(job['jobId'], self.acceptance(job, full=False))
+        self.accept_legacy_receipt(job, full=False)
         self.driver.step()
         self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
-        self.store.accept(job['jobId'], self.acceptance(job, full=True))
+        self.accept_viewer_copy(job, full=True)
         self.driver.step()
         self.assertEqual(self.node_fixture.counts().get('remove', 0), 1)
         self.assertIsNone(self.native.read('/task/' + job['jobId'] + '/info', missing=True))

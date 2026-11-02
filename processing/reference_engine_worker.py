@@ -30,7 +30,7 @@ class WorkerHeld(ValueError):
 class ReferenceEngineWorker:
     def __init__(self, path, *, ledger, outbox, engine, engine_id, node_id,
                  authority_id, coordinator_origin, gate_generation, worker_id,
-                 engine_version, allowed_odm_options=()):
+                 engine_version, allowed_odm_options=(), viewer_receipt_keys=None):
         self.path = Path(path).absolute()
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(x.is_symlink() for x in (self.path, *self.path.parents)):
@@ -69,6 +69,12 @@ class ReferenceEngineWorker:
         self.engine_id, self.node_id = engine_id, node_id
         self.authority_id, self.origin = authority_id, coordinator_origin
         self.gate_generation, self.worker_id = gate_generation, worker_id
+        from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
+        try:
+            self.viewer_receipt_keys = validate_trusted_viewer_receipt_keys(
+                {} if viewer_receipt_keys is None else viewer_receipt_keys)
+        except ValueError:
+            raise ValueError('invalid pinned Viewer receipt keys') from None
         self.version, self.allowed_options = engine_version, frozenset(allowed_odm_options)
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS executions (
@@ -297,20 +303,57 @@ class ReferenceEngineWorker:
         job, reservation = identity['job'], identity['reservation']
         result = p.validate_result_manifest(json.loads(row['result']), job_id=job_id,
             generation=job['generation'], environment=job['environment'], pipeline_digest=job['pipelineDigest'])
-        checked, identities = [], {}
-        for receipt in receipts:
+        checked, identities, signed_identities, receipt_owners = [], {}, {}, {}
+        for envelope in receipts:
+            viewer_receipt = None
+            receipt = envelope
+            if type(envelope) is dict and set(envelope) == {'acceptance', 'viewerReceipt'}:
+                if not self.viewer_receipt_keys:
+                    raise WorkerHeld('pinned Viewer receipt keys are not configured')
+                receipt, viewer_receipt = envelope['acceptance'], envelope['viewerReceipt']
             value = p.validate_acceptance(receipt, result_manifest=result,
                 input_manifest_sha256=job['manifestSha256'])
+            if viewer_receipt is not None:
+                from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+                expected = dict(jobId=job_id, generation=job['generation'], environment=job['environment'],
+                    inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
+                    resultManifestSha256=result['resultManifestSha256'])
+                try:
+                    signed = verify_viewer_acceptance_receipt(viewer_receipt,
+                        trusted_keys=self.viewer_receipt_keys, expected=expected,
+                        result_manifest=result, accepted_object_ids=value['acceptedObjectIds']).receipt
+                except (TypeError, ValueError):
+                    raise WorkerHeld('Viewer accepted-copy signature or binding is invalid') from None
+                bind_fields = ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
+                if (any(value[field] != signed[field] for field in bind_fields)
+                        or value['acceptedObjectIds'] != signed['acceptedObjectIds']
+                        or {value['receiptId'], value['storageReceiptId']} & {signed['receiptId'], signed['storageReceiptId']}):
+                    raise WorkerHeld('Viewer and processing acceptance bindings disagree')
             encoded = p.canonical_json(value)
             if value['receiptId'] in identities and identities[value['receiptId']] != encoded:
                 raise WorkerHeld('relayed receipt identity changed')
             identities[value['receiptId']] = encoded
-            checked.append(value)
-        for receipt in checked:
+            receipt_ids = {value['receiptId'], value['storageReceiptId']}
+            if viewer_receipt is not None:
+                signed_encoded = p.canonical_json(signed)
+                if value['receiptId'] in signed_identities and signed_identities[value['receiptId']] != signed_encoded:
+                    raise WorkerHeld('relayed signed Viewer receipt changed')
+                signed_identities[value['receiptId']] = signed_encoded
+                receipt_ids.update((signed['receiptId'], signed['storageReceiptId']))
+            if len(receipt_ids) != (4 if viewer_receipt is not None else 2):
+                raise WorkerHeld('relayed acceptance identities are not distinct')
+            if any(owner != value['receiptId'] for identity in receipt_ids
+                   if (owner := receipt_owners.get(identity)) is not None):
+                raise WorkerHeld('relayed acceptance identity collision')
+            for identity in receipt_ids:
+                receipt_owners[identity] = value['receiptId']
+            checked.append((value, signed if viewer_receipt is not None else None))
+        for receipt, signed_viewer_receipt in checked:
             self.ledger.accept_receipt(reservation, receipt_id=receipt['receiptId'],
                 storage_receipt_id=receipt['storageReceiptId'], job_id=job_id, generation=receipt['generation'],
                 manifest_sha256=receipt['inputManifestSha256'], pipeline_sha256=receipt['pipelineDigest'],
-                result_manifest_sha256=receipt['resultManifestSha256'], accepted_object_ids=receipt['acceptedObjectIds'])
+                result_manifest_sha256=receipt['resultManifestSha256'], accepted_object_ids=receipt['acceptedObjectIds'],
+                viewer_receipt=signed_viewer_receipt, verified_copy=signed_viewer_receipt is not None)
         with self.ledger._transaction() as db:
             accepted = {obj['id'] for obj in db.execute(
                 'SELECT id FROM objects WHERE reservation=? AND accepted IS NOT NULL', (reservation,))}

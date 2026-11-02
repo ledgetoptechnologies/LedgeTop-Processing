@@ -120,9 +120,11 @@ class ScratchLedger:
                 CREATE TABLE IF NOT EXISTS objects (
                   reservation TEXT NOT NULL, id TEXT NOT NULL, bytes INTEGER NOT NULL,
                   sha TEXT NOT NULL, path TEXT NOT NULL UNIQUE, accepted REAL,
-                  cleaned REAL, PRIMARY KEY(reservation,id));
+                  cleaned REAL, accepted_copy_verified INTEGER NOT NULL DEFAULT 0,
+                  PRIMARY KEY(reservation,id));
                 CREATE TABLE IF NOT EXISTS receipts (
-                  id TEXT PRIMARY KEY, storage_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL);
+                  id TEXT PRIMARY KEY, storage_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
+                  viewer_receipt TEXT, verified_copy INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS pins (
                   reservation TEXT NOT NULL, object TEXT NOT NULL, reference TEXT NOT NULL,
                   kind TEXT NOT NULL, state TEXT NOT NULL,
@@ -135,6 +137,14 @@ class ScratchLedger:
             for statement in schema.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            for table, name, declaration in (
+                ("objects", "accepted_copy_verified", "INTEGER NOT NULL DEFAULT 0"),
+                ("receipts", "viewer_receipt", "TEXT"),
+                ("receipts", "verified_copy", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                if name not in columns:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
             db.execute(CONTROL_SCHEMA)
             expected=sqlite3.connect(':memory:')
             try:
@@ -481,12 +491,19 @@ class ScratchLedger:
             self._check_path_aliases(db, normalized)
             db.execute("INSERT INTO results VALUES(?,?)", (reservation_id, identity))
             for obj in normalized:
-                db.execute("INSERT INTO objects VALUES(?,?,?,?,?,NULL,NULL)",
+                db.execute("INSERT INTO objects(reservation,id,bytes,sha,path,accepted,cleaned) VALUES(?,?,?,?,?,NULL,NULL)",
                     (reservation_id, obj["object_id"], obj["bytes"], obj["sha256"], obj["relative_path"]))
 
     def accept_receipt(self, reservation_id, *, receipt_id, storage_receipt_id,
                        job_id, generation, manifest_sha256, pipeline_sha256,
-                       result_manifest_sha256, accepted_object_ids):
+                       result_manifest_sha256, accepted_object_ids,
+                       viewer_receipt=None, verified_copy=False):
+        if type(verified_copy) is not bool or (verified_copy != (viewer_receipt is not None)):
+            raise PolicyConflict("signed Viewer copy proof and verification state must be paired")
+        if viewer_receipt is not None:
+            if type(viewer_receipt) is not dict:
+                raise PolicyConflict("signed Viewer copy proof required")
+            viewer_receipt = _json(viewer_receipt)
         _id(receipt_id); _id(storage_receipt_id)
         _id(job_id); _integer(generation, "generation", 1)
         ids = sorted(set(accepted_object_ids))
@@ -507,18 +524,27 @@ class ScratchLedger:
                     raise PolicyConflict("stale receipt")
             if not set(ids) <= {o["object_id"] for o in identity["objects"]}:
                 raise PolicyConflict("receipt contains unknown object")
-            old = db.execute("SELECT payload FROM receipts WHERE id=?", (receipt_id,)).fetchone()
+            old = db.execute("SELECT payload,viewer_receipt,verified_copy FROM receipts WHERE id=?", (receipt_id,)).fetchone()
             if old:
                 if old[0] != payload:
                     raise PolicyConflict("receipt changed")
+                if old[2] and viewer_receipt is not None and old[1] != viewer_receipt:
+                    raise PolicyConflict("signed Viewer receipt changed")
+                if not old[2] and verified_copy:
+                    db.execute("UPDATE receipts SET viewer_receipt=?,verified_copy=1 WHERE id=?",
+                        (viewer_receipt, receipt_id))
+                    for object_id in ids:
+                        db.execute("UPDATE objects SET accepted_copy_verified=1 WHERE reservation=? AND id=?",
+                            (reservation_id, object_id))
                 return
             storage_old = db.execute("SELECT id FROM receipts WHERE storage_id=?", (storage_receipt_id,)).fetchone()
             if storage_old:
                 raise PolicyConflict("storage receipt already bound")
-            db.execute("INSERT INTO receipts VALUES(?,?,?)", (receipt_id, storage_receipt_id, payload))
+            db.execute("INSERT INTO receipts(id,storage_id,payload,viewer_receipt,verified_copy) VALUES(?,?,?,?,?)",
+                (receipt_id, storage_receipt_id, payload, viewer_receipt, int(verified_copy)))
             for object_id in ids:
-                db.execute("UPDATE objects SET accepted=COALESCE(accepted,?) WHERE reservation=? AND id=?",
-                           (self._now(db), reservation_id, object_id))
+                db.execute("UPDATE objects SET accepted=COALESCE(accepted,?),accepted_copy_verified=MAX(accepted_copy_verified,?) WHERE reservation=? AND id=?",
+                           (self._now(db), int(verified_copy), reservation_id, object_id))
 
     def set_pin(self, reservation_id, object_id, reference, *, kind, state):
         _id(reference)
@@ -542,6 +568,7 @@ class ScratchLedger:
     def _eligible(self, db, now):
         return db.execute("""SELECT o.*,r.generation FROM objects o JOIN reservations r
             ON r.id=o.reservation WHERE r.state='terminal' AND o.accepted IS NOT NULL
+            AND o.accepted_copy_verified=1
             AND o.cleaned IS NULL AND MAX(o.accepted,r.terminal_at)<=?
             AND NOT EXISTS(SELECT 1 FROM cleanup_intents c WHERE c.reservation=o.reservation AND c.object=o.id)
             AND NOT EXISTS(SELECT 1 FROM pins p WHERE p.reservation=o.reservation

@@ -9,6 +9,7 @@ from processing import reference_protocol as p
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
 from processing.reference_store import ReferenceStore, PROFILE
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 STAGING = "synthetic-staging-token-0001"
@@ -21,6 +22,7 @@ class ReferenceAPITests(unittest.TestCase):
         self.queue = Queue(self.directory.name)
         self.queue.allowed_profiles.add(PROFILE)
         self.store = ReferenceStore(self.queue)
+        self.viewer_signer = SyntheticViewerSigner()
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
                                   "contracts/reference-v1.contract.json").read_text())
         self.api = self.make_api()
@@ -30,11 +32,13 @@ class ReferenceAPITests(unittest.TestCase):
         self.directory.cleanup()
 
     def make_api(self, **kwargs):
+        viewer_keys = kwargs.pop("viewer_receipt_keys", self.viewer_signer.trusted_keys)
         return ReferenceAPI(kwargs.pop("store", self.store),
             bearer_tokens={STAGING: "staging", PRODUCTION: "production"},
             capability_fingerprint=self.fixture["capabilities"]["capabilityFingerprint"],
             options_fingerprint=self.fixture["capabilities"]["engines"]["odm"]["optionsFingerprint"],
-            allowed_odm_options={"pc-quality", "projection"}, **kwargs)
+            allowed_odm_options={"pc-quality", "projection"},
+            viewer_receipt_keys=viewer_keys, **kwargs)
 
     def request(self, method, path, body=None, *, token=STAGING, protected=True, headers=None, api=None):
         return (api or self.api).handle(method, "/ltds/v1" + path,
@@ -162,6 +166,40 @@ class ReferenceAPITests(unittest.TestCase):
                                self.request("GET", path + "/results").body])
         for secret in (claim_token, STAGING, PRODUCTION, "claimToken", "executionPhase", "submission"):
             self.assertNotIn(secret, combined)
+
+    def test_signed_viewer_receipt_is_persisted_atomically_and_relayed_after_store_reopen(self):
+        job, result, _claim_token = self.ready()
+        acceptance = copy.deepcopy(self.fixture["acceptance"])
+        acceptance.update(jobId=job["jobId"], pipelineDigest=job["pipelineDigest"],
+            resultManifestSha256=result["resultManifestSha256"])
+        signed = self.viewer_signer.receipt(acceptance, result)
+        route = "/jobs/" + job["jobId"] + "/acceptance"
+        response = self.request("POST", route, {"acceptance": acceptance, "viewerReceipt": signed})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(response.body["fullyAccepted"])
+        reopened = ReferenceStore(self.queue)
+        relayed = reopened.acceptance_receipts(job["jobId"])
+        self.assertEqual(relayed["receipts"], [{"acceptance": acceptance, "viewerReceipt": signed}])
+        replay = self.request("POST", route, {"acceptance": acceptance, "viewerReceipt": signed})
+        self.assertEqual(replay.status, 200)
+        self.assertFalse(replay.body["created"])
+
+    def test_signed_viewer_receipt_tamper_or_missing_key_fails_closed(self):
+        job, result, _claim_token = self.ready()
+        acceptance = copy.deepcopy(self.fixture["acceptance"])
+        acceptance.update(jobId=job["jobId"], pipelineDigest=job["pipelineDigest"],
+            resultManifestSha256=result["resultManifestSha256"])
+        signed = self.viewer_signer.receipt(acceptance, result)
+        signed["signature"] = ("A" if signed["signature"][0] != "A" else "B") + signed["signature"][1:]
+        response = self.request("POST", "/jobs/" + job["jobId"] + "/acceptance",
+            {"acceptance": acceptance, "viewerReceipt": signed})
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.store.acceptance_receipts(job["jobId"])["receipts"], [])
+        unpinned = self.make_api(viewer_receipt_keys={})
+        response = self.request("POST", "/jobs/" + job["jobId"] + "/acceptance",
+            {"acceptance": acceptance, "viewerReceipt": self.viewer_signer.receipt(acceptance, result)}, api=unpinned)
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.store.acceptance_receipts(job["jobId"])["receipts"], [])
 
     def test_explicit_treedar_availability_does_not_prove_file_contents(self):
         api = self.make_api(treedar_available=True)

@@ -1,5 +1,23 @@
 # Reference pipeline implementation checkpoint
 
+## Current source progress, November 2, 2026
+
+The isolated Processing candidate now contains an authenticated, resumable
+Processing-to-Viewer ODM transfer client, a SQLite-backed acceptance outbox,
+and an opt-in runtime supervisor (private runtime schema 4). It streams sealed
+worker results through the fixed-origin `ResultProxy`, resumes chunk offsets
+after disconnects, recovers a lost commit response from Viewer status, and
+persists the signed Viewer receipt pair before worker cleanup can qualify.
+Synthetic tests cover HMAC requests, chunk boundaries, empty objects, lost chunk
+and commit responses, durable outbox leases, and receipt verification.
+
+This is source-only progress. The shared/installed runtime has not been changed,
+no production or staging credentials have been provisioned, and no Viewer
+transfer has run against TrueNAS. The current Viewer endpoint accepts only ODM
+result roles; TreeDar output role mapping and Viewer presentation remain an
+explicit cross-project gap. See [reference-recovery-runtime.md](reference-recovery-runtime.md)
+for schema 4 details.
+
 This is an additive, opt-in successor to the existing multipart Viewer provider.
 The coordinator TLS API is installed at `https://192.168.50.89:18443` under the
 original queue authority. The existing Viewer provider still uses its unchanged
@@ -276,18 +294,35 @@ role uniqueness and durable coordinator relay remain required integration work.
 
 `reference_engine_cleanup.py` independently removes one exact, successful native
 engine task only after coordinator metadata acknowledgement and full, locally
-persisted Viewer result acceptance. It retains the original worker input files,
+persisted Viewer result acceptance backed by the pinned Ed25519 accepted-copy
+receipt. The Viewer receipt is paired with the legacy processing acceptance;
+the two receipt IDs remain independent and are cross-bound to job generation,
+environment, input/pipeline/result digests and accepted object closure. Old
+unsigned receipts remain usable as job-state metadata but add no cleanup coverage.
+Coordinator and worker both verify the signature, and missing pins fail closed.
+It retains the original worker input files,
 verifies their hashes again, waits for grace and released result pins, and holds
 the same physical node gate across idle census and removal. A FULL journal intent
 precedes the remove call; a lost response permits only read-only exact-UUID
 reconciliation. An absent task without an intent is held, never counted as a
 successful deletion. Failed/cancelled metadata ACKs authorize no removal.
 
+`POST /ltds/v1/jobs/:jobId/acceptance` now accepts the exact sibling envelope
+`{ "acceptance": ..., "viewerReceipt": ... }` and persists both atomically.
+The Processing API can still accept legacy job-state receipts, but they do not
+mark local outputs eligible for deletion. This is the verification/receiver
+seam only: the bounded Processing transfer client that uploads result objects
+to Viewer and submits the returned pair has not yet been implemented, so this
+change alone does not complete the installed workflow.
+
 The worker daemon's `engineCleanupEnabled` is separate from archive
 `cleanupEnabled`, and defaults to false. The driver keeps deferred cleanup proof
 after execution capacity is released; it does not need to claim a new execution
 slot or receive a new Viewer acknowledgement to retry grace/pin checks. No new
-cleanup is enabled on either real processing PC by this source change.
+cleanup is enabled on either real processing PC by this source change. Enabling
+signed acceptance requires the same `viewerReceiptKeys` public pin map in the
+coordinator runtime and each worker daemon's private config; missing pins keep
+the operation held. No private signing key is provisioned to Processing.
 
 ## TreeDar host adapter and rollout preparation
 

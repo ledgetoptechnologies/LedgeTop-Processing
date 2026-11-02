@@ -23,7 +23,7 @@ class _Held(ValueError):
 
 
 class EngineCacheCleanup:
-    def __init__(self, worker, *, path, max_census_tasks=100):
+    def __init__(self, worker, *, path, max_census_tasks=100, viewer_receipt_keys=None):
         if not isinstance(worker.engine, NativeEngine):
             raise ValueError('fixed native engine required')
         origin = worker.engine.origin
@@ -35,6 +35,12 @@ class EngineCacheCleanup:
             raise ValueError('fixed literal loopback native engine required')
         if type(max_census_tasks) is not int or not 1 <= max_census_tasks <= p.MAX_OBJECTS:
             raise ValueError('invalid engine census bound')
+        from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
+        try:
+            self.viewer_receipt_keys = validate_trusted_viewer_receipt_keys(
+                {} if viewer_receipt_keys is None else viewer_receipt_keys)
+        except ValueError:
+            raise ValueError('invalid pinned Viewer receipt keys') from None
         self.worker, self.maximum = worker, max_census_tasks
         self.path = Path(path).absolute()
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -148,16 +154,57 @@ class EngineCacheCleanup:
             raise _Held('retained_inputs_not_verified') from None
 
     def _proof(self, identity, result, receipts):
+        if not self.viewer_receipt_keys:
+            raise _Held('viewer_receipt_keys_not_configured')
         if type(receipts) is not list or not 0 < len(receipts) <= p.MAX_OBJECTS:
             raise _Held('full_viewer_receipts_required')
-        checked, seen, accepted = [], {}, set()
-        for receipt in receipts:
-            value = p.validate_acceptance(receipt, result_manifest=result, input_manifest_sha256=identity['inputManifestSha256'])
-            encoded = p.canonical_json(value)
+        from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+        checked, seen, accepted, receipt_owners = [], {}, set(), {}
+        expected = dict(jobId=identity['jobId'], generation=identity['generation'],
+            environment=identity['environment'], inputManifestSha256=identity['inputManifestSha256'],
+            pipelineDigest=identity['pipelineDigest'], resultManifestSha256=identity['resultManifestSha256'])
+        for envelope in receipts:
+            if type(envelope) is not dict or set(envelope) != {'acceptance', 'viewerReceipt'}:
+                # Legacy processing receipts remain valid job-state metadata,
+                # but never add cleanup coverage without the signed sibling.
+                if type(envelope) is dict and 'viewerReceipt' not in envelope:
+                    try:
+                        legacy = p.validate_acceptance(envelope, result_manifest=result,
+                            input_manifest_sha256=identity['inputManifestSha256'])
+                    except (TypeError, ValueError):
+                        raise _Held('viewer_receipt_binding_invalid') from None
+                    legacy_ids = {legacy['receiptId'], legacy['storageReceiptId']}
+                    if len(legacy_ids) != 2 or any(owner != legacy['receiptId'] for key in legacy_ids
+                            if (owner := receipt_owners.get(key)) is not None):
+                        raise _Held('viewer_receipt_identity_collision')
+                    for key in legacy_ids:
+                        receipt_owners[key] = legacy['receiptId']
+                    continue
+                raise _Held('signed_viewer_receipt_required')
+            value = p.validate_acceptance(envelope['acceptance'], result_manifest=result,
+                input_manifest_sha256=identity['inputManifestSha256'])
+            try:
+                signed = verify_viewer_acceptance_receipt(envelope['viewerReceipt'],
+                    trusted_keys=self.viewer_receipt_keys, expected=expected,
+                    result_manifest=result, accepted_object_ids=value['acceptedObjectIds']).receipt
+            except (TypeError, ValueError):
+                raise _Held('viewer_receipt_signature_or_binding_invalid') from None
+            bind_fields = ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
+            if (any(value[field] != signed[field] for field in bind_fields)
+                    or value['acceptedObjectIds'] != signed['acceptedObjectIds']
+                    or {value['receiptId'], value['storageReceiptId']} & {signed['receiptId'], signed['storageReceiptId']}):
+                raise _Held('viewer_receipt_sibling_binding_mismatch')
+            encoded = p.canonical_json(dict(acceptance=value, viewerReceipt=signed))
+            receipt_ids = {value['receiptId'], value['storageReceiptId'], signed['receiptId'], signed['storageReceiptId']}
+            if len(receipt_ids) != 4 or any(owner != value['receiptId'] for key in receipt_ids
+                    if (owner := receipt_owners.get(key)) is not None):
+                raise _Held('viewer_receipt_identity_collision')
+            for key in receipt_ids:
+                receipt_owners[key] = value['receiptId']
             if value['receiptId'] in seen and seen[value['receiptId']] != encoded:
                 raise _Held('viewer_receipt_changed')
             if value['receiptId'] not in seen:
-                checked.append(value)
+                checked.append(dict(acceptance=value, viewerReceipt=signed))
             seen[value['receiptId']] = encoded
             accepted.update(value['acceptedObjectIds'])
         if accepted != {obj['id'] for obj in result['objects']}:
@@ -174,18 +221,22 @@ class EngineCacheCleanup:
             if tuple(registered[key] for key in ('job_id','generation','manifest_sha256','pipeline_sha256','result_manifest_sha256')) != (
                     identity['jobId'],identity['generation'],identity['inputManifestSha256'],identity['pipelineDigest'],identity['resultManifestSha256']):
                 raise _Held('registered_result_changed')
-            stored = list(db.execute('SELECT id,accepted FROM objects WHERE reservation=?', (identity['reservationId'],)))
-            if {obj['id'] for obj in stored} != accepted or any(obj['accepted'] is None for obj in stored):
+            stored = list(db.execute('SELECT id,accepted,accepted_copy_verified FROM objects WHERE reservation=?', (identity['reservationId'],)))
+            if ({obj['id'] for obj in stored} != accepted or any(obj['accepted'] is None
+                    or obj['accepted_copy_verified'] != 1 for obj in stored)):
                 raise _Held('durable_viewer_acceptance_required')
-            for value in checked:
-                old = db.execute('SELECT payload FROM receipts WHERE id=?', (value['receiptId'],)).fetchone()
+            for envelope in checked:
+                value = envelope['acceptance']
+                old = db.execute('SELECT payload,viewer_receipt,verified_copy FROM receipts WHERE id=?',
+                    (value['receiptId'],)).fetchone()
                 expected = dict(reservation_id=identity['reservationId'], receipt_id=value['receiptId'],
                     storage_receipt_id=value['storageReceiptId'], job_id=identity['jobId'], generation=identity['generation'],
                     manifest_sha256=identity['inputManifestSha256'], pipeline_sha256=identity['pipelineDigest'],
                     result_manifest_sha256=identity['resultManifestSha256'], accepted_object_ids=sorted(value['acceptedObjectIds']))
-                if old is None or json.loads(old[0]) != expected:
+                if (old is None or json.loads(old['payload']) != expected or old['verified_copy'] != 1
+                        or old['viewer_receipt'] != p.canonical_json(envelope['viewerReceipt']).decode()):
                     raise _Held('viewer_receipt_not_durable_locally')
-        return sorted(checked, key=lambda value: value['receiptId'])
+        return sorted(checked, key=lambda value: value['acceptance']['receiptId'])
 
     def _census(self, target):
         info = self.worker.engine.read('/info')
