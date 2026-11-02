@@ -1255,8 +1255,13 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   `canonical_metadata` rejects all 14 same raw fixture bytes. This is limited
   differential evidence, not fuzzing, runtime endpoint validation, or full
   schema/auth review. The Viewer branch currently starts at draft PR #409's
-  head `7b8e9271`; the strict decoder appears independent of that PR, so the
-  Viewer agent was asked to isolate/rebase it before opening a reviewable PR.
+  old head `7b8e9271`. The Viewer agent removed that dependency and rebased the
+  candidate onto current Viewer `origin/main` at local commit `7e1dd43b`; an
+  independent check confirmed current main is an ancestor and the focused
+  suite passes 5/5. The canonicalizer in those tests is an explicitly labeled
+  test-only snapshot because main has no real protocol-v2 canonicalizer export.
+  The Viewer agent was asked to push an isolated draft PR; it remains local and
+  unpushed until that happens.
 - Therefore the production/staging admission flow, NAS spool reservation and
   transfer, live Viewer acceptance, cross-service recovery, and bounded safe
   cleanup remain implementation and runtime-acceptance gates. No task or NAS
