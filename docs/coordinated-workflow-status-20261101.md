@@ -308,3 +308,10 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   would pull a much larger unrelated candidate tree into the diff. Keep the
   current review boundary until the parent work is split or a deliberate
   main-based review plan is prepared.
+- On 2026-11-02, a clean Viewer integration branch was created from current
+  `main`, applying only the workspace redesign and hierarchy feature commits;
+  old merge/workflow commits were excluded. Draft Viewer PR #406 is open against
+  `main` with 28 files. Its production build and 117 focused tests passed,
+  including Edge desktop and 390px/320px browser checks. No workflows changed,
+  and the original Claude branch and PR #347 remain untouched. This is review
+  evidence only, not a Viewer deployment or live Processing acceptance.
