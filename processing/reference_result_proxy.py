@@ -6,6 +6,7 @@ the last chunk is withheld until its exact size, EOF and SHA256 are established.
 The worker endpoint owns the upstream read pin until that response closes.
 """
 import hashlib
+import re
 import ssl
 from types import MappingProxyType
 from urllib.error import HTTPError
@@ -44,18 +45,25 @@ class _NoRedirects(HTTPRedirectHandler):
 
 
 class ResultProxyStream:
-    """Single-consumer response DTO. Always use as a context manager or close()."""
+    """Single-consumer response DTO; a range is complete but not whole-object verified."""
     status = 200
 
-    def __init__(self, response, lease, *, byte_size, sha256, manifest_sha256, content_type):
+    def __init__(self, response, lease, *, byte_size, sha256, manifest_sha256, content_type,
+                 response_size=None, response_sha256=True, status=200, content_range=None):
         self._response, self._lease = response, lease
         self.byte_size, self.sha256 = byte_size, sha256
-        self.headers = MappingProxyType({"Content-Type": content_type,
-            "Content-Length": str(byte_size), "X-Result-Sha256": sha256,
+        response_size = byte_size if response_size is None else response_size
+        headers = {"Content-Type": content_type,
+            "Content-Length": str(response_size), "X-Result-Sha256": sha256,
             "X-Result-Manifest-Sha256": manifest_sha256,
-            "Cache-Control": "no-store"})
+            "Cache-Control": "no-store"}
+        if status == 206:
+            headers.update({"Accept-Ranges": "bytes", "Content-Range": content_range})
+        self.headers = MappingProxyType(headers)
+        self.status = status
+        self._response_size, self._response_sha256 = response_size, response_sha256
         self._digest, self._count = hashlib.sha256(), 0
-        self.verified, self.closed = False, False
+        self.verified, self.complete, self.closed = False, False, False
 
     def __enter__(self):
         return self
@@ -90,25 +98,26 @@ class ResultProxyStream:
         """Read at most one bounded chunk; never return an unverified last chunk."""
         if type(size) is not int or size < 1:
             raise ResultProxyError("positive bounded stream read required")
-        if self.verified:
+        if self.complete:
             self.close()
             return b""
         if self.closed:
             raise ResultProxyError("worker result stream is closed")
         try:
-            remaining = self.byte_size - self._count
+            remaining = self._response_size - self._count
             chunk = self._response.read(min(size, CHUNK_BYTES, remaining + 1))
             if type(chunk) is not bytes or len(chunk) > min(size, CHUNK_BYTES, remaining + 1):
                 self._fail()
             self._count += len(chunk)
-            if self._count > self.byte_size or (not chunk and self._count != self.byte_size):
+            if self._count > self._response_size or (not chunk and self._count != self._response_size):
                 self._fail()
             self._digest.update(chunk)
-            if self._count == self.byte_size:
+            if self._count == self._response_size:
                 extra = self._response.read(1)
-                if extra != b"" or self._digest.hexdigest() != self.sha256:
+                if extra != b"" or (self._response_sha256 and self._digest.hexdigest() != self.sha256):
                     self._fail()
-                self.verified = True
+                self.complete = True
+                self.verified = self._response_sha256
             return chunk
         except Exception:
             self._fail()
@@ -159,7 +168,7 @@ class ResultProxy:
         self._open = opener or build_opener(_NoRedirects(), HTTPSHandler(context=context)).open
         self.timeout = timeout
 
-    def open(self, job, result_manifest, object_id):
+    def open(self, job, result_manifest, object_id, *, range_header=None):
         """Open one exact sealed result from its configured assigned worker node."""
         lease, entered, response = None, False, None
         try:
@@ -176,37 +185,51 @@ class ResultProxy:
             obj = next((obj for obj in manifest["objects"] if obj["id"] == object_id), None)
             if obj is None:
                 raise ResultProxyError("object is outside sealed result")
+            byte_range = _parse_range(range_header, obj["byteSize"])
+            response_size = byte_range[1] - byte_range[0] + 1 if byte_range else obj["byteSize"]
             binding = dict(nodeId=node, jobId=job["jobId"], generation=job["generation"],
                 environment=job["environment"], resultManifestSha256=manifest["resultManifestSha256"],
-                objectId=obj["id"], byteSize=obj["byteSize"], bufferBytes=CHUNK_BYTES)
+                objectId=obj["id"], byteSize=response_size, bufferBytes=CHUNK_BYTES)
             lease = self._admit_read(binding)
             lease.__enter__()
             entered = True
             url = self._origins[node] + RESULT_PREFIX + job["jobId"] + "/results/" + obj["id"]
-            request = Request(url, method="GET", headers={
+            request_headers = {
                 "Authorization": "Bearer " + self._tokens[node], "Accept-Encoding": "identity",
                 "X-Result-Generation": str(job["generation"]), "X-Result-Sha256": obj["sha256"],
-                "X-Result-Manifest-Sha256": manifest["resultManifestSha256"]})
+                "X-Result-Manifest-Sha256": manifest["resultManifestSha256"]}
+            if byte_range:
+                request_headers["Range"] = "bytes=%d-%d" % byte_range
+            request = Request(url, method="GET", headers=request_headers)
             try:
                 response = self._open(request, timeout=self.timeout)
             except HTTPError as error:
                 error.close()
                 raise ResultProxyError("worker rejected result read") from None
-            if response.status != 200 or response.geturl() != url:
+            expected_status = 206 if byte_range else 200
+            if response.status != expected_status or response.geturl() != url:
                 raise ResultProxyError("unexpected worker result response")
             if (response.headers.get("X-Result-Sha256") != obj["sha256"]
                     or response.headers.get("X-Result-Manifest-Sha256") != manifest["resultManifestSha256"]):
                 raise ResultProxyError("worker result response identity mismatch")
             length = response.headers.get("Content-Length")
-            if length is not None and (not length.isascii() or not length.isdecimal() or int(length) != obj["byteSize"]):
+            if length is not None and (not length.isascii() or not length.isdecimal() or int(length) != response_size):
                 raise ResultProxyError("worker result length mismatch")
+            content_range = None
+            if byte_range:
+                start, end = byte_range
+                content_range = "bytes %d-%d/%d" % (start, end, obj["byteSize"])
+                if response.headers.get("Content-Range") != content_range:
+                    raise ResultProxyError("worker result range mismatch")
             if response.headers.get("Content-Encoding", "identity").lower() != "identity":
                 raise ResultProxyError("encoded worker results are forbidden")
             content_type = "application/zip" if obj["role"] == "odm_archive" else "application/octet-stream"
             if response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != content_type:
                 raise ResultProxyError("worker result content type mismatch")
             return ResultProxyStream(response, lease, byte_size=obj["byteSize"], sha256=obj["sha256"],
-                manifest_sha256=manifest["resultManifestSha256"], content_type=content_type)
+                manifest_sha256=manifest["resultManifestSha256"], content_type=content_type,
+                response_size=response_size, response_sha256=not byte_range,
+                status=expected_status, content_range=content_range)
         except Exception:
             if response is not None:
                 try:
@@ -219,3 +242,18 @@ class ResultProxy:
                 except Exception:
                     pass
             raise ResultProxyError("worker result read unavailable") from None
+
+
+def _parse_range(value, size):
+    """Accept one explicit, satisfiable byte range; reject multipart/suffix forms."""
+    if value is None:
+        return None
+    if type(value) is not str or len(value) > 128:
+        raise ResultProxyError("invalid worker result range")
+    match = re.fullmatch(r"bytes=([0-9]{1,20})-([0-9]{1,20})", value)
+    if not match:
+        raise ResultProxyError("invalid worker result range")
+    start, end = map(int, match.groups())
+    if start > end or end >= size:
+        raise ResultProxyError("unsatisfiable worker result range")
+    return start, end

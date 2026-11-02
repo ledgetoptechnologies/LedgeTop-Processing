@@ -211,12 +211,18 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 - Cross-source boundary review: the Processing broker client expects a scoped
   HTTPS GET at `/api/processing/reference/v1/objects/{objectId}`, checks the
   full object size/hash and publishes a private fsynced local object, but has no
-  range resume or physical request/byte meter; failed object transfers restart
-  from byte zero. Worker result bytes are exposed separately by an authenticated
-  result GET bound to generation/object/result-manifest hashes and durable read
-  pins, and the worker endpoint accepts ranges. The coordinator's current
-  `ResultProxy.open` requests the whole object and requires HTTP 200, so there
-  is no end-to-end range resume. The worker's `/results` POST is a metadata
+  range resume or physical request/byte meter; failed source-object transfers
+  restart from byte zero. Worker result bytes are exposed separately by an
+  authenticated result GET bound to generation/object/result-manifest hashes
+  and durable read pins. Processing now forwards a single explicit byte range
+  through its protected HTTP API and result proxy, validates the exact 206
+  `Content-Range` and content length, and admits only the requested response
+  bytes. The worker revalidates the complete sealed object before each ranged
+  response. Synthetic proxy/API/HTTP tests cover range forwarding, malformed
+  ranges, mismatched range metadata, and cleanup. This enables a caller to retry
+  a partial result download against the same immutable result; it does not add
+  resumable source-object downloads or a durable receiver-side partial-file
+  assembler. The worker's `/results` POST is a metadata
   completion receipt, not an archive upload; Viewer acceptance is a later,
   separate receipt. No NAS broker service or mounted Viewer accepted-copy
   ingest is implemented. This mapping is an existing-source audit, not a new

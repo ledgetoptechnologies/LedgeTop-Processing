@@ -298,17 +298,24 @@ class ReferenceHTTPTests(unittest.TestCase):
         self.store.set_result_manifest(job['jobId'], manifest)
         closed, calls = [], []
         class Stream:
-            headers = {'Content-Type': 'application/zip', 'Content-Length': str(len(archive)),
-                       'Set-Cookie': 'must-not-forward'}
+            def __init__(self, body, status, headers):
+                self.body, self.status, self.headers = body, status, headers
             def chunks(self):
-                yield archive[:4]
-                yield archive[4:]
+                yield self.body
             def close(self):
                 closed.append(True)
         class Proxy:
-            def open(self, public, result, object_id):
-                calls.append(public)
-                return Stream()
+            def open(self, public, result, object_id, *, range_header=None):
+                calls.append((public, range_header))
+                body, status = archive, 200
+                headers = {'Content-Type': 'application/zip', 'Content-Length': str(len(body)),
+                           'Set-Cookie': 'must-not-forward'}
+                if range_header:
+                    start, end = map(int, range_header.removeprefix('bytes=').split('-'))
+                    body, status = archive[start:end + 1], 206
+                    headers.update({'Content-Length': str(len(body)),
+                                    'Content-Range': f'bytes {start}-{end}/{len(archive)}'})
+                return Stream(body, status, headers)
         self.api.viewer.result_proxy = Proxy()
         route = '/ltds/v1/jobs/' + job['jobId'] + '/results/result-1'
         self.assertEqual(self.request('GET', route, token=PRODUCTION)[0], 404)
@@ -320,8 +327,17 @@ class ReferenceHTTPTests(unittest.TestCase):
         self.assertEqual(response.getheader('Content-Type'), 'application/zip')
         self.assertIsNone(response.getheader('Set-Cookie'))
         connection.close()
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        connection.request('GET', route, headers={'Authorization': 'Bearer ' + STAGING,
+                                                   'Range': 'bytes=0-3'})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 206)
+        self.assertEqual(response.read(), archive[:4])
+        self.assertEqual(response.getheader('Content-Range'), f'bytes 0-3/{len(archive)}')
+        connection.close()
         self.assertTrue(closed)
-        self.assertNotIn('claimToken', calls[0])
+        self.assertNotIn('claimToken', calls[0][0])
+        self.assertEqual(calls[1][1], 'bytes=0-3')
 
     def test_confirmed_cancelled_outcome_and_metadata_acceptance_over_http(self):
         _, job, _ = self.request('POST', '/ltds/v1/jobs', self.fixture['submission'])

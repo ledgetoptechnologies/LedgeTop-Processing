@@ -86,6 +86,7 @@ class ReferenceResultProxyTests(unittest.TestCase):
             self.assertEqual(stream.status, 200)
             self.assertEqual(stream.headers["Content-Type"], "application/zip")
             self.assertEqual(b"".join(stream), b"abc")
+            self.assertTrue(stream.complete)
             self.assertTrue(stream.verified)
         self.assertTrue(self.responses[0].closed)
         self.assertTrue(self.leases[0].exited)
@@ -111,6 +112,29 @@ class ReferenceResultProxyTests(unittest.TestCase):
             self.assertTrue(all(len(chunk) <= CHUNK_BYTES for chunk in chunks))
             self.assertTrue(stream.verified)
         self.assertTrue(all(0 < size <= CHUNK_BYTES for size in self.responses[0].read_sizes))
+
+    def test_exact_byte_range_is_forwarded_and_validated_for_retryable_result_reads(self):
+        proxy = self.proxy(b"bc", status=206, header_updates={
+            "Content-Length": "2", "Content-Range": "bytes 1-2/3"})
+        with proxy.open(self.job, self.manifest, "result-1", range_header="bytes=1-2") as stream:
+            self.assertEqual(stream.status, 206)
+            self.assertEqual(stream.headers["Content-Range"], "bytes 1-2/3")
+            self.assertEqual(b"".join(stream), b"bc")
+            self.assertTrue(stream.complete)
+            self.assertFalse(stream.verified)
+        self.assertEqual(self.requests[0].get_header("Range"), "bytes=1-2")
+        self.assertEqual(self.admissions[0]["byteSize"], 2)
+        self.assertTrue(self.leases[0].exited)
+
+    def test_malformed_or_mismatched_ranges_fail_closed(self):
+        for value in ("bytes=-1", "bytes=0-1,2-2", "bytes=2-1", "bytes=0-3"):
+            with self.subTest(range=value), self.assertRaises(ResultProxyError):
+                self.proxy().open(self.job, self.manifest, "result-1", range_header=value)
+        with self.assertRaises(ResultProxyError):
+            self.proxy(b"bc", status=206, header_updates={
+                "Content-Length": "2", "Content-Range": "bytes 0-1/3"}).open(
+                    self.job, self.manifest, "result-1", range_header="bytes=1-2")
+        self.assertTrue(self.leases[-1].exited)
 
     def test_corrupt_truncated_and_extra_bytes_do_not_return_last_chunk(self):
         for body in (b"bad", b"ab", b"abcd"):

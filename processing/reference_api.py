@@ -116,9 +116,10 @@ class ReferenceAPI:
                 if binary[2] not in {obj['id'] for obj in job['resultManifest']['objects']}:
                     return self._error(404, 'not_found')
                 public = self._job(binary[1], environment)
-                stream = self.result_proxy.open(public, job['resultManifest'], binary[2])
+                stream = self.result_proxy.open(public, job['resultManifest'], binary[2],
+                                                range_header=headers.get('Range'))
                 from .reference_binary import BinaryResponse
-                return BinaryResponse(stream, headers=stream.headers)
+                return BinaryResponse(stream, status=stream.status, headers=stream.headers)
             lookup = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/by-submission/([0-9a-f-]{36})', path)
             if method == 'GET' and lookup:
                 job = self.store.find_submission(lookup[1], environment=environment)
