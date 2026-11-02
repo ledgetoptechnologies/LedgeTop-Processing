@@ -170,6 +170,14 @@ No real client data was processed as part of this checkpoint.
   discovery available and a 25-photo plan selecting local execution without
   starting work. The main NodeODM container was observed running. These probes
   did not submit a Viewer task or run photogrammetry.
+- A read-only inspect of the live `.89` Processing prototype container on
+  2026-11-02 returned `PROCESSING_VIEWER_MAX_INPUT_BYTES=21474836480` (20 GiB)
+  and `PROCESSING_VIEWER_MAX_ARCHIVE_BYTES=107374182400` (100 GiB). The planned
+  ~50 GB photo dataset exceeds the current Viewer intake cap and cannot be
+  uploaded through this deployed route as configured. The archive cap is a
+  separate ceiling. No limit was changed and no data was submitted; the
+  deployment's local-spool admission cannot safely be raised until capacity and
+  NAS-backed queueing are addressed.
 - Beau's read-only Viewer metadata query matched the saved test task and
   provider task. The recorded schema v1 archive receipt has matching identity,
   a 71-file bounded inventory and matching manifest digest; `3d-tiles` was a
