@@ -227,14 +227,20 @@ or `getfacl`; ACL tooling is unnecessary for the ownership scheme above.
    in-container JSON path. The listener must bind the appropriate container
    interface so the published port is usable. Do not launch a second application
    process, temporary coordinator or second state volume for staging.
-4. Stage one `bkoltz` systemd user unit on each host. Use a versioned source root
-   as `WorkingDirectory` and `/usr/bin/python3 -m ops.reference_worker_daemon
-   --config ABSOLUTE_PRIVATE_JSON` as the command. This preserves package imports
-   and the existing account's canonical gate location. Configure fixed loopback
-   engine origins, the observed engine-version pins, exact gate identity and
-   generation, separate HTTPS coordinator/broker origins, private result readers,
-   explicit allowed environments and conservative scratch/output budgets. Serve
-   worker results over verified HTTPS on `.89:18445` and `.88:18445`.
+4. Stage the candidate user unit at
+   `ops/systemd/user/ledgetop-processing-reference-worker.service` for `bkoltz`
+   on each host. Its `current/source` working path must resolve to one reviewed,
+   immutable source version; its private config path must resolve to the host's
+   exact worker profile. Configure fixed loopback engine origins, observed
+   engine-version pins, exact gate identity and generation, separate HTTPS
+   coordinator/broker origins, private result readers, explicit allowed
+   environments and conservative scratch/output budgets. Serve worker results
+   over verified HTTPS on `.89:18445` and `.88:18445`. The unit restarts the
+   daemon after failures with a bounded start rate. It requests graceful stop and
+   has `SendSIGKILL=no`; a worker that cannot drain remains stopping and blocks a
+   replacement instead of being force-killed. A repeated held/invalid startup
+   eventually hits the rate limit for operator review. The unit does not clear
+   claims, reconcile stale pins, certify engine state or delete results.
 5. Initially leave `cleanupEnabled=false` and restrict new reference work to
    staging. Verify TLS trust, authentication separation, authority, health,
    dynamic options and queue visibility without submitting processing jobs.
@@ -243,8 +249,12 @@ or `getfacl`; ACL tooling is unnecessary for the ownership scheme above.
    or unexpected admission occurred.
 6. Enable unattended worker startup only after qualification. Main already has
    linger; cluster needs explicitly approved linger enablement for user units to
-   survive logout/start at boot. Verify the real service identities and active
-   result listeners. Firewall changes, if necessary, need separate authorized
+   survive logout/start at boot. Then run `systemctl --user daemon-reload`,
+   `systemctl --user enable --now ledgetop-processing-reference-worker.service`,
+   and verify the actual service identity, state roots, active result listener,
+   and same persistent driver/ledger state after a controlled service restart.
+   A process restart test with only fake engines is not sufficient to approve
+   client work. Firewall changes, if necessary, need separate authorized
    administration; no rule change was attempted in this preflight.
 
 The workers' daemon lock covers in-flight driver operations and active result

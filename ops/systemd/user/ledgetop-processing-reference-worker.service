@@ -1,0 +1,20 @@
+[Unit]
+Description=LedgeTop Processing reference worker
+StartLimitIntervalSec=10min
+StartLimitBurst=20
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/ledgetop-processing-reference/current/source
+ExecStart=/usr/bin/python3 -B -m ops.reference_worker_daemon --config %h/.config/ledgetop-processing/reference-worker.json
+Restart=on-failure
+RestartSec=15s
+TimeoutStartSec=30s
+TimeoutStopSec=10min
+KillMode=mixed
+SendSIGKILL=no
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

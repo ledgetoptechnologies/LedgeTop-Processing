@@ -59,6 +59,13 @@ No real client data was processed as part of this checkpoint.
   solution or deployment artifact. Do not install it or treat its tests as
   unattended resilience qualification. A reviewed kernel process-tree
   containment and daemon fencing design is still required.
+- A separate candidate systemd user unit now directly supervises the durable
+  `ops.reference_worker_daemon` process. Its restart loop is rate-limited and
+  it never force-kills a daemon that has not drained. Three focused policy
+  tests and `systemd-analyze --user verify` pass. This checks the unit contract
+  and syntax only: no worker service was installed or run, and automatic
+  recovery with a real persistent engine, outbox, Viewer receipt and stale-pin
+  fault is still unqualified.
 
 ## Still required for the requested end state
 
