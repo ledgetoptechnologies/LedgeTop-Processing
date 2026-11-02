@@ -1188,3 +1188,28 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
 - Focused Processing checks passed: acceptance/release candidate, existing v2
   acceptance, and signed source-retention suites ran 45 tests with one
   platform-specific skip. These are local synthetic checks only.
+
+### Cross-profile collision correction — 2026-11-02
+
+- Viewer review found that the proposal's original `schemaVersion: 1` and
+  `source_release_ack` marker collided with a different existing Viewer v1
+  acknowledgement shape. That would make profile confusion possible even if
+  the individual parsers were strict.
+- Reprofiled this inactive proposal as the explicit
+  `ltds-processing-spool-v2` protocol, endpoint namespace
+  `/api/v2/processing-spool`, `schemaVersion: 2`, and `_v2` record markers for
+  custody, authorization and source-release acknowledgement. V1 remains
+  unchanged; the proposal now requires cross-profile and downgrade rejection.
+- Recomputed the closure, custody and authorization commitments. The same
+  exact JSON vectors produce matching SHA-256 values in the Processing Python
+  implementation and the current Viewer `referenceProtocol.canonicalBytes`
+  implementation: closure
+  `ca76a1cce7d85f3a722a9b01724bcd0e62cf09c73fb79eabc94f0ac82d5dbf76`, custody
+  `451a6a162c12b9f43679586c3d42d3f958fb5e5674b76639cbeef5b498be916a`, and
+  authorization
+  `52001cc62453843a79e80a1240853fee397c84a55b23c06988dfbb129cfdb792`.
+- The focused Processing acceptance/release, existing v2 acceptance, and
+  signed source-retention suites now run 46 tests with one platform-specific
+  skip. This verifies the current synthetic profile and vectors only; it does
+  not establish an agreed deployed endpoint, physical source custody, or live
+  result acceptance/cleanup.

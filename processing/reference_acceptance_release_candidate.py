@@ -13,24 +13,25 @@ import re
 
 from . import reference_v2_candidate as v2
 
-AUTHORIZATION_DOMAIN = b"LTDS-SOURCE-RELEASE-AUTHORIZATION-V1\0"
-SPOOL_CLOSURE_DOMAIN = b"LTDS-PROCESSING-SPOOL-CLOSURE-V1\0"
-CUSTODY_RECEIPT_DOMAIN = b"LTDS-PROCESSING-SPOOL-CUSTODY-RECEIPT-V1\0"
+PROTOCOL = "ltds-processing-spool-v2"
+AUTHORIZATION_DOMAIN = b"LTDS-SOURCE-RELEASE-AUTHORIZATION-V2\0"
+SPOOL_CLOSURE_DOMAIN = b"LTDS-PROCESSING-SPOOL-CLOSURE-V2\0"
+CUSTODY_RECEIPT_DOMAIN = b"LTDS-PROCESSING-SPOOL-CUSTODY-RECEIPT-V2\0"
 SPOOL_CUSTODY_FIELDS = {
-    "schemaVersion", "receiptType", "receiptId", "issuerId", "storageReceiptId", "binding",
+    "protocol", "schemaVersion", "receiptType", "receiptId", "issuerId", "storageReceiptId", "binding",
     "spoolRootId", "spoolRootGeneration", "sourceClosureSha256", "objects",
     "writerFenceReceiptId", "capacityReservationReceiptId", "reservedBytes", "retainedAt",
     "retentionGuarantee",
 }
 AUTH_FIELDS = {
-    "schemaVersion", "receiptType", "authorizationId", "operationId", "issuerId",
+    "protocol", "schemaVersion", "receiptType", "authorizationId", "operationId", "issuerId",
     "binding", "sourceCustodyReceiptId", "sourceCustodyReceiptSha256", "storageReceiptId",
     "spoolRootId", "spoolRootGeneration", "sourceClosureSha256", "objects",
     "terminalReceiptId", "terminalReceiptSha256", "acceptedCopyAckIds", "policySha256",
     "authorizedAt", "expiresAt",
 }
 ACK_FIELDS = {
-    "schemaVersion", "receiptType", "ackId", "operationId", "authorizationId",
+    "protocol", "schemaVersion", "receiptType", "ackId", "operationId", "authorizationId",
     "authorizationSha256", "issuerId", "binding", "sourceCustodyReceiptId",
     "sourceCustodyReceiptSha256", "storageReceiptId", "spoolRootId",
     "spoolRootGeneration", "sourceClosureSha256", "deletedObjects", "deletedAt", "acknowledgedAt",
@@ -86,7 +87,7 @@ def validate_spool_custody_receipt(receipt_raw, *, authenticated_peer, expected_
     fence, capacity reservation or physical file observations are trustworthy.
     """
     receipt = _decode(receipt_raw)
-    _record(receipt, SPOOL_CUSTODY_FIELDS, "processing_spool_custody")
+    _record(receipt, SPOOL_CUSTODY_FIELDS, "processing_spool_custody_v2")
     _need(authenticated_peer == {"role": "sourceStorageExecutor", "principal": receipt["issuerId"]},
           "authenticated storage role mismatch")
     _need(receipt["binding"] == expected_binding, "stale or foreign source binding")
@@ -192,7 +193,7 @@ def _binding(value):
 
 def _record(value, fields, record_type):
     _need(type(value) is dict and set(value) == fields, "invalid closed record")
-    _need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+    _need(value["protocol"] == PROTOCOL and type(value["schemaVersion"]) is int and value["schemaVersion"] == 2
           and value["receiptType"] == record_type, "unsupported record type/version")
     _binding(value["binding"])
 
@@ -253,8 +254,8 @@ def validate_source_release_pair(authorization_raw, acknowledgement_raw, *,
     """
     authorization = _decode(authorization_raw)
     acknowledgement = _decode(acknowledgement_raw)
-    _record(authorization, AUTH_FIELDS, "source_release_authorization")
-    _record(acknowledgement, ACK_FIELDS, "source_release_ack")
+    _record(authorization, AUTH_FIELDS, "source_release_authorization_v2")
+    _record(acknowledgement, ACK_FIELDS, "source_release_ack_v2")
     auth, ack = authorization, acknowledgement
     _need(authorization_peer == {"role": "sourceReleaseAuthorizer", "principal": auth["issuerId"]}
           and acknowledgement_peer == {"role": "sourceStorageExecutor", "principal": ack["issuerId"]},

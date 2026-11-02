@@ -138,6 +138,41 @@ class ResultAcceptanceReleaseCandidateTests(unittest.TestCase):
         with self.assertRaises(CandidateRejected):
             self.validate_pair(ack=changed)
 
+    def test_v1_and_unmarked_records_cannot_downgrade_or_cross_the_v2_profile(self):
+        profiles = (
+            ("authorization", self.auth, self.validate_pair, "auth"),
+            ("acknowledgement", self.ack, self.validate_pair, "ack"),
+        )
+        changes = (
+            ("foreign protocol", lambda record: record.update(protocol="ltds-reference-v1")),
+            ("missing protocol", lambda record: record.pop("protocol")),
+            ("v1 schema", lambda record: record.update(schemaVersion=1)),
+            ("missing schema", lambda record: record.pop("schemaVersion")),
+            ("v1 marker", lambda record: record.update(receiptType="source_release_ack")),
+        )
+        for name, original, validator, argument in profiles:
+            for label, mutate in changes:
+                changed = copy.deepcopy(original)
+                mutate(changed)
+                with self.subTest(profile=name, case=label), self.assertRaises(CandidateRejected):
+                    validator(**{argument: changed})
+
+        for label, mutate in changes:
+            changed = copy.deepcopy(self.custody)
+            mutate(changed)
+            with self.subTest(profile="custody", case=label), self.assertRaises(CandidateRejected):
+                validate_spool_custody_receipt(
+                    json.dumps(changed, separators=(",", ":")).encode(),
+                    authenticated_peer={"role": "sourceStorageExecutor", "principal": changed.get("issuerId", "")},
+                    expected_binding=self.auth["binding"],
+                    expected_spool_root_id=self.auth["spoolRootId"],
+                    expected_spool_root_generation=self.auth["spoolRootGeneration"],
+                    expected_source_objects=self.auth["objects"],
+                    expected_custody_receipt_sha256=self.expected["expected_custody_receipt_sha256"],
+                    expected_writer_fence_receipt_id="writer-fence-1",
+                    expected_capacity_reservation_receipt_id="capacity-reservation-1",
+                    expected_reserved_bytes=12, now="2026-11-02T12:00:00.000Z")
+
     def test_expired_authority_or_late_physical_effect_cannot_start_or_complete_release(self):
         late = "2026-11-02T12:06:00.000Z"
         with self.assertRaises(CandidateRejected):
