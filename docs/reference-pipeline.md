@@ -322,6 +322,14 @@ Processing store before an attempt is marked complete. This source wiring does
 not establish that the deployed Viewer exposes the matching route or that either
 node has the required credentials/configuration installed.
 
+The 2026-11-02 source comparison against Viewer PR #424 head
+`bca50f0440bc34719631e35387122fe99577abc7` found identical v1/v2 acceptance
+route prefixes and byte-identical signed-receipt vector fixtures. The Viewer
+receiver remains explicitly disabled by default
+(`VIEWER_REFERENCE_ACCEPTANCE_ENABLED=false`). This establishes branch-level
+contract compatibility, not a live endpoint, installed key/configuration or
+runtime acceptance.
+
 The worker daemon's `engineCleanupEnabled` is separate from archive
 `cleanupEnabled`, and defaults to false. The driver keeps deferred cleanup proof
 after execution capacity is released; it does not need to claim a new execution
