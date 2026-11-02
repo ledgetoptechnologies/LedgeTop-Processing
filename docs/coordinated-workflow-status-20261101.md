@@ -422,7 +422,8 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   container with the required ZIP dependency installed only in its temporary
   filesystem. This confirms the existing lost-ACK hold behavior and broker
   replay primitive on Linux; it does not implement or verify an automatic
-  durable transfer outbox.
+  durable transfer outbox. The same combined suites passed 49 tests on Windows
+  with two Linux-only/platform-specific skips.
 - Beau's read-only Viewer metadata check for task
   `a8a93a98-2740-4341-8dc6-0043ef86c72f` and provider task
   `d5463e33-aeed-4136-a81f-a9a7d233da0f` returned a matching attempt, enabled
