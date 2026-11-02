@@ -665,6 +665,13 @@ raise SystemExit(app.main())
             threading.Event().wait(0.01)
         self.fail('coordinator lifecycle condition not reached')
 
+    def assert_queue_owned(self, state, **kwargs):
+        unexpected=None
+        try:
+            with self.assertRaises(RuntimeError):unexpected=Queue(state,**kwargs)
+        finally:
+            if unexpected is not None:unexpected.close()
+
     def test_coordinator_shutdown_joins_native_and_reference_handlers_before_queue_unlock(self):
         handler = self.supervised_handler()
         native_entered, native_release = threading.Event(), threading.Event()
@@ -731,13 +738,11 @@ raise SystemExit(app.main())
             self.wait_for(lambda: service.health()['state'] == 'draining')
             self.assertFalse(service.healthy())
             self.wait_for(lambda: not service.health()['referenceAlive'])
-            with self.assertRaises(RuntimeError):
-                Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+            self.assert_queue_owned(self.config.prototype_state_dir,node_ids=('cluster','main'))
             native_release.set()
             self.assertTrue(running.is_alive())
             self.assertFalse(reference_closed.is_set())
-            with self.assertRaises(RuntimeError):
-                Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+            self.assert_queue_owned(self.config.prototype_state_dir,node_ids=('cluster','main'))
             reference_release.set()
             running.join(timeout=3)
             for client in clients:
@@ -757,7 +762,7 @@ raise SystemExit(app.main())
             for client in clients:
                 client.join(timeout=7)
 
-    def test_shutdown_waits_for_actual_partial_viewer_upload(self):
+    def test_default_shutdown_waits_for_upload_client(self):
         from processing import viewer_http
         from tests.test_viewer_http import multipart, BOUNDARY
         for mode in ('complete','half_close','reset','stall_then_reset','partial_then_reset'):
@@ -843,6 +848,92 @@ raise SystemExit(app.main())
                     native.server_close()
                     handler.viewer_service.close();handler.prototype_queue.close()
 
+    def test_stop_interrupts_dripping_upload_preserving_committed_part(self):
+        from tests.test_viewer_http import multipart, BOUNDARY
+        from processing.viewer_tasks import TaskStore
+        from processing.maintenance import Conflict
+        handler=make_handler(replace(self.config,stop_upload_reads=True));input_root=handler.viewer_service.store.root
+        identifier=str(uuid.uuid4())
+        handler.viewer_service.store.initialize(identifier,'synthetic',[],None,'production')
+        job,_=handler.prototype_queue.submit({'requestId':str(uuid.uuid4()),'environment':'staging',
+                                             'profile':'treedar-synthetic-v1'})
+        native=ThreadingHTTPServer(('127.0.0.1',0),handler)
+        service=CoordinatorService(native,handler);stop=threading.Event();exits=[]
+        running=threading.Thread(target=lambda:exits.append(service.run(stop)))
+        committed=threading.Event();upload=handler.viewer_service.upload
+        def observed_upload(*args,**kwargs):
+            result=upload(*args,**kwargs);committed.set();return result
+        client=None;dripper=None;drip_stop=threading.Event();drip_started=threading.Event()
+        try:
+            with patch.object(handler.viewer_service,'upload',observed_upload):
+                running.start();self.wait_for(service.healthy)
+                client=socket.create_connection(native.server_address,timeout=4);client.settimeout(4)
+                body=multipart([('images','owned.jpg',b'synthetic-photo'),('images','second.jpg',b'x'*131072)])
+                headers=(f'POST /task/new/upload/{identifier}?token={self.config.viewer_token} HTTP/1.1\r\n'
+                         f'Host: localhost\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\n'
+                         f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode()
+                client.sendall(headers+body[:65536]);self.assertTrue(committed.wait(3))
+                def drip():
+                    while not drip_stop.wait(0.05):
+                        try:client.sendall(b'x');drip_started.set()
+                        except OSError:return
+                dripper=threading.Thread(target=drip);dripper.start();self.assertTrue(drip_started.wait(3))
+                stop.set();running.join(5);self.assertFalse(running.is_alive());self.assertEqual(exits,[0])
+            replacement=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),
+                              treedar_node_ids=('main',),viewer_enabled=True)
+            try:
+                self.assertEqual(replacement.get(job['id'])['status'],'queued')
+                store=TaskStore(replacement,input_root);task=store.task(identifier)
+                self.assertEqual(len(task['files']),1)
+                self.assertEqual(Path(task['files'][0]['path']).read_bytes(),b'synthetic-photo')
+                self.assertTrue(store.upload(identifier,'owned.jpg',io.BytesIO(b'synthetic-photo'),15)['success'])
+                with self.assertRaises(Conflict):store.upload(identifier,'owned.jpg',io.BytesIO(b'different-bytes'),15)
+            finally:replacement.close()
+        finally:
+            drip_stop.set()
+            if dripper is not None and dripper.ident is not None:dripper.join(4)
+            if client is not None:client.close()
+            stop.set()
+            if running.ident is not None:running.join(8)
+            if running.is_alive():
+                self._cleanups=[item for item in self._cleanups if item[0] != self.temp.cleanup]
+                self.temp._finalizer.detach()
+                self.fail('owned coordinator thread did not exit; resources retained')
+            native.server_close();handler.viewer_service.close();handler.prototype_queue.close()
+            if dripper is not None:self.assertFalse(dripper.is_alive())
+
+    def test_upload_registration_after_stop_and_closed_socket_are_safe(self):
+        handler=make_handler(self.config)
+        self.addCleanup(handler.prototype_queue.close);self.addCleanup(handler.viewer_service.close)
+        native=ThreadingHTTPServer(('127.0.0.1',0),handler);self.addCleanup(native.server_close)
+        service=CoordinatorService(native,handler);stop=threading.Event();service._stop_event=stop
+        first,peer=socket.socketpair();self.addCleanup(first.close);self.addCleanup(peer.close)
+        self.assertTrue(service.begin_upload(first))
+        first.close();stop.set()
+        service._interrupt_uploads();service._interrupt_uploads();service.end_upload(first)
+        self.assertFalse(service.begin_upload(peer))
+        peer.settimeout(1);first2,peer2=socket.socketpair()
+        try:
+            first2.sendall(b'x');self.assertEqual(peer2.recv(1),b'x')
+        finally:first2.close();peer2.close()
+
+    def test_upload_registration_waiting_for_stop_lock_is_rejected(self):
+        handler=make_handler(self.config)
+        self.addCleanup(handler.prototype_queue.close);self.addCleanup(handler.viewer_service.close)
+        native=ThreadingHTTPServer(('127.0.0.1',0),handler);self.addCleanup(native.server_close)
+        service=CoordinatorService(native,handler);stop=threading.Event();service._stop_event=stop
+        first,peer=socket.socketpair();self.addCleanup(first.close);self.addCleanup(peer.close)
+        attempted=threading.Event();result=[]
+        def register():
+            attempted.set();result.append(service.begin_upload(first))
+        thread=threading.Thread(target=register)
+        try:
+            with service._upload_lock:
+                thread.start();self.assertTrue(attempted.wait(2));stop.set()
+            thread.join(2);self.assertFalse(thread.is_alive());self.assertEqual(result,[False])
+        finally:
+            if thread.ident is not None:thread.join(3)
+
     def test_reference_listener_failure_fails_supervision_without_healthy_native_endpoint(self):
         handler = self.supervised_handler()
         fail = threading.Event()
@@ -911,8 +1002,7 @@ raise SystemExit(app.main())
             stop.set()
             self.assertTrue(closed.wait(timeout=3))
             self.assertTrue(running.is_alive())
-            with self.assertRaises(RuntimeError):
-                Queue(self.config.prototype_state_dir, node_ids=('cluster','main'))
+            self.assert_queue_owned(self.config.prototype_state_dir,node_ids=('cluster','main'))
             release.set()
             running.join(timeout=3)
             self.assertEqual(exits, [0])
@@ -955,8 +1045,7 @@ raise SystemExit(app.main())
             self.assertEqual(health['status'], 'ok')
             self.assertEqual(health['mode'], 'routing_probe')
             self.assertFalse(health['viewerEnabled'])
-            with self.assertRaises(RuntimeError):
-                Queue(state)
+            self.assert_queue_owned(state)
             process.send_signal(signal.SIGTERM)
             stdout, stderr = process.communicate(timeout=4)
             self.assertEqual(process.returncode, 0)

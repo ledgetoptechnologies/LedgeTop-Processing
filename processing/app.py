@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import signal
+import socket
 import sys
 import threading
 
@@ -94,6 +95,7 @@ def make_handler(config: Config):
         viewer_service = service
         reference_listener = reference_runtime
         lifecycle_service = None
+        stop_upload_reads = config.stop_upload_reads
 
         def setup(self):
             super().setup()
@@ -310,7 +312,27 @@ class CoordinatorService:
         self._state, self._reason = 'starting', None
         self._native_thread = None
         self._reference_server = self._reference_thread = None
+        self._upload_lock = threading.Lock()
+        self._upload_sockets = set()
+        self._stop_event = None
         handler.lifecycle_service = self
+
+    def begin_upload(self, connection):
+        with self._upload_lock:
+            if self._stop_event is None or self._stop_event.is_set():
+                return False
+            self._upload_sockets.add(connection)
+            return True
+
+    def end_upload(self, connection):
+        with self._upload_lock:
+            self._upload_sockets.discard(connection)
+
+    def _interrupt_uploads(self):
+        with self._upload_lock:
+            for connection in self._upload_sockets:
+                try:connection.shutdown(socket.SHUT_RD)
+                except OSError:pass
 
     def _failed(self, reason, stop):
         with self._lock:
@@ -381,6 +403,7 @@ class CoordinatorService:
     def run(self, stop):
         if self._native_thread is not None:
             raise ValueError('coordinator service already started')
+        self._stop_event = stop
 
         def serve_native():
             try:
@@ -415,6 +438,7 @@ class CoordinatorService:
             self._failed('coordinator_start_failed', stop)
         finally:
             stop.set()
+            self._interrupt_uploads()
             with self._lock:
                 if self._state != 'failed':
                     self._state = 'draining'

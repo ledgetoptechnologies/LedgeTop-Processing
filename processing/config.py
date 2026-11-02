@@ -32,6 +32,7 @@ class Config:
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     admission_drain_enabled: bool = False
+    stop_upload_reads: bool = False  # experimental; no production environment switch
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
 

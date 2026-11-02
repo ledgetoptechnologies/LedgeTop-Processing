@@ -39,7 +39,7 @@ whose queued job remains available to a new owner.
 If starting the Viewer dispatcher thread fails before the thread starts, cleanup
 does not join that unstarted thread; a synthetic failure checks listener closure,
 Queue reacquisition and preservation of the queued job.
-A real loopback Viewer multipart upload test pauses in the server's body read,
+A real loopback Viewer multipart upload test with default settings pauses in the server's body read,
 then requests graceful stop. Shutdown waits until the client either completes
 the body or closes its write side; the former receives 200 and retains exact
 input bytes, and the latter receives 400 with no input file. A separate queued
@@ -52,6 +52,17 @@ In a synthetic two-file request, the first file commits before a reset during
 the second; the first survives reopening, an identical direct store retry is
 accepted, and different bytes under that name conflict. This does not establish
 that a real Viewer automatically retries an ambiguous response.
+
+An experimental `Config.stop_upload_reads` option (default false, with no
+environment switch) registers native Viewer upload sockets and interrupts their
+read side when shutdown begins. A loopback client dripping a second file was
+interrupted while a previously committed file and a queued job survived; an
+identical direct store retry succeeded and different bytes conflicted. The
+client may lose the response and must reconcile or retry; actual Viewer retry is
+not proven. Default shutdown retains its prior behavior. Interruption covers
+only registered native Viewer upload socket reads; buffered data, filesystem
+sync, SQLite, other handlers and thread joins can still delay shutdown. It is
+not a hard drain deadline or a host/network fence.
 These tests do not fence
 host restart, direct engine access or other writers and do not authorize a live
 coordinator replacement. The admission-drain startup gate remains disabled.
