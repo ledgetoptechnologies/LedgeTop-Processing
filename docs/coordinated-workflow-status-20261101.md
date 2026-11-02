@@ -403,19 +403,18 @@ TreeDar remains main-node-only; the shared global execution slot remains one.
   contracts. It ran against the current shared Windows-mounted worktree and is
   synthetic test evidence only, not runtime acceptance.
 - Lost source-grant acknowledgement follow-up: a separate inactive Viewer
-  broker candidate `codex/viewer-grant-replay-candidate` at `0c334e0b` and draft
+  broker candidate `codex/viewer-grant-replay-candidate` at `7addbac9` and draft
   stacked PR #408 allow exact token replay after restart when a stable
   explicitly injected 32-byte HMAC key is available; only the token hash is
   stored. `tokenRecoverable` now reflects whether the broker can derive the
   bearer, including for new grants; random legacy grants remain unrecoverable
   if no key existed at creation. The key is held in a private field and cleared
-  at close. A dispatch-core retry seam now releases a claim only when the
-  trusted transfer adapter reports `REFERENCE_GRANT_REPLAY_SAFE`; ordinary
-  ambiguous failure remains held. The synthetic test confirms two attempts
-  post identical grant bytes after a lost ACK. Focused Linux retry tests passed
-  2/2; combined Windows broker/dispatch suites passed 50 with two
-  platform-specific skips. There is still no production transfer adapter,
-  key provisioning, or durable dispatch outbox, and Viewer reference dispatch
+  at close. A proposed dispatch retry seam was reviewed and reverted because
+  its string error marker did not prove durable grant identity or fence an old
+  sender. The lost-ACK path remains held for reconciliation. Linux synthetic
+  broker + joint-harness suites passed 28/28; Windows passed 27 with one
+  Linux-only skip. There is still no production transfer adapter, key
+  provisioning, or durable dispatch outbox, and Viewer reference dispatch
   remains hard-off. This is source-level recovery evidence, not an enabled
   source grant, NAS custody proof, or runtime acceptance.
 - Beau's read-only Viewer metadata check for task
