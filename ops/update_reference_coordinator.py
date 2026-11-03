@@ -61,7 +61,6 @@ class Stopped(ValueError):pass
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
 
-
 def cluster_http_json(route,token,deadline,limit=65536):
     """Fixed private NodeODM reads with one absolute header/body deadline."""
     if (route not in ('/info','/task/list') or type(token) is not str or not 1<=len(token)<=4096
@@ -469,8 +468,8 @@ print(json.dumps(counts))
     script=legacy.BACKUP.replace('print(json.dumps(counts))',extra)
     # The historical installer requires empty Viewer tables. Here the census
     # above already requires every retained task to be terminal and binds it.
-    empty_viewer="""  for table in ('viewer_tasks','viewer_files','viewer_incarnations'):
-   if table in tables:assert db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0
+    empty_viewer="""  if 'viewer_tasks' in tables:
+   assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0]==0
 """
     if script.count(empty_viewer)!=1:raise Stopped('reviewed_backup_script_changed')
     return explicit_guard_source(script.replace(empty_viewer,"""  if 'viewer_tasks' in tables:assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'").fetchone()[0]==0
