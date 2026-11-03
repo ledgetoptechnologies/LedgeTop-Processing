@@ -5,15 +5,21 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.prototype import Queue, PROFILE as LEGACY_PROFILE
 from processing.maintenance import Conflict
 from processing.reference_store import ReferenceStore, PROFILE
+from tests.reference_activation_fixture import activate_reference_job, prepare_reference_job
 
 
 class ReferenceStoreTests(unittest.TestCase):
     def setUp(self):
+        # Only exercises post-activation mechanics with a synthetic future grant.
+        self.ready_patch = patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)
+        self.ready_patch.start()
+        self.addCleanup(self.ready_patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.queue = Queue(self.directory.name, node_ids=("cluster", "node-2"))
         self.queue.allowed_profiles.add(PROFILE)
@@ -42,7 +48,8 @@ class ReferenceStoreTests(unittest.TestCase):
         return self.store.reserve(job["jobId"], transfer, node_id="cluster")
 
     def result_ready(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         self.store.update_phase(job["jobId"], "fetching")
         self.store.update_phase(job["jobId"], "processing")
@@ -61,7 +68,8 @@ class ReferenceStoreTests(unittest.TestCase):
         return receipt
 
     def test_retry_transfer_budget_has_explicit_three_copy_ceiling(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
                          worker_instance_id='instance', claim_request_id='claim-budget')
         transfer = copy.deepcopy(self.fixture['transferRequest'])
@@ -73,7 +81,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.reserve(job['jobId'], transfer, node_id='cluster')['phase'], 'awaiting_transfer')
 
     def test_wire_expiry_requires_viewer_compatible_utc_milliseconds(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
             worker_instance_id='instance', claim_request_id='claim-expiry')
         for value in ('2030-01-01T00:00:00.123456Z', '2030-01-01T00:00:00Z', '2030-01-01T00:00:00.000+00:00'):
@@ -135,7 +144,8 @@ class ReferenceStoreTests(unittest.TestCase):
         checked = p.validate_submission(raw, environment="staging",
             capability_fingerprint=raw["capabilityFingerprint"])
         self.assertEqual(checked["manifest"]["totalBytes"], 50_000_000_000)
-        job, created = self.store.submit(checked)
+        job, created = prepare_reference_job(self.store, checked)
+        activate_reference_job(self.store, job)
         self.assertTrue(created)
         self.assertEqual(self.store._required_node(checked), "node-2")
         self.assertIsNone(self.store.next_for_node("cluster"))
@@ -149,7 +159,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(store.list(), [])
 
     def test_reservation_identity_transition_and_public_redaction(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         with self.assertRaises(Conflict):
             self.store.update_phase(job["jobId"], "processing")
         with self.assertRaises(Conflict):
@@ -165,7 +176,8 @@ class ReferenceStoreTests(unittest.TestCase):
             self.store.get("unknown")
 
     def test_global_engine_lock_includes_legacy_treedar(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         legacy, _ = self.queue.submit({"requestId": "legacy", "environment": "staging", "profile": LEGACY_PROFILE})
         claim = self.store.get(job["jobId"], private=True)
@@ -178,7 +190,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.queue.get(legacy["id"])["status"], "queued")
 
     def test_restart_preserves_identity_and_holds_uncertain_engine(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         self.queue.claim({"workerId": "worker", "profiles": [PROFILE]})
         self.queue.close()
@@ -186,7 +199,7 @@ class ReferenceStoreTests(unittest.TestCase):
         self.queue.allowed_profiles.add(PROFILE)
         self.store = ReferenceStore(self.queue)
         self.assertEqual(self.store.get(job["jobId"])["phase"], "held")
-        self.assertFalse(self.store.submit(self.submission)[1])
+        self.assertFalse(prepare_reference_job(self.store, self.submission)[1])
         self.assertIsNone(self.queue.claim({"workerId": "worker", "profiles": [PROFILE]}))
 
     def test_acceptance_subsets_and_changed_receipt(self):
@@ -209,7 +222,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(accepted["job"]["status"], "running")
 
     def test_claim_replay_atomicity_binding_and_restart(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         kwargs = dict(node_id="cluster", worker_id="worker", worker_instance_id="instance-1", claim_request_id="claim-1")
         with ThreadPoolExecutor(max_workers=8) as pool:
             claims = list(pool.map(lambda _: self.store.claim(job["jobId"], **kwargs), range(8)))
@@ -230,7 +244,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.claim(job["jobId"], **kwargs)["status"], "succeeded")
 
     def test_claim_transaction_rolls_back_queue_when_envelope_insert_fails(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         with self.queue._db() as db:
             db.execute("CREATE TRIGGER reject_claim BEFORE INSERT ON reference_claims BEGIN SELECT RAISE(ABORT,'test crash'); END")
         with self.assertRaises(Exception):
@@ -240,14 +255,16 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get(job["jobId"], private=True)["claimToken"])
 
     def test_unclaimed_execution_and_reservation_rejected(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         with self.assertRaises(Conflict):
             self.store.reserve(job["jobId"], self.fixture["transferRequest"], node_id="cluster")
         with self.assertRaises(Conflict):
             self.store.update_phase(job["jobId"], "fetching")
 
     def test_claim_respects_shared_priority_and_node_maintenance(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.queue.submit({"requestId": "priority", "environment": "production", "profile": LEGACY_PROFILE})
         kwargs = dict(node_id="cluster", worker_id="worker", worker_instance_id="instance", claim_request_id="claim-1")
         self.assertIsNone(self.store.claim(job["jobId"], **kwargs))
@@ -260,7 +277,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.claim(job["jobId"], **kwargs)["jobId"], job["jobId"])
 
     def test_surviving_worker_terminal_result_recovers_without_engine_replay(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         self.store.update_phase(job["jobId"], "fetching")
         self.store.update_phase(job["jobId"], "processing")
@@ -310,7 +328,8 @@ class ReferenceStoreTests(unittest.TestCase):
             self.store.set_result_manifest(job["jobId"], result)
 
     def test_outbox_durable_idempotency_backoff_and_no_secrets(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         payload = {"jobId": job["jobId"], "generation": 1, "environment": "staging", "receiptId": "receipt-1"}
         self.assertTrue(self.store.enqueue_outbox("delivery_ack", "ack-1", payload))
         self.assertFalse(self.store.enqueue_outbox("delivery_ack", "ack-1", payload))

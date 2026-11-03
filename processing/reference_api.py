@@ -89,10 +89,10 @@ class ReferenceAPI:
 
     def _job(self, job_id, environment, *, private=False):
         try:
-            job = self.store.get(job_id, private=private)
+            job = self.store.get_legacy_job(job_id, environment, private=private)
         except Conflict:
             return None
-        if job["environment"] != environment:
+        if job is None:
             return None
         return job
 
@@ -144,8 +144,10 @@ class ReferenceAPI:
                     options_fingerprint=self.options_fingerprint,
                     allowed_odm_options=self.allowed_odm_options,
                     available_engines=("odm", "treedar") if self.treedar_available else ("odm",))
-                job, created = self.store.submit(validated)
-                return Response(201 if created else 200, job)
+                # This credential identifies only an environment, not a Viewer
+                # principal. Such a job could never be safely activated and
+                # would permanently occupy the priority queue head.
+                return self._error(503, "viewer_prepared_submission_required")
             match = re.fullmatch(re.escape(protocol.PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/results|/acceptance|/transfer-grants|/terminal-outcome|/terminal-acceptance)?", path)
             if not match:
                 return self._error(404, "not_found")

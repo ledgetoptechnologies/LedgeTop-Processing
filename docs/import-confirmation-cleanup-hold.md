@@ -33,5 +33,10 @@ The acceptance ledger and Viewer processing database are separate; recovery
 must reconcile crashes between them without duplicate publication. TreeDar and
 multi-object results need their own role and completion bindings. Existing
 cleanup journals still govern uncertain operations and must not be reset merely
-because the new hold is present. The staging photo-smoke removal route and other
-temporary-file cleanup paths require separate review.
+because the new hold is present. The separate `odx-photo-smoke-v1` worker is
+staging-only, requires explicit enablement, reads its input photos from a
+separate root without modifying those inputs, and removes its engine task after
+terminal failure or bounded smoke-result validation. It does not deliver a
+durable Viewer model and must not be used for
+client-result processing. Other temporary-file cleanup paths require separate
+review.
