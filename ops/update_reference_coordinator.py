@@ -214,6 +214,40 @@ def volume_census(root, *, uid=10001, offline=False):
                     or re.sub(r'\s+', ' ', entries[0][3]).strip() != expected_lease
                     or list(db.execute('SELECT singleton,required FROM coordinator_authority_lease')) != [(1, 1)]):
                 raise AssertionError('authority lease marker invalid')
+        if 'owned_maintenance_schedules' in names:
+            entries = [row for row in objects if row[2] == 'owned_maintenance_schedules']
+            expected_owned = ('CREATE TABLE owned_maintenance_schedules ( request_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,authority_id TEXT NOT NULL, '
+                              'request_sha256 TEXT NOT NULL,request_json TEXT NOT NULL,receipt_json TEXT NOT NULL)')
+            table = [row for row in entries if row[0] == 'table']
+            indexes = [row for row in entries if row[0] == 'index']
+            if (len(table) != 1 or re.sub(r'\s+', ' ', table[0][3]).strip() != expected_owned
+                    or indexes != [['index', 'sqlite_autoindex_owned_maintenance_schedules_1', 'owned_maintenance_schedules', None]]
+                    or len(entries) != 2):
+                raise AssertionError('owned schedule schema invalid')
+            authority_row = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
+            if not authority_row:
+                raise AssertionError('owned schedule authority missing')
+            node_ids = {row[0] for row in db.execute('SELECT id FROM nodes')}
+            for request_id, node_id, authority_id, request_hash, request_json, receipt_json in db.execute(
+                    'SELECT request_id,node_id,authority_id,request_sha256,request_json,receipt_json FROM owned_maintenance_schedules'):
+                try:
+                    if (type(request_json) is not str or type(receipt_json) is not str
+                            or len(request_json.encode()) > 65536 or len(receipt_json.encode()) > 65536):
+                        raise ValueError()
+                    request, receipt = json.loads(request_json), json.loads(receipt_json)
+                    if type(request) is not dict or type(receipt) is not dict:
+                        raise ValueError()
+                    digest = sha({'nodeId': node_id, 'request': request})
+                    receipt_digest = sha({k: v for k, v in receipt.items() if k != 'receiptSha256'})
+                    if (node_id not in node_ids or authority_id != authority_row[0]
+                            or encode(request).decode() != request_json or encode(receipt).decode() != receipt_json
+                            or digest != request_hash or receipt.get('receiptSha256') != receipt_digest
+                            or (request.get('requestId'), request.get('authorityId'), receipt.get('requestId'),
+                                receipt.get('authorityId'), receipt.get('nodeId'), receipt.get('requestSha256'))
+                            != (request_id, authority_id, request_id, authority_id, node_id, request_hash)):
+                        raise ValueError()
+                except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+                    raise AssertionError('owned schedule evidence invalid') from None
         expected = {
             'viewer_reservations': "CREATE TABLE viewer_reservations ( uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))",
             'viewer_option_evidence': "CREATE TABLE viewer_option_evidence ( uuid TEXT NOT NULL, generation INTEGER NOT NULL, definitions TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(uuid,generation))",
@@ -270,7 +304,7 @@ def volume_census(root, *, uid=10001, offline=False):
         # nonterminal task, reservation or orphaned task row holds instead.
         retained_viewer = {'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'viewer_option_evidence'}
         for name in names:
-            if (name.startswith(('reference_', 'viewer_')) or name == 'owned_maintenance_schedules') and tables[name]['count'] != 0 and name not in retained_viewer:
+            if (name.startswith(('reference_', 'viewer_')) and tables[name]['count'] != 0 and name not in retained_viewer):
                 raise AssertionError('nonempty guarded table')
         if 'viewer_tasks' in names:
             if db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage IN ('succeeded','failed','cancelled'))").fetchone()[0]:

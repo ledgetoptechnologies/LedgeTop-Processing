@@ -274,6 +274,24 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             db.execute('DELETE FROM coordinator_authority_lease')
         with self.assertRaises(AssertionError):
             module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_historical_owned_receipt_is_preserved_and_tampering_holds(self):
+        from datetime import datetime, timezone
+        with self.queue._db() as db: self.queue._init_maintenance(db)
+        stamp = datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+        request = {'schemaVersion':1, 'requestId':str(__import__('uuid').uuid4()),
+                   'authorityId':module.AUTHORITY, 'expectedRevision':self.queue.get_node('main')['revision'],
+                   'drainAt':stamp, 'notBefore':stamp, 'afterJobId':None, 'targetImage':MAIN}
+        receipt = self.queue.schedule_node_owned('main', request)
+        self.queue.cancel_node('main', {'planId':receipt['planId'], 'expectedRevision':receipt['revision']})
+        before = module.volume_census(self.volume,uid=os.geteuid())
+        self.assertEqual(before['tables']['owned_maintenance_schedules']['count'],1)
+        copied = self.root/'owned-history-copy';shutil.copytree(self.volume,copied)
+        module.compatible(module.volume_census(copied,uid=os.geteuid(),offline=True), before)
+        with self.queue._db() as db:
+            db.execute("UPDATE owned_maintenance_schedules SET request_sha256=?", ('0'*64,))
+        with self.assertRaisesRegex(AssertionError,'owned schedule evidence invalid'):
+            module.volume_census(self.volume,uid=os.geteuid())
     def test_terminal_viewer_task_files_are_retained_and_censused(self):
         import hashlib,uuid
         identifier=str(uuid.uuid4())
