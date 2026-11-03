@@ -166,15 +166,18 @@ class ReferenceWorkerAPI:
                 receipt = self.failure_receiver.receive(payload['delivery'], **identity,
                     claim_request_id=payload['claimRequestId'], claim_token=payload['claimToken'])
                 return Response(200, receipt)
-            action = re.fullmatch(re.escape(PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(reservation|phase)', path) if type(path) is str else None
+            action = re.fullmatch(re.escape(PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(reservation/successor|reservation|phase)', path) if type(path) is str else None
             if method == 'POST' and action:
                 job_id, kind = action.groups()
                 payload = protocol.decode_submission(body)
-                field = 'transferRequest' if kind == 'reservation' else 'phase'
+                field = 'phase' if kind == 'phase' else 'transferRequest'
                 protocol._closed(payload, ('claimToken', field), 'worker control')
                 job = self._owned_job(job_id, identity, payload['claimToken'])
                 if job['status'] != 'running':
                     raise Conflict('worker execution is not running')
+                if kind == 'reservation/successor':
+                    return Response(200, self.store.reserve_successor(job_id, payload[field],
+                        node_id=identity['node_id'], claim_token=payload['claimToken']))
                 if kind == 'reservation':
                     return Response(200, self.store.reserve(job_id, payload[field], node_id=identity['node_id']))
                 if payload[field] not in ('fetching', 'processing'):

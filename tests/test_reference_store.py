@@ -202,6 +202,88 @@ class ReferenceStoreTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(Conflict):
                 self.store.reserve(job['jobId'], {**base, **mutation}, node_id='cluster')
 
+    def successor_job(self):
+        job, _ = prepare_reference_job(self.store, self.new_submission())
+        activate_reference_job(self.store, job)
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance-successor', claim_request_id='successor-' + job['jobId'])
+        transfer = copy.deepcopy(self.fixture['transferRequest'])  # expires 2030-01-01T00:00:00.000Z
+        transfer.update(manifestSha256=job['manifestSha256'], generation=job['generation'],
+                        byteBudget=self.submission['manifest']['totalBytes'])
+        self.store.reserve(job['jobId'], transfer, node_id='cluster')
+        return job['jobId'], claim['claimToken'], transfer
+
+    @staticmethod
+    def successor(current, sequence, expires='2030-01-01T00:10:00.000Z'):
+        return dict(current, expiresAt=expires, nonce='successor-nonce-%d' % sequence,
+                    successorSequence=sequence, previousTransferSha256=p.digest(current))
+
+    def test_reservation_successor_gate_closed_refuses_without_schema_change(self):
+        job_id, token, current = self.successor_job()
+        with patch('processing.reference_store.time.time', return_value=1893456001), self.assertRaises(Conflict):
+            self.store.reserve_successor(job_id, self.successor(current, 1), node_id='cluster', claim_token=token)
+        self.assertEqual(self.store.get(job_id)['transferRequest'], current)
+        with self.queue._db() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_reservation_successors'").fetchone())
+
+    def test_reservation_successor_cas_idempotency_fencing_and_history(self):
+        gate = patch.object(ReferenceStore, '_reservation_successor_ready', return_value=True)
+        gate.start()
+        self.addCleanup(gate.stop)
+        job_id, token, current = self.successor_job()
+        def call(request, **overrides):
+            return self.store.reserve_successor(job_id, request, **{'node_id': 'cluster', 'claim_token': token, **overrides})
+        first = self.successor(current, 1)
+        with patch('processing.reference_store.time.time', return_value=1893455999), self.assertRaises(Conflict):
+            call(first)  # the current lease has not elapsed: no pre-extension
+        with patch('processing.reference_store.time.time', return_value=1893456001):
+            refused = {
+                'stale claim token': (first, {'claim_token': 'stale-synthetic-claim'}),
+                'different node': (first, {'node_id': 'node-2'}),
+                'reused nonce': (dict(first, nonce=current['nonce']), {}),
+                'earlier expiry': (dict(first, expiresAt='2029-12-31T23:59:59.000Z'), {}),
+                'already elapsed expiry': (dict(first, expiresAt='2030-01-01T00:00:00.500Z'), {}),
+                'wrong prior digest': (dict(first, previousTransferSha256='0' * 64), {}),
+                'wrong sequence': (dict(first, successorSequence=2), {}),
+                'sequence above cap': (dict(first, successorSequence=1001), {}),
+                'changed budget': (dict(first, byteBudget=first['byteBudget'] + 1), {}),
+                'changed reservation': (dict(first, reservationId='other-reservation'), {}),
+                'unknown field': (dict(first, extra='synthetic'), {}),
+                'missing sequence': ({key: value for key, value in first.items() if key != 'successorSequence'}, {}),
+            }
+            for name, (request, overrides) in refused.items():
+                with self.subTest(name=name), self.assertRaises((Conflict, ValueError)):
+                    call(request, **overrides)
+            self.assertEqual(self.store.get(job_id)['transferRequest'], current)
+            receipt = call(first)
+            sealed = receipt['transferRequest']
+            self.assertEqual(sealed, dict(current, expiresAt=first['expiresAt'], nonce=first['nonce']))
+            self.assertEqual(receipt, {'jobId': job_id, 'successorSequence': 1, 'previousTransferSha256': p.digest(current),
+                                       'transferSha256': p.digest(sealed), 'transferRequest': sealed})
+            self.assertEqual(self.store.get(job_id)['transferRequest'], sealed)
+            self.assertEqual(ReferenceStore(self.queue).reserve_successor(job_id, first, node_id='cluster',
+                                                                          claim_token=token), receipt)
+            with self.assertRaises(Conflict):
+                call(dict(first, nonce='different-successor-nonce'))  # same sequence, different request
+            second = self.successor(sealed, 2, expires='2030-01-01T00:20:00.000Z')
+            with self.assertRaises(Conflict):
+                call(second)  # the successor lease itself has not elapsed
+        with patch('processing.reference_store.time.time', return_value=1893456601):
+            with self.assertRaises(Conflict):
+                call(dict(second, nonce=current['nonce']))  # nonce of the superseded original
+            with self.assertRaises(Conflict):
+                call(self.successor(current, 2, expires='2030-01-01T00:20:00.000Z'))  # digest of a superseded lease
+            self.assertEqual(call(second)['successorSequence'], 2)
+            self.assertEqual(call(first), receipt)  # sealed history replays exactly
+        with self.queue._db() as db:
+            history = [(row[0], json.loads(row[1])) for row in db.execute(
+                'SELECT sequence,prior_json FROM reference_reservation_successors WHERE job_id=? ORDER BY sequence', (job_id,))]
+        self.assertEqual(history, [(1, current), (2, sealed)])
+        self.store.update_phase(job_id, 'fetching')
+        self.store.update_phase(job_id, 'processing')
+        with patch('processing.reference_store.time.time', return_value=1893457201), self.assertRaises(Conflict):
+            call(self.successor(self.store.get(job_id)['transferRequest'], 3, expires='2030-01-01T00:30:00.000Z'))
+
     def test_disabled_profile_fails_closed(self):
         self.queue.allowed_profiles.remove(PROFILE)
         with self.assertRaises(ValueError):

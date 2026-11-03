@@ -318,6 +318,42 @@ class ScratchPolicyTests(unittest.TestCase):
         with self.assertRaises(PolicyConflict):
             self.ledger.set_engine_state('r1', 'engine_started')
 
+    def test_successor_extension_holds_lease_idempotently_and_monotonically(self):
+        self.reserve()  # t=100, expires=120
+        self.assertEqual(self.ledger.extend('r1', sequence=1, expires_at=150)['expires'], 150)
+        self.assertEqual(self.ledger.extend('r1', sequence=1, expires_at=150)['expires'], 150)
+        for sequence, expires in ((1, 160), (3, 170), (2, 140), (2, 150)):
+            with self.subTest(sequence=sequence, expires=expires), self.assertRaises(PolicyConflict):
+                self.ledger.extend('r1', sequence=sequence, expires_at=expires)
+        self.now = 130  # past the original lease, inside the extension
+        self.ledger = self.open()
+        with self.assertRaises(PolicyConflict):
+            self.reserve(job_id='j2', reservation_id='r2', input_bytes=600)
+        with self.ledger._transaction() as db:
+            row = self.ledger._reservation(db, 'r1')
+            self.assertEqual((row['state'], row['remaining'], row['expires']), ('reserved', 400, 120))
+        self.now = 151
+        self.reserve(job_id='j2', reservation_id='r2', input_bytes=600)  # the extension elapsed and released it
+        with self.assertRaises(PolicyConflict):
+            self.ledger.extend('r1', sequence=2, expires_at=300)
+
+    def test_extended_lease_admits_transfer_fence_after_original_expiry(self):
+        self.reserve()
+        self.now = 119
+        self.ledger.extend('r1', sequence=1, expires_at=140)
+        self.now = 130
+        self.ledger.begin_transfer('r1')
+        self.ledger.set_engine_state('r1', 'engine_started')
+        with self.assertRaises(PolicyConflict):
+            self.ledger.extend('r1', sequence=2, expires_at=125)  # never moves expiry earlier
+
+    def test_actual_pinned_old_allocator_opens_ledger_with_reservation_extension(self):
+        module = self.legacy_module(); self.reserve(); self.ledger.extend('r1', sequence=1, expires_at=150)
+        old = self.old_open(module)
+        old.reserve(job_id='old-job', generation=1, reservation_id='old-res', manifest_sha256='d'*64, input_bytes=1,
+                    output_budget=0, environment='staging', ttl_seconds=20, worker_ready=True)
+        self.assertEqual(self.open().extend('r1', sequence=1, expires_at=150)['expires'], 150)
+
     def test_engine_and_uncertain_reservations_do_not_expire(self):
         self.reserve()
         self.ledger.set_engine_state('r1', 'engine_started')

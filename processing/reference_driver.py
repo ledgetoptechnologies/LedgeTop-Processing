@@ -41,6 +41,7 @@ from .treedar_engine import TreeDarHeld
 
 
 PREFIX = '/ltds/worker/v1'
+MAX_RESERVATION_SUCCESSORS = 1000  # mirrors the coordinator's successor sequence cap
 
 
 class DriverHeld(ValueError):
@@ -331,6 +332,10 @@ class ReferenceDriver:
         try:
             previous = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
         except Exception:
+            # After a successor the sealed grant still carries the prior nonce; only a
+            # Viewer grant bound to the successor lease can continue the transfer.
+            if data.get('reservationSuccessorSequence', 0):
+                raise DriverHeld('reservation_successor_grant_unavailable') from None
             raise DriverHeld('source_transfer_grant_unavailable') from None
         if pending is not None:
             if (type(pending) is not dict or set(pending) not in
@@ -588,6 +593,96 @@ class ReferenceDriver:
             if hint['kind'] != self._pipeline_kind(claim['submission']):
                 raise DriverHeld('execution_advice_pipeline_changed')
             self.execution_router.bind(claim)
+
+    @staticmethod
+    def _reservation_successor_ready():
+        # The Viewer successor contract (successor-bound grant and grant head) is
+        # not implemented. A caller must not turn this into a runtime override.
+        return False
+
+    def _successor_enabled(self):
+        return self._reservation_successor_ready() is True and self.combined_preparation is None
+
+    def _reservation_clock(self, job_id, stage, data):
+        """Journal a clock high-water mark first: rollback cannot reopen a seen deadline."""
+        observed = data.get('reservationClockHighWater', 0)
+        if type(observed) not in (int, float) or not math.isfinite(observed) or observed < 0:
+            raise DriverHeld('reservation_clock_journal_invalid')
+        now = max(self.clock(), observed)
+        if now > observed:
+            data['reservationClockHighWater'] = now
+            self._save(job_id, stage, data)
+        return now
+
+    def _reservation_successor(self, job_id, stage, claim, data, now):
+        """Succeed an elapsed reservation lease through a durable request journal.
+
+        Same reservationId, so accounting, range ids, partial files and scratch
+        carry over; only expiresAt and nonce change. The exact journaled request
+        is replayed after a lost reply or restart; anything ambiguous holds.
+        """
+        sequence = data.get('reservationSuccessorSequence', 0)
+        if type(sequence) is not int or not 0 <= sequence <= MAX_RESERVATION_SUCCESSORS:
+            raise DriverHeld('reservation_successor_journal_invalid')
+        current, pending = data.get('reservation'), data.get('reservationSuccessor')
+        extra = ('successorSequence', 'previousTransferSha256')
+        if (type(current) is not dict or any(key in current for key in extra)
+                or claim.get('transferRequest') not in (None, current)):
+            raise DriverHeld('reservation_successor_journal_invalid')
+        digest = hashlib.sha256(p.canonical_json(current)).hexdigest()
+        if pending is None:
+            if sequence >= MAX_RESERVATION_SUCCESSORS:
+                raise DriverHeld('reservation_successor_sequence_exhausted')
+            expires_at = datetime.fromtimestamp(now + self.transfer_ttl, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+            request = dict(current, expiresAt=expires_at, nonce=secrets.token_hex(16),
+                           successorSequence=sequence + 1, previousTransferSha256=digest)
+            pending = {'sequence': sequence + 1, 'request': request, 'phase': 'request_pending'}
+            data['reservationSuccessor'] = pending
+            self._save(job_id, stage, data)  # the exact intent precedes any remote call
+        request = pending.get('request') if type(pending) is dict else None
+        try:
+            valid = (set(pending) == {'sequence', 'request', 'phase'} and pending['phase'] == 'request_pending'
+                and pending['sequence'] == sequence + 1 and type(request) is dict
+                and set(request) == set(current) | set(extra)
+                and request['successorSequence'] == sequence + 1 and request['previousTransferSha256'] == digest
+                and all(request[key] == current[key] for key in current if key not in ('expiresAt', 'nonce'))
+                and type(request['nonce']) is str and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', request['nonce'])
+                and request['nonce'] != current['nonce']
+                and self._timestamp(request['expiresAt']) > self._timestamp(current['expiresAt']))
+        except Exception:
+            valid = False
+        if not valid:
+            raise DriverHeld('reservation_successor_journal_invalid')
+        try:
+            # Idempotent per sequence; holds the same scratch budget and directory longer.
+            self.ledger.extend(current['reservationId'], sequence=pending['sequence'],
+                               expires_at=self._timestamp(request['expiresAt']))
+        except PolicyConflict:
+            raise DriverHeld('reservation_successor_scratch_unavailable') from None
+        status, receipt = self._request('POST', '/jobs/' + job_id + '/reservation/successor',
+                                        {'claimToken': claim['claimToken'], 'transferRequest': request})
+        if status == 409:
+            raise DriverHeld('reservation_successor_rejected')
+        sealed = {key: value for key, value in request.items() if key not in extra}
+        expected = {'jobId': job_id, 'successorSequence': pending['sequence'], 'previousTransferSha256': digest,
+                    'transferSha256': hashlib.sha256(p.canonical_json(sealed)).hexdigest(), 'transferRequest': sealed}
+        if type(receipt) is not dict or p.canonical_json(receipt) != p.canonical_json(expected):
+            raise DriverHeld('reservation_successor_response_invalid')
+        data['reservation'] = sealed
+        if claim.get('transferRequest') is not None:
+            claim['transferRequest'] = sealed
+        data['reservationSuccessorSequence'] = pending['sequence']
+        data.pop('reservationSuccessor')
+        self._save(job_id, stage, data)
+        return {'state': stage, 'jobId': job_id}
+
+    def _successor_due(self, job_id, stage, data):
+        if not self._successor_enabled():
+            return None
+        now = self._reservation_clock(job_id, stage, data)
+        if data.get('reservationSuccessor') is not None or self._timestamp(data['reservation']['expiresAt']) <= now:
+            return now
+        return None
 
     def _require_activation_bound_grant(self):
         # The current v1 source grant does not bind the coordinator authority,
@@ -899,15 +994,11 @@ class ReferenceDriver:
             # The clock high-water mark is journaled first, so a restart or a clock moved
             # back cannot reopen a deadline this driver has already seen pass.
             if stage == 'reservation_pending':
-                observed = data.get('reservationClockHighWater', 0)
-                if type(observed) not in (int, float) or not math.isfinite(observed) or observed < 0:
-                    raise DriverHeld('reservation_clock_journal_invalid')
-                now = max(self.clock(), observed)
-                if now > observed:
-                    data['reservationClockHighWater'] = now
-                    self._save(job_id, 'reservation_pending', data)
-                if self._timestamp(request['expiresAt']) <= now:
-                    raise DriverHeld('transfer_reservation_expired')
+                now = self._reservation_clock(job_id, 'reservation_pending', data)
+                if data.get('reservationSuccessor') is not None or self._timestamp(request['expiresAt']) <= now:
+                    if not self._successor_enabled():
+                        raise DriverHeld('transfer_reservation_expired')
+                    return self._reservation_successor(job_id, stage, claim, data, now)
             self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
                 manifest_sha256=claim['manifestSha256'], input_bytes=claim['submission']['manifest']['totalBytes'], output_budget=self.output_budget,
                 environment=claim['environment'], ttl_seconds=self.transfer_ttl, worker_ready=True)
@@ -919,6 +1010,9 @@ class ReferenceDriver:
             return {'state': 'awaiting_grant', 'jobId': job_id}
         if stage == 'awaiting_grant':
             self._require_activation_bound_grant()
+            now = self._successor_due(job_id, stage, data)
+            if now is not None:
+                return self._reservation_successor(job_id, stage, claim, data, now)
             status, grant = self._request('GET', suffix + '/transfer-grant', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_grant', 'jobId': job_id}
@@ -945,6 +1039,9 @@ class ReferenceDriver:
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
         if stage == 'fetching':
             self._require_activation_bound_grant()
+            now = self._successor_due(job_id, stage, data)
+            if now is not None:
+                return self._reservation_successor(job_id, stage, claim, data, now)
             source_range_v2 = (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2'
             if source_range_v2:
                 if self.source_range_client is None:

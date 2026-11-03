@@ -57,6 +57,15 @@ _ENVELOPE_V2_DOMAIN = b'ltds-viewer-prepared-envelope-v2\x00'
 _PREPARED_PROTOCOL = 'ltds-viewer-prepared-submit-v1'
 
 
+MAX_RESERVATION_SUCCESSORS = 1000
+# Created only by an enabled successor call, so a gated coordinator keeps its schema.
+_SUCCESSOR_SCHEMA = """CREATE TABLE IF NOT EXISTS reference_reservation_successors (
+  job_id TEXT NOT NULL REFERENCES reference_jobs(job_id), sequence INTEGER NOT NULL,
+  prior_sha256 TEXT NOT NULL, prior_json TEXT NOT NULL, request_json TEXT NOT NULL,
+  request_sha256 TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(job_id, sequence))"""
+
+
 def _json(value):
     return protocol.canonical_json(value).decode("utf-8")
 
@@ -356,6 +365,9 @@ class ReferenceStore:
             used += db.execute('''SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(epoch_id)+length(request_sha256)
                 +length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0)
                 FROM reference_recovery_receipts''').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_reservation_successors'").fetchone():
+            used += db.execute("""SELECT COALESCE(SUM(length(CAST(prior_json AS BLOB))+length(CAST(request_json AS BLOB))),0)
+                FROM reference_reservation_successors""").fetchone()[0]
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
@@ -1198,6 +1210,91 @@ class ReferenceStore:
             db.execute("UPDATE reference_jobs SET phase='awaiting_transfer',node_id=?,transfer_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
                        (node_id, encoded, job_id))
             return self._public(self._row(db, job_id))
+
+    @staticmethod
+    def _reservation_successor_ready():
+        # Viewer successor ingestion, the grant-head migration and successor
+        # grant sealing are not implemented. A caller must not turn this into a
+        # runtime override; tests patch it.
+        return False
+
+    def reserve_successor(self, job_id, request, *, node_id, claim_token):
+        """Seal a later lease on the same reservationId; never a new transfer.
+
+        Only expiresAt and nonce change. CAS on (sequence, prior digest); an
+        identical replay returns the sealed receipt, any other is a Conflict.
+        No TTL is chosen here: the requested deadline is the worker's.
+        """
+        if not self._reservation_successor_ready():
+            raise Conflict('reservation successor unavailable')
+        if type(request) is not dict or not {'successorSequence', 'previousTransferSha256', 'expiresAt', 'nonce'} <= set(request):
+            raise ValueError('invalid reservation successor request')
+        sequence = request['successorSequence']
+        if type(sequence) is not int or not 1 <= sequence <= MAX_RESERVATION_SUCCESSORS:
+            raise ValueError('invalid reservation successor sequence')
+        protocol._hash(request['previousTransferSha256'], 'previousTransferSha256')
+        protocol._slug(request['nonce'], 'nonce')
+        protocol._string(request['expiresAt'], 'expiresAt', 40)
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z', request['expiresAt']):
+            raise ValueError('transfer expiry must use UTC millisecond wire format')
+        expiry = datetime.fromisoformat(request['expiresAt'].replace('Z', '+00:00')).timestamp()
+        if type(claim_token) is not str or not 1 <= len(claim_token) <= 128 or not claim_token.isascii():
+            raise ValueError('invalid claim token')
+        self.queue._known_node(node_id)
+        sealed = {key: value for key, value in request.items() if key not in ('successorSequence', 'previousTransferSha256')}
+        encoded, request_json = _json(sealed), _json(request)
+        request_sha256 = protocol.digest(request)
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
+            row = self._row(db, job_id)
+            if self._activation(db, row) is None:
+                raise Conflict('Viewer activation required')
+            if not self._activation_bound_grant_ready():
+                raise Conflict('activation-bound source grant unavailable')
+            claim = db.execute('SELECT node_id,token FROM reference_claims WHERE job_id=?', (job_id,)).fetchone()
+            if (row['status'] != 'running' or row['node_id'] != node_id or claim is None
+                    or claim['node_id'] != node_id or not hmac.compare_digest(claim['token'], claim_token)):
+                raise Conflict('reservation successor requires the running claim on this node')
+            db.execute(_SUCCESSOR_SCHEMA)
+            old = db.execute('SELECT * FROM reference_reservation_successors WHERE job_id=? AND sequence=?',
+                             (job_id, sequence)).fetchone()
+            if old is not None:
+                # History is immutable: an exact replay acknowledges it even after a later successor.
+                if old['request_sha256'] != request_sha256 or old['request_json'] != request_json:
+                    raise Conflict('reservation successor already sealed')
+                return self._successor_receipt(job_id, json.loads(old['request_json']))
+            if row['phase'] not in ('awaiting_transfer', 'fetching') or not row['transfer_json']:
+                raise Conflict('reservation successor requires a sealed transfer in progress')
+            current = json.loads(row['transfer_json'])
+            latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_reservation_successors WHERE job_id=?',
+                                (job_id,)).fetchone()[0]
+            if (sequence != latest + 1 or request['previousTransferSha256'] != protocol.digest(current)
+                    or set(sealed) != set(current)
+                    or any(sealed[key] != current[key] for key in current if key not in ('expiresAt', 'nonce'))):
+                raise Conflict('reservation successor binding differs')
+            previous = datetime.fromisoformat(current['expiresAt'].replace('Z', '+00:00')).timestamp()
+            # Window zero: only an elapsed lease is succeeded, never extended ahead of time.
+            now = time.time()
+            if previous > now or expiry <= previous or expiry <= now:
+                raise Conflict('reservation successor deadline differs')
+            nonces = {current['nonce']} | {json.loads(item[0])['nonce'] for item in
+                db.execute('SELECT prior_json FROM reference_reservation_successors WHERE job_id=?', (job_id,))}
+            if sealed['nonce'] in nonces:
+                raise Conflict('reservation successor nonce reused')
+            prior_json = row['transfer_json']
+            self._quota(db, len(encoded.encode()) + len(request_json.encode()) + len(prior_json.encode()))
+            db.execute('INSERT INTO reference_reservation_successors(job_id,sequence,prior_sha256,prior_json,request_json,request_sha256) VALUES(?,?,?,?,?,?)',
+                       (job_id, sequence, request['previousTransferSha256'], prior_json, request_json, request_sha256))
+            db.execute('UPDATE reference_jobs SET transfer_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?', (encoded, job_id))
+            return self._successor_receipt(job_id, request)
+
+    @staticmethod
+    def _successor_receipt(job_id, request):
+        sealed = {key: value for key, value in request.items() if key not in ('successorSequence', 'previousTransferSha256')}
+        return {'jobId': job_id, 'successorSequence': request['successorSequence'],
+                'previousTransferSha256': request['previousTransferSha256'],
+                'transferSha256': protocol.digest(sealed), 'transferRequest': sealed}
 
     def set_result_manifest(self, job_id, result):
         with self.queue._db() as db:

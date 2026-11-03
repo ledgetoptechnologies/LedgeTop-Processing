@@ -1,7 +1,38 @@
 # Source reservation successor (design, not implemented)
 
-Status: design and characterization only. No runtime flag, TTL or activation
-gate changes. Nothing here selects live TTLs.
+Status: the Processing side is implemented behind disabled gates
+(`ReferenceStore._reservation_successor_ready` and
+`ReferenceDriver._reservation_successor_ready` both return False). The Viewer
+side is not implemented. No runtime flag, TTL or activation gate changes.
+Nothing here selects live TTLs.
+
+**As built, the lineage is the `reservationId` itself.** A successor keeps the
+same `reservationId` and changes only `expiresAt` and `nonce`, plus
+`successorSequence` and `previousTransferSha256` on the request. Every
+accounting key, range request id, `.part` name and scratch directory hashes
+`reservationId` and not the deadline or nonce, so no new lineage id is needed.
+That replaces item 1 below.
+
+What is built:
+- **Coordinator:** `ReferenceStore.reserve_successor` and
+  `POST /ltds/worker/v1/jobs/{id}/reservation/successor`.
+  - Fencing: the running claim token and the node.
+  - Compare-and-swap on (sequence, prior digest).
+  - An identical replay returns the sealed receipt.
+  - A nonce is never reused, and the new deadline must be strictly later.
+  - Window zero: it succeeds only an elapsed lease and never extends one ahead
+    of time.
+  - Prior leases are kept in `reference_reservation_successors`. That table is
+    created only by an enabled call, so the gated schema is unchanged.
+- **Scratch:** `ScratchLedger.extend` in a new `reservation_extensions` table.
+- **Driver:** a `reservationSuccessor` journal, saved before `ledger.extend` and
+  the POST, with exact replay after a lost reply or restart. Adoption only
+  happens on an exact receipt; ambiguous outcomes hold.
+
+Interoperation is not claimed. After adoption the sealed grant still carries
+the prior nonce. In `fetching` the driver holds as
+`reservation_successor_grant_unavailable` until the Viewer mints a
+successor-bound grant and the coordinator accepts it (see below).
 
 ## Problem
 

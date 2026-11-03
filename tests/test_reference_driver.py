@@ -1,5 +1,6 @@
 """Real durable components and NativeEngine with transport mocked at its edge."""
 import copy
+from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -534,6 +535,133 @@ class ReferenceDriverTests(unittest.TestCase):
                     side_effect=lambda **kwargs: kwargs['grant_provider']()):
                 result = self.driver.step()
             self.assertEqual((result['state'], result.get('reason')), (expected_state, expected_reason))
+
+    def open_successor_gate(self):
+        for target in (ReferenceStore, ReferenceDriver):
+            mocked = patch.object(target, '_reservation_successor_ready', return_value=True)
+            mocked.start()
+            self.patches.append(mocked)
+
+    def driver_data(self, job):
+        with self.driver._db() as db:
+            return json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+
+    def scratch_rows(self, reservation):
+        with closing(sqlite3.connect(self.root / 'ledger.sqlite')) as db:
+            row = db.execute('SELECT state,allocated,remaining FROM reservations WHERE id=?', (reservation,)).fetchone()
+            extension = db.execute("SELECT sequence,expires FROM reservation_extensions WHERE reservation=?", (reservation,)).fetchone()
+            return row, extension
+
+    def successor_fetching(self, name):
+        """A v2 transfer interrupted mid-object (fenced scratch, partial file) on an offset clock."""
+        real, offset = time.time, [0]
+        state = self.root / ('driver-successor-' + name + '.sqlite')
+        clock = lambda: real() + offset[0]
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state, clock=clock)
+        job = self.submit(contents=(b'successor-partial-photo-' + name.encode(),))
+        self.advance(job, 'fetching')
+        def partial(*, grant, object_id, destination, grant_provider):
+            (Path(destination).parent / '.source-range-synthetic.part').write_bytes(b'partial')
+            raise OSError('synthetic interrupted object')
+        with patch.object(self.driver, '_source_range_grant', return_value=None), \
+             patch.object(self.driver.source_range_client, 'download_object', side_effect=partial):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        real_request, posts = self.request, []
+        def recording(method, suffix, payload=None, **kwargs):
+            if suffix.endswith('/reservation/successor'):
+                posts.append(copy.deepcopy(payload['transferRequest']))
+            return real_request(method, suffix, payload, **kwargs)
+        self.driver._request = recording
+        return job, state, clock, offset, real, posts
+
+    def test_gate_closed_reservation_expiry_mid_transfer_holds_without_successor(self):
+        job, _state, _clock, offset, real, posts = self.successor_fetching('closed')
+        before = self.driver_data(job)
+        offset[0] = 241  # fixture transfer_ttl is 240 s
+        with patch('processing.reference_store.time.time', side_effect=lambda: real() + offset[0]):
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_transfer_grant_unavailable'})
+        self.assertEqual(posts, [])
+        self.assertEqual(self.driver_data(job), before)  # no journal, no high-water mark, nothing adopted
+        with self.queue._db() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_reservation_successors'").fetchone())
+
+    def test_reservation_successor_keeps_reservation_id_scratch_and_partial_file(self):
+        self.open_successor_gate()
+        job, _state, _clock, offset, real, posts = self.successor_fetching('adopt')
+        before = self.driver_data(job)
+        original = before['reservation']
+        rows_before, extension = self.scratch_rows(original['reservationId'])
+        self.assertIsNone(extension)
+        offset[0] = 241
+        with patch('processing.reference_store.time.time', side_effect=lambda: real() + offset[0]):
+            self.assertEqual(self.driver.step(), {'state': 'fetching', 'jobId': job['jobId']})
+            after = self.driver_data(job)
+            sealed = after['reservation']
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(posts[0], dict(sealed, successorSequence=1,
+                previousTransferSha256=hashlib.sha256(json.dumps(original, sort_keys=True, separators=(',', ':')).encode()).hexdigest()))
+            self.assertEqual({key: value for key, value in sealed.items() if key not in ('expiresAt', 'nonce')},
+                             {key: value for key, value in original.items() if key not in ('expiresAt', 'nonce')})
+            self.assertNotEqual(sealed['nonce'], original['nonce'])
+            self.assertGreater(ReferenceDriver._timestamp(sealed['expiresAt']), ReferenceDriver._timestamp(original['expiresAt']))
+            self.assertEqual(after['claim']['transferRequest'], sealed)
+            self.assertEqual(self.store.get(job['jobId'])['transferRequest'], sealed)
+            self.assertEqual(after['reservationSuccessorSequence'], 1)
+            self.assertNotIn('reservationSuccessor', after)
+            rows_after, extension = self.scratch_rows(original['reservationId'])
+            self.assertEqual(rows_after, rows_before)  # same reservation, budget and allocation
+            self.assertEqual(extension, (1, ReferenceDriver._timestamp(sealed['expiresAt'])))
+            self.assertTrue((self.scratch / 'jobs' / original['reservationId'] / '.source-range-synthetic.part').exists())
+            # The sealed grant still carries the prior nonce: a Viewer successor grant is required.
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'reservation_successor_grant_unavailable'})
+            self.assertEqual(len(posts), 1)
+        # A stale claim token is refused at the worker boundary.
+        response = self.api.handle('POST', '/ltds/worker/v1/jobs/' + job['jobId'] + '/reservation/successor',
+            {'Authorization': 'Bearer ' + TOKEN}, json.dumps({'claimToken': 'stale-synthetic-claim',
+            'transferRequest': posts[0]}).encode(), protected_transport=True)
+        self.assertEqual(response.status, 409)
+
+    def test_lost_successor_reply_and_restart_replays_exact_request_once_sealed(self):
+        self.open_successor_gate()
+        job, state, clock, offset, real, posts = self.successor_fetching('lost')
+        original = self.driver_data(job)['reservation']
+        recording = self.driver._request
+        def lost(method, suffix, payload=None, **kwargs):
+            result = recording(method, suffix, payload, **kwargs)
+            if suffix.endswith('/reservation/successor') and len(posts) == 1:
+                raise OSError('synthetic lost successor reply')  # the coordinator committed
+            return result
+        self.driver._request = lost
+        offset[0] = 241
+        with patch('processing.reference_store.time.time', side_effect=lambda: real() + offset[0]):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            pending = self.driver_data(job)
+            self.assertEqual(pending['reservation'], original)
+            self.assertEqual(pending['reservationSuccessor'], {'sequence': 1, 'request': posts[0], 'phase': 'request_pending'})
+            offset[0] = 300  # restart later; the journaled deadline and nonce are replayed, not re-minted
+            self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state, clock=clock)
+            self.driver._request = recording
+            self.assertEqual(self.driver.step(), {'state': 'fetching', 'jobId': job['jobId']})
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[1], posts[0])
+        adopted = self.driver_data(job)
+        self.assertEqual(adopted['reservationSuccessorSequence'], 1)
+        self.assertEqual(adopted['reservation']['nonce'], posts[0]['nonce'])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_reservation_successors WHERE job_id=?',
+                                        (job['jobId'],)).fetchone()[0], 1)
+
+    def test_committed_reservation_past_deadline_is_succeeded_then_replayed_when_gate_open(self):
+        self.open_successor_gate()
+        job, _state, _offset, _lost, posts = self.committed_reservation_with_lost_reply('successor')
+        real = time.time
+        with patch('processing.reference_store.time.time', side_effect=lambda: real() + 241):
+            self.assertEqual(self.driver.step(), {'state': 'reservation_pending', 'jobId': job['jobId']})
+            self.assertEqual(len(posts), 1)  # the successor, not a new reservation
+            self.assertEqual(self.driver.step()['state'], 'awaiting_grant')
+        self.assertEqual(posts[1]['reservationId'], posts[0]['reservationId'])
+        self.assertNotEqual(posts[1]['nonce'], posts[0]['nonce'])
+        self.assertEqual(self.store.get(job['jobId'])['transferRequest'], posts[1])
 
     def test_authority_version_and_active_native_tasks_prevent_claim(self):
         job = self.submit()

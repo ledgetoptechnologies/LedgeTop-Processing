@@ -109,6 +109,8 @@ class ScratchLedger:
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS job_environments (job TEXT PRIMARY KEY, environment TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS transfer_fences (reservation TEXT PRIMARY KEY, started_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS reservation_extensions (
+                  reservation TEXT PRIMARY KEY, sequence INTEGER NOT NULL, expires REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS reservations (
                   id TEXT PRIMARY KEY, settings TEXT NOT NULL, job TEXT NOT NULL,
                   generation INTEGER NOT NULL, environment TEXT NOT NULL,
@@ -250,9 +252,44 @@ class ScratchLedger:
 
     def _expire(self, db, now):
         # Neither engine-started, uncertain nor in-flight transfer reservations may expire automatically.
+        # A successor extension only ever moves the effective expiry later.
         db.execute("UPDATE reservations SET state='expired', remaining=0 "
-                   "WHERE state='reserved' AND expires<=? AND allocated=0 "
+                   "WHERE state='reserved' AND MAX(expires,COALESCE((SELECT e.expires FROM reservation_extensions e "
+                   "WHERE e.reservation=reservations.id),expires))<=? AND allocated=0 "
                    "AND id NOT IN (SELECT reservation FROM transfer_fences)", (now,))
+
+    @staticmethod
+    def _expires(db, row):
+        extension = db.execute("SELECT expires FROM reservation_extensions WHERE reservation=?", (row["id"],)).fetchone()
+        return max(row["expires"], extension[0]) if extension else row["expires"]
+
+    def extend(self, reservation_id, *, sequence, expires_at):
+        """Move a live lease to a successor deadline; same id, budget and files.
+
+        Idempotent per sequence and monotonic. Kept in its own table so a
+        pinned older allocator still opens this database (it ignores it).
+        """
+        _id(reservation_id); _integer(sequence, "extension sequence", 1)
+        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or not math.isfinite(expires_at) or expires_at <= 0:
+            raise ValueError("invalid extension expiry")
+        with self._transaction() as db:
+            now = self._now(db)
+            self._expire(db, now)
+            row = self._reservation(db, reservation_id)
+            old = db.execute("SELECT sequence,expires FROM reservation_extensions WHERE reservation=?", (reservation_id,)).fetchone()
+            if old is not None and old["sequence"] == sequence:
+                if old["expires"] != float(expires_at):
+                    raise PolicyConflict("reservation extension differs")
+                return dict(row, expires=self._expires(db, row))
+            if row["state"] not in ("reserved", "engine_started", "uncertain") or row["terminal_at"] is not None:
+                raise PolicyConflict("extension outside a live reservation")
+            if sequence != (old["sequence"] if old else 0) + 1:
+                raise PolicyConflict("reservation extension sequence differs")
+            if expires_at <= self._expires(db, row) or expires_at <= now:
+                raise PolicyConflict("reservation extension must move expiry later")
+            db.execute("INSERT INTO reservation_extensions VALUES(?,?,?) ON CONFLICT(reservation) DO UPDATE "
+                       "SET sequence=excluded.sequence,expires=excluded.expires", (reservation_id, sequence, float(expires_at)))
+            return dict(row, expires=float(expires_at))
 
     def reserve(self, *, job_id, generation, reservation_id, manifest_sha256,
                 input_bytes, output_budget, environment, ttl_seconds, worker_ready):
@@ -304,7 +341,7 @@ class ScratchLedger:
             row = self._reservation(db, reservation_id)
             # A separate table, so a pinned older allocator still opens this database.
             fenced = db.execute("SELECT 1 FROM transfer_fences WHERE reservation=?", (reservation_id,)).fetchone()
-            if row["state"] == "reserved" and fenced is None and row["expires"] <= now:
+            if row["state"] == "reserved" and fenced is None and self._expires(db, row) <= now:
                 raise PolicyConflict("lease expired before transfer write")
             if row["state"] not in ("reserved", "engine_started", "uncertain"):
                 raise PolicyConflict("transfer outside reservation")
@@ -431,7 +468,7 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
-            if row["state"] == "reserved" and row["expires"] <= now:
+            if row["state"] == "reserved" and self._expires(db, row) <= now:
                 raise PolicyConflict("lease expired before engine mutation")
             if row["state"] == "expired" or (row["state"] == "terminal" and state != "terminal"):
                 raise PolicyConflict("invalid engine transition")
