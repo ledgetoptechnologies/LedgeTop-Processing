@@ -54,13 +54,33 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
             self.assertIsNone(store.claim(job['jobId'],node_id='cluster',worker_id='synthetic-worker',worker_instance_id='synthetic-instance',claim_request_id='synthetic-claim'))
             with patch.object(ReferenceStore,'_v3_source_contract_ready',return_value=True),patch.object(ReferenceStore,'_activation_bound_grant_ready',return_value=True):
                 self.assertEqual(post(activation_path,activation)[0],200)
-                self.assertIsNotNone(store.claim(job['jobId'],node_id='cluster',worker_id='synthetic-worker',worker_instance_id='synthetic-instance',claim_request_id='synthetic-claim'))
+                claim=store.claim(job['jobId'],node_id='cluster',worker_id='synthetic-worker',worker_instance_id='synthetic-instance',claim_request_id='synthetic-claim')
+                self.assertEqual(claim['sourceViewerAttemptId'],env['viewerAttemptId'])
+                from processing.source_range_transfer import build_source_transfer_request,validate_source_grant
+                from processing.reference_driver import ReferenceDriver
+                import time
+                driver=object.__new__(ReferenceDriver);driver.source_range_v2_enabled=True;driver.transfer_ttl=3600;driver.clock=time.time
+                self.assertEqual(driver._new_transfer_request(claim)['viewerAttemptId'],env['viewerAttemptId'])
+                from processing.reference_worker_api import ReferenceWorkerAPI,PREFIX
+                from processing.reference_delivery import DeliveryReceiver
+                worker_token='synthetic-private-worker-token-0001'
+                worker_identity=dict(node_id='cluster',worker_id='synthetic-worker',worker_instance_id='synthetic-instance')
+                worker=ReferenceWorkerAPI(store,DeliveryReceiver(store),bearer_workers={worker_token:worker_identity})
+                self.assertEqual(worker._owned_job(job['jobId'],worker_identity,claim['claimToken'])['sourceViewerAttemptId'],env['viewerAttemptId'])
+                with self.assertRaises(Conflict):worker._owned_job(job['jobId'],worker_identity,'wrong-synthetic-token')
+                built=build_source_transfer_request(claim,reservation_id='synthetic-reservation',expires_at=transfer['expiresAt'],nonce='synthetic-nonce')
+                self.assertEqual(built,transfer)
                 bad=copy.deepcopy(transfer);bad['viewerAttemptId']=str(uuid.uuid4())
                 with self.assertRaisesRegex(Conflict,'attempt binding differs'):store.reserve(job['jobId'],bad,node_id='cluster')
                 bad=copy.deepcopy(transfer);bad['byteBudget']+=1
                 with self.assertRaises(Conflict):store.reserve(job['jobId'],bad,node_id='cluster')
-                stored=store.reserve(job['jobId'],transfer,node_id='cluster')
+                reply=worker.handle('POST',PREFIX+'/jobs/'+job['jobId']+'/reservation',{'Authorization':'Bearer '+worker_token},
+                    json.dumps({'claimToken':claim['claimToken'],'transferRequest':transfer}).encode(),protected_transport=True)
+                self.assertEqual(reply.status,200);stored=reply.body
                 self.assertEqual(stored['transferRequest'],transfer)
+                claim['transferRequest']=stored['transferRequest']
+                self.assertEqual(validate_source_grant(grant,job=claim).identity.viewer_attempt_id,env['viewerAttemptId'])
+                self.assertEqual(driver._source_range_grant(job['jobId'],claim,{'grant':grant}).identity.viewer_attempt_id,env['viewerAttemptId'])
                 self.assertEqual(store.reserve(job['jobId'],transfer,node_id='cluster')['transferRequest'],transfer)
                 changed=copy.deepcopy(transfer);changed['viewerAttemptId']=str(uuid.uuid4())
                 with self.assertRaisesRegex(Conflict,'attempt binding differs'):store.reserve(job['jobId'],changed,node_id='cluster')

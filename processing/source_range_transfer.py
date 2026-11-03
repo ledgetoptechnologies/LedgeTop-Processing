@@ -42,6 +42,13 @@ MAX_RENEWAL_SEQUENCE = 1000
 MAX_RENEWAL_BODY_BYTES = p.MAX_BODY_BYTES
 
 
+def _viewer_attempt(value):
+    p._uuid(value, 'prepared Viewer attempt')
+    if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',value):
+        raise TransferError('invalid prepared Viewer attempt')
+    return value
+
+
 class SourceRenewalUnavailable(TransferError):
     """A renewal request may have been accepted; retry the durable intent."""
 
@@ -107,7 +114,7 @@ def build_source_transfer_request(job, *, reservation_id, expires_at, nonce, clo
             raise ValueError()
         byte_budget = min(p.MAX_SAFE_INTEGER, total_bytes * 3)
         attempt_budget = min(p.MAX_SAFE_INTEGER, minimum_requests * 3)
-        return {
+        result = {
             'protocol': 'source-range-v2', 'reservationId': reservation_id,
             'generation': job['generation'], 'expiresAt': expires_at,
             'manifestSha256': manifest['sha256'], 'sourceVersion': source_version,
@@ -115,6 +122,10 @@ def build_source_transfer_request(job, *, reservation_id, expires_at, nonce, clo
             'requestBudget': minimum_requests, 'byteBudget': byte_budget,
             'nonce': nonce, 'attemptBudget': attempt_budget,
         }
+        if 'sourceViewerAttemptId' in job:
+            _viewer_attempt(job['sourceViewerAttemptId'])
+            result['viewerAttemptId']=job['sourceViewerAttemptId']
+        return result
     except (KeyError, TypeError, ValueError, AttributeError):
         raise TransferError('invalid source transfer request') from None
 
@@ -127,6 +138,7 @@ class SourceIdentity:
     generation: int
     manifest_sha256: str
     source_version: str
+    viewer_attempt_id: str | None = None
 
     def canonical(self):
         values = {
@@ -146,6 +158,10 @@ class SourceIdentity:
             raise TransferError("invalid source identity")
         if type(self.source_version) is not str or not 1 <= len(self.source_version) <= 256 or any(ord(c) < 33 or ord(c) > 126 for c in self.source_version):
             raise TransferError("invalid source identity")
+        if self.viewer_attempt_id is not None:
+            try: _viewer_attempt(self.viewer_attempt_id)
+            except ValueError: raise TransferError('invalid source identity') from None
+            values['viewerAttemptId']=self.viewer_attempt_id
         return values
 
 
@@ -181,18 +197,27 @@ def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
     fields = ("protocol", "reservationId", "generation", "expiresAt", "manifestSha256",
               "sourceVersion", "jobId", "environment", "objectIds", "nonce", "token", "chunkBytes",
               "requestBudget", "byteBudget", "attemptBudget")
+    prepared_attempt = job.get('sourceViewerAttemptId') if type(job) is dict else None
+    if type(job) is dict and 'sourceViewerAttemptId' in job:
+        if prepared_attempt is None: raise TransferError('invalid prepared Viewer attempt')
+        fields=(*fields,'viewerAttemptId')
     if type(grant) is not dict or set(grant) != set(fields):
         raise TransferError("invalid source grant shape")
     if type(job) is not dict or grant["protocol"] != "source-range-v2":
         raise TransferError("invalid source grant protocol")
     try:
         identity = SourceIdentity(grant["environment"], grant["jobId"], grant["reservationId"],
-                                  grant["generation"], grant["manifestSha256"], grant["sourceVersion"])
+                                  grant["generation"], grant["manifestSha256"], grant["sourceVersion"],prepared_attempt)
         identity.canonical()
         transfer = job["transferRequest"]
         transfer_fields = ("protocol", "reservationId", "generation", "expiresAt", "manifestSha256",
                            "sourceVersion", "objectIds", "chunkBytes", "requestBudget", "byteBudget", "nonce")
         transfer_fields = (*transfer_fields, "attemptBudget")
+        if prepared_attempt is not None:
+            transfer_fields=(*transfer_fields,'viewerAttemptId')
+            if (type(grant.get('viewerAttemptId')) is not str or grant['viewerAttemptId']!=prepared_attempt
+                    or transfer.get('viewerAttemptId')!=prepared_attempt):
+                raise TransferError('prepared Viewer attempt differs')
         p._closed(transfer, transfer_fields, "source transfer request")
         if transfer["protocol"] != "source-range-v2":
             raise TransferError("unsupported queued source transfer protocol")
@@ -257,6 +282,8 @@ def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
     if grant["attemptBudget"] < minimum_requests:
         raise TransferError("source attempt budget is too small")
     token = grant["token"]
+    if prepared_attempt is not None and (type(token) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{43}',token)):
+        raise TransferError('invalid source access grant')
     if (type(token) is not str or not 1 <= len(token) <= 4096
             or any(ord(char) < 33 or ord(char) > 126 for char in token)):
         raise TransferError("invalid source access grant")
@@ -416,6 +443,26 @@ class SourceRangeClient:
     def _ensure_state(self, key, identity_json, obj, part, grant):
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
+            # Adding Viewer attempt identity must not silently mint a fresh
+            # budget over an older ledger for the same job generation.
+            incoming=json.loads(identity_json)
+            existing=db.execute('SELECT DISTINCT identity_key,identity_json FROM source_objects LIMIT 10001').fetchall()
+            if len(existing)>10000:
+                raise TransferError('source lineage requires reconciliation')
+            if 'viewerAttemptId' in incoming and db.execute('SELECT 1 FROM source_budgets b WHERE NOT EXISTS (SELECT 1 FROM source_objects o WHERE o.identity_key=b.identity_key) LIMIT 1').fetchone():
+                raise TransferError('source lineage requires reconciliation')
+            for old_key,old_wire in existing:
+                try:
+                    old=json.loads(old_wire)
+                    if (type(old) is not dict or json.dumps(old,sort_keys=True,separators=(',',':'))!=old_wire
+                            or hashlib.sha256(old_wire.encode()).hexdigest()!=old_key):
+                        raise ValueError()
+                    same=all(type(old.get(k)) is type(incoming.get(k)) and old.get(k)==incoming.get(k)
+                             for k in ('environment','jobId','generation'))
+                    if same and ('viewerAttemptId' in old or 'viewerAttemptId' in incoming) and old_wire!=identity_json:
+                        raise ValueError()
+                except (ValueError,TypeError):
+                    raise TransferError('source lineage requires reconciliation') from None
             budget = db.execute("SELECT chunk_bytes,request_budget,byte_budget,attempt_budget FROM source_budgets WHERE identity_key=?", (key,)).fetchone()
             settings = (grant.chunk_bytes, grant.request_budget, grant.byte_budget, grant.attempt_budget)
             if budget is None:

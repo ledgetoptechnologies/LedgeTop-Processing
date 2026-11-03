@@ -70,19 +70,19 @@ class ReferenceWorkerAPI:
         return Response(status, {"error": code})
 
     def _owned_job(self, job_id, identity, claim_token):
-        job = self.store.get(job_id, private=True)
         with self.store.queue._db() as db:
             db.execute('BEGIN')
+            self.store._check_jcs_capability(db)
             row = self.store._row(db, job_id)
             if self.store._activation(db, row) is None:
                 raise Conflict('Viewer activation required')
             claim = db.execute("SELECT * FROM reference_claims WHERE job_id=?", (job_id,)).fetchone()
-        if (not claim or (claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
-                (identity["node_id"], identity["worker_id"], identity["worker_instance_id"])
-                or type(claim_token) is not str or not claim_token.isascii()
-                or not hmac.compare_digest(claim["token"], claim_token)):
-            raise Conflict("worker grant ownership mismatch")
-        return job
+            if (not claim or (claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
+                    (identity["node_id"], identity["worker_id"], identity["worker_instance_id"])
+                    or type(claim_token) is not str or not claim_token.isascii()
+                    or not hmac.compare_digest(claim["token"], claim_token)):
+                raise Conflict("worker grant ownership mismatch")
+            return self.store._owned_private_record(db,row)
 
     def _grant(self, job_id, identity, claim_token):
         job = self._owned_job(job_id, identity, claim_token)

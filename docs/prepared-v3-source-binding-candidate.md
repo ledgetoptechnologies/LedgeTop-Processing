@@ -28,3 +28,22 @@ The current reference driver, request builder and v2 client still do not include
 the Viewer attempt field and cannot use this path without deliberate integration.
 The JCS optional dependency must be available only in the isolated test setup; no
 runtime image or deployment was changed.
+
+## Attempt-bound client candidate
+
+For prepared-v3 claims, the private worker response now derives
+`sourceViewerAttemptId` from the verified durable activation. The existing driver
+passes it through its real request builder; the v2 grant validator, renewal identity
+and range request ID include that attempt. Worker ownership is checked before the
+private record is returned. Legacy requests keep their existing wire format. A
+new attempt identity cannot silently create a new client budget over an existing
+legacy or different attempt ledger for the same job/generation; it holds pending
+reconciliation. This is not an automatic migration.
+
+A paired synthetic test runs the actual changed Processing downloader over verified
+local TLS against the real Viewer c92 source broker code. It checks request replay,
+attempt accounting, revocation and rejection of untrusted/wrong-host certificates.
+The broker is a test harness, not an installed Viewer route; credentials, source
+bytes and certificates are synthetic. Actual source activation, network access,
+production authority fencing and cleanup are not enabled or proved. The independently
+configured coordinator authority pin must also be integrated before release.

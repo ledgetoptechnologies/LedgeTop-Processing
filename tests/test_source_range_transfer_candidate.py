@@ -502,6 +502,33 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
                 build_source_transfer_request(job, reservation_id='reserve-v2',
                     expires_at=invalid_expiry, nonce='nonce-v2')
 
+    def test_prepared_attempt_builder_grant_and_client_use_viewer_request_identity(self):
+        from processing.viewer_source_v2_reconcile_candidate import request_id as viewer_request_id
+        attempt='123e4567-e89b-42d3-a456-426614174000'
+        self.job['sourceViewerAttemptId']=attempt;self.transfer['viewerAttemptId']=attempt
+        built=build_source_transfer_request(self.job,reservation_id='reservation-1',
+            expires_at='2035-01-01T00:00:00.000Z',nonce='nonce-1',clock=lambda:100)
+        self.assertEqual(built['viewerAttemptId'],attempt)
+        grant=self.grant('z'*43)
+        self.assertEqual(grant.identity.canonical()['viewerAttemptId'],attempt)
+        self.make_client().download_object(grant=grant,object_id=self.obj.id,destination=self.root/'prepared.bin')
+        expected=viewer_request_id(grant.identity.canonical(),{'id':self.obj.id,'byteSize':self.obj.byte_size,'sha256':self.obj.sha256},0,CHUNK_BYTES)
+        self.assertEqual(self.calls[0][0].get_header('X-processing-request-id'),expected)
+        bad=self.raw_grant('z'*43);bad['viewerAttemptId']='123e4567-e89b-42d3-a456-426614174001'
+        with self.assertRaises(TransferError):validate_source_grant(bad,job=self.job,clock=lambda:100)
+        bad=self.raw_grant('z'*43);del bad['viewerAttemptId']
+        with self.assertRaises(TransferError):validate_source_grant(bad,job=self.job,clock=lambda:100)
+
+    def test_prepared_identity_cannot_reset_existing_legacy_ledger_budget(self):
+        client=self.make_client();legacy=self.grant();key,wire=client._identity_key(legacy.identity)
+        client._ensure_state(key,wire,self.obj,self.root/'partial',legacy)
+        attempt='123e4567-e89b-42d3-a456-426614174000'
+        self.job['sourceViewerAttemptId']=attempt;self.transfer['viewerAttemptId']=attempt
+        prepared=self.grant('z'*43);new_key,new_wire=client._identity_key(prepared.identity)
+        self.assertNotEqual(new_key,key)
+        with self.assertRaisesRegex(TransferError,'lineage requires reconciliation'):
+            client._ensure_state(new_key,new_wire,self.obj,self.root/'partial',prepared)
+
     def test_second_process_transfer_is_rejected_while_object_lock_is_held(self):
         entered, release = threading.Event(), threading.Event()
         grant = self.grant()

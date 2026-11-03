@@ -306,6 +306,16 @@ class ReferenceStore:
                           claimToken=row["private_claim_token"], executionPhase=row["phase"])
         return result
 
+    def _owned_private_record(self, db, row):
+        """Attach prepared-v3 attempt only from the checked activation row."""
+        result=self._record(row, True)
+        owner=self._submission_owner(db,row)
+        if owner is not None and owner['protocol']=='ltds-viewer-prepared-envelope-jcs-v3':
+            activation=self._activation(db,row)
+            if activation is None: raise Conflict('Viewer activation required')
+            result['sourceViewerAttemptId']=activation['viewerAttemptId']
+        return result
+
     def _quota(self, db, extra_bytes=0):
         used = db.execute("""SELECT COALESCE(SUM(length(CAST(input_json AS BLOB))+
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
@@ -940,7 +950,7 @@ class ReferenceStore:
                 if (old["job_id"], old["node_id"], old["worker_id"], old["instance_id"]) != (
                         job_id, node_id, worker_id, worker_instance_id):
                     raise Conflict("claim request belongs to different worker binding")
-                return self._record(row, True)
+                return self._owned_private_record(db,row)
             self.queue._refresh_nodes(db)
             if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
                 return None
@@ -967,7 +977,7 @@ class ReferenceStore:
             db.execute("UPDATE reference_jobs SET node_id=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (node_id, job_id))
             db.execute("""INSERT INTO reference_claims(request_id,job_id,node_id,worker_id,instance_id,token)
               VALUES(?,?,?,?,?,?)""", (claim_request_id, job_id, node_id, worker_id, worker_instance_id, token))
-            return self._record(self._row(db, job_id), True)
+            return self._owned_private_record(db,self._row(db, job_id))
 
     def claim_snapshot(self, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
         """Observe one owned claim in a read transaction; never replay a claim.
@@ -1085,7 +1095,8 @@ class ReferenceStore:
                 "byteBudget", "nonce", "attemptBudget")
             if 'viewerAttemptId' in transfer_request:
                 fields=(*fields,'viewerAttemptId')
-                protocol._uuid(transfer_request['viewerAttemptId'], 'Viewer attempt')
+                from .source_range_transfer import _viewer_attempt
+                _viewer_attempt(transfer_request['viewerAttemptId'])
             protocol._closed(transfer_request, fields, "source-range-v2 transfer request")
         else:
             protocol._closed(transfer_request, ("reservationId", "generation", "expiresAt", "manifestSha256", "byteBudget", "nonce"), "transfer request")
@@ -1205,7 +1216,7 @@ class ReferenceStore:
                 raise Conflict('job is not awaiting a transfer grant')
             if json.loads(row['transfer_json'] or '{}').get('protocol') == 'source-range-v2':
                 from .source_range_transfer import validate_source_grant
-                validate_source_grant(grant, job=self._record(row, True), clock=clock or time.time)
+                validate_source_grant(grant, job=self._owned_private_record(db,row), clock=clock or time.time)
             else:
                 validate_grant(grant, job=self._record(row, True), clock=clock or time.time)
             if not old:
