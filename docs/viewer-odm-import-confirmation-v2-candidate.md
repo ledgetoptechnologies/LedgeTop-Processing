@@ -91,8 +91,8 @@ Callers must supply independent trusted values and current public-key pins.
 They must select both trust registries for the independently determined
 environment and authorized Viewer issuer; a staging key trusted in production
 could otherwise sign a production assertion. Shared keys cannot isolate those
-environments. Callers
-they must never populate expectations by copying the received confirmation.
+environments. Callers must never populate expectations by copying the received
+confirmation.
 The first verified canonical signed bytes/digest must be persisted atomically
 with the binding, and every replay must compare against that first digest.
 The pure verifier cannot enforce first-write persistence. Its returned bytes
@@ -106,4 +106,7 @@ vectors; implement and verify pre-submission/returned-job mapping, Viewer
 descriptor-safe archive intake and transactional readiness outbox; implement
 durable first-proof/replay storage against the revised v2 verifier; and test
 crash/retry, deletion gates, key rotation, actual Viewer persistence and live
-recovery. The earlier provisional v1 store is not wired to this verifier.
+recovery. `readyAt` is syntax-checked; it does not prove causal order. The Viewer
+must durably bind acceptance, ingestion and readiness in that order rather than
+relying on wall-clock timestamps. The earlier provisional v1 store is not wired
+to this verifier.
