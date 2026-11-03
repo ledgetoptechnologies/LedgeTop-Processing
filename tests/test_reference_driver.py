@@ -189,6 +189,20 @@ class ReferenceDriverTests(unittest.TestCase):
         normalized = validate_submission(raw, environment=environment, capability_fingerprint=raw['capabilityFingerprint'])
         return self.store.submit(normalized)[0]
 
+    def test_no_transfer_or_engine_start_without_scratch_reservation(self):
+        job = self.submit()
+        self.ledger.probe = lambda _: 0
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        for _ in range(2):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'queued')
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+        self.assertFalse(any(c[0] in ('initialize', 'upload', 'commit') for c in self.transport.calls))
+        self.assertEqual(list(self.scratch.iterdir()), [])
+        self.ledger.probe = lambda _: 10**9
+        self.assertEqual(self.driver.step()['state'], 'awaiting_grant')
+
     def supply_grants(self):
         for job in self.store.list(private=True):
             if job['phase'] == 'awaiting_transfer' and self.store.private_transfer_grant(job['jobId']) is None:
