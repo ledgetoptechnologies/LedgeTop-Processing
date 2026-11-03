@@ -359,6 +359,38 @@ class ReferenceDriverTests(unittest.TestCase):
                 finally:
                     case.tearDown()
 
+    def test_legacy_guarded_failure_stages_fence_background_and_cleanup_after_restart(self):
+        self.worker.host_mutation_journal = True
+        original = self.transport.action
+        def action(kind, identifier):
+            original(kind, identifier)
+            return {'uuid': identifier}
+        with patch.object(self.native, 'action', side_effect=action):
+            job = self.submit()
+            self.advance(job, 'executing')
+            with self.driver._db() as db:
+                data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+            # Model persisted pre-fix records without pretending that any
+            # coordinator receipt or physical process stop has occurred.
+            data['failure'] = {'terminalState': 'cancelled'}
+            with NodeGate('engine') as gate:
+                before = gate.snapshot()
+            for stage in ('failure_delivering', 'awaiting_failure_acceptance', 'completed'):
+                with self.subTest(stage=stage):
+                    self.driver._save(job['jobId'], stage, data)
+                    self.driver = self.make_driver()
+                    with patch.object(self.driver, '_request') as request, \
+                         patch.object(self.driver, '_background') as background, \
+                         patch.object(self.ledger, 'cleanup_candidates') as cleanup:
+                        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'guarded_terminal_stop_unverified'})
+                        request.assert_not_called()
+                        background.assert_not_called()
+                        cleanup.assert_not_called()
+                    with self.driver._db() as db:
+                        self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], stage)
+                    with NodeGate('engine') as gate:
+                        self.assertEqual(gate.snapshot(), before)
+
     def test_unrelated_success_ack_does_not_advance_current_job(self):
         job = self.submit()
         self.advance(job, 'delivering')

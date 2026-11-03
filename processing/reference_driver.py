@@ -514,6 +514,7 @@ class ReferenceDriver:
                 try:self._state_owner.check(self.path.parent)
                 except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
             self._active_step=DriverStepLease(self)
+            self._hold_legacy_guarded_failures()
             if self._combined_policy_initial is not None:
                 if self.combined_preparation is not self._combined_preparation_initial or self._combined_policy is not self._combined_policy_initial:raise DriverHeld('combined_profile_identity_changed')
                 self.combined_preparation.before_step(self._active_step)
@@ -539,6 +540,19 @@ class ReferenceDriver:
         finally:
             self._active_step=None
             self._lock.release()
+
+    def _hold_legacy_guarded_failures(self):
+        # Older builds could progress a guarded failure after marking scratch
+        # terminal without physical-stop evidence. Fence those rows before
+        # background acceptance, generic cleanup, or another claim can run.
+        with self._db() as db:
+            rows = db.execute("""SELECT job, data FROM driver_jobs WHERE stage IN
+                ('failure_delivering','awaiting_failure_acceptance','completed')""").fetchall()
+        for row in rows:
+            data = json.loads(row['data'])
+            if data.get('failure') is not None and self._kind(row['job']) == 'odm':
+                if self.worker._row(row['job'])['host_guarded']:
+                    raise DriverHeld('guarded_terminal_stop_unverified')
 
     def _background(self):
         """One retained acknowledgement plus at most one separately fenced cleanup."""
