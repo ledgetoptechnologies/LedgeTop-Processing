@@ -39,6 +39,24 @@ class FrameReceiverTests(unittest.TestCase):
   self.db.execute('PRAGMA synchronous=OFF')
   with self.assertRaises(ReceiverHeld):self.run_stage()
   self.assertEqual(self.counts(),(0,0))
+ def test_failed_initialization_rolls_back_its_schema_transaction(self):
+  db=sqlite3.connect(Path(self.temp.name)/'other.sqlite',isolation_level=None)
+  try:
+   db.set_authorizer(lambda action,name,*_: sqlite3.SQLITE_DENY if action==sqlite3.SQLITE_CREATE_TABLE and name=='candidate_frame_pages' else sqlite3.SQLITE_OK)
+   with self.assertRaises(ReceiverHeld):initialize(db)
+   db.set_authorizer(None)
+   self.assertFalse(db.in_transaction)
+   self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='candidate_frame_receipts'").fetchone())
+  finally:db.close()
+ def test_preexisting_transaction_is_not_rolled_back(self):
+  self.db.execute('CREATE TABLE unrelated_work(value TEXT)')
+  self.db.execute('BEGIN IMMEDIATE');self.db.execute("INSERT INTO unrelated_work VALUES('pending')")
+  with self.assertRaises(ReceiverHeld):initialize(self.db)
+  self.assertTrue(self.db.in_transaction)
+  with self.assertRaises(ReceiverHeld):self.run_stage()
+  self.assertTrue(self.db.in_transaction)
+  self.assertEqual(self.db.execute('SELECT value FROM unrelated_work').fetchall(),[('pending',)])
+  self.db.rollback()
  def test_synthetic_disk_full_rolls_back(self):
   def full(kind,index):
    if kind=='source' and index==2:raise sqlite3.OperationalError('synthetic disk full')

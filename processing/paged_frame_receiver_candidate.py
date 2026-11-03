@@ -32,13 +32,18 @@ def _preflight_binding(binding):
 def initialize(db):
  """Initialize a dedicated synthetic database; ownership/auth are caller concerns."""
  if db.in_transaction:raise ReceiverHeld('dedicated_database_required')
- db.execute('PRAGMA foreign_keys=ON')
- db.execute('PRAGMA synchronous=FULL')
- try:_durability(db)
- except (ValueError,sqlite3.Error):raise ReceiverHeld('durable_database_required') from None
- db.execute('CREATE TABLE IF NOT EXISTS candidate_frame_receipts(stage_id TEXT PRIMARY KEY,binding_pin TEXT NOT NULL,binding_json TEXT NOT NULL,closure_json TEXT NOT NULL)')
- db.execute('CREATE TABLE IF NOT EXISTS candidate_frame_pages(stage_id TEXT NOT NULL REFERENCES candidate_frame_receipts(stage_id),kind TEXT NOT NULL,ordinal INTEGER NOT NULL,wire BLOB NOT NULL,PRIMARY KEY(stage_id,kind,ordinal))')
- db.commit()
+ began_transaction=False
+ try:
+  db.execute('PRAGMA foreign_keys=ON')
+  db.execute('PRAGMA synchronous=FULL')
+  _durability(db)
+  db.execute('BEGIN IMMEDIATE');began_transaction=True
+  db.execute('CREATE TABLE IF NOT EXISTS candidate_frame_receipts(stage_id TEXT PRIMARY KEY,binding_pin TEXT NOT NULL,binding_json TEXT NOT NULL,closure_json TEXT NOT NULL)')
+  db.execute('CREATE TABLE IF NOT EXISTS candidate_frame_pages(stage_id TEXT NOT NULL REFERENCES candidate_frame_receipts(stage_id),kind TEXT NOT NULL,ordinal INTEGER NOT NULL,wire BLOB NOT NULL,PRIMARY KEY(stage_id,kind,ordinal))')
+  db.commit()
+ except (ValueError,sqlite3.Error):
+  if began_transaction and db.in_transaction:db.rollback()
+  raise ReceiverHeld('durable_database_required') from None
 
 class _Rows(io.RawIOBase):
  def __init__(self,cursor):self.cursor=cursor;self.pending=b''
@@ -82,8 +87,9 @@ def _validated(db,stage_id,binding,pin,closure,processing_pages):
 
 def stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,selected_stream,processing_closure,processing_pages,_fault=None):
  """Transactional candidate only; trusted_binding has NO authentication here."""
+ if db.in_transaction:raise ReceiverHeld('staging_unavailable')
+ began_transaction=False
  try:
-  if db.in_transaction:raise ValueError()
   _durability(db);_preflight_binding(trusted_binding)
   p._slug(stage_id,'stage ID');p._hash(expected_binding_sha256,'binding pin')
   # Snapshot/pin are application-owned and immutable; wire decoder not supplied.
@@ -91,7 +97,7 @@ def stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,se
   validate_pages(processing_closure,processing_pages,expected_closure_sha256=trusted_binding['processingClosureSha256'])
   binding_wire=p.canonical_json(trusted_binding);closure_wire=p.canonical_json(processing_closure)
   if len(binding_wire)>65536 or len(closure_wire)>65536:raise ValueError()
-  db.execute('BEGIN IMMEDIATE')
+  db.execute('BEGIN IMMEDIATE');began_transaction=True
   old=db.execute("SELECT CASE WHEN typeof(binding_pin)='text' AND instr(binding_pin,char(0))=0 AND length(binding_pin)=64 THEN binding_pin END, CASE WHEN typeof(binding_json)='text' AND instr(binding_json,char(0))=0 AND length(binding_json)<=65536 THEN binding_json END, CASE WHEN typeof(closure_json)='text' AND instr(closure_json,char(0))=0 AND length(closure_json)<=65536 THEN closure_json END FROM candidate_frame_receipts WHERE stage_id=?",(stage_id,)).fetchone()
   if old:
    _preflight_stored_pages(db,stage_id)
@@ -116,5 +122,5 @@ def stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,se
   result=_validated(db,stage_id,trusted_binding,expected_binding_sha256,processing_closure,processing_pages)
   db.commit();return dict(result,created=True)
  except (sqlite3.Error,OSError,ValueError,TypeError,KeyError,UnicodeError,OverflowError,AttributeError):
-  if db.in_transaction:db.rollback()
+  if began_transaction and db.in_transaction:db.rollback()
   raise ReceiverHeld('staging_unavailable') from None
