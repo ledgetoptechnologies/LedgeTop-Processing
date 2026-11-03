@@ -269,6 +269,20 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.task(identifier)['node_id'], 'cluster')
 
+    def test_offline_small_node_waits_even_when_administratively_active(self):
+        identifier = self.submit()
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'active')
+        self.unavailable.add('cluster')
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertFalse(self.fleet.commits)
+        self.assertFalse(self.engines['main'].calls)
+
+        self.unavailable.remove('cluster')
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'], 'cluster')
+
     def test_large_job_waits_for_main_without_overflow_to_small_node(self):
         self.config.local_max_photos = 1
         identifier = self.submit(count=2)
