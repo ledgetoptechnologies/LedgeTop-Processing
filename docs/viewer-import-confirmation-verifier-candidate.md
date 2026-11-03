@@ -18,6 +18,15 @@ results have no ODM archive; combined results require one archive and the full
 role-object closure. This candidate does not attest that TreeDar artifacts were
 actually imported.
 
+**Current integration deadlock:** no trusted channel currently supplies the
+Viewer model/version/output IDs or output and archive inventory digests to
+Processing independently of the proposed confirmation. The verifier therefore
+cannot yet be safely wired. Copying those expected values from the incoming
+confirmation merely to satisfy the check would remove the intended binding;
+keep the verifier inactive and the cleanup holds in place until the Viewer and
+Processing owners agree on an authenticated source or a revised protocol that
+establishes equivalent guarantees.
+
 The closed signed body uses protocol `ltds-viewer-import-confirmation-v1`,
 schema version 1 and domain `LTDS-VIEWER-IMPORT-CONFIRMATION-V1` followed by a
 NUL byte. It includes issuer/key/confirmation IDs; job, generation, environment
@@ -29,6 +38,21 @@ ODM archive identity/size/hash and inventory digest (or null with no ODM); and
 unpadded base64url Ed25519 over domain plus `reference_protocol.canonical_json`
 of the body without signature. The confirmation digest hashes canonical JSON of
 the entire signed object.
+
+Before any hashing or canonicalization, all arguments are detached into bounded
+JSON snapshots and share a conservative
+16 MiB serialized-size budget and limits of 500,000 nodes, nesting depth 12,
+10,000 list items, 64 map entries, and 8,192 UTF-8 bytes per string (128 bytes
+per key). Only exact built-in JSON types and safe integers are accepted; cycles,
+invalid Unicode, and custom container subclasses fail closed. These limits are
+part of this proposal and must be negotiated with Viewer. The verifier returns
+immutable canonical bytes and their digest; each `confirmation` property read
+decodes a new detached copy, so mutations cannot alter the retained proof.
+The caller must obtain coherent trusted expected values from its own durable
+transaction; snapshotting cannot make separately read database rows atomic.
+The result type is a data container, not an unforgeable capability: callers
+must rely on the verification operation and durable binding, never on the
+presence of an instance of that type alone.
 
 On first receipt the caller must atomically bind and persist the verified
 confirmation digest before any action. Replays must supply that stored digest;

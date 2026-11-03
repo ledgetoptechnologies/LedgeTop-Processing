@@ -1,6 +1,9 @@
 import base64
 import copy
+from dataclasses import FrozenInstanceError
+import hashlib
 import unittest
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -8,7 +11,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from processing import reference_protocol as protocol
 from processing.viewer_acceptance_receipt import SIGNATURE_DOMAIN as COPY_DOMAIN
 from processing.viewer_import_confirmation import (
-    ImportConfirmationRejected, PROTOCOL, SIGNATURE_DOMAIN, verify_import_confirmation,
+    ImportConfirmationRejected, PROTOCOL, SIGNATURE_DOMAIN, VerifiedImportConfirmation,
+    verify_import_confirmation,
 )
 from tests.viewer_receipt_signer import SyntheticViewerSigner
 
@@ -73,8 +77,78 @@ class ViewerImportConfirmationTests(unittest.TestCase):
         verified = self.verify()
         self.assertEqual(verified.confirmation, self.confirmation)
         self.assertEqual(self.verify(prior_confirmation_sha256=verified.sha256).sha256, verified.sha256)
-        verified.confirmation['modelId'] = 'changed-local-copy'
+        detached = verified.confirmation
+        detached['modelId'] = 'changed-local-copy'
+        self.assertEqual(verified.confirmation['modelId'], 'model-1')
         self.assertEqual(self.confirmation['modelId'], 'model-1')
+        self.assertEqual(hashlib.sha256(verified.canonical_bytes).hexdigest(), verified.sha256)
+        with self.assertRaises(FrozenInstanceError):
+            verified.canonical_bytes = b'changed'
+        with self.assertRaisesRegex(ValueError, 'invalid immutable confirmation snapshot'):
+            VerifiedImportConfirmation(bytearray(verified.canonical_bytes), verified.sha256)
+        with self.assertRaisesRegex(ValueError, 'invalid immutable confirmation snapshot'):
+            VerifiedImportConfirmation(verified.canonical_bytes, '0' * 64)
+
+    def test_rejects_adversarial_inputs_before_any_canonicalization(self):
+        deep = None
+        for _ in range(15):
+            deep = {'nested': deep}
+        cycle = []
+        cycle.append(cycle)
+        aggregate = [['x' * 8192] * 400]
+        cases = [('deep', deep, 'input_structure_too_large'),
+                 ('cycle', cycle, 'input_structure_too_large'),
+                 ('long_string', 'x' * 8193, 'input_string_too_large'),
+                 ('many_items', [None] * 10001, 'input_container_too_large'),
+                 ('aggregate_bytes', aggregate, 'input_bytes_too_large'),
+                 ('wide_utf8', '\U0001f600' * 2049, 'input_string_too_large'),
+                 ('surrogate', '\ud800', 'invalid_input_utf8'),
+                 ('large_integer', 1 << 60, 'invalid_input_integer'),
+                 ('non_json', b'bytes', 'invalid_input_type')]
+        original = self.confirmation['archive']
+        for label, value, reason in cases:
+            with self.subTest(label=label):
+                self.confirmation['archive'] = value
+                with patch('processing.viewer_import_confirmation.protocol.canonical_json',
+                           side_effect=AssertionError('must not serialize unbounded input')):
+                    with self.assertRaisesRegex(ImportConfirmationRejected, reason):
+                        self.verify()
+        self.confirmation['archive'] = original
+
+    def test_prevalidation_covers_all_external_argument_trees(self):
+        bad_expected = copy.deepcopy(self.expected)
+        bad_expected['viewerTaskId'] = 'x' * 8193
+        bad_manifest = copy.deepcopy(self.manifest)
+        bad_manifest['objects'][0]['id'] = '\ud800'
+        bad_envelopes = copy.deepcopy(self.envelopes)
+        bad_envelopes[0]['viewerReceipt']['objects'] = [None] * 10001
+        bad_import_keys = copy.deepcopy(self.import_keys)
+        bad_import_keys['import-key']['publicKeyPem'] = 'x' * 8193
+        bad_copy_keys = copy.deepcopy(self.copy_signer.trusted_keys)
+        bad_copy_keys[self.copy_signer.key_id]['issuerId'] = 'x' * 8193
+        for kwargs, reason in [({'expected': bad_expected}, 'input_string_too_large'),
+                               ({'result_manifest': bad_manifest}, 'invalid_input_utf8'),
+                               ({'accepted_envelopes': bad_envelopes}, 'input_container_too_large'),
+                               ({'trusted_import_keys': bad_import_keys}, 'input_string_too_large'),
+                               ({'trusted_copy_keys': bad_copy_keys}, 'input_string_too_large'),
+                               ({'prior_confirmation_sha256': 'x' * 8193}, 'input_string_too_large')]:
+            with self.subTest(argument=next(iter(kwargs))):
+                with patch('processing.viewer_import_confirmation.protocol.canonical_json',
+                           side_effect=AssertionError('must not serialize unbounded input')):
+                    with self.assertRaisesRegex(ImportConfirmationRejected, reason):
+                        self.verify(**kwargs)
+
+    def test_input_mutation_during_hashing_cannot_change_verified_snapshot(self):
+        original = copy.deepcopy(self.confirmation)
+        real_canonical = protocol.canonical_json
+        def mutate_inputs(value):
+            self.confirmation['objects'][0]['byteSize'] = 999
+            self.expected['viewerAttemptId'] = 'changed-after-snapshot'
+            return real_canonical(value)
+        with patch('processing.viewer_import_confirmation.protocol.canonical_json', side_effect=mutate_inputs):
+            verified = self.verify()
+        self.assertEqual(verified.confirmation, original)
+        self.assertEqual(hashlib.sha256(verified.canonical_bytes).hexdigest(), verified.sha256)
 
     def test_validly_signed_changed_binding_is_rejected(self):
         for field, value in [('viewerAttemptId', 'attempt-2'), ('modelId', 'other-model'),
