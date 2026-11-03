@@ -136,6 +136,8 @@ class TaskStore:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1))')
             if 'full_option_evidence_required' not in {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN full_option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(full_option_evidence_required IN (0,1))')
+            if 'node_guarded' not in {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN node_guarded INTEGER NOT NULL DEFAULT 0 CHECK(node_guarded IN (0,1))')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_files (
                 uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
                 path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -700,11 +702,13 @@ class TaskStore:
     @task_fenced
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
-                   'progress', 'output_lines', 'archive_path'}
+                   'progress', 'output_lines', 'archive_path', 'node_guarded'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('unexpected broker update fields')
         if 'stage' in fields and fields['stage'] not in STAGES:
             raise ValueError('invalid task stage')
+        if 'node_guarded' in fields and type(fields['node_guarded']) is not bool:
+            raise ValueError('guard marker must be boolean')
         for field in ('phase', 'node_id'):
             if field in fields and (not isinstance(fields[field], str) or not PHASE.fullmatch(fields[field])):
                 raise ValueError('invalid broker identity or phase')
@@ -733,6 +737,8 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            if row['node_guarded'] and fields.get('node_guarded', True) is not True:
+                raise Conflict('guard marker cannot be cleared')
             if row['engine_uuid'] and fields.get('engine_uuid', row['engine_uuid']) != row['engine_uuid']:
                 raise Conflict('engine task identity is immutable')
             if fields.get('engine_uuid') and db.execute(

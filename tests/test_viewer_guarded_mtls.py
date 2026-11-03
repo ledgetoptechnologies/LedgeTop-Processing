@@ -11,12 +11,14 @@ import os
 import shutil
 import ssl
 import subprocess
+import sys
 import threading
 import unittest
 import uuid
 
 from processing.guarded_native_https import create_guarded_https_server
 from processing.viewer_service import EngineUnavailable
+from processing.prototype import Conflict
 from tests.test_viewer_guarded_bridge import ViewerGuardedBridgeTests, TOKEN
 
 
@@ -155,6 +157,86 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         self.assertEqual(self.journal_state()[1][-1], ('commit', 'pending'))
         self.service.tick()
         self.assertEqual(self.native_fixture.counts()['commit'], 1)
+
+    def assert_restart_holds_pending(self, phase, status):
+        job = self.submit()
+        self.service.tick()
+        task = self.service.store.task(job)
+        self.assertEqual(task['node_guarded'], 1)
+        self.service.store.update(job, phase=phase)
+        with self.native_fixture._db() as db:
+            db.execute('UPDATE tasks SET status=? WHERE uuid=?', (status, task['engine_uuid']))
+        # Reopen service with a replacement object that does not carry the
+        # guard marker; the authoritative marker must survive in SQLite.
+        self.service.close()
+        engine = self.service.engines['cluster']
+        engine.node_guarded = False
+        from processing.viewer_service import ViewerService
+        self.service = ViewerService(self.queue, self.service.config,
+                                     engines={'cluster': engine, 'main': engine}, probe=self.service.probe)
+        self.addCleanup(self.service.close)
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': []}
+        self.service._selected_options = lambda _: []
+        calls = self.native_fixture.counts()
+        self.service.tick()
+        self.assertTrue(self.service.info(job).get('ledgetopHeld'))
+        self.assertEqual(self.service.store.task(job)['node_guarded'], 1)
+        self.assertEqual(self.native_fixture.counts(), calls)
+        with self.assertRaises(Conflict):
+            self.service.store.update(job, node_guarded=False)
+
+    def test_restart_commit_pending_status_20_holds(self):
+        self.assert_restart_holds_pending('commit_pending', 20)
+
+    def test_restart_commit_pending_status_40_holds(self):
+        self.assert_restart_holds_pending('commit_pending', 40)
+
+    def test_restart_init_pending_holds(self):
+        self.assert_restart_holds_pending('init_pending', 20)
+
+    def test_restart_upload_pending_holds(self):
+        self.assert_restart_holds_pending('upload_pending', 40)
+
+    @unittest.skipIf(os.name == 'nt', 'coordinator restart fixture requires Linux gate locking')
+    def test_new_process_holds_guarded_commit_before_observing_engine(self):
+        job = self.submit()
+        self.service.tick()
+        self.service.store.update(job, phase='commit_pending')
+        self.service.close()
+        self.queue.close()
+        crash = '''
+import os, sys
+from processing.prototype import Queue
+queue = Queue(sys.argv[1], node_ids=('cluster','main'), treedar_node_ids=('main',), viewer_enabled=True)
+os._exit(37)
+'''
+        crashed = subprocess.run([sys.executable, '-c', crash, str(self.root / 'state')],
+                                 text=True, capture_output=True, timeout=15)
+        self.assertEqual(crashed.returncode, 37, crashed.stderr)
+        program = '''
+import sys
+from types import SimpleNamespace
+from processing.prototype import Queue
+from processing.viewer_service import ViewerService
+root, identifier = sys.argv[1:]
+queue = Queue(root, node_ids=('cluster','main'), treedar_node_ids=('main',), viewer_enabled=True)
+config = SimpleNamespace(prototype_state_dir=root, viewer_max_input_bytes=1000,
+    viewer_max_archive_bytes=1048576, local_node_url='http://unused-local', local_node_token='unused',
+    main_node_url='http://unused-main', main_node_token='unused', local_max_photos=1000,
+    local_max_input_bytes=1000)
+class Engine:
+    node_guarded = False
+    def read(self, *args, **kwargs): raise AssertionError('uncertain journal must not be polled')
+service = ViewerService(queue, config, engines={'cluster':Engine(),'main':Engine()},
+    probe=lambda *args: (_ for _ in ()).throw(AssertionError('must hold before dispatch')))
+service.tick()
+assert service.info(identifier).get('ledgetopHeld') is True
+assert service.store.task(identifier)['node_guarded'] == 1
+service.close(); queue.close()
+'''
+        result = subprocess.run([sys.executable, '-c', program, str(self.root / 'state'), job],
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == '__main__': unittest.main()

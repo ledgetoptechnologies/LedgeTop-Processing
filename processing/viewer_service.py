@@ -704,7 +704,11 @@ class ViewerService:
             task = self.store.task(identifier)
             engine = self.engines[task['node_id']]
             self._check_dispatch_boundary(task)
-            self.store.update(identifier, phase='init_pending')
+            # Persist the guard association with the first pending phase,
+            # before issuing a mutation, so recovery is independent of the
+            # replacement process's engine object or runtime configuration.
+            self.store.update(identifier, phase='init_pending',
+                              node_guarded=getattr(engine, 'node_guarded', False) is True)
             engine.initialize(task)
             self._check_dispatch_boundary(task)
             self.store.update(identifier, phase='initialized')
@@ -723,7 +727,7 @@ class ViewerService:
         except Exception:
             current = self.store.task(identifier)
             if current['phase'] == 'commit_pending':
-                if getattr(self.engines[current['node_id']], 'node_guarded', False) is True:
+                if current['node_guarded'] == 1:
                     # A guarded node may have committed without a verifiable
                     # response, leaving its durable intent unresolved. Native
                     # status alone does not acknowledge that journal entry.
@@ -841,6 +845,9 @@ class ViewerService:
                 try:
                     task = self.store.task_for_job(job['id'])
                     if task['uuid'] in self._dispatch_threads:
+                        continue
+                    if task['node_guarded'] == 1 and task['phase'] in ('init_pending', 'upload_pending', 'commit_pending'):
+                        self._hold(task, 'guard_mutation_uncertain')
                         continue
                     if (task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
                             and task['engine_uuid'] and task['node_id'] and task['claim_token']):
@@ -971,7 +978,10 @@ class ViewerService:
                 if current['phase'] == 'commit_pending':
                     # Exact assigned engine UUID lets us reconcile a lost commit
                     # ACK by reads. Never send commit again under uncertainty.
-                    self.store.update(task['uuid'], error='commit_ack_uncertain')
+                    if current['node_guarded'] == 1:
+                        self._hold(current, 'commit_ack_uncertain')
+                    else:
+                        self.store.update(task['uuid'], error='commit_ack_uncertain')
                 else:
                     self._hold(current, 'engine_submission_uncertain')
 
