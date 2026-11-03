@@ -11,6 +11,7 @@ from processing import reference_protocol as protocol
 from tests.test_bound_node_job_candidate import BoundJobTests, KEY
 from tests.test_guarded_native_https import TOKEN
 from tests.test_viewer_service import ViewerServiceTests
+from tests.guarded_test_signer import operation_signer
 
 
 class PairedReconciliation(BoundJobTests):
@@ -46,7 +47,8 @@ class PairedReconciliation(BoundJobTests):
         source.chmod(0o600)
         context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
         context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
-        client = GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10)
+        client = GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10,
+                                   job_claim=env, operation_signer=operation_signer(self.proxy, KEY, env))
         client.upload(self.job, {'path': str(source), **{k: item[k] for k in ('name', 'bytes', 'sha256')}})
         kwargs = dict(claim_key=KEY, node='main', authority=self.authority,
                       gate_generation=1, origin='https://coordinator.invalid')

@@ -5,21 +5,23 @@ from urllib.parse import urlsplit
 
 from processing.guarded_native_client import GuardedNativeClient
 from processing.viewer_service import EngineUnavailable
-from tests.test_bound_node_job_candidate import BoundJobTests
+from tests.test_bound_node_job_candidate import BoundJobTests, KEY
 from tests.test_guarded_native_https import TOKEN
+from tests.guarded_test_signer import operation_signer
 from ops.native_node_fixture import ARCHIVE
 
 
 class BoundReadTests(BoundJobTests):
-    def client(self, server):
+    def client(self, server, claim):
         context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
         context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
-        return GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10)
+        return GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10,
+                                   job_claim=claim, operation_signer=operation_signer(self.proxy, KEY, claim))
 
     def test_bound_reads_gate_results_until_commit_and_reject_wrong_job(self):
         server = self.start_listener()
         claim = self.envelope()
-        client = self.client(server)
+        client = self.client(server, claim)
         self.assertEqual(self.request(server, '/v1/initialize-bound', {'task': self.task, 'jobClaim': claim})[0], 200)
         self.assertEqual(client.read_bound(claim, 'info')['held'], True)
         with self.assertRaises(EngineUnavailable):
@@ -46,7 +48,7 @@ class BoundReadTests(BoundJobTests):
         claim = self.envelope()
         self.assertEqual(self.request(server, '/v1/initialize-bound', {'task': self.task, 'jobClaim': claim})[0], 200)
         self.commit_reply(False)
-        client = self.client(server)
+        client = self.client(server, claim)
         client.upload(self.job, self.item)
         with self.assertRaises(EngineUnavailable): client.action('commit', self.job)
         self.assertEqual(client.read_bound(claim, 'output', line=0), {'held': True, 'value': []})
@@ -58,7 +60,7 @@ class BoundReadTests(BoundJobTests):
         server = self.start_listener()
         claim = self.envelope()
         self.assertEqual(self.request(server, '/v1/initialize-bound', {'task': self.task, 'jobClaim': claim})[0], 200)
-        client = self.client(server)
+        client = self.client(server, claim)
         client.upload(self.job, self.item)
         client.action('commit', self.job)
         engine = self.proxy.engine
@@ -76,7 +78,7 @@ class BoundReadTests(BoundJobTests):
         server = self.start_listener()
         claim = self.envelope()
         self.assertEqual(self.request(server, '/v1/initialize-bound', {'task': self.task, 'jobClaim': claim})[0], 200)
-        client = self.client(server)
+        client = self.client(server, claim)
         client.upload(self.job, self.item)
         client.action('commit', self.job)
         engine = self.proxy.engine
