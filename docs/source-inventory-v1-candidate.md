@@ -77,3 +77,12 @@ semantic checker. Viewer currently snapshots bytes/count at attempt creation,
 but the source implementation examined does not freeze the corresponding rows;
 reading subsequently mutable marks as proof is unsafe. Exact trusted evidence
 provenance and numeric bounds must be agreed before any integration.
+The candidate deliberately holds some inputs the current Viewer generator can
+emit: colliding ASCII case-insensitive basenames, non-ASCII basenames, duplicate
+point/image or identical rendered rows, and coordinates or pixels outside its
+conservative bounds. Viewer itself only rejects empty or whitespace-containing
+basenames and non-finite numbers in this generator. These stricter checks are
+provisional and do not imply that Viewer has adopted them. Tests compare actual
+Viewer output at negative rounding boundaries, signed zero, 1e-8, multiple
+ordered rows and duplicate-basename cases; they do not establish the source
+rows' authenticity or a complete cross-service protocol.

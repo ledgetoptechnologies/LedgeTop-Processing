@@ -40,5 +40,28 @@ class GcpSemanticsTests(unittest.TestCase):
         result=subprocess.run(['node','-e',script,str(path)],input=json.dumps(viewer),text=True,encoding='utf8',capture_output=True,check=True)
         validate_gcp_semantics(result.stdout.encode(),processing=self.processing,correspondences=rows)
 
+    def test_viewer_rounding_boundaries_order_and_ambiguous_names(self):
+        source=os.environ.get('VIEWER_GCP_ODM_JS')
+        if not source:self.skipTest('pinned Viewer gcpOdm.js required')
+        path=Path(source).resolve(strict=True); data=path.read_bytes().replace(b'\r\n',b'\n')
+        self.assertEqual(hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest(),'81dc6b7bd20cc3505cd3a33e8222ba5acb9e845c')
+        numbers=[-1.234567895,-1.234567885,-0.0,-0.000000001,0.00000001]
+        rows=[dict(self.rows[0],pointId=f'point-{i}',longitude=n,pixelX=i+1) for i,n in enumerate(numbers)]
+        viewer=[dict(longitude=r['longitude'],latitude=r['latitude'],elevationM=r['elevationM'],pixelX=r['pixelX'],pixelY=r['pixelY'],relativePath=self.processing[0]['relativePath']) for r in rows]
+        script="const f=require(process.argv[1]).odmGcpList;let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>process.stdout.write(f(JSON.parse(s))))"
+        def generate(values):
+            return subprocess.run(['node','-e',script,str(path)],input=json.dumps(values),text=True,encoding='utf8',capture_output=True,check=True).stdout.encode()
+        raw=generate(viewer)
+        validate_gcp_semantics(raw,processing=self.processing,correspondences=rows)
+        self.assertIn(b'\n-0 ',raw)
+        self.assertIn(b'\n0.00000001 ',raw)
+        with self.assertRaises(ValueError):validate_gcp_semantics(raw,processing=self.processing,correspondences=list(reversed(rows)))
+        # Viewer generator emits duplicate-basename lines; our separate v1
+        # materialization boundary must reject their ambiguous image identity.
+        viewer[1]['relativePath']='other/IMG_0001.JPG'
+        dup_processing=self.processing+[dict(self.processing[0],datasetFileId='image-2',relativePath='other/IMG_0001.JPG')]
+        dup_rows=copy.deepcopy(rows);dup_rows[1]['imageDatasetFileId']='image-2'
+        with self.assertRaises(ValueError):validate_gcp_semantics(generate(viewer),processing=dup_processing,correspondences=dup_rows)
+
 
 if __name__=='__main__':unittest.main()
