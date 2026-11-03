@@ -1030,6 +1030,41 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.task(fallback)['node_id'], 'large')
 
+    def test_viewer_uses_small_node_behind_oversized_reference_job(self):
+        from processing.reference_store import ReferenceStore
+        from processing import reference_protocol as protocol
+        self.service.close(); self.queue.close()
+        inventory = (dict(id='cluster', physicalHostId='cluster', origin='http://192.0.2.1:3000',
+                          token='', maxPhotos=1, capabilities=('odm',)),
+                     dict(id='main', physicalHostId='main', origin='http://192.0.2.2:3000',
+                          token='', maxPhotos=None, capabilities=('odm',)))
+        self.config.node_inventory = inventory
+        self.config.prototype_state_dir = str(self.root / 'mixed-profile-state')
+        self.queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                           treedar_node_ids=(), viewer_enabled=True, reference_enabled=True,
+                           per_node_slots=True, node_photo_limits={'cluster': 1, 'main': None})
+        self.service = ViewerService(self.queue, self.config, engines=self.engines,
+            probe=lambda role, origin, token: {'ready': True, 'maxImages': None, 'taskQueueCount': 0})
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
+        self.service._selected_options = lambda _: [dict(item) for item in OPTIONS]
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
+        raw = fixture['submission']; manifest = raw['manifest']
+        manifest['objects'] = [{**manifest['objects'][0], 'id': f'image-{i}',
+                                'name': f'image-{i}.jpg'} for i in range(2)]
+        manifest.update(objectCount=2, totalBytes=6,
+                        inputCounts={'images': 2, 'lidarObjects': 0, 'points': 0})
+        manifest['sha256'] = protocol.manifest_sha256(manifest)
+        reference = ReferenceStore(self.queue)
+        first, _ = reference.submit(protocol.validate_submission(raw, environment='production',
+            capability_fingerprint=raw['capabilityFingerprint']))
+        viewer = self.submit()
+        self.service.tick()
+        self.assertEqual(self.task(viewer)['node_id'], 'cluster')
+        self.assertEqual(self.queue.get(first['jobId'])['status'], 'queued')
+        self.assertEqual(self.service.info(viewer)['status']['code'], 10)
+        self.service.tick()
+        self.assertEqual(self.service.info(viewer)['status']['code'], 20)
+
     def test_partial_catalog_saved_evidence_routes_only_to_compatible_returned_node(self):
         from tests.test_options import Engine
         self.service.close(); self.queue.close()

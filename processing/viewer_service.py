@@ -176,6 +176,9 @@ class ViewerService:
         self.inventory = getattr(config, 'node_inventory', ())
         if self.inventory and (not queue.per_node_slots or tuple(n['id'] for n in self.inventory) != queue.node_ids):
             raise ValueError('inventory requires matching ordered per-node queue')
+        if (self.inventory and queue.node_photo_limits is not None
+                and queue.node_photo_limits != {n['id']: n['maxPhotos'] for n in self.inventory}):
+            raise ValueError('inventory photo limits differ from queue')
         self.engines = engines or ({n['id']: NativeEngine(n['origin'], n['token']) for n in self.inventory if 'odm' in n['capabilities']}
                                   if self.inventory else {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
                                   'main': NativeEngine(config.main_node_url, config.main_node_token)})
@@ -997,12 +1000,16 @@ class ViewerService:
                 return
             queued = sorted((j for j in jobs if j['status'] == 'queued'),
                             key=lambda j: (j['environment'] != 'production', jobs.index(j)))
-            if not queued or queued[0]['profile'] != VIEWER_PROFILE:
+            if not queued or (not self.inventory and queued[0]['profile'] != VIEWER_PROFILE):
                 return
             if queued[0]['environment'] == 'staging' and any(
                     j['environment'] == 'production' and j['status'] in ('queued', 'running', 'held') for j in jobs):
                 return
-            task = self.store.task_for_job(queued[0]['id'])
+            first_viewer = next((job for job in queued if job['profile'] == VIEWER_PROFILE
+                                 and job['environment'] == queued[0]['environment']), None)
+            if first_viewer is None:
+                return
+            task = self.store.task_for_job(first_viewer['id'])
             nodes = {}
             if self.inventory:
                 occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
@@ -1028,11 +1035,15 @@ class ViewerService:
                 node_id = None
                 top_environment = queued[0]['environment']
                 for candidate in queued:
-                    if candidate['environment'] != top_environment or candidate['profile'] != VIEWER_PROFILE:
+                    if candidate['environment'] != top_environment:
                         break
+                    if candidate['profile'] != VIEWER_PROFILE:
+                        continue
                     current = self.store.task_for_job(candidate['id'])
                     for spec, limit in available:
                         if all(maximum is None or current['images_count'] <= maximum for maximum in (spec['maxPhotos'], limit)):
+                            if not self.queue.viewer_skip_is_safe(candidate['id'], spec['id']):
+                                continue
                             try:
                                 self._check_options(current['options'], node_id=spec['id'],
                                                     evidence=current['option_evidence'], full_evidence=current['full_option_evidence'])

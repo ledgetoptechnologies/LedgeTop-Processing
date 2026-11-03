@@ -305,6 +305,37 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIsNone(store.claim(reference['jobId'], node_id='cluster', worker_id='local',
                                       worker_instance_id='instance', claim_request_id='missing-evidence'))
 
+    def test_viewer_claim_bypasses_reference_only_if_node_cannot_fit_it(self):
+        self.queue.per_node_slots = True
+        self.queue.node_photo_limits = {'cluster': 1, 'node-2': None}
+        self.queue.allowed_profiles.add(VIEWER_PROFILE)
+        raw = copy.deepcopy(self.fixture['submission'])
+        manifest = raw['manifest']
+        manifest['objects'] = [{**manifest['objects'][0], 'id': f'image-{i}',
+                                'name': f'image-{i}.jpg'} for i in range(2)]
+        manifest.update(objectCount=2, totalBytes=6,
+                        inputCounts={'images': 2, 'lidarObjects': 0, 'points': 0})
+        manifest['sha256'] = p.manifest_sha256(manifest)
+        reference, _ = self.store.submit(p.validate_submission(raw, environment='staging',
+            capability_fingerprint=raw['capabilityFingerprint']))
+        viewer, _ = self.queue.submit({'requestId': 'viewer-after-reference', 'environment': 'staging',
+                                       'profile': VIEWER_PROFILE})
+        request = {'workerId': 'viewer-dispatch', 'nodeId': 'node-2',
+                   'profiles': [VIEWER_PROFILE], 'expectedJobId': viewer['id']}
+        self.assertFalse(self.queue.viewer_skip_is_safe(viewer['id'], 'node-2'))
+        self.assertIsNone(self.queue.claim(request, allow_viewer_same_priority_skip=True))
+        self.assertTrue(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+        # A changed manifest after advisory discovery must block atomic claim.
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET manifest_sha=? WHERE job_id=?', ('0' * 64, reference['jobId']))
+        request['nodeId'] = 'cluster'
+        self.assertIsNone(self.queue.claim(request, allow_viewer_same_priority_skip=True))
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET manifest_sha=? WHERE job_id=?',
+                       (manifest['sha256'], reference['jobId']))
+        self.assertIsNotNone(self.queue.claim(request, allow_viewer_same_priority_skip=True))
+        self.assertEqual(self.queue.get(reference['jobId'])['status'], 'queued')
+
     def test_released_unstarted_claim_is_fenced_from_replay(self):
         job, _ = self.store.submit(self.new_submission())
         binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',

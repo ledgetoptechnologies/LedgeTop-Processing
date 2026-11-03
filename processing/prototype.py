@@ -83,7 +83,7 @@ class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
                  require_idle_existing=False, per_node_slots=False, node_capabilities=None,
-                 parallel_viewer_uploads=False):
+                 parallel_viewer_uploads=False, node_photo_limits=None):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or ('cluster' not in node_ids and not per_node_slots)):
@@ -98,6 +98,12 @@ class Queue(Maintenance):
         self._viewer_task_locks_guard = threading.Lock()
         self._viewer_task_locks = {}
         self.node_ids = tuple(node_ids)
+        if node_photo_limits is not None and (type(node_photo_limits) is not dict
+                or set(node_photo_limits) != set(self.node_ids)
+                or any(value is not None and (type(value) is not int or value < 1)
+                       for value in node_photo_limits.values())):
+            raise ValueError('node photo limits must cover the configured nodes')
+        self.node_photo_limits = dict(node_photo_limits) if node_photo_limits is not None else None
         if type(per_node_slots) is not bool:
             raise ValueError("per_node_slots must be boolean")
         self.per_node_slots = per_node_slots
@@ -282,6 +288,47 @@ class Queue(Maintenance):
         except AdmissionClosed:
             return None
 
+    def _viewer_skip_is_safe(self, db, candidate, node_id):
+        """Check prior profile barriers under the same lock as the claim."""
+        prior = db.execute("SELECT * FROM jobs WHERE status='queued' AND environment=? AND seq<? ORDER BY seq",
+                           (candidate['environment'], candidate['seq'])).fetchall()
+        for job in prior:
+            if job['profile'] == VIEWER_PROFILE:
+                continue  # ViewerService separately checks node eligibility.
+            if job['profile'] != REFERENCE_PROFILE or self.node_photo_limits is None:
+                return False
+            limit = self.node_photo_limits[node_id]
+            if limit is None:
+                return False
+            try:
+                row = db.execute('SELECT input_json,manifest_sha FROM reference_jobs WHERE job_id=?',
+                                 (job['id'],)).fetchone()
+                if not row:
+                    return False
+                from . import reference_protocol as protocol
+                submission = json.loads(row['input_json'])
+                manifest = submission['manifest']
+                count = manifest['inputCounts']['images']
+                objects = manifest['objects']
+                if (type(count) is not int or count < 0 or count <= limit
+                        or type(objects) is not list or not 0 < len(objects) <= protocol.MAX_OBJECTS
+                        or any(type(obj) is not dict or obj.get('kind') not in ('image', 'lidar', 'auxiliary') for obj in objects)
+                        or count != sum(obj['kind'] == 'image' for obj in objects)
+                        or protocol.manifest_sha256(manifest) != row['manifest_sha']
+                        or manifest.get('sha256') != row['manifest_sha']):
+                    return False
+            except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError):
+                return False
+        return True
+
+    def viewer_skip_is_safe(self, job_id, node_id):
+        """Advisory selection; claim rechecks against current queue state."""
+        self._known_node(node_id)
+        with self._db() as db:
+            candidate = db.execute("SELECT * FROM jobs WHERE id=? AND status='queued'", (job_id,)).fetchone()
+            return bool(candidate and candidate['profile'] == VIEWER_PROFILE
+                        and self._viewer_skip_is_safe(db, candidate, node_id))
+
     def _claim(self, payload, *, allow_viewer_same_priority_skip=False):
         expected = ['workerId']
         if isinstance(payload, dict):
@@ -316,12 +363,10 @@ class Queue(Maintenance):
                 return None
             if allow_viewer_same_priority_skip and self.per_node_slots and expected_job and row['id'] != expected_job:
                 candidate = db.execute("SELECT * FROM jobs WHERE id=? AND status='queued'", (expected_job,)).fetchone()
-                if (candidate is None or candidate['profile'] != VIEWER_PROFILE or row['profile'] != VIEWER_PROFILE
+                if (candidate is None or candidate['profile'] != VIEWER_PROFILE
                         or candidate['environment'] != row['environment']):
                     return None
-                barrier = db.execute("SELECT 1 FROM jobs WHERE status='queued' AND environment=? AND seq<? AND profile<>? LIMIT 1",
-                                     (candidate['environment'], candidate['seq'], VIEWER_PROFILE)).fetchone()
-                if barrier:
+                if not self._viewer_skip_is_safe(db, candidate, node_id):
                     return None
                 row = candidate
             if (row['environment'] == 'staging' and db.execute(
