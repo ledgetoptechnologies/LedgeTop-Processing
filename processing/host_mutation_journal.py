@@ -215,6 +215,16 @@ class HostMutationJournal:
             self._validate_operations()
             return self.db.execute('SELECT 1 FROM operations WHERE op_id=?', (op_id,)).fetchone() is not None
 
+    def require_done(self, op_id, request_digest, ack_digest):
+        """Confirm the exact durable operation before releasing its spool copy."""
+        self._ready()
+        with self._transaction():
+            self._validate_operations()
+            row = self.db.execute('SELECT kind,request_digest,ack_digest,state FROM operations WHERE op_id=?',
+                                  (op_id,)).fetchone()
+            if row != ('upload', request_digest, ack_digest, 'done'):
+                raise MutationHeld('upload acknowledgment requires inspection')
+
     def begin(self, op_id, kind, request_digest):
         """Record intent before mutation. A done replay returns its ack hash.
 

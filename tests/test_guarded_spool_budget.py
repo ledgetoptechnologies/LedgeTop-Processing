@@ -85,5 +85,36 @@ os._exit(37)
             os.close(root_fd)
         self.assertEqual(self.budget.inspect()['reservations'], [])
 
+    def test_crash_after_discard_unlink_keeps_charge_until_explicit_reconciliation(self):
+        name = self.name('e')
+        script = '''
+import os, sys
+from pathlib import Path
+from processing.guarded_spool_budget import GuardedSpoolBudget
+root, name = sys.argv[1:]
+ledger = GuardedSpoolBudget(root, cap=10, floor=0)
+ledger.reserve(name, 3)
+Path(root, name).write_bytes(b'abc')
+ledger.transition(name, 'receiving', 'spooled')
+ledger.transition(name, 'spooled', 'mutation_started')
+ledger.transition(name, 'mutation_started', 'discardable')
+fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+os.unlink(name, dir_fd=fd)
+os.fsync(fd)
+os._exit(37)
+'''
+        result = subprocess.run([sys.executable, '-c', script, str(self.root), name], timeout=10)
+        self.assertEqual(result.returncode, 37)
+        reopened = GuardedSpoolBudget(self.root, cap=10, floor=0)
+        self.assertEqual(reopened.inspect()['reservations'],
+                         [{'name': name, 'bytes': 3, 'stage': 'discardable', 'present': False}])
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            reopened.release_discarded(name, root_fd)
+            with self.assertRaises(SpoolBudgetError): reopened.release_discarded(name, root_fd)
+        finally:
+            os.close(root_fd)
+        self.assertEqual(reopened.inspect()['reservations'], [])
+
 
 if __name__ == '__main__': unittest.main()

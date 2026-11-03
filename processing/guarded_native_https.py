@@ -183,9 +183,22 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                     budget.transition(filename, stage, 'mutation_started'); stage = 'mutation_started'
                     retain = True
                     try:
-                        adapter.upload(task, {'path': str(adapter.root / filename), 'name': name,
+                        proof = adapter.upload(task, {'path': str(adapter.root / filename), 'name': name,
                                               'bytes': size, 'sha256': expected},
                                        bearer=bearer, protected_transport=True)
+                        # Only a returned, journal-verified exact acknowledgment
+                        # permits discarding this request's owned spool inode.
+                        from . import reference_protocol as protocol
+                        request = dict(task=task, name=name, bytes=size, sha256=expected)
+                        req = protocol.digest(request)
+                        ack = protocol.digest(dict(task=task, kind='upload', requestDigest=req,
+                                                   validation='native-engine-contract-passed'))
+                        key = hashlib.sha256(TaskStore._filename(name).encode('ascii')).hexdigest()
+                        if proof != dict(task=task, name=name, bytes=size, sha256=expected,
+                                         operationId=adapter._op(task, 'upload', key),
+                                         requestDigest=req, ackDigest=ack):
+                            raise ValueError('upload proof differs')
+                        retain = False
                     except UnissuedGuardedUpload:
                         # This call is proved not to have issued a mutation:
                         # either a prior intent exists or gate acquisition failed.

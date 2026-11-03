@@ -170,6 +170,13 @@ class GuardedNativeProxy:
                     # Once begin may have committed, no downstream exception
                     # can establish that this request did not mutate NodeODM.
                     raise MutationHeld('upload outcome requires inspection') from None
+                request_digest = protocol.digest(request)
+                ack_digest = protocol.digest(dict(task=task, kind='upload',
+                    requestDigest=request_digest, validation='native-engine-contract-passed'))
+                journal.require_done(op, request_digest, ack_digest)
+                return {'task': task, 'name': item['name'], 'bytes': item['bytes'],
+                        'sha256': item['sha256'], 'operationId': op,
+                        'requestDigest': request_digest, 'ackDigest': ack_digest}
             finally:
                 journal.close()
 
