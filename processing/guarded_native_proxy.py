@@ -8,7 +8,7 @@ network isolation. There is deliberately no cancellation or release path.
 import hashlib
 import hmac
 import os
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import re
 import secrets
@@ -286,6 +286,62 @@ class GuardedNativeProxy:
         return {'schema': 'ledgetop-bound-node-observation-v1', 'claim': verified,
                 'operation': dict(operation), 'state': evidence['state'],
                 'ackDigest': evidence['ackDigest'], 'held': True}
+
+    @contextmanager
+    def _bound_reader(self, envelope, bearer, protected_transport):
+        """Pin a bound reservation while reading; does not authorize recovery."""
+        self._auth(bearer, protected_transport)
+        from .node_job_claim import verify_job_claim
+        claim = envelope.get('claim') if type(envelope) is dict else None
+        task = claim.get('engineTaskId') if type(claim) is dict else None
+        self._task(task)
+        verified = verify_job_claim(envelope, self._job_claim_key, node=self.node_id,
+            authority=self.authority_id, gate_generation=self.generation, task=task,
+            origin=self.origin, admission=False)
+        with NodeGate(self.engine_id) as gate:
+            journal = HostMutationJournal(gate, self._owner(gate, task)).open()
+            try:
+                journal.verify_viewer_job(verified)
+                try:
+                    digest = protocol.digest(dict(task=task))
+                    evidence = journal.inspect_operation(self._op(task, 'commit'), 'commit', digest)
+                    expected = protocol.digest(dict(task=task, kind='commit', requestDigest=digest,
+                                                    validation='native-engine-contract-passed'))
+                    committed = evidence['state'] == 'done' and evidence['ackDigest'] == expected
+                except GateError:
+                    committed = False
+                yield task, committed
+            finally:
+                journal.close()
+
+    def read_bound(self, envelope, kind, line, *, bearer, protected_transport):
+        if kind not in ('info', 'output') or type(line) is not int or line < 0 or line > 2**31 - 1:
+            raise GateError('invalid read')
+        with self._bound_reader(envelope, bearer, protected_transport) as (task, committed):
+            if not committed:
+                return {'held': True, 'value': {'uuid': task, 'status': {'code': 10}} if kind == 'info' else []}
+            value = self.engine.read('/task/' + task + '/' + kind, **({'line': line} if kind == 'output' else {}))
+            if kind == 'info':
+                if type(value) is not dict or value.get('uuid') != task or type(value.get('status')) is not dict:
+                    raise GateError('invalid engine status')
+            elif type(value) is not list or any(type(item) is not str for item in value):
+                raise GateError('invalid engine output')
+            return {'held': False, 'value': value}
+
+    @contextmanager
+    def download_bound(self, envelope, *, bearer, protected_transport):
+        with self._bound_reader(envelope, bearer, protected_transport) as (task, committed):
+            if not committed:
+                raise MutationHeld('task completion unverified')
+            info = self.engine.read('/task/' + task + '/info')
+            if (type(info) is not dict or info.get('uuid') != task or type(info.get('status')) is not dict
+                    or info['status'].get('code') != 40):
+                raise MutationHeld('task completion unverified')
+            with self.engine.download(task) as stream:
+                size = stream.headers.get('Content-Length')
+                if type(size) is not str or not re.fullmatch(r'[0-9]{1,12}', size) or not 0 < int(size) <= 100 * 1024**3:
+                    raise GateError('invalid archive length')
+                yield stream, int(size)
 
     def recover_acknowledged_spool(self, budget, name):
         """Reconcile one locally owned upload, never an uncertain mutation.

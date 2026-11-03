@@ -110,6 +110,10 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                     result = {'accepted': True, 'held': True}
                 elif self.path == '/v1/inspect-bound-mutation' and set(request) == {'jobClaim', 'operation'}:
                     result = adapter.inspect_bound_mutation(request['jobClaim'], request['operation'], **args)
+                elif self.path == '/v1/read-bound' and set(request) == {'jobClaim', 'kind', 'line'}:
+                    result = adapter.read_bound(request['jobClaim'], request['kind'], request['line'], **args)
+                elif self.path == '/v1/download-bound' and set(request) == {'jobClaim'}:
+                    return self._download_bound(request['jobClaim'], args)
                 elif self.path == '/v1/commit' and set(request) == {'task'}:
                     result = adapter.commit(request['task'], **args)
                 elif self.path == '/v1/inspect-mutation' and set(request) == {'claim'}:
@@ -120,6 +124,30 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
             except Exception:
                 # A mutation may have happened before an error. The underlying
                 # durable journal retains its reservation; callers must not retry.
+                return self._reply(409, {'error': 'operation unavailable or held'})
+
+        def _download_bound(self, claim, args):
+            started = False
+            try:
+                with adapter.download_bound(claim, **args) as (stream, length):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/zip')
+                    self.send_header('Content-Length', str(length))
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    started = True
+                    remaining = length
+                    while remaining:
+                        block = stream.read(min(1024 * 1024, remaining))
+                        if not block:
+                            raise OSError('truncated engine archive')
+                        self.wfile.write(block)
+                        remaining -= len(block)
+                    self.close_connection = True
+            except Exception:
+                if started:
+                    self.close_connection = True
+                    return
                 return self._reply(409, {'error': 'operation unavailable or held'})
 
         def _upload_stream(self, bearer):

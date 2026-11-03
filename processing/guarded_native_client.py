@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+from contextlib import contextmanager
 
 from .viewer_service import EngineUnavailable
 
@@ -59,6 +60,31 @@ class GuardedNativeClient:
                     or any(c not in '0123456789abcdef' for c in value['ackDigest'])))):
             raise EngineUnavailable('guard proof unavailable')
         return value
+
+    def read_bound(self, job_claim, kind, *, line=0):
+        value = self._json('read-bound', {'jobClaim': job_claim, 'kind': kind, 'line': line})
+        if (set(value) != {'held', 'value'} or type(value['held']) is not bool
+                or (kind == 'info' and type(value['value']) is not dict)
+                or (kind == 'output' and (type(value['value']) is not list
+                    or any(type(item) is not str for item in value['value'])))
+                or kind not in ('info', 'output')):
+            raise EngineUnavailable('guard read unavailable')
+        return value
+
+    @contextmanager
+    def download_bound(self, job_claim):
+        conn = self._connection()
+        try:
+            body = json.dumps({'jobClaim': job_claim}, allow_nan=False, separators=(',', ':')).encode()
+            conn.request('POST', '/v1/download-bound', body, {'Authorization': 'Bearer ' + self.bearer})
+            response = conn.getresponse()
+            if response.status != 200 or response.getheader('Content-Type') != 'application/zip':
+                raise EngineUnavailable('guard archive unavailable')
+            yield response
+        except (OSError, ValueError, http.client.HTTPException):
+            raise EngineUnavailable('guard archive unavailable') from None
+        finally:
+            conn.close()
 
     def upload(self, identifier, item):
         path = Path(item['path'])
