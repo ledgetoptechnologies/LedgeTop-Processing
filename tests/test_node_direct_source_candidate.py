@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.guarded_native_client import GuardedNativeClient
+from processing.viewer_service import EngineUnavailable
 from processing.source_range_transfer import (CHUNK_BYTES, SourceRangeClient, TransferError,
     source_version_for_manifest, validate_source_grant)
 from tests.test_guarded_native_https import GuardedHTTPS, TOKEN
@@ -24,6 +25,9 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
     def test_nas_ranges_land_on_node_before_guarded_upload_not_coordinator(self):
         # The synthetic NodeODM fixture only accepts this fixed byte string.
         self._direct_source(b'abc')
+
+    def test_uncertain_upload_keeps_source_and_spool_for_reconciliation(self):
+        self._direct_source(b'abc', ack_failure=True)
 
     def test_32mib_source_ranges_arrive_intact_on_node_without_coordinator_copy(self):
         body = b'synthetic-32mib-' * (32 * 1024 * 1024 // len(b'synthetic-32mib-'))
@@ -50,7 +54,7 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
         self.backend._dispatch = dispatch
         self._direct_source(body, disconnect_once=True)
 
-    def _direct_source(self, body, disconnect_once=False):
+    def _direct_source(self, body, disconnect_once=False, ack_failure=False):
         digest = hashlib.sha256(body).hexdigest()
         requests = []
         failed = []
@@ -123,7 +127,30 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
         self.assertEqual(self.request(server, '/v1/initialize', {'task':self.task})[0], 200)
         context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
         node_client = GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10)
-        node_client.upload(self.job, dict(path=str(photo), name='photo.jpg', bytes=len(body), sha256=digest))
+        item = dict(path=str(photo), name='photo.jpg', bytes=len(body), sha256=digest)
+        if ack_failure:
+            from processing.host_mutation_journal import MutationHeld
+            with patch('processing.host_mutation_journal.HostMutationJournal.require_done',
+                       side_effect=MutationHeld('synthetic acknowledgement unavailable')):
+                with self.assertRaises(EngineUnavailable):
+                    node_client.upload(self.job, item)
+            self.assertTrue(server.wait_drained(5))
+            self.assertEqual(photo.read_bytes(), body)
+            spools = list(self.spool.glob('incoming-*'))
+            self.assertEqual(len(spools), 1)
+            self.assertEqual(spools[0].read_bytes(), body)
+            self.assertEqual(server.spool_budget.inspect()['reservations'][0]['stage'], 'mutation_started')
+            self.assertEqual(self.backend.counts()['upload'], 1)
+            self.assertEqual(self.journal(), [('init','done'), ('upload','done')])
+            self.assertEqual(list(coordinator.iterdir()), [])
+            return
+        node_client.upload(self.job, item)
+        self.assertTrue(server.wait_drained(5))
+        # Successful acknowledgement permits discarding only the request-owned
+        # temporary upload copy, not the node source or the NAS original.
+        self.assertEqual(hashlib.sha256(photo.read_bytes()).hexdigest(), digest)
+        self.assertEqual(list(self.spool.glob('incoming-*')), [])
+        self.assertEqual(server.spool_budget.inspect()['reservations'], [])
         self.assertEqual(self.request(server, '/v1/commit', {'task':self.job}), (200, {'uuid':self.job}))
         self.assertEqual(self.backend.counts()['upload'], 1)
         self.assertEqual(self.journal(), [('init','done'), ('upload','done'), ('commit','done')])
