@@ -11,6 +11,10 @@ import ssl
 import threading
 import math
 import socket
+import os
+import select
+import signal
+import unittest
 from unittest.mock import patch
 
 from processing import reference_protocol as p
@@ -31,6 +35,10 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
 
     def test_recover_durable_ack_releases_spool_without_resending_source(self):
         self._direct_source(b'abc', ack_failure=True, recover_after=True)
+
+    @unittest.skipIf(os.name == 'nt', 'requires POSIX process death and durable node gate')
+    def test_actual_listener_process_death_after_engine_ack_recovers_without_replay(self):
+        self._direct_source(b'abc', actual_process_death=True)
 
     def test_32mib_source_ranges_arrive_intact_on_node_without_coordinator_copy(self):
         body = b'synthetic-32mib-' * (32 * 1024 * 1024 // len(b'synthetic-32mib-'))
@@ -57,7 +65,8 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
         self.backend._dispatch = dispatch
         self._direct_source(body, disconnect_once=True)
 
-    def _direct_source(self, body, disconnect_once=False, ack_failure=False, recover_after=False):
+    def _direct_source(self, body, disconnect_once=False, ack_failure=False, recover_after=False,
+                       actual_process_death=False):
         digest = hashlib.sha256(body).hexdigest()
         requests = []
         failed = []
@@ -125,6 +134,76 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
             retries = [entry for entry in requests if entry[2].startswith(f'bytes={CHUNK_BYTES}-')]
             self.assertEqual(len(retries), 2)
             self.assertEqual(retries[0][3], retries[1][3])
+        if actual_process_death:
+            # The real mTLS listener runs in a separate process. Its adapter
+            # exits immediately after the native upload ACK was journaled,
+            # before the listener can send its HTTP response or discard the
+            # spool. This is a real socket disconnect and node-process death.
+            from processing.guarded_native_https import create_guarded_https_server
+            from processing.guarded_spool_budget import GuardedSpoolBudget
+            self.proxy.initialize(self.task, **self.auth)
+            read_fd, write_fd = os.pipe()
+            child = os.fork()
+            if child == 0:
+                try:
+                    os.close(read_fd)
+                    original_upload = self.proxy.upload
+                    def die_after_ack(*args, **kwargs):
+                        original_upload(*args, **kwargs)
+                        os._exit(71)
+                    self.proxy.upload = die_after_ack
+                    server = create_guarded_https_server(self.proxy, bind_host='127.0.0.1', port=0,
+                        certificate=self.root / 'server.pem', private_key=self.root / 'server.key',
+                        client_ca=self.root / 'client.pem', client_fingerprint=self.fingerprint, enabled=True)
+                    os.write(write_fd, str(server.server_port).encode('ascii'))
+                    os.close(write_fd)
+                    server.serve_forever(poll_interval=.01)
+                except BaseException:
+                    os._exit(72)
+                os._exit(73)
+            os.close(write_fd)
+            try:
+                ready, _, _ = select.select([read_fd], [], [], 10)
+                self.assertTrue(ready, 'child listener did not start')
+                port = int(os.read(read_fd, 32))
+                context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
+                client = GuardedNativeClient('127.0.0.1', port, context, TOKEN, timeout=10)
+                with self.assertRaises(EngineUnavailable):
+                    client.upload(self.job, dict(path=str(photo), name='photo.jpg', bytes=len(body), sha256=digest))
+                waited, status = os.waitpid(child, 0)
+                child = None
+                self.assertEqual(waited > 0 and os.waitstatus_to_exitcode(status), 71)
+                self.assertEqual(self.backend.counts()['upload'], 1)
+                self.assertEqual(self.journal(), [('init','done'), ('upload','done')])
+                spools = list(self.spool.glob('incoming-*'))
+                self.assertEqual(len(spools), 1)
+                self.assertEqual(spools[0].read_bytes(), body)
+                self.assertEqual(photo.read_bytes(), body)
+                budget = GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3)
+                self.assertEqual(budget.inspect()['reservations'][0]['stage'], 'mutation_started')
+                # Run reconciliation in a *new* node process, using only the
+                # persisted gate/journal and spool ledger from the first one.
+                recovery = os.fork()
+                if recovery == 0:
+                    try:
+                        reopened = GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3)
+                        self.proxy.recover_acknowledged_spool(reopened, spools[0].name)
+                    except BaseException:
+                        os._exit(74)
+                    os._exit(0)
+                _, recovery_status = os.waitpid(recovery, 0)
+                self.assertEqual(os.waitstatus_to_exitcode(recovery_status), 0)
+                self.assertEqual(GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3).inspect()['reservations'], [])
+                self.assertFalse(spools[0].exists())
+                self.assertEqual(photo.read_bytes(), body)
+                self.assertEqual(self.backend.counts()['upload'], 1)
+                self.assertEqual(list(coordinator.iterdir()), [])
+            finally:
+                os.close(read_fd)
+                if child is not None:
+                    os.kill(child, signal.SIGKILL)
+                    os.waitpid(child, 0)
+            return
         server = self.start_listener()
         self.commit_reply(True)
         self.assertEqual(self.request(server, '/v1/initialize', {'task':self.task})[0], 200)
