@@ -851,6 +851,107 @@ class ReferenceDriverTests(unittest.TestCase):
                           trusted_viewer_receipt_keys=signer.trusted_keys)
         self.assertEqual(self.driver.step()['state'], 'completed')
 
+    def _full_receipt(self, job, label):
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        return result, dict(schemaVersion=1, receiptId=label + '-proof', storageReceiptId=label + '-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']],
+            acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+
+    def _stage(self, job):
+        with self.driver._db() as db:
+            row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        return row['stage'], json.loads(row['data'])
+
+    def test_required_signed_copy_survives_restart_and_only_then_enables_cleanup(self):
+        # Synthetic only: legacy unsigned full coverage, switch to required,
+        # restart, relax config, then signed proof through the real driver.
+        signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = signer.trusted_keys
+        job = self.submit()
+        self.advance(job, 'awaiting_acceptance')
+        result, receipt = self._full_receipt(job, 'restart')
+        self.store.accept(job['jobId'], receipt)
+        self.store.viewer_required_environments = frozenset(('staging',))
+        self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        stage, data = self._stage(job)
+        self.assertEqual((stage, data['viewerCopyRequired']), ('awaiting_acceptance', True))
+        with self.ledger._transaction() as db:
+            self.assertEqual({row[0] for row in db.execute('SELECT accepted_copy_verified FROM objects')}, {0})
+        self.driver = self.make_driver()
+        # A later relaxed relay cannot undo a requirement this driver persisted.
+        self.store.viewer_required_environments = frozenset()
+        for _ in range(2):
+            self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+                          trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        self.assertEqual(self._stage(job)[0], 'completed')
+        self.assertEqual({item['id'] for item in self.ledger.cleanup_candidates()},
+                         {obj['id'] for obj in result['objects']})
+
+    def test_explicit_legacy_policy_keeps_unsigned_completion(self):
+        job = self.submit()
+        self.advance(job, 'awaiting_acceptance')
+        _, receipt = self._full_receipt(job, 'legacy')
+        self.store.accept(job['jobId'], receipt)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        stage, data = self._stage(job)
+        self.assertEqual(stage, 'completed')
+        self.assertNotIn('viewerCopyRequired', data)
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+
+    def test_null_legacy_policy_is_held_for_reconciliation(self):
+        signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = signer.trusted_keys
+        job = self.submit()
+        self.advance(job, 'awaiting_acceptance')
+        result, receipt = self._full_receipt(job, 'null-policy')
+        self.store.accept(job['jobId'], receipt)
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=NULL WHERE job_id=?', (job['jobId'],))
+        for _ in range(2):
+            self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        self.assertEqual(self._stage(job)[0], 'awaiting_acceptance')
+        with self.assertRaises(Exception):
+            self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+                              trusted_viewer_receipt_keys=signer.trusted_keys)
+        # Explicit operator reconciliation to required; only signed proof completes.
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=1 WHERE job_id=?', (job['jobId'],))
+        self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+                          trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+
+    def test_signed_replay_is_idempotent_and_changed_signed_replay_is_rejected(self):
+        signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = signer.trusted_keys
+        job = self.submit()
+        self.advance(job, 'awaiting_acceptance')
+        result, receipt = self._full_receipt(job, 'replay')
+        self.store.accept(job['jobId'], receipt)
+        self.store.viewer_required_environments = frozenset(('staging',))
+        self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        signed = signer.receipt(receipt, result)
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signed, trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signed, trusted_viewer_receipt_keys=signer.trusted_keys)
+        with self.assertRaises(Exception):
+            self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+                              trusted_viewer_receipt_keys=signer.trusted_keys)
+        relayed = self.store.acceptance_receipts(job['jobId'])
+        self.assertEqual(relayed['receipts'], [dict(acceptance=receipt, viewerReceipt=signed)])
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        observed = self.worker.apply_viewer_acceptance(job['jobId'], relayed['receipts'], require_verified_copy=True)
+        self.assertTrue(observed['fullyAccepted'])
+        with self.assertRaises(PolicyConflict):
+            self.worker.apply_viewer_acceptance(job['jobId'], [dict(acceptance=receipt,
+                viewerReceipt=signer.receipt(receipt, result))], require_verified_copy=True)
+        with self.ledger._transaction() as db:
+            self.assertEqual([json.loads(row[0]) for row in db.execute('SELECT viewer_receipt FROM receipts')], [signed])
+
 
 class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
     # Reuse durable coordinator/transport helpers, while replacing the patched

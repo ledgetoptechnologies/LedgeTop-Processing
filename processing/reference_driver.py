@@ -407,9 +407,16 @@ class ReferenceDriver:
         if self.combined_preparation is not None and self.combined_preparation.is_combined(job_id):return 'combined'
         return self.execution_router.kind_for(job_id) if self.execution_router else 'odm'
 
-    def _apply_acceptance(self, job_id, receipts):
+    def _apply_acceptance(self, job_id, relayed, data):
+        # Only an explicit false relay keeps legacy metadata completion. A
+        # missing or malformed policy, or one this driver already saw required,
+        # waits for locally verified signed coverage; the requirement is sticky.
+        required = data.get('viewerCopyRequired') is True or relayed.get('viewerCopyRequired') is not False
+        if required and data.get('viewerCopyRequired') is not True:
+            data['viewerCopyRequired'] = True
+            self._save(job_id, 'awaiting_acceptance', data)
         source = self.execution_router if self.execution_router is not None else self.worker
-        return source.apply_viewer_acceptance(job_id, receipts)
+        return source.apply_viewer_acceptance(job_id, relayed['receipts'], require_verified_copy=required)
 
     def _bind_claim(self, claim, data):
         self._validate_job(claim)
@@ -553,7 +560,7 @@ class ReferenceDriver:
                 except Exception:
                     background = {'state': 'background_retry'}
             result = self._step()
-            return background if result['state'] == 'idle' and background['state'] == 'completed' else result
+            return background if result['state'] == 'idle' and background['state'] in ('completed', 'awaiting_acceptance') else result
         except DriverHeld as error:
             return {'state': 'held', 'reason': str(error)}
         except DriverWait as error:
@@ -613,9 +620,12 @@ class ReferenceDriver:
             claim = data['claim']
             kind = 'acceptance' if row['stage'] == 'awaiting_acceptance' else 'terminal-acceptance'
             status, relayed = self._request('GET', '/jobs/' + row['job'] + '/' + kind, claim_token=claim['claimToken'])
+            if kind == 'acceptance':
+                # Keep a still-pending success observable when no other work runs.
+                observed = {'state': 'awaiting_acceptance', 'jobId': row['job']}
             if status != 409:
                 if kind == 'acceptance':
-                    accepted = self._apply_acceptance(row['job'], relayed['receipts'])['fullyAccepted']
+                    accepted = self._apply_acceptance(row['job'], relayed, data)['fullyAccepted']
                 else:
                     receipt = relayed.get('receipt')
                     accepted = receipt is not None
@@ -976,7 +986,7 @@ class ReferenceDriver:
             status, relayed = self._request('GET', suffix + '/acceptance', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_acceptance', 'jobId': job_id}
-            observed = self._apply_acceptance(job_id, relayed['receipts'])
+            observed = self._apply_acceptance(job_id, relayed, data)
             if observed['fullyAccepted']:
                 self._save(job_id, 'completed', data)
                 return {'state': 'completed', 'jobId': job_id}

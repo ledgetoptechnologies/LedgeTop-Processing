@@ -1136,16 +1136,26 @@ class ReferenceStore:
             return True
 
     def acceptance_receipts(self, job_id):
-        """PRIVATE worker relay; only signed Viewer receipts may prove accepted copies."""
+        """PRIVATE worker relay; only signed Viewer receipts may prove accepted copies.
+
+        viewerCopyRequired tells the worker whether completion needs verified
+        signed coverage. Durable per-job policy, an existing Viewer transfer or
+        the current environment target can each only tighten it; legacy NULL
+        policy is never relayed as legacy-OK and requires reconciliation.
+        """
         with self.queue._db() as db:
             row = self._row(db, job_id)
+            if row['viewer_receipt_required'] not in (0, 1):
+                raise Conflict('legacy Viewer acceptance policy requires reconciliation')
+            required = bool(row['viewer_receipt_required'] == 1 or row['environment'] in self.viewer_required_environments
+                or db.execute('SELECT 1 FROM reference_viewer_transfers WHERE job_id=?', (job_id,)).fetchone())
             receipts = []
             for item in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances WHERE job_id=? ORDER BY receipt_id', (job_id,)):
                 acceptance = json.loads(item['receipt_json'])
                 signed = db.execute('SELECT receipt_json FROM reference_viewer_receipts WHERE acceptance_receipt_id=?',
                     (item['receipt_id'],)).fetchone()
                 receipts.append(dict(acceptance=acceptance, viewerReceipt=json.loads(signed[0])) if signed else acceptance)
-            return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed'}
+            return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed', 'viewerCopyRequired': required}
 
     def pending_outbox(self, *, now=None, limit=100):
         if type(limit) is not int or not 1 <= limit <= 1000:

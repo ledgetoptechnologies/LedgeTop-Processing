@@ -285,7 +285,7 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.assertEqual(self.request('GET', route, token=OTHER, claim_token=delivery['claimToken']).status, 409)
         response = self.request('GET', route, claim_token=delivery['claimToken'])
         self.assertEqual(response.status, 200)
-        self.assertEqual(response.body, {'receipts': [receipt], 'fullyAccepted': False})
+        self.assertEqual(response.body, {'receipts': [receipt], 'fullyAccepted': False, 'viewerCopyRequired': False})
 
     def test_grant_only_returns_for_exact_persisted_claim(self):
         claim = self.claim()

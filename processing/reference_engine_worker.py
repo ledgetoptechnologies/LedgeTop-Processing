@@ -362,12 +362,17 @@ class ReferenceEngineWorker:
                 gate.acknowledge(row['receipt'], job_ack)
             self._phase(job_id, 'delivered')
 
-    def apply_viewer_acceptance(self, job_id, receipts):
+    def apply_viewer_acceptance(self, job_id, receipts, *, require_verified_copy=False):
         """Apply exact relayed Viewer receipts; never delete or bypass pins/grace.
 
         Transport authenticates the coordinator. A relay's fullyAccepted flag is
         never evidence: derive coverage from locally registered receipt subsets.
+        When signed Viewer copy is required, fullyAccepted means every object
+        has locally verified signed coverage; unsigned or legacy metadata alone
+        never completes the job, so a later signed receipt stays observable.
         """
+        if type(require_verified_copy) is not bool:
+            raise WorkerHeld('Viewer accepted-copy policy must be explicit')
         if type(receipts) is not list or len(receipts) > p.MAX_OBJECTS:
             raise WorkerHeld('Viewer acceptance must be a bounded receipt list')
         row = self._row(job_id)
@@ -429,7 +434,11 @@ class ReferenceEngineWorker:
                 result_manifest_sha256=receipt['resultManifestSha256'], accepted_object_ids=receipt['acceptedObjectIds'],
                 viewer_receipt=signed_viewer_receipt, verified_copy=signed_viewer_receipt is not None)
         with self.ledger._transaction() as db:
-            accepted = {obj['id'] for obj in db.execute(
-                'SELECT id FROM objects WHERE reservation=? AND accepted IS NOT NULL', (reservation,))}
-        return {'acceptedObjectIds': sorted(accepted),
-                'fullyAccepted': accepted == {obj['id'] for obj in result['objects']}}
+            rows = list(db.execute('SELECT id,accepted_copy_verified FROM objects WHERE reservation=? AND accepted IS NOT NULL',
+                (reservation,)))
+        accepted, expected = {obj['id'] for obj in rows}, {obj['id'] for obj in result['objects']}
+        if not require_verified_copy:
+            return {'acceptedObjectIds': sorted(accepted), 'fullyAccepted': accepted == expected}
+        verified = {obj['id'] for obj in rows if obj['accepted_copy_verified'] == 1}
+        return {'acceptedObjectIds': sorted(accepted), 'verifiedObjectIds': sorted(verified),
+                'fullyAccepted': verified == expected}

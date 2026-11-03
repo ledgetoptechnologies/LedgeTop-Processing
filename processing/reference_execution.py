@@ -406,6 +406,6 @@ class ExecutionRouter:
             raise RouteConflict('reservation_route_binding_changed')
         return self.worker_for(reserved['job'])._file(reservation,relative,expected_size,expected_sha)
 
-    def apply_viewer_acceptance(self,job_id,receipts):
+    def apply_viewer_acceptance(self,job_id,receipts,*,require_verified_copy=False):
         self._row(job_id)
-        return self.worker_for(job_id).apply_viewer_acceptance(job_id,receipts)
+        return self.worker_for(job_id).apply_viewer_acceptance(job_id,receipts,require_verified_copy=require_verified_copy)
