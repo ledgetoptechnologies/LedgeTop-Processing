@@ -177,6 +177,65 @@ class ReferenceInstallationTests(unittest.TestCase):
                 self.assertIn(rule, source)
                 self.assertNotIn("stage='succeeded')", source)  # no succeeded-only variant remains
 
+    def test_legacy_helper_scripts_keep_their_guards_under_python_optimize(self):
+        import ast
+        import sqlite3
+        # Every reviewed script the installer hands to python -c carries no assert
+        # that -O or PYTHONOPTIMIZE could strip.
+        emitted = []
+        def capture(*args, **kwargs):
+            argv = list(args[0]) if len(args) == 1 and isinstance(args[0], list) else list(args)
+            emitted.append(argv[argv.index("-c") + 1])
+            raise self.install.CutoverStopped("synthetic_capture")
+        with patch.object(self.install, "command", capture):
+            with self.assertRaises(self.install.CutoverStopped):
+                self.install.backup(self.root, {"operation": "synthetic"})
+        with patch.object(self.install, "docker", side_effect=lambda action, *args, **kwargs: "" if action == "ps" else capture(*args)):
+            with self.assertRaises(self.install.CutoverStopped):
+                self.install.offline_rollback_precheck({"image": "synthetic-cached-image"})
+        with patch.object(self.install, "command", return_value=""),                 patch.object(Path, "lstat", return_value=os.stat_result((stat.S_IFDIR | 0o700, 0, 0, 2, 10001, 10001, 0, 0, 0, 0))),                 patch.object(self.install, "docker", side_effect=capture):
+            with self.assertRaises(self.install.CutoverStopped):
+                self.install.backup(self.root, {"operation": "synthetic", "image": "synthetic-cached-image"})
+        self.assertEqual(len(emitted), 3)
+        for source in emitted:
+            self.assertFalse(any(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(source))))
+
+        # The guarded census still refuses a nonterminal Viewer task when compiled
+        # with optimize=2; the raw script would silently report it as rollback-safe.
+        database = self.root / "jobs.sqlite3"
+        with sqlite3.connect(database) as db:
+            db.executescript("""
+                CREATE TABLE coordinator_identity(singleton INTEGER PRIMARY KEY, authority_id TEXT NOT NULL);
+                INSERT INTO coordinator_identity VALUES(1,'7131882e-38ce-4d3e-99cc-4ba5a94d2ee8');
+                CREATE TABLE jobs(id TEXT PRIMARY KEY, request_id TEXT, environment TEXT, profile TEXT, status TEXT,
+                    worker_id TEXT, node_id TEXT, held_reason TEXT, result TEXT, created_at TEXT, updated_at TEXT);
+                CREATE TABLE reference_jobs(job_id TEXT PRIMARY KEY);
+                CREATE TABLE viewer_tasks(removed INTEGER NOT NULL, phase TEXT NOT NULL, stage TEXT NOT NULL);
+                INSERT INTO viewer_tasks VALUES(0,'complete','succeeded');
+                INSERT INTO viewer_tasks VALUES(0,'complete','failed');
+                INSERT INTO viewer_tasks VALUES(0,'complete','cancelled');
+                INSERT INTO viewer_tasks VALUES(0,'processing','running');
+            """)
+        original_lstat = Path.lstat
+        def container_uid(path, *args, **kwargs):
+            result = original_lstat(path, *args, **kwargs)
+            if path == database:
+                values = list(result); values[4] = 10001
+                return os.stat_result(values)
+            return result
+        def census(source):
+            output = io.StringIO()
+            with patch("pathlib.Path.lstat", container_uid), redirect_stdout(output):
+                exec(compile(source.replace("/source/jobs.sqlite3", str(database)), "<optimized-census>", "exec", optimize=2),
+                    {"__name__": "__main__"})
+            return json.loads(output.getvalue())
+        self.assertEqual(census(self.install.OFFLINE_ROLLBACK_CENSUS)["nativeViewerTasks"], 4)
+        with self.assertRaises(AssertionError):
+            census(self.install.explicit_guard_source(self.install.OFFLINE_ROLLBACK_CENSUS))
+        with sqlite3.connect(database) as db:
+            db.execute("DELETE FROM viewer_tasks WHERE phase='processing'")
+        self.assertEqual(census(self.install.explicit_guard_source(self.install.OFFLINE_ROLLBACK_CENSUS))["nativeViewerTasks"], 3)
+
     def migration_fixture(self):
         """Real maintenance CAS state, synthetic Docker control/HTTP transport."""
         from processing.prototype import Queue
