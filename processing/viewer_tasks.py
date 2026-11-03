@@ -207,6 +207,14 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            current = db.execute('SELECT * FROM viewer_guarded_dispatch_checkpoint WHERE uuid=?', (identifier,)).fetchone()
+            history = db.execute('SELECT * FROM viewer_guarded_dispatch_history WHERE uuid=? AND sequence=?',
+                                 (identifier,sequence)).fetchone()
+            # An observed response must acknowledge the exact same intent in
+            # both records. In particular, a mismatched final commit has no
+            # subsequent checkpoint that would otherwise detect the split.
+            if current is None or history is None or dict(current) != dict(history):
+                raise Conflict('guarded dispatch history changed')
             changed = db.execute('''UPDATE viewer_guarded_dispatch_checkpoint SET state='acknowledged'
                 WHERE uuid=? AND sequence=? AND state='pending' AND generation=? AND job_id=?
                 AND node_id=? AND engine_uuid=?''', (identifier,sequence,row['generation'],row['job_id'],

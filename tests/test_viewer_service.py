@@ -1667,6 +1667,33 @@ else:
         self.assertEqual(self.service.store.guarded_dispatch_checkpoint(identifier), checkpoint)
         self.assertEqual(self.service.store.guarded_dispatch_history(identifier), [])
 
+    def test_guarded_final_commit_ack_rejects_mismatched_history(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        engine.node_guarded = True
+        original = engine.action
+
+        def action(kind, task_uuid):
+            response = original(kind, task_uuid)
+            if kind == 'commit':
+                with self.queue._db() as db:
+                    db.execute("UPDATE viewer_guarded_dispatch_history SET evidence='{}' WHERE uuid=? AND operation='commit'", (identifier,))
+            return response
+
+        engine.action = action
+        self.service.tick()
+        checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
+        self.assertEqual((checkpoint['operation'], checkpoint['state']), ('commit', 'pending'))
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        # A separately mismatched operation must also be rejected even when
+        # the evidence is identical. Neither acknowledgement can proceed.
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_guarded_dispatch_history SET operation='upload', evidence=? WHERE uuid=? AND sequence=?",
+                       (checkpoint['evidence'], identifier, checkpoint['sequence']))
+        with self.assertRaises(Conflict):
+            self.service.store.acknowledge_guarded_dispatch(identifier, checkpoint['sequence'])
+        self.assertEqual(self.service.store.guarded_dispatch_checkpoint(identifier), checkpoint)
+
     def test_guarded_checkpoint_is_durable_before_engine_upload(self):
         identifier = self.submit()
         engine = self.engines['cluster']
