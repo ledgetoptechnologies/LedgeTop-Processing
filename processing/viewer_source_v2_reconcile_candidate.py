@@ -46,12 +46,19 @@ def _timestamp(value):
         raise ValueError('invalid timestamp') from None
 
 
-def reconcile(*, binding, transfer, grant, objects, now):
+def reconcile(*, binding, transfer, grant, objects, trusted_manifest, trusted_policy, now):
     """Check a v2 grant against independent binding; returns non-secret metadata.
 
     No signatures, bearer possession, current epoch, or source object bytes are
     verified. Success is never permission to issue HTTP or mutate a worker.
     """
+    # Detach caller-owned snapshots before comparing independent evidence.
+    try:
+        binding, transfer, grant, objects, trusted_manifest, trusted_policy = (
+            json.loads(p.canonical_json(value)) for value in
+            (binding, transfer, grant, objects, trusted_manifest, trusted_policy))
+    except (ValueError, TypeError):
+        raise ValueError('invalid reconciliation input') from None
     _identity(binding)
     p._closed(transfer, TRANSFER, 'Viewer source transfer')
     p._closed(grant, GRANT, 'Viewer source grant')
@@ -72,6 +79,11 @@ def reconcile(*, binding, transfer, grant, objects, now):
         raise ValueError('grant expiry mismatch')
     for key in POLICY:
         p._integer(transfer[key], key)
+    p._closed(trusted_policy, POLICY, 'independent transfer policy')
+    for key in POLICY:
+        p._integer(trusted_policy[key], key)
+        if type(transfer[key]) is not type(trusted_policy[key]) or transfer[key] != trusted_policy[key]:
+            raise ValueError('independent policy mismatch')
     if transfer['chunkBytes'] != CHUNK:
         raise ValueError('noncanonical chunk size')
     if type(objects) is not list or not objects or len(objects) > p.MAX_OBJECTS:
@@ -84,11 +96,41 @@ def reconcile(*, binding, transfer, grant, objects, now):
     ids = [x['id'] for x in objects]
     if len(set(ids)) != len(ids) or transfer['objectIds'] != ids:
         raise ValueError('object closure mismatch')
+    p._closed(trusted_manifest, ('id','revision','sha256','totalBytes','objectCount','inputCounts','objects'), 'trusted manifest')
+    p._slug(trusted_manifest['id'], 'manifest ID')
+    p._integer(trusted_manifest['revision'], 'manifest revision')
+    p._integer(trusted_manifest['totalBytes'], 'manifest total')
+    p._integer(trusted_manifest['objectCount'], 'manifest object count')
+    p._hash(trusted_manifest['sha256'], 'manifest digest')
+    p._closed(trusted_manifest['inputCounts'], ('images','lidarObjects','points'), 'input counts')
+    for value in trusted_manifest['inputCounts'].values(): p._integer(value, 'input count', allow_zero=True)
+    manifest_objects=trusted_manifest['objects']
+    if type(manifest_objects) is not list or len(manifest_objects)!=len(objects) or trusted_manifest['objectCount']!=len(objects):
+        raise ValueError('independent manifest closure mismatch')
+    for obj in manifest_objects:
+        p._closed(obj, ('id','name','byteSize','sha256','kind','mediaType'), 'manifest object')
+        p._slug(obj['id'], 'object'); p._basename(obj['name']); p._integer(obj['byteSize'], 'object size')
+        p._hash(obj['sha256'], 'object digest'); p._string(obj['mediaType'], 'media type', 127)
+        if obj['kind'] not in ('image','lidar','auxiliary'): raise ValueError('invalid object kind')
+    if (len({o['name'].casefold() for o in manifest_objects})!=len(objects)
+            or sum(o['byteSize'] for o in manifest_objects)!=trusted_manifest['totalBytes']
+            or trusted_manifest['inputCounts']['images']!=sum(o['kind']=='image' for o in manifest_objects)
+            or trusted_manifest['inputCounts']['lidarObjects']!=sum(o['kind']=='lidar' for o in manifest_objects)
+            or [{k:o[k] for k in ('id','byteSize','sha256')} for o in manifest_objects]!=objects
+            or p.manifest_sha256(trusted_manifest)!=trusted_manifest['sha256']
+            or trusted_manifest['sha256']!=binding['manifestSha256']):
+        raise ValueError('independent manifest mismatch')
+    if not trusted_manifest['id'].startswith('dataset-'):
+        raise ValueError('invalid dataset identity')
+    dataset=trusted_manifest['id'][len('dataset-'):];p._slug(dataset, 'dataset ID')
+    if binding['sourceVersion']!='dataset:'+dataset+':'+trusted_manifest['sha256']:
+        raise ValueError('independent source version mismatch')
     total = sum(x['byteSize'] for x in objects)
     minimum = sum((x['byteSize'] + CHUNK - 1) // CHUNK for x in objects)
     if (not 1 <= total <= p.MAX_SAFE_INTEGER or not minimum
-            or transfer['requestBudget'] < minimum or transfer['attemptBudget'] < minimum
-            or transfer['byteBudget'] < total):
+            or transfer['requestBudget'] != minimum
+            or transfer['attemptBudget'] != min(p.MAX_SAFE_INTEGER, minimum*3)
+            or transfer['byteBudget'] != min(p.MAX_SAFE_INTEGER, total*3)):
         raise ValueError('invalid transfer budget')
     return {'identity': dict(binding), 'policy': {k: transfer[k] for k in POLICY},
             'objects': [dict(x) for x in objects]}
