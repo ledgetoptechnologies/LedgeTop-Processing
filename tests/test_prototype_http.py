@@ -1,13 +1,17 @@
+import io
 import json
 import tempfile
 import unittest
+import uuid
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from processing.app import make_handler
 from processing.config import Config
-from processing.prototype import PHOTO_PROFILE, PROFILE
+from processing.prototype import PHOTO_PROFILE, PROFILE, VIEWER_PROFILE
+from processing.viewer_tasks import TaskStore
 from tests.test_service import TOKEN, start_server
 from tests.test_prototype import submission
 
@@ -125,6 +129,30 @@ class PrototypeHTTPTests(unittest.TestCase):
                         self.assertEqual([n['id'] for n in json.load(response)['nodes']], ['tree','photo'])
                 finally:
                     removed_server.shutdown(); removed_server.server_close(); removed_handler.prototype_queue.close()
+
+    def test_inventory_generic_http_claim_cannot_bypass_viewer_eligibility(self):
+        self.server.shutdown(); self.server.server_close(); self.handler.prototype_queue.close()
+        inventory = (
+            {'id':'small', 'physicalHostId':'host-small', 'origin':'http://192.0.2.1:3000', 'token':'', 'maxPhotos':1, 'capabilities':('odm',)},
+            {'id':'large', 'physicalHostId':'host-large', 'origin':'http://192.0.2.2:3000', 'token':'', 'maxPhotos':None, 'capabilities':('odm',)},
+        )
+        self.handler = make_handler(Config(TOKEN, '', '', 1000, 20000,
+            prototype_state_dir=self.directory.name, prototype_node_ids=('small','large'),
+            treedar_node_ids=(), per_node_slots=True, node_inventory=inventory))
+        self.handler.prototype_queue.allowed_profiles.add(VIEWER_PROFILE)
+        store = TaskStore(self.handler.prototype_queue, Path(self.directory.name) / 'inputs')
+        identifier = str(uuid.uuid4())
+        store.initialize(identifier, 'Two-photo test', [], ['all.zip'], 'production')
+        for filename in ('a.jpg', 'b.jpg'):
+            store.upload(identifier, filename, io.BytesIO(b'abc'), 3)
+        store.commit(identifier)
+        job = store.task(identifier)['job']
+        self.assertEqual(store.task(identifier)['images_count'], 2)
+        self.server = start_server(self.handler)
+        self.origin = f'http://127.0.0.1:{self.server.server_port}'
+        _, denied = self.request('/v1/prototype/claim', {'workerId':'direct', 'nodeId':'small', 'profiles':[VIEWER_PROFILE], 'expectedJobId':job['id']})
+        self.assertIsNone(denied['job'])
+        self.assertEqual(self.handler.prototype_queue.get(job['id'])['status'], 'queued')
 
     def test_default_probe_has_no_job_queue(self):
         disabled = start_server(make_handler(Config(TOKEN, "", "", 800, 20000)))

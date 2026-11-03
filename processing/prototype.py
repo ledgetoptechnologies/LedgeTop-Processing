@@ -331,6 +331,13 @@ class Queue(Maintenance):
                 # Reference claims also persist an idempotent private envelope
                 # and enforce input-dependent routing in ReferenceStore.claim.
                 return None
+            if (self.node_capabilities is not None and row['profile'] == VIEWER_PROFILE
+                    and not allow_viewer_same_priority_skip):
+                # Inventory Viewer dispatch must run through ViewerService,
+                # which checks photo caps, engine readiness and task identity.
+                # A generic prototype claim has no photo-count evidence and
+                # must not bypass that eligibility decision.
+                return None
             if expected_job is not None and row['id'] != expected_job:
                 return None
             if row["profile"] not in profiles or row["profile"] not in self.node_profiles(node_id):

@@ -227,7 +227,7 @@ class ViewerService:
 
     def output(self, identifier, line=0):
         task = self.store.task(identifier)
-        if task['engine_uuid'] and task['node_id'] and task['phase'] in ('processing', 'complete', 'cancel_pending'):
+        if task['engine_uuid'] and task['node_id'] in self.engines and task['phase'] in ('processing', 'complete', 'cancel_pending', 'held'):
             try:
                 result = self.engines[task['node_id']].read('/task/' + task['engine_uuid'] + '/output', line=line)
                 if not isinstance(result, list) or any(not isinstance(x, str) for x in result):
@@ -653,6 +653,11 @@ class ViewerService:
             fields = {'progress': progress}
             if code == 20:
                 fields['stage'] = 'running'
+            else:
+                # A later queued observation must not keep advertising an old
+                # processing state. Keep the same claim and node reservation;
+                # this is an observation, never permission to replay work.
+                fields['stage'] = 'queued'
             if code == 20 and task['phase'] == 'commit_pending':
                 fields.update(phase='processing', error=None)
             self.store.update(identifier, **fields)

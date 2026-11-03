@@ -767,6 +767,24 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertIsNone(self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'}))
         self.assertEqual(self.queue.get(tree['id'])['status'], 'queued')
 
+    def test_engine_returns_to_queued_without_losing_claim_or_replaying(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        node, engine_uuid = task['node_id'], task['engine_uuid']
+        before = list(self.engines[node].calls)
+        self.engines[node].tasks[engine_uuid]['status']['code'] = 10
+        self.service.tick()
+        observed = self.task(identifier)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.assertEqual(observed['job']['status'], 'running')
+        self.assertEqual((observed['node_id'], observed['engine_uuid']), (node, engine_uuid))
+        later_calls = self.engines[node].calls[len(before):]
+        self.assertTrue(later_calls)
+        self.assertTrue(all(call[0] == 'read' for call in later_calls))
+
     def test_opt_in_main_busy_does_not_route_large_job_to_cluster(self):
         self.queue.per_node_slots = True
         self.config.local_max_photos = 1
@@ -1935,6 +1953,28 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.service.tick()
         self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
         self.engines['cluster'].output_unavailable = True
+        self.service.store.update(identifier, output_lines=['retained output'])
+        self.assertEqual(self.service.output(identifier, 0), ['retained output'])
+
+    def test_held_output_reads_only_bound_engine_without_resuming(self):
+        identifier = self.submit()
+        self.service.tick()
+        task = self.task(identifier)
+        self.service._hold(task, 'synthetic_uncertainty')
+        before = {node: list(engine.calls) for node, engine in self.engines.items()}
+        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        held = self.task(identifier)
+        self.assertEqual(held['job']['status'], 'held')
+        self.assertEqual((held['node_id'], held['engine_uuid']), (task['node_id'], task['engine_uuid']))
+        for node, engine in self.engines.items():
+            calls = engine.calls[len(before[node]):]
+            if node == task['node_id']:
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][0], 'read')
+                self.assertIn(task['engine_uuid'], calls[0][1])
+            else:
+                self.assertEqual(calls, [])
+        self.engines[task['node_id']].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
         self.assertEqual(self.service.output(identifier, 0), ['retained output'])
 
