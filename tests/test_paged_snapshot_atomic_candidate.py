@@ -1,10 +1,13 @@
-import base64,copy,hashlib,io,json,sqlite3,subprocess,sys,unittest
+import base64,copy,hashlib,io,json,queue,sqlite3,subprocess,sys,threading,unittest
 from processing import reference_protocol as p
 from processing import paged_frame_receiver_candidate as frames
-from processing.paged_snapshot_journal_candidate import initialize,inspect,ServerSnapshotTrust,SnapshotHeld,DOMAIN
+from processing.paged_snapshot_journal_candidate import initialize,initialize_frames,inspect,ServerSnapshotTrust,SnapshotHeld,DOMAIN
 from processing.viewer_paged_frame_candidate import VERSION as SV,DOMAIN as SD
 from processing.viewer_selected_frames_candidate import VERSION as TV,DOMAIN as TD,binding_digest
 from processing.large_paged_manifest_candidate import build,_digest
+from processing.prototype import Queue
+from processing.reference_store import ReferenceStore,PROFILE
+from pathlib import Path
 from tests.test_viewer_selected_frames_candidate import frames as encode_frames
 from tests.test_paged_snapshot_signature_candidate import PagedSnapshotSignatureTests
 
@@ -13,7 +16,7 @@ class AtomicSnapshotTests(unittest.TestCase):
  statement_hash=PagedSnapshotSignatureTests.statement_hash
  def setUp(self):
   PagedSnapshotSignatureTests.setUp(self)
-  with self.queue._db() as db:initialize(db);frames.initialize(db)
+  with self.queue._db() as db:initialize(db);initialize_frames(db)
   source=[dict(type='dataset_file',datasetFileId='photo',relativePath='flight/a.jpg',byteSize=3,sha256='a'*64,processingRole='image',mediaType='image/jpeg',kind='image')]
   selected=[dict(type='dataset_file',ordinal=0,pageObjectId='photo',datasetFileId='photo')]
   self.source,self.sourcepins=encode_frames(source,SV,SD);self.selected,self.selectedpins=encode_frames(selected,TV,TD)
@@ -56,6 +59,17 @@ class AtomicSnapshotTests(unittest.TestCase):
   self.run_stage()
   with self.queue._db() as db:db.execute('UPDATE paged_snapshot_journal_v1 SET signed_bytes=?',(b'x'*65537,))
   with self.assertRaises(SnapshotHeld):self.run_stage()
+ def test_missing_frame_table_with_marker_cannot_be_recreated(self):
+  self.run_stage()
+  with self.queue._db() as db:db.execute('DROP TABLE candidate_frame_pages')
+  with self.queue._db() as db:
+   with self.assertRaises(SnapshotHeld):initialize_frames(db)
+ def test_missing_all_frame_tables_with_journal_history_cannot_be_recreated(self):
+  self.run_stage()
+  with self.queue._db() as db:
+   db.execute('DROP TABLE candidate_frame_pages');db.execute('DROP TABLE candidate_frame_receipts');db.execute('DROP TABLE paged_snapshot_frame_marker_v1')
+  with self.queue._db() as db:
+   with self.assertRaises(SnapshotHeld):initialize_frames(db)
  def test_committed_snapshot_survives_process_reopen_after_lost_reply(self):
   self.run_stage()
   arg=dict(root=self.temp.name,authority=self.queue.authority_id,entries=self.config,submission=self.env['submission']['submissionId'],raw=self.raw().decode(),binding=self.binding,closure=self.closure,pages=self.pages)
@@ -74,3 +88,35 @@ finally:q.close()
 '''
   result=subprocess.run([sys.executable,'-c',script],input=json.dumps(arg),capture_output=True,text=True,check=True,timeout=20)
   self.assertEqual(json.loads(result.stdout)['reason'],'snapshot_replay_status_only')
+ def test_real_child_kill_before_commit_then_retry_and_post_commit_exit(self):
+  raw=self.raw();arg=dict(root=self.temp.name,authority=self.queue.authority_id,entries=self.config,submission=self.env['submission']['submissionId'],raw=raw.decode(),binding=self.binding,closure=self.closure,pages=self.pages,source=base64.b64encode(self.source).decode(),selected=base64.b64encode(self.selected).decode())
+  context=Path(self.temp.name)/'synthetic-context.json';context.write_text(json.dumps(arg),encoding='utf8')
+  self.queue.close()
+  script='''import base64,io,json,os,sys
+from processing.prototype import Queue
+from processing.reference_store import ReferenceStore,PROFILE
+from processing.paged_snapshot_journal_candidate import inspect,ServerSnapshotTrust
+from processing.viewer_selected_frames_candidate import binding_digest
+a=json.load(open(sys.argv[1],encoding='utf8'));q=Queue(a['root']);q.allowed_profiles.add(PROFILE)
+s=ReferenceStore(q,jcs_runtime_enabled=True);t=ServerSnapshotTrust(authority_id=a['authority'],key_entries=a['entries'],clock_provider=lambda:1893456300000)
+b=dict(binding=a['binding'],bindingSha256=binding_digest(a['binding']),sourceStream=io.BytesIO(base64.b64decode(a['source'])),selectedStream=io.BytesIO(base64.b64decode(a['selected'])),processingClosure=a['closure'],processingPages=a['pages'],evidenceStream=None)
+def fault(phase):
+ if phase==sys.argv[2]:print('inserted',flush=True);sys.stdin.read(1)
+inspect(s,a['submission'],a['raw'].encode(),principal='viewer-a',environment='staging',trust=t,stage_bundle=b,_fault=fault)
+os._exit(73)
+'''
+  for phase in ('journal','frames'):
+   child=subprocess.Popen([sys.executable,'-c',script,str(context),phase],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   try:
+    output=queue.Queue();reader=threading.Thread(target=lambda:output.put(child.stdout.readline()),daemon=True);reader.start()
+    self.assertEqual(output.get(timeout=15).strip(),'inserted');child.kill();child.wait(timeout=10);reader.join(timeout=5);self.assertFalse(reader.is_alive())
+   finally:
+    if child.poll() is None:child.kill();child.wait(timeout=10)
+    child.communicate(timeout=5)
+   self.queue=Queue(self.temp.name);self.queue.allowed_profiles.add(PROFILE);self.store=ReferenceStore(self.queue,jcs_runtime_enabled=True)
+   self.assertEqual(self.counts(),(0,0,0));self.queue.close()
+  child=subprocess.run([sys.executable,'-c',script,str(context),'none'],capture_output=True,text=True,timeout=20)
+  self.assertEqual(child.returncode,73,msg=child.stderr)
+  self.queue=Queue(self.temp.name);self.queue.allowed_profiles.add(PROFILE);self.store=ReferenceStore(self.queue,jcs_runtime_enabled=True)
+  self.addCleanup(self.queue.close)
+  self.assertEqual(self.counts(),(1,1,3));self.assertEqual(self.run_stage(source=b'')['reason'],'snapshot_replay_status_only')

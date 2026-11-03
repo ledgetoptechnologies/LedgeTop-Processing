@@ -15,9 +15,11 @@ permit status-only recovery. The signed statement and frames never confer
 source access, dispatch, a grant, cleanup, or trusted custody.
 
 This is not a production migration or authority. Its frame/evidence schemas are
-initialized by existing test-only helpers which do not validate existing schema
-and lack downgrade protection; external writer/clone fencing, quota, trusted
+initialized by a separate test-only marker and closed schema check; they lack
+downgrade protection. External writer/clone fencing, quota, trusted
 binding/epoch and signer revocation remain unresolved. The journal marker
 detects a single dropped marker or journal, not simultaneous loss of both or
 restoration of an old database. Transactions are synthetic and tests do not
 establish live deployment, full crash/power-loss durability or GCP semantics.
+Synthetic tests kill a child after journal or frame inserts and verify rollback;
+another exits immediately after commit before reply, then reopens and replays.

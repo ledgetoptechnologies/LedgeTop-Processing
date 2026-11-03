@@ -64,12 +64,42 @@ class ServerSnapshotTrust:
 
 DDL="CREATE TABLE paged_snapshot_journal_v1 (issuer_id TEXT NOT NULL, key_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, statement_sha256 TEXT NOT NULL, signed_bytes BLOB NOT NULL, job_id TEXT NOT NULL, principal_id TEXT NOT NULL, environment TEXT NOT NULL, authority_id TEXT NOT NULL, PRIMARY KEY(issuer_id,snapshot_id))"
 MARKER_DDL="CREATE TABLE paged_snapshot_journal_marker_v1 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))"
+FRAME_MARKER_DDL="CREATE TABLE paged_snapshot_frame_marker_v1 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))"
+FRAME_RECEIPTS_DDL='CREATE TABLE candidate_frame_receipts(stage_id TEXT PRIMARY KEY,binding_pin TEXT NOT NULL,binding_json TEXT NOT NULL,closure_json TEXT NOT NULL)'
+FRAME_PAGES_DDL='CREATE TABLE candidate_frame_pages(stage_id TEXT NOT NULL REFERENCES candidate_frame_receipts(stage_id),kind TEXT NOT NULL,ordinal INTEGER NOT NULL,wire BLOB NOT NULL,PRIMARY KEY(stage_id,kind,ordinal))'
+
+def _check_frame_schema(db):
+ for name,ddl in (('paged_snapshot_frame_marker_v1',FRAME_MARKER_DDL),('candidate_frame_receipts',FRAME_RECEIPTS_DDL),('candidate_frame_pages',FRAME_PAGES_DDL)):
+  row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
+  if row is None or row[0]!=ddl:raise SnapshotHeld('snapshot_frame_schema_unavailable')
+  triggers=db.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name=?",(name,)).fetchone()[0]
+  if triggers:raise SnapshotHeld('snapshot_frame_schema_unavailable')
+ if [tuple(r) for r in db.execute('SELECT singleton,version FROM paged_snapshot_frame_marker_v1 LIMIT 2')]!=[(1,1)]:raise SnapshotHeld('snapshot_frame_schema_unavailable')
+ for name in ('candidate_frame_receipts','candidate_frame_pages'):
+  indexes=db.execute('PRAGMA index_list('+name+')').fetchall()
+  if len(indexes)!=1 or indexes[0][2]!=1 or indexes[0][3]!='pk':raise SnapshotHeld('snapshot_frame_schema_unavailable')
+
+def initialize_frames(db):
+ """Fresh test-only schema creation; missing one table never repairs history."""
+ if db.in_transaction:raise SnapshotHeld('snapshot_frame_schema_unavailable')
+ db.execute('PRAGMA foreign_keys=ON');db.execute('BEGIN IMMEDIATE')
+ try:
+  names={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE name IN ('paged_snapshot_frame_marker_v1','candidate_frame_receipts','candidate_frame_pages')")}
+  if not names:
+   if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paged_snapshot_journal_v1'").fetchone() and db.execute('SELECT 1 FROM paged_snapshot_journal_v1 LIMIT 1').fetchone():raise SnapshotHeld('snapshot_frame_schema_unavailable')
+   for ddl in (FRAME_MARKER_DDL,FRAME_RECEIPTS_DDL,FRAME_PAGES_DDL):db.execute(ddl)
+   db.execute('INSERT INTO paged_snapshot_frame_marker_v1 VALUES(1,1)')
+  elif len(names)!=3:raise SnapshotHeld('snapshot_frame_schema_unavailable')
+  _check_frame_schema(db);db.commit()
+ except BaseException:
+  db.rollback();raise
 
 def _check_schema(db):
  row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='paged_snapshot_journal_v1'").fetchone()
  if row is None or row[0]!=DDL:raise SnapshotHeld('snapshot_journal_schema_unavailable')
  marker=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='paged_snapshot_journal_marker_v1'").fetchone()
  if marker is None or marker[0]!=MARKER_DDL or [tuple(r) for r in db.execute('SELECT singleton,version FROM paged_snapshot_journal_marker_v1 LIMIT 2')]!=[(1,1)]:raise SnapshotHeld('snapshot_journal_schema_unavailable')
+ if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('paged_snapshot_journal_v1','paged_snapshot_journal_marker_v1') LIMIT 1").fetchone():raise SnapshotHeld('snapshot_journal_schema_unavailable')
  indexes=db.execute("PRAGMA index_list('paged_snapshot_journal_v1')").fetchall()
  if len(indexes)!=1 or indexes[0][2]!=1 or indexes[0][3]!='pk':raise SnapshotHeld('snapshot_journal_schema_unavailable')
 
@@ -80,6 +110,7 @@ def initialize(db):
  try:
   names={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE name IN ('paged_snapshot_journal_v1','paged_snapshot_journal_marker_v1')")}
   if not names:
+   if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='candidate_frame_receipts'").fetchone() and db.execute('SELECT 1 FROM candidate_frame_receipts LIMIT 1').fetchone():raise SnapshotHeld('snapshot_journal_schema_unavailable')
    db.execute(DDL);db.execute(MARKER_DDL);db.execute('INSERT INTO paged_snapshot_journal_marker_v1 VALUES(1,1)')
   elif len(names)!=2:raise SnapshotHeld('snapshot_journal_schema_unavailable')
   _check_schema(db);db.commit()
@@ -149,7 +180,7 @@ def inspect(store,submission_id,raw,*,principal,environment,trust,stage_bundle=N
   if p.canonical_json(statement)!=raw:raise ValueError('canonical signed bytes required')
   statement_hash=hashlib.sha256(DOMAIN+wire).hexdigest()
   with store.queue._db() as db:
-   db.execute('BEGIN IMMEDIATE');_check_schema(db);store._check_jcs_capability(db);store._require_viewer_authority(db,expected_authority_id)
+   db.execute('PRAGMA foreign_keys=ON');db.execute('BEGIN IMMEDIATE');_check_schema(db);_check_frame_schema(db);store._check_jcs_capability(db);store._require_viewer_authority(db,expected_authority_id)
    found=store._scoped_prepared_job_id(db,submission_id,principal,environment,jcs.PROTOCOL)
    if found is None:return None
    row=store._row(db,found['job_id']);owner=store._submission_owner(db,row)
