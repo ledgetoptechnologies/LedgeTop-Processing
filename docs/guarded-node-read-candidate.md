@@ -7,6 +7,9 @@ Viewer-job binding while the node gate is held. Until a matching committed
 operation is durably acknowledged, info reports held, output is empty, and
 archive download is refused. Archive access also requires NodeODM status 40;
 bytes stream directly without a path supplied by the caller.
+The listener validates and pins its loopback engine target at startup. Bound
+reads use the captured engine and the same fixed target as its mutation client;
+ordinary engine or parsed-target replacement is rejected before a read.
 
 This is not production authorization or a delivery acknowledgment. The claim
 verifier deliberately permits expired claims for inspection, but current

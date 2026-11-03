@@ -1,5 +1,7 @@
 import ssl
 import unittest
+from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from processing.guarded_native_client import GuardedNativeClient
 from processing.viewer_service import EngineUnavailable
@@ -51,6 +53,57 @@ class BoundReadTests(BoundJobTests):
         with self.assertRaises(EngineUnavailable):
             with client.download_bound(claim): self.fail('pending download')
         self.assertEqual(self.backend.counts()['download'], 0)
+
+    def test_reads_and_download_reject_engine_or_parsed_target_replacement(self):
+        server = self.start_listener()
+        claim = self.envelope()
+        self.assertEqual(self.request(server, '/v1/initialize-bound', {'task': self.task, 'jobClaim': claim})[0], 200)
+        client = self.client(server)
+        client.upload(self.job, self.item)
+        client.action('commit', self.job)
+        engine = self.proxy.engine
+        with patch.object(engine.client, 'parsed', urlsplit('http://192.0.2.1:3000')):
+            with self.assertRaises(EngineUnavailable): client.read_bound(claim, 'info')
+            with self.assertRaises(EngineUnavailable):
+                with client.download_bound(claim): self.fail('diverged target')
+        with patch.object(self.proxy, 'engine', object()):
+            with self.assertRaises(EngineUnavailable): client.read_bound(claim, 'info')
+            with self.assertRaises(EngineUnavailable):
+                with client.download_bound(claim): self.fail('replaced engine')
+        self.assertEqual(self.backend.counts()['download'], 0)
+
+    def test_read_and_download_use_captured_endpoint_after_validation(self):
+        server = self.start_listener()
+        claim = self.envelope()
+        self.assertEqual(self.request(server, '/v1/initialize-bound', {'task': self.task, 'jobClaim': claim})[0], 200)
+        client = self.client(server)
+        client.upload(self.job, self.item)
+        client.action('commit', self.job)
+        engine = self.proxy.engine
+        pinned = engine.client
+        original = pinned.fixed_origin
+        def switch_after_check():
+            fixed = original()
+            engine.origin = 'http://192.0.2.1:3000'
+            return fixed
+        try:
+            with patch.object(pinned, 'fixed_origin', side_effect=switch_after_check):
+                self.assertEqual(client.read_bound(claim, 'info')['value']['status']['code'], 40)
+            engine.origin = self.backend.origin
+            # Check a swap immediately before the archive network request,
+            # after its preceding NodeODM status check has already succeeded.
+            calls = []
+            def switch_second():
+                fixed = original()
+                calls.append(True)
+                if len(calls) == 2: engine.origin = 'http://192.0.2.1:3000'
+                return fixed
+            with patch.object(pinned, 'fixed_origin', side_effect=switch_second):
+                with client.download_bound(claim) as result:
+                    self.assertEqual(result.read(), ARCHIVE)
+            self.assertEqual(self.backend.counts()['download'], 1)
+        finally:
+            engine.origin = self.backend.origin
 
 
 if __name__ == '__main__':

@@ -52,6 +52,11 @@ class _PinnedLoopbackClient(Client):
             raise SmokeError('fixed node target cannot be overridden')
         return super().request(*args, _fixed_target=self.__target, **kwargs)
 
+    def fixed_origin(self):
+        # Use the same private parsed target as the mutation socket.  Never
+        # derive a read URL from mutable public engine or client attributes.
+        return self.__target.scheme + '://' + self.__target.netloc
+
 
 class NativeEngine:
     def __init__(self, origin, token=''):
@@ -95,7 +100,9 @@ class NativeEngine:
 
     def read(self, route, *, missing=False, limit=4 * 1024 ** 2, **query):
         try:
-            request = Request(self.origin + self.route(route, **query))
+            pinned = getattr(self, '_guarded_client', None)
+            origin = self._mutation_client().fixed_origin() if pinned is not None else self.origin
+            request = Request(origin + self.route(route, **query))
             with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=5) as response:
                 if 'json' not in response.headers.get('Content-Type', ''):
                     raise ValueError()
@@ -154,8 +161,10 @@ class NativeEngine:
         return result
 
     def download(self, identifier):
+        pinned = getattr(self, '_guarded_client', None)
+        origin = self._mutation_client().fixed_origin() if pinned is not None else self.origin
         return build_opener(ProxyHandler({}), _NoRedirect()).open(
-            self.origin + self.route('/task/' + identifier + '/download/all.zip'), timeout=60)
+            origin + self.route('/task/' + identifier + '/download/all.zip'), timeout=60)
 
 
 class ViewerService:
