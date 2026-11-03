@@ -19,8 +19,8 @@ PROTOCOL='ltds-viewer-paged-source-snapshot-v1'
 DOMAIN=b'LTDS-VIEWER-PAGED-SOURCE-SNAPSHOT-V1\0'
 PURPOSE='paged-source-snapshot'
 MAX_BODY=65536
-MAX_TTL_SECONDS=3600
-FIELDS=('protocol','schemaVersion','issuerId','keyId','snapshotId','principalId','environment','coordinatorAuthorityId','jobId','generation','submissionId','activationId','viewerTaskId','viewerAttemptId','preparedEnvelopeSha256','datasetId','datasetManifestSha256','pipelineDigest','sourcePageHashes','sourcePageBytes','sourceCount','selectedPageHashes','selectedPageBytes','selectedCount','inputManifestSha256','processingClosureSha256','gcpEvidenceSha256','sourceRevision','revocationEpoch','issuedAt','expiresAt','signature')
+MAX_TTL_SECONDS=900
+FIELDS=('protocol','schemaVersion','issuerId','keyId','snapshotId','principalId','environment','coordinatorAuthorityId','jobId','generation','submissionId','activationId','viewerTaskId','viewerAttemptId','preparedEnvelopeSha256','datasetId','datasetManifestSha256','pipelineDigest','sourcePageHashes','sourcePageBytes','sourceCount','selectedPageHashes','selectedPageBytes','selectedCount','inputManifestSha256','processingClosureSha256','gcpEvidenceVersion','gcpEvidencePageHashes','gcpEvidencePageBytes','gcpEvidencePageCount','gcpEvidenceByteCount','gcpEvidenceSha256','issuedAt','expiresAt','signature')
 
 class SnapshotHeld(ValueError):pass
 
@@ -52,15 +52,15 @@ def pin_registry(registry):
 
 class ServerSnapshotTrust:
  """Independently configured server policy; never construct from request data."""
- def __init__(self,*,authority_id,key_entries,clock_provider=None,epoch_provider=None,snapshot_pin_provider=None,max_future_skew_ms=60000):
+ def __init__(self,*,authority_id,key_entries,clock_provider=None,snapshot_pin_provider=None,max_future_skew_ms=60000):
   p._uuid(authority_id,'configured authority')
-  if type(max_future_skew_ms) is not int or not 0<=max_future_skew_ms<=300000:raise ValueError('invalid clock skew')
-  for provider in (clock_provider,epoch_provider,snapshot_pin_provider):
+  if type(max_future_skew_ms) is not int or not 0<=max_future_skew_ms<=60000:raise ValueError('invalid clock skew')
+  for provider in (clock_provider,snapshot_pin_provider):
    if provider is not None and not callable(provider):raise ValueError('invalid provider')
   registry=pin_registry(key_entries)
   if any(key[0]!=authority_id for key in registry):raise ValueError('key authority differs')
   self.authority_id=authority_id;self.registry=MappingProxyType(registry);self.clock_provider=clock_provider
-  self.epoch_provider=epoch_provider;self.snapshot_pin_provider=snapshot_pin_provider;self.max_future_skew_ms=max_future_skew_ms
+  self.snapshot_pin_provider=snapshot_pin_provider;self.max_future_skew_ms=max_future_skew_ms
 
 def inspect(store,submission_id,raw,*,principal,environment,trust):
  """Read-only held inspection. `trust` must be provisioned independently.
@@ -78,13 +78,24 @@ def inspect(store,submission_id,raw,*,principal,environment,trust):
   statement=json.loads(raw.decode('utf8'),object_pairs_hook=_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
   p._closed(statement,FIELDS,'snapshot')
   if statement['protocol']!=PROTOCOL or type(statement['schemaVersion']) is not int or statement['schemaVersion']!=1:raise ValueError()
-  for k in ('issuerId','keyId','snapshotId','principalId','jobId','datasetId','sourceRevision'):p._slug(statement[k],k)
+  for k in ('issuerId','keyId','snapshotId','principalId','jobId','datasetId'):p._slug(statement[k],k)
   p._environment(statement['environment'])
   for k in ('coordinatorAuthorityId','submissionId','activationId','viewerTaskId','viewerAttemptId'):p._uuid(statement[k],k)
   for k in ('preparedEnvelopeSha256','datasetManifestSha256','pipelineDigest','inputManifestSha256','processingClosureSha256'):p._hash(statement[k],k)
-  if statement['gcpEvidenceSha256'] is not None:p._hash(statement['gcpEvidenceSha256'],'GCP evidence')
+  evidence_keys=('gcpEvidenceVersion','gcpEvidencePageHashes','gcpEvidencePageBytes','gcpEvidencePageCount','gcpEvidenceByteCount','gcpEvidenceSha256')
+  if any(statement[k] is not None for k in evidence_keys):
+   if any(statement[k] is None for k in evidence_keys) or statement['gcpEvidenceVersion']!='ltds-viewer-gcp-evidence-chunks-v1':raise ValueError()
+   hashes=statement['gcpEvidencePageHashes'];sizes=statement['gcpEvidencePageBytes'];count=statement['gcpEvidencePageCount'];size=statement['gcpEvidenceByteCount']
+   if type(hashes) is not list or type(sizes) is not list or type(count) is not int or not 2<=count<=512 or len(hashes)!=count or len(sizes)!=count:raise ValueError()
+   p._integer(size,'evidence byte count')
+   if not count-1<=size<=min(16*1024*1024,(count-1)*46080):raise ValueError()
+   for value in hashes:p._hash(value,'evidence page hash')
+   for value in sizes:
+    p._integer(value,'evidence page bytes')
+    if value>65535:raise ValueError()
+   if sum(sizes)+count>24*1024*1024:raise ValueError()
+   p._hash(statement['gcpEvidenceSha256'],'GCP evidence')
   for k in ('generation','sourceCount','selectedCount'):p._integer(statement[k],k)
-  p._integer(statement['revocationEpoch'],'epoch',allow_zero=True)
   if statement['sourceCount']>20000 or statement['selectedCount']>20000:raise ValueError()
   for k in ('sourcePageHashes','selectedPageHashes'):
    if type(statement[k]) is not list or not 0<len(statement[k])<=64:raise ValueError()
@@ -137,12 +148,11 @@ def inspect(store,submission_id,raw,*,principal,environment,trust):
     delta=value-epoch0
     return (delta.days*86400+delta.seconds)*1000+delta.microseconds//1000
    if now_ms+trust.max_future_skew_ms<millis(times[0]) or now_ms>=millis(times[1]):raise ValueError()
-   if trust.epoch_provider is None or trust.snapshot_pin_provider is None:return {'state':'held','reason':'trusted_snapshot_or_epoch_unavailable'}
+   if trust.snapshot_pin_provider is None:return {'state':'held','reason':'trusted_snapshot_unavailable'}
    # Callbacks receive only immutable identifiers, never the SQLite handle.
    # They are trusted in-process code, not a sandbox or a same-transaction loader.
    context=MappingProxyType(dict(principalId=principal,environment=environment,authorityId=expected_authority_id,jobId=row['job_id'],snapshotId=statement['snapshotId']))
-   epoch=trust.epoch_provider(context)
    pin=trust.snapshot_pin_provider(context)
-   if type(epoch) is not int or epoch!=statement['revocationEpoch'] or type(pin) is not str or not hmac.compare_digest(pin,statement_hash):raise ValueError()
-   return {'state':'held','reason':'atomic_staging_unavailable','statementSha256':statement_hash}
+   if type(pin) is not str or not hmac.compare_digest(pin,statement_hash):raise ValueError()
+   return {'state':'held','reason':'independent_epoch_and_atomic_staging_unavailable','statementSha256':statement_hash}
  except (ValueError,TypeError,KeyError,UnicodeError,OverflowError,InvalidSignature,Conflict,sqlite3.Error,OSError,RuntimeError,AttributeError):raise SnapshotHeld('snapshot_inspection_unavailable') from None
