@@ -18,11 +18,18 @@ is run. The source-byte check is fixture-only and is not an authenticated
 production reader, custody proof or test of an actual lost file.
 
 Set `PINNED_VIEWER_ROOT` to a clean detached checkout at that commit and
-`PYTHONPATH` to the hash-pinned rfc8785 candidate dependency, then run:
+`PYTHONPATH` to the hash-pinned rfc8785 candidate dependency outside the
+checkout. The checkout must have no tracked modifications or untracked files.
+For release validation, require the pinned checkout explicitly (PowerShell):
 
 ```
+$env:REQUIRE_PINNED_VIEWER_PAIR = '1'
 python -m unittest tests.test_viewer_repository_source_snapshot_pair
 ```
+
+Without `REQUIRE_PINNED_VIEWER_PAIR=1`, the test skips when the Viewer checkout
+is not configured; such a run is not release validation. A configured checkout
+with a wrong revision or untracked files always fails.
 
 The Viewer repository can produce attempt-bound evidence in this synthetic
 case. Real trusted snapshot/selection loading, authentication, transport,

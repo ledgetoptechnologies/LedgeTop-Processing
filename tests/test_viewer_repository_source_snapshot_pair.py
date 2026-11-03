@@ -19,10 +19,13 @@ class ViewerRepositorySourceSnapshotPairTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root=os.environ.get('PINNED_VIEWER_ROOT')
-        if not root:raise unittest.SkipTest('PINNED_VIEWER_ROOT required')
+        if not root:
+            if os.environ.get('REQUIRE_PINNED_VIEWER_PAIR') == '1':
+                raise RuntimeError('PINNED_VIEWER_ROOT required for release validation')
+            raise unittest.SkipTest('PINNED_VIEWER_ROOT required; set REQUIRE_PINNED_VIEWER_PAIR=1 for release validation')
         cls.viewer=Path(root).resolve(strict=True)
         head=subprocess.run(['git','rev-parse','HEAD'],cwd=cls.viewer,text=True,capture_output=True,check=True).stdout.strip()
-        status=subprocess.run(['git','status','--porcelain','--untracked-files=no'],cwd=cls.viewer,text=True,capture_output=True,check=True).stdout
+        status=subprocess.run(['git','status','--porcelain','--untracked-files=all'],cwd=cls.viewer,text=True,capture_output=True,check=True).stdout
         if head!=VIEWER_COMMIT or status:raise AssertionError('clean pinned Viewer checkout required')
 
     def fixture(self, mode='normal'):
