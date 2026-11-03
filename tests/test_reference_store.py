@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 import tempfile
+import threading
 import unittest
 import uuid
 
@@ -209,6 +210,34 @@ class ReferenceStoreTests(unittest.TestCase):
         self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')
         with self.assertRaises(Conflict):
             self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+
+    def test_release_and_reservation_race_has_one_winner(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='race-release')
+        claim = self.store.claim(job['jobId'], **binding)
+        identity = {key: binding[key] for key in ('node_id', 'worker_id', 'worker_instance_id')}
+        barrier = threading.Barrier(2)
+        def attempt(kind):
+            barrier.wait(timeout=5)
+            try:
+                if kind == 'release':
+                    self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+                else:
+                    self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster',
+                        worker_identity=identity, claim_token=claim['claimToken'])
+                return kind
+            except Conflict:
+                return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, ('release', 'reserve')))
+        self.assertEqual(sum(item is not None for item in outcomes), 1)
+        current = self.store.get(job['jobId'])
+        if 'release' in outcomes:
+            self.assertEqual((current['status'], current['phase']), ('queued', 'waiting_capacity'))
+            self.assertIsNone(current['transferRequest'])
+        else:
+            self.assertEqual((current['status'], current['phase']), ('running', 'awaiting_transfer'))
 
     def test_release_refuses_inconsistent_queue_claim_hash(self):
         job, _ = self.store.submit(self.new_submission())
