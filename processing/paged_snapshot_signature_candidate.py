@@ -45,7 +45,7 @@ def pin_registry(registry):
    key=serialization.load_pem_public_key(entry['publicKeyPem'].encode('ascii'))
    if not isinstance(key,Ed25519PublicKey):raise ValueError()
    raw=key.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw);scope=(entry['coordinatorAuthorityId'],entry['principalId'],entry['environment']);identity=(*scope,entry['issuerId'],entry['keyId'])
-   if identity in out or (raw in owners and owners[raw]!=scope):raise ValueError()
+   if identity in out or raw in owners:raise ValueError()
    owners[raw]=scope;out[identity]=key
   return out
  except (ValueError,TypeError,KeyError,UnicodeError,UnsupportedAlgorithm):raise SnapshotHeld('invalid_key_registry') from None
@@ -138,8 +138,11 @@ def inspect(store,submission_id,raw,*,principal,environment,trust):
     return (delta.days*86400+delta.seconds)*1000+delta.microseconds//1000
    if now_ms+trust.max_future_skew_ms<millis(times[0]) or now_ms>=millis(times[1]):raise ValueError()
    if trust.epoch_provider is None or trust.snapshot_pin_provider is None:return {'state':'held','reason':'trusted_snapshot_or_epoch_unavailable'}
-   epoch=trust.epoch_provider(db,principal,environment,expected_authority_id)
-   pin=trust.snapshot_pin_provider(db,row['job_id'],statement['snapshotId'])
+   # Callbacks receive only immutable identifiers, never the SQLite handle.
+   # They are trusted in-process code, not a sandbox or a same-transaction loader.
+   context=MappingProxyType(dict(principalId=principal,environment=environment,authorityId=expected_authority_id,jobId=row['job_id'],snapshotId=statement['snapshotId']))
+   epoch=trust.epoch_provider(context)
+   pin=trust.snapshot_pin_provider(context)
    if type(epoch) is not int or epoch!=statement['revocationEpoch'] or type(pin) is not str or not hmac.compare_digest(pin,statement_hash):raise ValueError()
    return {'state':'held','reason':'atomic_staging_unavailable','statementSha256':statement_hash}
  except (ValueError,TypeError,KeyError,UnicodeError,OverflowError,InvalidSignature,Conflict,sqlite3.Error,OSError,RuntimeError,AttributeError):raise SnapshotHeld('snapshot_inspection_unavailable') from None

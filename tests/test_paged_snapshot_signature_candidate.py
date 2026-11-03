@@ -86,6 +86,23 @@ class PagedSnapshotSignatureTests(unittest.TestCase):
    return 3
   with self.assertRaises(SnapshotHeld):self.call(epoch_provider=malicious)
   self.assertEqual(hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest(),before)
+ def test_provider_cannot_reset_read_only_or_escape_transaction(self):
+  before=hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest()
+  for provider in ('epoch_provider','snapshot_pin_provider'):
+   for sql in ('PRAGMA query_only=OFF','CREATE TABLE forbidden_write(id INTEGER)','DELETE FROM reference_jobs','COMMIT'):
+    observed=[]
+    def attempt(context):
+     observed.append(type(context).__name__)
+     return context.execute(sql)
+    with self.subTest(provider=provider,sql=sql),self.assertRaises(SnapshotHeld):self.call(**{provider:attempt})
+    self.assertEqual(observed,['mappingproxy'])
+    self.assertEqual(hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest(),before)
+  def mutate(context):context['jobId']='changed';return 3
+  with self.assertRaises(SnapshotHeld):self.call(epoch_provider=mutate)
+  self.assertEqual(hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest(),before)
+ def test_same_key_cannot_be_aliased_within_scope(self):
+  for changes in (dict(keyId='another-key'),dict(issuerId='another-issuer')):
+   with self.subTest(changes=changes),self.assertRaises(SnapshotHeld):pin_registry(self.config+[dict(self.config[0],**changes)])
  def test_ttl_and_page_count_constraints_hold(self):
   for key,value in [('expiresAt','2030-01-01T02:00:00.000Z'),('sourcePageBytes',[262145]),('selectedCount',513),('sourceRevision','')]:
    changed=copy.deepcopy(self.statement);changed[key]=value;pin=self.statement_hash(changed)
