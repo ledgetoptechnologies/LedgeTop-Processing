@@ -37,8 +37,23 @@ _NORMALIZED = {"schemaVersion", "submissionId", "manifest", "pipeline", "capabil
                "environment", "requestDigest", "manifestSha256", "pipelineDigest"}
 
 
+# Generation stays fixed across a release: it is bound into worker journals and
+# Viewer receipts. A release is bounded per job, so its tombstones stay a small
+# multiple of the job row and cannot exhaust the metadata quota by cycling.
+MAX_CLAIM_RELEASES_PER_JOB = 3
+# Any row for the job means a worker reported or the job left unstarted custody.
+_RELEASE_BARRIER_TABLES = ('reference_worker_failures', 'reference_worker_receipts',
+                           'reference_acceptances', 'reference_viewer_receipts',
+                           'reference_viewer_transfers', 'reference_terminal_acceptances',
+                           'reference_recovery_receipts')
+
+
 class ViewerTransferJobConflict(Conflict):
     """A particular sealed result requires reconciliation before transfer."""
+
+
+class ClaimReleased(Conflict):
+    """This exact claim request was fenced; it can never become a claim again."""
 
 
 def _json(value):
@@ -438,11 +453,24 @@ class ReferenceStore:
             with self.queue._db() as db:
                 db.execute('BEGIN')
                 row=self._row(db,job_id)
+                self._fence_released_request(db,job_id,node_id,worker_id,worker_instance_id,claim_request_id)
                 old=db.execute('SELECT * FROM reference_claims WHERE request_id=?',(claim_request_id,)).fetchone()
                 if old is None:return None
                 if (old['job_id'],old['node_id'],old['worker_id'],old['instance_id'])!=(job_id,node_id,worker_id,worker_instance_id):
                     raise Conflict('claim request belongs to different worker binding')
                 return self._record(row,True)
+
+    @staticmethod
+    def _fence_released_request(db, job_id, node_id, worker_id, worker_instance_id, claim_request_id):
+        """Answer one released request identically on every claim path."""
+        old = db.execute('SELECT * FROM reference_released_claims WHERE request_id=?',
+                         (claim_request_id,)).fetchone()
+        if old is None:
+            return
+        if (old['job_id'], old['node_id'], old['worker_id'], old['instance_id']) != (
+                job_id, node_id, worker_id, worker_instance_id):
+            raise Conflict('claim request belongs to different worker binding')
+        raise ClaimReleased('claim request was released')
 
     def _claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
         """PRIVATE worker API: atomically persist ownership and replay envelope.
@@ -459,10 +487,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
-            released = db.execute('SELECT 1 FROM reference_released_claims WHERE request_id=?',
-                                  (claim_request_id,)).fetchone()
-            if released:
-                raise Conflict('claim request was released')
+            self._fence_released_request(db, job_id, node_id, worker_id, worker_instance_id, claim_request_id)
             old = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if old:
                 if (old["job_id"], old["node_id"], old["worker_id"], old["instance_id"]) != (
@@ -488,13 +513,27 @@ class ReferenceStore:
               VALUES(?,?,?,?,?,?)""", (claim_request_id, job_id, node_id, worker_id, worker_instance_id, token))
             return self._record(self._row(db, job_id), True)
 
+    @staticmethod
+    def _worker_reported(db, job_id):
+        """Any durable worker or Viewer evidence forbids returning a job to queue."""
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if any(table in tables and db.execute(f'SELECT 1 FROM {table} WHERE job_id=? LIMIT 1', (job_id,)).fetchone()
+               for table in _RELEASE_BARRIER_TABLES):
+            return True
+        # reference_outbox has no job column; a job UUID in its payload binds it.
+        return db.execute('SELECT 1 FROM reference_outbox WHERE instr(payload_json,?)>0 LIMIT 1',
+                          (job_id,)).fetchone() is not None
+
     def release_unstarted_claim(self, job_id, *, node_id, worker_id, worker_instance_id,
-                                claim_request_id, claim_token):
+                                claim_request_id, claim_token, worker_attestation):
         """Held candidate: fence an authenticated claim before any transfer grant.
 
         This method has no HTTP route and is not connected to the worker. It
         does not prove the physical engine stayed idle; activation requires
-        independently validated node fencing and a durable worker handshake.
+        independently validated node fencing. The worker goes first: only its
+        exact durable release attestation (ReferenceDriver.prepare_release) is
+        accepted, and a job any worker reported on stays with its claim so that
+        a sealed failure still ends failed instead of returning to the queue.
         """
         self.queue._known_node(node_id); self.queue.slug(worker_id)
         for value in (worker_instance_id, claim_request_id):
@@ -503,8 +542,16 @@ class ReferenceStore:
             raise ValueError('invalid claim token')
         digest = hashlib.sha256(claim_token.encode()).hexdigest()
         binding = (job_id, node_id, worker_id, worker_instance_id, digest)
+        expected = protocol.release_attestation(job_id=job_id, claim_request_id=claim_request_id,
+            node_id=node_id, worker_id=worker_id, worker_instance_id=worker_instance_id)
+        if (type(worker_attestation) is not dict
+                or protocol.canonical_json(worker_attestation) != protocol.canonical_json(expected)):
+            raise Conflict('matching worker release attestation required')
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            authority = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
+            if not authority or authority['authority_id'] != self.queue.authority_id:
+                raise Conflict('claim cannot be safely released')
             old = db.execute('SELECT * FROM reference_released_claims WHERE request_id=?',
                              (claim_request_id,)).fetchone()
             if old:
@@ -522,13 +569,17 @@ class ReferenceStore:
                     or row['node_id'] != node_id or type(row['claim_hash']) is not str
                     or not hmac.compare_digest(row['claim_hash'], digest)
                     or row['transfer_json'] is not None or row['result_json'] is not None
-                    or row['private_grant_json'] is not None):
+                    or row['private_grant_json'] is not None or row['queue_result'] is not None
+                    or self._worker_reported(db, job_id)):
                 raise Conflict('claim cannot be safely released')
             if (row['terminal_failure_json'] is not None or
                     db.execute('SELECT 1 FROM reference_worker_receipts WHERE job_id=? LIMIT 1', (job_id,)).fetchone() or
                     db.execute("""SELECT 1 FROM reference_outbox WHERE
                         json_extract(payload_json,'$.jobId')=? LIMIT 1""", (job_id,)).fetchone()):
                 raise Conflict('claim has durable outcome evidence')
+            if db.execute('SELECT COUNT(*) FROM reference_released_claims WHERE job_id=?',
+                          (job_id,)).fetchone()[0] >= MAX_CLAIM_RELEASES_PER_JOB:
+                raise Conflict('claim release budget exhausted')
             self._quota(db, sum(len(x) for x in (claim_request_id, *binding)))
             db.execute('INSERT INTO reference_released_claims VALUES(?,?,?,?,?,?)',
                        (claim_request_id, *binding))

@@ -11,6 +11,7 @@ from types import MappingProxyType
 
 from . import reference_protocol as protocol
 from .maintenance import Conflict
+from .reference_store import ClaimReleased
 from .reference_api import Response
 from .reference_transfer import validate_grant
 
@@ -204,6 +205,9 @@ class ReferenceWorkerAPI:
                     return Response(200, self.terminal.accepted(match[1], job['environment']))
                 return Response(200, self._grant(match[1], identity, claim_token))
             return self._error(404, "not_found")
+        except ClaimReleased:
+            # Distinct so a driver can stop replaying this exact fenced request.
+            return self._error(409, "claim_released")
         except Conflict:
             return self._error(409, "worker_conflict")
         except (ValueError, TypeError):

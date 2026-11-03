@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from processing.prototype import Queue
 from processing.reference_delivery import DeliveryReceiver, BINDING
-from processing.reference_protocol import digest, validate_submission
+from processing.reference_protocol import digest, release_attestation, validate_submission
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI, PREFIX
 from processing.reference_failure import FailureOutbox, make_failure
@@ -155,13 +155,22 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.assertEqual(response.body['job']['jobId'], self.job['jobId'])
         self.assertEqual(response.body['execution']['jobId'], self.job['jobId'])
 
+    def test_released_claim_request_has_a_distinct_conflict_answer(self):
+        claim = self.claim()
+        request = dict(self.identities[WORKER], claim_request_id='claim-1')
+        self.store.release_unstarted_claim(self.job['jobId'], **request, claim_token=claim['claimToken'],
+            worker_attestation=release_attestation(job_id=self.job['jobId'], **request))
+        response = self.request('POST', '/claim', {'jobId': self.job['jobId'], 'claimRequestId': 'claim-1'})
+        self.assertEqual((response.status, response.body), (409, {'error': 'claim_released'}))
+
     def test_stale_reservation_request_cannot_mutate_reclaimed_job(self):
         original_claim = self.claim()
         original_owned = self.api._owned_job
         def release_between_checks(job_id, identity, token):
             result = original_owned(job_id, identity, token)
-            self.store.release_unstarted_claim(job_id, **identity,
-                claim_request_id='claim-1', claim_token=token)
+            request = dict(identity, claim_request_id='claim-1')
+            self.store.release_unstarted_claim(job_id, **request, claim_token=token,
+                worker_attestation=release_attestation(job_id=job_id, **request))
             self.store.claim(job_id, **identity, claim_request_id='claim-2')
             return result
         with patch.object(self.api, '_owned_job', side_effect=release_between_checks):

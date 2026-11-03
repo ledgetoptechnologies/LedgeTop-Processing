@@ -14,13 +14,14 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 import uuid
 import zipfile
 
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
-from processing.reference_driver import ReferenceDriver, DriverHeld
+from processing.reference_driver import ReferenceDriver, DriverHeld, DriverWait, READINESS_TASK_CAP
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
@@ -149,7 +150,7 @@ class ReferenceDriverTests(unittest.TestCase):
         response = self.api.handle(method, '/ltds/worker/v1' + suffix, headers,
             b'' if payload is None else json.dumps(payload).encode(), protected_transport=True)
         if response.status == 409:
-            return 409, None
+            return 409, response.body if response.body == {'error': 'claim_released'} else None
         if response.status != 200:
             raise DriverHeld('test_control_rejected')
         return 200, response.body
@@ -727,13 +728,189 @@ class ReferenceDriverTests(unittest.TestCase):
         self.driver._ready()
         self.assertEqual(self.worker.allowed_options, frozenset(('new-flag',)))
 
-    def test_unknown_retained_task_readiness_scan_is_bounded_per_poll(self):
+    def task_reads(self):
+        return [route for kind, route in self.transport.calls if kind == 'read' and route.startswith('/task/') and route.endswith('/info')]
+
+    def test_retained_task_readiness_scan_is_capped_and_fails_closed_above_cap(self):
         self.submit()
-        self.transport.tasks = {str(uuid.uuid4()): 40 for _ in range(5)}
+        self.transport.tasks = {str(uuid.uuid4()): 40 for _ in range(READINESS_TASK_CAP + 1)}
         self.assertEqual(self.driver.step()['state'], 'not_ready')
-        checks = [route for kind, route in self.transport.calls if kind == 'read' and route.startswith('/task/') and route.endswith('/info')]
-        self.assertEqual(len(checks), 4)
+        self.assertIsNone(self.driver.readiness_report())
+        self.assertEqual(self.task_reads(), [])
+        self.transport.tasks.popitem()
         self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(len(self.task_reads()), READINESS_TASK_CAP)
+
+    def test_cached_terminal_task_is_reread_on_every_readiness_decision(self):
+        task = str(uuid.uuid4())
+        self.transport.tasks = {task: 40}
+        self.assertTrue(self.driver.readiness_report()['ready'])
+        # NodeODX restarted the task; its queue count alone has not moved.
+        self.transport.tasks[task] = 20
+        self.assertFalse(self.driver._ready())
+        self.assertIsNone(self.driver.readiness_report())
+        self.assertEqual(self.driver.step()['state'], 'not_ready')
+        self.transport.tasks[task] = 50
+        self.assertTrue(self.driver._ready())
+
+    def test_retained_task_read_error_or_mismatch_fails_closed(self):
+        task = str(uuid.uuid4())
+        self.transport.tasks = {task: 40}
+        self.assertTrue(self.driver._ready())
+        original = self.native.read.side_effect
+        def failing(route, **kwargs):
+            if route == '/task/' + task + '/info':
+                raise OSError('synthetic engine read failure')
+            return original(route, **kwargs)
+        self.native.read.side_effect = failing
+        self.assertFalse(self.driver._ready())
+        self.assertIsNone(self.driver.readiness_report())
+        def mismatched(route, **kwargs):
+            return {'uuid': str(uuid.uuid4()), 'status': {'code': 40}} if route == '/task/' + task + '/info' else original(route, **kwargs)
+        self.native.read.side_effect = mismatched
+        self.assertFalse(self.driver._ready())
+
+    def test_queue_count_is_rechecked_after_retained_task_scan(self):
+        task = str(uuid.uuid4())
+        self.transport.tasks = {task: 40}
+        original = self.native.read.side_effect
+        def racing(route, **kwargs):
+            if route == '/task/' + task + '/info':
+                self.transport.queue_count = 1
+            return original(route, **kwargs)
+        self.native.read.side_effect = racing
+        self.assertFalse(self.driver._ready())
+
+    def test_readiness_provenance_is_pruned_to_listed_tasks(self):
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        self.transport.tasks = {first: 40}
+        self.assertTrue(self.driver._ready())
+        self.transport.tasks = {second: 30}
+        self.assertTrue(self.driver._ready())
+        with self.driver._db() as db:
+            self.assertEqual([row[0] for row in db.execute('SELECT uuid FROM readiness_tasks')], [second])
+
+    def driver_row(self, job):
+        with self.driver._db() as db:
+            return db.execute('SELECT * FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+
+    def release_at_coordinator(self, job, attestation):
+        request = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id=attestation['claimRequestId'])
+        token = self.store.claim(job['jobId'], **request)['claimToken']
+        return self.store.release_unstarted_claim(job['jobId'], **request, claim_token=token, worker_attestation=attestation)
+
+    def test_lost_claim_response_then_release_is_terminal_and_node_recovers(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        original = self.driver._request
+        def lost(method, suffix, payload=None, **kwargs):
+            original(method, suffix, payload, **kwargs)
+            raise OSError('synthetic lost claim response')
+        self.driver._request = lost
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.driver._request = original
+        attestation = self.driver.prepare_release(job['jobId'])
+        self.assertEqual(self.driver.prepare_release(job['jobId']), attestation)
+        self.assertEqual(self.driver.step()['state'], 'release_pending')
+        self.assertIsNone(self.driver.readiness_report())
+        self.assertTrue(self.release_at_coordinator(job, attestation))
+        self.assertEqual(self.driver.step(), {'state': 'released', 'jobId': job['jobId']})
+        self.assertIsNone(self.driver_row(job))
+        self.assertTrue(self.driver.readiness_report()['ready'])
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_acceptance')
+        self.assertEqual(self.store.get(job['jobId'])['generation'], 1)
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+
+    def test_released_answer_ends_claim_pending_without_a_local_tombstone(self):
+        # A claim fenced before this build must not leave a 409 retry loop.
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        request_id = self.driver_row(job)['claim_request']
+        self.assertTrue(self.release_at_coordinator(job, self.driver._release_attestation(job['jobId'], request_id)))
+        self.assertEqual(self.driver.step()['state'], 'released')
+        self.assertTrue(self.driver.readiness_report()['ready'])
+        with self.driver._db() as db:
+            self.assertEqual(db.execute('SELECT job FROM driver_released_claims WHERE claim_request=?',
+                                        (request_id,)).fetchone()[0], job['jobId'])
+
+    def test_released_reservation_pending_frees_ledger_for_same_generation_reclaim(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        original = self.driver._request
+        def lost(method, suffix, payload=None, **kwargs):
+            if suffix.endswith('/reservation'):
+                raise DriverWait('synthetic_coordinator_unavailable')
+            return original(method, suffix, payload, **kwargs)
+        self.driver._request = lost
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.driver._request = original
+        self.assertEqual(self.driver_row(job)['stage'], 'reservation_pending')
+        before = self.ledger.available_scratch()
+        data = json.loads(self.driver_row(job)['data'])
+        request_id = self.driver_row(job)['claim_request']
+        self.assertTrue(self.release_at_coordinator(job, self.driver._release_attestation(job['jobId'], request_id)))
+        self.assertEqual(self.driver.step()['state'], 'released')
+        self.assertGreater(self.ledger.available_scratch(), before)
+        with self.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT state FROM reservations WHERE id=?',
+                                        (data['reservation']['reservationId'],)).fetchone()[0], 'expired')
+        self.advance(job, 'awaiting_acceptance')
+
+    def test_released_reservation_with_unusable_local_lease_does_not_retry_forever(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        self.ledger.probe = lambda _: 0
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        request_id = self.driver_row(job)['claim_request']
+        self.assertTrue(self.release_at_coordinator(job, self.driver._release_attestation(job['jobId'], request_id)))
+        self.assertEqual(self.driver.step()['state'], 'released')
+
+    def test_insufficient_scratch_holds_and_never_mints_release_tombstones(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        self.ledger.probe = lambda _: 0
+        for _ in range(50):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            with self.assertRaisesRegex(DriverHeld, 'insufficient_scratch'):
+                self.driver.prepare_release(job['jobId'])
+        self.assertEqual(self.driver_row(job)['stage'], 'reservation_pending')
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_released_claims').fetchone()[0], 0)
+
+    def test_refused_release_resumes_only_through_explicit_abandon(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        self.driver.prepare_release(job['jobId'])
+        self.assertEqual(self.driver.step()['state'], 'release_pending')
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+        self.assertEqual(self.driver.abandon_release(job['jobId'])['state'], 'claimed')
+        self.advance(job, 'awaiting_acceptance')
+
+    def test_started_stage_cannot_prepare_release(self):
+        job = self.submit()
+        self.advance(job, 'awaiting_grant')
+        with self.assertRaisesRegex(DriverHeld, 'claim_not_releasable'):
+            self.driver.prepare_release(job['jobId'])
+
+    def test_only_exact_conflict_reason_reaches_the_driver(self):
+        def answer(body):
+            def opener(request, timeout):
+                raise HTTPError(request.full_url, 409, 'Conflict', {}, io.BytesIO(body))
+            return opener
+        for body, expected in ((b'{"error":"claim_released"}', {'error': 'claim_released'}),
+                               (b'{"error":"worker_conflict"}', None), (b'not-json', None)):
+            with self.subTest(body=body):
+                driver = ReferenceDriver.__new__(ReferenceDriver)
+                driver.origin, driver._bearer = 'https://coordinator.invalid:9443', TOKEN
+                driver._open = answer(body)
+                self.assertEqual(ReferenceDriver._request(driver, 'POST', '/claim', {}), (409, expected))
 
     def test_restarted_retained_task_with_busy_engine_is_not_ready(self):
         task = str(uuid.uuid4())

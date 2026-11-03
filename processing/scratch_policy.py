@@ -304,6 +304,24 @@ class ScratchLedger:
                 raise PolicyConflict("job generation already reserved") from exc
             return dict(self._reservation(db, reservation_id))
 
+    def release_unstarted(self, reservation_id):
+        """Free an untouched pre-transfer hold; idempotent and never touches files.
+
+        Expired rows leave the active (job,generation) index, so the same
+        generation may be reserved again after a coordinator-fenced release.
+        """
+        _id(reservation_id)
+        with self._transaction() as db:
+            self._expire(db, self._now(db))
+            row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
+            if row is None or row["state"] == "expired":
+                return
+            if (row["state"] != "reserved" or row["allocated"] != 0
+                    or db.execute("SELECT 1 FROM objects WHERE reservation=? LIMIT 1", (reservation_id,)).fetchone()
+                    or db.execute("SELECT 1 FROM control_charges WHERE reservation=? LIMIT 1", (reservation_id,)).fetchone()):
+                raise PolicyConflict("reservation is not unstarted")
+            db.execute("UPDATE reservations SET state='expired',remaining=0 WHERE id=?", (reservation_id,))
+
     def record_allocated(self, reservation_id, allocated_bytes):
         """Set monotonic total allocation after disk writes; never a delta."""
         _integer(allocated_bytes, "allocated bytes")
