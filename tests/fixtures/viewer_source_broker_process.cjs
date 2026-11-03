@@ -1,0 +1,22 @@
+'use strict';
+// Synthetic localhost-only harness. Uses the exact checked-out Viewer broker.
+const path=require('node:path'), fs=require('node:fs'), http=require('node:http'), crypto=require('node:crypto');
+const [viewerRoot,root]=process.argv.slice(2);
+const brokerModule=require(path.join(viewerRoot,'apps/viewer/server/sourceRangeV2Candidate'));
+const protocol=require(path.join(viewerRoot,'apps/viewer/server/referenceProtocol'));
+const {SourceRangeV2BrokerCandidate,createSourceRangeV2Handler,canonicalIdentity,CHUNK_BYTES}=brokerModule;
+const bytes=Buffer.from('synthetic-photo-123'); const file=path.join(root,'input.jpg');fs.writeFileSync(file,bytes);
+const hash=x=>crypto.createHash('sha256').update(x).digest('hex');
+const manifest={id:'dataset-fixture',revision:1,sha256:'0'.repeat(64),totalBytes:bytes.length,objectCount:1,inputCounts:{images:1,lidarObjects:0,points:0},objects:[{id:'photo-1',name:'input.jpg',byteSize:bytes.length,sha256:hash(bytes),kind:'image',mediaType:'image/jpeg'}]};
+manifest.sha256=protocol.manifestSha256(manifest);
+const attempt='00000000-0000-4000-8000-000000000001';
+const transfer={protocol:'source-range-v2',viewerAttemptId:attempt,reservationId:'reservation-1',generation:1,expiresAt:new Date(Date.now()+300000).toISOString(),manifestSha256:manifest.sha256,sourceVersion:'dataset:fixture:'+manifest.sha256,objectIds:['photo-1'],chunkBytes:CHUNK_BYTES,requestBudget:1,byteBudget:bytes.length*3,nonce:'nonce-1',attemptBudget:3};
+const job={jobId:'job-1',generation:1,environment:'staging',manifestSha256:manifest.sha256,submission:{manifest,viewerAttemptId:attempt},transferRequest:transfer};
+const binding={environment:job.environment,generation:1,jobId:job.jobId,manifestSha256:manifest.sha256,reservationId:transfer.reservationId,sourceVersion:transfer.sourceVersion,viewerAttemptId:attempt};
+const broker=new SourceRangeV2BrokerCandidate({databasePath:path.join(root,'viewer-broker.sqlite'),managedRoot:root,grantTokenKey:Buffer.alloc(32,7),allowCreate:true,maxGrantTtlMs:60000});
+const grant=broker.mintGrant({job,resolveSource:()=>({jobId:binding.jobId,generation:binding.generation,environment:binding.environment,manifestSha256:binding.manifestSha256,sourceVersion:binding.sourceVersion,objects:manifest.objects.map(o=>({id:o.id,path:file,byteSize:o.byteSize,sha256:o.sha256}))})});
+const handler=createSourceRangeV2Handler({broker,enabled:true,isProtectedTransport:()=>true});
+const server=http.createServer(async(req,res)=>{try {if(!await handler(req,res)){res.statusCode=404;res.end()}}catch{res.statusCode=500;res.end()}});
+server.listen(0,'127.0.0.1',()=>console.log(JSON.stringify({port:server.address().port,manifest,transfer,grant,binding})));
+process.stdin.setEncoding('utf8');process.stdin.on('data', data=>{if(data.includes('revoke')){broker.revoke(hash(canonicalIdentity(binding)));console.log('revoked')}});
+process.stdin.on('end',()=>{server.closeAllConnections();server.close(()=>{broker.close();process.exit(0)})});
