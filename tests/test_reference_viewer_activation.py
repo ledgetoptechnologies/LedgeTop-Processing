@@ -285,9 +285,14 @@ class ViewerActivationTests(unittest.TestCase):
             submission=copy.deepcopy(self.fixture['submission']), viewerTaskId=str(uuid.uuid4()),
             viewerAttemptId=str(uuid.uuid4()), activationId=str(uuid.uuid4()))
 
+    def trusted_policy(self):
+        return dict(capabilityFingerprint=self.fixture['capabilities']['capabilityFingerprint'],
+            optionsFingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'],
+            allowedOdmOptions=['pc-quality', 'projection'], availableEngines=['odm'])
+
     def prepare_v2(self, envelope, principal='viewer-prod'):
         return self.store.prepare_viewer_envelope_v2(envelope, authenticated_principal=principal,
-                                                     authenticated_environment='production')
+                                                     authenticated_environment='production', trusted_policy=self.trusted_policy())
 
     def test_v2_replay_restart_and_identity_conflicts(self):
         envelope = self.envelope_v2()
@@ -295,7 +300,7 @@ class ViewerActivationTests(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(self.prepare_v2(envelope), (job, False))
         reopened = ReferenceStore(self.queue)
-        self.assertEqual(reopened.prepare_viewer_envelope_v2(envelope, authenticated_principal='viewer-prod', authenticated_environment='production'), (job, False))
+        self.assertEqual(reopened.prepare_viewer_envelope_v2(envelope, authenticated_principal='viewer-prod', authenticated_environment='production', trusted_policy=self.trusted_policy()), (job, False))
         for field in ('activationId', 'viewerTaskId', 'viewerAttemptId'):
             altered = copy.deepcopy(envelope)
             altered[field] = str(uuid.uuid4())
@@ -322,6 +327,25 @@ class ViewerActivationTests(unittest.TestCase):
         self.store.submit(checked)
         with self.assertRaises(Conflict): self.prepare_v2(envelope)
         self.assertEqual(len(self.queue.list()), 1)
+
+    def test_v2_untrusted_capabilities_options_and_disabled_engine_rejected(self):
+        for mutation in (
+            lambda e: e['submission'].update(capabilityFingerprint='0'*64),
+            lambda e: e['submission']['pipeline']['odm'].update(optionsFingerprint='0'*64),
+            lambda e: e['submission']['pipeline']['odm'].update(options={'unapproved': True}),
+            lambda e: e['submission']['pipeline']['odm'].update(options={'projection': {'bad': 1}}),
+        ):
+            envelope = self.envelope_v2()
+            mutation(envelope)
+            with self.assertRaises(ValueError): self.prepare_v2(envelope)
+        envelope = self.envelope_v2()
+        envelope['submission']['pipeline']['treedar'].update(requested=True)
+        with self.assertRaisesRegex(ValueError, 'TreeDar unavailable'):
+            self.prepare_v2(envelope)
+        self.assertEqual(self.queue.list(), [])
+        envelope = self.envelope_v2()
+        first = self.prepare_v2(envelope)
+        self.assertEqual(self.prepare_v2(envelope), (first[0], False))
 
     def test_v2_activation_must_match_prepared_evidence(self):
         envelope = self.envelope_v2()

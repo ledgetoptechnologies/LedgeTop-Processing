@@ -89,3 +89,9 @@ accounting key or reset spent counts on restart.
 * Process-death, mixed-version, migration/rollback and real authenticated
   multi-process broker integration tests are release gates. Existing synthetic
   mocks are insufficient to qualify production or client data processing.
+
+The unmounted Python v2 candidate requires a separately supplied trusted_policy
+snapshot with capabilityFingerprint, optionsFingerprint, allowedOdmOptions and
+availableEngines. Fingerprints, option allowlist and engine availability must
+come from one authoritative coherent snapshot, never the submitted envelope.
+The caller and its policy provenance are not yet authenticated or implemented.

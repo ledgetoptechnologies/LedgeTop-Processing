@@ -296,8 +296,12 @@ class ReferenceStore:
             raise Conflict('Viewer submission environment differs')
         return self._submit(validated, owner=(authenticated_principal, authenticated_environment))
 
-    def prepare_viewer_envelope_v2(self, envelope, *, authenticated_principal, authenticated_environment):
-        """Unmounted candidate; caller must supply a genuinely authenticated context."""
+    def prepare_viewer_envelope_v2(self, envelope, *, authenticated_principal, authenticated_environment, trusted_policy):
+        """Unmounted candidate; policy and identity must come from trusted configuration.
+
+        The caller must obtain one coherent capability snapshot independently of
+        all request data. This method does not authenticate either argument.
+        """
         protocol._slug(authenticated_principal, 'authenticated Viewer principal')
         protocol._environment(authenticated_environment)
         protocol._closed(envelope, ('schemaVersion','protocol','submission','viewerTaskId','viewerAttemptId','activationId'), 'prepared envelope')
@@ -305,10 +309,19 @@ class ReferenceStore:
             raise ValueError('unsupported prepared envelope')
         for field in ('viewerTaskId','viewerAttemptId','activationId'):
             protocol._uuid(envelope[field], field)
+        protocol._closed(trusted_policy, ('capabilityFingerprint','optionsFingerprint','allowedOdmOptions','availableEngines'), 'trusted policy')
+        protocol._hash(trusted_policy['capabilityFingerprint'], 'trusted capability fingerprint')
+        protocol._hash(trusted_policy['optionsFingerprint'], 'trusted options fingerprint')
+        options, engines = trusted_policy['allowedOdmOptions'], trusted_policy['availableEngines']
+        if (type(options) not in (list, tuple) or any(type(o) is not str or not o for o in options)
+                or len(set(options)) != len(options) or type(engines) not in (list, tuple)
+                or any(e not in ('odm', 'treedar') for e in engines) or len(set(engines)) != len(engines)):
+            raise ValueError('invalid trusted capability policy')
         raw = envelope['submission']
         validated = protocol.validate_submission(raw, environment=authenticated_environment,
-            capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm','treedar'),
-            allowed_odm_options=set(raw['pipeline']['odm']['options']))
+            capability_fingerprint=trusted_policy['capabilityFingerprint'],
+            options_fingerprint=trusted_policy['optionsFingerprint'], available_engines=tuple(engines),
+            allowed_odm_options=set(options))
         wire = _json(envelope)
         if len(wire.encode('utf-8')) > protocol.MAX_BODY_BYTES:
             raise ValueError('prepared envelope too large')
