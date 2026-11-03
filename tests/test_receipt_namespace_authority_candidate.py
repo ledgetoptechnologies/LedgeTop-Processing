@@ -197,6 +197,18 @@ class ReceiptNamespaceAuthorityTests(unittest.TestCase):
     first=fixture.store.accept(fixture.job['jobId'],receipt);again=fixture.store.accept(fixture.job['jobId'],receipt)
     self.assertTrue(first['created']);self.assertFalse(again['created'])
    finally:fixture.tearDown()
+ def test_real_acceptance_holds_before_decoding_nul_prefixed_legacy_row(self):
+  with patch.object(ReferenceStore,'_activation',return_value={'viewerAttemptId':'synthetic'}),patch.object(ReferenceStore,'_activation_bound_grant_ready',return_value=True):
+   fixture=delivery_fixture.ReferenceDeliveryTests('test_lost_viewer_acceptance_response_replays_after_restart_without_cleanup');fixture.setUp()
+   try:
+    fixture.receiver.receive(fixture.envelope,**fixture.identity)
+    receipt=copy.deepcopy(fixture.fixture['acceptance']);receipt.update(jobId=fixture.job['jobId'],pipelineDigest=fixture.job['pipelineDigest'],inputManifestSha256=fixture.job['manifestSha256'],resultManifestSha256=fixture.result['resultManifestSha256'])
+    with fixture.queue._db() as db:db.execute('INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)',('hostile','other','f'*64,'{}\x00'+'x'*1000000))
+    before=hashlib.sha256(Path(fixture.queue.path).read_bytes()).hexdigest()
+    with patch('processing.reference_copy_hold_integrity.bounded_json',side_effect=AssertionError('decoder reached')):
+     with self.assertRaisesRegex(Conflict,'acceptance identity unavailable'):fixture.store.accept(fixture.job['jobId'],receipt)
+    self.assertEqual(hashlib.sha256(Path(fixture.queue.path).read_bytes()).hexdigest(),before)
+   finally:fixture.tearDown()
  def test_real_acceptance_and_signed_import_race_one_writer_holds(self):
   with patch.object(ReferenceStore,'_activation',return_value={'viewerAttemptId':'synthetic'}),patch.object(ReferenceStore,'_activation_bound_grant_ready',return_value=True):
    fixture=delivery_fixture.ReferenceDeliveryTests('test_lost_viewer_acceptance_response_replays_after_restart_without_cleanup');fixture.setUp()
