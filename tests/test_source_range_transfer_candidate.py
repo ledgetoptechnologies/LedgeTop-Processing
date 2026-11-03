@@ -259,6 +259,75 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
         self.assertEqual(second_range[0][0].get_header("X-processing-request-id"),
                          second_range[1][0].get_header("X-processing-request-id"))
 
+    def test_short_disk_writes_are_completed_before_checkpoint(self):
+        target = self.root / "photo.bin"
+        real_fdopen = os.fdopen
+
+        class ShortWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def write(self, data):
+                if len(data) > 1:
+                    return self.stream.write(data[:max(1, len(data) // 2)])
+                return self.stream.write(data)
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+        with patch("processing.source_range_transfer.os.fdopen",
+                   side_effect=lambda *args, **kwargs: ShortWriter(real_fdopen(*args, **kwargs))):
+            result = self.make_client().download_object(grant=self.grant(), object_id=self.obj.id,
+                                                        destination=target)
+        self.assertEqual(result.read_bytes(), self.body)
+
+    def test_zero_disk_write_is_not_checkpointed_and_retries_from_committed_offset(self):
+        target = self.root / "photo.bin"
+        real_fdopen = os.fdopen
+        failed = False
+
+        class ZeroWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def write(self, data):
+                nonlocal failed
+                if not failed and len(data) > 1:
+                    failed = True
+                    return 0
+                return self.stream.write(data)
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+        with patch("processing.source_range_transfer.os.fdopen",
+                   side_effect=lambda *args, **kwargs: ZeroWriter(real_fdopen(*args, **kwargs))):
+            with self.assertRaises(TransferError):
+                self.make_client().download_object(grant=self.grant(), object_id=self.obj.id,
+                                                    destination=target)
+
+        with closing(sqlite3.connect(self.root / "progress.sqlite")) as db:
+            self.assertEqual(db.execute("SELECT committed_bytes FROM source_objects").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT state FROM source_ranges").fetchall(), [("intent",)])
+
+        result = self.make_client().download_object(grant=self.grant("rotated"), object_id=self.obj.id,
+                                                    destination=target)
+        self.assertEqual(result.read_bytes(), self.body)
+
     def test_publish_before_partial_unlink_crash_is_cleaned_on_retry(self):
         target = self.root / "photo.bin"
         original_unlink = Path.unlink
