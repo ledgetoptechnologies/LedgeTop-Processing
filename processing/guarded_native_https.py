@@ -82,6 +82,11 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
                 if type(request) is not dict:
                     raise ValueError()
+                # The input deadline must not abort an already-issued engine
+                # operation. An expired input never reaches the adapter.
+                if not self.server.input_complete(self.connection):
+                    self.close_connection = True
+                    return
                 args = dict(bearer=auth[0][7:], protected_transport=True)
                 if self.path == '/v1/initialize' and set(request) == {'task'}:
                     adapter.initialize(request['task'], **args)
@@ -100,58 +105,88 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                 return self._reply(409, {'error': 'operation unavailable or held'})
 
     class Server(socketserver.ThreadingMixIn, HTTPServer):
-        daemon_threads = False
-        block_on_close = True
+        # Closing the listening socket is bounded even if an engine call is
+        # stuck. Active mutations are NOT cancelled; wait_drained reports them.
+        daemon_threads = True
+        block_on_close = False
 
         def __init__(self, *args):
             self.slots = threading.BoundedSemaphore(4)
-            self.timers = {}
-            self.timers_lock = threading.Lock()
+            self.entries = {}
+            self.entries_lock = threading.Lock()
+            self.drained = threading.Event()
+            self.drained.set()
             super().__init__(*args)
 
         def handle_error(self, request, address):
             if not isinstance(sys.exc_info()[1], OSError):
                 super().handle_error(request, address)
 
-        def get_request(self):
-            connection, address = super().get_request()
-            connection.settimeout(5)
-            try:
-                return tls.wrap_socket(connection, server_side=True), address
-            except Exception:
-                connection.close()
-                raise
+        def wait_drained(self, timeout):
+            return self.drained.wait(timeout)
+
+        def input_complete(self, connection):
+            with self.entries_lock:
+                entry = self.entries.get(connection)
+                if not entry or entry['expired']:
+                    return False
+                entry['timer'].cancel()
+                entry['input_complete'] = True
+                return True
 
         def process_request(self, connection, address):
             if not self.slots.acquire(blocking=False):
                 self.shutdown_request(connection)
                 return
+            entry = {'connection': connection, 'expired': False, 'input_complete': False}
             def expire():
-                try:
-                    connection.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+                with self.entries_lock:
+                    if entry['input_complete']:
+                        return
+                    entry['expired'] = True
+                    current = entry['connection']
+                    try:
+                        current.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
             timer = threading.Timer(request_deadline, expire)
             timer.daemon = True
-            with self.timers_lock:
-                self.timers[connection] = timer
+            entry['timer'] = timer
+            with self.entries_lock:
+                self.entries[connection] = entry
+                self.drained.clear()
             timer.start()
             try:
                 super().process_request(connection, address)
             except BaseException:
-                with self.timers_lock:
-                    self.timers.pop(connection, None)
+                with self.entries_lock:
+                    self.entries.pop(connection, None)
+                    if not self.entries: self.drained.set()
                 timer.cancel()
                 self.slots.release()
                 raise
 
         def process_request_thread(self, connection, address):
+            current = connection
             try:
-                super().process_request_thread(connection, address)
+                connection.settimeout(request_deadline)
+                current = tls.wrap_socket(connection, server_side=True, do_handshake_on_connect=False)
+                with self.entries_lock:
+                    entry = self.entries.pop(connection)
+                    self.entries[current] = entry
+                    entry['connection'] = current
+                    if entry['expired']:
+                        return
+                current.do_handshake()
+                self.finish_request(current, address)
+            except Exception:
+                self.handle_error(current, address)
             finally:
-                with self.timers_lock:
-                    timer = self.timers.pop(connection)
-                timer.cancel()
+                self.shutdown_request(current)
+                with self.entries_lock:
+                    entry = self.entries.pop(current, None) or self.entries.pop(connection, None)
+                    if entry: entry['timer'].cancel()
+                    if not self.entries: self.drained.set()
                 self.slots.release()
 
     return Server((bind_host, port), Handler)

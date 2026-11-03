@@ -126,3 +126,46 @@ class GuardedHTTPS(GuardedNativeProxyTests):
             self.assertEqual(self.backend.counts()['initialize'], 0)
         finally:
             slow.close()
+
+    def test_slow_handshake_is_deadlined_and_does_not_block_accept(self):
+        import socket
+        server = self.start_listener(request_deadline=.4)
+        slow = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+        slow.settimeout(2)
+        try:
+            self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task}, token='wrong')[0], 409)
+            self.assertEqual(slow.recv(1), b'')
+            self.assertEqual(self.backend.counts()['initialize'], 0)
+        finally:
+            slow.close()
+
+    def test_long_engine_call_survives_input_deadline_and_shutdown_reports_active(self):
+        server = self.start_listener(request_deadline=.2)
+        started = threading.Event()
+        release = threading.Event()
+        original = self.proxy.initialize
+        def delayed(*args, **kwargs):
+            started.set()
+            if not release.wait(3):
+                raise RuntimeError('test timed out')
+            return original(*args, **kwargs)
+        self.proxy.initialize = delayed
+        result = []
+        thread = threading.Thread(target=lambda: result.append(self.request(server, '/v1/initialize', {'task': self.task})))
+        thread.start()
+        try:
+            self.assertTrue(started.wait(2))
+            time.sleep(.35)
+            self.assertTrue(thread.is_alive())
+            server.shutdown()
+            server.server_close()
+            self.assertFalse(server.wait_drained(.05))
+            release.set()
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result, [(200, {'accepted': True})])
+            self.assertTrue(server.wait_drained(1))
+            self.assertEqual(self.backend.counts()['initialize'], 1)
+        finally:
+            release.set()
+            thread.join(3)
