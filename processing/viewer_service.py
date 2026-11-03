@@ -140,7 +140,10 @@ class ViewerService:
 
     def _catalog(self):
         if self.inventory:
-            return catalog([(n['id'], n['origin'], n['token']) for n in self.inventory if 'odm' in n['capabilities']], inventory=True)
+            # A partial fleet may admit a task based on the healthy nodes' exact
+            # common definitions. Its saved evidence is checked again against
+            # the selected node before any claim or upstream mutation.
+            return catalog([(n['id'], n['origin'], n['token']) for n in self.inventory if 'odm' in n['capabilities']], inventory=True, available_only=True)
         return catalog([('local', self.config.local_node_url, self.config.local_node_token),
                         ('main', self.config.main_node_url, self.config.main_node_token)])
 
@@ -184,7 +187,16 @@ class ViewerService:
     def _check_options(self, options, *, node_id=None, evidence=None):
         # Legacy tasks lack admission evidence and retain the conservative
         # fleet-wide intersection check.
-        definitions = self._selected_options(node_id) if node_id is not None and evidence is not None else self.options()
+        if node_id is not None and evidence is None and self.inventory:
+            # Old tasks lack immutable option evidence; preserve their original
+            # complete-fleet policy rather than trusting a partial catalog.
+            complete = catalog([(n['id'], n['origin'], n['token']) for n in self.inventory
+                                if 'odm' in n['capabilities']], inventory=True)
+            if not complete['ready']:
+                raise Conflict('legacy engine catalog unavailable')
+            definitions = complete['commonOptions']
+        else:
+            definitions = self._selected_options(node_id) if node_id is not None and evidence is not None else self.options()
         allowed = {item['name'] for item in definitions}
         if (not isinstance(options, list) or any(not isinstance(item, dict)
                 or item.get('name') not in allowed for item in options)):
@@ -770,6 +782,13 @@ class ViewerService:
                     current = self.store.task_for_job(candidate['id'])
                     for spec, limit in available:
                         if all(maximum is None or current['images_count'] <= maximum for maximum in (spec['maxPhotos'], limit)):
+                            try:
+                                self._check_options(current['options'], node_id=spec['id'],
+                                                    evidence=current['option_evidence'])
+                            except (Conflict, ValueError):
+                                # A node that returned with changed options is
+                                # ineligible for this task; try the next node.
+                                continue
                             task, node_id = current, spec['id']
                             break
                     if node_id is not None:

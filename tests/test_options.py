@@ -82,6 +82,27 @@ class OptionsTests(unittest.TestCase):
         self.assertNotIn(self.engine.token, json.dumps(result))
         self.assertEqual(result['commonOptions'], self.engine.options)
 
+    def test_partial_inventory_is_explicit_and_recovers_fresh_intersection(self):
+        other = Engine()
+        self.addCleanup(other.close)
+        nodes = [('small', self.engine.origin, self.engine.token),
+                 ('large', other.origin, other.token)]
+        other.mode = 'unavailable'
+        partial = catalog(nodes, inventory=True, available_only=True)
+        self.assertTrue(partial['ready'])
+        self.assertTrue(partial['degraded'])
+        self.assertEqual(partial['commonOptions'], self.engine.options)
+        self.assertFalse(catalog(nodes, inventory=True)['ready'])
+        other.mode = 'normal'
+        other.options[0]['value'] = True
+        recovered = catalog(nodes, inventory=True, available_only=True)
+        self.assertTrue(recovered['ready'])
+        self.assertFalse(recovered['degraded'])
+        self.assertEqual(recovered['commonOptions'], [])
+        self.engine.mode = 'unavailable'
+        other.mode = 'unavailable'
+        self.assertFalse(catalog(nodes, inventory=True, available_only=True)['ready'])
+
     def test_fresh_calls_reflect_added_removed_and_changed_engine_metadata(self):
         first = self.discover()
         original = copy.deepcopy(self.engine.options)

@@ -911,6 +911,40 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.task(fallback)['node_id'], 'large')
 
+    def test_partial_catalog_saved_evidence_routes_only_to_compatible_returned_node(self):
+        from tests.test_options import Engine
+        self.service.close(); self.queue.close()
+        first, second = Engine(), Engine()
+        self.addCleanup(first.close); self.addCleanup(second.close)
+        first.options = [dict(item) for item in OPTIONS]
+        second.options = [dict(item) for item in OPTIONS]
+        second.mode = 'unavailable'
+        inventory = tuple(dict(id=name, physicalHostId=name, origin=engine.origin,
+                               token=engine.token, maxPhotos=None, capabilities=('odm',))
+                          for name, engine in [('first', first), ('second', second)])
+        self.config.node_inventory = inventory
+        self.config.prototype_state_dir = str(self.root / 'partial-inventory-state')
+        self.engines = {n['id']: FakeEngine(n['id'], self.fleet) for n in inventory}
+        self.queue = Queue(self.config.prototype_state_dir, node_ids=('first', 'second'),
+                           treedar_node_ids=(), viewer_enabled=True, per_node_slots=True)
+        self.service = ViewerService(self.queue, self.config, engines=self.engines,
+            probe=lambda role, origin, token: {'ready': (first if role == 'first' else second).mode == 'normal',
+                'maxImages': None, 'taskQueueCount': sum(x.startswith(role + ':') for x in self.fleet.active)})
+        self.assertEqual(self.service.options(), sorted(OPTIONS, key=lambda option: option['name']))
+        identifier = self.submit()
+        # The first node changes a definition after admission. With the other
+        # still offline the task must wait without an engine mutation.
+        first.options[0]['value'] = True
+        self.service.tick()
+        self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertEqual(self.engines['first'].calls, [])
+        # The previously unavailable node returns with the original definition.
+        second.mode = 'normal'
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'], 'second')
+        self.assertEqual(self.engines['first'].calls, [])
+        self.assertEqual([name for name, _ in self.fleet.commits], ['second'])
+
     def test_inventory_rejects_invalid_caps_and_duplicate_hosts(self):
         from processing.config import parse_node_inventory
         valid = dict(id='n1', physicalHostId='host1', origin='http://192.0.2.1:3000',
