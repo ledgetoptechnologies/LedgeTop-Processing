@@ -391,6 +391,106 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.task(third)['node_id'], 'cluster')
 
+    def test_parallel_transfer_does_not_block_other_node_or_release_its_slot(self):
+        self.queue.per_node_slots = True
+        self.service._parallel_dispatch = True
+        entered, release = threading.Event(), threading.Event()
+        original_upload = self.engines['cluster'].upload
+        def slow_upload(identifier, item):
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError('synthetic transfer timeout')
+            return original_upload(identifier, item)
+        self.engines['cluster'].upload = slow_upload
+        first, second = self.submit(), self.submit()
+        try:
+            self.service.tick()
+            self.assertTrue(entered.wait(5))
+            first_job = self.task(first)['job_id']
+            self.assertEqual(self.task(first)['node_id'], 'cluster')
+            with self.assertRaisesRegex(Conflict, 'submission in progress'):
+                self.service.cancel(first)
+            with self.assertRaisesRegex(Conflict, 'submission in progress'):
+                self.service.operator(first_job, 'hold', {'note': 'test'})
+            self.service.tick()
+            deadline = threading.Event()
+            for _ in range(100):
+                if self.task(second)['phase'] == 'processing':
+                    break
+                deadline.wait(0.02)
+            self.assertEqual(self.task(second)['node_id'], 'main')
+            self.assertEqual(self.task(second)['phase'], 'processing')
+            self.assertEqual(self.task(first)['job']['status'], 'running')
+            self.finish(second)
+            self.service.tick()
+            self.assertEqual(self.task(second)['job']['status'], 'succeeded')
+            self.assertEqual(self.task(first)['job']['status'], 'running')
+        finally:
+            release.set()
+            self.service.close()
+
+    def test_parallel_dispatch_requires_explicit_opt_in_and_per_node_slots(self):
+        self.assertFalse(self.service._parallel_dispatch)
+        self.config.viewer_parallel_dispatch = True
+        with self.assertRaisesRegex(ValueError, 'requires per-node slots'):
+            ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
+        self.queue.per_node_slots = True
+        parallel = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
+        try:
+            self.assertTrue(parallel._parallel_dispatch)
+        finally:
+            parallel.close()
+
+    def test_parallel_uncertain_upload_holds_its_node_and_other_can_run(self):
+        self.queue.per_node_slots = True
+        self.service._parallel_dispatch = True
+        self.engines['cluster'].fail = 'upload'
+        first, second = self.submit(), self.submit()
+        self.service.tick()
+        wait = threading.Event()
+        for _ in range(100):
+            if self.task(first)['job']['status'] == 'held':
+                break
+            wait.wait(0.02)
+        self.assertEqual(self.task(first)['job']['status'], 'held')
+        self.assertEqual(self.task(first)['phase'], 'held')
+        self.service.tick()
+        for _ in range(100):
+            if self.task(second)['phase'] == 'processing':
+                break
+            wait.wait(0.02)
+        self.assertEqual(self.task(second)['node_id'], 'main')
+        self.assertEqual(self.task(second)['phase'], 'processing')
+        self.assertEqual(len([x for x in self.engines['cluster'].calls if x[0] == 'upload']), 1)
+
+    def test_shutdown_drain_keeps_sender_owned_until_it_exits(self):
+        self.queue.per_node_slots = True
+        self.service._parallel_dispatch = True
+        entered, release, drained = threading.Event(), threading.Event(), threading.Event()
+        original_upload = self.engines['cluster'].upload
+        def slow_upload(identifier, item):
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError('synthetic transfer timeout')
+            return original_upload(identifier, item)
+        self.engines['cluster'].upload = slow_upload
+        first, second = self.submit(), self.submit()
+        self.service.tick()
+        self.assertTrue(entered.wait(5))
+        self.service._stop.set()
+        waiter = threading.Thread(target=lambda: (self.service.wait_for_transfers(), drained.set()))
+        waiter.start()
+        try:
+            self.assertFalse(drained.wait(0.1))
+            self.assertEqual(self.task(first)['job']['status'], 'running')
+            self.service.tick()
+            self.assertIsNone(self.task(second)['node_id'])
+        finally:
+            release.set()
+            waiter.join(5)
+        self.assertFalse(waiter.is_alive())
+        self.assertTrue(drained.is_set())
+
     def test_opt_in_held_treedar_blocks_its_host_only(self):
         self.queue.per_node_slots = True
         tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})

@@ -516,6 +516,7 @@ class CoordinatorService:
                 thread = getattr(service, '_thread', None)
                 if thread is not None:
                     thread.join()  # close()'s legacy ten-second join is insufficient.
+                service.wait_for_transfers()  # Keep queue authority until senders actually exit.
             if self.handler.prototype_queue:
                 self.handler.prototype_queue.close()
             with self._lock:

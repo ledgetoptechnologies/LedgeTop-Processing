@@ -127,6 +127,12 @@ class ViewerService:
         self._thread = None
         self._backoff = {}
         self._downloads = {}
+        # Prototype only: absent configuration keeps the deployed synchronous
+        # path. A node's in-flight transfer remains in its durable queue slot.
+        self._parallel_dispatch = getattr(config, 'viewer_parallel_dispatch', False) is True
+        self._dispatch_threads = {}
+        if self._parallel_dispatch and not queue.per_node_slots:
+            raise ValueError('parallel dispatch requires per-node slots')
 
     def _catalog(self):
         if self.inventory:
@@ -523,6 +529,8 @@ class ViewerService:
 
     def cancel(self, identifier):
         with self._lock:
+            if identifier in self._dispatch_threads:
+                raise Conflict('submission in progress; inspect before cancelling')
             self.store.authorize_reservation(identifier,None,None)
             cancelled = self.store.cancel_never_started(identifier)
             if cancelled is not None:
@@ -555,7 +563,34 @@ class ViewerService:
     def operator(self, identifier, action, request):
         """Serialize operator state changes with Viewer engine mutations."""
         with self._lock:
+            if any(job_id == identifier for job_id, _ in self._dispatch_threads.values()):
+                raise Conflict('submission in progress; inspect before operator action')
             return self.queue.operator(identifier, action, request)
+
+    def _send_claimed_task(self, identifier):
+        """Run one already-claimed submission; never replay a mutation on error."""
+        try:
+            task = self.store.task(identifier)
+            engine = self.engines[task['node_id']]
+            self.store.update(identifier, phase='init_pending')
+            engine.initialize(task)
+            self.store.update(identifier, phase='initialized')
+            for item in task['files']:
+                self.store.update(identifier, phase='upload_pending')
+                engine.upload(task['engine_uuid'], item)
+                self.store.update(identifier, phase='uploaded')
+            self.store.update(identifier, phase='commit_pending')
+            engine.action('commit', task['engine_uuid'])
+            self.store.update(identifier, phase='processing')
+        except Exception:
+            current = self.store.task(identifier)
+            if current['phase'] == 'commit_pending':
+                self.store.update(identifier, error='commit_ack_uncertain')
+            else:
+                self._hold(current, 'engine_submission_uncertain')
+        finally:
+            with self._lock:
+                self._dispatch_threads.pop(identifier, None)
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])
@@ -611,6 +646,8 @@ class ViewerService:
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
+            if self._stop.is_set():
+                return
             jobs = self.queue.list()
             split_jobs = self.store.incomplete_terminal_job_ids()
             reconciliation_errors = []
@@ -644,6 +681,8 @@ class ViewerService:
                     continue
                 try:
                     task = self.store.task_for_job(job['id'])
+                    if task['uuid'] in self._dispatch_threads:
+                        continue
                     if (task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
                             and task['engine_uuid'] and task['node_id'] and task['claim_token']):
                         self._poll(task)
@@ -743,18 +782,19 @@ class ViewerService:
             try:
                 self.store.update(task['uuid'], stage='queued', phase='claimed', node_id=node_id,
                                   claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
-                task = self.store.task(task['uuid'])
-                engine = self.engines[node_id]
-                self.store.update(task['uuid'], phase='init_pending')
-                engine.initialize(task)
-                self.store.update(task['uuid'], phase='initialized')
-                for item in task['files']:
-                    self.store.update(task['uuid'], phase='upload_pending')
-                    engine.upload(task['engine_uuid'], item)
-                    self.store.update(task['uuid'], phase='uploaded')
-                self.store.update(task['uuid'], phase='commit_pending')
-                engine.action('commit', task['engine_uuid'])
-                self.store.update(task['uuid'], phase='processing')
+                if self._parallel_dispatch:
+                    if not self.queue.per_node_slots:
+                        raise Conflict('parallel dispatch requires per-node slots')
+                    thread = threading.Thread(target=self._send_claimed_task, args=(task['uuid'],),
+                                              name='viewer-node-transfer', daemon=True)
+                    self._dispatch_threads[task['uuid']] = (job['id'], thread)
+                    try:
+                        thread.start()
+                    except BaseException:
+                        self._dispatch_threads.pop(task['uuid'], None)
+                        raise
+                else:
+                    self._send_claimed_task(task['uuid'])
             except Exception:
                 current = self.store.task(task['uuid'])
                 if current['phase'] == 'commit_pending':
@@ -788,3 +828,26 @@ class ViewerService:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=10)
+            if self._thread.is_alive():
+                raise RuntimeError('Viewer scheduler did not stop; retain queue ownership')
+        with self._lock:
+            transfers = [thread for _, thread in self._dispatch_threads.values()]
+        for thread in transfers:
+            thread.join(timeout=10)
+        if any(thread.is_alive() for thread in transfers):
+            raise RuntimeError('active Viewer transfer did not stop; retain queue ownership')
+
+    def wait_for_transfers(self):
+        """Keep coordinator authority until every task-owned sender exits.
+
+        No lock is held while waiting: senders need it for their final cleanup.
+        A caller may terminate the process, but must not release queue authority
+        in a still-running process with a sender able to mutate an engine.
+        """
+        while True:
+            with self._lock:
+                transfers = [thread for _, thread in self._dispatch_threads.values()]
+            if not transfers:
+                return
+            for thread in transfers:
+                thread.join()
