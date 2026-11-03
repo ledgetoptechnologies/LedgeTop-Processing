@@ -20,6 +20,8 @@ import time
 import uuid
 from urllib.parse import urlencode
 
+from ops.guarded_script import explicit_guard_source
+
 class _HistoricalTransport:
     """Defer the Linux-only historical helper until an operation uses it."""
     def __getattr__(self,name):
@@ -56,18 +58,6 @@ class Stopped(ValueError):pass
 
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
-
-def explicit_guard_source(source):
-    """Keep generated helper guard checks active under python -O."""
-    import ast
-    class ReplaceAssertions(ast.NodeTransformer):
-        def visit_Assert(self,node):
-            return ast.copy_location(ast.If(test=ast.UnaryOp(op=ast.Not(),operand=self.visit(node.test)),
-                body=[ast.Raise(exc=ast.Call(func=ast.Name(id='AssertionError',ctx=ast.Load()),
-                    args=[] if node.msg is None else [self.visit(node.msg)],keywords=[]),cause=None)],orelse=[]),node)
-    tree=ast.fix_missing_locations(ReplaceAssertions().visit(ast.parse(source)))
-    return ast.unparse(tree)
-
 
 def cluster_http_json(route,token,deadline,limit=65536):
     """Fixed private NodeODM reads with one absolute header/body deadline."""

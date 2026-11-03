@@ -25,6 +25,7 @@ from urllib.error import HTTPError
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ops.guarded_script import explicit_guard_source
 from processing.odx_smoke_worker import Client
 
 NAME = 'ledgetop-processing-prototype-c3fcb3a'
@@ -383,7 +384,7 @@ s=p.parent.stat();assert s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077
 os.mkdir(p,0o700);os.chown(p,10001,10001)
 fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 """
-    command(['sudo','-n','python3','-c',make_backup,str(destination)])
+    command(['sudo','-n','python3','-c',explicit_guard_source(make_backup),str(destination)])
     info=destination.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid!=10001 or info.st_gid!=10001 or stat.S_IMODE(info.st_mode)!=0o700:
         raise CutoverStopped('private_uid_backup_directory_required')
@@ -391,7 +392,7 @@ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
         '--read-only','--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
         '--mount','type=bind,src='+str(destination)+',dst=/backup',
-        '--entrypoint','python',state['image'],'-c',BACKUP,timeout=120)
+        '--entrypoint','python',state['image'],'-c',explicit_guard_source(BACKUP),timeout=120)
     result=json.loads(result)
     if result['sqliteQuickCheck']!='ok' or result['databaseHistory']['count']!=state['history']['count']:
         raise CutoverStopped('offline_backup_validation_failed')
@@ -582,7 +583,7 @@ def offline_rollback_precheck(state):
     result=json.loads(docker('run','--rm','--pull=never','--network','none','--read-only',
         '--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly','--entrypoint','python',
-        state['image'],'-c',OFFLINE_ROLLBACK_CENSUS))
+        state['image'],'-c',explicit_guard_source(OFFLINE_ROLLBACK_CENSUS)))
     if result!=dict(authorityId=AUTHORITY,history=state['history'],nativeViewerTasks=state['history']['nativeViewerTasks'],referenceJobs=0):
         raise CutoverStopped('offline_downgrade_baseline_changed')
 
