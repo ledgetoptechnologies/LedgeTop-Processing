@@ -89,6 +89,12 @@ class PreparedSubmissionAPI:
                 job, created = self.store.prepare_viewer_envelope_jcs_v3(body, authenticated_principal=principal,
                     authenticated_environment=environment, trusted_policy=self._jcs_policies[environment])
                 return Response(201 if created else 200, job)
+            view = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/(status|result-manifest|accepted-copies)', path) if type(path) is str else None
+            if method == 'GET' and view and self._jcs_policies is not None:
+                if body: raise ValueError('GET body forbidden')
+                outcome=self.store.read_viewer_v3_job(view[1], authenticated_principal=principal,
+                    authenticated_environment=environment, view=view[2])
+                return Response(200,outcome) if outcome is not None else Response(404,{'error':'not_found'})
             activation = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/activation', path) if type(path) is str else None
             if method == 'POST' and activation and self._jcs_policies is not None:
                 request = p.decode_submission(body)

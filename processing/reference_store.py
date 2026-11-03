@@ -561,6 +561,51 @@ class ReferenceStore:
                 envelopeSha256=record['envelope_sha256'], viewerTaskId=record['viewer_task_id'],
                 viewerAttemptId=record['viewer_attempt_id'], activationId=record['activation_id'])
 
+    @staticmethod
+    def _v3_result_contract_ready():
+        # No verified end-to-end v3 source/worker/result custody contract yet.
+        return False
+
+    def read_viewer_v3_job(self, submission_id, *, authenticated_principal, authenticated_environment, view):
+        """Inactive read model; never authorizes retrieval, acceptance or cleanup."""
+        from .prepared_envelope_jcs_candidate import PROTOCOL as JCS_PROTOCOL
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        if view not in ('status','result-manifest','accepted-copies'): raise ValueError('unsupported view')
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            self._check_jcs_capability(db)
+            found=db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?',(submission_id,)).fetchone()
+            if found is None: return None
+            row=self._row(db,found['job_id']);owner=self._submission_owner(db,row)
+            if owner is None or owner['protocol']!=JCS_PROTOCOL or (owner['principal_id'],owner['environment']) != (authenticated_principal,authenticated_environment): return None
+            envelope=db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?',(row['job_id'],)).fetchone()
+            if envelope is None: raise Conflict('prepared evidence unavailable')
+            activation=self._activation(db,row)
+            binding=dict(submissionId=submission_id,jobId=row['job_id'],generation=row['generation'],environment=row['environment'],
+                viewerTaskId=envelope['viewer_task_id'],viewerAttemptId=envelope['viewer_attempt_id'],
+                activationId=envelope['activation_id'],envelopeSha256=envelope['envelope_sha256'])
+            if view == 'status':
+                return dict(binding, status=row['status'], phase=row['phase'], activated=activation is not None)
+            # The current receipt tables accept unsigned legacy receipts and do
+            # not carry the current principal-scoped verifier context. Never
+            # represent them as verified v3 accepted copies.
+            if view == 'accepted-copies':
+                raise JCSRuntimeUnavailable('v3 accepted-copy recovery unavailable')
+            if not self._v3_result_contract_ready():
+                raise JCSRuntimeUnavailable('v3 result custody contract unavailable')
+            if activation is None or row['status']!='succeeded' or row['phase'] not in ('awaiting_acceptance','completed') or not row['result_json']:
+                raise Conflict('v3 result not ready')
+            try:
+                raw=json.loads(row['result_json'])
+                result=protocol.validate_result_manifest(raw,job_id=row['job_id'],generation=row['generation'],
+                    environment=row['environment'],pipeline_digest=row['pipeline_digest'])
+                if _json(result)!=row['result_json']: raise ValueError('result evidence changed')
+            except (ValueError,TypeError,KeyError,json.JSONDecodeError):
+                raise Conflict('v3 result evidence invalid') from None
+            return dict(binding,resultManifest=result)
+
     def get_legacy_job(self, job_id, environment, *, private=False):
         """Environment-only callers cannot inspect principal-owned prepared jobs."""
         with self.queue._db() as db:

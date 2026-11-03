@@ -30,11 +30,19 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
             def do_POST(self):
                 raw=self.rfile.read(int(self.headers.get('content-length','0'))); result=self.server.api.handle('POST',self.path,self.headers,raw,protected_transport=True)
                 out=json.dumps(result.body).encode();self.send_response(result.status);self.send_header('Content-Length',str(len(out)));self.end_headers();self.wfile.write(out)
+            def do_GET(self):
+                result=self.server.api.handle('GET',self.path,self.headers,protected_transport=True)
+                out=json.dumps(result.body).encode();self.send_response(result.status);self.send_header('Content-Length',str(len(out)));self.end_headers();self.wfile.write(out)
             def log_message(self,*args): pass
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.api=api
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         def post(obj, path='/ltds/prepared/v3/submissions', caller=token):
             request=Request('http://127.0.0.1:%d%s'%(server.server_port,path),data=json.dumps(obj).encode(),headers={'Authorization':'Bearer '+caller},method='POST')
+            try:
+                with urlopen(request,timeout=5) as response: return response.status,json.load(response)
+            except HTTPError as error: return error.code,json.load(error)
+        def get(path,caller=token):
+            request=Request('http://127.0.0.1:%d%s'%(server.server_port,path),headers={'Authorization':'Bearer '+caller})
             try:
                 with urlopen(request,timeout=5) as response: return response.status,json.load(response)
             except HTTPError as error: return error.code,json.load(error)
@@ -119,6 +127,29 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                     original=db.execute('SELECT policy_json FROM reference_viewer_v3_policy WHERE job_id=?',(job['jobId'],)).fetchone()[0]
                     db.execute("UPDATE reference_viewer_v3_policy SET policy_json='{}' WHERE job_id=?",(job['jobId'],))
                 self.assertEqual(post(activation,path)[0],409)
+                server.api=make_api(reopened,policy)
+                prefix='/ltds/prepared/v3/submissions/'+env['submission']['submissionId']
+                status_code,status=get(prefix+'/status');self.assertEqual(status_code,200);self.assertTrue(status['activated'])
+                self.assertEqual(status['viewerAttemptId'],env['viewerAttemptId'])
+                self.assertEqual(get(prefix+'/status','synthetic-jcs-other-token-0001')[0],404)
+                self.assertEqual(get(prefix+'/result-manifest')[0],503)
+                self.assertEqual(get(prefix+'/accepted-copies')[0],503)
+                # Synthetic DB injection only: no claim or live processing is performed.
+                result=copy.deepcopy(fixture['resultManifest'])
+                result.update(jobId=job['jobId'],generation=job['generation'],environment=job['environment'],pipelineDigest=job['pipelineDigest'])
+                result['resultManifestSha256']=rp.digest({k:v for k,v in result.items() if k!='resultManifestSha256'})
+                with queue._db() as db:
+                    db.execute("UPDATE jobs SET status='succeeded' WHERE id=?",(job['jobId'],))
+                    db.execute("UPDATE reference_jobs SET phase='awaiting_acceptance',result_json=? WHERE job_id=?",(rp.canonical_json(result).decode(),job['jobId']))
+                self.assertEqual(get(prefix+'/result-manifest')[0],503)
+                with patch.object(ReferenceStore,'_v3_result_contract_ready',return_value=True):
+                    code,body=get(prefix+'/result-manifest');self.assertEqual(code,200)
+                    self.assertEqual(body['resultManifest'],result)
+                    self.assertEqual(body['envelopeSha256'],found['envelopeSha256'])
+                    self.assertEqual(get(prefix+'/result-manifest','synthetic-jcs-other-token-0001')[0],404)
+                    server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy)
+                    self.assertEqual(get(prefix+'/result-manifest')[1],body)
+
                 with queue._db() as db:
                     db.execute('UPDATE reference_viewer_v3_policy SET policy_json=? WHERE job_id=?',(original,job['jobId']))
                 # A reopened store retains the same evidence and does not dispatch.
