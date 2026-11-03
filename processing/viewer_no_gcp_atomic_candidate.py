@@ -16,12 +16,20 @@ def stage(store,submission_id,statement,*,principal,environment,configured_autho
   if type(src) is not bytes or type(sel) is not bytes or not 0<len(src)<=12*1024*1024 or not 0<len(sel)<=12*1024*1024:raise ValueError()
   trusted=synthetic_bundle['binding'];expected=dict(datasetId=statement['viewerDatasetId'],datasetManifestSha256=statement['viewerDatasetManifestSha256'],principalId=principal,environment=environment,authorityId=configured_authority,viewerTaskId=statement['viewerTaskId'],viewerAttemptId=statement['viewerAttemptId'],pipelineDigest=statement['pipelineDigest'],sourcePageHashes=statement['sourcePageHashes'],sourceCount=statement['sourceCount'],selectedPageHashes=statement['selectedPageHashes'],selectedCount=statement['selectedCount'],inputManifestSha256=statement['viewerInputManifestSha256'])
   if type(trusted) is not dict or any(trusted.get(k)!=v for k,v in expected.items()):raise ValueError()
-  # Deterministic Viewer ids; page/frame content validation happens below.
-  for line in sel.splitlines():
-   if len(line)>262144:raise ValueError()
-   _preflight_stored_json(line);f=json.loads(line,object_pairs_hook=_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+  # Bounded prescan before any frame array allocation or database writes.
+  scan=io.BytesIO(sel);index=0
+  while True:
+   line=scan.readline(frames.MAX_FRAME_BYTES+2)
+   if not line:break
+   if index>=frames.MAX_FRAMES or len(line)>frames.MAX_FRAME_BYTES+1 or not line.endswith(b'\n'):raise ValueError()
+   raw=line[:-1];_preflight_stored_json(raw)
+   f=json.loads(raw,object_pairs_hook=_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+   p._closed(f,('version','index','records'),'selected frame')
+   if f['version']!=frames.SELECTED_VERSION or type(f['index']) is not int or f['index']!=index or type(f['records']) is not list or not 0<len(f['records'])<=512 or p.canonical_json(f)!=raw:raise ValueError()
    for obj in f['records']:
-    if obj.get('type')!='dataset_file' or obj.get('pageObjectId')!=obj.get('datasetFileId'):raise ValueError()
+    if type(obj) is not dict or obj.get('type')!='dataset_file' or obj.get('pageObjectId')!=obj.get('datasetFileId'):raise ValueError()
+   index+=1
+  if not index:raise ValueError()
   with store.queue._db() as db:
    db.execute('BEGIN IMMEDIATE')
    result=binding._stage_owned(db,store,submission_id,statement,principal=principal,environment=environment,configured_authority=configured_authority,synthetic_viewer_provenance=synthetic_viewer_provenance)

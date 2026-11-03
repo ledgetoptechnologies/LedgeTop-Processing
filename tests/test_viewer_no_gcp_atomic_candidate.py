@@ -87,3 +87,12 @@ class NoGcpAtomic(unittest.TestCase):
     # Restore only this task's synthetic database for the next subcase.
     with self.queue._db() as db:
      db.execute('DELETE FROM candidate_frame_pages WHERE stage_id=?',(self.statement['jobId'],));db.execute('DELETE FROM candidate_frame_receipts WHERE stage_id=?',(self.statement['jobId'],));db.execute('DELETE FROM synthetic_viewer_dataset_transport_v1 WHERE job_id=?',(self.statement['jobId'],))
+
+ def test_selected_prescan_is_bounded_and_strict(self):
+  samples=(b'{}\n'*100000,b'{"version":"x","version":"y","index":0,"records":[]}\n',b'{broken}\n',b'{"index":0,"records":[],"version":"ltds-viewer-selected-frames-v1"}\n')
+  valid=tuple(p.canonical_json(dict(version='ltds-viewer-selected-frames-v1',index=i,records=[dict(type='dataset_file',datasetFileId='x',pageObjectId='x',ordinal=i)]))+b'\n' for i in range(65))
+  samples=samples+(b''.join(valid),)
+  for wire in samples:
+   bad=copy.deepcopy(self.bundle);bad['selection']=wire
+   with self.subTest(size=len(wire)),self.assertRaises(NoGcpHeld):self.call(bad)
+   self.assertEqual(self.counts(),(0,0,0))
