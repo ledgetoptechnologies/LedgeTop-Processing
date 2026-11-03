@@ -1183,12 +1183,22 @@ class ReferenceStore:
             required = bool(row['viewer_receipt_required'] == 1 or row['environment'] in self.viewer_required_environments
                 or db.execute('SELECT 1 FROM reference_viewer_transfers WHERE job_id=?', (job_id,)).fetchone())
             receipts = []
+            signed_coverage = set()
             for item in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances WHERE job_id=? ORDER BY receipt_id', (job_id,)):
                 acceptance = json.loads(item['receipt_json'])
                 signed = db.execute('SELECT receipt_json FROM reference_viewer_receipts WHERE acceptance_receipt_id=?',
                     (item['receipt_id'],)).fetchone()
                 receipts.append(dict(acceptance=acceptance, viewerReceipt=json.loads(signed[0])) if signed else acceptance)
-            return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed', 'viewerCopyRequired': required}
+                if signed:
+                    signed_coverage.update(acceptance['acceptedObjectIds'])
+            complete = row['phase'] == 'completed'
+            if required and complete:
+                # This is an advisory status only: the worker must still
+                # verify each signature and its local object coverage. Old
+                # unsigned completion cannot count as verified coverage.
+                result = json.loads(row['result_json']) if row['result_json'] else None
+                complete = bool(result and signed_coverage == {obj['id'] for obj in result['objects']})
+            return {'receipts': receipts, 'fullyAccepted': complete, 'viewerCopyRequired': required}
 
     def pending_outbox(self, *, now=None, limit=100):
         if type(limit) is not int or not 1 <= limit <= 1000:

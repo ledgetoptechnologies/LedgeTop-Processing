@@ -97,6 +97,21 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             reopened.accept(job['jobId'], receipt)
 
+    def test_relay_does_not_report_unsigned_legacy_completion_as_verified(self):
+        from tests.viewer_receipt_signer import SyntheticViewerSigner
+        job, result = self.result_ready()
+        receipt = self.receipt(job, result)
+        receipt['acceptedObjectIds'] = sorted(obj['id'] for obj in result['objects'])
+        self.assertTrue(self.store.accept(job['jobId'], receipt)['fullyAccepted'])
+        self.store.viewer_required_environments = frozenset(('staging',))
+        relay = self.store.acceptance_receipts(job['jobId'])
+        self.assertTrue(relay['viewerCopyRequired'])
+        self.assertFalse(relay['fullyAccepted'])
+        signer = SyntheticViewerSigner()
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+                          trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.assertTrue(self.store.acceptance_receipts(job['jobId'])['fullyAccepted'])
+
     def test_retry_transfer_budget_has_explicit_three_copy_ceiling(self):
         job, _ = self.store.submit(self.submission)
         self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
