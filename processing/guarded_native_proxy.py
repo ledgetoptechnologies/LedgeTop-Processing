@@ -74,9 +74,11 @@ class GuardedNativeProxy:
         if self.engine is not engine:
             raise GateError('guarded native engine changed during startup')
         previous = getattr(self, '_listener_engine', None)
-        if previous is not None and previous is not self.engine:
+        if previous is not None and previous is not engine:
             raise GateError('guarded native engine changed')
-        self._listener_engine = self.engine
+        # Never re-read the mutable attribute after validation: a concurrent
+        # replacement must not become the listener's trusted engine.
+        self._listener_engine = engine
 
     def _mutation_engine(self):
         bound = getattr(self, '_listener_engine', None)

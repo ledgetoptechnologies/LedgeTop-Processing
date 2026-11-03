@@ -51,6 +51,27 @@ class GuardedNativeProxyTests(unittest.TestCase):
             return status, value, binary
         self.backend._dispatch = dispatch
 
+    def test_listener_bind_retains_checked_engine_during_concurrent_swap(self):
+        proxy = self.proxy
+        checked = proxy.engine
+        replacement = NativeEngine('http://192.0.2.1:3000')
+        swapped = []
+        def getattribute(instance, name):
+            value = object.__getattribute__(instance, name)
+            if instance is proxy and name == 'engine' and not swapped:
+                # Swap after the bind check has read the original value but
+                # before it persists the listener's trusted engine.
+                swapped.append(True)
+                object.__setattr__(instance, 'engine', replacement)
+            return value
+        with patch.object(GuardedNativeProxy, '__getattribute__', getattribute):
+            proxy.bind_listener_engine(checked)
+        self.assertTrue(swapped)
+        self.assertIs(proxy._listener_engine, checked)
+        with self.assertRaises(GateError):
+            proxy._mutation_engine()
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+
     def journal(self):
         with NodeGate('physical-engine') as gate:
             state = gate.snapshot()
