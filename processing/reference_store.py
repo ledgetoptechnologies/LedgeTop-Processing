@@ -813,6 +813,13 @@ class ReferenceStore:
         if after_job is not None and (type(after_job) is not str or not after_job or len(after_job) > 128):
             raise ValueError('invalid Viewer acceptance audit cursor')
         with self.queue._db() as db:
+            placeholders = ','.join('?' for _ in PHASES)
+            invalid_phase = db.execute('''SELECT 1 FROM reference_jobs r
+                WHERE (r.viewer_receipt_required IS NULL OR r.viewer_receipt_required != 0)
+                AND (r.phase IS NULL OR r.phase NOT IN (''' + placeholders + ''')) LIMIT 1''',
+                tuple(sorted(PHASES))).fetchone()
+            if invalid_phase:
+                return {'state': 'reconcile'}
             ambiguous = db.execute('''SELECT 1 FROM reference_jobs r
                 WHERE r.phase IN ('awaiting_acceptance','completed')
                 AND ((r.viewer_receipt_required IS NULL OR r.viewer_receipt_required NOT IN (0,1))

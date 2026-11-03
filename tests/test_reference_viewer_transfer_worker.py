@@ -179,6 +179,20 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
         self.assertEqual(self.worker.run_once(), {'state': 'idle'})
 
+    def test_unknown_viewer_or_legacy_phase_is_held_without_affecting_normal_phases(self):
+        for policy in (1, None, 9):
+            with self.subTest(policy=policy):
+                with self.fixture.queue._db() as db:
+                    db.execute("UPDATE reference_jobs SET phase='unrecognized-phase',viewer_receipt_required=? WHERE job_id=?",
+                               (policy, self.job['jobId']))
+                self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE reference_jobs SET phase='queued',viewer_receipt_required=1 WHERE job_id=?", (self.job['jobId'],))
+        self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE reference_jobs SET phase='unrecognized-phase',viewer_receipt_required=0 WHERE job_id=?", (self.job['jobId'],))
+        self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+
     def test_legacy_completed_transfer_with_unrelated_signed_partial_is_held(self):
         partial = self._full_acceptance()
         partial['acceptedObjectIds'] = ['result-1']
