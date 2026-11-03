@@ -13,8 +13,8 @@ from processing.viewer_paged_frame_candidate import verify,FrameHeld,VERSION,DOM
 class ViewerPagedFrameTests(unittest.TestCase):
  @classmethod
  def setUpClass(cls):
-  cls.records=[dict(type='dataset_file',datasetFileId=f'file-{i:05}',relativePath=f'surveys/site/flight-{i%50:02}/raw/IMG_{i:05}.jpg',byteSize=9089354,sha256='a'*64,processingRole='image',mediaType='image/jpeg') for i in range(16832)]
-  cls.records.append(dict(type='dataset_file',datasetFileId='raw-gcp-file',relativePath='control/raw.csv',byteSize=5,sha256='d'*64,processingRole='gcp_source',mediaType='text/csv'))
+  cls.records=[dict(type='dataset_file',datasetFileId=f'file-{i:05}',relativePath=f'surveys/site/flight-{i%50:02}/raw/IMG_{i:05}.jpg',byteSize=9089354,sha256='a'*64,processingRole='image',mediaType='image/jpeg',kind='image') for i in range(16832)]
+  cls.records.append(dict(type='dataset_file',datasetFileId='raw-gcp-file',relativePath='control/raw.csv',byteSize=5,sha256='d'*64,processingRole='gcp_source',mediaType='text/csv',kind='auxiliary'))
   cls.records.append(dict(type='attempt_generated_gcp',attemptId='901a7098-d215-41aa-9c2a-530c81ecff04',byteSize=10,sha256='b'*64,sourceFiles=[dict(datasetFileId='raw-gcp-file',relativePath='control/raw.csv',sha256='d'*64)],correspondenceSha256='c'*64))
   cls.lines=[];cls.hashes=[]
   for i in range(0,len(cls.records),512):

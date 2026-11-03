@@ -31,8 +31,9 @@ def _path(value):
 def _item(value):
  if type(value) is not dict:raise ValueError()
  if value.get('type')=='dataset_file':
-  p._closed(value,('type','datasetFileId','relativePath','byteSize','sha256','processingRole','mediaType'),'dataset file')
+  p._closed(value,('type','datasetFileId','relativePath','byteSize','sha256','processingRole','mediaType','kind'),'dataset file')
   p._slug(value['datasetFileId'],'source ID');_path(value['relativePath']);p._string(value['processingRole'],'role',80);p._string(value['mediaType'],'media type',127)
+  if value['processingRole'] not in ('auto','image','gcp_source','provider_input','administrative') or value['kind'] not in ('image','lidar','auxiliary'):raise ValueError()
  elif value.get('type')=='attempt_generated_gcp':
   p._closed(value,('type','attemptId','byteSize','sha256','sourceFiles','correspondenceSha256'),'GCP')
   p._uuid(value['attemptId'],'attempt');p._hash(value['correspondenceSha256'],'correspondence')
@@ -45,7 +46,7 @@ def _item(value):
  else:raise ValueError()
  p._integer(value['byteSize'],'size',allow_zero=True);p._hash(value['sha256'],'digest')
 
-def verify(stream,*,expected_page_hashes,expected_items):
+def verify(stream,*,expected_page_hashes,expected_items,_capture_selection=False):
  """Bound read/parse and validate pins; consume no untrusted external side effects.
 
  Expected hashes/count must be independently trusted. A successful result is
@@ -57,7 +58,8 @@ def verify(stream,*,expected_page_hashes,expected_items):
   for h in expected_page_hashes:p._hash(h,'page digest')
   p._integer(expected_items,'count')
   if expected_items>MAX_ITEMS:raise ValueError()
-  count=0;total=0;seen=set();paths=set();generated=0;source_facts={};gcp_refs=[]
+  count=0;total=0;seen=set();paths=set();generated=0;source_facts={};gcp_refs=[];selected=[];generated_record=None
+  photo=re.compile(r'\.(?:jpe?g|png|tiff?|dng|raw|heic)$',re.I|re.ASCII)
   for index,pin in enumerate(expected_page_hashes):
    line=stream.readline(MAX_FRAME_BYTES+2)
    if type(line) is not bytes or not line.endswith(b'\n') or len(line)>MAX_FRAME_BYTES+1:raise ValueError()
@@ -75,11 +77,19 @@ def verify(stream,*,expected_page_hashes,expected_items):
      if item['datasetFileId'] in seen or item['relativePath'] in paths:raise ValueError()
      seen.add(item['datasetFileId']);paths.add(item['relativePath'])
      if item['processingRole']=='gcp_source':source_facts[item['datasetFileId']]=(item['relativePath'],item['sha256'])
+     if _capture_selection and item['processingRole'] not in ('gcp_source','administrative') and (item['processingRole']!='auto' or photo.search(item['relativePath'])):selected.append(dict(item))
     else:
      generated+=1
      if generated>1:raise ValueError()
-     gcp_refs=item['sourceFiles']
+     gcp_refs=item['sourceFiles'];generated_record=dict(item)
   if count!=expected_items or stream.read(1)!=b'':raise ValueError()
   if any(source_facts.get(ref['datasetFileId'])!=(ref['relativePath'],ref['sha256']) for ref in gcp_refs):raise ValueError()
-  return {'state':'held_no_viewer_authority_or_mapping','objects':count,'pages':len(expected_page_hashes),'generatedGcp':generated,'framedBytes':total}
+  result={'state':'held_no_viewer_authority_or_mapping','objects':count,'pages':len(expected_page_hashes),'generatedGcp':generated,'framedBytes':total}
+  if _capture_selection:
+   if generated_record is not None:
+    selected=[x for x in selected if x['relativePath'].rsplit('/',1)[-1].lower()!='gcp_list.txt']
+    generated_record['relativePath']='gcp_list.txt';selected.append(generated_record)
+   selected=[x for x in selected if photo.search(x['relativePath'])]+[x for x in selected if not photo.search(x['relativePath'])]
+   return result,selected
+  return result
  except (ValueError,TypeError,KeyError,UnicodeError,OverflowError):raise FrameHeld('frame_validation_unavailable') from None
