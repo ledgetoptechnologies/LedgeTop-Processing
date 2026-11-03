@@ -666,8 +666,8 @@ class ReferenceStore:
             row = self._row(db, job_id)
             if not row['result_json'] or row['phase'] not in ('awaiting_acceptance', 'completed'):
                 raise Conflict('result is not ready for Viewer transfer')
-            result = json.loads(row['result_json'])
             try:
+                result = json.loads(row['result_json'])
                 viewer_manifest = derive_viewer_result_manifest(result, job_id=job_id,
                     generation=row['generation'], environment=row['environment'],
                     pipeline_digest=row['pipeline_digest'])
@@ -735,6 +735,26 @@ class ReferenceStore:
                 AND NOT EXISTS (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id)
                 ORDER BY r.created_at,r.job_id LIMIT ?''', (limit,)).fetchall()
             return [row['job_id'] for row in rows]
+
+    def pending_viewer_transfer_page(self, *, limit=20, after=None):
+        """Return a bounded keyset page; callers may wrap after reaching its end."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('invalid Viewer transfer discovery limit')
+        if after is not None and (type(after) is not tuple or len(after) != 2
+                                  or any(type(v) is not str or not v for v in after)):
+            raise ValueError('invalid Viewer transfer discovery cursor')
+        with self.queue._db() as db:
+            params = []
+            cursor = ''
+            if after is not None:
+                cursor = ' AND (r.created_at > ? OR (r.created_at = ? AND r.job_id > ?))'
+                params.extend((after[0], after[0], after[1]))
+            params.append(limit)
+            rows = db.execute('''SELECT r.job_id,r.created_at FROM reference_jobs r
+                WHERE r.phase='awaiting_acceptance' AND r.result_json IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id)'''
+                + cursor + ' ORDER BY r.created_at,r.job_id LIMIT ?', params).fetchall()
+            return [(row['created_at'], row['job_id']) for row in rows]
 
     def claim_viewer_transfer(self, *, now, lease_seconds=120):
         """Lease one due Viewer transfer; expired leases are safe to resume."""

@@ -23,6 +23,7 @@ class ReferenceViewerTransferWorker:
         if not self.trusted_receipt_keys:
             raise ValueError('Viewer acceptance receipt pins are required')
         self.clock, self.lease_seconds = clock, lease_seconds
+        self._discovery_after = None
 
     @staticmethod
     def _reason(error):
@@ -39,22 +40,31 @@ class ReferenceViewerTransferWorker:
         now = self.clock()
         if type(now) not in (int, float) or now < 0:
             return {'state': 'held', 'reason': 'viewer_transfer_clock_unavailable'}
+        discovery_conflict = False
         try:
-            pending = self.store.pending_viewer_transfer_jobs(limit=20)
+            pending = self.store.pending_viewer_transfer_page(limit=20, after=self._discovery_after)
             # An unrepresentable sealed result must remain retained for
             # reconciliation, but must not strand other ready transfers. Only
             # skip explicit per-job conflicts; storage failures still hold the
             # worker rather than silently masking a broken queue.
-            for candidate in pending:
+            for created_at, candidate in pending:
                 try:
                     self.store.ensure_viewer_transfer(candidate)
+                    self._discovery_after = None
                     break
                 except Conflict:
+                    discovery_conflict = True
                     continue
+            else:
+                # When a whole page is unrepresentable, advance next time;
+                # at the end wrap around so held jobs can be retried later.
+                self._discovery_after = pending[-1] if len(pending) == 20 else None
             claim = self.store.claim_viewer_transfer(now=now, lease_seconds=self.lease_seconds)
         except Exception:
             return {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'}
         if claim is None:
+            if discovery_conflict:
+                return {'state': 'held', 'reason': 'viewer_transfer_jobs_need_reconciliation'}
             return {'state': 'idle'}
         job_id, lease_token = claim['jobId'], claim['leaseToken']
         try:

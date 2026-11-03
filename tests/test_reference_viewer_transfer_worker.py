@@ -46,8 +46,8 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             if job_id == invalid:
                 raise Conflict('result cannot be represented')
             return real_ensure(job_id)
-        with patch.object(self.store, 'pending_viewer_transfer_jobs',
-                          return_value=[invalid, self.job['jobId']]), \
+        with patch.object(self.store, 'pending_viewer_transfer_page',
+                          return_value=[('a', invalid), ('b', self.job['jobId'])]), \
              patch.object(self.store, 'ensure_viewer_transfer', side_effect=ensure):
             result = self.worker.run_once()
         self.assertEqual(result, {'state': 'accepted', 'jobId': self.job['jobId']})
@@ -58,6 +58,24 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             self.assertEqual(self.worker.run_once(),
                              {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'})
         self.assertEqual(self.sender.calls, [])
+
+    def test_full_page_of_conflicts_does_not_starve_later_job(self):
+        self.sender.fail = False
+        with self.fixture.queue._db() as db:
+            for i in range(25):
+                bad = 'bad-%02d' % i
+                db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,?)",
+                           (bad, bad, 'staging', 'reference-pipeline-v1', 'succeeded'))
+                db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,
+                    environment,input_json,manifest_sha,pipeline_digest,generation,phase,result_json,created_at)
+                    SELECT ?,?,request_digest,environment,input_json,manifest_sha,pipeline_digest,
+                    generation,'awaiting_acceptance',?,'2000-01-01 00:00:00'
+                    FROM reference_jobs WHERE job_id=?""", (bad, bad, 'not-json' if i == 0 else '{}', self.job['jobId']))
+        self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_transfer_jobs_need_reconciliation'})
+        self.assertEqual(self.worker.run_once(), {'state': 'accepted', 'jobId': self.job['jobId']})
+        self.assertTrue(self.store.viewer_transfer_status(self.job['jobId'])['completed'])
+        with self.fixture.queue._db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_jobs WHERE job_id LIKE 'bad-%' AND phase='awaiting_acceptance'").fetchone()[0], 25)
 
     def test_stable_outbox_retries_and_signed_acceptance_completes_job(self):
         first = self.worker.run_once()

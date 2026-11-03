@@ -20,3 +20,9 @@ already-verified Git queries. This is not an in-container Git identity check.
 The tests do not exercise production credentials, live data, NAS custody,
 runtime installation, automatic cleanup activation or the newer guarded node
 path. Nothing here authorizes enabling transfer or cleanup.
+
+Discovery now scans a bounded keyset page and moves past a full page of
+unrepresentable results, retaining them for later reconciliation. The cursor
+is in memory and resets on worker restart: repeated restarts before the worker
+reaches a later page could still delay those jobs. It is not a durable
+quarantine or a replacement for operator-visible reconciliation.
