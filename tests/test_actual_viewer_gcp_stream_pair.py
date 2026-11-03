@@ -1,5 +1,6 @@
 """Synthetic actual Viewer evidence frames paired to inactive Processing decoder."""
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -9,8 +10,10 @@ import subprocess
 import unittest
 
 from processing.gcp_evidence_stream_candidate import verify, EvidenceHeld
-from processing.viewer_paged_frame_candidate import verify as verify_source, FrameHeld
-from processing.gcp_semantic_bridge_candidate import inspect as semantic_inspect
+from processing.viewer_paged_frame_candidate import verify_dataset_count_v2, FrameHeld
+from processing.gcp_semantic_bridge_candidate import inspect as semantic_inspect, SemanticHeld
+from processing.gcp_file_stream_candidate import verify as verify_file
+from processing.gcp_cumulative_quota_candidate import validate_wire_quota
 
 ROOT=Path(__file__).resolve().parents[1]
 PIN='4ed7dcd566380c3c0cd7f03a765ee1badf2004d5'
@@ -56,10 +59,25 @@ class ViewerGcpPair(unittest.TestCase):
   self.assertEqual(self.run_evidence(streams[2])['state'],'held_evidence_not_authorized')
   source=[r for line in streams[0].splitlines() for r in json.loads(line)['records']]
   selected=[r for line in streams[1].splitlines() for r in json.loads(line)['records']]
-  result=semantic_inspect(attempt_id=x['attemptId'],evidence=json.loads(evidence),evidence_bytes=evidence,evidence_sha256=x['gcpEvidenceSha256'],generated_bytes=file,source_records=source,selected_records=selected)
+  parsed=json.loads(evidence);rows=parsed['correspondences']
+  # Synthetic independent trust fixture; real authenticated loaders do not exist.
+  trust=copy.deepcopy(rows);images={r['imageDatasetFileId']:dict(relativePath=r['imageRelativePath'],width=r['imageWidth'],height=r['imageHeight']) for r in rows}
+  args=dict(attempt_id=x['attemptId'],evidence=parsed,evidence_bytes=evidence,evidence_sha256=x['gcpEvidenceSha256'],generated_bytes=file,source_records=source,selected_records=selected,trusted_images=images,trusted_correspondences=trust)
+  result=semantic_inspect(**args)
   self.assertEqual(result['state'],'held_gcp_authority_correspondence_hash_unverified')
-  # Current Viewer count excludes generated record; Processing includes it.
-  with self.assertRaises(FrameHeld):verify_source(io.BytesIO(streams[0]),expected_page_hashes=x['sourcePageHashes'],expected_items=x['sourceCount'])
+  self.assertEqual(verify_dataset_count_v2(io.BytesIO(streams[0]),expected_page_hashes=x['sourcePageHashes'],expected_dataset_items=x['sourceCount'])['generatedGcp'],1)
+  with self.assertRaises(FrameHeld):verify_dataset_count_v2(io.BytesIO(streams[0]),expected_page_hashes=x['sourcePageHashes'],expected_dataset_items=x['sourceCount']+1)
+  self.assertEqual(verify_file(io.BytesIO(streams[3]),attempt_id=x['attemptId'],evidence_sha256=x['gcpEvidenceSha256'],file_sha256=x['gcpFileSha256'],page_hashes=x['gcpFilePageHashes'],page_bytes=x['gcpFilePageBytes'],decoded_bytes=x['gcpFileByteCount'])['state'],'held_file_not_authorized')
+  self.assertEqual(validate_wire_quota(source_bytes=len(streams[0]),selected_bytes=len(streams[1]),evidence_page_bytes=x['gcpEvidencePageBytes'],file_page_bytes=x['gcpFilePageBytes']),x['totalStreamBytes'])
+  for field,value in (('pixelX',4001),('correspondenceId','changed'),('gcpSetId','changed'),('label','changed')):
+   bad=copy.deepcopy(args);bad['evidence']['correspondences'][0][field]=value
+   bad['evidence_bytes']=json.dumps(bad['evidence'],separators=(',',':')).encode();bad['evidence_sha256']=hashlib.sha256(bad['evidence_bytes']).hexdigest()
+   with self.subTest(field=field),self.assertRaises(SemanticHeld):semantic_inspect(**bad)
+  bad=copy.deepcopy(args);first=rows[0]['imageDatasetFileId'];bad['trusted_images'][first]['width']+=1
+  with self.assertRaises(SemanticHeld):semantic_inspect(**bad)
+  bad=copy.deepcopy(args);bad['evidence']['correspondences'][0]['pixelX']=4000;bad['trusted_correspondences'][0]['pixelX']=4000
+  bad['evidence_bytes']=json.dumps(bad['evidence'],separators=(',',':')).encode();bad['evidence_sha256']=hashlib.sha256(bad['evidence_bytes']).hexdigest()
+  with self.assertRaises(SemanticHeld):semantic_inspect(**bad)
 
  def test_evidence_tamper_truncation_and_split_utf8(self):
   x=self.x;stream=decoded(x['gcpEvidenceFrames'])

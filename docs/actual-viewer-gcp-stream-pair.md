@@ -10,18 +10,20 @@ python -m unittest tests.test_actual_viewer_gcp_stream_pair
 
 Actual Viewer repositories populate an in-memory synthetic database; the test
 compares its stored evidence JSON and generated content bytes with exported
-streams and pins, validates evidence via the Processing decoder, and invokes
-the inactive semantic bridge using stored bytes. It checks a real producer
+streams and pins, validates evidence and generated file through Processing
+decoders, and invokes the inactive semantic bridge using stored bytes. It checks a real producer
 split across a multi-byte UTF-8 character, tampering and missing trailer,
 individual stream and combined sizes, and source/selected/evidence/file page
-hashes. Test-only chunk extraction compares stored file bytes; it is not a
-Processing file-stream decoder. The Processing candidate has no such decoder
-at this commit and therefore file-stream trailer, tamper and UTF-8 enforcement
-are not proven on that side. The test checks actual size accounting, not a
-72 MiB boundary-sized input or a combined Processing receiver quota.
+hashes. Test-only chunk extraction additionally compares stored file bytes;
+it is not itself a decoder. The quota helper checks aggregate declared sizes,
+not a combined authenticated Processing receiver or a boundary-sized stream.
 
-The GCP source frame contains an additional generated record but Viewer reports
-only the dataset file count. Processing currently expects all records in that
-count; the test confirms this mismatch is held. It does not adjust the count.
+Viewer reports the dataset file count excluding the generated record; the
+versioned Processing verifier accepts the unchanged actual count and rejects
+the wrong count. The semantic bridge requires independent trusted image path,
+dimensions and complete correspondence records, and verifies pixel bounds.
+The test's trusted fixtures are synthetic copies, not a real independent
+Viewer authority. No same-transaction authenticated loader or source-file
+custody exists.
 This is not an authenticated source, file custody or execution test; no route,
 grant or cleanup is enabled.

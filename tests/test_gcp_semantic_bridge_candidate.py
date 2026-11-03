@@ -7,6 +7,8 @@ class ActualViewerSemantics(unittest.TestCase):
  def setUpClass(cls):
   ViewerPair.setUpClass(); d=ViewerPair.data; real=d['real']; raw=base64.b64decode(real['decoded'])
   cls.args=dict(attempt_id=real['attempt'],evidence=json.loads(raw),evidence_bytes=raw,evidence_sha256=real['digest'],generated_bytes=base64.b64decode(d['generated']),source_records=json.loads(base64.b64decode(d['sources']))['records'],selected_records=json.loads(base64.b64decode(d['selected']))['records'])
+  rows=cls.args['evidence']['correspondences'];cls.args['trusted_correspondences']=copy.deepcopy(rows)
+  cls.args['trusted_images']={r['imageDatasetFileId']:dict(relativePath=r['imageRelativePath'],width=r['imageWidth'],height=r['imageHeight']) for r in rows}
  def test_actual_viewer_rows_and_exact_stored_file(self):
   self.assertEqual(inspect(**self.args)['state'],'held_gcp_authority_correspondence_hash_unverified')
   self.assertEqual(self.args['source_records'][-1]['correspondenceSha256'],ViewerPair.data['jsCorrespondenceSha'])

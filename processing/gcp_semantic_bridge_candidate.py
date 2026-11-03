@@ -1,12 +1,14 @@
 """Held semantic bridge. Inputs require independent authentication and bounded decoding."""
 import hashlib
+import json
+import math
 from . import reference_protocol as p
 from .gcp_snapshot_semantics_candidate import validate_gcp_semantics
 from .viewer_paged_frame_candidate import _item
 
 class SemanticHeld(ValueError): pass
 
-def inspect(*, attempt_id, evidence, evidence_bytes, evidence_sha256, generated_bytes, source_records, selected_records):
+def inspect(*, attempt_id, evidence, evidence_bytes, evidence_sha256, generated_bytes, source_records, selected_records, trusted_images, trusted_correspondences):
  """Compare supplied evidence and inventory; never authorize or accept a snapshot.
 
  Evidence and source/selection MUST originate from independently authenticated,
@@ -22,6 +24,10 @@ def inspect(*, attempt_id, evidence, evidence_bytes, evidence_sha256, generated_
   p._closed(evidence,('schemaVersion','snapshot','correspondences'),'evidence')
   if type(evidence['schemaVersion']) is not int or evidence['schemaVersion']!=1:raise ValueError()
   snapshot=evidence['snapshot']; rows=evidence['correspondences']
+  # These must come from a separate authoritative loader, never from the
+  # request/evidence being checked. The synthetic caller supplies fixtures.
+  if type(trusted_images) is not dict or type(trusted_correspondences) is not list:raise ValueError()
+  if json.dumps(rows,sort_keys=True,separators=(',',':'),allow_nan=False)!=json.dumps(trusted_correspondences,sort_keys=True,separators=(',',':'),allow_nan=False):raise ValueError()
   p._closed(snapshot,('snapshotId','byteSize','sha256','sourceGcpDatasetFileIds','imageDatasetFileIds','correspondenceCount'),'snapshot')
   if snapshot['snapshotId']!=attempt_id or type(generated_bytes) is not bytes or not 0<len(generated_bytes)<=16*1024*1024 or type(snapshot['byteSize']) is not int or snapshot['byteSize']!=len(generated_bytes) or hashlib.sha256(generated_bytes).hexdigest()!=snapshot['sha256']:raise ValueError()
   if type(source_records) is not list or not 0<len(source_records)<=20001 or type(selected_records) is not list or not 0<len(selected_records)<=20001:raise ValueError()
@@ -47,11 +53,21 @@ def inspect(*, attempt_id, evidence, evidence_bytes, evidence_sha256, generated_
    else:raise ValueError()
   if selected_gcp!=1:raise ValueError()
   if type(rows) is not list or not rows or len(rows)>100000 or type(snapshot['correspondenceCount']) is not int or len(rows)!=snapshot['correspondenceCount']:raise ValueError()
-  reduced=[]; raw_refs={}; image_ids=set()
+  reduced=[]; raw_refs={}; image_ids=set();correspondence_ids=set()
   for row in rows:
    p._closed(row,('correspondenceId','gcpPointId','gcpSetId','externalId','label','latitude','longitude','elevationM','sourceGcpDatasetFileId','sourceGcpSha256','sourceGcpRelativePath','imageDatasetFileId','imageRelativePath','imageWidth','imageHeight','pixelX','pixelY'),'correspondence')
    src=sources.get(row['sourceGcpDatasetFileId']); img=sources.get(row['imageDatasetFileId'])
    if not src or src['processingRole']!='gcp_source' or src['relativePath']!=row['sourceGcpRelativePath'] or src['sha256']!=row['sourceGcpSha256'] or not img or img['kind']!='image' or img['relativePath']!=row['imageRelativePath'] or img['datasetFileId'] not in selected_id_set:raise ValueError()
+   for k in ('correspondenceId','gcpPointId','gcpSetId'):p._slug(row[k],k)
+   if row['correspondenceId'] in correspondence_ids:raise ValueError()
+   correspondence_ids.add(row['correspondenceId'])
+   trusted=trusted_images.get(row['imageDatasetFileId'])
+   p._closed(trusted,('relativePath','width','height'),'trusted image')
+   width,height=trusted['width'],trusted['height']
+   if type(width) is not int or type(height) is not int or type(row['imageWidth']) is not int or type(row['imageHeight']) is not int or width<=0 or height<=0 or (trusted['relativePath'],width,height)!=(row['imageRelativePath'],row['imageWidth'],row['imageHeight']):raise ValueError()
+   for field,limit in (('pixelX',width),('pixelY',height)):
+    n=row[field]
+    if type(n) not in (int,float) or not math.isfinite(n) or not 0<=n<limit:raise ValueError()
    raw_refs[src['datasetFileId']]={'datasetFileId':src['datasetFileId'],'relativePath':src['relativePath'],'sha256':src['sha256']};image_ids.add(img['datasetFileId'])
    reduced.append(dict(sourceGcpDatasetFileId=src['datasetFileId'],imageDatasetFileId=img['datasetFileId'],pointId=row['gcpPointId'],**{k:row[k] for k in ('longitude','latitude','elevationM','pixelX','pixelY')}))
   if sorted(raw_refs)!=snapshot['sourceGcpDatasetFileIds'] or sorted(image_ids)!=snapshot['imageDatasetFileIds'] or [raw_refs[x] for x in sorted(raw_refs)]!=generated[0]['sourceFiles']:raise ValueError()
