@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+import re
 import secrets
 import stat
 import uuid
@@ -83,6 +84,24 @@ class GuardedNativeProxy:
             raise GateError('invalid task')
         identifier = task['engine_uuid']
         self._task(identifier)
+        name, options, outputs = task['name'], task['options'], task['outputs']
+        if (type(name) is not str or len(name) > 256 or any(ord(c) < 32 for c in name)
+                or type(options) is not list or len(options) > 1000
+                or any(type(option) is not dict or set(option) != {'name', 'value'}
+                       or type(option['name']) is not str
+                       or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,119}', option['name'])
+                       for option in options)
+                or len({option['name'] for option in options}) != len(options)
+                or (outputs is not None and (type(outputs) is not list or len(outputs) > 1000
+                    or any(type(output) is not str or len(output) > 256 for output in outputs)))):
+            raise GateError('invalid native task settings')
+        # Validate the exact request before acquiring a reservation: JSON may
+        # parse 1e999 as infinity even when NaN tokens are rejected.
+        try:
+            if len(protocol.canonical_json(task)) > 65536:
+                raise ValueError()
+        except (ValueError, protocol.ProtocolError):
+            raise GateError('invalid native task settings') from None
         with NodeGate(self.engine_id) as gate:
             receipt = secrets.token_hex(16)
             gate.reserve(self.node_id, self.origin, self.authority_id, self.generation, receipt)
