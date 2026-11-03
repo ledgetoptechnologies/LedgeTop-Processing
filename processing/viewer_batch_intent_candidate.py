@@ -18,7 +18,11 @@ def attest(db):
     if list(db.execute('PRAGMA foreign_key_list(held_batch_intent_v1)')): raise Conflict('intent foreign keys incompatible')
 
 def bounded_intent(db,batch_id):
-    if db.execute("SELECT 1 FROM held_batch_intent_v1 WHERE batch_id=? AND (typeof(manifest)!='text' OR length(manifest)>65536 OR instr(manifest,char(0))!=0 OR typeof(digest)!='text' OR length(digest)!=64)",(batch_id,)).fetchone(): raise Conflict('intent corrupt')
+    columns=(('batch_id',80),('task_id',36),('environment',10),('manifest',65536),('digest',64))
+    for column,limit in columns:
+        if db.execute(f"SELECT 1 FROM held_batch_intent_v1 WHERE batch_id=? AND (typeof({column})!='text' OR length({column})>? OR instr({column},char(0))!=0)",(batch_id,limit)).fetchone(): raise Conflict('intent corrupt')
+        if db.execute(f"SELECT 1 FROM held_batch_intent_v1 WHERE batch_id=? AND length(CAST({column} AS BLOB))>?",(batch_id,limit)).fetchone(): raise Conflict('intent corrupt')
+    if db.execute("SELECT 1 FROM held_batch_intent_v1 WHERE batch_id=? AND (typeof(generation)!='integer' OR generation<1 OR length(digest)!=64)",(batch_id,)).fetchone(): raise Conflict('intent corrupt')
     row=db.execute('SELECT * FROM held_batch_intent_v1 WHERE batch_id=?',(batch_id,)).fetchone()
     if row is None:return None
     raw=row['manifest']
