@@ -278,6 +278,37 @@ store.upload(identifier,'image.jpg',DyingStream(b'abc'),3)
         finally:
             queue.close()
 
+    def test_parallel_upload_process_death_after_rename_before_commit(self):
+        root = self.root / 'rename-exit'
+        identifier = str(uuid.uuid4())
+        program = '''import io,os,sys
+from pathlib import Path
+from unittest.mock import patch
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]);identifier=sys.argv[2]
+queue=Queue(root/'queue',node_ids=('cluster','main'),viewer_enabled=True,parallel_viewer_uploads=True)
+store=TaskStore(queue,root/'inputs');store.initialize(identifier,'synthetic',[],None,'production')
+with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os._exit(73)):
+ store.upload(identifier,'image.jpg',io.BytesIO(b'abc'),3)
+'''
+        proc = subprocess.run([sys.executable, '-c', program, str(root), identifier], capture_output=True, timeout=15)
+        self.assertEqual(proc.returncode, 73)
+        queue = Queue(root/'queue', node_ids=('cluster','main'), viewer_enabled=True, parallel_viewer_uploads=True)
+        try:
+            store = TaskStore(queue, root/'inputs')
+            task = store.task(identifier)
+            self.assertEqual(task['files'], [])
+            directory = Path(task['directory'])
+            files = [p for p in directory.iterdir() if p.is_file()]
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].read_bytes(), b'abc')
+            self.assertTrue(store.upload(identifier, 'image.jpg', io.BytesIO(b'abc'), 3)['success'])
+            self.assertEqual(files[0].read_bytes(), b'abc')
+            self.assertEqual(Path(store.task(identifier)['files'][0]['path']).read_bytes(), b'abc')
+        finally:
+            queue.close()
+
     def test_truncated_or_overlong_stream_never_enters_manifest(self):
         self.initialize()
         for body, length in ((b'ab', 3), (b'abcd', 3)):

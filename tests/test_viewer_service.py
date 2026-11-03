@@ -267,6 +267,66 @@ class ViewerServiceTests(unittest.TestCase):
             server.shutdown(); server.server_close(); thread.join(timeout=2)
             self.assertFalse(thread.is_alive())
 
+    def test_real_http_commit_conflicts_between_multipart_files(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.error import HTTPError
+        from urllib.request import Request, urlopen
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import multipart, BOUNDARY
+
+        self.queue.parallel_viewer_uploads = True
+        identifier = self.initialize()
+        spool = self.root / 'http-interleave-spool'; spool.mkdir(mode=0o700)
+        facade = ViewerFacade(self.service, 'synthetic-production-token', temp_dir=spool)
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_POST(self): facade.handle(self)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        base = f'http://127.0.0.1:{server.server_port}/task/new'
+        suffix = f'/{identifier}?token=synthetic-production-token'
+        paused, release = threading.Event(), threading.Event()
+        original = self.service.upload
+        results = []
+        def upload_and_pause(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if not paused.is_set():
+                paused.set()
+                if not release.wait(10):
+                    raise RuntimeError('test upload release timed out')
+            return result
+        def upload_request():
+            try:
+                request = Request(base + '/upload' + suffix,
+                    data=multipart([('images', 'one.jpg', b'one'), ('images', 'two.jpg', b'two')]),
+                    headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY})
+                with urlopen(request, timeout=10) as response:
+                    results.append((response.status, json.load(response)))
+            except Exception as exc:
+                results.append(exc)
+        worker = threading.Thread(target=upload_request)
+        try:
+            with patch.object(self.service, 'upload', side_effect=upload_and_pause):
+                worker.start()
+                self.assertTrue(paused.wait(5))
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(Request(base + '/commit' + suffix, data=b''), timeout=5)
+                self.assertEqual(caught.exception.code, 409)
+                self.assertEqual([f['name'] for f in self.task(identifier)['files']], ['one.jpg'])
+                release.set(); worker.join(10)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(results, [(200, {'success': True})])
+            with urlopen(Request(base + '/commit' + suffix, data=b''), timeout=5) as response:
+                self.assertEqual(response.status, 200)
+            self.assertEqual([f['name'] for f in self.task(identifier)['files']], ['one.jpg', 'two.jpg'])
+        finally:
+            release.set()
+            if worker.ident is not None: worker.join(10)
+            server.shutdown(); server.server_close(); server_thread.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(server_thread.is_alive())
+
     def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
         # A lowered synthetic threshold exercises the same boundary without
         # fabricating 1,001 files on disk; the policy's 1,000 boundary is separate.
