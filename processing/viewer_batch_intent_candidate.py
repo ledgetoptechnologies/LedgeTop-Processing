@@ -7,21 +7,32 @@ from .maintenance import Conflict
 DDL = "CREATE TABLE held_batch_intent_v1 (batch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL, manifest TEXT NOT NULL, digest TEXT NOT NULL)"
 TRIGGERS = ("CREATE TRIGGER held_batch_intent_no_replace BEFORE INSERT ON held_batch_intent_v1 WHEN EXISTS(SELECT 1 FROM held_batch_intent_v1 WHERE batch_id=NEW.batch_id) BEGIN SELECT RAISE(ABORT,'immutable'); END", "CREATE TRIGGER held_batch_intent_no_update BEFORE UPDATE ON held_batch_intent_v1 BEGIN SELECT RAISE(ABORT,'immutable'); END", "CREATE TRIGGER held_batch_intent_no_delete BEFORE DELETE ON held_batch_intent_v1 BEGIN SELECT RAISE(ABORT,'immutable'); END")
 
+def attest(db):
+    expected = {'held_batch_intent_v1': DDL, 'held_batch_intent_no_replace': TRIGGERS[0], 'held_batch_intent_no_update': TRIGGERS[1], 'held_batch_intent_no_delete': TRIGGERS[2]}
+    found={r['name']:r['sql'] for r in db.execute("SELECT name,sql FROM sqlite_master WHERE name='held_batch_intent_v1' OR (type='trigger' AND tbl_name='held_batch_intent_v1')")}
+    if found != expected: raise Conflict('intent schema incompatible')
+    cols=[tuple(r) for r in db.execute('PRAGMA table_info(held_batch_intent_v1)')]
+    if [(r[1],r[2],r[3],r[5]) for r in cols] != [('batch_id','TEXT',0,1),('task_id','TEXT',1,0),('generation','INTEGER',1,0),('environment','TEXT',1,0),('manifest','TEXT',1,0),('digest','TEXT',1,0)]: raise Conflict('intent schema incompatible')
+    indexes=list(db.execute('PRAGMA index_list(held_batch_intent_v1)'))
+    if len(indexes)!=1 or indexes[0]['unique']!=1 or indexes[0]['origin']!='pk' or [r['name'] for r in db.execute('PRAGMA index_info('+indexes[0]['name']+')')]!=['batch_id']: raise Conflict('intent index incompatible')
+    if list(db.execute('PRAGMA foreign_key_list(held_batch_intent_v1)')): raise Conflict('intent foreign keys incompatible')
+
+def bounded_intent(db,batch_id):
+    if db.execute("SELECT 1 FROM held_batch_intent_v1 WHERE batch_id=? AND (typeof(manifest)!='text' OR length(manifest)>65536 OR instr(manifest,char(0))!=0 OR typeof(digest)!='text' OR length(digest)!=64)",(batch_id,)).fetchone(): raise Conflict('intent corrupt')
+    row=db.execute('SELECT * FROM held_batch_intent_v1 WHERE batch_id=?',(batch_id,)).fetchone()
+    if row is None:return None
+    raw=row['manifest']
+    if not raw.isascii() or hashlib.sha256(raw.encode('ascii')).hexdigest()!=row['digest']: raise Conflict('intent corrupt')
+    return row
+
 def initialize(store):
     with store.queue._db() as db:
         db.execute('BEGIN IMMEDIATE')
-        expected = {'held_batch_intent_v1': DDL, 'held_batch_intent_no_replace': TRIGGERS[0], 'held_batch_intent_no_update': TRIGGERS[1], 'held_batch_intent_no_delete': TRIGGERS[2]}
-        found = {r['name']:r['sql'] for r in db.execute("SELECT name,sql FROM sqlite_master WHERE name IN ('held_batch_intent_v1','held_batch_intent_no_replace','held_batch_intent_no_update','held_batch_intent_no_delete')")}
-        if not found:
+        names=list(db.execute("SELECT name FROM sqlite_master WHERE name='held_batch_intent_v1' OR (type='trigger' AND tbl_name='held_batch_intent_v1')"))
+        if not names:
             db.execute(DDL)
-            for sql in TRIGGERS: db.execute(sql)
-        elif found != expected:
-            raise Conflict('intent schema incompatible')
-        cols=[tuple(r) for r in db.execute('PRAGMA table_info(held_batch_intent_v1)')]
-        if [(r[1],r[2],r[3],r[5]) for r in cols] != [('batch_id','TEXT',0,1),('task_id','TEXT',1,0),('generation','INTEGER',1,0),('environment','TEXT',1,0),('manifest','TEXT',1,0),('digest','TEXT',1,0)]: raise Conflict('intent schema incompatible')
-        indexes=list(db.execute('PRAGMA index_list(held_batch_intent_v1)'))
-        if len(indexes)!=1 or indexes[0]['unique']!=1 or indexes[0]['origin']!='pk' or [r['name'] for r in db.execute('PRAGMA index_info('+indexes[0]['name']+')')]!=['batch_id']: raise Conflict('intent index incompatible')
-        if list(db.execute('PRAGMA foreign_key_list(held_batch_intent_v1)')): raise Conflict('intent foreign keys incompatible')
+            for sql in TRIGGERS:db.execute(sql)
+        attest(db)
 
 def prepare(store, task, environment, capability, generation, batch_id, files):
     if not isinstance(batch_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',batch_id) or type(generation) is not int or generation < 1 or type(files) is not list or not 1 <= len(files) <= 100:
@@ -36,10 +47,11 @@ def prepare(store, task, environment, capability, generation, batch_id, files):
     digest=hashlib.sha256(manifest.encode('ascii')).hexdigest()
     with store._lock, store.queue._db() as db:
         db.execute('BEGIN IMMEDIATE')
+        attest(db)
         if store._reservation(db,task,environment,capability) is None: raise Conflict('reservation required')
         row=store._row(db,task)
         if row['generation']!=generation or row['environment']!=environment or row['stage']!='uploading' or row['job_id']: raise Conflict('task unavailable')
-        old=db.execute('SELECT * FROM held_batch_intent_v1 WHERE batch_id=?',(batch_id,)).fetchone()
+        old=bounded_intent(db,batch_id)
         identity=(task,generation,environment,manifest,digest)
         if old:
             if tuple(old[k] for k in ('task_id','generation','environment','manifest','digest'))!=identity: raise Conflict('batch differs')
@@ -49,10 +61,11 @@ def prepare(store, task, environment, capability, generation, batch_id, files):
 def upload_held(store, task, environment, capability, generation, batch_id, name, stream, length):
     with store._lock, store.queue._db() as db:
         db.execute('BEGIN')
+        attest(db)
         if store._reservation(db,task,environment,capability) is None: raise Conflict('reservation required')
         row=store._row(db,task)
         if row['generation']!=generation or row['environment']!=environment or row['stage']!='uploading' or row['job_id']: raise Conflict('task unavailable')
-        intent=db.execute('SELECT * FROM held_batch_intent_v1 WHERE batch_id=?',(batch_id,)).fetchone()
+        intent=bounded_intent(db,batch_id)
         if intent is None or (intent['task_id'],intent['environment'],intent['generation'])!=(task,environment,generation): raise Conflict('intent unavailable')
         raw=intent['manifest']
         if not isinstance(raw,str) or len(raw)>65536 or not raw.isascii() or hashlib.sha256(raw.encode('ascii')).hexdigest()!=intent['digest']: raise Conflict('intent corrupt')

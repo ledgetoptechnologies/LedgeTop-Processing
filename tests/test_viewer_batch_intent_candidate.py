@@ -25,4 +25,8 @@ class BatchIntentTest(unittest.TestCase):
     changed=[dict(x) for x in files];changed[0]['sha256']=hashlib.sha256(b'xyz').hexdigest()
     with self.assertRaises(Conflict):prepare(s,task,'production',cap,1,'batch1',changed)
     with self.assertRaises(Conflict):upload_held(s,task,'production',cap,2,'batch1','a.jpg',io.BytesIO(b'abc'),3)
+    with q._db() as db:db.execute("CREATE TRIGGER hostile_extra AFTER INSERT ON held_batch_intent_v1 BEGIN SELECT 1; END")
+    with self.assertRaises(Conflict):upload_held(s,task,'production',cap,1,'batch1','a.jpg',io.BytesIO(b'abc'),3)
+    with q._db() as db:db.execute('DROP TRIGGER hostile_extra');db.execute('DROP TRIGGER held_batch_intent_no_update');db.execute("UPDATE held_batch_intent_v1 SET manifest=? WHERE batch_id='batch1'",('x'*65537,));db.execute("CREATE TRIGGER held_batch_intent_no_update BEFORE UPDATE ON held_batch_intent_v1 BEGIN SELECT RAISE(ABORT,'immutable'); END")
+    with self.assertRaises(Conflict):upload_held(s,task,'production',cap,1,'batch1','a.jpg',io.BytesIO(b'abc'),3)
    finally:q.close()

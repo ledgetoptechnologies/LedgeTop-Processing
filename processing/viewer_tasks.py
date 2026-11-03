@@ -390,7 +390,9 @@ class TaskStore:
                         raise Conflict('task is no longer accepting uploads')
                     if expected_batch is not None:
                         batch_id, batch_digest = expected_batch
-                        batch=db.execute('SELECT task_id,generation,environment,digest FROM held_batch_intent_v1 WHERE batch_id=?',(batch_id,)).fetchone()
+                        from .viewer_batch_intent_candidate import attest, bounded_intent
+                        attest(db)
+                        batch=bounded_intent(db,batch_id)
                         if batch is None or (batch['task_id'],batch['generation'],batch['environment'],batch['digest']) != (identifier,expected_generation,environment,batch_digest):
                             raise Conflict('batch intent changed')
                     existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
