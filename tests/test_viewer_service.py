@@ -568,6 +568,38 @@ class ViewerServiceTests(unittest.TestCase):
             self.queue.begin_node_update('cluster', {'expectedRevision': node['revision'],
                                                       'planId': node['planId']})
 
+    def test_maintenance_explicitly_after_claimed_job_allows_that_job_to_finish_submission(self):
+        self.queue.per_node_slots = True
+        self.service._parallel_dispatch = True
+        entered, release = threading.Event(), threading.Event()
+        original_upload = self.engines['cluster'].upload
+        def slow_upload(identifier, item):
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError('synthetic transfer timeout')
+            return original_upload(identifier, item)
+        self.engines['cluster'].upload = slow_upload
+        identifier = self.submit(count=2)
+        self.service.tick()
+        self.assertTrue(entered.wait(5))
+        now = datetime.now(timezone.utc).isoformat()
+        job_id = self.task(identifier)['job_id']
+        node = self.queue.schedule_node('cluster', {'expectedRevision': 0, 'drainAt': now,
+            'notBefore': now, 'afterJobId': job_id, 'targetImage': 'sha256:' + 'a' * 64})
+        try:
+            self.assertEqual(node['state'], 'draining')
+        finally:
+            release.set()
+            self.service.wait_for_transfers()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['status'], 'running')
+        self.assertEqual(task['phase'], 'processing')
+        self.assertEqual(len([c for c in self.engines['cluster'].calls if c[0] == 'upload']), 2)
+        self.assertEqual(len([c for c in self.engines['cluster'].calls if c[0] == 'commit']), 1)
+        with self.assertRaisesRegex(Conflict, 'owns running or held work'):
+            self.queue.begin_node_update('cluster', {'expectedRevision': node['revision'],
+                                                      'planId': node['planId']})
+
     def test_opt_in_held_treedar_blocks_its_host_only(self):
         self.queue.per_node_slots = True
         tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})

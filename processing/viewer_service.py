@@ -607,7 +607,8 @@ class ViewerService:
         if self._stop.is_set():
             raise _DispatchInterrupted('dispatch_interrupted_for_shutdown')
         node = self.queue.get_node(task['node_id'])
-        if node['state'] not in ('active', 'scheduled'):
+        if (node['state'] not in ('active', 'scheduled') and not
+                (node['state'] == 'draining' and node.get('afterJobId') == task['job_id'])):
             raise _DispatchInterrupted('dispatch_interrupted_for_maintenance')
         if self._stop.is_set():
             raise _DispatchInterrupted('dispatch_interrupted_for_shutdown')

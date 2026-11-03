@@ -20,6 +20,8 @@ these checks, and a stop can race the gap between a check and the next HTTP
 call: these checks are not a cross-process fence or a guarantee that no request
 starts after maintenance begins. A held submission also requires operator
 reconciliation before maintenance can complete.
+An explicit `afterJobId` maintenance plan for the already-claimed task allows
+that task to finish submitting; node update remains blocked while it runs.
 
 An additional synthetic characterization demonstrates a deployment blocker:
 the existing inbound `TaskStore.upload` holds the store-wide lock while reading
