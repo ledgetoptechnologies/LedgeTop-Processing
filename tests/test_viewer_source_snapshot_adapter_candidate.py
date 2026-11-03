@@ -48,7 +48,7 @@ class ViewerSnapshotAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'transmitted inventory'):self.run_adapter()
         self.sub['inputFiles'].reverse()
         self.sub['sourceFiles'][0]['processingRole']='administrative';self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
-        with self.assertRaisesRegex(ValueError,'selection differs'):self.run_adapter()
+        with self.assertRaisesRegex(ValueError,'source role differs'):self.run_adapter()
         self.sub['sourceFiles'][0]['processingRole']='image';self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
         self.sub['attemptId']='40000000-0000-4000-8000-000000000001'
         with self.assertRaisesRegex(ValueError,'attempt provenance differs'):self.run_adapter()
@@ -63,7 +63,48 @@ class ViewerSnapshotAdapterTests(unittest.TestCase):
         f.selection['files'].append(dict(datasetFileId='raw-1',processingRole='administrative',disposition='retained'))
         self.sub['sourceFiles'].append(dict(relativePath=raw['relativePath'],byteSize=1,sha256='f'*64,processingRole='provider_input'))
         self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
-        with self.assertRaisesRegex(ValueError,'generated GCP shadows selected source'):self.run_adapter()
+        with self.assertRaisesRegex(ValueError,'Viewer source role differs'):self.run_adapter()
+
+    def test_retained_original_roles_cannot_be_relabeled(self):
+        f=self.fixture
+        raw=dict(datasetFileId='admin-1',relativePath='notes/readme.txt',byteSize=1,sha256='f'*64,
+                 processingRole='gcp_source',contentType='text/plain')
+        f.inv['retained'].insert(0,raw)
+        f.authoritative['files'].insert(0,{k:raw[k] for k in ('datasetFileId','relativePath','byteSize','sha256','contentType')} |
+                                      dict(mimeType='text/plain',imageWidth=None,imageHeight=None))
+        f.selection['files'].insert(0,dict(datasetFileId='admin-1',processingRole='gcp_source',disposition='retained'))
+        self.sub['sourceFiles'].append(dict(relativePath=raw['relativePath'],byteSize=1,sha256='f'*64,processingRole='administrative'))
+        self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
+        with self.assertRaisesRegex(ValueError,'Viewer source role differs'):self.run_adapter()
+
+    def test_v3_excluded_auto_preserves_role_and_viewer_selection(self):
+        from processing import source_inventory_candidate as inv
+        f=self.fixture; f.inv.update(protocol=inv.EXCLUDED_AUTO_PROTOCOL,schemaVersion=3,substitutions=[])
+        raw=dict(datasetFileId='raw-1',relativePath='notes/survey.csv',byteSize=1,sha256='f'*64,
+                 processingRole='auto',contentType='text/csv')
+        f.inv['retained'].append(raw)
+        f.inv['excludedAuto']=[dict(sourceDatasetFileId='raw-1',sourceRelativePath=raw['relativePath'],
+            sourceSha256=raw['sha256'],sourceProcessingRole='auto')]
+        f.authoritative['files'].append({k:raw[k] for k in ('datasetFileId','relativePath','byteSize','sha256','contentType')} |
+                                       dict(mimeType='text/csv',imageWidth=None,imageHeight=None))
+        f.selection['files'].append(dict(datasetFileId='raw-1',processingRole='auto',disposition='retained'))
+        self.sub['sourceFiles'].append(dict(relativePath=raw['relativePath'],byteSize=1,sha256='f'*64,processingRole='auto'))
+        # Viewer auto photo resolves to image while preserving the source role.
+        self.sub['sourceFiles'][0]['processingRole']='auto'
+        self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
+        self.assertEqual(self.run_adapter()[2],'held_authenticated_source_authority_unavailable')
+        source=os.environ.get('VIEWER_PROCESSING_PROVENANCE_JS')
+        if source:
+            path=Path(source).resolve(strict=True);data=path.read_bytes().replace(b'\r\n',b'\n')
+            self.assertEqual(hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest(),'f9adb05b62e1ffec2a90dc06038f77199f0c3436')
+            script="const f=require(process.argv[1]).inputInventory;let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{let x=JSON.parse(s);console.log(JSON.stringify(f(x.files,x.gcp)))})"
+            value=dict(files=self.sub['sourceFiles'],gcp=dict(content=f.gcp.decode(),sha256=f.inv['generated'][0]['sha256']))
+            result=json.loads(subprocess.run(['node','-e',script,str(path)],input=json.dumps(value),text=True,encoding='utf8',capture_output=True,check=True).stdout)
+            self.assertEqual(result['inputFiles'],self.sub['inputFiles'])
+            self.assertEqual(result['sourceFilesSha256'],self.sub['sourceFilesSha256'])
+            self.assertEqual(result['inputManifestSha256'],self.sub['inputManifestSha256'])
+        f.inv['excludedAuto'][0]['sourceSha256']='0'*64
+        with self.assertRaises(ValueError):self.run_adapter()
 
     def test_v2_explicit_gcp_substitution_preserves_raw_role_and_custody(self):
         from processing import source_inventory_candidate as inv
@@ -82,6 +123,13 @@ class ViewerSnapshotAdapterTests(unittest.TestCase):
                 self.sub['sourceFiles'].append(dict(relativePath=raw['relativePath'],byteSize=1,sha256='f'*64,processingRole=role))
                 self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
                 self.assertEqual(self.run_adapter()[2],'held_authenticated_source_authority_unavailable')
+                if role=='auto':
+                    f.inv.update(protocol=inv.EXCLUDED_AUTO_PROTOCOL,schemaVersion=3,
+                        excludedAuto=[dict(sourceDatasetFileId='raw-1',sourceRelativePath=raw['relativePath'],
+                                           sourceSha256=raw['sha256'],sourceProcessingRole='auto')])
+                    self.assertEqual(self.run_adapter()[2],'held_authenticated_source_authority_unavailable')
+                    f.inv.update(protocol=inv.SUBSTITUTION_PROTOCOL,schemaVersion=2)
+                    del f.inv['excludedAuto']
                 # Multiple retained originals with the same provider basename
                 # are ambiguous even if Viewer would drop both before upload.
                 second=dict(raw,datasetFileId='raw-2',relativePath='other/gcp_list.txt')

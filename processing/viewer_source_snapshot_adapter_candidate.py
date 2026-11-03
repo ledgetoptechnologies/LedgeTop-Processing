@@ -50,6 +50,7 @@ def evaluate(raw_inventory, *, expected, authoritative_dataset, trusted_selectio
     if p.digest(source)!=viewer_submission['sourceFilesSha256']:
         raise ValueError('Viewer source digest differs')
     by_path={v['relativePath']:v for v in item['processing']+item['retained']}
+    processing_paths={v['relativePath'] for v in item['processing']}
     if len(source)!=len(by_path): raise ValueError('Viewer source closure differs')
     for record in source:
         p._closed(record,('relativePath','byteSize','sha256','processingRole'),'Viewer source')
@@ -58,6 +59,10 @@ def evaluate(raw_inventory, *, expected, authoritative_dataset, trusted_selectio
                 or (record['byteSize'],record['sha256']) != (found['byteSize'],found['sha256'])
                 or record['processingRole'] not in ('auto','image','provider_input','gcp_source','administrative')):
             raise ValueError('Viewer source mapping differs')
+        allowed_role=('image' if record['processingRole']=='auto' and record['relativePath'] in processing_paths
+                      and _PHOTO.search(record['relativePath']) else record['processingRole'])
+        if found['processingRole']!=allowed_role:
+            raise ValueError('Viewer source role differs')
     if len({v['relativePath'] for v in source})!=len(source):raise ValueError('Viewer source path duplicated')
     selected={v['relativePath']:v for v in item['processing']}
     derived=[v for v in source if v['processingRole'] not in ('gcp_source','administrative')
@@ -72,12 +77,12 @@ def evaluate(raw_inventory, *, expected, authoritative_dataset, trusted_selectio
                 raise ValueError('generated GCP substitution provenance differs')
         captured_raw=[v for v in source if v['processingRole'] in ('auto','provider_input')
                       and v['relativePath'].split('/')[-1].lower()=='gcp_list.txt']
-        if captured_raw and (item['protocol']!=inventory.SUBSTITUTION_PROTOCOL
+        if captured_raw and (item['protocol'] not in (inventory.SUBSTITUTION_PROTOCOL,inventory.EXCLUDED_AUTO_PROTOCOL)
                 or len(captured_raw)!=len(substitutions)
                 or {v['relativePath'] for v in captured_raw}!={v['sourceRelativePath'] for v in substitutions}):
             raise ValueError('generated GCP shadows selected source')
         selected_shadow=[v for v in derived if v['relativePath'].split('/')[-1].lower()=='gcp_list.txt']
-        if (selected_shadow and (item['protocol']!=inventory.SUBSTITUTION_PROTOCOL
+        if (selected_shadow and (item['protocol'] not in (inventory.SUBSTITUTION_PROTOCOL,inventory.EXCLUDED_AUTO_PROTOCOL)
                 or len(selected_shadow)!=len(substitutions)
                 or {v['relativePath'] for v in selected_shadow}!={v['sourceRelativePath'] for v in substitutions})):
             raise ValueError('generated GCP shadows selected source')

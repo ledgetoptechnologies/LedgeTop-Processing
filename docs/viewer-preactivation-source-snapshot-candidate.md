@@ -31,8 +31,9 @@ hash, exact engine object count/bytes and independently supplied byte policy.
 The actual engine's object ceiling includes the generated GCP.
 For compatibility with the current source-range renewal candidate, the
 transfer byte budget must equal three times the input bytes, capped at the
-safe-integer maximum. Other retry budgets remain held until a versioned broker
-contract explicitly supports them.
+safe-integer maximum. This is narrower than Viewer's general acceptance of
+budgets from one to three times input bytes. Other retry budgets remain held
+until a versioned broker contract explicitly supports them.
 
 This proposal holds historical or absent evidence, nonrepresentable paths,
 and unsupported source role/extension combinations. A versioned
@@ -46,6 +47,13 @@ substitution and remains held for these cases. Viewer agreement and durable
 snapshot provenance are still required. No path is normalized or flattened.
 Future materialization must also preflight provider-specific basename
 collisions before writes.
+
+Separately domain-versioned `ltds-source-inventory-v3` adds `excludedAuto`
+entries for all excluded `auto` non-photo sources, retaining their exact IDs,
+paths, hashes and original `auto` role; when one is a raw GCP it can also be
+explicitly bound in `substitutions`. Every captured original role must match
+the inventory, except that a selected `auto` photo resolves to `image`.
+These v3 fields are provisional and not a deployed Viewer contract.
 
 Synthetic tests call the real Viewer `processingProvenance.inputInventory`
 from commit `5513f92b6cf45221475a3c38347e3ca1dbf0c32d` (Git blob

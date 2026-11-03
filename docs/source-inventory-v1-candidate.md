@@ -11,6 +11,8 @@ form with an explicit `substitutions` array for one original raw GCP file
 replaced or excluded when an attempt-generated snapshot is sent. Its source
 ID/path/hash/original role and generated attempt ID are explicit; the source
 stays in retained custody. This does not change the v1 interpretation.
+Provisional v3 additionally records excluded `auto` non-photo originals in
+`excludedAuto` without relabeling them; its protocol and hash domain are distinct.
 
 The closed root has `protocol`, `schemaVersion`, `dataset`, `binding`,
 `processing`, `retained`, and `generated`. Dataset contains `id` and
