@@ -8,13 +8,20 @@ accepted-copy receipt in the same SQLite transaction that records the proof.
 The configured principal, environment, issuer and signing key registries are
 trusted installation inputs; they are never taken from the proof itself. Missing
 records, changed bindings, changed pins or an unavailable Queue owner hold.
+Installation must also explicitly pin the prepared protocol: legacy v2 or JCS
+v3. ReferenceStore validates the version-specific prepared bytes and digest;
+the journal binding additionally includes that protocol and exact prepared
+envelope digest. Rewriting one valid prepared version to another therefore
+cannot replay an earlier proof even if all job/task/attempt identities match.
+Earlier unversioned adapter binding digests do not match this candidate and
+hold on replay; no automatic journal migration is implemented.
 
 Only the ODM single-archive verifier is supported. Its model/output IDs and
 inventory hashes remain signed Viewer assertions. This adds no HTTP route,
 does not activate a job, perform a transfer, or authorize cleanup. Separate
 v1/v2 proof tables remain independent with no supersession semantics.
 
-The reference v2 activation and authenticated grant remain deliberately blocked.
+The reference v2/v3 activation and authenticated grant remain deliberately blocked.
 Tests directly inject **synthetic** completed activation/copy records to exercise
 database atomicity and restart; these records are not evidence of an executable
 end-to-end path. The writer-fenced Viewer receipt, independently authenticated

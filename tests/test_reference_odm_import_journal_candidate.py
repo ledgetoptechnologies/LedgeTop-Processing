@@ -1,5 +1,6 @@
 """Injected synthetic completion; prepared activation remains disabled in runtime."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,22 +21,30 @@ from tests.test_viewer_odm_import_confirmation_v2 import OdmImportConfirmationV2
 
 @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'), 'directory sync required')
 class ReferenceOdmJournalCandidateTests(unittest.TestCase):
+    PREPARED='ltds-viewer-prepared-envelope-v2'
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(prefix='odm-reference-proof-'); self.addCleanup(self.tmp.cleanup)
         self.queue=Queue(self.tmp.name,node_ids=('cluster',),reference_enabled=True)
         self.addCleanup(self.close_queue)
-        self.ref=ReferenceStore(self.queue)
+        self.ref=ReferenceStore(self.queue,jcs_runtime_enabled=True)
         self.fixture=OdmImportConfirmationV2Tests('test_signed_viewer_assertions_are_not_prebound_processing_expectations')
         self.fixture.setUp()
         sub=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
-        env=dict(schemaVersion=2,protocol='ltds-viewer-prepared-envelope-v2',submission=sub,
+        env=dict(schemaVersion=3 if self.PREPARED.endswith('jcs-v3') else 2,protocol=self.PREPARED,submission=sub,
             viewerTaskId=str(uuid.uuid4()),viewerAttemptId=str(uuid.uuid4()),activationId=str(uuid.uuid4()))
-        policy=dict(capabilityFingerprint='a'*64,optionsFingerprint='b'*64,allowedOdmOptions=[],availableEngines=['odm'])
-        job,_=self.ref.prepare_viewer_envelope_v2(env,authenticated_principal='viewer-prod',authenticated_environment='staging',trusted_policy=policy)
+        if self.PREPARED.endswith('jcs-v3'):
+            sub['pipeline']['odm']['options']={'resolution':1.25,'quality':'high'}
+            policy=dict(capabilityFingerprint='a'*64,optionsFingerprint='b'*64,availableEngines=['odm'],
+                        optionDefinitions={'resolution':dict(type='float',domain=dict(min=0,max=5)),
+                                           'quality':dict(type='enum',domain=['high','low'])})
+            job,_=self.ref.prepare_viewer_envelope_jcs_v3(json.dumps(env).encode(),authenticated_principal='viewer-prod',authenticated_environment='staging',trusted_policy=policy)
+        else:
+            policy=dict(capabilityFingerprint='a'*64,optionsFingerprint='b'*64,allowedOdmOptions=[],availableEngines=['odm'])
+            job,_=self.ref.prepare_viewer_envelope_v2(env,authenticated_principal='viewer-prod',authenticated_environment='staging',trusted_policy=policy)
         self.scope=dict(jobId=job['jobId'],generation=1,environment='staging')
         self.env=env
         self.journal=ReferenceOdmImportJournalCandidate(self.ref,principal='viewer-prod',environment='staging',
-            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,copy_keys=self.fixture.copy_signer.trusted_keys)
+            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,copy_keys=self.fixture.copy_signer.trusted_keys,prepared_protocol=self.PREPARED)
         self.assertFalse(self.ref._activation_bound_grant_ready())
         self.assertIsNone(self.ref.next_for_node('cluster'))
         self.inject_synthetic_completion(job)
@@ -78,9 +87,9 @@ class ReferenceOdmJournalCandidateTests(unittest.TestCase):
         self.queue.close()
         with self.assertRaises(ImportConfirmationStoreHeld): self.journal.load_verified(self.scope)
         self.queue=Queue(self.tmp.name,node_ids=('cluster',),reference_enabled=True)
-        self.ref=ReferenceStore(self.queue)
+        self.ref=ReferenceStore(self.queue,jcs_runtime_enabled=True)
         self.journal=ReferenceOdmImportJournalCandidate(self.ref,principal='viewer-prod',environment='staging',
-            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,copy_keys=self.fixture.copy_signer.trusted_keys)
+            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,copy_keys=self.fixture.copy_signer.trusted_keys,prepared_protocol=self.PREPARED)
         self.assertEqual(self.journal.record(self.scope,self.fixture.confirmation).state,'replayed')
 
     def test_mutated_binding_or_missing_copy_holds_existing_proof(self):
@@ -91,7 +100,7 @@ class ReferenceOdmJournalCandidateTests(unittest.TestCase):
 
     def test_missing_prebinding_or_wrong_configured_principal_holds(self):
         other=ReferenceOdmImportJournalCandidate(self.ref,principal='other',environment='staging',
-            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,copy_keys=self.fixture.copy_signer.trusted_keys)
+            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,copy_keys=self.fixture.copy_signer.trusted_keys,prepared_protocol=self.PREPARED)
         with self.assertRaises(ImportConfirmationStoreHeld): other.record(self.scope,self.fixture.confirmation)
         with self.queue._db() as db:
             db.execute('DELETE FROM reference_viewer_activation WHERE job_id=?',(self.scope['jobId'],))
@@ -113,6 +122,44 @@ class ReferenceOdmJournalCandidateTests(unittest.TestCase):
                         other.execute('UPDATE reference_viewer_transfers SET completed_at=NULL WHERE job_id=?',(self.scope['jobId'],))
             finally: proceed.set()
             self.assertEqual(future.result(timeout=5).state,'recorded')
+
+    def test_cross_protocol_substitution_and_unpinned_keys_hold(self):
+        other_version=('ltds-viewer-prepared-envelope-jcs-v3' if self.PREPARED.endswith('v2') else 'ltds-viewer-prepared-envelope-v2')
+        other=ReferenceOdmImportJournalCandidate(self.ref,principal='viewer-prod',environment='staging',
+            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,
+            copy_keys=self.fixture.copy_signer.trusted_keys,prepared_protocol=other_version)
+        with self.assertRaises(ImportConfirmationStoreHeld): other.record(self.scope,self.fixture.confirmation)
+        self.journal.record(self.scope,self.fixture.confirmation)
+        other_keys=copy.deepcopy(self.fixture.import_keys); other_keys['import-key']['issuerId']='wrong-issuer'
+        wrong=ReferenceOdmImportJournalCandidate(self.ref,principal='viewer-prod',environment='staging',
+            issuer=self.fixture.copy_signer.issuer_id,import_keys=other_keys,
+            copy_keys=self.fixture.copy_signer.trusted_keys,prepared_protocol=self.PREPARED)
+        with self.assertRaises(ImportConfirmationStoreHeld): wrong.load_verified(self.scope)
+
+    def test_durable_binding_rejects_rewritten_other_version_with_same_identities(self):
+        import rfc8785
+        from processing.prepared_envelope_jcs_candidate import DOMAIN as jcs_domain
+        from processing.reference_store import _ENVELOPE_V2_DOMAIN
+        original=self.journal.record(self.scope,self.fixture.confirmation)
+        new_version=('ltds-viewer-prepared-envelope-jcs-v3' if self.PREPARED.endswith('v2') else 'ltds-viewer-prepared-envelope-v2')
+        rewritten=copy.deepcopy(self.env); rewritten.update(protocol=new_version,schemaVersion=3 if new_version.endswith('jcs-v3') else 2)
+        canonical=rfc8785.dumps(rewritten) if new_version.endswith('jcs-v3') else p.canonical_json(rewritten)
+        digest=hashlib.sha256((jcs_domain if new_version.endswith('jcs-v3') else _ENVELOPE_V2_DOMAIN)+canonical).hexdigest()
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_viewer_submission_owners SET protocol=? WHERE job_id=?',(new_version,self.scope['jobId']))
+            db.execute('UPDATE reference_viewer_envelopes_v2 SET envelope_json=?,envelope_sha256=? WHERE job_id=?',
+                       (canonical.decode(),digest,self.scope['jobId']))
+        with self.assertRaises(ImportConfirmationStoreHeld): self.journal.load_verified(self.scope)
+        new=ReferenceOdmImportJournalCandidate(self.ref,principal='viewer-prod',environment='staging',
+            issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,
+            copy_keys=self.fixture.copy_signer.trusted_keys,prepared_protocol=new_version)
+        with self.assertRaisesRegex(ImportConfirmationStoreHeld,'stored_confirmation_conflict'):
+            new.load_verified(self.scope)
+        self.assertEqual(original.state,'recorded')
+
+
+class ReferenceOdmJcsJournalCandidateTests(ReferenceOdmJournalCandidateTests):
+    PREPARED='ltds-viewer-prepared-envelope-jcs-v3'
 
 
 if __name__ == '__main__': unittest.main()

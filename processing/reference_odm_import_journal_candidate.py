@@ -11,22 +11,38 @@ from .viewer_odm_import_confirmation_store_v2 import OdmImportConfirmationStoreV
 from .viewer_result_manifest import derive_viewer_result_manifest
 
 
+class _VersionBoundOdmJournal(OdmImportConfirmationStoreV2):
+    def _trusted(self, db, scope):
+        context, digest = super()._trusted(db, scope)
+        prepared = db.execute('''SELECT o.protocol,e.envelope_sha256 FROM reference_viewer_submission_owners o
+            JOIN reference_viewer_envelopes_v2 e ON e.job_id=o.job_id WHERE o.job_id=?''', (scope['jobId'],)).fetchone()
+        if prepared is None: raise ImportConfirmationStoreHeld('trusted_binding_unavailable')
+        # First receipt must remain tied to the exact authenticated prepared
+        # version and bytes, even if two versions carry identical identities.
+        digest = p.digest(dict(bindingSha256=digest, preparedProtocol=prepared['protocol'],
+                               preparedEnvelopeSha256=prepared['envelope_sha256']))
+        return context, digest
+
+
 class ReferenceOdmImportJournalCandidate:
     """Same-DB synthetic integration. Config and coordinator ownership are trusted.
 
     No route mounts this class. The caller must configure pins for exactly one
     principal/environment/issuer and must not accept them from request data.
     """
-    def __init__(self, reference, *, principal, environment, issuer, import_keys, copy_keys):
+    def __init__(self, reference, *, principal, environment, issuer, import_keys, copy_keys, prepared_protocol):
         if not isinstance(reference, ReferenceStore): raise ValueError('owned reference store required')
         p._slug(principal, 'principal'); p._slug(issuer, 'issuer'); p._environment(environment)
         if type(import_keys) is not dict or not import_keys or type(copy_keys) is not dict or not copy_keys:
             raise ValueError('explicit Viewer pins required')
+        if prepared_protocol not in ('ltds-viewer-prepared-envelope-v2','ltds-viewer-prepared-envelope-jcs-v3'):
+            raise ValueError('explicit prepared protocol required')
         self.reference, self.queue = reference, reference.queue
         self.principal, self.environment, self.issuer = principal, environment, issuer
+        self.prepared_protocol = prepared_protocol
         self.import_keys, self.copy_keys = copy.deepcopy(import_keys), copy.deepcopy(copy_keys)
         with self._owner():
-            self.journal = OdmImportConfirmationStoreV2(self.queue.path, trusted_loader=self._load)
+            self.journal = _VersionBoundOdmJournal(self.queue.path, trusted_loader=self._load)
 
     @contextmanager
     def _owner(self):
@@ -44,7 +60,7 @@ class ReferenceOdmImportJournalCandidate:
                 scope['generation'], self.environment, self.environment): raise ValueError('job differs')
         owner = self.reference._submission_owner(db, row)
         if (owner is None or owner['principal_id'] != self.principal
-                or owner['protocol'] != 'ltds-viewer-prepared-envelope-v2'):
+                or owner['protocol'] != self.prepared_protocol):
             raise ValueError('untrusted job owner')
         prepared = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (scope['jobId'],)).fetchone()
         activation = self.reference._activation(db, row)
