@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import stat
 import time
 import uuid
@@ -18,6 +19,7 @@ from datetime import datetime, timezone
 
 from .maintenance import Conflict
 from . import reference_protocol as protocol
+from .prototype import VIEWER_PROFILE
 from .viewer_result_manifest import derive_viewer_result_manifest, validate_viewer_acceptance
 
 PROFILE = "reference-pipeline-v1"
@@ -370,13 +372,37 @@ class ReferenceStore:
         if environment == 'staging' and db.execute("""SELECT 1 FROM jobs
                 WHERE environment='production' AND status IN ('queued','running','held') LIMIT 1""").fetchone():
             return None
+        foreign_viewer_counts = []
         for job in jobs:
-            if job['environment'] != environment or job['profile'] != PROFILE:
+            if job['environment'] != environment:
+                break
+            if job['profile'] == VIEWER_PROFILE:
+                # A Viewer job may be bypassed only on a node that provably
+                # cannot accept its photo count. Missing or ambiguous Viewer
+                # metadata is a barrier, not evidence of ineligibility.
+                try:
+                    viewer = db.execute('SELECT uuid FROM viewer_tasks WHERE job_id=? AND removed=0',
+                                        (job['id'],)).fetchall()
+                    if len(viewer) != 1:
+                        return None
+                    counts = db.execute('SELECT COUNT(*),SUM(CASE WHEN is_photo=1 THEN 1 ELSE 0 END),'
+                                        'SUM(CASE WHEN is_photo NOT IN (0,1) OR is_photo IS NULL THEN 1 ELSE 0 END) '
+                                        'FROM viewer_files WHERE uuid=?', (viewer[0]['uuid'],)).fetchone()
+                    if not counts[0] or not counts[1] or counts[2]:
+                        return None
+                    foreign_viewer_counts.append(counts[1])
+                except (KeyError, TypeError, ValueError, sqlite3.Error):
+                    return None
+                continue
+            if job['profile'] != PROFILE:
                 break
             row = self._row(db, job['id'])
             submission = json.loads(row['input_json'])
             photos = submission['manifest']['inputCounts']['images']
             for spec, limit, scratch, output in available:
+                if any(not any(cap is not None and count > cap for cap in (spec['maxPhotos'], limit))
+                       for count in foreign_viewer_counts):
+                    continue
                 if ((submission['pipeline']['odm']['requested'] and 'odm' not in spec['capabilities']) or
                     (submission['pipeline']['treedar']['requested'] and
                      ('treedar' not in spec['capabilities'] or spec['id'] not in self.queue.treedar_node_ids))):

@@ -9,7 +9,7 @@ import unittest
 import uuid
 
 from processing import reference_protocol as p
-from processing.prototype import Queue, PROFILE as LEGACY_PROFILE
+from processing.prototype import Queue, PROFILE as LEGACY_PROFILE, VIEWER_PROFILE
 from processing.maintenance import Conflict
 from processing.reference_store import ReferenceStore, PROFILE
 
@@ -266,6 +266,44 @@ class ReferenceStoreTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             claims = list(pool.map(claim, range(2)))
         self.assertEqual(sum(value is not None for value in claims), 1)
+
+    def test_reference_can_pass_viewer_job_only_on_photo_ineligible_node(self):
+        self.queue.per_node_slots = True
+        self.queue.allowed_profiles.add(VIEWER_PROFILE)
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        ready = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: ready)
+        viewer, _ = self.queue.submit({'requestId': 'viewer-first', 'environment': 'staging',
+                                       'profile': VIEWER_PROFILE})
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_tasks(uuid TEXT, job_id TEXT, removed INTEGER)')
+            db.execute('CREATE TABLE viewer_files(uuid TEXT, is_photo INTEGER)')
+            db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', ('viewer-task', viewer['id']))
+            db.executemany('INSERT INTO viewer_files VALUES(?,1)', [('viewer-task',), ('viewer-task',)])
+        reference, _ = store.submit(self.new_submission())
+        self.assertEqual(store.next_for_node('cluster')['jobId'], reference['jobId'])
+        self.assertIsNone(store.next_for_node('node-2'))
+        self.assertIsNone(store.claim(reference['jobId'], node_id='node-2', worker_id='main',
+                                      worker_instance_id='instance', claim_request_id='wrong-node'))
+        self.assertIsNotNone(store.claim(reference['jobId'], node_id='cluster', worker_id='local',
+                                         worker_instance_id='instance', claim_request_id='small-node'))
+        self.assertEqual(self.queue.get(viewer['id'])['status'], 'queued')
+
+    def test_reference_does_not_bypass_unknown_viewer_photo_count(self):
+        self.queue.per_node_slots = True
+        self.queue.allowed_profiles.add(VIEWER_PROFILE)
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        ready = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: ready)
+        self.queue.submit({'requestId': 'viewer-missing', 'environment': 'staging', 'profile': VIEWER_PROFILE})
+        reference, _ = store.submit(self.new_submission())
+        self.assertIsNone(store.next_for_node('cluster'))
+        self.assertIsNone(store.claim(reference['jobId'], node_id='cluster', worker_id='local',
+                                      worker_instance_id='instance', claim_request_id='missing-evidence'))
 
     def test_released_unstarted_claim_is_fenced_from_replay(self):
         job, _ = self.store.submit(self.new_submission())
