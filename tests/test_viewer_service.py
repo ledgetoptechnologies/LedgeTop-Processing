@@ -915,6 +915,21 @@ class ViewerServiceTests(unittest.TestCase):
 
     def test_ordered_three_node_inventory_prefers_first_eligible_and_falls_through(self):
         from processing.config import parse_node_inventory
+        class DistinctEngine(FakeEngine):
+            def read(self, route, *, missing=False, **query):
+                result = super().read(route, missing=missing, **query)
+                if route.endswith('/output'):
+                    identifier = route.split('/')[2]
+                    return [self.name + ':' + identifier][query.get('line', 0):]
+                return result
+
+            def download(self, identifier):
+                self.calls.append(('download', identifier))
+                body = io.BytesIO()
+                with zipfile.ZipFile(body, 'w') as archive:
+                    archive.writestr('synthetic-result.txt', self.name + ':' + identifier)
+                return DownloadResponse(body.getvalue())
+
         self.service.close(); self.queue.close()
         entries = [dict(id=name, physicalHostId=name, origin=f'http://192.0.2.{i}:3000',
                         tokenEnv=f'NODE_{i}_TOKEN', maxPhotos=limit, capabilities=['odm'])
@@ -922,7 +937,7 @@ class ViewerServiceTests(unittest.TestCase):
         inventory = parse_node_inventory(json.dumps(entries), {})
         self.config.node_inventory = inventory
         self.config.prototype_state_dir = str(self.root / 'inventory-state')
-        self.engines = {n['id']: FakeEngine(n['id'], self.fleet) for n in inventory}
+        self.engines = {n['id']: DistinctEngine(n['id'], self.fleet) for n in inventory}
         self.queue = Queue(self.config.prototype_state_dir, node_ids=tuple(n['id'] for n in inventory),
                            treedar_node_ids=(), viewer_enabled=True, per_node_slots=True)
         self.service = ViewerService(self.queue, self.config, engines=self.engines,
@@ -940,7 +955,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.service.info(first)['progress'], 67)
         self.assertEqual(self.service.info(third)['status']['code'], 20)
-        self.assertEqual(self.service.output(first), ['synthetic engine output', '', 'comma,record'])
+        self.assertEqual(self.service.output(first), ['tiny:' + self.task(first)['engine_uuid']])
         self.assertIn(('read', self.task(first)['engine_uuid'], 'output'), self.engines['tiny'].calls)
         self.finish(first)
         blocked = self.submit(count=3)
@@ -953,13 +968,21 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertNotIn('ledgetopQueueState', self.service.info(eligible))
         self.finish(eligible); self.finish(third)
         self.service.tick()
+        archives = []
+        for completed in (first, third):
+            with self.service.download(completed)[0] as stream:
+                with zipfile.ZipFile(io.BytesIO(stream.read())) as archive:
+                    archives.append(archive.read('synthetic-result.txt').decode())
+        self.assertEqual(archives, ['tiny:' + self.task(first)['engine_uuid'],
+                                    'large:' + self.task(third)['engine_uuid']])
+        self.assertNotEqual(*archives)
         self.assertEqual(self.task(blocked)['node_id'], 'large')
         self.assertEqual(self.service.info(blocked)['status']['code'], 10)
         self.assertNotIn('ledgetopQueueState', self.service.info(blocked))
         self.service.tick()
         self.assertEqual(self.service.info(blocked)['status']['code'], 20)
         self.assertEqual(self.service.info(blocked)['ledgetopNodeId'], 'large')
-        self.assertEqual(self.service.output(blocked), ['synthetic engine output', '', 'comma,record'])
+        self.assertEqual(self.service.output(blocked), ['large:' + self.task(blocked)['engine_uuid']])
         self.assertIn(('read', self.task(blocked)['engine_uuid'], 'output'), self.engines['large'].calls)
         staging = self.submit(environment='staging')
         production = self.submit(environment='production')
