@@ -11,6 +11,7 @@ from processing.reference_delivery import DeliveryReceiver
 from processing.reference_protocol import validate_submission, digest
 from processing.worker_outbox import WorkerOutbox
 from processing.maintenance import Conflict
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 class ReferenceDeliveryTests(unittest.TestCase):
@@ -112,6 +113,35 @@ class ReferenceDeliveryTests(unittest.TestCase):
         # Even full Viewer acceptance is not a worker-file deletion receipt.
         self.assertEqual(self.outbox.get(self.outbox_id)['local_metadata'],
                          retained['local_metadata'])
+
+    def test_signed_acceptance_survives_both_coordinator_restart_and_lost_response(self):
+        # Both services operate on synthetic journals and manifests; no engine
+        # or live Viewer is exercised by this test.
+        self.store.viewer_required_environments = frozenset(('staging',))
+        self.assertTrue(self.store.acceptance_receipts(self.job['jobId'])['viewerCopyRequired'])
+        self.restart()
+        coordinator_receipt = self.receiver.receive(self.envelope, **self.identity)
+        self.outbox.acknowledge(self.outbox_id, coordinator_receipt)
+        acceptance = copy.deepcopy(self.fixture['acceptance'])
+        acceptance.update(jobId=self.job['jobId'], pipelineDigest=self.job['pipelineDigest'],
+            inputManifestSha256=self.job['manifestSha256'],
+            resultManifestSha256=self.result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in self.result['objects']])
+        with self.assertRaises(Conflict):
+            self.store.accept(self.job['jobId'], acceptance)
+        signer = SyntheticViewerSigner()
+        signed = signer.receipt(acceptance, self.result)
+        accepted = self.store.accept(self.job['jobId'], acceptance, viewer_receipt=signed,
+                                     trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.assertTrue(accepted['fullyAccepted'])
+        retained = self.outbox.get(self.outbox_id)['local_metadata']
+        self.restart()  # Viewer acceptance committed but the response was lost.
+        self.assertTrue(self.store.acceptance_receipts(self.job['jobId'])['viewerCopyRequired'])
+        replay = self.store.accept(self.job['jobId'], acceptance, viewer_receipt=signed,
+                                   trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.assertTrue(replay['fullyAccepted'])
+        self.assertFalse(replay['created'])
+        self.assertEqual(self.outbox.get(self.outbox_id)['local_metadata'], retained)
 
     def test_crash_after_manifest_commit_before_slot_release_replays(self):
         with patch.object(self.queue, 'complete', side_effect=OSError('synthetic crash')):
