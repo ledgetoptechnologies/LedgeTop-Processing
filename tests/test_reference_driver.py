@@ -20,7 +20,7 @@ import zipfile
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
-from processing.reference_driver import ReferenceDriver, DriverHeld
+from processing.reference_driver import ReferenceDriver, DriverHeld, DriverWait
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
@@ -273,7 +273,7 @@ class ReferenceDriverTests(unittest.TestCase):
             state_path=self.root / 'driver-source-range-v2.sqlite')
         job = self.submit(contents=(b'v2-queued-photo',))
         downloads = []
-        def synthetic_download(*, grant, object_id, destination):
+        def synthetic_download(*, grant, object_id, destination, grant_provider=None):
             downloads.append((grant.identity.source_version, object_id))
             Path(destination).write_bytes(self.contents[object_id])
             return Path(destination)
@@ -285,6 +285,107 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(transfer['sourceVersion'], source_version_for_manifest(persisted['submission']['manifest']))
         self.assertEqual(transfer['objectIds'], [obj['id'] for obj in persisted['submission']['manifest']['objects']])
         self.assertEqual(downloads, [(transfer['sourceVersion'], transfer['objectIds'][0])])
+
+    def test_expired_source_grant_is_durably_renewed_and_ack_replays_without_new_grant(self):
+        from processing.source_range_transfer import SourceRenewalUnavailable
+        state_path = self.root / 'driver-source-range-renewal.sqlite'
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=state_path)
+        job = self.submit(contents=(b'renewal-test-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        data = json.loads(row[0])
+        claim = data['claim']
+        previous = data['grant']
+        previous['expiresAt'] = '1970-01-01T00:00:00.000Z'
+        data['grant'] = previous
+        self.driver._save(job['jobId'], 'fetching', data)
+        successor = dict(previous, expiresAt=claim['transferRequest']['expiresAt'], token='renewed-synthetic-token')
+        renewals, acknowledgements = [], []
+
+        def renew_lost(request):
+            renewals.append(request)
+            raise SourceRenewalUnavailable('synthetic renewal response loss')
+
+        def renew_success(request):
+            renewals.append(request)
+            return 200, {'protocol': 'source-range-v2-renewal', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'previousGrantSha256': request['previousGrantSha256'],
+                'grant': successor}
+
+        def acknowledge_lost(request):
+            acknowledgements.append(request)
+            raise SourceRenewalUnavailable('synthetic ack response loss')
+
+        def acknowledge_success(request):
+            acknowledgements.append(request)
+            return 200, {'protocol': 'source-range-v2-renewal-ack', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'grantSha256': request['grantSha256']}
+
+        def download(*, grant, object_id, destination, grant_provider=None):
+            self.assertEqual(grant.token, 'renewed-synthetic-token')
+            self.assertTrue(callable(grant_provider))
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+
+        with patch.object(self.driver.source_range_client, 'renew_grant', side_effect=renew_lost):
+            first = self.driver.step()
+            self.assertEqual(first['state'], 'retry_wait')
+            with self.driver._db() as db:
+                row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+            pending = json.loads(row[0])
+            self.assertEqual(pending['sourceRenewal']['phase'], 'request_pending')
+            request_intent = pending['sourceRenewal']['request']
+
+        # Reconstruct the driver to model process loss after the renewal POST.
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state_path)
+        with patch.object(self.driver.source_range_client, 'renew_grant', side_effect=renew_success), \
+             patch.object(self.driver.source_range_client, 'acknowledge_grant_renewal', side_effect=acknowledge_lost):
+            second = self.driver.step()
+            self.assertEqual(second['state'], 'retry_wait')
+            with self.driver._db() as db:
+                row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+            pending = json.loads(row[0])
+            self.assertEqual(pending['sourceRenewal']['phase'], 'ack_pending')
+            self.assertEqual(pending['sourceRenewal']['successorGrant'], successor)
+            self.assertEqual(pending['grant'], previous)
+
+        # Reconstruct again to verify the durable ack intent, not a new renewal, is replayed.
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state_path)
+        with patch.object(self.driver.source_range_client, 'acknowledge_grant_renewal', side_effect=acknowledge_success), \
+             patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
+            third = self.driver.step()
+            self.assertEqual(third['state'], 'fetching')
+        self.assertEqual(len(renewals), 2)
+        self.assertEqual(renewals[0], request_intent)
+        self.assertEqual(renewals[1], request_intent)
+        self.assertEqual(len(acknowledgements), 2)
+        self.assertEqual(acknowledgements[0], acknowledgements[1])
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        self.assertEqual(data['grant'], successor)
+        self.assertEqual(data['sourceRenewalSequence'], 1)
+        self.assertNotIn('sourceRenewal', data)
+
+    def test_mid_transfer_renewal_wait_and_rejection_keep_driver_state(self):
+        from processing.source_range_transfer import validate_source_grant
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-mid-transfer.sqlite')
+        job = self.submit(contents=(b'mid-range-renewal-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        data = json.loads(row[0])
+        grant = validate_source_grant(data['grant'], job=data['claim'])
+        cases = ((DriverWait('synthetic renewal outage'), 'retry_wait', 'source_renewal_endpoint_unavailable'),
+                 (DriverHeld('synthetic renewal conflict'), 'held', 'source_renewal_response_invalid'))
+        for renewal_error, expected_state, expected_reason in cases:
+            with patch.object(self.driver, '_source_range_grant', side_effect=[grant, renewal_error]), \
+                 patch.object(self.driver.source_range_client, 'download_object',
+                    side_effect=lambda **kwargs: kwargs['grant_provider']()):
+                result = self.driver.step()
+            self.assertEqual((result['state'], result.get('reason')), (expected_state, expected_reason))
 
     def test_authority_version_and_active_native_tasks_prevent_claim(self):
         job = self.submit()

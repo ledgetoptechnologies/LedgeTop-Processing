@@ -35,7 +35,19 @@ from .reference_transfer import TransferError, _now
 
 CHUNK_BYTES = 8 * 1024 * 1024
 OBJECT_PREFIX = "/api/processing/source-range/v2/objects/"
+RENEWAL_PATH = "/api/processing/source-range/v2/grants/renew"
+RENEWAL_ACK_PATH = RENEWAL_PATH + "/ack"
 REQUEST_HEADER = "X-Processing-Request-ID"
+MAX_RENEWAL_SEQUENCE = 1000
+MAX_RENEWAL_BODY_BYTES = p.MAX_BODY_BYTES
+
+
+class SourceRenewalUnavailable(TransferError):
+    """A renewal request may have been accepted; retry the durable intent."""
+
+
+class SourceRenewalInvalid(TransferError):
+    """A response could not be validated; preserve state and hold for review."""
 
 
 def source_version_for_manifest(manifest):
@@ -162,8 +174,10 @@ class ValidatedSourceGrant:
     token: str = field(repr=False)
 
 
-def validate_source_grant(grant, *, job, clock=time.time):
+def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
     """Validate a closed v2 grant against the immutable queued job envelope."""
+    if type(allow_expired) is not bool:
+        raise TransferError("invalid source grant validation mode")
     fields = ("protocol", "reservationId", "generation", "expiresAt", "manifestSha256",
               "sourceVersion", "jobId", "environment", "objectIds", "nonce", "token", "chunkBytes",
               "requestBudget", "byteBudget", "attemptBudget")
@@ -258,7 +272,7 @@ def validate_source_grant(grant, *, job, clock=time.time):
             raise TransferError("invalid " + label) from None
     expires = timestamp(grant["expiresAt"], "source grant expiry")
     lease_expires = timestamp(transfer["expiresAt"], "source reservation expiry")
-    if expires <= _now(clock):
+    if expires <= _now(clock) and not allow_expired:
         raise TransferError("source grant expired")
     if expires > lease_expires or lease_expires <= _now(clock):
         raise TransferError("source grant exceeds reservation lease")
@@ -314,6 +328,62 @@ class SourceRangeClient:
         db.execute("PRAGMA synchronous=FULL")
         db.execute("PRAGMA journal_mode=DELETE")
         return db
+
+    def _post_renewal_json(self, route, payload):
+        """POST one bounded canonical renewal message without redirects."""
+        if route not in (RENEWAL_PATH, RENEWAL_ACK_PATH):
+            raise SourceRenewalInvalid("invalid source renewal route")
+        try:
+            body = p.canonical_json(payload)
+        except Exception:
+            raise SourceRenewalInvalid("invalid source renewal request") from None
+        if len(body) > MAX_RENEWAL_BODY_BYTES:
+            raise SourceRenewalInvalid("source renewal request exceeds protocol limit")
+        url = self.origin + route
+        request = Request(url, data=body, method="POST", headers={
+            "Accept": "application/json", "Accept-Encoding": "identity",
+            "Content-Type": "application/json",
+        })
+        try:
+            try:
+                response = self._open(request, timeout=self.timeout)
+            except HTTPError as error:
+                response = error
+            except Exception:
+                raise SourceRenewalUnavailable("source renewal endpoint unavailable") from None
+            try:
+                status = getattr(response, "status", None)
+                if (type(status) is not int or response.geturl() != url
+                        or response.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json"
+                        or response.headers.get("Content-Encoding", "identity").lower() != "identity"):
+                    raise SourceRenewalInvalid("invalid source renewal response")
+                raw = response.read(MAX_RENEWAL_BODY_BYTES + 1)
+                if not isinstance(raw, bytes) or not raw or len(raw) > MAX_RENEWAL_BODY_BYTES:
+                    raise SourceRenewalInvalid("invalid source renewal response size")
+                expected = response.headers.get("Content-Length")
+                if expected is not None and (not expected.isascii() or not expected.isdecimal()
+                        or int(expected) != len(raw)):
+                    raise SourceRenewalInvalid("truncated source renewal response")
+                result = p.decode_submission(raw)
+                if type(result) is not dict or p.canonical_json(result) != raw:
+                    raise SourceRenewalInvalid("noncanonical source renewal response")
+                return status, result
+            except (SourceRenewalInvalid, SourceRenewalUnavailable):
+                raise
+            except Exception:
+                raise SourceRenewalInvalid("invalid source renewal response") from None
+            finally:
+                response.close()
+        except (SourceRenewalInvalid, SourceRenewalUnavailable):
+            raise
+        except Exception:
+            raise SourceRenewalUnavailable("source renewal endpoint unavailable") from None
+
+    def renew_grant(self, request):
+        return self._post_renewal_json(RENEWAL_PATH, request)
+
+    def acknowledge_grant_renewal(self, request):
+        return self._post_renewal_json(RENEWAL_ACK_PATH, request)
 
     def _init_ledger(self):
         with closing(self._connect()) as db:
@@ -501,18 +571,21 @@ class SourceRangeClient:
                 os.fsync(stream.fileno())
         return str(info.st_dev), str(info.st_ino)
 
-    def download_object(self, *, grant, object_id, destination):
+    def download_object(self, *, grant, object_id, destination, grant_provider=None):
         try:
-            return self._download_object(grant=grant, object_id=object_id, destination=destination)
+            return self._download_object(grant=grant, object_id=object_id, destination=destination,
+                                         grant_provider=grant_provider)
         except TransferError:
             raise
         except Exception:
             # Storage and HTTP exception strings may contain secrets or local paths.
             raise TransferError("source object transfer failed") from None
 
-    def _download_object(self, *, grant, object_id, destination):
+    def _download_object(self, *, grant, object_id, destination, grant_provider=None):
         if not isinstance(grant, ValidatedSourceGrant):
             raise TransferError("validated v2 source grant required")
+        if grant_provider is not None and not callable(grant_provider):
+            raise TransferError("invalid source grant provider")
         obj = next((item for item in grant.objects if item.id == object_id), None)
         if obj is None:
             raise TransferError("source object is outside grant")
@@ -520,7 +593,8 @@ class SourceRangeClient:
         key, identity_json = self._identity_key(identity)
         lock_path = self.ledger_path.parent / (".source-lock-" + key[:32])
         with self._object_lock(lock_path):
-            return self._download_locked(grant, identity, identity_json, key, obj, destination)
+            return self._download_locked(grant, identity, identity_json, key, obj, destination,
+                                         grant_provider=grant_provider)
 
     @contextmanager
     def _object_lock(self, lock_path):
@@ -559,7 +633,7 @@ class SourceRangeClient:
                     pass
             stream.close()
 
-    def _download_locked(self, grant, identity, identity_json, key, obj, destination):
+    def _download_locked(self, grant, identity, identity_json, key, obj, destination, *, grant_provider=None):
         target = Path(destination).absolute()
         if target.name in ("", ".", "..") or target.parent.is_symlink() or not target.parent.is_dir():
             raise TransferError("private destination directory required")
@@ -580,6 +654,19 @@ class SourceRangeClient:
         part_device, part_inode = self._reconcile(key, obj, part, committed, part_device, part_inode)
         validator = _validator(obj)
         while committed < obj.byte_size:
+            if grant.expires <= _now(self.clock) and grant_provider is not None:
+                successor = grant_provider()
+                old = grant
+                if (not isinstance(successor, ValidatedSourceGrant)
+                        or successor.identity != identity
+                        or successor.expires <= _now(self.clock)
+                        or successor.expires <= old.expires
+                        or (successor.chunk_bytes, successor.request_budget, successor.byte_budget,
+                            successor.attempt_budget, successor.objects) !=
+                           (old.chunk_bytes, old.request_budget, old.byte_budget,
+                            old.attempt_budget, old.objects)):
+                    raise TransferError("invalid renewed source grant")
+                grant = successor
             length = min(grant.chunk_bytes, obj.byte_size - committed)
             request_id = _request_id(identity_json, obj, committed, length)
             should_fetch = self._record_intent(key, identity_json, obj, grant, request_id, committed, length)
@@ -625,17 +712,7 @@ class SourceRangeClient:
                     response.close()
                 if target.parent.stat().st_ino != parent_info.st_ino or target.parent.stat().st_dev != parent_info.st_dev:
                     raise TransferError("destination directory changed")
-                fd = os.open(part, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-                try:
-                    with os.fdopen(fd, "r+b", buffering=0) as stream:
-                        fd = None
-                        stream.seek(committed)
-                        stream.write(data)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                finally:
-                    if fd is not None:
-                        os.close(fd)
+                self._write_range_bytes(part, committed, data)
                 self._commit_range(key, obj.id, request_id, committed, length, hashlib.sha256(data).hexdigest())
             committed += length
         part_device, part_inode = self._reconcile(key, obj, part, committed, part_device, part_inode)
@@ -648,6 +725,23 @@ class SourceRangeClient:
         self._fsync_dir(target.parent)
         self._mark_published(key, obj.id)
         return target
+
+    @staticmethod
+    def _write_range_bytes(part, offset, data):
+        """Write one range fully before it can be committed in the ledger."""
+        fd = os.open(part, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            with os.fdopen(fd, "r+b", buffering=0) as stream:
+                fd = None
+                stream.seek(offset)
+                written = stream.write(data)
+                if written != len(data):
+                    raise TransferError("short source range file write")
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            if fd is not None:
+                os.close(fd)
 
     def _remove_published_partial(self, part, target, expected_device, expected_inode):
         """Finish cleanup after a crash between no-clobber publish and partial unlink."""

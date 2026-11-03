@@ -41,7 +41,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting'))
+                      'executionRouting','sourceRangeV2Enabled'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -350,8 +350,10 @@ def load_config(path):
             raise ValueError('explicit result sharing decision required')
         config.setdefault('cleanupEnabled', False)
         config.setdefault('engineCleanupEnabled', False)
+        config.setdefault('sourceRangeV2Enabled', False)
         config.setdefault('allowedEnvironments', ['production','staging'])
         if (type(config['cleanupEnabled']) is not bool or type(config['engineCleanupEnabled']) is not bool
+                or type(config['sourceRangeV2Enabled']) is not bool
                 or type(config['allowedEnvironments']) is not list or not config['allowedEnvironments']):
             raise ValueError('invalid worker sharing or cleanup policy')
         for environment in config['allowedEnvironments']:
@@ -472,6 +474,7 @@ def _build_worker(config,owner,resources):
         execution_router=router, provenance_client=provenance,state_owner=owner,
         engine_cleanup=EngineCacheCleanup(worker, path=root / 'engine-cleanup.sqlite')
             if config['engineCleanupEnabled'] else None,
+        source_range_v2_enabled=config['sourceRangeV2Enabled'],
         cleanup_executor=ScratchCleanupExecutor(ledger) if config['cleanupEnabled'] else None)
     permitted = frozenset(config['allowedEnvironments'])
     result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker,
