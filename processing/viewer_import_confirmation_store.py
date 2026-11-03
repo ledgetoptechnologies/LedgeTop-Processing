@@ -19,7 +19,8 @@ import stat
 
 from . import reference_protocol as protocol
 from .viewer_import_confirmation import (
-    ImportConfirmationRejected, MAX_INPUT_BYTES, _snapshot_inputs,
+    ImportConfirmationRejected, MAX_INPUT_BYTES, MAX_INPUT_DEPTH, MAX_INPUT_NODES,
+    MAX_CONTAINER_ITEMS, MAX_MAP_ITEMS, MAX_STRING_BYTES, _snapshot_inputs,
     verify_import_confirmation,
 )
 
@@ -66,6 +67,123 @@ def _reject_duplicate_pairs(pairs):
     return result
 
 
+def _preflight_stored_json(raw):
+    """Bound JSON structure before the allocating stdlib decoder runs.
+
+    This scanner counts values (keys are not values), object members and array
+    items without materializing a tree. JSON syntax and duplicate keys are
+    checked again by the decoder; the verifier then applies its shared snapshot
+    and UTF-8 value limits. The scan only accepts the subset needed for JSON.
+    """
+    if type(raw) is not bytes or not 0 < len(raw) <= MAX_INPUT_BYTES:
+        raise ImportConfirmationStoreHeld('stored_confirmation_invalid')
+    length, i, nodes, root_done = len(raw), 0, 0, False
+    stack = []
+    whitespace = b' \t\r\n'
+
+    def invalid():
+        raise ImportConfirmationStoreHeld('stored_confirmation_invalid')
+
+    def string_at(start, max_decoded_bytes):
+        if start >= length or raw[start] != 34:
+            invalid()
+        pos = start + 1
+        # JSON escaping can require at most six ASCII bytes per decoded UTF-8
+        # byte; a tighter decoded byte check follows in the verifier.
+        limit = max_decoded_bytes * 6
+        while pos < length:
+            ch = raw[pos]
+            if ch == 34:
+                return pos + 1
+            if ch < 32:
+                invalid()
+            if ch == 92:
+                pos += 1
+                if pos >= length:
+                    invalid()
+            pos += 1
+            if pos - start - 1 > limit:
+                invalid()
+        invalid()
+
+    while True:
+        while i < length and raw[i] in whitespace:
+            i += 1
+        if not stack and root_done:
+            if i != length:
+                invalid()
+            return
+        if i >= length:
+            invalid()
+        if stack:
+            frame = stack[-1]
+            kind, state = frame['kind'], frame['state']
+            if kind == 'array' and state == 'first' and raw[i] == 93:
+                stack.pop(); i += 1; continue
+            if kind == 'object' and state == 'first' and raw[i] == 125:
+                stack.pop(); i += 1; continue
+            if kind == 'array' and state == 'after':
+                if raw[i] == 93:
+                    stack.pop(); i += 1; continue
+                if raw[i] != 44:
+                    invalid()
+                frame['state'] = 'value'; i += 1; continue
+            if kind == 'object' and state == 'after':
+                if raw[i] == 125:
+                    stack.pop(); i += 1; continue
+                if raw[i] != 44:
+                    invalid()
+                frame['state'] = 'key'; i += 1; continue
+            if kind == 'object' and state in ('first', 'key'):
+                frame['count'] += 1
+                if frame['count'] > MAX_MAP_ITEMS:
+                    invalid()
+                i = string_at(i, 128)
+                frame['state'] = 'colon'; continue
+            if kind == 'object' and state == 'colon':
+                if raw[i] != 58:
+                    invalid()
+                frame['state'] = 'value'; i += 1; continue
+            if state not in ('first', 'value'):
+                invalid()
+            if kind == 'array':
+                frame['count'] += 1
+                if frame['count'] > MAX_CONTAINER_ITEMS:
+                    invalid()
+            frame['state'] = 'after'
+        else:
+            root_done = True
+
+        nodes += 1
+        if nodes > MAX_INPUT_NODES or len(stack) > MAX_INPUT_DEPTH:
+            invalid()
+        ch = raw[i]
+        if ch == 91:
+            stack.append({'kind': 'array', 'state': 'first', 'count': 0}); i += 1
+        elif ch == 123:
+            stack.append({'kind': 'object', 'state': 'first', 'count': 0}); i += 1
+        elif ch == 34:
+            i = string_at(i, MAX_STRING_BYTES)
+        else:
+            start = i
+            while i < length and raw[i] not in whitespace and raw[i] not in b',]}':
+                i += 1
+                if i - start > 32:  # All allowed safe integers/literals fit.
+                    invalid()
+            if i == start:
+                invalid()
+
+
+def _decode_stored_confirmation(raw):
+    """Preflight bounded bytes before allowing the allocating JSON decoder."""
+    _preflight_stored_json(raw)
+    try:
+        return json.loads(raw.decode('utf-8'), object_pairs_hook=_reject_duplicate_pairs,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid JSON number')))
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise ImportConfirmationStoreHeld('stored_confirmation_invalid') from None
+
+
 class ImportConfirmationStore:
     """Journal exact verifier output under a trusted job scope, first write wins.
 
@@ -92,12 +210,21 @@ class ImportConfirmationStore:
         if os.name != 'nt' and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
             raise ImportConfirmationStoreHeld('private_store_directory_required')
         self.parent_identity = (info.st_dev, info.st_ino)
+        # Establish capability before creating a file. A stale pre-existing
+        # file is also made durable on every open, not merely on first create.
+        self._sync_parent()
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         except FileExistsError:
             pass
         else:
-            os.close(fd)
+            try:
+                os.fsync(fd)
+            except OSError:
+                raise ImportConfirmationStoreHeld('store_file_sync_unavailable') from None
+            finally:
+                os.close(fd)
+        self._sync_parent()
         self.file_identity = self._check_file()
         with self._connect() as db:
             try:
@@ -109,10 +236,35 @@ class ImportConfirmationStore:
                     PRIMARY KEY (job_id, generation, environment))''')
                 self._check_schema(db)
                 db.commit()
+                self._sync_parent()
             except BaseException:
                 if db.in_transaction:
                     db.rollback()
                 raise
+        # SQLite may checkpoint or remove sidecars while closing its connection.
+        self._sync_parent()
+
+    def _sync_parent(self):
+        """Require a verified directory fsync; unsupported platforms hold."""
+        if (os.name != 'posix' or not hasattr(os, 'O_DIRECTORY')
+                or not hasattr(os, 'O_NOFOLLOW')):
+            raise ImportConfirmationStoreHeld('directory_durability_unavailable')
+        try:
+            fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                         | getattr(os, 'O_CLOEXEC', 0))
+            try:
+                observed = os.fstat(fd)
+                current = self.path.parent.stat()
+                if (not stat.S_ISDIR(observed.st_mode)
+                        or (observed.st_dev, observed.st_ino) != self.parent_identity
+                        or (current.st_dev, current.st_ino) != self.parent_identity
+                        or observed.st_uid != os.geteuid() or observed.st_mode & 0o077):
+                    raise ImportConfirmationStoreHeld('private_store_directory_required')
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            raise ImportConfirmationStoreHeld('directory_durability_unavailable') from None
 
     def _check_file(self):
         try:
@@ -272,12 +424,16 @@ class ImportConfirmationStore:
                     _after_insert()
                     result = RecordResult('recorded', verified.sha256)
                 db.commit()
-                _after_commit()
-                return result
+                # If this fails, COMMIT may already have succeeded. Report an
+                # uncertain outcome; exact replay will recheck and resync.
+                self._sync_parent()
             except BaseException:
                 if db.in_transaction:
                     db.rollback()
                 raise
+        self._sync_parent()
+        _after_commit()
+        return result
 
     def load_verified(self, scope):
         """Reverify a retained proof against current trusted state, or return None."""
@@ -302,16 +458,14 @@ class ImportConfirmationStore:
                 if (type(digest) is not str or not _HASH.fullmatch(digest)
                         or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), digest)):
                     raise ImportConfirmationStoreHeld('stored_confirmation_conflict')
-                try:
-                    confirmation = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs,
-                        parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid JSON number')))
-                except (ValueError, TypeError, UnicodeError, RecursionError):
-                    raise ImportConfirmationStoreHeld('stored_confirmation_invalid') from None
+                confirmation = _decode_stored_confirmation(raw)
                 verified = self._verify(confirmation, context, prior=row['confirmation_sha256'])
                 self._compare(row, verified, binding_sha)
                 db.commit()
-                return verified
+                self._sync_parent()
             except BaseException:
                 if db.in_transaction:
                     db.rollback()
                 raise
+        self._sync_parent()
+        return verified

@@ -34,15 +34,29 @@ removing the signing pin makes future reads/replays hold. Neither result type
 is an authentication capability and caller-supplied verified-result objects are
 not accepted as input.
 
-The database must be in a private, exclusive service-owned directory; the
-candidate checks owner and mode on POSIX but relies on operator-provisioned
-Windows ACLs. Same-account malicious filesystem/SQLite writers are outside the
-boundary. SQLite uses a durable DELETE or WAL journal and `synchronous=FULL`;
-this requests filesystem durability and does not prove hardware or power-loss
-behavior. The immediate transaction includes bounded hashing/signature work,
-so deployment would need lock-contention and large-input qualification. A
-future network boundary must bound raw bytes before JSON parsing and reject
-duplicate keys, as described in the verifier proposal.
+The database must be in a private, exclusive service-owned directory. The
+candidate requires POSIX `O_DIRECTORY`, `O_NOFOLLOW`, owner/mode checks, and a
+successful verified parent-directory fsync; unsupported platforms, including
+Windows, fail closed before creating a database. The newly created file is
+fsynced; the parent is fsynced after creation, after SQLite commits, and after
+connection close. SQLite uses a durable DELETE or WAL journal and
+`synchronous=FULL`. A post-commit sync error is an uncertain outcome: the
+caller must retry the exact proof, which re-verifies and re-syncs. These calls
+request durability; they do not prove filesystem, hardware, or power-loss
+behavior. Same-account malicious filesystem/SQLite writers are outside the
+boundary. The immediate transaction includes bounded hashing/signature work,
+so deployment needs lock-contention and large-input qualification.
+
+Before decoding retained bytes, a bounded structural scan that does not build
+a JSON tree checks the
+existing verifier's 16 MiB raw limit, 500,000 value-node limit, depth 12,
+10,000 array items and 64 object members, plus conservative escaped-string and
+safe-integer token bounds. The stdlib decoder then checks JSON and duplicate
+keys; the verifier applies its aggregate UTF-8/tree bounds after decoding. The
+scanner bounds retained-proof parsing, not the trusted loader's own database
+reads or any future HTTP body. A future network boundary must bound raw bytes
+before JSON parsing and reject duplicate keys, as described in the verifier
+proposal.
 
 The current verifier is provisional and broader than the agreed first ODM-only
 v1 scope: exactly one `odm_archive` object, with TreeDar-only/mixed results

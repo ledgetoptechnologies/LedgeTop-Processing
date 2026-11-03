@@ -3,8 +3,10 @@ from contextlib import closing
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -15,7 +17,10 @@ from unittest.mock import patch
 
 from processing import reference_protocol as protocol
 from processing.viewer_import_confirmation import VerifiedImportConfirmation
-from processing.viewer_import_confirmation_store import ImportConfirmationStore, ImportConfirmationStoreHeld
+from processing.viewer_import_confirmation_store import (
+    ImportConfirmationStore, ImportConfirmationStoreHeld, _decode_stored_confirmation,
+    _preflight_stored_json,
+)
 import tests.test_viewer_import_confirmation as verifier_fixture
 
 
@@ -27,6 +32,76 @@ def fixture_loader(db, scope):
     return json.loads(row[0])
 
 
+class StoredJsonPreflightTests(unittest.TestCase):
+    def test_valid_bounded_json_round_trips_with_escaped_strings(self):
+        values = [None, True, 123, ['text', {'quote': '\\"\n', 'unicode': '\u2603'}], {}, []]
+        for value in values:
+            with self.subTest(value=value):
+                self.assertEqual(_decode_stored_confirmation(protocol.canonical_json(value)), value)
+
+    def test_dense_json_rejected_before_allocating_decoder(self):
+        with patch('processing.viewer_import_confirmation_store.MAX_INPUT_NODES', 4):
+            _preflight_stored_json(b'[0,0,0]')  # root plus three values
+            with patch('processing.viewer_import_confirmation_store.json.loads',
+                       side_effect=AssertionError('decoder must not run')):
+                with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'stored_confirmation_invalid'):
+                    _decode_stored_confirmation(b'[0,0,0,0]')
+
+    def test_actual_node_limit_rejects_dense_valid_json_before_decoder(self):
+        # Every nested array is below the per-container bound, while the full
+        # valid document exceeds the actual 500,000-node shared limit.
+        chunk = b'[' + b'0,' * 999 + b'0]'
+        raw = b'[' + b','.join([chunk] * 501) + b']'
+        with patch('processing.viewer_import_confirmation_store.json.loads',
+                   side_effect=AssertionError('decoder must not run')):
+            with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'stored_confirmation_invalid'):
+                _decode_stored_confirmation(raw)
+
+    def test_depth_container_and_string_limits_precede_decoding(self):
+        nested = 0
+        for _ in range(12):
+            nested = [nested]
+        self.assertEqual(_decode_stored_confirmation(b'[' * 12 + b'0' + b']' * 12), nested)
+        cases = [b'[' * 14 + b'0' + b']' * 14,
+                 b'[' + b'0,' * 10000 + b'0]',
+                 protocol.canonical_json({str(i): i for i in range(65)}),
+                 b'"' + b'x' * (8192 * 6 + 1) + b'"']
+        for raw in cases:
+            with self.subTest(prefix=raw[:15]):
+                with patch('processing.viewer_import_confirmation_store.json.loads',
+                           side_effect=AssertionError('decoder must not run')):
+                    with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'stored_confirmation_invalid'):
+                        _decode_stored_confirmation(raw)
+
+    def test_malformed_duplicate_and_invalid_utf8_are_refused(self):
+        for raw in (b'{"x":1,"x":2}', b'[1,]', b'{"x":}', b'"\xff"', b'{} extra'):
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'stored_confirmation_invalid'):
+                    _decode_stored_confirmation(raw)
+
+
+class DirectoryDurabilityTests(unittest.TestCase):
+    def test_unavailable_directory_sync_fails_before_creating_database(self):
+        with tempfile.TemporaryDirectory(prefix='lt-import-fsync-refusal-') as root:
+            path = Path(root) / 'not-created.sqlite'
+            with patch.object(ImportConfirmationStore, '_sync_parent',
+                              side_effect=ImportConfirmationStoreHeld('directory_durability_unavailable')):
+                with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'directory_durability_unavailable'):
+                    ImportConfirmationStore(path, trusted_loader=fixture_loader)
+            self.assertFalse(path.exists())
+
+    @unittest.skipIf(os.name == 'posix' and hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'),
+                     'platform has required directory open flags')
+    def test_native_unsupported_platform_fails_closed(self):
+        with tempfile.TemporaryDirectory(prefix='lt-import-unsupported-') as root:
+            path = Path(root) / 'not-created.sqlite'
+            with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'directory_durability_unavailable'):
+                ImportConfirmationStore(path, trusted_loader=fixture_loader)
+            self.assertFalse(path.exists())
+
+
+@unittest.skipUnless(os.name == 'posix' and hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'),
+                     'directory fsync is required; store remains unavailable on this platform')
 class ImportConfirmationStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='lt-import-proof-store-')
@@ -93,6 +168,40 @@ class ImportConfirmationStoreTests(unittest.TestCase):
         self.assertEqual(len(self.stored_rows()), 1)
         self.assertEqual(self.store.record(self.scope, proof).state, 'replayed')
 
+    def test_new_store_syncs_file_and_verified_parent_directory(self):
+        calls = []
+        real_fsync = os.fsync
+        def observe(fd):
+            calls.append(stat.S_IFMT(os.fstat(fd).st_mode))
+            return real_fsync(fd)
+        with patch('processing.viewer_import_confirmation_store.os.fsync', side_effect=observe):
+            ImportConfirmationStore(self.root / 'second.sqlite', trusted_loader=fixture_loader)
+        self.assertIn(stat.S_IFDIR, calls)
+        self.assertIn(stat.S_IFREG, calls)
+
+    def test_parent_sync_failure_after_commit_is_uncertain_and_exact_retry_recovers(self):
+        proof = self.fixture.confirmation
+        with patch.object(self.store, '_sync_parent',
+                          side_effect=ImportConfirmationStoreHeld('directory_durability_unavailable')):
+            with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'directory_durability_unavailable'):
+                self.store.record(self.scope, proof)
+        self.assertEqual(len(self.stored_rows()), 1)
+        self.assertEqual(self.store.record(self.scope, proof).state, 'replayed')
+
+    def test_record_and_verified_read_sync_parent_after_commit_and_close(self):
+        with patch.object(self.store, '_sync_parent', wraps=self.store._sync_parent) as sync:
+            self.assertEqual(self.store.record(self.scope, self.fixture.confirmation).state, 'recorded')
+            self.assertEqual(sync.call_count, 2)
+            self.assertIsNotNone(self.store.load_verified(self.scope))
+            self.assertEqual(sync.call_count, 4)
+
+    def test_actual_directory_fsync_failure_prevents_creation(self):
+        path = self.root / 'fsync-failed.sqlite'
+        with patch('processing.viewer_import_confirmation_store.os.fsync', side_effect=OSError('unsupported')):
+            with self.assertRaisesRegex(ImportConfirmationStoreHeld, 'directory_durability_unavailable'):
+                ImportConfirmationStore(path, trusted_loader=fixture_loader)
+        self.assertFalse(path.exists())
+
     def test_trusted_binding_writer_cannot_interleave_before_first_commit(self):
         original = protocol.canonical_json(self.context).decode('utf-8')
         attempted = []
@@ -130,6 +239,54 @@ class ImportConfirmationStoreTests(unittest.TestCase):
         reopened = ImportConfirmationStore(self.path, trusted_loader=fixture_loader)
         self.assertIsNone(reopened.load_verified(self.scope))
         self.assertEqual(reopened.record(self.scope, self.fixture.confirmation).state, 'recorded')
+
+    def test_process_death_after_file_create_before_parent_sync_reopens_safely(self):
+        path = self.root / 'synthetic-create-crash.sqlite'
+        code = textwrap.dedent('''
+            import os, sys
+            from unittest.mock import patch
+            from processing.viewer_import_confirmation_store import ImportConfirmationStore
+            original = ImportConfirmationStore._sync_parent
+            count = 0
+            def crash_on_second_sync(store):
+                global count
+                count += 1
+                if count == 2: os._exit(73)
+                return original(store)
+            with patch.object(ImportConfirmationStore, '_sync_parent', crash_on_second_sync):
+                ImportConfirmationStore(sys.argv[1], trusted_loader=lambda db, scope: None)
+        ''')
+        child = subprocess.run([sys.executable, '-c', code, str(path)],
+                               capture_output=True, text=True, timeout=20)
+        self.assertEqual(child.returncode, 73, child.stderr)
+        self.assertTrue(path.exists())
+        ImportConfirmationStore(path, trusted_loader=fixture_loader)
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_import_confirmations_candidate_v1').fetchone()[0], 0)
+
+    def test_process_death_after_commit_before_directory_sync_replays(self):
+        proof_path = self.root / 'synthetic-confirmation.json'
+        proof_path.write_bytes(protocol.canonical_json(self.fixture.confirmation))
+        code = textwrap.dedent('''
+            import json, os, sys
+            from unittest.mock import patch
+            from processing.viewer_import_confirmation_store import ImportConfirmationStore
+            def loader(db, scope):
+                row = db.execute('SELECT payload FROM trusted_import_fixture WHERE job_id=? AND generation=? AND environment=?',
+                    (scope['jobId'], scope['generation'], scope['environment'])).fetchone()
+                return json.loads(row[0])
+            store = ImportConfirmationStore(sys.argv[1], trusted_loader=loader)
+            with open(sys.argv[2], 'rb') as source: proof = json.load(source)
+            with patch.object(store, '_sync_parent', side_effect=lambda: os._exit(72)):
+                store.record({'jobId':'job-1','generation':1,'environment':'staging'}, proof)
+        ''')
+        child = subprocess.run([sys.executable, '-c', code, str(self.path), str(proof_path)],
+                               capture_output=True, text=True, timeout=20)
+        self.assertEqual(child.returncode, 72, child.stderr)
+        reopened = ImportConfirmationStore(self.path, trusted_loader=fixture_loader)
+        self.assertIsNotNone(reopened.load_verified(self.scope))
+        self.assertEqual(reopened.record(self.scope, self.fixture.confirmation).state, 'replayed')
 
     def test_concurrent_identical_first_writes_commit_once(self):
         barrier = threading.Barrier(2)
