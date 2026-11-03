@@ -310,6 +310,15 @@ class ViewerHTTPTests(unittest.TestCase):
         self.assertTrue(self.facade.handle(handler))
         return handler
 
+    def test_opt_in_capacity_requires_header_before_body_parser(self):
+        self.initialize()
+        self.facade.upload_capacity = object()
+        body = multipart([('images','photo.jpg',b'123')])
+        with patch('processing.viewer_http._multipart', side_effect=AssertionError('body read')):
+            handler = self.memory('/task/new/upload/' + IDENTIFIER, body,
+                Content_Type='multipart/form-data; boundary=' + BOUNDARY)
+        self.assertEqual(handler.status, 400)
+
     def test_body_limits_chunked_and_truncation_fail_before_execution(self):
         handler = MemoryHandler('/task/new/init?token=' + TOKEN,
             Content_Length=str(MAX_FORM_BYTES + 1), set_uuid=IDENTIFIER)

@@ -16,10 +16,12 @@ import re
 import tempfile
 from urllib.parse import parse_qs, unquote, urlsplit
 import uuid as uuid_module
+from contextlib import nullcontext
 
 from .maintenance import Conflict
 from .viewer_tasks import InputLimitExceeded
 from .viewer_limits import MAX_UPLOAD_BYTES
+from .scratch_policy import PolicyConflict
 
 
 MAX_FORM_BYTES = 64 * 1024
@@ -177,7 +179,7 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False, upload_capacity=None):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         if type(production_held) is not bool:
@@ -193,6 +195,18 @@ class ViewerFacade:
                 raise ValueError('private existing spool directory required')
             temp_dir = str(directory)
         self.temp_dir = temp_dir
+        if upload_capacity is not None:
+            from .viewer_upload_capacity_candidate import ViewerUploadCapacity
+            if (not isinstance(upload_capacity, ViewerUploadCapacity) or upload_capacity.store is not service.store
+                    or temp_dir is None or os.path.realpath(temp_dir) != upload_capacity.spool):
+                raise ValueError('capacity gate must own exact service and spool')
+        self.upload_capacity = upload_capacity
+
+    def _declared_input(self, handler):
+        values = handler.headers.get_all('X-LTDS-Declared-Input-Bytes', [])
+        if len(values) != 1 or not re.fullmatch(r'[1-9][0-9]{0,15}', values[0]):
+            raise RequestError(400, 'declared_input_bytes_required')
+        return int(values[0])
 
     @staticmethod
     def _reply(handler, status, value):
@@ -404,18 +418,25 @@ class ViewerFacade:
             length = _length(handler, MAX_UPLOAD_BYTES)
             identifier = task_uuid(unquote(upload[1]))
             self._authorize(identifier, environment, handler)
+            declared = self._declared_input(handler) if self.upload_capacity else None
             count, seen = 0, set()
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                if name != 'images':
-                    raise RequestError(400, 'invalid_upload_form')
-                filename = safe_filename(filename)
-                if filename.casefold() in seen or not size:
-                    raise RequestError(400, 'duplicate_or_empty_upload')
-                seen.add(filename.casefold())
-                capability=self._capability(handler)
-                if capability is None:self.service.upload(identifier, filename, stream, size)
-                else:self.service.upload(identifier, filename, stream, size, environment, capability)
-                count += 1
+            try:
+                guard = self.upload_capacity.upload(identifier, environment, declared, length) if self.upload_capacity else nullcontext()
+                with guard:
+                    for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
+                        if name != 'images':
+                            raise RequestError(400, 'invalid_upload_form')
+                        filename = safe_filename(filename)
+                        if filename.casefold() in seen or not size:
+                            raise RequestError(400, 'duplicate_or_empty_upload')
+                        seen.add(filename.casefold())
+                        if self.upload_capacity:self.upload_capacity.file(identifier, environment, declared, filename, size)
+                        capability=self._capability(handler)
+                        if capability is None:self.service.upload(identifier, filename, stream, size)
+                        else:self.service.upload(identifier, filename, stream, size, environment, capability)
+                        count += 1
+            except PolicyConflict:
+                raise RequestError(503, 'upload_capacity_unavailable') from None
             if not count:
                 raise RequestError(400, 'empty_upload')
             self._reply(handler, 200, {'success': True})
@@ -427,8 +448,14 @@ class ViewerFacade:
             if _length(handler, MAX_FORM_BYTES, allow_empty=True):
                 raise RequestError(400, 'unexpected_body')
             capability=self._capability(handler)
-            if capability is None:result=self.service.commit(identifier)
-            else:result=self.service.commit(identifier,environment,capability)
+            declared = self._declared_input(handler) if self.upload_capacity else None
+            try:
+                guard = self.upload_capacity.commit(identifier, environment, declared) if self.upload_capacity else nullcontext()
+                with guard:
+                    if capability is None:result=self.service.commit(identifier)
+                    else:result=self.service.commit(identifier,environment,capability)
+            except PolicyConflict:
+                raise RequestError(503, 'upload_capacity_unavailable') from None
             self._reply(handler, 200, result)
             return
         if path in ('/task/cancel', '/task/remove'):
