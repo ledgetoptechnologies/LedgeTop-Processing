@@ -788,6 +788,43 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         before.pop('rootMode');after.pop('rootMode')
         self.assertEqual(after,before)
 
+    def run_actual_backup(self,destination):
+        code=module.backup_script().replace("Path('/source')",'Path('+repr(str(self.volume))+')').replace("Path('/backup')",'Path('+repr(str(destination))+')')
+        code=code.replace('10001',str(os.geteuid())).replace('uid=10001','uid='+str(os.geteuid()))
+        output=io.StringIO()
+        with redirect_stdout(output):exec(compile(code,'<synthetic-offline-backup>','exec',optimize=2),{})
+        return json.loads(output.getvalue())
+
+    def test_actual_backup_and_restore_keep_each_terminal_stage_with_its_own_bytes(self):
+        # A third task, so succeeded, failed and cancelled each own distinct files.
+        identifier=str(__import__('uuid').uuid4());base=self.volume/'viewer-tasks/task-2';(base/'images').mkdir(parents=True,mode=0o700)
+        for relative,content in (('images/IMG_0001.JPG',b'synthetic cancelled photo'),('all.zip',b'PKsynthetic cancelled partial')):
+            (base/relative).write_bytes(content);(base/relative).chmod(0o600);self.retained['viewer-tasks/task-2/'+relative]=content
+        with self.queue._db() as db:
+            db.execute("""INSERT INTO viewer_tasks(uuid,directory,name,options,outputs,environment,stage,phase,archive_path)
+                VALUES(?,'task-2','retained-2','[]','[]','production','cancelled','complete',?)""",(identifier,str(base/'all.zip')))
+            db.execute("UPDATE viewer_tasks SET stage='failed' WHERE directory='task-1'")
+        expected={'task-0':'succeeded','task-1':'failed','task-2':'cancelled'}
+        destination=self.root/'stage-backup';destination.mkdir(mode=0o700)
+        proof=self.run_actual_backup(destination)
+        before=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        self.assertEqual(proof['fullCensusSha256'],module.digest(before))
+        self.assertEqual(before['tables']['viewer_tasks']['count'],3)
+        restored=self.root/'stage-restore';shutil.copytree(destination,restored)
+        after=module.volume_census(restored,uid=os.geteuid(),offline=True)
+        before.pop('rootMode');after.pop('rootMode')
+        self.assertEqual(after,before)
+        with sqlite3.connect('file:'+str(restored/'jobs.sqlite3')+'?mode=ro',uri=True) as db:
+            stages=dict(db.execute("SELECT directory,stage FROM viewer_tasks WHERE phase='complete'"))
+        self.assertEqual(stages,expected)
+        for relative,content in self.retained.items():self.assertEqual((restored/relative).read_bytes(),content)
+        self.assertEqual(len({(restored/'viewer-tasks'/directory/'all.zip').read_bytes() for directory in expected}),3)
+
+    def test_actual_backup_refuses_a_nonterminal_viewer_task_under_python_optimize(self):
+        with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET stage='running',phase='processing' WHERE directory='task-1'")
+        destination=self.root/'refused-backup';destination.mkdir(mode=0o700)
+        with self.assertRaises(AssertionError):self.run_actual_backup(destination)
+
     def test_actual_authenticated_owned_get_requires_exact_new_missing_receipt_body(self):
         self.probe.stop()
         with self.queue._db() as db:
