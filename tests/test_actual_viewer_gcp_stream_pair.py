@@ -69,6 +69,15 @@ class ViewerGcpPair(unittest.TestCase):
   with self.assertRaises(FrameHeld):verify_dataset_count_v2(io.BytesIO(streams[0]),expected_page_hashes=x['sourcePageHashes'],expected_dataset_items=x['sourceCount']+1)
   self.assertEqual(verify_file(io.BytesIO(streams[3]),attempt_id=x['attemptId'],evidence_sha256=x['gcpEvidenceSha256'],file_sha256=x['gcpFileSha256'],page_hashes=x['gcpFilePageHashes'],page_bytes=x['gcpFilePageBytes'],decoded_bytes=x['gcpFileByteCount'])['state'],'held_file_not_authorized')
   self.assertEqual(validate_wire_quota(source_bytes=len(streams[0]),selected_bytes=len(streams[1]),evidence_page_bytes=x['gcpEvidencePageBytes'],file_page_bytes=x['gcpFilePageBytes']),x['totalStreamBytes'])
+  # Reject oversized/nested synthetic trust before any serialization.
+  from unittest.mock import patch
+  for bad_trust in ([rows[0]]*100001, [dict(rows[0], label=['nested'])]):
+   bad=copy.copy(args);bad['trusted_correspondences']=bad_trust
+   with patch('json.dumps',side_effect=AssertionError('unexpected serialization')):
+    with self.assertRaises(SemanticHeld):semantic_inspect(**bad)
+  bad=copy.copy(args);bad['trusted_images']={f'image-{i}':None for i in range(20001)}
+  with patch('json.dumps',side_effect=AssertionError('unexpected serialization')):
+   with self.assertRaises(SemanticHeld):semantic_inspect(**bad)
   for field,value in (('pixelX',4001),('correspondenceId','changed'),('gcpSetId','changed'),('label','changed')):
    bad=copy.deepcopy(args);bad['evidence']['correspondences'][0][field]=value
    bad['evidence_bytes']=json.dumps(bad['evidence'],separators=(',',':')).encode();bad['evidence_sha256']=hashlib.sha256(bad['evidence_bytes']).hexdigest()

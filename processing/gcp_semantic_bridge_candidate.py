@@ -1,6 +1,5 @@
 """Held semantic bridge. Inputs require independent authentication and bounded decoding."""
 import hashlib
-import json
 import math
 from . import reference_protocol as p
 from .gcp_snapshot_semantics_candidate import validate_gcp_semantics
@@ -26,8 +25,34 @@ def inspect(*, attempt_id, evidence, evidence_bytes, evidence_sha256, generated_
   snapshot=evidence['snapshot']; rows=evidence['correspondences']
   # These must come from a separate authoritative loader, never from the
   # request/evidence being checked. The synthetic caller supplies fixtures.
-  if type(trusted_images) is not dict or type(trusted_correspondences) is not list:raise ValueError()
-  if json.dumps(rows,sort_keys=True,separators=(',',':'),allow_nan=False)!=json.dumps(trusted_correspondences,sort_keys=True,separators=(',',':'),allow_nan=False):raise ValueError()
+  # Both independent trust inputs are bounded before traversal or serialization.
+  # Compare scalar values row-by-row with exact types (bool != 1). No large
+  # temporary JSON strings, and no caller-provided nested structures accepted.
+  if (type(trusted_images) is not dict or len(trusted_images)>20000
+      or type(rows) is not list or not 0<len(rows)<=100000
+      or type(trusted_correspondences) is not list or len(trusted_correspondences)!=len(rows)):raise ValueError()
+  fields=('correspondenceId','gcpPointId','gcpSetId','externalId','label','latitude','longitude','elevationM','sourceGcpDatasetFileId','sourceGcpSha256','sourceGcpRelativePath','imageDatasetFileId','imageRelativePath','imageWidth','imageHeight','pixelX','pixelY')
+  trust_bytes=0
+  for left,right in zip(rows,trusted_correspondences):
+   p._closed(left,fields,'evidence row');p._closed(right,fields,'trusted row')
+   for field in fields:
+    a,b=left[field],right[field]
+    if type(a) not in (str,int,float,type(None)) or type(b) is not type(a):raise ValueError()
+    if type(a) is str:
+     n=len(a.encode('utf8'))
+     if n>4096:raise ValueError()
+     trust_bytes+=n
+     if trust_bytes>12*1024*1024:raise ValueError()
+    if type(a) is float and not math.isfinite(a):raise ValueError()
+    if a!=b:raise ValueError()
+  for key,value in trusted_images.items():
+   p._slug(key,'image identity');p._closed(value,('relativePath','width','height'),'trusted image')
+   if type(value['relativePath']) is not str:raise ValueError()
+   n=len(value['relativePath'].encode('utf8'))
+   if n>4096:raise ValueError()
+   trust_bytes+=n
+   if trust_bytes>12*1024*1024:raise ValueError()
+   if any(type(value[k]) is not int or not 0<value[k]<=p.MAX_SAFE_INTEGER for k in ('width','height')):raise ValueError()
   p._closed(snapshot,('snapshotId','byteSize','sha256','sourceGcpDatasetFileIds','imageDatasetFileIds','correspondenceCount'),'snapshot')
   if snapshot['snapshotId']!=attempt_id or type(generated_bytes) is not bytes or not 0<len(generated_bytes)<=16*1024*1024 or type(snapshot['byteSize']) is not int or snapshot['byteSize']!=len(generated_bytes) or hashlib.sha256(generated_bytes).hexdigest()!=snapshot['sha256']:raise ValueError()
   if type(source_records) is not list or not 0<len(source_records)<=20001 or type(selected_records) is not list or not 0<len(selected_records)<=20001:raise ValueError()
