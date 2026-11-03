@@ -24,8 +24,7 @@ It patches the two readiness predicates only in the test, as no real broker or
 source-provenance capability currently exists. Wrong principal/environment,
 attempt, object IDs, mutable reservation budgets and persisted manifest changes
 are rejected. No real job, Viewer runtime, broker route or NAS data was used.
-The current reference driver, request builder and v2 client still do not include
-the Viewer attempt field and cannot use this path without deliberate integration.
+The attempt-bound client candidate below adds the missing Viewer attempt field.
 The JCS optional dependency must be available only in the isolated test setup; no
 runtime image or deployment was changed.
 
@@ -45,5 +44,14 @@ local TLS against the real Viewer c92 source broker code. It checks request repl
 attempt accounting, revocation and rejection of untrusted/wrong-host certificates.
 The broker is a test harness, not an installed Viewer route; credentials, source
 bytes and certificates are synthetic. Actual source activation, network access,
-production authority fencing and cleanup are not enabled or proved. The independently
-configured coordinator authority pin must also be integrated before release.
+production authority fencing and cleanup are not enabled or proved. The candidate
+includes the independently configured coordinator authority pin and requires one
+matching authority header for prepared-v3 routes, including inspection. A database
+clone with the same authority ID and rollback still need external fencing.
+
+The Viewer source-grant and accepted-copy delivery routes remain owner-scoped 503
+holds. The new inspection result is not either route, a grant ACK, actual broker
+authorization, or Viewer custody proof. It does not authenticate the grant bearer
+or enforce revocation/epoch fencing. The existing v2 ledger and this candidate's
+attempt-bearing identity have no automatic migration; ambiguous older state is
+held. The synthetic test patches readiness only within its test process.

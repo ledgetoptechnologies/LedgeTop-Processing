@@ -27,7 +27,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         legacy=dict(capabilityFingerprint=fixture['capabilities']['capabilityFingerprint'],optionsFingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'],allowedOdmOptions=['resolution'],availableEngines=['odm'])
         policy=dict(capabilityFingerprint=legacy['capabilityFingerprint'],optionsFingerprint=legacy['optionsFingerprint'],availableEngines=['odm'],optionDefinitions={'resolution':{'type':'float','domain':{'min':-100,'max':100}}})
         primary='synthetic-jcs-viewer-token-0001';other='synthetic-jcs-other-token-0001';stage='synthetic-jcs-stage-token-0001'
-        def make_api(s):return PreparedSubmissionAPI(s,credentials=[dict(token=primary,principalId='viewer-a',environment='production'),dict(token=other,principalId='viewer-b',environment='production'),dict(token=stage,principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy},expected_authority_id=queue.authority_id)
+        def make_api(s,authority=None):return PreparedSubmissionAPI(s,credentials=[dict(token=primary,principalId='viewer-a',environment='production'),dict(token=other,principalId='viewer-b',environment='production'),dict(token=stage,principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy},expected_authority_id=queue.authority_id if authority is None else authority)
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 raw=self.rfile.read(int(self.headers.get('content-length','0')));r=self.server.api.handle('POST',self.path,self.headers,raw,protected_transport=True)
@@ -36,7 +36,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.api=make_api(store)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         def post(path,value,token=primary):
-            req=Request('http://127.0.0.1:%d%s'%(server.server_port,path),data=json.dumps(value).encode(),headers={'Authorization':'Bearer '+token},method='POST')
+            req=Request('http://127.0.0.1:%d%s'%(server.server_port,path),data=json.dumps(value).encode(),headers={'Authorization':'Bearer '+token,'X-LTDS-Expected-Coordinator-Authority':queue.authority_id},method='POST')
             try:
                 with urlopen(req,timeout=5) as response:return response.status,json.load(response)
             except HTTPError as error:return error.code,json.load(error)
@@ -88,6 +88,15 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                 store.reserve(job['jobId'],transfer,node_id='cluster')
             expected=(200,{'state':'held','reason':'broker_authorization_unverified'})
             self.assertEqual(post(path,{'grant':grant}),expected)
+            body=json.dumps({'grant':grant}).encode();headers={'Authorization':'Bearer '+primary}
+            self.assertEqual(server.api.handle('POST',path,headers,body,protected_transport=True).status,400)
+            headers['X-LTDS-Expected-Coordinator-Authority']=str(uuid.uuid4())
+            self.assertEqual(server.api.handle('POST',path,headers,body,protected_transport=True).status,503)
+            headers['X-LTDS-Expected-Coordinator-Authority']=queue.authority_id
+            headers['x-ltds-expected-coordinator-authority']=queue.authority_id
+            self.assertEqual(server.api.handle('POST',path,headers,body,protected_transport=True).status,400)
+            wrong_pin=str(uuid.uuid4());wrong_api=make_api(store,wrong_pin)
+            self.assertEqual(wrong_api.handle('POST',path,{'Authorization':'Bearer '+primary,'X-LTDS-Expected-Coordinator-Authority':wrong_pin},body,protected_transport=True).status,503)
             self.assertEqual(post(path,{'grant':grant},other)[0],404);self.assertEqual(post(path,{'grant':grant},stage)[0],404)
             self.assertEqual(post(path,{'grant':grant},'invalid')[0],401)
             for field,value in [('viewerAttemptId',str(uuid.uuid4())),('objectIds',['changed']),('byteBudget',transfer['byteBudget']+1)]:
