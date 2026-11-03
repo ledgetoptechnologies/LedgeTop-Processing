@@ -1,4 +1,9 @@
 import io
+import json
+import queue
+import subprocess
+import sys
+import threading
 import sqlite3
 import tempfile
 import unittest
@@ -57,6 +62,50 @@ class FrameReceiverTests(unittest.TestCase):
   self.assertTrue(self.db.in_transaction)
   self.assertEqual(self.db.execute('SELECT value FROM unrelated_work').fetchall(),[('pending',)])
   self.db.rollback()
+ def _child_files(self):
+  root=Path(self.temp.name);f=self.fixture
+  (root/'source.frames').write_bytes(f.source_wire);(root/'selected.frames').write_bytes(f.selected_wire)
+  (root/'context.json').write_text(json.dumps(dict(binding=self.binding,pin=self.pin,closure=f.closure,pages=f.pages),separators=(',',':')),encoding='utf8')
+  return root
+ def test_actual_child_death_before_commit_rolls_back_and_retry_succeeds(self):
+  root=self._child_files()
+  script="""import io,json,sqlite3,sys
+from pathlib import Path
+from processing.paged_frame_receiver_candidate import stage
+r=Path(sys.argv[1]);c=json.loads((r/'context.json').read_text(encoding='utf8'));db=sqlite3.connect(r/'candidate.sqlite',isolation_level=None)
+def pause(kind,index):
+ if kind=='source' and index==2:
+  print('partial-inserted',flush=True);sys.stdin.read(1)
+with (r/'source.frames').open('rb') as source,(r/'selected.frames').open('rb') as selected:
+ stage(db,'test-stage',trusted_binding=c['binding'],expected_binding_sha256=c['pin'],source_stream=source,selected_stream=selected,processing_closure=c['closure'],processing_pages=c['pages'],_fault=pause)
+"""
+  proc=subprocess.Popen([sys.executable,'-c',script,str(root)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  try:
+   messages=queue.Queue();reader=threading.Thread(target=lambda:messages.put(proc.stdout.readline()),daemon=True);reader.start()
+   try:signal=messages.get(timeout=30)
+   except queue.Empty:self.fail('child did not reach partial inserts within 30 seconds')
+   self.assertEqual(signal.strip(),'partial-inserted');self.assertIsNone(proc.poll())
+   proc.kill();proc.wait(timeout=10);self.assertNotEqual(proc.returncode,0)
+   reader.join(timeout=5);self.assertFalse(reader.is_alive())
+  finally:
+   if proc.poll() is None:proc.kill();proc.wait(timeout=10)
+   proc.communicate(timeout=5)
+  self.db.close();self.db=sqlite3.connect(self.path,isolation_level=None);self.addCleanup(self.db.close)
+  self.assertEqual(self.counts(),(0,0));self.assertTrue(self.run_stage()['created'])
+ def test_actual_child_commit_then_lost_response_replays(self):
+  root=self._child_files()
+  script="""import json,os,sqlite3,sys
+from pathlib import Path
+from processing.paged_frame_receiver_candidate import stage
+r=Path(sys.argv[1]);c=json.loads((r/'context.json').read_text(encoding='utf8'));db=sqlite3.connect(r/'candidate.sqlite',isolation_level=None)
+with (r/'source.frames').open('rb') as source,(r/'selected.frames').open('rb') as selected:
+ stage(db,'test-stage',trusted_binding=c['binding'],expected_binding_sha256=c['pin'],source_stream=source,selected_stream=selected,processing_closure=c['closure'],processing_pages=c['pages'])
+os._exit(73)
+"""
+  child=subprocess.run([sys.executable,'-c',script,str(root)],capture_output=True,text=True,timeout=30)
+  self.assertEqual(child.returncode,73,msg=child.stderr)
+  self.db.close();self.db=sqlite3.connect(self.path,isolation_level=None);self.addCleanup(self.db.close)
+  result=self.run_stage(source=b'',selected=b'');self.assertFalse(result['created']);self.assertEqual(result['state'],'held_authenticated_source_unavailable')
  def test_synthetic_disk_full_rolls_back(self):
   def full(kind,index):
    if kind=='source' and index==2:raise sqlite3.OperationalError('synthetic disk full')
