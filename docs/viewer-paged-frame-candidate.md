@@ -24,3 +24,13 @@ A pinned Viewer `referenceProtocol.canonicalBytes` implementation is exercised b
 The proposed trusted binding commits dataset/manifest, principal/environment/authority, Viewer task/attempt, pipeline, revocation epoch, ordered source-page hashes/count, ordered selected-page hashes/count, `inputManifestSha256`, and processing-closure hash. The independently pinned binding digest is SHA-256 over ASCII `ltds-viewer-selected-binding-v1`, NUL, and reference-v1 canonical JSON. These fields and pins must be independently authenticated from a coherent immutable Viewer transaction; neither the hash nor this module provides authentication, actual stream revocation, verified GCP correspondence/content, source-byte verification or custody.
 
 For the input digest, the prototype hashes incrementally the exact JSON.stringify-compatible array bytes with keys inserted in Viewer order `relativePath`, `byteSize`, `sha256`, not sorted canonical JSON. A synthetic 16,832-photo test runs actual Viewer 551 `inputInventory()` and compares its `inputManifestSha256` across Unicode nested paths, excluded dotless-i auto extension, source role selection, old GCP replacement, generated GCP and a LiDAR input. The real Viewer exporter and DB-backed producer remain unimplemented. Selected/source frame reads are bounded per page; processing pages and selection are decoded/retained in memory and their existing separate bounds apply. Output is always `held_authenticated_source_unavailable`.
+
+`test_actual_viewer_large_frames_candidate` also calls `frameStream()` from a
+clean Viewer `4ed7dcd566380c3c0cd7f03a765ee1badf2004d5` source checkout,
+checking the SHA-256 of that module and its two local dependencies. It builds
+16,832 synthetic records with long nested paths, verifies that the actual
+Viewer helper splits a page before 512 items when required by the byte limit,
+and feeds its frames and hashes into the Processing verifier. The producer and
+pins are synthetic and in memory: this is not the DB-backed export, an
+independently authenticated pin, source custody, a live route, or a memory
+qualification for the complete processing system.
