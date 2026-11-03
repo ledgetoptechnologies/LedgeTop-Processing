@@ -27,9 +27,13 @@ class NodeReadiness:
         """Invalidate prior readiness and return a ticket for one local probe."""
         if node_id not in self._nodes:
             raise ValueError('unknown node')
+        now = self._clock()
+        if type(now) not in (int, float) or not math.isfinite(now):
+            self.invalidate(node_id)
+            raise ValueError('invalid readiness clock')
         with self._lock:
             self._epochs[node_id] += 1
-            self._pending[node_id] = self._epochs[node_id]
+            self._pending[node_id] = (self._epochs[node_id], now)
             self._observations.pop(node_id, None)
             return self._epochs[node_id]
 
@@ -37,7 +41,8 @@ class NodeReadiness:
         if node_id not in self._nodes:
             raise ValueError('unknown node')
         with self._lock:
-            if type(ticket) is not int or self._pending.get(node_id) != ticket or ticket < 1:
+            pending = self._pending.get(node_id)
+            if type(ticket) is not int or pending is None or pending[0] != ticket or ticket < 1:
                 raise ValueError('stale readiness probe')
         if (type(report) is not dict or set(report) != {'ready', 'taskQueueCount', 'maxImages',
                                                       'availableScratchBytes', 'outputBudgetBytes'}
@@ -53,10 +58,13 @@ class NodeReadiness:
             self._invalidate_ticket(node_id, ticket)
             raise ValueError('invalid readiness clock')
         with self._lock:
-            if self._pending.get(node_id) != ticket:
+            pending = self._pending.get(node_id)
+            if pending is None or pending[0] != ticket:
                 raise ValueError('stale readiness probe')
             self._pending.pop(node_id)
-            self._observations[node_id] = (now, dict(report))
+            if now < pending[1] or now - pending[1] >= self._ttl:
+                raise ValueError('expired readiness probe')
+            self._observations[node_id] = (pending[1], dict(report))
 
     def _invalidate_ticket(self, node_id, ticket):
         with self._lock:

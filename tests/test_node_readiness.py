@@ -39,6 +39,17 @@ class NodeReadinessTests(unittest.TestCase):
             cache.publish('small', ready, ticket=newer)
         self.assertFalse(cache.get('small')['ready'])
 
+    def test_probe_ttl_starts_before_network_request(self):
+        now = [100.0]
+        cache = NodeReadiness(('small',), ttl_seconds=5, clock=lambda: now[0])
+        report = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                  'availableScratchBytes': 1000, 'outputBudgetBytes': 100}
+        ticket = cache.begin('small')
+        now[0] = 105
+        with self.assertRaises(ValueError):
+            cache.publish('small', report, ticket=ticket)
+        self.assertIsNone(cache.get('small'))
+
 
 if __name__ == '__main__':
     unittest.main()
