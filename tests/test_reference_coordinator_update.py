@@ -150,6 +150,127 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
         self.assertTrue(self.state.get('downgradeRefused'))
 
+    def old_volume(self,*,extra=()):
+        """Live predecessor schema; only the first start runs the real migration."""
+        with self.queue._db() as db:
+            for name in ('reference_viewer_receipts','reference_viewer_transfers','viewer_full_option_evidence'):db.execute('DROP TABLE '+name)
+            for table,column,_statement in module.MIGRATION_COLUMNS:db.execute('ALTER TABLE '+table+' DROP COLUMN '+column)
+        self.state['baseline']=module.volume_census(self.volume,uid=os.geteuid());self.updater.save(self.state)
+        started=[]
+        def migrate(action):
+            if action=='start' and not started:
+                started.append(action);self.migrate()
+                with self.queue._db() as db:
+                    for statement in extra:db.execute(statement)
+        self.transport.hook=migrate
+        return self.state['baseline']
+
+    def migrate(self):
+        ReferenceStore(self.queue);TaskStore(self.queue,self.volume/'viewer-tasks')
+
+    def columns(self,table):
+        with self.queue._db() as db:return {row[1]:list(row) for row in db.execute('PRAGMA table_info('+table+')')}
+
+    def test_pinned_migration_is_exactly_what_the_candidate_creates(self):
+        fresh=module.volume_census(self.volume,uid=os.geteuid())
+        pinned=module.normalized_schema(module.migration_schema())
+        self.assertEqual({row[2] for row in pinned},{'reference_viewer_receipts','reference_viewer_transfers','viewer_full_option_evidence'})
+        self.assertEqual(module.normalized_schema([row for row in fresh['schema'] if row[2] in {row[2] for row in pinned}]),pinned)
+        source=''.join((Path(module.__file__).resolve().parents[1]/'processing'/name).read_text() for name in ('reference_store.py','viewer_tasks.py'))
+        for table,column,statement in module.MIGRATION_COLUMNS:
+            self.assertIn(statement,source)
+            self.assertIn(self.columns(table)[column],fresh['tables'][table]['columns'])
+        for statement in module.MIGRATION_TABLES:
+            self.assertIn(statement.replace('CREATE TABLE ','CREATE TABLE IF NOT EXISTS ',1) if statement.startswith('CREATE') else statement,source)
+        self.assertEqual([column[1:] for column in fresh['tables']['viewer_tasks']['columns'][-2:]],
+            [[ 'full_option_evidence_required','INTEGER',1,'0',0],['node_guarded','INTEGER',1,'0',0]])
+        self.assertEqual(fresh['tables']['reference_jobs']['columns'][-1][1:],['viewer_receipt_required','INTEGER',0,None,0])
+        # Replaying pinned DDL over the live-like old table equals the real migration.
+        before=self.old_volume();self.migrate();after=module.volume_census(self.volume,uid=os.geteuid())
+        for table in ('viewer_tasks','reference_jobs'):
+            original=[row for row in before['schema'] if row[0]=='table' and row[1]==table][0]
+            statements=[statement for name,_column,statement in module.MIGRATION_COLUMNS if name==table]
+            self.assertEqual(module.migrated_table(original,statements),
+                ([row for row in after['schema'] if row[0]=='table' and row[1]==table],after['tables'][table]['columns']))
+        module.compatible(after,before,allow_migration=True)
+        with self.assertRaises(module.Stopped):module.compatible(after,before,allow_owned=True,allow_viewer_additions=True)
+        with self.assertRaises(module.Stopped):module.compatible(before,after,allow_migration=True)
+
+    def test_old_volume_reviewed_migration_completes_and_verifies(self):
+        self.old_volume()
+        self.assertNotIn('node_guarded',self.columns('viewer_tasks'))
+        self.assertEqual(self.activate()['phase'],'completed')
+        self.assertIn('verification',self.state)
+        self.assertTrue({'full_option_evidence_required','node_guarded'}<=set(self.columns('viewer_tasks')))
+        self.assertIn('viewer_receipt_required',self.columns('reference_jobs'))
+        self.assertEqual(self.transport.inspected(module.NAME)['Id'],NEW_ID)
+        self.assertEqual({self.queue.get_node(node)['state'] for node in ('cluster','main')},{'active'})
+
+    def test_old_volume_reviewed_migration_allows_exact_rollback(self):
+        self.old_volume();self.fail_after_start()
+        self.assertIn('node_guarded',self.columns('viewer_tasks'))
+        self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back')
+        restored=self.transport.inspected(module.NAME)
+        self.assertEqual((restored['Id'],restored['Image']),(module.OLD_ID,module.OLD_IMAGE))
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.state['databaseRestored'])
+
+    def test_old_volume_unreviewed_migration_stops_update_and_refuses_rollback(self):
+        self.old_volume(extra=('ALTER TABLE reference_jobs ADD COLUMN unreviewed INTEGER',))
+        with self.assertRaises(module.Stopped):self.activate()
+        self.assertEqual(self.state['phase'],'needs_inspection')
+        calls=len(self.transport.calls)
+        with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
+        self.assertEqual(len(self.transport.calls),calls)
+        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_migration_negative_cases_stop(self):
+        old=self.root/'old-volume-copy'
+        before=self.old_volume();shutil.copytree(self.volume,old)
+        self.migrate();after=module.volume_census(self.volume,uid=os.geteuid())
+        allow=dict(allow_owned=True,allow_viewer_additions=True,allow_migration=True)
+        module.compatible(after,before,**allow)
+        def census(name,statements,base):
+            target=self.root/name;shutil.copytree(base,target)
+            with sqlite3.connect(target/'jobs.sqlite3') as db:
+                for statement in statements:db.execute(statement)
+            db.close()
+            return module.volume_census(target,uid=os.geteuid(),offline=True)
+        pinned=[statement for _table,_column,statement in module.MIGRATION_COLUMNS]
+        real=[*(statement.replace('CREATE TABLE ','CREATE TABLE IF NOT EXISTS ',1) for statement in module.MIGRATION_TABLES)]
+        module.compatible(census('replayed',real+pinned,old),before,**allow)
+        variants={
+            'unreviewed-column':(self.volume,['ALTER TABLE viewer_tasks ADD COLUMN unreviewed INTEGER NOT NULL DEFAULT 0']),
+            'wrong-default':(old,real+[pinned[0],pinned[1].replace('DEFAULT 0','DEFAULT 1'),pinned[2]]),
+            'wrong-null-default':(old,real+pinned[:2]+[pinned[2]+' DEFAULT 0']),
+            'wrong-declaration':(old,real+[pinned[0].replace(' CHECK(full_option_evidence_required IN (0,1))',''),*pinned[1:]]),
+            'wrong-table-ddl':(old,[real[0].replace('receipt_json TEXT NOT NULL','receipt_json TEXT'),*real[1:],*pinned]),
+            'missing-table-column':(old,[*real[:2],real[3],*pinned]),
+        }
+        for name,(base,statements) in variants.items():
+            with self.subTest(case=name):
+                with self.assertRaises(module.Stopped):module.compatible(census(name,statements,base),before,**allow)
+        # The read-only census itself fences rows, so pinned defaults hold without reading values.
+        for name,statement in (('nonempty-table',"INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json) VALUES('synthetic','receipt','{}')"),
+                ('nondefault-value',"INSERT INTO viewer_tasks(uuid,directory,name,options,outputs,environment,node_guarded) VALUES('synthetic','d','n','{}','[]','staging',1)"),
+                ('unpinned-table','CREATE TABLE reference_unreviewed (id TEXT PRIMARY KEY)')):
+            with self.subTest(case=name):
+                with self.assertRaises(AssertionError):census(name,[statement],self.volume)
+        crafted={}
+        crafted['nonempty']=copy.deepcopy(after);crafted['nonempty']['tables']['reference_viewer_receipts']['count']=1
+        crafted['nondefault']=copy.deepcopy(after);crafted['nondefault']['tables']['viewer_tasks'].update(count=1,sha256='0'*64)
+        crafted['unpinned']=copy.deepcopy(after);crafted['unpinned']['tables']['reference_unreviewed']=dict(count=0,sha256=module.digest([]),columns=[])
+        crafted['unpinned']['schema'].append(['table','reference_unreviewed','reference_unreviewed','CREATE TABLE reference_unreviewed (id TEXT)'])
+        for name,value in crafted.items():
+            with self.subTest(case=name):
+                with self.assertRaises(module.Stopped):module.compatible(value,before,**allow)
+        # Additions already in the baseline are no longer additions: exact match only.
+        changed=copy.deepcopy(after)
+        changed['tables']['viewer_tasks']['columns'][-1][4]='1'
+        with self.assertRaises(module.Stopped):module.compatible(changed,after,**allow)
+        with self.assertRaises(module.Stopped):module.compatible(after,before,allow_owned=True,allow_viewer_additions=True)
+
     def make_transport(self):
         owner=self
         class Transport:

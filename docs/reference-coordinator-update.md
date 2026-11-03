@@ -182,9 +182,18 @@ running candidate. A second stopped-volume census fences admissions that arrive
 while shutdown drains. Any new work, private-field change, receipt, unknown
 schema/progress, native metadata, or unverifiable census blocks downgrade.
 
-The only additive schema exception is the exact reviewed empty
-`owned_maintenance_schedules` table and its implicit primary-key index. Nonempty
-rows, extra columns/indexes/triggers, or any other addition are refused. If a
+The additive schema exceptions are the exact reviewed empty
+`owned_maintenance_schedules` table and its implicit primary-key index, and the
+pinned candidate start-up migration (`MIGRATION_TABLES`/`MIGRATION_COLUMNS`):
+empty `reference_viewer_receipts`, `reference_viewer_transfers` and
+`viewer_full_option_evidence`, plus `viewer_tasks.full_option_evidence_required`,
+`viewer_tasks.node_guarded` and `reference_jobs.viewer_receipt_required`. Only
+items absent from the drained baseline count as additions; column DDL is replayed
+in memory over the baseline table DDL and must match exactly, and the census's
+zero-row fence proves the defaults. The predecessor names every INSERT column on
+those tables, so rollback accepts this migration (not the Viewer reservation
+tables). Nonempty rows, extra columns/indexes/triggers, or any other addition
+are refused. If a
 stopped-volume fence fails, the executor may restart only the exact unchanged
 candidate, verify its health and retain nodes fenced. It never starts the old
 binary over incompatible state or restores the snapshot over admitted records.
