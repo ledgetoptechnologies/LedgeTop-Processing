@@ -13,6 +13,8 @@ from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from processing.viewer_paged_frame_candidate import verify, verify_dataset_count_v2, FrameHeld
 from processing.gcp_evidence_stream_candidate import verify as verify_evidence
 from processing.gcp_file_stream_candidate import verify as verify_file
+from processing.held_viewer_snapshot_verifier_candidate import verify_snapshot
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -77,6 +79,18 @@ class ViewerGcpCountContract(unittest.TestCase):
             attempt_id=intent['attemptId'], evidence_sha256=gcp['evidenceSha256'], file_sha256=gcp['fileSha256'],
             page_hashes=gcp['filePageHashes'], page_bytes=gcp['filePageBytes'],
             decoded_bytes=gcp['fileByteCount'])['state'], 'held_file_not_authorized')
+        arguments = dict(intent_bytes=raw, signature=signature, public_key=key,
+            issuer_id='synthetic-issuer', key_id='synthetic-key', dataset_id=intent['datasetId'],
+            task_id=intent['taskId'], attempt_id=intent['attemptId'], source_frames=source,
+            selected_frames=base64.b64decode(result['selectedFrames']),
+            evidence_frames=base64.b64decode(result['evidenceFrames']),
+            file_frames=base64.b64decode(result['fileFrames']))
+        self.assertEqual(verify_snapshot(**arguments)['state'], 'held_snapshot_not_authorized')
+        for mutation in ({'public_key': Ed25519PrivateKey.generate().public_key()},
+                         {'task_id': '00000000-0000-4000-8000-000000000000'},
+                         {'file_frames': arguments['file_frames'][:-1]}):
+            with self.subTest(mutation=list(mutation)), self.assertRaises(ValueError):
+                verify_snapshot(**{**arguments, **mutation})
 
 
 if __name__ == '__main__':
