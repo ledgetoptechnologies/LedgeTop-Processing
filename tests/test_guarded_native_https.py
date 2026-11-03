@@ -9,6 +9,7 @@ import time
 import unittest
 
 from processing.guarded_native_https import create_guarded_https_server
+from processing.guarded_native_client import GuardedNativeClient
 from tests.test_guarded_native_proxy import GuardedNativeProxyTests, TOKEN
 
 
@@ -60,7 +61,13 @@ class GuardedHTTPS(GuardedNativeProxyTests):
         server = self.start_listener()
         self.commit_reply(True)
         self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 200)
-        self.assertEqual(self.request(server, '/v1/upload', {'task': self.job, 'item': self.item})[0], 200)
+        # An authenticated caller cannot use the old path-bearing upload route
+        # to bypass the persistent spool capacity budget.
+        self.assertEqual(self.request(server, '/v1/upload', {'task': self.job, 'item': self.item})[0], 404)
+        self.assertEqual(self.backend.counts()['upload'], 0)
+        context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
+        context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
+        GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10).upload(self.job, self.item)
         self.assertEqual(self.request(server, '/v1/commit', {'task': self.job}), (200, {'uuid': self.job}))
         self.assertEqual(self.backend.counts()['commit'], 1)
         self.assertEqual(self.request(server, '/v1/commit', {'task': self.job})[0], 409)
@@ -75,6 +82,19 @@ class GuardedHTTPS(GuardedNativeProxyTests):
             self.request(server, '/v1/initialize', {'task': self.task}, trust_server=False)
         self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task}, token='wrong')[0], 409)
         self.assertEqual(self.backend.counts()['initialize'], 0)
+
+    def test_stream_cannot_exceed_persistent_aggregate_capacity(self):
+        from processing.viewer_service import EngineUnavailable
+        server = self.start_listener(spool_cap=2)
+        self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 200)
+        context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
+        context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
+        client = GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10)
+        with self.assertRaises(EngineUnavailable): client.upload(self.job, self.item)
+        self.assertTrue(server.wait_drained(5))
+        self.assertEqual(self.backend.counts()['upload'], 0)
+        self.assertEqual(server.spool_budget.inspect()['reservations'], [])
+        self.assertEqual(list(self.spool.glob('incoming-*')), [])
 
     def test_trusted_ca_but_wrong_pinned_identity_is_rejected(self):
         server = self.start_listener(client_fingerprint='0' * 64)
