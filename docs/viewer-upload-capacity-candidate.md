@@ -2,7 +2,9 @@
 
 This candidate is disabled unless an explicitly constructed `ViewerUploadCapacity`
 is passed to `ViewerFacade`; no application configuration or deployment enables
-it. Existing Viewer clients do not supply a total. An opt-in client must send
+it. Its constructor rejects normal use because cross-process spool fencing is
+not implemented; `synthetic_only=True` exists solely for isolated tests.
+Existing Viewer clients do not supply a total. An opt-in client must send
 one `X-LTDS-Declared-Input-Bytes` decimal header on every upload and commit,
 equal to the total bytes of all inputs; a missing or malformed header fails
 before the multipart parser consumes the body. The declaration is authenticated
@@ -25,3 +27,4 @@ worker scratch, cleanup, process restart, current Viewer integration, and
 large-dataset throughput need independent qualification before use. The current
 implementation may conservatively double-charge an in-progress spool. Never
 enable this candidate on a live service.
+The init route may spool up to 64 KiB and is not covered by this upload gate.

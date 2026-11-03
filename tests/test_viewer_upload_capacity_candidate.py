@@ -32,7 +32,9 @@ class UploadCapacityTests(unittest.TestCase):
             try:
                 free = [MAX_UPLOAD_BYTES + 1000]
                 ledger = ScratchLedger(Path(root)/'scratch.sqlite',root,capacity_probe=lambda _:free[0],safety_floor_bytes=100,clock=lambda:1)
-                gate = ViewerUploadCapacity(ledger,store,root)
+                with self.assertRaisesRegex(ValueError,'cross-process'):
+                    ViewerUploadCapacity(ledger,store,root)
+                gate = ViewerUploadCapacity(ledger,store,root,synthetic_only=True)
                 with gate.upload('job1','production',20,10): gate.file('job1','production',20,'a.jpg',10)
                 store.db.execute("INSERT INTO viewer_files VALUES('job1','a.jpg',10)");store.db.commit();free[0]-=10
                 with gate.upload('job1','production',20,10): gate.file('job1','production',20,'a.jpg',10)
@@ -48,9 +50,13 @@ class UploadCapacityTests(unittest.TestCase):
                     with gate.upload('job1','production',20,10): pass
                 # A restart cannot silently drop or enlarge the original hold.
                 reopened = ScratchLedger(Path(root)/'scratch.sqlite',root,capacity_probe=lambda _:free[0],safety_floor_bytes=100,clock=lambda:90000)
-                replacement = ViewerUploadCapacity(reopened,store,root)
+                replacement = ViewerUploadCapacity(reopened,store,root,synthetic_only=True)
                 with self.assertRaises(PolicyConflict):
                     with replacement.upload('job1','production',21,10): pass
                 with reopened._transaction() as db:
                     self.assertEqual(db.execute('SELECT state FROM reservations').fetchone()[0], 'uncertain')
+                for invalid in (float('nan'), -1, True, 1.5):
+                    free[0] = invalid
+                    with self.subTest(free=invalid), self.assertRaises((PolicyConflict, ValueError)):
+                        with gate.upload('job1','production',20,10): pass
             finally: store.db.close()

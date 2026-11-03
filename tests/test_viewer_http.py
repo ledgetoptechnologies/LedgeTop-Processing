@@ -331,7 +331,7 @@ class ViewerHTTPTests(unittest.TestCase):
         self.service.store = store
         ledger = ScratchLedger(Path(self.spool.name)/'ledger.sqlite', self.spool.name,
             capacity_probe=lambda _: MAX_UPLOAD_BYTES+1000, safety_floor_bytes=100, clock=lambda:1)
-        self.facade.upload_capacity = ViewerUploadCapacity(ledger,store,self.spool.name)
+        self.facade.upload_capacity = ViewerUploadCapacity(ledger,store,self.spool.name,synthetic_only=True)
         original = self.service.upload
         def upload(identifier,filename,stream,length):
             result=original(identifier,filename,stream,length)

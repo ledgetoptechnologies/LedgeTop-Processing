@@ -225,6 +225,39 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.capabilities()['ledgetopMaxInputBytes'], self.service.store.max_input_bytes)
         self.assertEqual(self.service.capabilities()['ledgetopMaxUploadRequestBytes'], MAX_UPLOAD_BYTES)
 
+    def test_synthetic_capacity_real_store_and_facade(self):
+        from processing.viewer_http import ViewerFacade
+        from processing.scratch_policy import ScratchLedger
+        from processing.viewer_upload_capacity_candidate import ViewerUploadCapacity
+        from processing.viewer_limits import MAX_UPLOAD_BYTES
+        from tests.test_viewer_http import multipart, BOUNDARY, MemoryHandler
+        identifier=self.initialize()
+        spool=self.root/'capacity-spool';spool.mkdir(mode=0o700)
+        ledger=ScratchLedger(self.root/'capacity.sqlite',self.root,capacity_probe=lambda _:MAX_UPLOAD_BYTES+1000,safety_floor_bytes=100,clock=lambda:1)
+        gate=ViewerUploadCapacity(ledger,self.service.store,spool,synthetic_only=True)
+        facade=ViewerFacade(self.service,'synthetic-production-token',temp_dir=spool,upload_capacity=gate)
+        def request(path,body=b'',declared='6'):
+            handler=MemoryHandler(path+'?token=synthetic-production-token',body,
+                Content_Length=str(len(body)),Content_Type='multipart/form-data; boundary='+BOUNDARY,
+                X_LTDS_Declared_Input_Bytes=declared)
+            self.assertTrue(facade.handle(handler));return handler.status
+        upload='/task/new/upload/'+identifier;commit='/task/new/commit/'+identifier
+        body=multipart([('images','a.jpg',b'123')])
+        self.assertEqual(request(upload,body),200)
+        self.assertEqual(request(upload,body),200)
+        self.assertEqual(self.service.store.task(identifier)['input_bytes'],3)
+        self.assertEqual(request(commit),503)
+        self.assertEqual(request(upload,multipart([('images','b.jpg',b'456')])),200)
+        self.assertEqual(self.service.store.task(identifier)['input_bytes'],6)
+        self.assertEqual(request(commit),200)
+        first=self.service.store.task(identifier)['job_id']
+        # Simulate lost response and a newly constructed gate; exact commit is
+        # read-only recovery, not a new reservation or queue admission.
+        facade.upload_capacity=ViewerUploadCapacity(ledger,self.service.store,spool,synthetic_only=True)
+        self.assertEqual(request(commit),200)
+        self.assertEqual(self.service.store.task(identifier)['job_id'],first)
+        self.assertEqual(request(commit,declared='7'),503)
+
     def test_real_http_batch_over_limit_retains_prior_file_and_retries_safely(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from urllib.error import HTTPError

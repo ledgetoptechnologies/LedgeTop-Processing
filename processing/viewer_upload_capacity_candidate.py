@@ -2,14 +2,17 @@
 import hashlib
 import json
 import os
+import sqlite3
 import threading
 from contextlib import contextmanager
-from .scratch_policy import PolicyConflict, ScratchLedger
+from .scratch_policy import PolicyConflict, ScratchLedger, _integer
 from .viewer_limits import MAX_UPLOAD_BYTES
 
 
 class ViewerUploadCapacity:
-    def __init__(self, ledger, store, spool):
+    def __init__(self, ledger, store, spool, *, synthetic_only=False):
+        if synthetic_only is not True:
+            raise ValueError('held: cross-process spool fencing unavailable')
         if not isinstance(ledger, ScratchLedger):
             raise ValueError('ScratchLedger required')
         self.ledger, self.store = ledger, store
@@ -50,7 +53,11 @@ class ViewerUploadCapacity:
             row = self.ledger._reservation(db, reservation)
             outstanding = db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
             outstanding += db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
-            if row['state'] != 'uncertain' or self.ledger.probe(self.ledger.root) < self.ledger.floor + outstanding:
+            try:
+                free = _integer(self.ledger.probe(self.ledger.root), 'free bytes')
+            except ValueError:
+                raise PolicyConflict('invalid free-space observation') from None
+            if row['state'] != 'uncertain' or free < self.ledger.floor + outstanding:
                 raise PolicyConflict('insufficient unreserved scratch')
         return actual
 
@@ -72,6 +79,36 @@ class ViewerUploadCapacity:
     @contextmanager
     def commit(self, identifier, environment, declared):
         with self._lock:
+            with self.store.queue._db() as db:
+                row = self.store._row(db, identifier)
+                if row['environment'] != environment:
+                    raise PolicyConflict('task unavailable')
+                if row['job_id']:
+                    if row['stage'] == 'cancelled':
+                        raise PolicyConflict('task unavailable')
+                    self.store._job(db, row)
+                    total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',(identifier,)).fetchone()[0]
+                    generation = row['generation']
+                else:
+                    generation = None
+            if generation is not None:
+                if type(declared) is not int or declared != total:
+                    raise PolicyConflict('declaration differs')
+                db = sqlite3.connect(self.ledger.path.absolute().as_uri()+'?mode=ro',uri=True)
+                db.row_factory = sqlite3.Row
+                try:
+                    db.execute('BEGIN'); self.ledger.validate_accounting(db)
+                    record = self.ledger._reservation(db,self._identity(identifier,generation))
+                    settings = json.loads(record['settings'])
+                    manifest = hashlib.sha256(json.dumps([identifier,generation,environment,declared],separators=(',',':')).encode()).hexdigest()
+                    if (record['state'] != 'uncertain' or settings.get('job_id') != identifier
+                            or settings.get('generation') != generation or settings.get('environment') != environment
+                            or settings.get('input_bytes') != declared or settings.get('manifest_sha256') != manifest):
+                        raise PolicyConflict('reservation differs')
+                finally:
+                    db.close()
+                yield
+                return
             if self._check(identifier, environment, declared, 1) != declared:
                 raise PolicyConflict('declared total not yet uploaded')
             yield
