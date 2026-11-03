@@ -360,7 +360,9 @@ os._exit(23)
         old_authority=queue.authority_id
         queue.close()
         import sqlite3
-        with sqlite3.connect(queue.path) as db: db.execute('DELETE FROM coordinator_identity')
+        from contextlib import closing
+        with closing(sqlite3.connect(queue.path)) as db:
+            db.execute('DELETE FROM coordinator_identity');db.commit()
         new_queue=Queue(temp.name);new_queue.allowed_profiles.add(PROFILE);self.addCleanup(new_queue.close)
         self.assertNotEqual(old_authority,new_queue.authority_id)
         new_store=ReferenceStore(new_queue,jcs_runtime_enabled=True)
