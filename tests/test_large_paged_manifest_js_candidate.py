@@ -2,13 +2,36 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 import unittest
 from processing.large_paged_manifest_candidate import build,_digest
 
+def pinned_module(node,module,*,required):
+ if not node or not module:
+  if required:raise RuntimeError('paired mode requires Node and canonicalize 2.1.0')
+  return False
+ if not os.path.isabs(module):raise RuntimeError('canonicalize module path must be absolute')
+ script=r"""const fs=require('node:fs'),p=require('node:path');try{const root=fs.realpathSync(process.argv[1]),meta=JSON.parse(fs.readFileSync(p.join(root,'package.json'),'utf8')),entry=fs.realpathSync(require.resolve(root));if(meta.name!=='canonicalize'||meta.version!=='2.1.0'||!entry.startsWith(root+p.sep))process.exit(2)}catch(e){process.exit(2)}"""
+ try:
+  result=subprocess.run([node,'-e',script,module],capture_output=True,timeout=10)
+ except (OSError,subprocess.TimeoutExpired):raise RuntimeError('canonicalize identity check failed') from None
+ if result.returncode:raise RuntimeError('canonicalize identity check failed')
+ return True
+
 class PagedManifestCrossLanguageTests(unittest.TestCase):
+ def test_missing_and_wrong_version_rejected_in_paired_mode(self):
+  with self.assertRaises(RuntimeError):pinned_module(None,None,required=True)
+  node=shutil.which('node')
+  if not node:self.skipTest('Node unavailable for wrong-version test')
+  with tempfile.TemporaryDirectory(prefix='paged-wrong-version-') as root:
+   with self.assertRaises(RuntimeError):pinned_module(node,str(Path(root,'missing')),required=True)
+   Path(root,'package.json').write_text('{"name":"canonicalize","version":"1.0.0","main":"index.js"}',encoding='utf8')
+   Path(root,'index.js').write_text('module.exports=()=>"";',encoding='utf8')
+   with self.assertRaises(RuntimeError):pinned_module(node,root,required=True)
  def test_node_canonicalize_unicode_escaping_and_page_boundary(self):
   module=os.environ.get('NODE_JCS_MODULE');node=shutil.which('node')
-  if not module or not node:self.skipTest('pinned Node canonicalize module required')
+  if not pinned_module(node,module,required=os.environ.get('PAGED_MANIFEST_PAIRED_REQUIRED')=='1'):self.skipTest('pinned Node canonicalize module required')
   objects=[dict(id=f'i-{i:04}',name=f'photo_{i:04}.jpg',byteSize=1,sha256='a'*64,kind='image',mediaType='image/jpeg') for i in range(513)]
   objects[0]['mediaType']='image/"\u96ea\U0001f600\\test'
   closure,pages=build(objects)

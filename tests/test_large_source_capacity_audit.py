@@ -24,11 +24,12 @@ class LargeSourceCapacityAudit(unittest.TestCase):
    p.validate_submission(self.submission,environment='staging',capability_fingerprint=self.submission['capabilityFingerprint'])
   with self.assertRaisesRegex(ValueError,'JSON node limit'):jcs._parse(wire)
  def test_full_inventory_shape_is_measured_without_claiming_validation(self):
-  records=[dict(objectId=f'img-{i:05}',viewerFileId=f'file-{i:05}',relativePath=f'mapping/flight-01/DJI_{i:05}.JPG',role='image',disposition='include',byteSize=9089354,sha256='a'*64,gcpSubstitution=None,custody='viewer-source') for i in range(16832)]
+  records=[dict(objectId=f'img-{i:05}',viewerFileId=f'file-{i:05}',relativePath=f'clients/synthetic-site/surveys/2026-11-03/mapping/flight-{i%50:02}/raw/primary-camera/DJI_{i:05}.JPG',role='image',disposition='include',byteSize=9089354,sha256='a'*64,gcpSubstitution=None,custody='viewer-source') for i in range(16832)]
+  records.append(dict(objectId='gcp-generated',viewerFileId='gcp-file',relativePath='clients/synthetic-site/surveys/2026-11-03/control/generated/gcp-list.txt',role='gcp',disposition='substitute',byteSize=4096,sha256='b'*64,custody='viewer-derived',gcpSubstitution=dict(originalFileId='control-original',generatedFileId='gcp-file',sourceCrs='EPSG:4326',targetCrs='EPSG:32616',markerIds=[f'control-{i:03}' for i in range(24)])))
   page_bytes=[len(p.canonical_json({'index':i//512,'objects':records[i:i+512]})) for i in range(0,len(records),512)]
   self.assertEqual(len(page_bytes),33)
   self.assertLess(max(page_bytes),256*1024);self.assertLess(sum(page_bytes),8*1024*1024)
-  self.assertEqual(len({row['objectId'] for row in records}),16832)
+  self.assertEqual(len({row['objectId'] for row in records}),16833)
  def test_builder_estimates_ranges_and_retry_budgets_but_does_not_admit(self):
   m=self.submission['manifest']
   job={'submission':self.submission,'manifestSha256':m['sha256'],'environment':'staging','generation':1}
