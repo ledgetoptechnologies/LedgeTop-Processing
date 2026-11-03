@@ -276,8 +276,14 @@ class NodeGate:
         self._save(state)
         return reservation
 
+    @staticmethod
+    def _journal_blocks_lifecycle(state):
+        if "hostMutationJournal" in state:
+            raise GateError("host mutation journal requires reconciliation; lifecycle blocked")
+
     def prepare_completion(self, receipt_id, payload):
         state, reservation = self._reservation(receipt_id)
+        self._journal_blocks_lifecycle(state)
         if reservation['job'] is None:
             raise GateError('completion requires a bound job')
         digest = _digest(payload)
@@ -288,6 +294,7 @@ class NodeGate:
 
     def acknowledge(self, receipt_id, job_ack):
         state = self.snapshot()
+        self._journal_blocks_lifecycle(state)
         identity, digest = self._job(state, job_ack), _digest(job_ack)
         tombstone = {'receiptId': receipt_id, 'job': identity, 'completionDigest': digest,
                      'generation': state['generation'], 'kind': 'completion'}
@@ -303,6 +310,7 @@ class NodeGate:
 
     def release_empty(self, receipt_id, response):
         state = self.snapshot()
+        self._journal_blocks_lifecycle(state)
         tombstone = {'receiptId': receipt_id, 'generation': state['generation'], 'kind': 'empty'}
         if (state['reservation'] is None and state.get('lastAcknowledgment') == tombstone
                 and response == {'job': None}):
@@ -324,6 +332,7 @@ class NodeGate:
         The new generation fences stale worker invocations after recovery.
         """
         state, reservation = self._reservation(receipt_id)
+        self._journal_blocks_lifecycle(state)
         self._generation(state, expected_generation)
         if (old_worker_stopped is not True or coordinator_resolved is not True
                 or not isinstance(note, str) or not 1 <= len(note) <= 256):

@@ -130,7 +130,7 @@ def volume_census(root, *, uid=10001, offline=False):
     Job/receipt contents never leave this function. Only the two system node
     rows are retained privately to prove exact operation-owned CAS transitions.
     """
-    import hashlib, json, os, sqlite3, stat
+    import hashlib, json, os, re, sqlite3, stat
     from pathlib import Path
     root = Path(root)
     root_info = root.lstat()
@@ -142,7 +142,7 @@ def volume_census(root, *, uid=10001, offline=False):
 
     def sha(value):
         return hashlib.sha256(encode(value)).hexdigest()
-    allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers'}
+    allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers', 'viewer_reservations', 'viewer_option_evidence'}
     files = []
     for path in sorted(root.rglob('*')):
         relative = path.relative_to(root).as_posix()
@@ -189,6 +189,23 @@ def volume_census(root, *, uid=10001, offline=False):
         names = {row[1] for row in objects if row[0] == 'table'}
         if not (not names - allowed and {'jobs', 'coordinator_identity', 'nodes', 'reference_jobs', 'viewer_tasks'} <= names):
             raise AssertionError()
+        viewer_extra = {'viewer_reservations', 'viewer_option_evidence'}
+        if names & viewer_extra:
+            if not viewer_extra <= names:
+                raise AssertionError('partial Viewer schema')
+            expected = {
+                'viewer_reservations': "CREATE TABLE viewer_reservations ( uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))",
+                'viewer_option_evidence': "CREATE TABLE viewer_option_evidence ( uuid TEXT NOT NULL, generation INTEGER NOT NULL, definitions TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(uuid,generation))",
+            }
+            for name in viewer_extra:
+                entries = [row for row in objects if row[2] == name]
+                table = [row for row in entries if row[0] == 'table']
+                indexes = [row for row in entries if row[0] == 'index']
+                if (len(table) != 1 or not isinstance(table[0][3], str)
+                        or re.sub(r'\s+', ' ', table[0][3]).strip() != expected[name]
+                        or indexes != [['index', 'sqlite_autoindex_' + name + '_1', name, None]]
+                        or len(entries) != 2):
+                    raise AssertionError('unreviewed Viewer schema')
         if not not any((row[0] in ('trigger', 'view') for row in objects)):
             raise AssertionError()
         if not all((row[0] != 'index' or row[1].startswith('sqlite_autoindex_') or row[1] == 'viewer_engine_uuid' for row in objects)):
@@ -228,16 +245,39 @@ def owned_schema():
         return [list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
     finally:db.close()
 
+def viewer_extra_schema():
+    """Exact empty additive tables accepted for the reviewed Viewer upgrade."""
+    import sqlite3
+    db=sqlite3.connect(':memory:')
+    try:
+        db.execute("CREATE TABLE viewer_reservations ( uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))")
+        db.execute("CREATE TABLE viewer_option_evidence ( uuid TEXT NOT NULL, generation INTEGER NOT NULL, definitions TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(uuid,generation))")
+        return [list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
+    finally:db.close()
+
 
 def normalized_schema(rows):
     return [[*row[:3],re.sub(r'\s+',' ',row[3]).strip() if row[3] is not None else None] for row in rows]
 
 
-def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False):
-    """Only one reviewed empty additive table can cross the old-binary fence."""
+def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False):
+    """Compare complete censuses; allow exact empty additions only explicitly.
+
+    Viewer additions are permitted for candidate verification, not the offline
+    rollback gate: an older binary's behavior on that schema is unqualified.
+    """
     a,b=json.loads(canonical(observed)),json.loads(canonical(baseline))
     for value in (a,b):
         if value['authorityId']!=AUTHORITY or value['sqliteQuickCheck']!='ok':raise Stopped('census_authority_or_integrity_changed')
+    extra={'viewer_reservations','viewer_option_evidence'}
+    added=extra & set(a['tables']);prior=extra & set(b['tables'])
+    if allow_viewer_additions and not prior and added:
+        additions=[row for row in a['schema'] if row[2] in extra]
+        if (added!=extra or normalized_schema(additions)!=normalized_schema(viewer_extra_schema())
+                or any(a['tables'][name]['count']!=0 for name in extra)):
+            raise Stopped('unreviewed_viewer_schema_or_rows')
+        a['schema']=[row for row in a['schema'] if row[2] not in extra]
+        for name in extra:a['tables'].pop(name)
     if allow_owned and 'owned_maintenance_schedules' not in b['tables'] and 'owned_maintenance_schedules' in a['tables']:
         additions=[row for row in a['schema'] if row[2]=='owned_maintenance_schedules']
         if (normalized_schema(additions)!=normalized_schema(owned_schema())
@@ -534,7 +574,7 @@ class ReferenceCoordinatorUpdate:
                 self.activity(state,api)
                 observed=self.census(state,container=state.get('newContainerId') or OLD_ID)
                 self.node_census(state,observed)
-                compatible(observed,state['drained'],allow_owned=True)
+                compatible(observed,state['drained'],allow_owned=True,allow_viewer_additions=True)
             current=api.json('GET','/v1/prototype/nodes/'+identifier)['node']
             if current['planId']!=plan['planId'] or current['targetImage']!=state['engineImages'][identifier]:raise Stopped('cannot_reopen_peer_plan')
             intent=plan.get('cancelIntent')
@@ -600,7 +640,7 @@ class ReferenceCoordinatorUpdate:
                 self.save(state,'started',replacementStarted=True)
                 self.t.health(api,container_id=identifier);self.t.sole_owner(identifier)
                 self.check(state,gates);self.activity(state,api);self.plans(state,api)
-                compatible(self.census(state,container=identifier),drained,allow_owned=True)
+                compatible(self.census(state,container=identifier),drained,allow_owned=True,allow_viewer_additions=True)
                 verified=self.t.verify_reference();verified.update(owned_api_probe(operator))
                 self.save(state,'verified',verification=verified)
                 self.reopen(state,gates,api,operator)
@@ -651,7 +691,7 @@ class ReferenceCoordinatorUpdate:
                 return self.finish_rollback(state,gates)
             if item is not None and item['State']['Running']:
                 _env,api,_operator=self.t.local_clients();self.activity(state,api)
-                compatible(self.census(state,container=item['Id']),state['drained'],allow_owned=True)
+                compatible(self.census(state,container=item['Id']),state['drained'],allow_owned=True,allow_viewer_additions=True)
                 self.save(state,'rollback_stop_pending')
                 self.mutation(state,gates,'stop','--time','-1',item['Id'],timeout=60)
                 if self.t.inspected(item['Id'])['State']['Running']:raise Stopped('candidate_not_confirmed_stopped')

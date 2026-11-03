@@ -1,6 +1,8 @@
 """Real HTTP and byte-boundary tests for the native Viewer transport."""
 
 import io
+import hashlib
+import http.client
 import json
 from pathlib import Path
 from email.message import Message
@@ -15,6 +17,7 @@ from urllib.request import Request, urlopen
 
 from processing.maintenance import Conflict
 from processing.viewer_http import ViewerFacade, CHUNK, MAX_FORM_BYTES
+from processing.viewer_tasks import InputLimitExceeded
 
 
 TOKEN = 'native-viewer-test-token-1234567890123456'
@@ -72,6 +75,10 @@ class Service:
         self.uploads.setdefault(identifier, {})[filename] = bytes(data)
         self.tasks[identifier]['imagesCount'] += 1
         return {'success': True}
+
+    def upload_batch(self, identifier):
+        from contextlib import nullcontext
+        return nullcontext()
 
     def commit(self, identifier):
         self.info(identifier)
@@ -164,6 +171,60 @@ class ViewerHTTPTests(unittest.TestCase):
             ('outputs', None, b'["all.zip"]')]), token=token,
             headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY, 'set-uuid': IDENTIFIER})
 
+    def test_archive_digest_header_requires_verified_stream_and_matches_response(self):
+        self.service.tasks[IDENTIFIER] = {'uuid': IDENTIFIER, 'status': {'code': 40}}
+        original = self.service.download
+        def verified(identifier):
+            stream, length = original(identifier)
+            stream.ledgetop_archive_sha256 = hashlib.sha256(self.service.result).hexdigest()
+            return stream, length
+        with patch.object(self.service, 'download', side_effect=verified):
+            handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+            self.facade.handle(handler)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.response_headers['X-LedgeTop-Archive-SHA256'],
+                         hashlib.sha256(handler.wfile.getvalue()).hexdigest())
+        self.assertEqual(handler.wfile.getvalue(), self.service.result)
+
+        handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+        self.facade.handle(handler)
+        self.assertNotIn('X-LedgeTop-Archive-SHA256', handler.response_headers)
+
+    def test_real_http_digest_header_and_truncated_mismatch(self):
+        self.service.tasks[IDENTIFIER] = {'uuid': IDENTIFIER, 'status': {'code': 40}}
+        original = self.service.download
+        def stream_with_digest(digest):
+            def send(identifier):
+                stream, length = original(identifier)
+                stream.ledgetop_archive_sha256 = digest
+                return stream, length
+            return send
+        url = self.origin + '/task/' + IDENTIFIER + '/download/all.zip?' + urlencode({'token': TOKEN})
+        expected = hashlib.sha256(self.service.result).hexdigest()
+        with patch.object(self.service, 'download', side_effect=stream_with_digest(expected)):
+            with urlopen(url, timeout=4) as response:
+                body = response.read()
+                self.assertEqual(response.headers['X-LedgeTop-Archive-SHA256'], expected)
+                self.assertEqual(hashlib.sha256(body).hexdigest(), expected)
+        with patch.object(self.service, 'download', side_effect=stream_with_digest('0' * 64)):
+            with urlopen(url, timeout=4) as response:
+                self.assertEqual(response.headers['X-LedgeTop-Archive-SHA256'], '0' * 64)
+                with self.assertRaises(http.client.IncompleteRead):
+                    response.read()
+
+    def test_digest_mismatch_withholds_final_chunk_and_closes(self):
+        self.service.tasks[IDENTIFIER] = {'uuid': IDENTIFIER, 'status': {'code': 40}}
+        def changed(identifier):
+            stream = BoundedStream(self.service.result)
+            stream.ledgetop_archive_sha256 = hashlib.sha256(b'different').hexdigest()
+            return stream, len(self.service.result)
+        with patch.object(self.service, 'download', side_effect=changed):
+            handler = MemoryHandler('/task/' + IDENTIFIER + '/download/all.zip?token=' + TOKEN, method='GET')
+            self.facade.handle(handler)
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(handler.close_connection)
+        self.assertLess(len(handler.wfile.getvalue()), len(self.service.result))
+
     def test_native_lifecycle_and_streamed_download(self):
         self.assertEqual(self.request('/info')[1]['engine'], 'ledgetop-processing')
         self.assertEqual(self.request('/options')[1][0]['name'], 'pc-ept')
@@ -181,6 +242,16 @@ class ViewerHTTPTests(unittest.TestCase):
         for action in ('cancel', 'remove'):
             self.assertEqual(self.request('/task/' + action, urlencode({'uuid': IDENTIFIER}).encode(),
                 headers={'Content-Type': 'application/x-www-form-urlencoded'})[1], {'success': True})
+
+    def test_input_ceiling_has_a_stable_sanitized_http_error(self):
+        self.initialize()
+        with patch.object(self.service, 'upload', side_effect=InputLimitExceeded('private detail')):
+            with self.assertRaises(HTTPError) as caught:
+                self.request('/task/new/upload/' + IDENTIFIER,
+                             multipart([('images', 'photo.jpg', b'123')]),
+                             headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY})
+        self.assertEqual(caught.exception.code, 413)
+        self.assertEqual(json.load(caught.exception), {'error': 'task_input_limit_exceeded'})
 
     def test_twenty_binary_files_preserve_false_and_cross_chunk_boundaries(self):
         self.initialize()
@@ -281,6 +352,7 @@ class ViewerHTTPTests(unittest.TestCase):
         with patch('processing.viewer_http.MAX_UPLOAD_BYTES', 4):
             handler = self.memory('/task/new/upload/' + IDENTIFIER, b'12345')
             self.assertEqual(handler.status, 413)
+            self.assertEqual(json.loads(handler.wfile.getvalue()), {'error': 'body_too_large'})
         handler = MemoryHandler('/v1/prototype/jobs', method='GET')
         self.assertFalse(self.facade.handle(handler))
         handler = MemoryHandler('/info?token=' + TOKEN, method='DELETE')

@@ -6,9 +6,14 @@ is `ledgetop-processing`, not an official ClusterODM build. Dynamic `/options`
 is the fresh exact-definition intersection of configured engines. Engine updates
 must not silently introduce options unsupported by the other node.
 
-Small jobs, at most 1,000 photos and the configured local byte ceiling, use
-cluster first. If cluster is busy/unavailable/draining, they wait for cluster.
-Larger jobs wait for main; they never overflow to cluster. There is one running
+Viewer photo jobs with at most 1,000 photos prefer cluster regardless of input
+bytes. If cluster is busy/unavailable/draining, they wait for cluster. Jobs with
+more photos wait for main; they never overflow to cluster. The independent Viewer
+upload admission cap still applies. This does not change the separate v1
+reference pipeline, which currently retains its local input-byte routing limit.
+The `/v1/plan` routing probe follows the same photo-count preference as Viewer.
+Viewer has no free-space reservation check; qualify one before raising its upload
+cap. There is one running
 or held job globally, production before staging and FIFO within each class.
 Running staging is allowed to finish when production arrives.
 
@@ -32,7 +37,24 @@ remain able to bypass host software controls. Legacy ClusterODX is retained stop
 
 Use the cluster's single existing coordinator and state volume. Never start a
 second real dispatcher for staging. `compose.viewer.yaml` requires explicit
-existing volume, immutable image, private runtime env path and LAN bind address.
+existing volume, immutable image, private runtime env path, LAN bind address,
+and `PROCESSING_AUTHORITY_LEASE_HOST_DIR`: the absolute path of an existing
+directory writable by container UID/GID 10001. The Compose file mounts this
+directory at `/run/ledgetop-authority-lease` and sets
+`PROCESSING_AUTHORITY_LEASE_DIR` to that path, overriding the runtime env value.
+Compose will not create a missing host directory. The state must already contain
+its coordinator authority; the lease is not a fresh-state initialization path.
+Compose resolves a relative source against its project directory; it does not
+enforce an absolute value, so the operator must provide and verify an absolute
+path to avoid accidentally selecting a different lease directory.
+
+Every lease-aware coordinator that could run the same authority must use the
+same underlying lease files and a filesystem whose `flock` locks are effective
+between those processes. Equal directory names on different PCs do not provide
+a shared lock. Do not assume a network filesystem supplies the required lock
+semantics without independently qualifying it. This is not a high-availability
+or distributed-fencing setup: older software that ignores the lease, a different
+lease directory, and privileged writers remain outside its protection.
 The native facade is opt-in through `PROCESSING_VIEWER_ENABLED=1`.
 
 Viewer registration uses an exact origin with no path or query. Add the origin
@@ -116,3 +138,56 @@ dataset or production Viewer storage was used. This remains transport/workflow
 evidence for the actual adapter and synthetic coordinator only; it does not
 validate real photogrammetry or Viewer result ingestion. See
 [November 1 synthetic adapter evidence](evidence/viewer-contract-smoke-20261101.json).
+
+## Optional archive identity
+
+For a receipt-backed verified archive, the download response may include
+X-LedgeTop-Archive-SHA256 containing 64 lowercase hexadecimal characters.
+The value identifies the full ZIP response body, not a Viewer acceptance or
+custody receipt. Existing archives without a coordinator verification receipt
+omit the header. Clients must require the full declared Content-Length and
+compare the digest before trusting the body. If the bytes change during
+streaming, the coordinator closes a truncated response before its final chunk;
+the 200 status and headers may already have been sent. TLS and client
+authentication remain separate. This adds a complete streaming hash pass in
+addition to the existing archive pre-verification and may cost substantial I/O
+for large results. It does not authorize deleting inputs or results.
+
+### Reservation-enabled initialization replay scope
+
+For this coordinator's reservation extension, an identical initialization
+using the same UUID, reservation capability, environment, name, options and
+outputs returns the existing task identity. Different settings conflict, a
+wrong capability is hidden as not found, and a cancelled reservation cannot be
+initialized again. This behavior is specific to the coordinator extension and
+must not be assumed for ordinary NodeODM providers.
+
+For an already committed reservation-bound initialization, the service checks
+the exact stored request and durable task/evidence state before consulting the
+live option catalog. An identical replay can therefore succeed during a catalog
+outage or after a catalog change. New tasks and unreserved legacy requests still
+require live validation; an overlapping request that arrives before the first
+commit may still fail catalog validation. The pending-drain 503 test applies to a close announced before reading the initialization body;
+an arbitrary 503 or disconnected client does not prove no mutation committed.
+Reconcile the reserved task identity before deciding what to do next. An
+initialization failure after directory creation can leave a private orphan;
+a retry chooses a separate directory rather than adopting or deleting it.
+Tests cover rollback, client disconnect and abrupt process exit immediately after
+directory creation. They do not prove power-loss atomicity or every crash point.
+The replay check verifies the task directory exists, any referenced job exists,
+and recorded option evidence is structurally consistent when evidence is
+required. It does not rehash input or result files or establish their custody.
+Older records with `option_evidence_required=0` have no option evidence to
+check. The outage and changed-catalog test cases inject errors at the catalog
+boundary; they do not prove recovery from every network failure.
+
+Archive intent and receipt markers are published from synced, uniquely named
+private temporary files without overwriting existing markers. If a process exits
+after linking a valid task-bound marker but before removing its matching staging
+link, a later download can finish that unlink after identity checks. A crash
+before publication can leave a staging-only orphan; this change does not delete
+it automatically. Foreign or invalid markers and unrelated hardlinks remain
+held for inspection. These checks do not establish Viewer ingestion, provide an
+acknowledgement, or prove power-loss behavior at every filesystem boundary.
+Concurrent recovery tests exercise threads in one coordinator service, whose
+per-task lock serializes them. They do not establish multi-process exclusion.

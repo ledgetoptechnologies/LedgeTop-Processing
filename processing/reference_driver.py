@@ -25,7 +25,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
-from .reference_transfer import BrokerClient, validate_grant
+from .reference_transfer import BrokerClient, TransferResponseUnavailable, validate_grant
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
@@ -640,6 +640,12 @@ class ReferenceDriver:
                 except Exception:
                     pass
                 return {'state': 'failure_delivering', 'jobId': job_id}
+        # claim_next is global to the outbox. A successful attempt may have
+        # acknowledged a different job; only this exact job can release its
+        # physical gate or advance its driver state.
+        completion = self.failure_outbox.get(data['failureOutboxId'])
+        if completion['state'] != 'acknowledged':
+            return {'state': 'failure_delivering', 'jobId': job_id}
         if tree:
             adapter.acknowledge_delivery(job_id)
             self._save(job_id, 'awaiting_failure_acceptance', data)
@@ -748,8 +754,7 @@ class ReferenceDriver:
         if stage == 'fetching':
             grant = validate_grant(data['grant'], job=claim, clock=self.clock)
             reservation = data['reservation']['reservationId']
-            directory = self.ledger.root / 'jobs' / reservation
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory = self.ledger.ensure_job_directory(reservation)
             paths = dict(data.get('inputPaths', {}))
             for obj in claim['submission']['manifest']['objects']:
                 if obj['id'] in paths:
@@ -765,7 +770,12 @@ class ReferenceDriver:
                         raise DriverHeld('worker_fetch_attempt_budget_exhausted')
                     data['fetchAttempts'][obj['id']] = attempts + 1
                     self._save(job_id, stage, data)
-                    self.broker.download_object(grant, obj['id'], target)
+                    try:
+                        self.broker.download_object(grant, obj['id'], target)
+                    except TransferResponseUnavailable:
+                        # Attempt and budget remain consumed/uncertain; retain the
+                        # existing cap and grant semantics. No automatic renewal.
+                        raise DriverWait('broker_response_unavailable') from None
                 paths[obj['id']] = relative
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
@@ -847,6 +857,11 @@ class ReferenceDriver:
                 sent = self.sender.send_next()
                 if sent['state'] != 'acknowledged':
                     return {'state': 'delivering', 'jobId': job_id, 'deliveryState': sent['state']}
+            # A shared sender can acknowledge another retained result first.
+            # Never treat that as this job's coordinator receipt.
+            completion = self.outbox.get(data['outboxId'])
+            if completion['state'] != 'acknowledged':
+                return {'state': 'delivering', 'jobId': job_id, 'deliveryState': 'other_acknowledged'}
             if self._kind(job_id) == 'treedar':
                 adapter.acknowledge_delivery(job_id)
                 self._save(job_id, 'awaiting_acceptance', data)

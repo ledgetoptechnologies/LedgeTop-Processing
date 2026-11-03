@@ -1,4 +1,5 @@
 import copy
+import base64
 from dataclasses import replace
 import json
 import http.client
@@ -119,6 +120,37 @@ class ReferenceRuntimeTests(unittest.TestCase):
             for node in self.config.prototype_node_ids}
         return value
 
+    def test_staged_ack_config_requires_disjoint_canonical_scoped_secret(self):
+        self.value['schemaVersion']=3
+        token=base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')
+        self.value['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':token}];self.write_config()
+        self.assertEqual(self.settings().staged_ack_bearers,{token:{'environment':'staging','principalId':'viewer-a'}})
+        combined=self.recovery_config();combined['schemaVersion']=3;combined['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':token}]
+        previous=self.value;self.value=combined;self.write_config()
+        self.assertIsNotNone(self.settings().recovery_bindings)
+        self.value=previous
+        self.value['stagedAckPrincipals']=[{'environment':'production','principalId':'viewer-a','bearer':token}];self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
+        self.value['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':self.value['workers']['cluster']['bearer']}];self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
+
+    def test_staged_ack_runtime_requires_same_native_authority(self):
+        from processing.viewer_service import ViewerService
+        queue=Queue(self.config.prototype_state_dir,node_ids=self.config.prototype_node_ids,
+                    treedar_node_ids=('main',),viewer_enabled=True,reference_enabled=True)
+        self.addCleanup(queue.close)
+        service=ViewerService(queue,self.config);self.addCleanup(service.close)
+        self.value['schemaVersion']=3
+        self.value['stagedAckPrincipals']=[{'environment':'staging','principalId':'viewer-a','bearer':base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')}];self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.runtime(queue)
+        with self.assertRaises(RuntimeConfigurationError):self.runtime(queue,viewer_service=service)
+        with patch('processing.reference_runtime.STAGED_ACK_SCHEMA_QUALIFIED',True):
+            with self.assertRaises(RuntimeConfigurationError):self.runtime(queue,viewer_service=service)
+            from processing.viewer_staged_ack_schema import initialize_staged_ack_schema
+            initialize_staged_ack_schema(queue)
+            runtime=self.runtime(queue,viewer_service=service)
+        self.assertIsNotNone(runtime.api.staged_ack)
+
     def test_schema2_loads_closed_frozen_bindings_and_legacy_settings_default_is_none(self):
         legacy=self.settings();self.assertIsNone(legacy.recovery_bindings)
         self.assertIsNone(ReferenceSettings(legacy.listener,legacy.viewer_bearers,legacy.workers,legacy.stream_budget).recovery_bindings)
@@ -168,6 +200,27 @@ class ReferenceRuntimeTests(unittest.TestCase):
         runtime = self.runtime(queue)
         self.assertIsNotNone(runtime._viewer_transfer_worker)
         self.assertIsNone(runtime._viewer_transfer_thread)
+
+    def test_schema5_combines_receipt_pins_targets_and_scoped_staged_ack(self):
+        signer = SyntheticViewerSigner()
+        secret_path = self.root / 'viewer-service-key.txt'
+        secret_path.write_text('synthetic-viewer-service-key-material')
+        if os.name != 'nt': secret_path.chmod(0o600)
+        token = base64.urlsafe_b64encode(b'z' * 32).decode().rstrip('=')
+        self.value.update(schemaVersion=5, viewerReceiptKeys=signer.trusted_keys,
+            viewerAcceptance={'production': {'origin': 'https://viewer.example',
+                'keyId': 'viewer-service-v1', 'secretFile': str(secret_path)}},
+            stagedAckPrincipals=[{'environment': 'staging', 'principalId': 'viewer-a', 'bearer': token}])
+        self.write_config()
+        loaded = self.settings()
+        self.assertEqual(loaded.viewer_receipt_keys, signer.trusted_keys)
+        self.assertEqual(loaded.staged_ack_bearers[token]['environment'], 'staging')
+        self.assertIn('production', loaded.viewer_acceptance_targets)
+        # Version 3 shapes are disjoint and cannot silently enable both contracts.
+        self.value['schemaVersion'] = 3
+        self.value.pop('viewerAcceptance')
+        self.write_config()
+        with self.assertRaises(RuntimeConfigurationError): self.settings()
 
     def test_schema4_rejects_untrusted_or_incomplete_viewer_targets(self):
         signer = SyntheticViewerSigner()
@@ -315,6 +368,34 @@ class ReferenceRuntimeTests(unittest.TestCase):
         runtime.store.claim(response.body["jobId"], node_id="cluster", worker_id="worker-cluster",
             worker_instance_id="instance-cluster", claim_request_id="reference-claim")
         self.assertIsNone(handler.prototype_queue.claim({"workerId": "legacy", "profiles": [VIEWER_PROFILE]}))
+        runtime.close()
+
+    def test_shared_admission_drain_blocks_real_reference_submission(self):
+        config = replace(self.config, reference_config_path=str(self.path), admission_drain_enabled=True)
+        first, second = self.tls_patches()
+        with first, second: handler = make_handler(config)
+        self.addCleanup(handler.prototype_queue.close)
+        self.addCleanup(handler.viewer_service.close)
+        runtime = handler.reference_listener
+        runtime.api.discover = lambda: self.snapshot
+        headers = {'Authorization': 'Bearer ' + self.value['viewerBearers']['staging']}
+        caps = runtime.api.handle('GET', '/ltds/v1/capabilities', headers, protected_transport=True)
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
+        fixture['capabilityFingerprint'] = caps.body['capabilityFingerprint']
+        fixture['pipeline']['odm']['optionsFingerprint'] = caps.body['engines']['odm']['optionsFingerprint']
+        handler.prototype_queue.admission_drain.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=False,expected_authority=handler.prototype_queue.authority_id)
+        response = runtime.api.handle('POST','/ltds/v1/jobs',headers,json.dumps(fixture).encode(),protected_transport=True)
+        self.assertEqual(response.status, 503)
+        self.assertEqual(handler.prototype_queue.list(), [])
+        handler.prototype_queue.admission_drain.set_closed(False,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=True,expected_authority=handler.prototype_queue.authority_id)
+        response = runtime.api.handle('POST','/ltds/v1/jobs',headers,json.dumps(fixture).encode(),protected_transport=True)
+        self.assertEqual(response.status, 201)
+        job_id = response.body['jobId']
+        claim = dict(node_id='cluster',worker_id='worker-cluster',worker_instance_id='instance-cluster',claim_request_id='synthetic-claim')
+        handler.prototype_queue.admission_drain.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=False,expected_authority=handler.prototype_queue.authority_id)
+        self.assertIsNone(runtime.store.claim(job_id, **claim))
+        handler.prototype_queue.admission_drain.set_closed(False,request_id=str(uuid.uuid4()),expected_generation=handler.prototype_queue.admission_drain.status()['generation'],expected_closed=True,expected_authority=handler.prototype_queue.authority_id)
+        self.assertIsNotNone(runtime.store.claim(job_id, **claim))
         runtime.close()
 
     def test_actual_catalog_changes_fingerprints_and_stale_admission_is_rejected(self):
@@ -599,6 +680,9 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 self._stop.set()
                 self._thread.join(timeout=0.01)
                 closed.set()
+
+            def wait_for_transfers(self):
+                pass  # This fixture owns no transfer workers.
 
         handler.viewer_service = Dispatcher()
         native = ThreadingHTTPServer(('127.0.0.1', 0), handler)

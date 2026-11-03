@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from processing import reference_protocol as p
@@ -100,6 +101,39 @@ class ReferenceAPITests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body, self.fixture["capabilities"])
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_pending_and_closed_drain_allow_only_exact_existing_claim_replay(self):
+        from processing.admission_drain import AdmissionDrain
+        self.queue.admission_drain=AdmissionDrain(self.queue)
+        job=self.submit(); binding=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_request_id='claim-1')
+        original=self.store.claim(job['jobId'],**binding)
+        gate=self.queue.admission_drain;gate._closing.set()
+        try:
+            self.assertEqual(self.store.claim(job['jobId'],**binding)['claimToken'],original['claimToken'])
+            self.assertIsNone(self.store.claim(job['jobId'],**dict(binding,claim_request_id='new-claim')))
+        finally:gate._closing.clear()
+        gate.set_closed(True,request_id=str(uuid.uuid4()),expected_generation=0,expected_closed=False,expected_authority=self.queue.authority_id)
+        self.assertEqual(self.store.claim(job['jobId'],**binding)['claimToken'],original['claimToken'])
+        self.assertIsNone(self.store.claim(job['jobId'],**dict(binding,claim_request_id='new-claim')))
+
+    def test_closed_replay_reads_job_and_claim_from_one_snapshot(self):
+        from processing.admission_drain import AdmissionDrain
+        with self.queue._db() as db:db.execute('PRAGMA journal_mode=WAL')
+        self.queue.admission_drain=AdmissionDrain(self.queue)
+        job=self.submit();binding=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_request_id='claim-1')
+        original=self.store.claim(job['jobId'],**binding);gate=self.queue.admission_drain;gate._closing.set()
+        real=self.store._row;changed=[]
+        def race(db,identifier):
+            row=real(db,identifier)
+            with self.queue._db() as writer:
+                writer.execute('BEGIN IMMEDIATE');writer.execute('DELETE FROM reference_claims WHERE request_id=?',('claim-1',))
+            changed.append(True)
+            return row
+        try:
+            with patch.object(self.store,'_row',side_effect=race):
+                replay=self.store.claim(job['jobId'],**binding)
+            self.assertTrue(changed);self.assertEqual(replay['claimToken'],original['claimToken'])
+        finally:gate._closing.clear()
 
     def test_submission_idempotency_environment_scoping_and_no_private_data(self):
         job = self.submit()
@@ -210,7 +244,50 @@ class ReferenceAPITests(unittest.TestCase):
         body["manifest"]["sha256"] = p.manifest_sha256(body["manifest"])
         body["pipeline"]["treedar"].update(requested=True, inputObjectIds=["image-1"], provenanceReceiptId="provenance-1")
         self.assertEqual(self.request("POST", "/jobs", body).status, 400)
+        rejected=self.request("POST", "/jobs", body, api=api)
+        self.assertEqual((rejected.status,rejected.body),
+                         (409,{'error': 'treedar_execution_shape_unsupported'}))
+        self.assertEqual(self.store.list(), [])
+        body['pipeline']['odm']['requested'] = False
         self.assertEqual(self.request("POST", "/jobs", body, api=api).status, 201)
+
+    def test_existing_combined_exact_replay_reconciles_without_new_job(self):
+        body=copy.deepcopy(self.fixture['submission'])
+        body['manifest']['objects'][0].update(kind='lidar',name='cloud.las')
+        body['manifest']['inputCounts'].update(images=0,lidarObjects=1)
+        body['manifest']['sha256']=p.manifest_sha256(body['manifest'])
+        body['pipeline']['treedar'].update(requested=True,inputObjectIds=['image-1'],provenanceReceiptId='provenance-1')
+        validated=p.validate_submission(body,environment='staging',capability_fingerprint=body['capabilityFingerprint'],
+            available_engines=('odm','treedar'),allowed_odm_options=set(body['pipeline']['odm']['options']))
+        original,_=self.store.submit(validated)
+        api=self.make_api(treedar_available=True)
+        replay=self.request('POST','/jobs',body,api=api)
+        self.assertEqual((replay.status,replay.body['jobId']),(200,original['jobId']))
+        changed=copy.deepcopy(body);changed['pipeline']['treedar']['provenanceReceiptId']='different-id'
+        conflict=self.request('POST','/jobs',changed,api=api)
+        self.assertEqual((conflict.status,conflict.body),(409,{'error':'treedar_execution_shape_unsupported'}))
+        cross=self.request('POST','/jobs',body,api=api,token=PRODUCTION)
+        self.assertEqual((cross.status,cross.body),(409,{'error':'treedar_execution_shape_unsupported'}))
+        self.assertEqual(len(self.store.list()),1)
+
+    def test_treedar_rejects_multiple_or_mixed_inputs_before_persisting(self):
+        api = self.make_api(treedar_available=True)
+        for second_kind in ('lidar', 'image'):
+            with self.subTest(second_kind=second_kind):
+                body = copy.deepcopy(self.fixture['submission'])
+                first = body['manifest']['objects'][0]
+                first.update(kind='lidar', name='cloud.las')
+                second = dict(first, id='input-two', name='second.laz' if second_kind=='lidar' else 'second.jpg', kind=second_kind)
+                body['manifest']['objects'].append(second)
+                body['manifest']['objectCount'] = 2
+                body['manifest']['totalBytes'] = first['byteSize'] + second['byteSize']
+                body['manifest']['inputCounts'].update(images=int(second_kind=='image'), lidarObjects=1+int(second_kind=='lidar'))
+                body['manifest']['sha256'] = p.manifest_sha256(body['manifest'])
+                body['pipeline']['odm']['requested'] = False
+                body['pipeline']['treedar'].update(requested=True, inputObjectIds=['image-1'], provenanceReceiptId='provenance-1')
+                response=self.request('POST','/jobs',body,api=api)
+                self.assertEqual((response.status,response.body),(409,{'error':'treedar_execution_shape_unsupported'}))
+                self.assertEqual(self.store.list(), [])
 
 
 if __name__ == "__main__":

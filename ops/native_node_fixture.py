@@ -111,7 +111,9 @@ class NativeNodeFixture:
                 try:
                     target = urlsplit(self.path)
                     query = parse_qs(target.query, keep_blank_values=True)
-                    if target.scheme or target.netloc or target.fragment or set(query) - {'token'} or any(len(v) != 1 for v in query.values()):
+                    output_query = self.command == 'GET' and re.fullmatch(r'/task/[0-9a-f-]{36}/output', target.path)
+                    allowed = {'token', 'line'} if output_query else {'token'}
+                    if target.scheme or target.netloc or target.fragment or set(query) - allowed or any(len(v) != 1 for v in query.values()):
                         raise ValueError('invalid target')
                     if self.headers.get_all('Transfer-Encoding') or self.headers.get('Content-Encoding'):
                         raise ValueError('unsupported encoding')
@@ -130,6 +132,18 @@ class NativeNodeFixture:
                     body = self.rfile.read(length) if length else b''
                     if len(body) != length:
                         raise ValueError('truncated body')
+                    if output_query:
+                        line = query.get('line', ['0'])[0]
+                        if not re.fullmatch(r'[0-9]{1,6}', line):
+                            raise ValueError('invalid output cursor')
+                        identifier = target.path.split('/')[2]
+                        p._uuid(identifier, 'synthetic task UUID')
+                        with fixture._db() as db:
+                            if not db.execute('SELECT 1 FROM tasks WHERE uuid=?', (identifier,)).fetchone():
+                                self.reply(404, {'error': 'synthetic_not_found'})
+                                return
+                        self.reply(200, ['synthetic phase one', '', 'synthetic phase two'][int(line):])
+                        return
                     status, value, binary = fixture._dispatch(self.command, target.path, self.headers, body)
                     self.reply(status, value, binary=binary)
                 except (ValueError, UnicodeError, sqlite3.IntegrityError):
@@ -269,7 +283,7 @@ class NativeNodeFixture:
                     return 409, {'error': 'synthetic_commit_refused'}, False
                 db.execute('UPDATE tasks SET committed=1,status=40 WHERE uuid=?', (identifier,))
                 db.execute("INSERT INTO calls VALUES('commit',?)", (identifier,))
-                return 200, {'success': True}, False
+                return 200, {'uuid': identifier}, False
             if method == 'GET' and action is None and read == 'info':
                 return 200, {'uuid': identifier, 'status': {'code': task['status']}}, False
             if method == 'GET' and action is None and read == 'download/all.zip':

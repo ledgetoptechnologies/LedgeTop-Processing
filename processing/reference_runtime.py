@@ -25,6 +25,9 @@ from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
 
 MAX_CONFIG_BYTES = 64 * 1024
+# This draft schema has not been qualified for upgrade, rollback, or restore.
+# Tests may patch this in an isolated fixture; production must remain closed.
+STAGED_ACK_SCHEMA_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -42,6 +45,7 @@ class ReferenceSettings:
     recovery_bindings: dict | None = None
     viewer_receipt_keys: dict | None = None
     viewer_acceptance_targets: dict | None = None
+    staged_ack_bearers: dict | None = None
 
 
 def _file(path, *, private):
@@ -75,19 +79,22 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
-        fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        if value["schemaVersion"] in (3, 4):
-            required = set(fields) | {"viewerReceiptKeys"}
-            if value["schemaVersion"] == 4:
-                required.add("viewerAcceptance")
-            allowed = required | {"recoveryBindings"}
-            if not required <= set(value) or set(value) - allowed:
-                raise RuntimeConfigurationError("runtime configuration fields differ")
-        else:
-            p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()),
-                "runtime configuration")
+        version = value["schemaVersion"]
+        fields = {"schemaVersion", "listener", "viewerBearers", "workers", "streamBudget"}
+        staged_enabled = version == 5 or (version == 3 and "stagedAckPrincipals" in value)
+        receipts_enabled = version in (4, 5) or (version == 3 and not staged_enabled)
+        required = fields | ({"recoveryBindings"} if version == 2 else set())
+        if staged_enabled:
+            required.add("stagedAckPrincipals")
+        if receipts_enabled:
+            required.add("viewerReceiptKeys")
+        if version in (4, 5):
+            required.add("viewerAcceptance")
+        allowed = required | ({"recoveryBindings"} if version in (3, 4, 5) else set())
+        if not required <= set(value) or set(value) - allowed:
+            raise RuntimeConfigurationError("runtime configuration fields differ")
         listener = value["listener"]
         p._closed(listener, ("host", "port", "certificate", "privateKey", "clientCA"), "TLS listener")
         if (type(listener["host"]) is not str or not listener["host"] or
@@ -127,6 +134,26 @@ def load_reference_settings(path, config):
             if (type(token) is not str or not 32 <= len(token) <= 4096
                     or any(ord(c) < 33 or ord(c) > 126 for c in token)):
                 raise RuntimeConfigurationError("reference credentials must be separate bounded printable secrets")
+        staged=None
+        if staged_enabled:
+            import base64
+            staged_config=value['stagedAckPrincipals']
+            if type(staged_config) is not list or not 1<=len(staged_config)<=32:
+                raise RuntimeConfigurationError('bounded staged principals required')
+            staged={}
+            principal_env={}
+            for entry in staged_config:
+                p._closed(entry,('principalId','environment','bearer'),'staged principal')
+                env,token,principal=entry['environment'],entry['bearer'],entry['principalId']
+                p._slug(principal,'staged principal');p._environment(env)
+                if env not in viewers or (principal in principal_env and principal_env[principal]!=env):
+                    raise RuntimeConfigurationError('staged principal environment changed')
+                principal_env[principal]=env
+                if type(token) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{43}',token):raise RuntimeConfigurationError('invalid staged credential')
+                raw=base64.urlsafe_b64decode(token+'=')
+                if len(raw)!=32 or base64.urlsafe_b64encode(raw).decode().rstrip('=')!=token:raise RuntimeConfigurationError('invalid staged credential')
+                staged[token]={'environment':env,'principalId':principal};credentials.append(token)
+            if not config.viewer_enabled:raise RuntimeConfigurationError('native Viewer service required')
         if len(set(credentials)) != len(credentials) or set(credentials) & legacy:
             raise RuntimeConfigurationError("reference credentials must be disjoint from existing credentials")
         budget = value["streamBudget"]
@@ -147,11 +174,11 @@ def load_reference_settings(path, config):
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
         viewer_keys = {}
-        if value["schemaVersion"] in (3, 4):
+        if receipts_enabled:
             from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
             viewer_keys = validate_trusted_viewer_receipt_keys(value["viewerReceiptKeys"])
         viewer_targets = {}
-        if value["schemaVersion"] == 4:
+        if value["schemaVersion"] in (4, 5):
             configured = value["viewerAcceptance"]
             if (type(configured) is not dict or not configured
                     or not set(configured) <= {"production", "staging"}):
@@ -192,7 +219,7 @@ def load_reference_settings(path, config):
                 raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
-                                 viewer_keys, viewer_targets or None)
+                                 viewer_keys, viewer_targets or None, staged)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -220,10 +247,14 @@ def discovered_policy(snapshot, config):
 
 
 class _DynamicAPI:
-    def __init__(self, control, config, settings, discover):
-        self.control, self.config, self.settings, self.discover = control, config, settings, discover
+    def __init__(self, control, config, settings, discover, staged_ack=None):
+        self.control, self.config, self.settings, self.discover, self.staged_ack = control, config, settings, discover, staged_ack
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
+        from .viewer_staged_ack import ROUTE
+        if path.startswith(ROUTE):
+            if self.staged_ack is None:return Response(404,{'error':'not_found'})
+            return self.staged_ack.handle(method,path,headers,body,protected_transport=protected_transport)
         # Authenticate before engine discovery; ordinary status and worker actions
         # never depend on live catalog reads. Each admission sees a fresh snapshot.
         if path in (p.PREFIX + '/options', p.PREFIX + "/capabilities", p.PREFIX + "/jobs") and method in ("GET", "POST"):
@@ -247,12 +278,21 @@ class _DynamicAPI:
                     viewer_receipt_keys=self.settings.viewer_receipt_keys)
             except Exception:
                 return Response(503, {"error": "engine_catalog_unavailable"})
+            if path == p.PREFIX + '/jobs' and method == 'POST':
+                from .admission_drain import AdmissionClosed
+                gate = getattr(self.control.viewer.store.queue, 'admission_drain', None)
+                if gate is not None:
+                    try:
+                        with gate.admit():
+                            return api.handle(method, path, headers, body, protected_transport=protected_transport)
+                    except AdmissionClosed:
+                        return Response(503, {'error': 'admission_draining'})
             return api.handle(method, path, headers, body, protected_transport=protected_transport)
         return self.control.handle(method, path, headers, body, protected_transport=protected_transport)
 
 
 class ReferenceRuntime:
-    def __init__(self, queue, config, settings, *, discover=None, server_factory=None):
+    def __init__(self, queue, config, settings, *, discover=None, server_factory=None, viewer_service=None):
         """Construct services around the existing authority; never create a Queue."""
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
@@ -313,7 +353,23 @@ class ReferenceRuntime:
             discover = discover or (lambda: catalog([
                 ("local", config.local_node_url, config.local_node_token),
                 ("main", config.main_node_url, config.main_node_token)]))
-            self.api = _DynamicAPI(self.control, config, settings, discover)
+            staged=None
+            if settings.staged_ack_bearers is not None:
+                if not STAGED_ACK_SCHEMA_QUALIFIED:
+                    raise RuntimeConfigurationError('staged acknowledgment schema is not qualified')
+                from .viewer_staged_ack import ViewerStagedAck
+                if viewer_service is None or viewer_service.queue is not queue:
+                    raise RuntimeConfigurationError('staged acknowledgment requires shared Viewer authority')
+                staged_tokens=set(settings.staged_ack_bearers)
+                existing=set(settings.viewer_bearers)
+                existing.update(worker[key] for worker in settings.workers.values() for key in ('bearer','resultBearer'))
+                existing.update(secret for secret in (config.api_token,config.prototype_operator_token,
+                    config.prototype_observer_token,config.viewer_token,config.viewer_staging_token,
+                    config.local_node_token,config.main_node_token) if secret)
+                if staged_tokens & existing or not {binding['environment'] for binding in settings.staged_ack_bearers.values()} <= set(settings.viewer_bearers.values()):
+                    raise RuntimeConfigurationError('staged credential scope or separation changed')
+                staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers)
+            self.api = _DynamicAPI(self.control, config, settings, discover, staged)
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
 

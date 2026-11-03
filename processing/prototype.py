@@ -27,25 +27,99 @@ VIEWER_PROFILE = "odm-viewer-v1"
 REFERENCE_PROFILE = "reference-pipeline-v1"
 
 
+def _require_safe_idle_database_file(path):
+    """Reject WAL and sidecars before any SQLite connection is opened."""
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError('production_hold_idle_state_unavailable')
+    try:
+        # WAL reads can create shared-memory files, and immutable SQLite reads
+        # can silently ignore uncheckpointed WAL data. Until that case is
+        # qualified, refuse it and any outstanding journal/sidecar outright.
+        if any(os.path.lexists(str(path) + suffix) for suffix in ('-wal', '-shm', '-journal')):
+            raise ValueError('database sidecars require inspection')
+        with path.open('rb') as source:
+            header = source.read(20)
+        if len(header) != 20 or header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x01\x01':
+            raise ValueError('unsupported database journal mode')
+    except (OSError, ValueError):
+        raise RuntimeError('production_hold_idle_state_unavailable') from None
+
+
+def _require_idle_state(path):
+    """Check held startup state under its flock, before any migration.
+
+    This is a point-in-time check, not a fence on other volumes, direct
+    engine clients, or noncooperating writers.
+    """
+    path = Path(path)
+    _require_safe_idle_database_file(path)
+    try:
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            db.execute('BEGIN')
+            if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                raise ValueError('invalid database')
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {'jobs', 'viewer_tasks'} <= tables:
+                raise ValueError('missing state tables')
+            if db.execute("SELECT 1 FROM jobs WHERE status IS NULL OR status NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
+                raise ValueError('nonterminal job')
+            if db.execute("SELECT 1 FROM viewer_tasks WHERE stage IS NULL OR stage NOT IN ('succeeded','failed','cancelled') LIMIT 1").fetchone():
+                raise ValueError('nonterminal task')
+            if 'viewer_reservations' in tables and db.execute("""SELECT 1 FROM viewer_reservations r
+                LEFT JOIN viewer_tasks t ON t.uuid=r.uuid
+                WHERE r.state IS NULL OR r.state NOT IN ('reserved','cancelled')
+                   OR (r.state='reserved' AND (t.uuid IS NULL OR t.stage IS NULL OR t.stage NOT IN ('succeeded','failed','cancelled')))
+                LIMIT 1""").fetchone():
+                raise ValueError('unresolved reservation')
+        finally:
+            db.close()
+    except (sqlite3.Error, OSError, ValueError, TypeError, IndexError):
+        raise RuntimeError('production_hold_idle_state_unavailable') from None
+
+
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
-                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None):
+                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
+                 require_idle_existing=False, per_node_slots=False, node_capabilities=None,
+                 parallel_viewer_uploads=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
-                or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
-            raise ValueError("node_ids must be unique configured slugs including cluster")
+                or len(set(node_ids)) != len(node_ids) or ('cluster' not in node_ids and not per_node_slots)):
+            raise ValueError("node_ids must be unique configured slugs")
         self._creator_pid = os.getpid()
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
+        if type(parallel_viewer_uploads) is not bool:
+            raise ValueError('parallel_viewer_uploads must be boolean')
+        self.parallel_viewer_uploads = parallel_viewer_uploads
+        self._viewer_store_lock = threading.RLock()
+        self._viewer_task_locks_guard = threading.Lock()
+        self._viewer_task_locks = {}
         self.node_ids = tuple(node_ids)
+        if type(per_node_slots) is not bool:
+            raise ValueError("per_node_slots must be boolean")
+        self.per_node_slots = per_node_slots
+        if node_capabilities is not None:
+            if (not isinstance(node_capabilities, dict) or set(node_capabilities) != set(self.node_ids)
+                    or any(not isinstance(caps, (tuple, list)) or not caps
+                           or any(c not in ('odm', 'treedar') for c in caps) for caps in node_capabilities.values())):
+                raise ValueError('invalid node capabilities')
+            self.node_capabilities = {node: frozenset(caps) for node, caps in node_capabilities.items()}
+        else:
+            self.node_capabilities = None
         if treedar_node_ids is None:
             # Isolated legacy fixtures retain their original node capabilities.
             treedar_node_ids = self.node_ids
-        if (not isinstance(treedar_node_ids, (tuple, list)) or not treedar_node_ids
+        if (not isinstance(treedar_node_ids, (tuple, list)) or (not treedar_node_ids and not per_node_slots)
                 or any(not isinstance(node, str) or node not in self.node_ids for node in treedar_node_ids)
                 or len(set(treedar_node_ids)) != len(treedar_node_ids)):
             raise ValueError("treedar_node_ids must be unique configured node IDs")
         self.treedar_node_ids = tuple(treedar_node_ids)
+        if self.node_capabilities is not None and set(self.treedar_node_ids) != {
+                node for node, caps in self.node_capabilities.items() if 'treedar' in caps}:
+            raise ValueError('TreeDar nodes must match inventory capabilities')
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
         if viewer_enabled:
@@ -78,6 +152,12 @@ class Queue(Maintenance):
         # Optional recovery persists this epoch with its restart overlay.
         self.startup_id = str(uuid.uuid4())
         self.path = root / "jobs.sqlite3"
+        if require_idle_existing:
+            try:
+                _require_idle_state(self.path)
+            except BaseException:
+                self._lock.close()
+                raise
         with self._db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
@@ -92,7 +172,10 @@ class Queue(Maintenance):
             db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
             db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
             self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
-            db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
+            if 'cluster' not in self.node_ids and db.execute("SELECT 1 FROM jobs WHERE node_id IS NULL AND status IN ('running','held') LIMIT 1").fetchone():
+                raise RuntimeError('legacy node binding requires inspection')
+            if 'cluster' in self.node_ids:
+                db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
             db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
             self._init_maintenance(db)
 
@@ -106,7 +189,9 @@ class Queue(Maintenance):
 
     def node_profiles(self, node_id):
         return sorted(profile for profile in self.allowed_profiles
-                      if profile != PROFILE or node_id in self.treedar_node_ids)
+                      if (profile != PROFILE or node_id in self.treedar_node_ids)
+                      and (self.node_capabilities is None or profile not in (PHOTO_PROFILE, VIEWER_PROFILE)
+                           or 'odm' in self.node_capabilities.get(node_id, ())))
 
     def _node_public(self, row):
         return {**super()._node_public(row), "allowedProfiles": self.node_profiles(row['id'])}
@@ -187,13 +272,23 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             return self.public(row) if row else None
 
-    def claim(self, payload):
+    def claim(self, payload, *, allow_viewer_same_priority_skip=False):
+        from contextlib import nullcontext
+        from .admission_drain import AdmissionClosed
+        gate = getattr(self, 'admission_drain', None)
+        try:
+            with gate.admit() if gate is not None else nullcontext():
+                return self._claim(payload, allow_viewer_same_priority_skip=allow_viewer_same_priority_skip)
+        except AdmissionClosed:
+            return None
+
+    def _claim(self, payload, *, allow_viewer_same_priority_skip=False):
         expected = ['workerId']
         if isinstance(payload, dict):
             expected.extend(key for key in ('profiles', 'nodeId', 'expectedJobId') if key in payload)
         self.fields(payload, expected)
         self.slug(payload["workerId"])
-        node_id = payload.get('nodeId', 'cluster')
+        node_id = payload.get('nodeId', self.node_ids[0])
         self._known_node(node_id)
         expected_job = payload.get('expectedJobId')
         if expected_job is not None:
@@ -205,18 +300,43 @@ class Queue(Maintenance):
             raise ValueError("worker must declare supported enabled profiles")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            gate = getattr(self, 'admission_drain', None)
+            if gate is not None and gate._closed(db):
+                return None
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
                 return None
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
+            occupied = db.execute("SELECT node_id FROM jobs WHERE status IN ('running','held')").fetchall()
+            if occupied and (not self.per_node_slots or any(
+                    row['node_id'] == node_id or row['node_id'] not in self.node_ids for row in occupied)):
                 return None
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
                 return None
+            if allow_viewer_same_priority_skip and self.per_node_slots and expected_job and row['id'] != expected_job:
+                candidate = db.execute("SELECT * FROM jobs WHERE id=? AND status='queued'", (expected_job,)).fetchone()
+                if (candidate is None or candidate['profile'] != VIEWER_PROFILE or row['profile'] != VIEWER_PROFILE
+                        or candidate['environment'] != row['environment']):
+                    return None
+                barrier = db.execute("SELECT 1 FROM jobs WHERE status='queued' AND environment=? AND seq<? AND profile<>? LIMIT 1",
+                                     (candidate['environment'], candidate['seq'], VIEWER_PROFILE)).fetchone()
+                if barrier:
+                    return None
+                row = candidate
+            if (row['environment'] == 'staging' and db.execute(
+                    "SELECT 1 FROM jobs WHERE environment='production' AND status IN ('queued','running','held') LIMIT 1").fetchone()):
+                return None
             if row['profile'] == REFERENCE_PROFILE:
                 # Reference claims also persist an idempotent private envelope
                 # and enforce input-dependent routing in ReferenceStore.claim.
+                return None
+            if (self.node_capabilities is not None and row['profile'] == VIEWER_PROFILE
+                    and not allow_viewer_same_priority_skip):
+                # Inventory Viewer dispatch must run through ViewerService,
+                # which checks photo caps, engine readiness and task identity.
+                # A generic prototype claim has no photo-count evidence and
+                # must not bypass that eligibility decision.
                 return None
             if expected_job is not None and row['id'] != expected_job:
                 return None
@@ -231,6 +351,11 @@ class Queue(Maintenance):
             return {**job, "claimToken": token}
 
     def complete(self, identifier, payload):
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return self._complete_in_transaction(db, identifier, payload)
+
+    def _complete_in_transaction(self, db, identifier, payload):
         self.fields(payload, ("claimToken", "status", "result"))
         if (not isinstance(payload["claimToken"], str) or len(payload["claimToken"]) > 128
                 or payload["status"] not in ("succeeded", "failed") or not isinstance(payload["result"], dict)):
@@ -238,23 +363,23 @@ class Queue(Maintenance):
         result = json.dumps(payload["result"], sort_keys=True, allow_nan=False, separators=(",", ":"))
         if len(result.encode()) > 4096:
             raise ValueError("result exceeds prototype limit")
-        with self._db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
-            if not row:
-                raise Conflict("unknown job")
-            supplied_hash = hashlib.sha256(payload["claimToken"].encode()).hexdigest()
-            if not row["claim_hash"] or not hmac.compare_digest(supplied_hash, row["claim_hash"]):
-                raise Conflict("invalid claim")
-            if row["status"] in ("succeeded", "failed"):
-                if row["status"] == payload["status"] and row["result"] == result:
-                    return self.public(row)
-                raise Conflict("terminal completion differs")
-            if row["status"] != "running" and not (row['status'] == 'held' and row['held_reason'] == 'coordinator_restart'):
-                raise Conflict("job is held for operator inspection; completion cannot release it")
-            db.execute("UPDATE jobs SET status=?,result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                       (payload["status"], result, identifier))
-            return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
+        if not db.in_transaction:
+            raise ValueError('completion requires a transaction')
+        row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
+        if not row:
+            raise Conflict("unknown job")
+        supplied_hash = hashlib.sha256(payload["claimToken"].encode()).hexdigest()
+        if not row["claim_hash"] or not hmac.compare_digest(supplied_hash, row["claim_hash"]):
+            raise Conflict("invalid claim")
+        if row["status"] in ("succeeded", "failed"):
+            if row["status"] == payload["status"] and row["result"] == result:
+                return self.public(row)
+            raise Conflict("terminal completion differs")
+        if row["status"] != "running" and not (row['status'] == 'held' and row['held_reason'] == 'coordinator_restart'):
+            raise Conflict("job is held for operator inspection; completion cannot release it")
+        db.execute("UPDATE jobs SET status=?,result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (payload["status"], result, identifier))
+        return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
 
     def operator(self, identifier, action, payload):
         """A separate human/operator credential is required by the HTTP layer.

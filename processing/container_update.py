@@ -170,12 +170,19 @@ class ComposeNode:
         # Canceled/removed tasks can still have running children. A conservative
         # image-specific allowlist blocks replacement until every engine child
         # has exited. This does not infer idleness from CPU utilization.
-        rows = self.docker(['docker', 'top', identifier, '-eo', 'pid,args']).splitlines()[1:]
+        rows = self.docker(['docker', 'top', identifier, '-eo', 'pid,args']).splitlines()
+        if not rows or rows[0].split() not in (['PID','COMMAND'], ['PID','ARGS']):
+            return False
+        rows = rows[1:]
         server, wrapper, init = 0, 0, 0
+        seen = set()
         for row in rows:
             parts = row.strip().split(None, 1)
-            if len(parts) != 2 or not parts[0].isdigit():
+            if len(parts) != 2 or not re.fullmatch(r'[1-9][0-9]{0,9}',parts[0]):
                 return False
+            if parts[0] in seen or int(parts[0]) <= 0:
+                return False
+            seen.add(parts[0])
             value = parts[1]
             if re.match(r'^(?:/usr/bin/)?node /var/www/index\.js(?: |$)', value):
                 server += 1
@@ -393,40 +400,25 @@ def finalize_deferred(coordinator,operator,node_id,root,*,expected_plan_id,expec
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Standalone node maintenance is disabled; use the managed workflow only after qualifying its ingress fence.')
     for name in ('coordinator', 'node-id', 'node-origin', 'compose-file', 'project', 'service',
                  'docker-engine-id', 'work'):
-        parser.add_argument('--' + name, required=True)
+        parser.add_argument('--' + name)
     parser.add_argument('--exclusive-admission', action='store_true',
-                        help='Attest all engine writers/uploads are fenced through this coordinator')
+                        help='Legacy flag; does not verify ingress or enable this command')
     parser.add_argument('--node-port', type=int, choices=range(1, 65536), default=3000)
     parser.add_argument('--expected-engine',choices=('odx','odm'),default='odx')
     parser.add_argument('--upload-layout',choices=('var-www-tmp-v1',))
     parser.add_argument('--process-layout',choices=('node-var-www-v1',))
     parser.add_argument('--wait-seconds', type=int, choices=range(0, 86401), default=0)
     parser.add_argument('--health-seconds', type=int, choices=range(1, 121), default=30)
-    args = parser.parse_args()
-    try:
-        root = Path(args.work).absolute()
-        compose = Path(args.compose_file).absolute()
-        if (not args.exclusive_admission or not root.is_dir() or root.is_symlink()
-                or root.resolve() != root or not compose.is_file() or compose.is_symlink()
-                or any(not NAME.fullmatch(x) for x in (args.node_id, args.project, args.service))
-                or not args.docker_engine_id or len(args.docker_engine_id) > 128):
-            raise UpdateError('private paths, exact service identity and exclusive admission attestation required')
-        base = loopback(args.coordinator)
-        api, secret = os.environ.get('PROCESSING_API_TOKEN', ''), os.environ.get('PROCESSING_PROTOTYPE_OPERATOR_TOKEN', '')
-        if not api or not secret or api == secret:
-            raise UpdateError('separate worker and maintenance operator credentials required')
-        adapter = ComposeNode(args, root)
-        with lock(root):
-            result = execute(Client(base, api), Client(base, secret), adapter, args.node_id, root,
-                             args.wait_seconds, args.health_seconds)
-        print(json.dumps(result, sort_keys=True))
-        return 0 if result['status'] != 'failed' else 1
-    except (UpdateError, SmokeError, OSError, ValueError, KeyError):
-        print('Maintenance stopped; inspect private receipt, node gate and exact service. No automatic retry.')
-        return 2
+    parser.parse_args()
+    # A command-line assertion is not proof that the backend has no direct
+    # writers. The managed workflow must close and verify its owned ingress
+    # after reservation and repeat physical-idle checks before replacement.
+    print('Standalone maintenance is disabled: exclusive admission was not verified. '
+          'Use the managed node maintenance workflow after qualifying its ingress fence.')
+    return 2
 
 
 if __name__ == '__main__':

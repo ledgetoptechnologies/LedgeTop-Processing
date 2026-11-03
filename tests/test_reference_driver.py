@@ -24,8 +24,8 @@ from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
-from processing.reference_transfer import BrokerClient
-from processing.scratch_policy import ScratchLedger
+from processing.reference_transfer import BrokerClient, TransferResponseUnavailable
+from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.viewer_service import NativeEngine
 from processing.worker_outbox import WorkerOutbox
 from processing.scratch_cleanup import ScratchCleanupExecutor
@@ -208,6 +208,18 @@ class ReferenceDriverTests(unittest.TestCase):
                 self.fail('unexpected driver hold: ' + result['reason'])
         self.fail('driver target stage not reached: ' + target)
 
+    def test_unavailable_broker_response_preserves_attempt_cap_across_restart(self):
+        job=self.submit();self.advance(job,'fetching')
+        with patch.object(self.broker,'download_object',side_effect=TransferResponseUnavailable('private')) as download:
+            for _ in range(2):
+                result=self.driver.step()
+                self.assertEqual(result,{'state':'retry_wait','reason':'broker_response_unavailable'})
+            self.driver=self.make_driver()
+            self.assertEqual(self.driver.step(),{'state':'retry_wait','reason':'broker_response_unavailable'})
+            self.assertEqual(self.driver.step(),{'state':'held','reason':'worker_fetch_attempt_budget_exhausted'})
+            self.assertEqual(download.call_count,3)
+        self.assertFalse(any(call[0]=='initialize' for call in self.transport.calls))
+
     def test_arbitrary_images_production_and_next_job_before_viewer_acceptance(self):
         first = self.submit(environment='production', contents=(b'not-abc-one', b'another-photo'))
         self.advance(first, 'awaiting_acceptance')
@@ -362,6 +374,63 @@ class ReferenceDriverTests(unittest.TestCase):
         self.driver.step()
         self.assertEqual(self.driver.step()['state'], 'held')
         self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+
+    def test_unrelated_failure_ack_does_not_release_current_job_gate(self):
+        from processing.reference_failure import make_failure, _receipt
+        # An earlier retained record is due first in the actual shared outbox.
+        other = make_failure(job_id=str(uuid.uuid4()), generation=1, environment='staging',
+            input_manifest_sha256='a'*64, pipeline_digest='b'*64,
+            terminal_state='failed', error_code='synthetic_failure')
+        other_id = self.failures.persist(other, engine_terminal=True)
+        self.transport.code = 30
+        job = self.submit()
+        self.advance(job, 'failure_delivering')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        current_id = data['failureOutboxId']
+        self.assertNotEqual(current_id, other_id)
+        with NodeGate('engine') as gate:
+            before = gate.snapshot()['reservation']
+            self.assertEqual(before['job']['id'], job['jobId'])
+        original_request = self.driver._request
+        original_binding = self.driver._claim_binding
+        def binding(payload):
+            if payload['jobId'] == other['jobId']:
+                return {'claimRequestId': 'synthetic-other', 'claimToken': 'synthetic-token'}
+            return original_binding(payload)
+        def request(method, suffix, payload=None, **kwargs):
+            if suffix == '/terminal-outcomes' and payload['delivery']['outboxId'] == other_id:
+                return 200, _receipt(payload['delivery'], other)
+            return original_request(method, suffix, payload, **kwargs)
+        with patch.object(self.driver, '_claim_binding', side_effect=binding), \
+             patch.object(self.driver, '_request', side_effect=request):
+            result = self.driver.step()
+        self.assertEqual(result['state'], 'failure_delivering')
+        self.assertEqual(self.failures.get(other_id)['state'], 'acknowledged')
+        self.assertNotEqual(self.failures.get(current_id)['state'], 'acknowledged')
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation'], before)
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.assertEqual(self.failures.get(current_id)['state'], 'acknowledged')
+        with NodeGate('engine') as gate:
+            self.assertIsNone(gate.snapshot()['reservation'])
+
+    def test_unrelated_success_ack_does_not_advance_current_job(self):
+        job = self.submit()
+        self.advance(job, 'delivering')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        self.assertNotEqual(self.outbox.get(data['outboxId'])['state'], 'acknowledged')
+        with NodeGate('engine') as gate:
+            before = gate.snapshot()['reservation']
+        with patch.object(self.driver.sender, 'send_next',
+                          return_value={'state': 'acknowledged', 'outboxId': 'a' * 64}):
+            result = self.driver.step()
+        self.assertEqual(result['state'], 'delivering')
+        self.assertEqual(result['deliveryState'], 'other_acknowledged')
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation'], before)
+        self.advance(job, 'awaiting_acceptance')
 
     def test_confirmed_failed_engine_delivers_metadata_without_fake_archive_and_releases_gate(self):
         self.transport.code = 30
@@ -520,6 +589,30 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.assertRaises(ValueError) as observed:
             load_config(str(path))
         self.assertNotIn(TOKEN, str(observed.exception))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX ownership and umask required')
+    def test_fetch_creates_private_jobs_directory_with_group_writable_umask(self):
+        previous = os.umask(0o002)
+        try:
+            job = self.submit()
+            self.advance(job, 'awaiting_acceptance')
+        finally:
+            os.umask(previous)
+        jobs = self.scratch / 'jobs'
+        self.assertEqual(jobs.stat().st_mode & 0o777, 0o700)
+        self.assertTrue(list(jobs.glob('*/all.zip')))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX directory mode required')
+    def test_unsafe_existing_jobs_directory_is_refused_without_modification(self):
+        jobs = self.scratch / 'jobs'
+        jobs.mkdir(mode=0o700)
+        jobs.chmod(0o775)
+        sentinel = jobs / 'keep'; sentinel.write_bytes(b'synthetic-retained-data')
+        with self.assertRaisesRegex(PolicyConflict, 'scratch directory is not privately owned'):
+            self.ledger.ensure_job_directory('synthetic-reservation')
+        self.assertEqual(jobs.stat().st_mode & 0o777, 0o775)
+        self.assertEqual(sentinel.read_bytes(), b'synthetic-retained-data')
+        self.assertFalse((jobs / 'synthetic-reservation').exists())
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'exact-object cleanup requires Linux')
     def test_opted_in_background_cleanup_removes_only_accepted_result_after_receipt(self):

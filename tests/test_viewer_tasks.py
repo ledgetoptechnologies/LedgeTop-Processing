@@ -1,5 +1,8 @@
 import io
 import os
+import subprocess
+import sys
+import threading
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,7 +10,7 @@ import uuid
 
 from processing.maintenance import Conflict
 from processing.prototype import PROFILE, Queue
-from processing.viewer_tasks import TaskStore, VIEWER_PROFILE
+from processing.viewer_tasks import InputLimitExceeded, TaskStore, VIEWER_PROFILE
 
 
 class ViewerTaskStoreTests(unittest.TestCase):
@@ -53,6 +56,49 @@ class ViewerTaskStoreTests(unittest.TestCase):
             with self.subTest(settings=settings), self.assertRaises(Conflict):
                 store.initialize(self.identifier, *settings)
 
+    def test_process_exit_after_directory_creation_preserves_orphan_and_reservation(self):
+        root=self.root/'process-exit';identifier=str(uuid.uuid4());cap='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        program="""import os,sys
+from pathlib import Path
+from unittest.mock import patch
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]);identifier=sys.argv[2];cap=sys.argv[3]
+queue=Queue(root/'queue',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+store=TaskStore(queue,root/'inputs');store.reserve(identifier,'production',cap)
+with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os._exit(73)):
+ store.initialize(identifier,'synthetic',[],None,'production',cap,option_evidence=[])
+"""
+        proc=subprocess.run([sys.executable,'-c',program,str(root),identifier,cap],capture_output=True,timeout=15)
+        self.assertEqual(proc.returncode,73)
+        orphan=root/'inputs'/(identifier+'-1');self.assertTrue(orphan.is_dir())
+        queue=Queue(root/'queue',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True)
+        try:
+            store=TaskStore(queue,root/'inputs')
+            with queue._db() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT state FROM viewer_reservations WHERE uuid=?',(identifier,)).fetchone()[0],'reserved')
+            self.assertEqual(store.initialize(identifier,'synthetic',[],None,'production',cap,option_evidence=[]),{'uuid':identifier})
+            with queue._db() as db:directory=db.execute('SELECT directory FROM viewer_tasks WHERE uuid=?',(identifier,)).fetchone()[0]
+            self.assertTrue(orphan.is_dir());self.assertNotEqual(directory,orphan.name);self.assertTrue((root/'inputs'/directory).is_dir())
+        finally:queue.close()
+
+    def test_reserved_replay_rejects_changed_durable_evidence_and_missing_directory(self):
+        cap='YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE'
+        self.store.reserve(self.identifier,'production',cap)
+        self.store.initialize(self.identifier,'synthetic',[],None,'production',cap,option_evidence=[])
+        args=(self.identifier,'synthetic',[],None,'production',cap)
+        self.assertEqual(self.store.initialize(*args,replay_only=True),{'uuid':self.identifier})
+        with self.queue._db() as db:
+            original=db.execute('SELECT sha256 FROM viewer_option_evidence WHERE uuid=?',(self.identifier,)).fetchone()[0]
+            db.execute('UPDATE viewer_option_evidence SET sha256=? WHERE uuid=?',('0'*64,self.identifier))
+        with self.assertRaises(Conflict):self.store.initialize(*args,replay_only=True)
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_option_evidence SET sha256=? WHERE uuid=?',(original,self.identifier))
+            name=db.execute('SELECT directory FROM viewer_tasks WHERE uuid=?',(self.identifier,)).fetchone()[0]
+        (self.store.root/name).rename(self.store.root/'moved-fixture')
+        with self.assertRaises(Conflict):self.store.initialize(*args,replay_only=True)
+
     def test_upload_hashes_exact_bytes_and_retries_do_not_duplicate(self):
         self.initialize()
         data = b'\0\xffbinary\r\n--not-a-multipart-boundary' * 10000
@@ -67,6 +113,202 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.assertEqual(self.store.info(self.identifier)['imagesCount'], 1)
         self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
 
+    def test_separate_store_instance_cannot_commit_while_upload_is_in_flight(self):
+        self.queue.close()
+        self.queue = Queue(self.root / 'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        self.initialize()
+        self.photo(name='first.jpg', data=b'first')
+        second_store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError('test upload was not released')
+                return super().read(size)
+        def upload():
+            try:
+                self.store.upload(self.identifier, 'second.jpg', SlowStream(b'second'), 6)
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=upload)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                second_store.commit(self.identifier)
+            with self.assertRaises(RuntimeError): self.queue.close()
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(second_store.commit(self.identifier)['success'])
+        self.assertEqual([f['name'] for f in self.store.task(self.identifier)['files']], ['first.jpg','second.jpg'])
+
+    def test_parallel_upload_does_not_block_another_task(self):
+        # Isolated opt-in only; production configuration cannot enable it yet.
+        self.queue.close()
+        self.queue = Queue(self.root / 'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        self.initialize()
+        other = str(uuid.uuid4())
+        self.initialize(other)
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5): raise TimeoutError('test upload not released')
+                return super().read(size)
+        def upload():
+            try: self.store.upload(self.identifier, 'first.jpg', SlowStream(b'first'), 5)
+            except Exception as error: errors.append(error)
+        thread = threading.Thread(target=upload)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.photo(other, 'other.jpg', b'other')
+            self.assertTrue(self.store.commit(other)['success'])
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_commit_cannot_overtake_registered_upload_waiter(self):
+        self.queue.close()
+        self.queue = Queue(self.root/'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root/'parallel-inputs')
+        self.initialize()
+        self.photo(name='first.jpg', data=b'first')
+        # Delay the upload after it registers as a waiter but before it
+        # acquires the task lock. A non-FIFO mutex could otherwise let commit
+        # overtake it during precisely this interval.
+        registered, release = threading.Event(), threading.Event()
+        class GateLock:
+            def __init__(self): self.lock = threading.RLock()
+            def acquire(self, blocking=True):
+                if threading.current_thread().name == 'upload-waiter':
+                    registered.set()
+                    if not release.wait(5): raise TimeoutError('waiter not released')
+                return self.lock.acquire(blocking=blocking)
+            def release(self): self.lock.release()
+        with self.queue._viewer_task_locks_guard:
+            self.queue._viewer_task_locks[self.identifier] = [GateLock(), 0, 0]
+        errors = []
+        def upload():
+            try: self.photo(name='second.jpg', data=b'second')
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=upload, name='upload-waiter')
+        worker.start()
+        try:
+            self.assertTrue(registered.wait(5))
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                self.store.commit(self.identifier)
+        finally:
+            release.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(self.store.commit(self.identifier)['success'])
+        self.assertEqual(len(self.store.task(self.identifier)['files']), 2)
+
+    def test_cancel_waits_for_inflight_upload_and_keeps_uploaded_bytes(self):
+        self.queue.close()
+        self.queue = Queue(self.root / 'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        self.initialize()
+        entered, release = threading.Event(), threading.Event()
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5): raise TimeoutError('test upload not released')
+                return super().read(size)
+        upload = threading.Thread(target=lambda: self.store.upload(self.identifier, 'first.jpg', SlowStream(b'first'), 5))
+        upload.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                self.store.cancel(self.identifier)
+        finally:
+            release.set()
+            upload.join(5)
+        self.assertFalse(upload.is_alive())
+        self.assertTrue(self.store.cancel(self.identifier)['success'])
+        task = self.store.task(self.identifier)
+        self.assertEqual(task['stage'], 'cancelled')
+        self.assertEqual(Path(task['files'][0]['path']).read_bytes(), b'first')
+
+    def test_parallel_upload_process_death_keeps_partial_out_of_manifest(self):
+        root = self.root / 'upload-exit'
+        identifier = str(uuid.uuid4())
+        program = '''import io,os,sys
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]);identifier=sys.argv[2]
+queue=Queue(root/'queue',node_ids=('cluster','main'),viewer_enabled=True,parallel_viewer_uploads=True)
+store=TaskStore(queue,root/'inputs');store.initialize(identifier,'synthetic',[],None,'production')
+class DyingStream(io.BytesIO):
+ def read(self,n=-1):
+  if self.tell(): os._exit(73)
+  return super().read(1)
+store.upload(identifier,'image.jpg',DyingStream(b'abc'),3)
+'''
+        proc = subprocess.run([sys.executable, '-c', program, str(root), identifier], capture_output=True, timeout=15)
+        self.assertEqual(proc.returncode, 73)
+        queue = Queue(root/'queue', node_ids=('cluster','main'), viewer_enabled=True, parallel_viewer_uploads=True)
+        try:
+            store = TaskStore(queue, root/'inputs')
+            task = store.task(identifier)
+            self.assertEqual(task['files'], [])
+            self.assertEqual(len(list(Path(task['directory']).glob('.incoming-*'))), 1)
+            self.assertTrue(store.upload(identifier, 'image.jpg', io.BytesIO(b'abc'), 3)['success'])
+            self.assertEqual(Path(store.task(identifier)['files'][0]['path']).read_bytes(), b'abc')
+        finally:
+            queue.close()
+
+    def test_parallel_upload_process_death_after_rename_before_commit(self):
+        root = self.root / 'rename-exit'
+        identifier = str(uuid.uuid4())
+        program = '''import io,os,sys
+from pathlib import Path
+from unittest.mock import patch
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]);identifier=sys.argv[2]
+queue=Queue(root/'queue',node_ids=('cluster','main'),viewer_enabled=True,parallel_viewer_uploads=True)
+store=TaskStore(queue,root/'inputs');store.initialize(identifier,'synthetic',[],None,'production')
+with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os._exit(73)):
+ store.upload(identifier,'image.jpg',io.BytesIO(b'abc'),3)
+'''
+        proc = subprocess.run([sys.executable, '-c', program, str(root), identifier], capture_output=True, timeout=15)
+        self.assertEqual(proc.returncode, 73)
+        queue = Queue(root/'queue', node_ids=('cluster','main'), viewer_enabled=True, parallel_viewer_uploads=True)
+        try:
+            store = TaskStore(queue, root/'inputs')
+            task = store.task(identifier)
+            self.assertEqual(task['files'], [])
+            directory = Path(task['directory'])
+            files = [p for p in directory.iterdir() if p.is_file()]
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].read_bytes(), b'abc')
+            self.assertTrue(store.upload(identifier, 'image.jpg', io.BytesIO(b'abc'), 3)['success'])
+            self.assertEqual(files[0].read_bytes(), b'abc')
+            self.assertEqual(Path(store.task(identifier)['files'][0]['path']).read_bytes(), b'abc')
+        finally:
+            queue.close()
+
     def test_truncated_or_overlong_stream_never_enters_manifest(self):
         self.initialize()
         for body, length in ((b'ab', 3), (b'abcd', 3)):
@@ -80,9 +322,21 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.initialize()
         self.photo(data=b'12345678')
         self.photo(data=b'12345678')
-        with self.assertRaises(ValueError):
+        with self.assertRaises(InputLimitExceeded):
             self.photo(name='other.jpg', data=b'1')
         self.assertEqual(self.store.task(self.identifier)['input_bytes'], 8)
+        with self.assertRaises(InputLimitExceeded):
+            self.photo(name='large.jpg', data=b'123456789')
+        self.assertEqual(len(self.store.task(self.identifier)['files']), 1)
+        self.assertFalse(list(Path(self.store.task(self.identifier)['directory']).glob('.incoming-*')))
+        # A failed later upload preserves earlier bytes and is safe to retry
+        # after reopening the store; the limit does not remove the source.
+        self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=8)
+        self.photo(data=b'12345678')
+        self.assertEqual(self.store.task(self.identifier)['input_bytes'], 8)
+        with self.assertRaises(InputLimitExceeded):
+            self.photo(name='other.jpg', data=b'1')
+        self.assertEqual(self.store.task(self.identifier)['files'][0]['bytes'], 8)
 
     def test_unsafe_names_identifiers_and_settings_rejected(self):
         for identifier in ('../task', self.identifier.upper(), 'not-a-uuid'):
@@ -118,7 +372,7 @@ class ViewerTaskStoreTests(unittest.TestCase):
             self.photo()
         claimed = self.claim()
         self.assertEqual(claimed['id'], task['job_id'])
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
 
     def test_preexisting_enqueue_is_reconciled_without_duplicate_job(self):
         self.initialize()
@@ -163,11 +417,12 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.queue = Queue(self.root / 'queue', node_ids=('cluster', 'main'), treedar_node_ids=('main',))
         self.queue.allowed_profiles.add(VIEWER_PROFILE)
         self.store = TaskStore(self.queue, self.root / 'inputs')
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 30)
-        self.assertEqual(self.store.info(self.identifier)['status']['errorMessage'], 'execution_held')
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
+        self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
         self.assertIsNone(self.claim())
         self.queue.complete(claimed['id'], {'claimToken': claimed['claimToken'], 'status': 'succeeded', 'result': {}})
         self.assertEqual(self.store.info(self.identifier)['status']['code'], 40)
+        self.assertNotIn('ledgetopHeld', self.store.info(self.identifier))
         self.assertIsNotNone(self.claim())
 
     def test_cancel_queued_is_atomic_and_repeated_cancel_is_safe(self):
@@ -189,10 +444,12 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.queue = Queue(self.root / 'queue', node_ids=('cluster', 'main'),
                            treedar_node_ids=('main',), viewer_enabled=True)
         self.store = TaskStore(self.queue, self.root / 'inputs')
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
         self.assertEqual(self.store.task(self.identifier)['job']['status'], 'held')
         self.queue.operator(claim['id'], 'hold', {'note': 'operator uncertainty requires inspection'})
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 30)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
+        self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
+        self.assertNotIn('operator uncertainty requires inspection', str(self.store.info(self.identifier)))
 
     def test_cancel_completion_is_truthful_before_metadata_stage_update(self):
         self.ready()
@@ -214,6 +471,22 @@ class ViewerTaskStoreTests(unittest.TestCase):
                 with self.assertRaises(Conflict):
                     self.store.remove(self.identifier)
         self.assertEqual(self.queue.get(claimed['id'])['status'], 'held')
+        self.store.update(self.identifier, stage='cancelled')
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
+        self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
+        self.store.update(self.identifier, stage='held')
+        # A stale retry may query or repeat commit, but cannot replace inputs,
+        # release the held slot, or create another execution.
+        before = self.store.task(self.identifier)
+        self.assertEqual(self.store.commit(self.identifier), {'success': True, 'uuid': self.identifier})
+        with self.assertRaises(Conflict):
+            self.store.upload(self.identifier, 'late.jpg', io.BytesIO(b'x'), 1)
+        after = self.store.task(self.identifier)
+        self.assertEqual(after['job_id'], before['job_id'])
+        self.assertEqual(after['generation'], before['generation'])
+        self.assertEqual(after['files'], before['files'])
+        self.assertEqual(self.queue.get(claimed['id'])['status'], 'held')
+        self.assertIsNone(self.claim())
 
     def test_remove_reset_uuid_retains_old_inputs_and_execution_history(self):
         old = self.ready()

@@ -9,6 +9,7 @@ from email.parser import BytesHeaderParser
 from email.policy import default as email_policy
 import hmac
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -17,9 +18,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import uuid as uuid_module
 
 from .maintenance import Conflict
+from .viewer_tasks import InputLimitExceeded
+from .viewer_limits import MAX_UPLOAD_BYTES
 
 
-MAX_UPLOAD_BYTES = 2 * 1024 ** 3
 MAX_FORM_BYTES = 64 * 1024
 MAX_PART_HEADERS = 16 * 1024
 MAX_PARTS = 64
@@ -175,10 +177,15 @@ def _length(handler, maximum, *, allow_empty=False):
 
 
 class ViewerFacade:
-    def __init__(self, service, token, staging_token='', temp_dir=None):
+    def __init__(self, service, token, staging_token='', temp_dir=None, *, production_held=False):
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
+        if type(production_held) is not bool:
+            raise ValueError('production hold must be a boolean')
         self.service, self.token, self.staging_token = service, token, staging_token
+        # Cutover hold: production may read but never mutate until reopened by
+        # restarting without the hold. Staging is unaffected.
+        self.production_held = production_held
         if temp_dir is not None:
             directory = Path(temp_dir)
             if (directory.is_symlink() or not directory.is_dir()
@@ -221,9 +228,36 @@ class ViewerFacade:
             if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
                 raise RequestError(400, 'invalid_query')
             if handler.command == 'GET':
-                self._get(handler, path, query, environment)
+                # A download can reconstruct and persist the cached archive;
+                # hold admission until the entire stream is closed.
+                guarded_download = re.fullmatch(r'/task/[^/]+/download/all\.zip', path)
+                if guarded_download and environment == 'production' and self.production_held:
+                    raise RequestError(503, 'production_admission_held')
+                gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
+                if guarded_download and gate is not None:
+                    from .admission_drain import AdmissionClosed
+                    try:
+                        with gate.admit(): self._get(handler, path, query, environment)
+                    except AdmissionClosed:
+                        raise RequestError(503, 'admission_draining')
+                else:
+                    self._get(handler, path, query, environment)
             elif handler.command == 'POST':
-                self._post(handler, path, environment)
+                if environment == 'production' and self.production_held:
+                    # Before any body read or service call: no production state change.
+                    raise RequestError(503, 'production_admission_held')
+                guarded = (path in ('/task/ledgetop/reserve', '/task/ledgetop/cancel',
+                                    '/task/new/init', '/task/cancel', '/task/remove') or
+                    re.fullmatch(r'/task/new/(upload|commit)/[^/]+', path))
+                gate = getattr(self.service.queue, 'admission_drain', None) if hasattr(self.service, 'queue') else None
+                if guarded and gate is not None:
+                    from .admission_drain import AdmissionClosed
+                    try:
+                        with gate.admit(): self._post(handler, path, environment)
+                    except AdmissionClosed:
+                        raise RequestError(503, 'admission_draining')
+                else:
+                    self._post(handler, path, environment)
             else:
                 raise RequestError(405, 'method_not_allowed')
         except RequestError as error:
@@ -235,6 +269,9 @@ class ViewerFacade:
         except Conflict:
             handler.close_connection = True
             self._reply(handler, 409, {'error': 'conflict'})
+        except InputLimitExceeded:
+            handler.close_connection = True
+            self._reply(handler, 413, {'error': 'task_input_limit_exceeded'})
         except (ValueError, TypeError, UnicodeError, RecursionError):
             handler.close_connection = True
             self._reply(handler, 400, {'error': 'invalid_request'})
@@ -247,10 +284,18 @@ class ViewerFacade:
                 pass
         return True
 
-    def _authorize(self, identifier, environment):
+    @staticmethod
+    def _capability(handler):
+        values=handler.headers.get_all('X-LedgeTop-Capability',[])
+        if len(values)>1:raise RequestError(400,'invalid_capability')
+        return values[0] if values else None
+
+    def _authorize(self, identifier, environment, handler):
         authorize = getattr(self.service, 'authorize', None)
         if callable(authorize):
-            authorize(identifier, environment)
+            capability=self._capability(handler)
+            if capability is None:authorize(identifier, environment)
+            else:authorize(identifier, environment, capability)
 
     def _get(self, handler, path, query, environment):
         lengths = handler.headers.get_all('Content-Length', [])
@@ -265,7 +310,7 @@ class ViewerFacade:
             if not route:
                 raise RequestError(404, 'not_found')
             identifier, action = task_uuid(unquote(route[1])), route[2]
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             if action == 'info':
                 value = self.service.info(identifier)
             elif action == 'output':
@@ -278,20 +323,41 @@ class ViewerFacade:
                 try:
                     if type(length) is not int or length < 0:
                         raise ValueError('invalid download length')
+                    digest = getattr(stream, 'ledgetop_archive_sha256', None)
+                    if digest is not None and (type(digest) is not str or
+                            not re.fullmatch(r'[a-f0-9]{64}', digest)):
+                        raise ValueError('invalid archive identity')
                     handler.send_response(200)
                     handler.send_header('Content-Type', 'application/zip')
                     handler.send_header('Content-Length', str(length))
+                    if digest is not None:
+                        handler.send_header('X-LedgeTop-Archive-SHA256', digest)
                     handler.send_header('Cache-Control', 'no-store')
                     handler.end_headers()
                     remaining = length
+                    calculated = hashlib.sha256() if digest is not None else None
+                    last = None
                     try:
                         while remaining:
                             data = stream.read(min(CHUNK, remaining))
                             if not data or len(data) > remaining:
                                 handler.close_connection = True
                                 return
-                            handler.wfile.write(data)
                             remaining -= len(data)
+                            if calculated is not None:
+                                calculated.update(data)
+                                if last is not None: handler.wfile.write(last)
+                                last = data
+                            else:
+                                handler.wfile.write(data)
+                        # Withhold the last chunk until the complete served
+                        # bytes match the receipt. A mismatch closes a
+                        # truncated 200 response, never a complete false body.
+                        if calculated is not None:
+                            if calculated.hexdigest() != digest:
+                                handler.close_connection = True
+                                return
+                            if last is not None: handler.wfile.write(last)
                     except OSError:
                         handler.close_connection = True
                 finally:
@@ -305,6 +371,17 @@ class ViewerFacade:
     def _post(self, handler, path, environment):
         if path in ('/info', '/options'):
             raise RequestError(405, 'method_not_allowed')
+        if path in ('/task/ledgetop/reserve','/task/ledgetop/cancel'):
+            length=_length(handler,MAX_FORM_BYTES)
+            if handler.headers.get_content_type()!='application/x-www-form-urlencoded':raise RequestError(415,'form_required')
+            body=handler.rfile.read(length)
+            if len(body)!=length:raise RequestError(400,'truncated_body')
+            values=parse_qs(body.decode('utf-8'),keep_blank_values=True,max_num_fields=2)
+            if set(values)!={'uuid'} or len(values['uuid'])!=1:raise RequestError(400,'invalid_action_form')
+            identifier=task_uuid(values['uuid'][0]);capability=self._capability(handler)
+            if capability is None:raise RequestError(400,'invalid_capability')
+            action=self.service.reserve if path.endswith('/reserve') else self.service.cancel_reserved
+            self._reply(handler,200,action(identifier,environment,capability));return
         if path == '/task/new/init':
             length = _length(handler, MAX_FORM_BYTES)
             identifier = task_uuid(handler.headers.get('set-uuid', ''))
@@ -317,23 +394,29 @@ class ViewerFacade:
                 values[name] = stream.read(size).decode('utf-8')
             options = json.loads(values.get('options', '[]'))
             outputs = json.loads(values['outputs']) if 'outputs' in values else None
-            self._reply(handler, 200, self.service.initialize(identifier, values.get('name', ''), options, outputs, environment))
+            capability=self._capability(handler)
+            if capability is None:result=self.service.initialize(identifier, values.get('name', ''), options, outputs, environment)
+            else:result=self.service.initialize(identifier, values.get('name', ''), options, outputs, environment, capability)
+            self._reply(handler, 200, result)
             return
         upload = re.fullmatch(r'/task/new/upload/([^/]+)', path)
         if upload:
             length = _length(handler, MAX_UPLOAD_BYTES)
             identifier = task_uuid(unquote(upload[1]))
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             count, seen = 0, set()
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                if name != 'images':
-                    raise RequestError(400, 'invalid_upload_form')
-                filename = safe_filename(filename)
-                if filename.casefold() in seen or not size:
-                    raise RequestError(400, 'duplicate_or_empty_upload')
-                seen.add(filename.casefold())
-                self.service.upload(identifier, filename, stream, size)
-                count += 1
+            with self.service.upload_batch(identifier):
+                for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
+                    if name != 'images':
+                        raise RequestError(400, 'invalid_upload_form')
+                    filename = safe_filename(filename)
+                    if filename.casefold() in seen or not size:
+                        raise RequestError(400, 'duplicate_or_empty_upload')
+                    seen.add(filename.casefold())
+                    capability=self._capability(handler)
+                    if capability is None:self.service.upload(identifier, filename, stream, size)
+                    else:self.service.upload(identifier, filename, stream, size, environment, capability)
+                    count += 1
             if not count:
                 raise RequestError(400, 'empty_upload')
             self._reply(handler, 200, {'success': True})
@@ -341,10 +424,13 @@ class ViewerFacade:
         commit = re.fullmatch(r'/task/new/commit/([^/]+)', path)
         if commit:
             identifier = task_uuid(unquote(commit[1]))
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             if _length(handler, MAX_FORM_BYTES, allow_empty=True):
                 raise RequestError(400, 'unexpected_body')
-            self._reply(handler, 200, self.service.commit(identifier))
+            capability=self._capability(handler)
+            if capability is None:result=self.service.commit(identifier)
+            else:result=self.service.commit(identifier,environment,capability)
+            self._reply(handler, 200, result)
             return
         if path in ('/task/cancel', '/task/remove'):
             length = _length(handler, MAX_FORM_BYTES)
@@ -357,7 +443,7 @@ class ViewerFacade:
             if set(values) != {'uuid'} or len(values['uuid']) != 1:
                 raise RequestError(400, 'invalid_action_form')
             identifier = task_uuid(values['uuid'][0])
-            self._authorize(identifier, environment)
+            self._authorize(identifier, environment, handler)
             action = self.service.cancel if path.endswith('cancel') else self.service.remove
             self._reply(handler, 200, action(identifier))
             return

@@ -250,6 +250,20 @@ class ReferenceStore:
         with self.queue._db() as db:
             return self._record(self._row(db, job_id), private)
 
+    def find_submission_replay(self, submission_id, *, request_digest, environment):
+        """Read-only exact replay; never creates a job for an unsupported shape."""
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._hash(request_digest, 'request digest')
+        protocol._environment(environment)
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            row=db.execute('SELECT job_id,request_digest,environment FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
+            # An absent, changed, or differently scoped identity is deliberately
+            # indistinguishable; none may create a new unsupported job.
+            if row is None or (row['request_digest'],row['environment']) != (request_digest,environment):
+                return None
+            return self._public(self._row(db,row['job_id']))
+
     def find_submission(self, submission_id, *, environment):
         """Recover a lost submit response without issuing another execution."""
         protocol._uuid(submission_id, 'submission ID')
@@ -298,6 +312,29 @@ class ReferenceStore:
             return self._public(row)
 
     def claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
+        from contextlib import nullcontext
+        from .admission_drain import AdmissionClosed
+        gate = getattr(self.queue, 'admission_drain', None)
+        try:
+            with gate.admit() if gate is not None else nullcontext():
+                return self._claim(job_id,node_id=node_id,worker_id=worker_id,
+                                   worker_instance_id=worker_instance_id,claim_request_id=claim_request_id)
+        except AdmissionClosed:
+            # Existing claims are read-only replay and remain recoverable while
+            # closing; a new claim may never cross the barrier.
+            self.queue._known_node(node_id);self.queue.slug(worker_id)
+            for value in (worker_instance_id,claim_request_id):protocol._slug(value,'claim identifier')
+            if PROFILE not in self.queue.allowed_profiles:raise Conflict('reference profile disabled')
+            with self.queue._db() as db:
+                db.execute('BEGIN')
+                row=self._row(db,job_id)
+                old=db.execute('SELECT * FROM reference_claims WHERE request_id=?',(claim_request_id,)).fetchone()
+                if old is None:return None
+                if (old['job_id'],old['node_id'],old['worker_id'],old['instance_id'])!=(job_id,node_id,worker_id,worker_instance_id):
+                    raise Conflict('claim request belongs to different worker binding')
+                return self._record(row,True)
+
+    def _claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
         """PRIVATE worker API: atomically persist ownership and replay envelope.
 
         Exact replay returns the current state and original token, including
@@ -318,6 +355,9 @@ class ReferenceStore:
                         job_id, node_id, worker_id, worker_instance_id):
                     raise Conflict("claim request belongs to different worker binding")
                 return self._record(row, True)
+            gate = getattr(self.queue, 'admission_drain', None)
+            if gate is not None and gate._closed(db):
+                return None
             self.queue._refresh_nodes(db)
             if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
                 return None

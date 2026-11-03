@@ -33,8 +33,17 @@ class ViewerRecoveryReviewTests(unittest.TestCase):
 
         fixture.finish(identifier, 50)
         fixture.service.tick()
-        self.assertEqual(fixture.service.info(identifier)['status']['code'], 50)
-        self.assertEqual(fixture.task(next_identifier)['node_id'], 'cluster')
+        # NodeODM's cancelled status alone does not prove its processes have
+        # stopped. Keep the global slot held until termination is verified.
+        info = fixture.service.info(identifier)
+        self.assertEqual(info['status']['code'], 20)
+        self.assertTrue(info['ledgetopHeld'])
+        self.assertEqual(fixture.task(identifier)['job']['status'], 'held')
+        self.assertEqual(fixture.task(identifier)['error'], 'cancel_termination_unverified')
+        self.assertIsNone(fixture.task(next_identifier)['node_id'])
+        self.assertEqual(fixture.task(next_identifier)['job']['status'], 'queued')
+        self.assertEqual(sum(call[0] == 'commit' for call in actions), 1)
+        self.assertEqual(sum(call[0] == 'cancel' for call in actions), 1)
         self.assertEqual(fixture.fleet.max_active, 1)
 
 

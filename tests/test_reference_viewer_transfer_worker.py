@@ -375,8 +375,15 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             provenanceReceiptId='provenance-test')
         api = self.fixture.make_api(store=store, treedar_available=True)
         created = self.fixture.request('POST', '/jobs', request, api=api)
-        self.assertEqual(created.status, 201)
-        job = created.body
+        # The public adapter holds new combined jobs until execution is wired.
+        self.assertEqual((created.status, created.body), (409, {'error': 'treedar_execution_shape_unsupported'}))
+        # Exercise retained historical combined-job result closure independently.
+        from processing import reference_protocol as protocol
+        validated = protocol.validate_submission(request, environment='staging',
+            capability_fingerprint=api.capability_fingerprint, options_fingerprint=api.options_fingerprint,
+            allowed_odm_options=api.allowed_odm_options, available_engines=('odm', 'treedar'))
+        job, inserted = store.submit(validated)
+        self.assertTrue(inserted)
         binding = dict(node_id='main', worker_id='worker', worker_instance_id='instance',
             claim_request_id='claim-combined')
         claim = store.claim(job['jobId'], **binding)

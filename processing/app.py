@@ -18,15 +18,62 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if config.per_node_slots and not config.node_inventory:
+        from .config import require_distinct_node_hosts
+        require_distinct_node_hosts(config.local_node_url, config.main_node_url)
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
         reference_settings = load_reference_settings(config.reference_config_path, config)
-    queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
-                  node_ids=config.prototype_node_ids,
-                  treedar_node_ids=config.treedar_node_ids,
-                  viewer_enabled=config.viewer_enabled,
-                  reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
+    if config.viewer_production_held:
+        if not config.prototype_state_dir:
+            raise RuntimeError('production_hold_idle_state_unavailable')
+        from .prototype import _require_safe_idle_database_file
+        _require_safe_idle_database_file(Path(config.prototype_state_dir) / 'jobs.sqlite3')
+    lease = None
+    if config.prototype_state_dir:
+        from . import authority_lease
+        if config.authority_lease_dir:
+            # Before any state write: a second holder of this authority refuses here.
+            lease = authority_lease.acquire(config.authority_lease_dir, config.prototype_state_dir)
+        elif authority_lease.required(config.prototype_state_dir):
+            raise RuntimeError('authority_lease_configuration_required')
+    try:
+        queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
+                      node_ids=config.prototype_node_ids,
+                      treedar_node_ids=config.treedar_node_ids,
+                      viewer_enabled=config.viewer_enabled,
+                      reference_enabled=reference_settings is not None,
+                      require_idle_existing=config.viewer_production_held,
+                      per_node_slots=config.per_node_slots,
+                      node_capabilities={n['id']: n['capabilities'] for n in config.node_inventory} if config.node_inventory else None) if config.prototype_state_dir else None
+    except BaseException:
+        if lease is not None:
+            lease.close()
+        raise
+    if config.viewer_production_held and queue is None:
+        raise RuntimeError('production_hold_idle_state_unavailable')
+    if lease is not None:
+        try:
+            authority_lease.record_required(queue, lease)
+        except Exception:
+            queue.close()
+            raise
+        queue.authority_lease = lease  # held, by this process, until it exits
+    if queue is not None and config.admission_drain_enabled:
+        from .admission_drain import AdmissionDrain
+        try:
+            queue.admission_drain = AdmissionDrain(queue)
+        except Exception:
+            queue.close()
+            raise
+    elif queue is not None:
+        # Never silently bypass a previously enabled persistent barrier.
+        with queue._db() as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
+        if exists:
+            queue.close()
+            raise RuntimeError('admission_drain_configuration_required')
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService
@@ -34,12 +81,13 @@ def make_handler(config: Config):
         service = ViewerService(queue, config)
         spool = Path(config.prototype_state_dir) / 'viewer-spool'
         spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
+        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool,
+                              production_held=config.viewer_production_held)
     reference_runtime = None
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime
         try:
-            reference_runtime = ReferenceRuntime(queue, config, reference_settings)
+            reference_runtime = ReferenceRuntime(queue, config, reference_settings, viewer_service=service)
         except Exception:
             if service:
                 service.close()
@@ -90,9 +138,34 @@ def make_handler(config: Config):
             return (probe_node("local", config.local_node_url, config.local_node_token),
                     probe_node("main", config.main_node_url, config.main_node_token))
 
+        def _inventory_nodes(self):
+            if queue is None:
+                raise Conflict('inventory queue unavailable')
+            jobs = queue.list()
+            occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
+            if any(node not in queue.node_ids for node in occupied):
+                raise Conflict('inventory occupancy unavailable')
+            result = []
+            for spec in config.node_inventory:
+                state = queue.get_node(spec['id'])
+                if state is None:
+                    raise Conflict('inventory node state unavailable')
+                report = (probe_node(spec['id'], spec['origin'], spec['token']) if 'odm' in spec['capabilities']
+                          else {'role': spec['id'], 'configured': True, 'ready': False,
+                                'reason': 'health_probe_unsupported', 'maxImages': None, 'taskQueueCount': None})
+                result.append({**report, 'id': spec['id'], 'physicalHostId': spec['physicalHostId'],
+                    'maxPhotos': spec['maxPhotos'], 'capabilities': list(spec['capabilities']),
+                    'state': state['state'], 'occupied': spec['id'] in occupied})
+            return result
+
         def do_GET(self):
             if facade and facade.handle(self):
                 return
+            if self.path == '/v1/prototype/admission-drain':
+                if not self._authorized(operator=True):return
+                gate = getattr(queue, 'admission_drain', None)
+                if gate is None:self._reply(404, {'error': 'not_found'});return
+                self._reply(200, gate.status());return
             if self.path.startswith("/v1/prototype/"):
                 prefix='/v1/prototype/nodes/'
                 if self.path.startswith(prefix) and '/schedule-owned' in self.path[len(prefix):]:
@@ -139,8 +212,21 @@ def make_handler(config: Config):
                                   "syntheticPrototypeEnabled": queue is not None,
                                   "photoSmokeEnabled": config.photo_smoke_enabled,
                                   "viewerEnabled": config.viewer_enabled})
-            elif self.path == '/v1/options':
+            elif self.path in ('/v1/options', '/v2/options'):
                 if self._authorized(observer=True):
+                    if self.path == '/v2/options' and not config.node_inventory:
+                        self._reply(404, {'error': 'not_found'}); return
+                    if self.path == '/v1/options' and config.node_inventory:
+                        self._reply(503, {'error': 'use_inventory_v2'}); return
+                    if config.node_inventory:
+                        nodes = [(n['id'], n['origin'], n['token']) for n in config.node_inventory if 'odm' in n['capabilities']]
+                        if not nodes:
+                            self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
+                        snapshot = catalog(nodes, inventory=True)
+                        self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
+                            'viewerNativeApiEnabled': config.viewer_enabled,
+                            'viewerProviderReady': config.viewer_enabled and snapshot['ready'],
+                            'snapshotConsistency': 'best_effort_read_only', **snapshot}); return
                     snapshot = catalog([
                         ('local', config.local_node_url, config.local_node_token),
                         ('main', config.main_node_url, config.main_node_token)])
@@ -148,8 +234,18 @@ def make_handler(config: Config):
                         'viewerNativeApiEnabled': config.viewer_enabled,
                         'viewerProviderReady': config.viewer_enabled and snapshot['ready'],
                         'snapshotConsistency': 'best_effort_read_only', **snapshot})
-            elif self.path == "/v1/nodes":
+            elif self.path in ("/v1/nodes", "/v2/nodes"):
                 if self._authorized():
+                    if self.path == '/v2/nodes' and not config.node_inventory:
+                        self._reply(404, {'error': 'not_found'}); return
+                    if self.path == '/v1/nodes' and config.node_inventory:
+                        self._reply(503, {'error': 'use_inventory_v2'}); return
+                    if config.node_inventory:
+                        try:
+                            self._reply(200, {'nodes': self._inventory_nodes()})
+                        except Conflict:
+                            self._reply(503, {'error': 'inventory_diagnostic_unavailable'})
+                        return
                     self._reply(200, {"nodes": self._nodes()})
             else:
                 self._reply(404, {"error": "not_found"})
@@ -158,13 +254,17 @@ def make_handler(config: Config):
             if facade and facade.handle(self):
                 return
             prototype = self.path.startswith("/v1/prototype/")
-            if self.path != "/v1/plan" and not prototype:
+            if self.path not in ("/v1/plan", "/v2/plan") and not prototype:
                 self._reply(404, {"error": "not_found"})
                 return
-            operator = prototype and (self.path.endswith(("/hold", "/resolve"))
+            operator = prototype and (self.path == '/v1/prototype/admission-drain' or self.path.endswith(("/hold", "/resolve"))
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return
+            if self.path == '/v1/plan' and config.node_inventory:
+                self._reply(503, {'error': 'use_inventory_v2'}); return
+            if self.path == '/v2/plan' and not config.node_inventory:
+                self._reply(404, {'error': 'not_found'}); return
             if prototype and queue is None:
                 self._reply(404, {"error": "prototype_disabled"})
                 return
@@ -180,7 +280,8 @@ def make_handler(config: Config):
                 return
             try:
                 raw=self.rfile.read(length)
-                if self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'):
+                if (self.path == '/v1/prototype/admission-drain' or
+                        (self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'))):
                     def unique(pairs):
                         value={}
                         for key,item in pairs:
@@ -191,8 +292,21 @@ def make_handler(config: Config):
                 else:
                     request=json.loads(raw)
                 if prototype:
-                    if self.path == "/v1/prototype/jobs":
-                        job, created = queue.submit(request)
+                    if self.path == '/v1/prototype/admission-drain':
+                        if not hasattr(queue, 'admission_drain'):
+                            self._reply(404, {'error': 'not_found'}); return
+                        if not isinstance(request, dict) or set(request) != {'closed','requestId','expectedGeneration','expectedClosed','expectedAuthorityId'}:
+                            raise ValueError('exact admission request required')
+                        self._reply(200, queue.admission_drain.set_closed(request['closed'],request_id=request['requestId'],expected_generation=request['expectedGeneration'],expected_closed=request['expectedClosed'],expected_authority=request['expectedAuthorityId']))
+                    elif self.path == "/v1/prototype/jobs":
+                        from .admission_drain import AdmissionClosed
+                        try:
+                            from contextlib import nullcontext
+                            gate = getattr(queue, 'admission_drain', None)
+                            with gate.admit() if gate is not None else nullcontext():
+                                job, created = queue.submit(request)
+                        except AdmissionClosed:
+                            self._reply(503, {'error': 'admission_draining'}); return
                         self._reply(201 if created else 200, {"job": job})
                     elif self.path == "/v1/prototype/claim":
                         self._reply(200, {"job": queue.claim(request)})
@@ -208,7 +322,8 @@ def make_handler(config: Config):
                             self._reply(200,result if action=='begin' else {'receipt':result} if action=='schedule-owned' else {'node':result})
                     elif operator and self.path.startswith("/v1/prototype/jobs/"):
                         identifier, _, action = self.path[len("/v1/prototype/jobs/"):].rpartition("/")
-                        self._reply(200, {"job": queue.operator(identifier, action, request)})
+                        transition = service.operator if service else queue.operator
+                        self._reply(200, {"job": transition(identifier, action, request)})
                     elif self.path.startswith("/v1/prototype/jobs/") and self.path.endswith("/complete"):
                         identifier = self.path[len("/v1/prototype/jobs/"):-len("/complete")]
                         self._reply(200, {"job": queue.complete(identifier, request)})
@@ -227,6 +342,25 @@ def make_handler(config: Config):
             except (ValueError, TypeError, RecursionError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 self._reply(400, {"error": "invalid_request", "detail": str(exc)[:160]})
                 return
+            if config.node_inventory:
+                try:
+                    nodes = self._inventory_nodes()
+                except Conflict:
+                    self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
+                selected = None
+                for node in nodes:
+                    maximum, actual = node['maxPhotos'], node.get('maxImages')
+                    if ('odm' not in node['capabilities'] or node['occupied'] or node['state'] != 'active'
+                            or node.get('ready') is not True or type(node.get('taskQueueCount')) is not int
+                            or node['taskQueueCount'] != 0 or 'maxImages' not in node
+                            or (actual is not None and (type(actual) is not int or actual < 1))):
+                        continue
+                    if any(value is not None and photos > value for value in (maximum, actual)):
+                        continue
+                    selected = node['id']; break
+                self._reply(200, {'mode': 'routing_probe', 'executesWork': False,
+                    'decision': 'node' if selected else 'wait', 'nodeId': selected,
+                    'reason': 'first_eligible' if selected else 'no_eligible_node', 'nodes': nodes}); return
             local, main = self._nodes()
             decision = plan(photos, size, local, main,
                             config.local_max_photos, config.local_max_input_bytes)
@@ -382,6 +516,7 @@ class CoordinatorService:
                 thread = getattr(service, '_thread', None)
                 if thread is not None:
                     thread.join()  # close()'s legacy ten-second join is insufficient.
+                service.wait_for_transfers()  # Keep queue authority until senders actually exit.
             if self.handler.prototype_queue:
                 self.handler.prototype_queue.close()
             with self._lock:

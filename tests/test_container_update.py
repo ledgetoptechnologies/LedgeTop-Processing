@@ -7,6 +7,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import os
 import subprocess
+import sys
 from urllib.parse import urlsplit
 
 from processing.app import make_handler
@@ -312,6 +313,26 @@ class ComposeBoundaryTests(unittest.TestCase):
             with self.assertRaises(UpdateError):
                 self.adapter.inspect()
 
+    def test_standalone_cli_refuses_unverified_admission_without_mutation(self):
+        # Use the actual entry point; no coordinator, Docker daemon or secrets
+        # are required or contacted even when the historical flag is supplied.
+        args=[sys.executable,'-m','processing.container_update',
+              '--coordinator','http://127.0.0.1:9','--node-id','cluster',
+              '--node-origin','http://127.0.0.1:9','--compose-file','unused.yaml',
+              '--project','fixture','--service','fixture','--docker-engine-id','fixture',
+              '--work',self.temp.name,'--exclusive-admission']
+        result=subprocess.run(args,capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,2)
+        self.assertIn('Standalone maintenance is disabled',result.stdout)
+        self.assertIn('managed node maintenance',result.stdout)
+        self.assertFalse((Path(self.temp.name)/'updater.lock').exists())
+        self.assertFalse((Path(self.temp.name)/'update.json').exists())
+        empty=subprocess.run([sys.executable,'-m','processing.container_update'],capture_output=True,text=True,timeout=5)
+        self.assertEqual(empty.returncode,2);self.assertIn('Standalone maintenance is disabled',empty.stdout)
+        help_text=subprocess.run([sys.executable,'-m','processing.container_update','--help'],capture_output=True,text=True,timeout=5)
+        self.assertEqual(help_text.returncode,0);self.assertIn('Standalone node maintenance is disabled',help_text.stdout)
+        self.assertIn('does not verify ingress',help_text.stdout)
+
     def test_explicit_context_takes_precedence_over_local_host_variable(self):
         with patch.dict(os.environ, {'DOCKER_HOST': 'unix:///local.sock', 'DOCKER_CONTEXT': 'remote'}), \
                 patch.object(self.adapter, 'docker', return_value=json.dumps('ssh://remote')) as command:
@@ -327,6 +348,14 @@ class ComposeBoundaryTests(unittest.TestCase):
             self.assertFalse(self.adapter.processing_idle('exact-container'))
         with patch.object(self.adapter, 'docker', return_value='COMMAND\n'):
             self.assertFalse(self.adapter.processing_idle('exact-container'))
+        for listing in ('unexpected header\n7 node /var/www/index.js\n',
+                        'PID COMMAND\n7 node /var/www/index.js\n7 /sbin/docker-init\n',
+                        'PID COMMAND\n0 node /var/www/index.js\n',
+                        'PID COMMAND\n7 node /var/www/index.js\n007 /sbin/docker-init\n',
+                        'PID COMMAND\n² node /var/www/index.js\n',
+                        'PID COMMAND\n99999999999 node /var/www/index.js\n'):
+            with self.subTest(listing=listing), patch.object(self.adapter, 'docker', return_value=listing):
+                self.assertFalse(self.adapter.processing_idle('exact-container'))
 
     def test_only_exact_regular_nodeodx_placeholder_is_not_an_upload(self):
         with patch.object(self.adapter, 'docker', side_effect=['.gitignore\n', 'regular file 1\n', '*']):

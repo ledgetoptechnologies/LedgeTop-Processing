@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sqlite3
+import stat
 import time
 import secrets
 import unicodedata
@@ -421,6 +422,38 @@ class ScratchLedger:
                        "THEN COALESCE(terminal_at,?) ELSE terminal_at END, "
                        "remaining=CASE WHEN ?='terminal' THEN 0 ELSE remaining END WHERE id=?",
                        (state, state, now, state, reservation_id))
+
+    def ensure_job_directory(self, reservation_id):
+        """Create each owned component privately; never repair unsafe existing data."""
+        self._owned_path(reservation_id, 'jobs/' + reservation_id + '/placeholder')
+        root = self.root
+        jobs = root / 'jobs'
+        job = jobs / reservation_id
+
+        def checked(path):
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or (os.name != 'nt' and (info.st_uid != os.geteuid() or info.st_mode & 0o022))):
+                raise PolicyConflict('scratch directory is not privately owned')
+        def sync(path):
+            if os.name != 'nt':
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+
+        checked(root)
+        for directory, parent in ((jobs, root), (job, jobs)):
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            checked(directory)
+            # Sync on creation and retry, including recovery after an unknown
+            # prior mkdir outcome; never chmod or remove an existing directory.
+            sync(parent)
+        return job
 
     def _owned_path(self, reservation_id, relative_path):
         if not isinstance(relative_path, str) or "\\" in relative_path or ":" in relative_path:
