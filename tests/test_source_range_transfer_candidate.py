@@ -328,6 +328,50 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
                                                     destination=target)
         self.assertEqual(result.read_bytes(), self.body)
 
+    def test_disk_error_after_partial_write_keeps_range_uncommitted_for_retry(self):
+        target = self.root / "photo.bin"
+        real_fdopen = os.fdopen
+        calls = 0
+
+        class FailingWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def write(self, data):
+                nonlocal calls
+                if len(data) > 1:
+                    calls += 1
+                    if calls == 1:
+                        return self.stream.write(data[:max(1, len(data) // 2)])
+                    raise OSError("synthetic disk full after partial write")
+                return self.stream.write(data)
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+        with patch("processing.source_range_transfer.os.fdopen",
+                   side_effect=lambda *args, **kwargs: FailingWriter(real_fdopen(*args, **kwargs))):
+            with self.assertRaises(TransferError):
+                self.make_client().download_object(grant=self.grant(), object_id=self.obj.id,
+                                                    destination=target)
+
+        partial = next(self.root.glob(".source-range-*.part"))
+        self.assertGreater(partial.stat().st_size, 0)
+        with closing(sqlite3.connect(self.root / "progress.sqlite")) as db:
+            self.assertEqual(db.execute("SELECT committed_bytes FROM source_objects").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT state FROM source_ranges").fetchall(), [("intent",)])
+
+        result = self.make_client().download_object(grant=self.grant("rotated"), object_id=self.obj.id,
+                                                    destination=target)
+        self.assertEqual(result.read_bytes(), self.body)
+
     def test_publish_before_partial_unlink_crash_is_cleaned_on_retry(self):
         target = self.root / "photo.bin"
         original_unlink = Path.unlink
