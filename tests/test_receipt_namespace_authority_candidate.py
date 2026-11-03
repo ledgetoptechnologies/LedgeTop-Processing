@@ -85,6 +85,22 @@ class ReceiptNamespaceAuthorityTests(unittest.TestCase):
     with self.assertRaises(ReceiptNamespaceHeld):ReceiptNamespaceGate(q,v1,v2).census()
     self.assertEqual(hashlib.sha256(Path(q.path).read_bytes()).hexdigest(),digest)
    finally:q.close()
+ def test_nul_and_ambiguous_legacy_rows_are_held_without_mutation(self):
+  cases=(('id','ok\x00'+'x'*1000000),('json','{}\x00'+'x'*1000000),
+         ('json','{"receiptId":"hidden","receiptId":"visible","storageReceiptId":"storage"}'))
+  for kind,value in cases:
+   with self.subTest(kind=kind, prefix=value[:30]), tempfile.TemporaryDirectory(prefix='hostile-census-') as root:
+    q=Queue(root,reference_enabled=True)
+    try:
+     store=ReferenceStore(q);TerminalService(store)
+     v1=ImportConfirmationStore(q.path,trusted_loader=lambda *_:None);v2=OdmImportConfirmationStoreV2(q.path,trusted_loader=lambda *_:None)
+     with q._db() as db:
+      if kind=='id':db.execute("INSERT INTO viewer_import_confirmations_candidate_v1 VALUES('job',1,'staging',?,'a','b',X'01')",(value,))
+      else:db.execute('INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)',('visible','job','f'*64,value))
+     before=hashlib.sha256(Path(q.path).read_bytes()).hexdigest()
+     with self.assertRaises(ReceiptNamespaceHeld):ReceiptNamespaceGate(q,v1,v2).census()
+     self.assertEqual(hashlib.sha256(Path(q.path).read_bytes()).hexdigest(),before)
+    finally:q.close()
  def test_competing_cooperative_writers_are_serialized_with_census(self):
   def write(table,job):
    db=sqlite3.connect(self.queue.path,timeout=5,isolation_level=None);db.row_factory=sqlite3.Row
@@ -127,6 +143,9 @@ class ReceiptNamespaceAuthorityTests(unittest.TestCase):
   self.store.configure_receipt_namespace_gate(self.gate)
   first=self.v1.record(scope,fixture.confirmation);again=self.v1.record(scope,fixture.confirmation)
   self.assertEqual((first.state,again.state),('recorded','replayed'));self.assertEqual(first.sha256,again.sha256)
+  with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+   repeats=list(pool.map(lambda _:self.v1.record(scope,fixture.confirmation),range(2)))
+  self.assertEqual([r.state for r in repeats],['replayed','replayed']);self.assertTrue(all(r.sha256==first.sha256 for r in repeats))
  def test_real_terminal_writer_rejects_import_id_collision(self):
   fixture=terminal_fixture.ReferenceTerminalTests('test_unavailable_bound_grant_still_blocks_runtime_claims');fixture.setUp()
   try:
@@ -137,6 +156,31 @@ class ReceiptNamespaceAuthorityTests(unittest.TestCase):
    with fixture.queue._db() as db:db.execute("INSERT INTO viewer_import_confirmations_candidate_v1 VALUES('other',1,'staging',?,'a','b',X'01')",(receipt['receiptId'],))
    with self.assertRaisesRegex(Conflict,'shared receipt namespace unavailable'):fixture.terminal.accept(fixture.job['jobId'],receipt,'staging')
    with fixture.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_terminal_acceptances').fetchone()[0],0)
+  finally:fixture.doCleanups()
+ def test_real_terminal_and_signed_import_race_one_writer_holds(self):
+  fixture=terminal_fixture.ReferenceTerminalTests('test_unavailable_bound_grant_still_blocks_runtime_claims');fixture.setUp()
+  try:
+   os.chmod(fixture.queue.path.parent,0o700);fixture.confirm()
+   v1=ImportConfirmationStore(fixture.queue.path,trusted_loader=fixture_loader);v2=OdmImportConfirmationStoreV2(fixture.queue.path,trusted_loader=lambda *_:None)
+   proof=import_fixture.ViewerImportConfirmationTests('test_valid_signature_full_ordered_closure_and_exact_replay');proof.setUp()
+   scope={'jobId':'job-1','generation':1,'environment':'staging'}
+   context=dict(expected=proof.expected,result_manifest=proof.manifest,accepted_envelopes=proof.envelopes,trusted_import_keys=proof.import_keys,trusted_copy_keys=proof.copy_signer.trusted_keys)
+   receipt=fixture.receipt();proof.confirmation['confirmationId']=receipt['receiptId'];proof.sign()
+   with fixture.queue._db() as db:
+    db.execute('CREATE TABLE trusted_import_fixture(job_id TEXT,generation INTEGER,environment TEXT,payload TEXT)')
+    db.execute('INSERT INTO trusted_import_fixture VALUES (?,?,?,?)',(*scope.values(),reference_protocol.canonical_json(context).decode()))
+   fixture.store.configure_receipt_namespace_gate(ReceiptNamespaceGate(fixture.queue,v1,v2));barrier=threading.Barrier(2)
+   def terminal():
+    barrier.wait(timeout=5)
+    try:fixture.terminal.accept(fixture.job['jobId'],receipt,'staging');return 'written'
+    except Conflict:return 'held'
+   def imported():
+    barrier.wait(timeout=5)
+    try:v1.record(scope,proof.confirmation);return 'written'
+    except ImportConfirmationStoreHeld:return 'held'
+   with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    futures=[pool.submit(terminal),pool.submit(imported)];results=[x.result(timeout=10) for x in futures]
+   self.assertCountEqual(results,['written','held'])
   finally:fixture.doCleanups()
  def test_real_acceptance_writer_rejects_import_id_and_allows_exact_replay(self):
   with patch.object(ReferenceStore,'_activation',return_value={'viewerAttemptId':'synthetic'}),patch.object(ReferenceStore,'_activation_bound_grant_ready',return_value=True):

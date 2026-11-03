@@ -22,6 +22,29 @@ def _id(value):
     return value
 
 
+def _legacy_receipt(raw, table_id):
+    def unique_pairs(pairs):
+        out={}
+        for key,value in pairs:
+            if key in out: raise ValueError('duplicate JSON key')
+            out[key]=value
+        return out
+    def reject_constant(_): raise ValueError('nonfinite JSON')
+    obj=json.loads(raw,object_pairs_hook=unique_pairs,parse_constant=reject_constant)
+    p._closed(obj, ('schemaVersion','receiptId','storageReceiptId','jobId','generation','environment',
+        'inputManifestSha256','pipelineDigest','resultManifestSha256','acceptedObjectIds','acceptedAt','validationVersion'), 'legacy acceptance')
+    p._slug(table_id,'legacy row receipt ID')
+    p._environment(obj['environment'])
+    if table_id!=obj['receiptId'] or obj['receiptId']==obj['storageReceiptId']:
+        raise ValueError('ambiguous legacy receipt identity')
+    ids=obj['acceptedObjectIds']
+    if type(ids) is not list: raise ValueError('invalid accepted objects')
+    expected={key:obj[key] for key in ('jobId','generation','environment','pipelineDigest','resultManifestSha256')}
+    expected['objects']=[{'id':value} for value in ids]
+    p.validate_acceptance(obj,result_manifest=expected,input_manifest_sha256=obj['inputManifestSha256'])
+    return obj
+
+
 class ReceiptNamespaceGate:
     """Bind actual journal instances to one queue DB; no external fencing claimed."""
     def __init__(self, queue, v1, v2):
@@ -43,7 +66,7 @@ class ReceiptNamespaceGate:
             attached=db.execute('PRAGMA database_list').fetchall()
             main=[row[2] for row in attached if row[1]=='main']
             if len(attached)!=1 or len(main)!=1 or Path(main[0]).absolute()!=q:raise ValueError()
-            rows=db.execute("SELECT CASE WHEN typeof(singleton)='integer' THEN singleton END, CASE WHEN typeof(authority_id)='text' AND length(authority_id)<=36 THEN authority_id END FROM coordinator_identity LIMIT 2").fetchall()
+            rows=db.execute("SELECT CASE WHEN typeof(singleton)='integer' THEN singleton END, CASE WHEN typeof(authority_id)='text' AND instr(authority_id,char(0))=0 AND length(authority_id)<=36 THEN authority_id END FROM coordinator_identity LIMIT 2").fetchall()
             if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.queue.authority_id:raise ValueError()
         except (OSError,ValueError,TypeError,sqlite3.Error):
             raise ReceiptNamespaceHeld('shared_receipt_database_required') from None
@@ -67,10 +90,10 @@ class ReceiptNamespaceGate:
                     yield row
             return generate()
         def safe_id(column):
-            return "CASE WHEN typeof("+column+")='text' AND length("+column+") BETWEEN 1 AND 128 THEN "+column+" END"
+            return "CASE WHEN typeof("+column+")='text' AND instr("+column+",char(0))=0 AND length("+column+") BETWEEN 1 AND 128 THEN "+column+" END"
         def payload_budget(table,column):
             nonlocal total
-            row=db.execute("SELECT COUNT(*),COALESCE(SUM(CASE WHEN typeof("+column+")='text' THEN length("+column+") ELSE 0 END),0),COALESCE(SUM(CASE WHEN typeof("+column+")!='text' THEN 1 ELSE 0 END),0) FROM "+table).fetchone()
+            row=db.execute("SELECT COUNT(*),COALESCE(SUM(CASE WHEN typeof("+column+")='text' AND instr("+column+",char(0))=0 THEN length("+column+") ELSE 0 END),0),COALESCE(SUM(CASE WHEN typeof("+column+")!='text' OR instr("+column+",char(0))!=0 THEN 1 ELSE 0 END),0) FROM "+table).fetchone()
             # Four bytes per character is a conservative UTF-8 upper bound;
             # avoid allocating a BLOB for every potentially hostile value.
             if row[0]>MAX_ROWS or row[2] or row[1]*4>MAX_BYTES-total:raise ReceiptNamespaceHeld('receipt_census_limit')
@@ -83,8 +106,7 @@ class ReceiptNamespaceGate:
                 raw=row[1]
                 if type(raw) is not str or len(raw.encode('utf-8'))>p.MAX_BODY_BYTES:raise ReceiptNamespaceHeld('receipt_census_limit')
                 _preflight_stored_json(raw.encode('utf-8'))
-                value=json.loads(raw)
-                if type(value) is not dict or row[0]!=value.get('receiptId'):raise ValueError()
+                value=_legacy_receipt(raw,row[0])
                 add(row[0],'acceptance');add(value['storageReceiptId'],'acceptance-storage')
             for row in rows('reference_viewer_receipts',safe_id('receipt_id')+','+safe_id('storage_receipt_id'),True):
                 add(row[0],'viewer-copy');add(row[1],'viewer-storage')
