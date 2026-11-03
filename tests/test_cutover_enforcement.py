@@ -84,6 +84,79 @@ class AuthorityLeaseTest(unittest.TestCase):
         self.assertFalse(authority_lease.required(self.copy))
 
 
+def leave_hot_journal(database, statements):
+    """Run statements in a write transaction, then die without commit or rollback."""
+    subprocess.run([sys.executable, '-c', textwrap.dedent('''
+        import os, sqlite3, sys
+        db = sqlite3.connect(sys.argv[1], isolation_level=None)
+        db.execute('PRAGMA cache_size=1')  # spill uncommitted pages into the database file
+        db.execute('BEGIN IMMEDIATE')
+        for statement in sys.argv[2:]:
+            db.execute(statement)
+        for _ in range(200):
+            db.execute('INSERT INTO hot_filler VALUES(randomblob(4000))')
+        os._exit(9)
+    '''), str(database), 'CREATE TABLE hot_filler(x BLOB)', *statements], check=False)
+    journal = Path(str(database) + '-journal')
+    assert journal.is_file() and journal.stat().st_size > 0, 'no hot journal left'
+    return journal
+
+
+class HotJournalPreflightTest(unittest.TestCase):
+    """A coordinator killed inside a write transaction must not block its own restart."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.state = Path(self.temporary.name) / 'state'
+        Queue(self.state).close()
+        self.database = self.state / 'jobs.sqlite3'
+        self.authority = authority_lease.existing_authority(self.state)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def snapshot(self, journal):
+        return {path: path.read_bytes() for path in (self.database, journal)}
+
+    def test_reads_committed_state_without_touching_database_or_journal(self):
+        journal = leave_hot_journal(self.database, [authority_lease.MARKER_DDL,
+                                                    'INSERT INTO coordinator_authority_lease VALUES(1,1)'])
+        before = self.snapshot(journal)
+        reader = sqlite3.connect('file:' + str(self.database) + '?mode=ro', uri=True)
+        with self.assertRaises(sqlite3.OperationalError):  # the failure this guards against
+            reader.execute('SELECT 1 FROM sqlite_master').fetchone()
+        reader.close()
+        self.assertFalse(authority_lease.required(self.state))  # the marker was never committed
+        self.assertEqual(authority_lease.existing_authority(self.state), self.authority)
+        self.assertEqual(self.snapshot(journal), before)
+
+    def test_committed_marker_is_still_required_through_a_hot_journal(self):
+        db = sqlite3.connect(self.database)
+        with db:
+            db.execute(authority_lease.MARKER_DDL)
+            db.execute('INSERT INTO coordinator_authority_lease VALUES(1,1)')
+        db.close()
+        journal = leave_hot_journal(self.database, ['DROP TABLE coordinator_authority_lease'])
+        before = self.snapshot(journal)
+        self.assertTrue(authority_lease.required(self.state))
+        self.assertEqual(self.snapshot(journal), before)
+
+    def test_fails_closed_without_private_space_and_leaves_state_untouched(self):
+        journal = leave_hot_journal(self.database, [])
+        before = self.snapshot(journal)
+        with patch.object(authority_lease.tempfile, 'TemporaryDirectory', side_effect=OSError('read-only')):
+            for check in (authority_lease.required, authority_lease.existing_authority):
+                with self.subTest(check=check.__name__), self.assertRaisesRegex(
+                        authority_lease.LeaseUnavailable, 'authority_preflight_hot_journal_unreadable'):
+                    check(self.state)
+        self.assertEqual(self.snapshot(journal), before)
+
+    def test_unrelated_read_errors_are_not_masked(self):
+        self.database.write_bytes(b'not a database' * 100)
+        with self.assertRaises(sqlite3.DatabaseError):
+            authority_lease.required(self.state)
+
+
 @unittest.skipUnless(POSIX, 'flock lease is POSIX-only')
 class StartupEnforcementTest(unittest.TestCase):
     """Real make_handler startup with environment configuration."""
@@ -120,6 +193,25 @@ class StartupEnforcementTest(unittest.TestCase):
         self.assertEqual(before, (self.copy / 'jobs.sqlite3').read_bytes())
         self.assertFalse((self.copy / 'coordinator.lock').exists())
         first.prototype_queue.close()
+
+    def test_restarts_after_a_kill_inside_a_write_transaction(self):
+        first = self.handler(self.state)
+        first.prototype_queue.authority_lease.close()
+        first.prototype_queue.close()
+        journal = leave_hot_journal(self.state / 'jobs.sqlite3', [])
+        before = (self.state / 'jobs.sqlite3').read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'authority_lease_configuration_required'):
+            self.handler(self.state, lease=False)  # still refused, and still before any write
+        self.assertEqual((self.state / 'jobs.sqlite3').read_bytes(), before)
+        self.assertTrue(journal.exists())
+        second = self.handler(self.state)  # lease first, then SQLite rolls the journal back
+        self.assertFalse(journal.exists())
+        self.assertNotIn('hot_filler', {row[0] for row in sqlite3.connect(self.state / 'jobs.sqlite3').execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")})
+        with self.assertRaises(authority_lease.LeaseUnavailable):
+            authority_lease.acquire(self.leases, self.copy)
+        second.prototype_queue.authority_lease.close()
+        second.prototype_queue.close()
 
     def test_leased_state_refuses_to_start_without_a_lease(self):
         first = self.handler(self.state)
