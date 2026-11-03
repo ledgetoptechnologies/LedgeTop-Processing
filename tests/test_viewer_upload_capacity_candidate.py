@@ -1,4 +1,6 @@
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -26,6 +28,35 @@ class Store:
 
 
 class UploadCapacityTests(unittest.TestCase):
+    def test_actual_store_lost_commit_response_process_restart(self):
+        script = r'''import io,json,os,sys
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore,VIEWER_PROFILE
+from processing.scratch_policy import ScratchLedger
+from processing.viewer_upload_capacity_candidate import ViewerUploadCapacity
+from processing.viewer_limits import MAX_UPLOAD_BYTES
+root=Path(sys.argv[1]); phase=sys.argv[2]; ident='11111111-2222-4333-8444-555555555555'
+q=Queue(root/'queue');q.allowed_profiles.add(VIEWER_PROFILE)
+try:
+ store=TaskStore(q,root/'inputs'); ledger=ScratchLedger(root/'ledger.sqlite',root,capacity_probe=lambda _:MAX_UPLOAD_BYTES+1000,safety_floor_bytes=100,clock=lambda:1)
+ gate=ViewerUploadCapacity(ledger,store,root,synthetic_only=True)
+ if phase=='first':
+  store.initialize(ident,'synthetic',[],None,'production')
+  with gate.upload(ident,'production',3,3):
+   gate.file(ident,'production',3,'a.jpg',3);store.upload(ident,'a.jpg',io.BytesIO(b'abc'),3)
+ with gate.commit(ident,'production',3): store.commit(ident)
+ job=store.task(ident)['job_id'];print(json.dumps({'job':job}),flush=True)
+ if phase=='first':os._exit(73)
+finally:q.close()
+'''
+        with tempfile.TemporaryDirectory() as root:
+            first=subprocess.run([sys.executable,'-c',script,root,'first'],capture_output=True,text=True,timeout=20)
+            self.assertEqual(first.returncode,73,msg=first.stderr)
+            second=subprocess.run([sys.executable,'-c',script,root,'retry'],capture_output=True,text=True,timeout=20)
+            self.assertEqual(second.returncode,0,msg=second.stderr)
+            self.assertEqual(first.stdout,second.stdout)
+
     def test_reserve_recheck_partial_retry_and_commit(self):
         with tempfile.TemporaryDirectory() as root:
             store = Store(root)
