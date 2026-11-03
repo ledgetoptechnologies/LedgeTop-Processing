@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+import ssl
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,6 +18,9 @@ from processing import reference_protocol as p
 from processing.node_gate import NodeGate
 from processing.reference_engine_worker import ReferenceEngineWorker, WorkerHeld
 from processing.reference_driver import ReferenceDriver
+from processing.reference_failure import FailureOutbox
+from processing.reference_transfer import BrokerClient
+from processing.viewer_service import NativeEngine
 from processing.reference_protocol import validate_submission
 from processing.scratch_cleanup import ScratchCleanupExecutor
 from processing.scratch_policy import ScratchLedger, PolicyConflict
@@ -109,6 +113,36 @@ class ReferenceWorkerViewerV2AcceptanceTests(unittest.TestCase):
         signed = self.acceptance(self.viewer, ids, suffix='signed')
         envelope = self.signer.envelope(signed, self.viewer)
         self.assertTrue(driver._apply_acceptance(self.job['jobId'], [envelope])['fullyAccepted'])
+
+    def test_initialized_driver_waits_for_signed_treedar_v2_receipt(self):
+        self.treedar()
+        ids = [obj['id'] for obj in self.result['objects']]
+        unsigned = self.acceptance(self.result, ids, suffix='driver-legacy')
+        signed = self.acceptance(self.viewer, ids, suffix='driver-signed')
+        receipt = [unsigned]
+        self.worker.engine = NativeEngine('http://127.0.0.1:3001')
+        tls = ssl.create_default_context()
+        broker = BrokerClient('https://broker.invalid:9443', ssl_context=tls)
+        driver = ReferenceDriver(self.worker, self.ledger, self.outbox, broker,
+            'https://coordinator.invalid:9443', 'synthetic-worker-token-0001',
+            state_path=self.root / 'driver.sqlite', ssl_context=tls, output_budget=10000,
+            transfer_ttl=240, safety_floor=0, failure_outbox=FailureOutbox(self.root / 'failure.sqlite'),
+            worker_instance_id='worker-instance')
+        with driver._db() as db:
+            db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,'awaiting_acceptance',?)",
+                (self.job['jobId'], 'synthetic-claim', json.dumps({'claim': self.job})))
+        driver._request = lambda *_a, **_k: (200, {'receipts': receipt})
+        driver._ready = lambda: False  # no actual NodeODM in this fixture
+        driver.step()
+        with driver._db() as db:
+            self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?',
+                (self.job['jobId'],)).fetchone()[0], 'awaiting_acceptance')
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        receipt[:] = [self.signer.envelope(signed, self.viewer)]
+        driver.step()
+        with driver._db() as db:
+            self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?',
+                (self.job['jobId'],)).fetchone()[0], 'completed')
 
     def acceptance(self, manifest, ids, suffix='1'):
         return dict(schemaVersion=1, receiptId='accept-' + suffix, storageReceiptId='storage-' + suffix,
