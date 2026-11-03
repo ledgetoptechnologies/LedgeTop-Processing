@@ -51,13 +51,25 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None, viewer_required_environments=()):
+                 main_node_id=None, viewer_required_environments=(),
+                 node_inventory=None, node_readiness=None):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
         self.queue = queue
+        self.node_inventory = tuple(node_inventory or ())
+        self.node_readiness = node_readiness
+        if self.node_inventory:
+            if (not queue.per_node_slots or not callable(node_readiness)
+                    or tuple(n['id'] for n in self.node_inventory) != queue.node_ids):
+                raise ValueError('reference inventory requires matching per-node queue and readiness')
+            for spec in self.node_inventory:
+                limit = spec.get('maxPhotos')
+                if (limit is not None and (type(limit) is not int or limit < 1)
+                        or not isinstance(spec.get('capabilities'), (list, tuple))):
+                    raise ValueError('invalid reference inventory capability or limit')
         if not isinstance(viewer_required_environments, (tuple, list, set, frozenset)):
             raise ValueError('invalid Viewer acceptance environments')
         self.viewer_required_environments = frozenset(viewer_required_environments)
@@ -291,25 +303,87 @@ class ReferenceStore:
             or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
         return self.main_node_id if requires_main else 'cluster'
 
+    def _eligible_head(self, db, node_id):
+        """Return the same eligible queue head for discovery and atomic claim.
+
+        Caller holds a transaction and refreshes maintenance state first.  This
+        is the legacy global-slot policy; inventory routing remains disabled.
+        """
+        if self.node_inventory:
+            return self._inventory_eligible_head(db, node_id)
+        if (self.queue._node(db, node_id)['state'] not in ('active', 'scheduled')
+                or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()):
+            return None
+        head = db.execute("""SELECT id,profile FROM jobs WHERE status='queued'
+            ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1""").fetchone()
+        if not head or head['profile'] != PROFILE or PROFILE not in self.queue.node_profiles(node_id):
+            return None
+        row = self._row(db, head['id'])
+        submission = json.loads(row['input_json'])
+        if (self._required_node(submission) != node_id or
+                (submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids)):
+            return None
+        return row
+
+    def _inventory_eligible_head(self, db, node_id):
+        """Pick one ordered eligible assignment under the queue write lock.
+
+        Readiness must be a trusted, nonblocking local observation. A missing or
+        malformed observation is ineligible; reservations are checked again in
+        this transaction. This path is not enabled by runtime configuration.
+        """
+        occupied = {r['node_id'] for r in db.execute(
+            "SELECT node_id FROM jobs WHERE status IN ('running','held')")}
+        if not occupied.issubset(set(self.queue.node_ids)):
+            return None
+        available = []
+        for spec in self.node_inventory:
+            name = spec['id']
+            if (name in occupied or self.queue._node(db, name)['state'] not in ('active', 'scheduled')
+                    or PROFILE not in self.queue.node_profiles(name)):
+                continue
+            try:
+                report = self.node_readiness(name)
+            except Exception:
+                continue
+            if (not isinstance(report, dict) or report.get('ready') is not True
+                    or type(report.get('taskQueueCount')) is not int or report['taskQueueCount'] != 0
+                    or 'maxImages' not in report):
+                continue
+            limit = report['maxImages']
+            if limit is not None and (type(limit) is not int or limit < 1):
+                continue
+            available.append((spec, limit))
+        jobs = db.execute("""SELECT id,profile,environment FROM jobs WHERE status='queued'
+            ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq""").fetchall()
+        if not jobs:
+            return None
+        environment = jobs[0]['environment']
+        if environment == 'staging' and db.execute("""SELECT 1 FROM jobs
+                WHERE environment='production' AND status IN ('queued','running','held') LIMIT 1""").fetchone():
+            return None
+        for job in jobs:
+            if job['environment'] != environment or job['profile'] != PROFILE:
+                break
+            row = self._row(db, job['id'])
+            submission = json.loads(row['input_json'])
+            photos = submission['manifest']['inputCounts']['images']
+            for spec, limit in available:
+                if ('odm' not in spec['capabilities'] or
+                    (submission['pipeline']['treedar']['requested'] and spec['id'] not in self.queue.treedar_node_ids)):
+                    continue
+                if all(cap is None or photos <= cap for cap in (spec['maxPhotos'], limit)):
+                    return row if spec['id'] == node_id else None
+        return None
+
     def next_for_node(self, node_id):
         """PRIVATE worker discovery; advisory only, claim remains atomic."""
         self.queue._known_node(node_id)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self.queue._refresh_nodes(db)
-            if (self.queue._node(db, node_id)['state'] not in ('active', 'scheduled')
-                    or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()):
-                return None
-            head = db.execute("SELECT id,profile FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
-            if not head or head['profile'] != PROFILE or PROFILE not in self.queue.node_profiles(node_id):
-                return None
-            row = self._row(db, head['id'])
-            submission = json.loads(row['input_json'])
-            if self._required_node(submission) != node_id:
-                return None
-            if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:
-                return None
-            return self._public(row)
+            row = self._eligible_head(db, node_id)
+            return self._public(row) if row else None
 
     def claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
         from contextlib import nullcontext
@@ -359,23 +433,11 @@ class ReferenceStore:
             if gate is not None and gate._closed(db):
                 return None
             self.queue._refresh_nodes(db)
-            if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
-                return None
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
-                return None
-            head = db.execute("""SELECT id,profile FROM jobs WHERE status='queued'
-              ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1""").fetchone()
-            if (not head or head["id"] != job_id or head["profile"] != PROFILE
-                    or PROFILE not in self.queue.node_profiles(node_id)):
+            eligible = self._eligible_head(db, node_id)
+            if not eligible or eligible['job_id'] != job_id:
                 return None
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference phase cannot be claimed")
-            submission = json.loads(row["input_json"])
-            required_node = self._required_node(submission)
-            if node_id != required_node:
-                return None
-            if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:
-                return None
             token = secrets.token_urlsafe(32)
             self._quota(db, sum(map(len, (claim_request_id, job_id, node_id, worker_id, worker_instance_id, token))))
             db.execute("""UPDATE jobs SET status='running',worker_id=?,node_id=?,claim_hash=?,

@@ -141,6 +141,40 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.next_for_node("cluster"))
         self.assertEqual(self.store.next_for_node("node-2")["jobId"], job["jobId"])
 
+    def test_candidate_inventory_atomic_discovery_and_claims(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        ready = {node['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None}
+                 for node in inventory}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda n: ready[n])
+        first, _ = store.submit(self.new_submission())
+        second, _ = store.submit(self.new_submission())
+        self.assertEqual(store.next_for_node('cluster')['jobId'], first['jobId'])
+        self.assertIsNone(store.next_for_node('node-2'))
+        claim = lambda job, node: store.claim(job, node_id=node, worker_id=node,
+            worker_instance_id='instance', claim_request_id='claim-' + job)
+        self.assertIsNone(claim(first['jobId'], 'node-2'))
+        self.assertIsNotNone(claim(first['jobId'], 'cluster'))
+        self.assertEqual(store.next_for_node('node-2')['jobId'], second['jobId'])
+        self.assertIsNotNone(claim(second['jobId'], 'node-2'))
+        self.assertEqual([self.queue.get(job['jobId'])['nodeId'] for job in (first, second)],
+                         ['cluster', 'node-2'])
+
+    def test_candidate_inventory_racing_claims_do_not_share_a_slot(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        store = ReferenceStore(self.queue, node_inventory=inventory,
+            node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None})
+        job, _ = store.submit(self.new_submission())
+        def claim(i):
+            return store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+                worker_instance_id='instance', claim_request_id='race-' + str(i))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claims = list(pool.map(claim, range(2)))
+        self.assertEqual(sum(value is not None for value in claims), 1)
+
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)
         with self.assertRaises(Conflict):
