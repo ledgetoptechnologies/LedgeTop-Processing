@@ -328,6 +328,11 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                     from tests.viewer_receipt_signer import SyntheticViewerSigner
                     signer=SyntheticViewerSigner()
                     pins={'viewer-a':{'production':signer.trusted_keys}}
+                    with self.assertRaises(ValueError):
+                        make_api(reopened,policy,copykeys={'viewer-a':{'production':signer.trusted_keys},'viewer-b':{'production':signer.trusted_keys}})
+                    with self.assertRaises(ValueError):
+                        make_api(reopened,policy,copykeys={'viewer-a':{'production':signer.trusted_keys,'staging':signer.trusted_keys}})
+
                     server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy,copykeys=pins)
                     acceptance=copy.deepcopy(fixture['acceptance'])
                     acceptance.update(jobId=job['jobId'],generation=job['generation'],environment=job['environment'],inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],resultManifestSha256=result['resultManifestSha256'],acceptedObjectIds=[o['id'] for o in result['objects']])
@@ -335,6 +340,16 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                     invalid=copy.deepcopy(envelope); invalid['viewerReceipt']['signature']='A'*86
                     self.assertEqual(post(invalid,prefix+'/accepted-copies')[0],409)
                     self.assertEqual(post(envelope,prefix+'/accepted-copies','synthetic-jcs-other-token-0001')[0],404)
+                    with queue._db() as db:
+                        db.execute('INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)',
+                            (acceptance['receiptId'],job['jobId'],'f'*64,json.dumps(acceptance)))
+                    self.assertEqual(post(envelope,prefix+'/accepted-copies')[0],409)
+                    with queue._db() as db:
+                        db.execute('DELETE FROM reference_acceptances WHERE receipt_id=?',(acceptance['receiptId'],))
+                        db.execute('CREATE TABLE viewer_import_confirmations_candidate_v1(confirmation_id TEXT NOT NULL UNIQUE)')
+                        db.execute('INSERT INTO viewer_import_confirmations_candidate_v1 VALUES(?)',(envelope['viewerReceipt']['receiptId'],))
+                    self.assertEqual(post(envelope,prefix+'/accepted-copies')[0],409)
+                    with queue._db() as db: db.execute('DELETE FROM viewer_import_confirmations_candidate_v1')
                     code,proof=post(envelope,prefix+'/accepted-copies');self.assertEqual(code,202);self.assertEqual(proof['state'],'verified_held');self.assertTrue(proof['created'])
                     server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy,copykeys=pins)
                     code,replay=post(envelope,prefix+'/accepted-copies');self.assertEqual(code,202);self.assertFalse(replay['created']);self.assertEqual(proof['proofSha256'],replay['proofSha256'])
@@ -345,6 +360,16 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                     with queue._db() as db:
                         self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_viewer_v3_copy_hold').fetchone()[0],1)
                         self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],0)
+                    # Legacy acceptance and terminal namespaces cannot later
+                    # take either of the already-held v3 proof identities.
+                    with self.assertRaisesRegex(Conflict,'held by v3'):
+                        reopened.accept(job['jobId'],acceptance)
+                    from processing.reference_terminal import TerminalService
+                    terminal=TerminalService(reopened)
+                    with queue._db() as db:
+                        with self.assertRaisesRegex(Conflict,'held by v3'):
+                            terminal._check_ids(db,acceptance)
+
 
 
                 with queue._db() as db:

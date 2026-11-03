@@ -93,6 +93,7 @@ class TerminalService:
 
     def _check_ids(self, db, checked):
         ids = {checked["receiptId"], checked["storageReceiptId"]}
+        if ids & self.store._held_copy_ids(db): raise Conflict("receipt identity held by v3 proof")
         for row in db.execute("SELECT receipt_id,receipt_json FROM reference_acceptances"):
             old = json.loads(row["receipt_json"])
             if ids & {row["receipt_id"], old["receiptId"], old["storageReceiptId"]}:

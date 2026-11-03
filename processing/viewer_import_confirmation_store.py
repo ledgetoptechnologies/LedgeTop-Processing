@@ -409,6 +409,17 @@ class ImportConfirmationStore:
                 db.execute('BEGIN IMMEDIATE')
                 self._check_schema(db)
                 context, binding_sha = self._trusted(db, scope)
+                # Other version's verification-only proof IDs share this
+                # namespace. Both checks run under the same write transaction.
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_viewer_v3_copy_hold'").fetchone():
+                    for held in db.execute("SELECT CASE WHEN typeof(payload_json)='text' AND length(CAST(payload_json AS BLOB))<=? THEN payload_json END FROM reference_viewer_v3_copy_hold", (MAX_INPUT_BYTES,)):
+                        try:
+                            if held[0] is None: raise ValueError('oversized')
+                            obj=json.loads(held[0])
+                            ids={obj['acceptance']['receiptId'],obj['acceptance']['storageReceiptId'],obj['viewerReceipt']['receiptId'],obj['viewerReceipt']['storageReceiptId']}
+                        except (ValueError,TypeError,KeyError): raise ImportConfirmationStoreHeld('held_copy_identity_unavailable') from None
+                        if type(confirmation) is dict and confirmation.get('confirmationId') in ids:
+                            raise ImportConfirmationStoreHeld('confirmation_identity_conflict')
                 row = self._row(db, scope)
                 prior = row['confirmation_sha256'] if row else None
                 verified = self._verify(confirmation, context, prior=prior)

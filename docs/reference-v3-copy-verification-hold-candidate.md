@@ -31,3 +31,13 @@ collision/rotation handling across all receipt namespaces, crash/rollback
 semantics, Viewer schema agreement, real peer integration, and independent
 review. A synthetic signed receipt and DB-injected result do not establish any
 of these production guarantees.
+
+The isolated successor rejects a public-key fingerprint or issuer ID configured
+for more than one principal/environment. It checks new/exact held-copy proof
+IDs against current legacy acceptance, signed Viewer receipt, terminal and
+import-confirmation tables in the same write transaction; legacy acceptance,
+terminal and import-confirmation writes likewise check the held-copy table.
+Pre-existing historical collisions are not migrated or reconciled: an operator
+must audit them before enabling any future use. This candidate does not prove
+identity safety across databases, older binaries or unmounted alternative
+writers, and retains all source/result/cleanup holds.

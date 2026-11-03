@@ -70,6 +70,8 @@ class PreparedSubmissionAPI:
         if copy_keys_by_identity is None: copy_keys_by_identity = {}
         if type(copy_keys_by_identity) is not dict: raise ValueError('invalid trusted copy registry')
         self._copy_keys = {}
+        key_owners = {}
+        issuer_owners = {}
         for principal, environments in copy_keys_by_identity.items():
             p._slug(principal, 'copy principal')
             if type(environments) is not dict: raise ValueError('invalid trusted copy registry')
@@ -77,6 +79,15 @@ class PreparedSubmissionAPI:
                 p._environment(environment)
                 clean=validate_trusted_viewer_receipt_keys(keys)
                 if not clean: raise ValueError('empty trusted copy registry')
+                from cryptography.hazmat.primitives import serialization
+                for record in clean.values():
+                    key = serialization.load_pem_public_key(record['publicKeyPem'].encode('ascii'))
+                    fingerprint = key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+                    identity = (principal,environment)
+                    if (fingerprint in key_owners and key_owners[fingerprint] != identity) or (record['issuerId'] in issuer_owners and issuer_owners[record['issuerId']] != identity):
+                        raise ValueError('copy key or issuer shared across identities')
+                    key_owners[fingerprint] = identity
+                    issuer_owners[record['issuerId']] = identity
                 self._copy_keys[(principal,environment)]=clean
         self.store = store
         self._credentials = tuple(configured)

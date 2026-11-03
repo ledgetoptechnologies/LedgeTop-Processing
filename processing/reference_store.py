@@ -659,6 +659,33 @@ class ReferenceStore:
                 raise Conflict('v3 result evidence invalid') from None
             return dict(binding,schemaVersion=1,view='result-manifest',resultManifest=result)
 
+    @staticmethod
+    def _held_copy_ids(db, *, exclude_job=None):
+        identities=set()
+        for row in db.execute("SELECT job_id, CASE WHEN typeof(payload_json)='text' AND length(CAST(payload_json AS BLOB))<=? THEN payload_json END AS payload_json FROM reference_viewer_v3_copy_hold",(protocol.MAX_BODY_BYTES,)):
+            if row['job_id']==exclude_job: continue
+            try:
+                if row['payload_json'] is None: raise ValueError('oversized')
+                obj=json.loads(row['payload_json'])
+                identities.update(obj['acceptance'][key] for key in ('receiptId','storageReceiptId'))
+                identities.update(obj['viewerReceipt'][key] for key in ('receiptId','storageReceiptId'))
+            except (ValueError,TypeError,KeyError): raise Conflict('held copy proof unavailable') from None
+        return identities
+
+    @classmethod
+    def _check_copy_identity_namespaces(cls, db, identities, *, exclude_job=None):
+        if identities & cls._held_copy_ids(db,exclude_job=exclude_job): raise Conflict('receipt identity already held')
+        for row in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances'):
+            try: old=json.loads(row['receipt_json']); occupied={row['receipt_id'],old['receiptId'],old['storageReceiptId']}
+            except (ValueError,TypeError,KeyError): raise Conflict('acceptance identity unavailable') from None
+            if identities & occupied: raise Conflict('receipt identity already accepted')
+        for row in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_viewer_receipts'):
+            if identities & {row['receipt_id'],row['storage_receipt_id']}: raise Conflict('receipt identity already accepted')
+        for table,columns in (('reference_terminal_acceptances','receipt_id,storage_receipt_id'),('viewer_import_confirmations_candidate_v1','confirmation_id'),('viewer_odm_import_confirmations_candidate_v2','confirmation_id')):
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
+                for row in db.execute('SELECT '+columns+' FROM '+table):
+                    if identities & set(row): raise Conflict('receipt identity already reserved')
+
     def verify_viewer_v3_copy_held(self, submission_id, payload, *, authenticated_principal, authenticated_environment, expected_authority_id, trusted_keys):
         """Candidate verifies and journals only; it never records acceptance or cleanup authority."""
         from .prepared_envelope_jcs_candidate import PROTOCOL as JCS_PROTOCOL
@@ -686,6 +713,8 @@ class ReferenceStore:
                 signed=verify_viewer_acceptance_receipt(payload['viewerReceipt'],trusted_keys=trusted_keys,expected=expected,result_manifest=manifest,accepted_object_ids=acceptance['acceptedObjectIds']).receipt
                 if len({acceptance['receiptId'],acceptance['storageReceiptId'],signed['receiptId'],signed['storageReceiptId']})!=4: raise ValueError('receipt IDs collide')
             except (ValueError,TypeError,KeyError): raise Conflict('v3 copy signature or binding invalid') from None
+            identities={acceptance['receiptId'],acceptance['storageReceiptId'],signed['receiptId'],signed['storageReceiptId']}
+            self._check_copy_identity_namespaces(db,identities,exclude_job=row['job_id'])
             wire=_json(dict(acceptance=acceptance,viewerReceipt=signed));sha=hashlib.sha256(wire.encode()).hexdigest()
             prior=db.execute('SELECT * FROM reference_viewer_v3_copy_hold WHERE job_id=?',(row['job_id'],)).fetchone()
             if prior:
@@ -1406,6 +1435,7 @@ class ReferenceStore:
                 viewer_identities = {viewer_checked['receiptId'], viewer_checked['storageReceiptId']}
                 if len(viewer_identities) != 2 or viewer_identities & identities:
                     raise Conflict('Viewer receipt identities must be independent')
+            if (identities | (viewer_identities if viewer_checked is not None else set())) & self._held_copy_ids(db): raise Conflict('receipt identity held by v3 proof')
             encoded, receipt_digest = _json(checked), protocol.receipt_tombstone_digest(checked)
             identities = {checked['receiptId'], checked['storageReceiptId']}
             for existing in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances'):
