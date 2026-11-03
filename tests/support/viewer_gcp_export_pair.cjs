@@ -32,5 +32,15 @@ try {
   const value=captureHeldSourceExport(p,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id});
   const stored=db.prepare('SELECT evidence_json,content_text FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(attempt.id);
   const split=gcpEvidenceStream(Buffer.from('a'.repeat(46079)+'é','utf8'),attempt.id);
-  console.log(JSON.stringify({...value,sourceFrames:value.sourceFrames.toString('base64'),selectedFrames:value.selectedFrames.toString('base64'),gcpEvidenceFrames:value.gcpEvidenceFrames.toString('base64'),gcpFileFrames:value.gcpFileFrames.toString('base64'),storedEvidence:Buffer.from(stored.evidence_json,'utf8').toString('base64'),storedFile:Buffer.from(stored.content_text,'utf8').toString('base64'),split:{bytes:split.bytes.toString('base64'),hashes:split.pageHashes,sizes:split.pageBytes,count:split.byteCount,sha256:split.sha256}}));
+  if (mode === 'snapshot') {
+    const { createHeldSourceSnapshot } = fromViewer('heldSourceSnapshot');
+    const { canonicalBytes } = fromViewer('referenceProtocol');
+    const keys = crypto.generateKeyPairSync('ed25519');
+    const snapshot = createHeldSourceSnapshot(p, { datasetId: dataset.id, taskId: task.id, attemptId: attempt.id,
+      signer: { issuerId:'synthetic-issuer', keyId:'synthetic-key', sign: bytes => crypto.sign(null, bytes, keys.privateKey) } });
+    console.log(JSON.stringify({ intent:snapshot.intent, intentBytes:canonicalBytes(snapshot.intent).toString('base64'),
+      signature:snapshot.signature.toString('base64'), publicKey:keys.publicKey.export({type:'spki',format:'pem'}),
+      sourceFrames:snapshot.sourceFrames.toString('base64'), selectedFrames:snapshot.selectedFrames.toString('base64'),
+      evidenceFrames:snapshot.gcpEvidenceFrames.toString('base64'), fileFrames:snapshot.gcpFileFrames.toString('base64') }));
+  } else console.log(JSON.stringify({...value,sourceFrames:value.sourceFrames.toString('base64'),selectedFrames:value.selectedFrames.toString('base64'),gcpEvidenceFrames:value.gcpEvidenceFrames.toString('base64'),gcpFileFrames:value.gcpFileFrames.toString('base64'),storedEvidence:Buffer.from(stored.evidence_json,'utf8').toString('base64'),storedFile:Buffer.from(stored.content_text,'utf8').toString('base64'),split:{bytes:split.bytes.toString('base64'),hashes:split.pageHashes,sizes:split.pageBytes,count:split.byteCount,sha256:split.sha256}}));
 } finally { db.close(); }
