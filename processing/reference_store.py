@@ -261,6 +261,13 @@ class ReferenceStore:
             "SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
             raise JCSRuntimeUnavailable('JCS durable state requires enabled capable runtime')
 
+    def _require_viewer_authority(self, db, expected):
+        if expected is None: return
+        protocol._uuid(expected, 'expected coordinator authority')
+        values=db.execute('SELECT singleton,authority_id FROM coordinator_identity').fetchall()
+        if len(values)!=1 or values[0]['singleton']!=1 or values[0]['authority_id']!=expected or self.queue.authority_id!=expected:
+            raise JCSRuntimeUnavailable('coordinator authority missing or changed')
+
     def _row(self, db, job_id):
         self._check_jcs_capability(db)
         has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
@@ -403,7 +410,7 @@ class ReferenceStore:
             allowed_odm_options=set(options))
         return self._submit(validated, owner=(authenticated_principal, authenticated_environment), envelope=(wire,envelope_hash,envelope['activationId'],envelope['viewerTaskId'],envelope['viewerAttemptId']))
 
-    def prepare_viewer_envelope_jcs_v3(self, raw, *, authenticated_principal, authenticated_environment, trusted_policy):
+    def prepare_viewer_envelope_jcs_v3(self, raw, *, authenticated_principal, authenticated_environment, trusted_policy, expected_authority_id=None):
         """Unmounted v3. Exact authenticated replay reads durable evidence first."""
         if not self.jcs_runtime_enabled:
             raise JCSRuntimeUnavailable('JCS runtime not enabled')
@@ -427,6 +434,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN')
             self._check_jcs_capability(db)
+            self._require_viewer_authority(db, expected_authority_id)
             existing = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (value['submission']['submissionId'],)).fetchone()
             if existing is not None:
                 row = self._row(db, existing['job_id'])
@@ -440,9 +448,9 @@ class ReferenceStore:
         canonical2, digest2, normalized = jcs.validate(raw, trusted_policy=trusted_policy, environment=authenticated_environment)
         if canonical2 != canonical or digest2 != digest: raise Conflict('JCS identity changed')
         return self._submit(normalized, owner=(authenticated_principal,authenticated_environment),
-            envelope=(wire,digest,value['activationId'],value['viewerTaskId'],value['viewerAttemptId']), envelope_protocol=jcs.PROTOCOL, policy_snapshot=trusted_policy)
+            envelope=(wire,digest,value['activationId'],value['viewerTaskId'],value['viewerAttemptId']), envelope_protocol=jcs.PROTOCOL, policy_snapshot=trusted_policy, expected_authority_id=expected_authority_id)
 
-    def _submit(self, validated, *, owner, envelope=None, envelope_protocol='ltds-viewer-prepared-envelope-v2', policy_snapshot=None):
+    def _submit(self, validated, *, owner, envelope=None, envelope_protocol='ltds-viewer-prepared-envelope-v2', policy_snapshot=None, expected_authority_id=None):
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -457,6 +465,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             self._check_jcs_capability(db)
+            self._require_viewer_authority(db, expected_authority_id)
             old = db.execute("SELECT job_id,request_digest,environment FROM reference_jobs WHERE submission_id=?",
                              (checked["submissionId"],)).fetchone()
             if old:
@@ -549,7 +558,7 @@ class ReferenceStore:
             WHERE r.submission_id=? AND o.principal_id=? AND o.environment=? AND o.protocol=?""",
             (submission_id,principal,environment,expected_protocol)).fetchone()
 
-    def find_viewer_envelope_v2(self, submission_id, *, authenticated_principal, authenticated_environment, expected_protocol='ltds-viewer-prepared-envelope-v2'):
+    def find_viewer_envelope_v2(self, submission_id, *, authenticated_principal, authenticated_environment, expected_protocol='ltds-viewer-prepared-envelope-v2', expected_authority_id=None):
         """Unmounted authenticated-boundary candidate, no secrets in response."""
         protocol._uuid(submission_id, 'submission ID')
         protocol._slug(authenticated_principal, 'authenticated Viewer principal')
@@ -557,6 +566,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN')
             self._check_jcs_capability(db)
+            self._require_viewer_authority(db, expected_authority_id)
             found = self._scoped_prepared_job_id(db, submission_id, authenticated_principal, authenticated_environment, expected_protocol)
             if found is None: return None
             row = self._row(db, found['job_id'])
@@ -574,7 +584,7 @@ class ReferenceStore:
         # No verified end-to-end v3 source/worker/result custody contract yet.
         return False
 
-    def read_viewer_v3_job(self, submission_id, *, authenticated_principal, authenticated_environment, view):
+    def read_viewer_v3_job(self, submission_id, *, authenticated_principal, authenticated_environment, view, expected_authority_id=None):
         """Inactive read model; never authorizes retrieval, acceptance or cleanup."""
         from .prepared_envelope_jcs_candidate import PROTOCOL as JCS_PROTOCOL
         protocol._uuid(submission_id, 'submission ID')
@@ -584,6 +594,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN')
             self._check_jcs_capability(db)
+            self._require_viewer_authority(db, expected_authority_id)
             found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,JCS_PROTOCOL)
             if found is None: return None
             row=self._row(db,found['job_id']);owner=self._submission_owner(db,row)
@@ -793,7 +804,7 @@ class ReferenceStore:
         # Dataset/file/GCP source snapshot contract is not implemented.
         return False
 
-    def activate_viewer_envelope_jcs_v3(self, submission_id, request, *, authenticated_principal, authenticated_environment, trusted_policy):
+    def activate_viewer_envelope_jcs_v3(self, submission_id, request, *, authenticated_principal, authenticated_environment, trusted_policy, expected_authority_id=None):
         """Unmounted candidate; caller authenticates identity and authoritative policy."""
         from . import prepared_envelope_jcs_candidate as jcs
         protocol._uuid(submission_id, 'submission ID')
@@ -805,6 +816,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._check_jcs_capability(db)
+            self._require_viewer_authority(db, expected_authority_id)
             found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,jcs.PROTOCOL)
             if found is None: return None
             row=self._row(db,found['job_id'])

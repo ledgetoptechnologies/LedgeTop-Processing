@@ -21,7 +21,7 @@ def _token(token):
 
 
 class PreparedSubmissionAPI:
-    def __init__(self, store, *, credentials, legacy_bearer_tokens, policies, jcs_policies=None):
+    def __init__(self, store, *, credentials, legacy_bearer_tokens, policies, jcs_policies=None, expected_authority_id=None):
         # Sequence rather than dict ensures duplicate credentials cannot be hidden.
         if type(credentials) not in (tuple, list) or not credentials or type(legacy_bearer_tokens) not in (tuple, list):
             raise ValueError('explicit credential inventories required')
@@ -46,6 +46,9 @@ class PreparedSubmissionAPI:
                 or len(set(opts)) != len(opts) or type(engines) not in (list,tuple)
                 or any(type(x) is not str or x not in ('odm','treedar') for x in engines) or len(set(engines)) != len(engines)):
                 raise ValueError('invalid server policy')
+        if jcs_policies is not None:
+            p._uuid(expected_authority_id, 'configured coordinator authority')
+        self._expected_authority_id = expected_authority_id
         if jcs_policies is not None and not store.jcs_runtime_enabled:
             raise ValueError('JCS API requires capable store')
         if jcs_policies is not None:
@@ -87,27 +90,27 @@ class PreparedSubmissionAPI:
         try:
             if method == 'POST' and path == '/ltds/prepared/v3/submissions' and self._jcs_policies is not None:
                 job, created = self.store.prepare_viewer_envelope_jcs_v3(body, authenticated_principal=principal,
-                    authenticated_environment=environment, trusted_policy=self._jcs_policies[environment])
-                return Response(201 if created else 200, job)
+                    authenticated_environment=environment, trusted_policy=self._jcs_policies[environment], expected_authority_id=self._expected_authority_id)
+                return Response(201 if created else 200, dict(job,authorityId=self._expected_authority_id))
             view = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/(status|result-manifest|accepted-copies)', path) if type(path) is str else None
             if method == 'GET' and view and self._jcs_policies is not None:
                 if body: raise ValueError('GET body forbidden')
                 outcome=self.store.read_viewer_v3_job(view[1], authenticated_principal=principal,
-                    authenticated_environment=environment, view=view[2])
-                return Response(200,outcome) if outcome is not None else Response(404,{'error':'not_found'})
+                    authenticated_environment=environment, view=view[2], expected_authority_id=self._expected_authority_id)
+                return Response(200,dict(outcome,authorityId=self._expected_authority_id)) if outcome is not None else Response(404,{'error':'not_found'})
             activation = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/activation', path) if type(path) is str else None
             if method == 'POST' and activation and self._jcs_policies is not None:
                 request = p.decode_submission(body)
                 outcome = self.store.activate_viewer_envelope_jcs_v3(activation[1], request,
                     authenticated_principal=principal, authenticated_environment=environment,
-                    trusted_policy=self._jcs_policies[environment])
-                return Response(200, outcome) if outcome is not None else Response(404, {'error':'not_found'})
+                    trusted_policy=self._jcs_policies[environment], expected_authority_id=self._expected_authority_id)
+                return Response(200, dict(outcome,authorityId=self._expected_authority_id)) if outcome is not None else Response(404, {'error':'not_found'})
             v3 = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})', path) if type(path) is str else None
             if method == 'GET' and v3 and self._jcs_policies is not None:
                 if body: raise ValueError('GET body forbidden')
                 result = self.store.find_viewer_envelope_v2(v3[1], authenticated_principal=principal,
-                    authenticated_environment=environment, expected_protocol='ltds-viewer-prepared-envelope-jcs-v3')
-                return Response(200, result) if result is not None else Response(404, {'error':'not_found'})
+                    authenticated_environment=environment, expected_protocol='ltds-viewer-prepared-envelope-jcs-v3', expected_authority_id=self._expected_authority_id)
+                return Response(200, dict(result,authorityId=self._expected_authority_id)) if result is not None else Response(404, {'error':'not_found'})
             if method == 'POST' and path == PREFIX + '/submissions':
                 envelope = p.decode_submission(body)
                 job, created = self.store.prepare_viewer_envelope_v2(envelope, authenticated_principal=principal,
