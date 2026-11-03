@@ -16,7 +16,7 @@ try {
   const dataset = p.createDataset({ projectId: project.id, displayName: 'Survey', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
   const raw = 'point_id,label,latitude,longitude,elevation_m\nA,Target,44.5,-88.1,244\n';
   const rawHash = crypto.createHash('sha256').update(raw).digest('hex');
-  const files = Array.from({length:mode === 'normal' ? 16832 : 1}, (_,i) => ({id:`photo-${String(i).padStart(5,'0')}`,relativePath:mode === 'path' ? 'C:photo.jpg' : mode === 'mime' ? 'flight/photo.dng' : `flight/IMG_${String(i).padStart(5,'0')}.jpg`,byteSize:10,sha256:'a'.repeat(64),contentType:mode === 'mime' ? 'image/x-adobe-dng' : 'image/jpeg',metadata:{width:4000,height:3000}}));
+  const files = Array.from({length:mode === 'normal' ? 16832 : mode === 'mixed' ? 2 : 1}, (_,i) => ({id:`photo-${String(i).padStart(5,'0')}`,relativePath:mode === 'path' ? 'C:photo.jpg' : mode === 'mime' ? 'flight/photo.dng' : `flight/IMG_${String(i).padStart(5,'0')}.jpg`,byteSize:10,sha256:'a'.repeat(64),contentType:mode === 'mime' ? 'image/x-adobe-dng' : 'image/jpeg',metadata:{width:4000,height:3000}}));
   files.push({id:'control',relativePath:'control/raw.csv',byteSize:Buffer.byteLength(raw),sha256:rawHash,contentType:'text/csv'}, {id:'lidar',relativePath:'survey/site.las',byteSize:11,sha256:'b'.repeat(64),contentType:'application/vnd.las',processingRole:'provider_input'});
   if (mixed) files.push({id:'Control',relativePath:'control/other.csv',byteSize:Buffer.byteLength(raw),sha256:rawHash,contentType:'text/csv'});
   p.finalizeDataset(dataset.id,files,'d'.repeat(64));

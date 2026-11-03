@@ -23,3 +23,14 @@ restoration of an old database. Transactions are synthetic and tests do not
 establish live deployment, full crash/power-loss durability or GCP semantics.
 Synthetic tests kill a child after journal or frame inserts and verify rollback;
 another exits immediately after commit before reply, then reopens and replays.
+
+Synthetic combined GCP candidate: `gcp_synthetic_atomic_candidate.stage_owned`
+uses a distinct unsigned test-only v1 bundle and an opt-in dataset-only source
+count. All four already allocated byte streams are buffered; this is not an
+untrusted network streaming implementation. The caller owns the SQLite
+transaction and must roll it back on any exception. An independently supplied
+synthetic binding pins the input-manifest hash, exact selection and processing
+closure; fixture values are derived from the same Viewer fixture and are not an
+authentication boundary. The candidate does not support no-GCP bundles and is
+not mounted or integrated into the coordinator journal. No source authority,
+revocation epoch, raw-file verification, execution, or cleanup is authorized.

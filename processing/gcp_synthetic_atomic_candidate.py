@@ -35,7 +35,7 @@ def _pages(wire, hashes, sizes, domain):
 def _decoded(wire):
  rows=wire.splitlines();return b''.join(base64.urlsafe_b64decode((obj['data']+'='*((-len(obj['data']))%4)).encode()) for obj in (json.loads(x) for x in rows[:-1]))
 
-def stage_owned(db,*,bundle_id,statement,streams,trusted_images,trusted_correspondences,_fault=None):
+def stage_owned(db,*,bundle_id,statement,streams,trusted_images,trusted_correspondences,trusted_binding,expected_binding_sha256,processing_closure,processing_pages,_fault=None):
  """Caller owns transaction and MUST rollback on any error; not production code."""
  if not db.in_transaction:raise SyntheticHeld('owned transaction required')
  try:
@@ -58,6 +58,11 @@ def stage_owned(db,*,bundle_id,statement,streams,trusted_images,trusted_correspo
   source.verify_dataset_count_v2(io.BytesIO(src),expected_page_hashes=statement['sourcePageHashes'],expected_dataset_items=statement['sourceCount'])
   sources=_pages(src,statement['sourcePageHashes'],statement['sourcePageBytes'],source.DOMAIN)
   selections=_pages(sel,statement['selectedPageHashes'],statement['selectedPageBytes'],selected.DOMAIN)
+  # Independent trusted fixture controls selection, input hash, and closure;
+  # production has no such loader yet. All remain within the caller transaction.
+  if (trusted_binding['viewerAttemptId']!=statement['attemptId'] or trusted_binding['sourceCount']!=statement['sourceCount']
+      or trusted_binding['sourcePageHashes']!=statement['sourcePageHashes'] or trusted_binding['selectedPageHashes']!=statement['selectedPageHashes']):raise ValueError()
+  selected.verify_dataset_count_v2(io.BytesIO(src),io.BytesIO(sel),source_hashes=statement['sourcePageHashes'],source_count=statement['sourceCount'],selected_hashes=statement['selectedPageHashes'],input_manifest_sha256=trusted_binding['inputManifestSha256'],processing_closure=processing_closure,processing_pages=processing_pages,closure_sha256=trusted_binding['processingClosureSha256'],trusted_binding=trusted_binding,expected_binding_sha256=expected_binding_sha256)
   if _fault:_fault('selection')
   evidence.verify(io.BytesIO(ev),attempt_id=statement['attemptId'],evidence_sha256=statement['gcpEvidenceSha256'],page_hashes=statement['gcpEvidencePageHashes'],page_bytes=statement['gcpEvidencePageBytes'],decoded_bytes=statement['gcpEvidenceByteCount'])
   db.execute('UPDATE synthetic_gcp_bundle SET evidence=? WHERE id=?',(ev,bundle_id))

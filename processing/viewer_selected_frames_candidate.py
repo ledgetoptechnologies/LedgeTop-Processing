@@ -14,7 +14,7 @@ DOMAIN=b'ltds-viewer-selected-frame-v1\0'
 def binding_digest(binding):
  return hashlib.sha256(BINDING_DOMAIN+p.canonical_json(binding)).hexdigest()
 
-def verify(source_stream,selected_stream,*,source_hashes,source_count,selected_hashes,input_manifest_sha256,processing_closure,processing_pages,closure_sha256,trusted_binding,expected_binding_sha256):
+def verify(source_stream,selected_stream,*,source_hashes,source_count,selected_hashes,input_manifest_sha256,processing_closure,processing_pages,closure_sha256,trusted_binding,expected_binding_sha256,_dataset_count_v2=False):
  """Pins are independent trusted inputs. No authority or custody is conferred."""
  try:
   p._hash(input_manifest_sha256,'Viewer input hash');p._hash(expected_binding_sha256,'binding pin')
@@ -26,7 +26,7 @@ def verify(source_stream,selected_stream,*,source_hashes,source_count,selected_h
    if type(trusted_binding[key]) is not list or not 0<len(trusted_binding[key])<=MAX_FRAMES:raise ValueError()
    for value in trusted_binding[key]:p._hash(value,key)
   if (trusted_binding['sourcePageHashes']!=source_hashes or trusted_binding['sourceCount']!=source_count or trusted_binding['selectedPageHashes']!=selected_hashes or trusted_binding['inputManifestSha256']!=input_manifest_sha256 or trusted_binding['processingClosureSha256']!=closure_sha256 or binding_digest(trusted_binding)!=expected_binding_sha256):raise ValueError()
-  _,selected=source_verify(source_stream,expected_page_hashes=source_hashes,expected_items=source_count,_capture_selection=True)
+  _,selected=source_verify(source_stream,expected_page_hashes=source_hashes,expected_items=source_count,_capture_selection=True,_dataset_count_v2=_dataset_count_v2)
   if type(selected_stream) not in (io.BytesIO,io.BufferedReader) or not selected_stream.readable():raise ValueError()
   if type(selected_hashes) is not list or not 0<len(selected_hashes)<=MAX_FRAMES:raise ValueError()
   for value in selected_hashes:p._hash(value,'selected page digest')
@@ -71,3 +71,8 @@ def verify(source_stream,selected_stream,*,source_hashes,source_count,selected_h
   if selected_stream.read(1)!=b'' or ordinal!=len(selected) or ordinal!=trusted_binding['selectedCount'] or digest.hexdigest()!=input_manifest_sha256:raise ValueError()
   return {'state':'held_authenticated_source_unavailable','selectedObjects':ordinal,'inputManifestSha256':input_manifest_sha256}
  except (ValueError,TypeError,KeyError,UnicodeError,OverflowError,AttributeError):raise FrameHeld('selected_frame_unavailable') from None
+
+
+def verify_dataset_count_v2(source_stream,selected_stream,**kwargs):
+ """Held v2 source-count interpretation, retaining old verify contract."""
+ return verify(source_stream,selected_stream,_dataset_count_v2=True,**kwargs)
