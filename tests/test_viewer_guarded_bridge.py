@@ -131,6 +131,51 @@ class ViewerGuardedBridgeTests(unittest.TestCase):
         self.assertEqual(self.journal_state()[0]['reservation']['job']['id'], task['engine_uuid'])
 
 
+    def enable_guard_reader(self, reader):
+        self.service.close()
+        self.service.config.viewer_require_guard = True
+        self.service = ViewerService(self.queue, self.service.config, engines=self.service.engines,
+                                     probe=self.service.probe, guard_probe=reader)
+        self.addCleanup(self.service.close)
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': []}
+        self.service._selected_options = lambda _: []
+
+    def test_guard_readiness_blocks_reassignment_until_separate_release(self):
+        def guard_ready(node):
+            if node != 'cluster': return False
+            with NodeGate('synthetic-physical-engine') as gate:
+                return gate.snapshot()['reservation'] is None
+        self.enable_guard_reader(guard_ready)
+        first = self.submit()
+        self.service.tick(); self.service.tick()
+        self.assertEqual(self.service.info(first)['status']['code'], 40)
+        second = self.submit()
+        self.service.tick()
+        self.assertEqual(self.service.info(second)['status']['code'], 10)
+        self.assertEqual(self.service.info(second)['ledgetopQueueState'], 'waiting_for_dispatch')
+        self.assertFalse(self.service.info(second).get('ledgetopHeld', False))
+        self.assertEqual(self.native_fixture.counts()['initialize'], 1)
+
+    def test_guard_reader_error_fails_closed_then_recovers(self):
+        reachable = [False]
+        def guard_ready(node):
+            if not reachable[0]: raise OSError('synthetic guard offline')
+            return node == 'cluster'
+        self.enable_guard_reader(guard_ready)
+        identifier = self.submit()
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['ledgetopQueueState'], 'waiting_for_dispatch')
+        self.assertEqual(self.native_fixture.counts()['initialize'], 0)
+        reachable[0] = True
+        self.service.tick()
+        self.assertEqual(self.native_fixture.counts()['initialize'], 1)
+
+    def test_configured_guard_cannot_start_without_reader(self):
+        self.service.config.viewer_require_guard = True
+        with self.assertRaises(ValueError):
+            ViewerService(self.queue, self.service.config, engines=self.service.engines,
+                          probe=self.service.probe)
+
     def test_lost_upload_response_holds_queue_and_never_replays(self):
         original = self.native_fixture._dispatch
         def disconnect_after_commit(method, path, headers, body):

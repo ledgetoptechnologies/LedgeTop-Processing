@@ -877,6 +877,30 @@ class ViewerServiceTests(unittest.TestCase):
                     require_distinct_node_hosts(local, main)
         require_distinct_node_hosts('http://192.0.2.1:3001', 'http://192.0.2.2:3004')
 
+    def test_guarded_inventory_skips_guard_unavailable_then_recovers(self):
+        from processing.config import parse_node_inventory
+        self.service.close(); self.queue.close()
+        entries = [dict(id=name, physicalHostId=name, origin=f'http://192.0.2.{i}:3000',
+                        tokenEnv=f'NODE_{i}_TOKEN', maxPhotos=None, capabilities=['odm'])
+                   for i, name in enumerate(('tiny', 'large'), 1)]
+        self.config.node_inventory = parse_node_inventory(json.dumps(entries), {})
+        self.config.prototype_state_dir = str(self.root / 'guard-inventory-state')
+        self.config.viewer_require_guard = True
+        self.engines = {n['id']: FakeEngine(n['id'], self.fleet) for n in self.config.node_inventory}
+        self.queue = Queue(self.config.prototype_state_dir, node_ids=('tiny', 'large'),
+                           treedar_node_ids=(), viewer_enabled=True, per_node_slots=True)
+        guard = {'tiny': False, 'large': True}
+        self.service = ViewerService(self.queue, self.config, engines=self.engines,
+            probe=lambda role, origin, token: {'ready': True, 'maxImages': None, 'taskQueueCount': 0},
+            guard_probe=lambda node: guard[node])
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
+        self.service._selected_options = lambda _: [dict(item) for item in OPTIONS]
+        first = self.submit(); self.service.tick()
+        self.assertEqual(self.task(first)['node_id'], 'large')
+        guard['tiny'] = True
+        second = self.submit(); self.service.tick()
+        self.assertEqual(self.task(second)['node_id'], 'tiny')
+
     def test_ordered_three_node_inventory_prefers_first_eligible_and_falls_through(self):
         from processing.config import parse_node_inventory
         self.service.close(); self.queue.close()

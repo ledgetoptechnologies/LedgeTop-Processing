@@ -116,7 +116,7 @@ class NativeEngine:
 
 
 class ViewerService:
-    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node):
+    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, guard_probe=None):
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
@@ -127,6 +127,15 @@ class ViewerService:
                                   if self.inventory else {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
                                   'main': NativeEngine(config.main_node_url, config.main_node_token)})
         self.probe = probe
+        # A guard-aware integration must supply its authenticated node-local
+        # readiness reader. Merely enabling it without the reader is unsafe.
+        require_guard = getattr(config, 'viewer_require_guard', False)
+        if type(require_guard) is not bool:
+            raise ValueError('guard requirement must be boolean')
+        self._require_guard = require_guard
+        if self._require_guard and not callable(guard_probe):
+            raise ValueError('guard readiness reader required')
+        self._guard_probe = guard_probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -138,6 +147,15 @@ class ViewerService:
         self._dispatch_threads = {}
         if self._parallel_dispatch and not queue.per_node_slots:
             raise ValueError('parallel dispatch requires per-node slots')
+
+    def _guard_ready(self, node_id):
+        if not self._require_guard:
+            return True
+        try:
+            # Missing, malformed and unavailable responses all fail closed.
+            return self._guard_probe(node_id) is True
+        except Exception:
+            return False
 
     def _catalog(self):
         if self.inventory:
@@ -856,6 +874,8 @@ class ViewerService:
                 for spec in self.inventory:
                     if 'odm' not in spec['capabilities'] or spec['id'] in occupied:
                         continue
+                    if not self._guard_ready(spec['id']):
+                        continue
                     if self.queue.get_node(spec['id'])['state'] != 'active':
                         continue
                     report = self.probe(spec['id'], spec['origin'], spec['token'])
@@ -895,6 +915,8 @@ class ViewerService:
                         ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
                     nodes[node] = {**self.probe(role, origin, token),
                                    'state': self.queue.get_node(node)['state']}
+                    if not self._guard_ready(node):
+                        nodes[node]['ready'] = False
                 occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
                 if any(node not in nodes for node in occupied):
                     return
