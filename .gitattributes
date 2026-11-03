@@ -5,3 +5,4 @@ contracts/reference-broker-budget-candidate/reference-range-budget-policy-vector
 contracts/reference-broker-budget-candidate/reference-v2-range-ledger-vectors.json text eol=lf
 contracts/treedar-project-provenance-vectors.json text eol=lf
 tests/fixtures/viewer-referenceProtocol-c92deb5.js text eol=lf
+tests/fixtures/viewer-processingProvenance-5513f92.js text eol=lf
