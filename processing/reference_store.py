@@ -51,6 +51,8 @@ _ENVELOPE_V2_SCHEMA = """CREATE TABLE reference_viewer_envelopes_v2 (
  environment TEXT NOT NULL, activation_id TEXT UNIQUE NOT NULL, viewer_task_id TEXT NOT NULL,
  viewer_attempt_id TEXT NOT NULL, envelope_json TEXT NOT NULL, envelope_sha256 TEXT NOT NULL,
  UNIQUE(principal_id, environment, viewer_attempt_id))"""
+_V3_POLICY_SCHEMA = """CREATE TABLE reference_viewer_v3_policy (
+ job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), policy_json TEXT NOT NULL, policy_sha256 TEXT NOT NULL)"""
 _ENVELOPE_V2_DOMAIN = b'ltds-viewer-prepared-envelope-v2\x00'
 _PREPARED_PROTOCOL = 'ltds-viewer-prepared-submit-v1'
 
@@ -162,6 +164,7 @@ class ReferenceStore:
             """)
             self._init_viewer_activation_schema(db)
             self._init_envelope_v2_schema(db)
+            self._init_v3_policy_schema(db)
             self._check_jcs_capability(db)
             if db.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
                 if not self.jcs_runtime_enabled:
@@ -236,6 +239,23 @@ class ReferenceStore:
         if len(fk) != 1 or (fk[0]['table'],fk[0]['from'],fk[0]['to'],fk[0]['on_update'],fk[0]['on_delete'],fk[0]['match']) != ('reference_jobs','job_id','job_id','NO ACTION','NO ACTION','NONE'):
             raise Conflict('incompatible prepared envelope foreign key')
 
+    @staticmethod
+    def _init_v3_policy_schema(db):
+        existing = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_viewer_v3_policy'").fetchone()
+        if existing is None:
+            db.execute(_V3_POLICY_SCHEMA)
+            existing = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_viewer_v3_policy'").fetchone()
+        if ' '.join(existing[0].split()) != ' '.join(_V3_POLICY_SCHEMA.split()):
+            raise Conflict('incompatible v3 policy schema')
+        indexes=db.execute('PRAGMA index_list(reference_viewer_v3_policy)').fetchall()
+        if len(indexes)!=1 or not indexes[0]['unique'] or indexes[0]['partial'] or tuple(x['name'] for x in db.execute('PRAGMA index_info('+indexes[0]['name']+')')) != ('job_id',):
+            raise Conflict('incompatible v3 policy index')
+        fks=db.execute('PRAGMA foreign_key_list(reference_viewer_v3_policy)').fetchall()
+        if len(fks)!=1 or (fks[0]['table'],fks[0]['from'],fks[0]['to']) != ('reference_jobs','job_id','job_id'):
+            raise Conflict('incompatible v3 policy foreign key')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='reference_viewer_v3_policy'").fetchone():
+            raise Conflict('unexpected v3 policy trigger')
+
     def _check_jcs_capability(self, db):
         if not self.jcs_runtime_enabled and db.execute(
             "SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
@@ -293,6 +313,7 @@ class ReferenceStore:
         used += db.execute("SELECT COALESCE(SUM(length(CAST(binding_json AS BLOB))+length(binding_sha256)),0) FROM reference_viewer_activation").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(principal_id)+length(environment)+length(request_digest)+length(protocol)),0) FROM reference_viewer_submission_owners").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))+512),0) FROM reference_viewer_envelopes_v2").fetchone()[0]
+        used += db.execute("SELECT COALESCE(SUM(length(CAST(policy_json AS BLOB))+64),0) FROM reference_viewer_v3_policy").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),
                               ("reference_viewer_transfers", "acceptance_json"),
@@ -419,9 +440,9 @@ class ReferenceStore:
         canonical2, digest2, normalized = jcs.validate(raw, trusted_policy=trusted_policy, environment=authenticated_environment)
         if canonical2 != canonical or digest2 != digest: raise Conflict('JCS identity changed')
         return self._submit(normalized, owner=(authenticated_principal,authenticated_environment),
-            envelope=(wire,digest,value['activationId'],value['viewerTaskId'],value['viewerAttemptId']), envelope_protocol=jcs.PROTOCOL)
+            envelope=(wire,digest,value['activationId'],value['viewerTaskId'],value['viewerAttemptId']), envelope_protocol=jcs.PROTOCOL, policy_snapshot=trusted_policy)
 
-    def _submit(self, validated, *, owner, envelope=None, envelope_protocol='ltds-viewer-prepared-envelope-v2'):
+    def _submit(self, validated, *, owner, envelope=None, envelope_protocol='ltds-viewer-prepared-envelope-v2', policy_snapshot=None):
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -432,6 +453,7 @@ class ReferenceStore:
         if _json(checked) != _json(validated):
             raise ValueError("normalized submission identity or digest mismatch")
         encoded = _json(checked)
+        policy_wire = _json(policy_snapshot) if policy_snapshot is not None else None
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             self._check_jcs_capability(db)
@@ -454,7 +476,7 @@ class ReferenceStore:
             pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
             if pending >= self.max_queued_jobs:
                 raise Conflict("reference pending job quota reached")
-            self._quota(db, len(encoded.encode("utf-8")) + (512 if owner else 0) + (len(envelope[0].encode("utf-8")) + 512 if envelope else 0))
+            self._quota(db, len(encoded.encode("utf-8")) + (512 if owner else 0) + (len(envelope[0].encode("utf-8")) + 512 if envelope else 0) + (len(policy_wire.encode("utf-8")) + 64 if policy_wire else 0))
             job_id = str(uuid.uuid4())
             # Namespaced request identity also prevents collisions with ordinary
             # multipart/legacy submission IDs in the shared jobs table.
@@ -477,6 +499,9 @@ class ReferenceStore:
                         (job_id, owner[0], owner[1], envelope[2], envelope[3], envelope[4], envelope[0], envelope[1]))
                 except sqlite3.IntegrityError:
                     raise Conflict('prepared envelope identity already bound') from None
+            if policy_wire is not None:
+                db.execute('INSERT INTO reference_viewer_v3_policy VALUES(?,?,?)',
+                    (job_id,policy_wire,hashlib.sha256(policy_wire.encode('utf-8')).hexdigest()))
             return self._public(self._row(db, job_id)), True
 
     def get(self, job_id, *, private=False):
@@ -709,6 +734,63 @@ class ReferenceStore:
             except sqlite3.IntegrityError:
                 raise Conflict('Viewer activation identity already bound') from None
             return {'activationId': binding['activationId'], 'bindingSha256': digest}
+
+    @staticmethod
+    def _v3_source_contract_ready():
+        # Dataset/file/GCP source snapshot contract is not implemented.
+        return False
+
+    def activate_viewer_envelope_jcs_v3(self, submission_id, request, *, authenticated_principal, authenticated_environment, trusted_policy):
+        """Unmounted candidate; caller authenticates identity and authoritative policy."""
+        from . import prepared_envelope_jcs_candidate as jcs
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        protocol._closed(request, ('activationId','viewerTaskId','viewerAttemptId','envelopeSha256'), 'v3 activation request')
+        for key in ('activationId','viewerTaskId','viewerAttemptId'): protocol._uuid(request[key], key)
+        protocol._hash(request['envelopeSha256'], 'envelope digest')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
+            found=db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
+            if found is None: return None
+            row=self._row(db,found['job_id'])
+            owner=self._submission_owner(db,row)
+            if owner is None or owner['protocol'] != jcs.PROTOCOL or (owner['principal_id'],owner['environment']) != (authenticated_principal,authenticated_environment): return None
+            envelope=db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?',(row['job_id'],)).fetchone()
+            snapshot=db.execute('SELECT * FROM reference_viewer_v3_policy WHERE job_id=?',(row['job_id'],)).fetchone()
+            if envelope is None or snapshot is None:
+                raise Conflict('v3 activation policy snapshot unavailable')
+            wire=snapshot['policy_json']
+            if (type(wire) is not str or hashlib.sha256(wire.encode()).hexdigest()!=snapshot['policy_sha256']
+                or wire != _json(trusted_policy)):
+                raise Conflict('v3 activation policy changed')
+            canonical, digest, normalized=jcs.validate(envelope['envelope_json'].encode(),trusted_policy=trusted_policy,environment=authenticated_environment)
+            if (digest != envelope['envelope_sha256'] or normalized['requestDigest'] != row['request_digest']
+                or (request['activationId'],request['viewerTaskId'],request['viewerAttemptId'],request['envelopeSha256']) !=
+                   (envelope['activation_id'],envelope['viewer_task_id'],envelope['viewer_attempt_id'],envelope['envelope_sha256'])):
+                raise Conflict('v3 activation binding differs')
+            binding=self._activation_binding(dict(schemaVersion=1,protocol='ltds-viewer-activation-v1',
+                activationId=envelope['activation_id'],principalId=authenticated_principal,submissionId=submission_id,
+                jobId=row['job_id'],generation=row['generation'],environment=row['environment'],
+                viewerTaskId=envelope['viewer_task_id'],viewerAttemptId=envelope['viewer_attempt_id'],
+                requestDigest=row['request_digest'],manifestSha256=row['manifest_sha'],pipelineDigest=row['pipeline_digest']))
+            if not self._v3_source_contract_ready():
+                raise JCSRuntimeUnavailable('v3 source provenance contract unavailable')
+            prior=self._activation(db,row)
+            encoded=_json(binding); digest=protocol.digest(binding)
+            if prior is not None:
+                if _json(prior)!=encoded: raise Conflict('v3 activation differs')
+                return {'activationId':binding['activationId'],'bindingSha256':digest,'created':False}
+            if row['status']!='queued' or row['phase'] not in ('queued','waiting_capacity') or db.execute('SELECT 1 FROM reference_claims WHERE job_id=?',(row['job_id'],)).fetchone():
+                raise Conflict('v3 activation requires unclaimed queued job')
+            self._quota(db,len(encoded.encode())+len(digest))
+            try:
+                db.execute('INSERT INTO reference_viewer_activation VALUES(?,?,?,?,?,?,?)',
+                    (row['job_id'],binding['activationId'],authenticated_principal,authenticated_environment,binding['viewerAttemptId'],encoded,digest))
+            except sqlite3.IntegrityError:
+                raise Conflict('activation identity already bound') from None
+            return {'activationId':binding['activationId'],'bindingSha256':digest,'created':True}
 
     def next_for_node(self, node_id):
         """PRIVATE worker discovery; advisory only, claim remains atomic."""

@@ -21,7 +21,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         legacy=dict(capabilityFingerprint=fixture['capabilities']['capabilityFingerprint'],optionsFingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'],allowedOdmOptions=['resolution'],availableEngines=['odm'])
         policy=dict(capabilityFingerprint=legacy['capabilityFingerprint'],optionsFingerprint=legacy['optionsFingerprint'],availableEngines=['odm'],optionDefinitions={'resolution':{'type':'float','domain':{'min':-100,'max':100}},'quality':{'type':'enum','domain':['high','ultra']}})
         token='synthetic-jcs-viewer-token-0001'
-        def make_api(store,policy): return PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy})
+        def make_api(store,policy): return PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production'),dict(token='synthetic-jcs-other-token-0001',principalId='viewer-b',environment='production'),dict(token='synthetic-jcs-stage-token-0001',principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy})
         api=make_api(store,policy)
         disabled_api=PreparedSubmissionAPI(disabled_store,credentials=[dict(token=token,principalId='viewer-a',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy})
         env=dict(schemaVersion=3,protocol=PROTOCOL,submission=copy.deepcopy(fixture['submission']),viewerTaskId=str(uuid.uuid4()),viewerAttemptId=str(uuid.uuid4()),activationId=str(uuid.uuid4()))
@@ -33,8 +33,8 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
             def log_message(self,*args): pass
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.api=api
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-        def post(obj):
-            request=Request('http://127.0.0.1:%d/ltds/prepared/v3/submissions'%server.server_port,data=json.dumps(obj).encode(),headers={'Authorization':'Bearer '+token},method='POST')
+        def post(obj, path='/ltds/prepared/v3/submissions', caller=token):
+            request=Request('http://127.0.0.1:%d%s'%(server.server_port,path),data=json.dumps(obj).encode(),headers={'Authorization':'Bearer '+caller},method='POST')
             try:
                 with urlopen(request,timeout=5) as response: return response.status,json.load(response)
             except HTTPError as error: return error.code,json.load(error)
@@ -101,6 +101,24 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
 
             found=reopened.find_viewer_envelope_v2(env['submission']['submissionId'],authenticated_principal='viewer-a',authenticated_environment='production',expected_protocol=PROTOCOL)
             self.assertEqual(found['viewerAttemptId'],env['viewerAttemptId'])
+            activation=dict(activationId=env['activationId'],viewerTaskId=env['viewerTaskId'],viewerAttemptId=env['viewerAttemptId'],envelopeSha256=found['envelopeSha256'])
+            path='/ltds/prepared/v3/submissions/'+env['submission']['submissionId']+'/activation'
+            # Real production behavior must hold until source provenance exists.
+            self.assertEqual(post(activation,path)[0],503)
+            self.assertEqual(post(activation,path,'synthetic-jcs-other-token-0001')[0],404)
+            self.assertEqual(post(activation,path,'synthetic-jcs-stage-token-0001')[0],404)
+            altered=dict(activation,viewerTaskId=str(uuid.uuid4()))
+            self.assertEqual(post(altered,path)[0],409)
+            with patch.object(ReferenceStore,'_v3_source_contract_ready',return_value=True):
+                code,first=post(activation,path); self.assertEqual(code,200); self.assertTrue(first['created'])
+                code,replay=post(activation,path);self.assertEqual(code,200);self.assertFalse(replay['created']);self.assertEqual(first['bindingSha256'],replay['bindingSha256'])
+                # A reopened store retains the same evidence and does not dispatch.
+                server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy)
+                self.assertFalse(post(activation,path)[1]['created'])
+                self.assertIsNone(reopened.next_for_node('cluster'))
+                server.api=make_api(reopened,changed)
+                self.assertEqual(post(activation,path)[0],409)
+
             self.assertIsNone(reopened.next_for_node('cluster'))
         finally:
             server.shutdown();server.server_close();thread.join(5)
