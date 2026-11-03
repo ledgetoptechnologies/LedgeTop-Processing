@@ -1,5 +1,6 @@
 """Injected synthetic completion; prepared activation remains disabled in runtime."""
 import copy
+import builtins
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import threading
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.prototype import Queue
@@ -156,6 +158,26 @@ class ReferenceOdmJournalCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ImportConfirmationStoreHeld,'stored_confirmation_conflict'):
             new.load_verified(self.scope)
         self.assertEqual(original.state,'recorded')
+
+    def test_legacy_v2_reopens_and_replays_without_jcs_dependency(self):
+        if self.PREPARED.endswith('jcs-v3'):
+            self.skipTest('v2-only compatibility regression')
+        self.queue.close()
+        self.queue=Queue(self.tmp.name,node_ids=('cluster',),reference_enabled=True)
+        actual_import=builtins.__import__
+        def without_jcs(name,*args,**kwargs):
+            if name == 'rfc8785' or name.startswith('rfc8785.'):
+                raise ImportError('synthetic missing optional JCS dependency')
+            return actual_import(name,*args,**kwargs)
+        with patch('builtins.__import__',side_effect=without_jcs):
+            ref=ReferenceStore(self.queue)  # Default JCS-disabled configuration.
+            journal=ReferenceOdmImportJournalCandidate(ref,principal='viewer-prod',environment='staging',
+                issuer=self.fixture.copy_signer.issuer_id,import_keys=self.fixture.import_keys,
+                copy_keys=self.fixture.copy_signer.trusted_keys,prepared_protocol=self.PREPARED)
+            first=journal.record(self.scope,self.fixture.confirmation)
+            self.assertEqual(first.state,'recorded')
+            self.assertEqual(journal.load_verified(self.scope).sha256,first.sha256)
+            self.assertEqual(journal.record(self.scope,self.fixture.confirmation).state,'replayed')
 
 
 class ReferenceOdmJcsJournalCandidateTests(ReferenceOdmJournalCandidateTests):
