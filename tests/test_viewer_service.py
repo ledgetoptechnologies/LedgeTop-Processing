@@ -220,6 +220,8 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(task['node_id'], 'cluster')
         self.assertEqual(self.engines['cluster'].tasks[task['engine_uuid']]['files']['owned.jpg'], content)
         self.assertEqual(self.engines['main'].calls, [])
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
         self.assertEqual(self.fleet.max_active, 1)
 
@@ -525,6 +527,13 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick(); self.service.tick(); self.service.tick()
         self.assertEqual([self.task(i)['node_id'] for i in (first, second, third)], ['tiny', 'medium', 'large'])
         self.assertEqual(self.fleet.max_active, 3)
+        self.assertEqual(self.service.info(third)['status']['code'], 10)
+        self.engines['tiny'].tasks[self.task(first)['engine_uuid']]['progress'] = 67
+        self.service.tick()
+        self.assertEqual(self.service.info(first)['progress'], 67)
+        self.assertEqual(self.service.info(third)['status']['code'], 20)
+        self.assertEqual(self.service.output(first), ['synthetic engine output', '', 'comma,record'])
+        self.assertIn(('read', self.task(first)['engine_uuid'], 'output'), self.engines['tiny'].calls)
         self.finish(first)
         blocked = self.submit(count=3)
         eligible = self.submit()

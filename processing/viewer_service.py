@@ -591,6 +591,8 @@ class ViewerService:
                 self._backoff[identifier] = (now + 2, 1)
                 return
             fields = {'progress': progress}
+            if code == 20:
+                fields['stage'] = 'running'
             if code == 20 and task['phase'] == 'commit_pending':
                 fields.update(phase='processing', error=None)
             self.store.update(identifier, **fields)
@@ -739,7 +741,7 @@ class ViewerService:
             if not job:
                 return
             try:
-                self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
+                self.store.update(task['uuid'], stage='queued', phase='claimed', node_id=node_id,
                                   claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
                 task = self.store.task(task['uuid'])
                 engine = self.engines[node_id]

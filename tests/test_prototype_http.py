@@ -100,12 +100,19 @@ class PrototypeHTTPTests(unittest.TestCase):
         with patch('processing.app.probe_node', side_effect=lambda role, origin, token: {
                 'role':role, 'ready':True, 'maxImages':None, 'taskQueueCount':0}), \
              patch('processing.app.catalog', return_value={'ready':True, 'nodes':[], 'commonOptions':[]}):
-            _, nodes = self.request('/v1/nodes')
+            _, nodes = self.request('/v2/nodes')
             self.assertEqual([n['id'] for n in nodes['nodes']], ['tree','photo','third'])
-            _, decision = self.request('/v1/plan', {'engine':'odm','photoCount':1001,'inputBytes':1})
+            self.assertEqual(nodes['nodes'][0]['reason'], 'health_probe_unsupported')
+            self.assertFalse(nodes['nodes'][0]['ready'])
+            _, decision = self.request('/v2/plan', {'engine':'odm','photoCount':1001,'inputBytes':1})
             self.assertEqual((decision['decision'], decision['nodeId']), ('node','third'))
-            _, options = self.request('/v1/options')
+            _, options = self.request('/v2/options')
             self.assertTrue(options['ready'])
+            for path, body in (('/v1/options', None), ('/v1/nodes', None), ('/v1/plan', {'engine':'odm','photoCount':1,'inputBytes':1})):
+                with self.assertRaises(HTTPError) as caught:
+                    self.request(path, body)
+                self.assertEqual(caught.exception.code, 503)
+                self.assertEqual(json.load(caught.exception)['error'], 'use_inventory_v2')
             with tempfile.TemporaryDirectory() as removed_dir:
                 removed_handler = make_handler(Config(TOKEN, '', '', 1000, 20000,
                     prototype_state_dir=removed_dir, photo_smoke_enabled=True,
@@ -113,7 +120,7 @@ class PrototypeHTTPTests(unittest.TestCase):
                     per_node_slots=True, node_inventory=inventory[:2]))
                 removed_server = start_server(removed_handler)
                 try:
-                    req = Request(f'http://127.0.0.1:{removed_server.server_port}/v1/nodes', headers={'Authorization':f'Bearer {TOKEN}'})
+                    req = Request(f'http://127.0.0.1:{removed_server.server_port}/v2/nodes', headers={'Authorization':f'Bearer {TOKEN}'})
                     with urlopen(req, timeout=5) as response:
                         self.assertEqual([n['id'] for n in json.load(response)['nodes']], ['tree','photo'])
                 finally:

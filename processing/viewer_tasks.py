@@ -660,6 +660,10 @@ class TaskStore:
                         'ledgetopHeld':True,'ledgetopHoldReason':'option_evidence_invalid'}
         job = task['job']
         state = job['status'] if job else task['stage']
+        if state == 'running' and task['stage'] != 'running':
+            # A coordinator claim and a successful commit ACK do not establish
+            # that the engine has actually begun processing.
+            state = 'queued'
         cancelled_result = (job and state == 'failed' and isinstance(job['result'], dict)
                             and job['result'].get('cancelled') is True)
         if state == 'held':

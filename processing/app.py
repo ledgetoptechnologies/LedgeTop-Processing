@@ -150,7 +150,9 @@ def make_handler(config: Config):
                 state = queue.get_node(spec['id'])
                 if state is None:
                     raise Conflict('inventory node state unavailable')
-                report = probe_node(spec['id'], spec['origin'], spec['token'])
+                report = (probe_node(spec['id'], spec['origin'], spec['token']) if 'odm' in spec['capabilities']
+                          else {'role': spec['id'], 'configured': True, 'ready': False,
+                                'reason': 'health_probe_unsupported', 'maxImages': None, 'taskQueueCount': None})
                 result.append({**report, 'id': spec['id'], 'physicalHostId': spec['physicalHostId'],
                     'maxPhotos': spec['maxPhotos'], 'capabilities': list(spec['capabilities']),
                     'state': state['state'], 'occupied': spec['id'] in occupied})
@@ -210,8 +212,12 @@ def make_handler(config: Config):
                                   "syntheticPrototypeEnabled": queue is not None,
                                   "photoSmokeEnabled": config.photo_smoke_enabled,
                                   "viewerEnabled": config.viewer_enabled})
-            elif self.path == '/v1/options':
+            elif self.path in ('/v1/options', '/v2/options'):
                 if self._authorized(observer=True):
+                    if self.path == '/v2/options' and not config.node_inventory:
+                        self._reply(404, {'error': 'not_found'}); return
+                    if self.path == '/v1/options' and config.node_inventory:
+                        self._reply(503, {'error': 'use_inventory_v2'}); return
                     if config.node_inventory:
                         nodes = [(n['id'], n['origin'], n['token']) for n in config.node_inventory if 'odm' in n['capabilities']]
                         if not nodes:
@@ -228,8 +234,12 @@ def make_handler(config: Config):
                         'viewerNativeApiEnabled': config.viewer_enabled,
                         'viewerProviderReady': config.viewer_enabled and snapshot['ready'],
                         'snapshotConsistency': 'best_effort_read_only', **snapshot})
-            elif self.path == "/v1/nodes":
+            elif self.path in ("/v1/nodes", "/v2/nodes"):
                 if self._authorized():
+                    if self.path == '/v2/nodes' and not config.node_inventory:
+                        self._reply(404, {'error': 'not_found'}); return
+                    if self.path == '/v1/nodes' and config.node_inventory:
+                        self._reply(503, {'error': 'use_inventory_v2'}); return
                     if config.node_inventory:
                         try:
                             self._reply(200, {'nodes': self._inventory_nodes()})
@@ -244,13 +254,17 @@ def make_handler(config: Config):
             if facade and facade.handle(self):
                 return
             prototype = self.path.startswith("/v1/prototype/")
-            if self.path != "/v1/plan" and not prototype:
+            if self.path not in ("/v1/plan", "/v2/plan") and not prototype:
                 self._reply(404, {"error": "not_found"})
                 return
             operator = prototype and (self.path == '/v1/prototype/admission-drain' or self.path.endswith(("/hold", "/resolve"))
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return
+            if self.path == '/v1/plan' and config.node_inventory:
+                self._reply(503, {'error': 'use_inventory_v2'}); return
+            if self.path == '/v2/plan' and not config.node_inventory:
+                self._reply(404, {'error': 'not_found'}); return
             if prototype and queue is None:
                 self._reply(404, {"error": "prototype_disabled"})
                 return

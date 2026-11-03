@@ -175,7 +175,7 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
             self.photo()
         claimed = self.claim()
         self.assertEqual(claimed['id'], task['job_id'])
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
 
     def test_preexisting_enqueue_is_reconciled_without_duplicate_job(self):
         self.initialize()
