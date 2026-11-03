@@ -21,7 +21,9 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         legacy=dict(capabilityFingerprint=fixture['capabilities']['capabilityFingerprint'],optionsFingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'],allowedOdmOptions=['resolution'],availableEngines=['odm'])
         policy=dict(capabilityFingerprint=legacy['capabilityFingerprint'],optionsFingerprint=legacy['optionsFingerprint'],availableEngines=['odm'],optionDefinitions={'resolution':{'type':'float','domain':{'min':-100,'max':100}},'quality':{'type':'enum','domain':['high','ultra']}})
         token='synthetic-jcs-viewer-token-0001'
-        def make_api(store,policy): return PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production'),dict(token='synthetic-jcs-other-token-0001',principalId='viewer-b',environment='production'),dict(token='synthetic-jcs-stage-token-0001',principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy},expected_authority_id=queue.authority_id)
+        def make_api(store,policy,authority=None): return PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production'),dict(token='synthetic-jcs-other-token-0001',principalId='viewer-b',environment='production'),dict(token='synthetic-jcs-stage-token-0001',principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy},expected_authority_id=queue.authority_id if authority is None else authority)
+        with self.assertRaises(ValueError):
+            PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy})
         api=make_api(store,policy)
         disabled_api=PreparedSubmissionAPI(disabled_store,credentials=[dict(token=token,principalId='viewer-a',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy})
         env=dict(schemaVersion=3,protocol=PROTOCOL,submission=copy.deepcopy(fixture['submission']),viewerTaskId=str(uuid.uuid4()),viewerAttemptId=str(uuid.uuid4()),activationId=str(uuid.uuid4()))
@@ -49,6 +51,11 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         try:
             status,job=post(env); self.assertEqual(status,201)
             self.assertEqual(job['authorityId'],queue.authority_id)
+            # A separately configured wrong installation pin must not use the DB's value.
+            server.api=make_api(store,policy,str(uuid.uuid4()))
+            self.assertEqual(post(env)[0],503)
+            server.api=make_api(store,policy)
+
             recovery='/ltds/prepared/v3/submissions/'+env['submission']['submissionId']
             self.assertEqual(get(recovery)[1]['authorityId'],queue.authority_id)
             with queue._db() as db: db.execute('UPDATE coordinator_identity SET authority_id=? WHERE singleton=1',(str(uuid.uuid4()),))
@@ -57,6 +64,15 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
             with queue._db() as db: db.execute('DELETE FROM coordinator_identity')
             self.assertEqual(get(recovery)[0],503)
             with queue._db() as db: db.execute('INSERT INTO coordinator_identity VALUES(1,?)',(queue.authority_id,))
+            with queue._db() as db: db.execute('DROP TABLE coordinator_identity')
+            self.assertEqual(get(recovery)[0],503)
+            with queue._db() as db: db.execute('CREATE TABLE coordinator_identity (singleton INTEGER)')
+            self.assertEqual(get(recovery)[0],503)
+            with queue._db() as db: db.execute('DROP TABLE coordinator_identity')
+            with queue._db() as db:
+                db.execute('CREATE TABLE coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
+                db.execute('INSERT INTO coordinator_identity VALUES(1,?)',(queue.authority_id,))
+
 
             with self.assertRaises(JCSRuntimeUnavailable): disabled_store.next_for_node('cluster')
             with self.assertRaises(JCSRuntimeUnavailable): disabled_store.list()
