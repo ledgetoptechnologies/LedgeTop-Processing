@@ -1,9 +1,12 @@
 import io
 import json
 import ssl
+import subprocess
+import threading
 import unittest
 import tempfile
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from email.message import Message
 
 from processing.node_readiness import NodeReadiness
@@ -50,6 +53,45 @@ class WorkerReadinessPollerTests(unittest.TestCase):
             WorkerReadinessPoller({'small': dict(origin='https://worker.invalid',
                 bearer='synthetic-read-token-0001', workerId='worker')},
                 NodeReadiness(('small',)), ssl_context=context)
+
+    def test_real_tls_listener_requires_trusted_certificate_and_bearer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cert, key = Path(directory) / 'cert.pem', Path(directory) / 'key.pem'
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                '-days', '1', '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1',
+                '-keyout', str(key), '-out', str(cert)], check=True, capture_output=True, timeout=15)
+            observation = dict(ready=True, taskQueueCount=0, maxImages=1000,
+                               availableScratchBytes=4000, outputBudgetBytes=1000)
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self, *_):
+                    pass
+                def do_GET(self):
+                    if self.headers.get('Authorization') != 'Bearer synthetic-read-token-0001':
+                        self.send_response(401); self.end_headers(); return
+                    payload = json.dumps(dict(nodeId='small', workerId='worker', observation=observation)).encode()
+                    self.send_response(200); self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
+            server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(cert, key)
+            server.socket = server_context.wrap_socket(server.socket, server_side=True)
+            thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05})
+            thread.start()
+            try:
+                cache = NodeReadiness(('small',))
+                origin = 'https://127.0.0.1:' + str(server.server_port)
+                workers = {'small': dict(origin=origin, bearer='synthetic-read-token-0001', workerId='worker')}
+                poller = WorkerReadinessPoller(workers, cache, ssl_context=ssl.create_default_context(cafile=str(cert)))
+                poller.poll_once(); self.assertEqual(cache.get('small'), observation)
+                wrong = WorkerReadinessPoller({'small': {**workers['small'], 'bearer': 'synthetic-wrong-token-001'}},
+                    cache, ssl_context=ssl.create_default_context(cafile=str(cert)))
+                wrong.poll_once(); self.assertIsNone(cache.get('small'))
+                untrusted = WorkerReadinessPoller(workers, cache, ssl_context=ssl.create_default_context())
+                untrusted.poll_once(); self.assertIsNone(cache.get('small'))
+                for item in (poller, wrong, untrusted): item.close()
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
 
     def test_polled_capacity_drives_held_store_and_restart_drops_observation(self):
         with tempfile.TemporaryDirectory() as directory:
