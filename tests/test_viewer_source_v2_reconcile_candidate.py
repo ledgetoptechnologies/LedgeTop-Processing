@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from processing import viewer_source_v2_reconcile_candidate as c
+from processing import reference_protocol as p
 
 
 class ViewerSourceV2Tests(unittest.TestCase):
@@ -16,17 +17,25 @@ class ViewerSourceV2Tests(unittest.TestCase):
             'sourceVersion':'dataset:synthetic-source:'+('a'*64),
             'viewerAttemptId':'123e4567-e89b-42d3-a456-426614174000'}
         self.objects=[{'id':'synthetic-1','byteSize':c.CHUNK+7,'sha256':'b'*64}]
+        self.manifest={'id':'dataset-synthetic-source','revision':1,'sha256':'',
+            'totalBytes':c.CHUNK+7,'objectCount':1,'inputCounts':{'images':1,'lidarObjects':0,'points':0},
+            'objects':[{**self.objects[0],'name':'synthetic.jpg','kind':'image','mediaType':'image/jpeg'}]}
+        self.manifest['sha256']=p.manifest_sha256(self.manifest)
+        self.identity['manifestSha256']=self.manifest['sha256']
+        self.identity['sourceVersion']='dataset:synthetic-source:'+self.manifest['sha256']
         self.transfer={'protocol':'source-range-v2','viewerAttemptId':self.identity['viewerAttemptId'],
             'reservationId':self.identity['reservationId'],'generation':1,
             'expiresAt':'2035-01-01T00:10:00.000Z','manifestSha256':self.identity['manifestSha256'],
             'sourceVersion':self.identity['sourceVersion'],'objectIds':['synthetic-1'],
-            'chunkBytes':c.CHUNK,'requestBudget':2,'byteBudget':2*(c.CHUNK+7),
-            'nonce':'synthetic-nonce','attemptBudget':3}
+            'chunkBytes':c.CHUNK,'requestBudget':2,'byteBudget':3*(c.CHUNK+7),
+            'nonce':'synthetic-nonce','attemptBudget':6}
+        self.trusted_policy={k:self.transfer[k] for k in c.POLICY}
         self.grant={**self.transfer,'expiresAt':'2035-01-01T00:05:00.000Z',
             'jobId':'job-1','environment':'production','token':'z'*43}
         self.now=2051222400
     def contract(self):
-        return c.reconcile(binding=self.identity,transfer=self.transfer,grant=self.grant,objects=self.objects,now=self.now)
+        return c.reconcile(binding=self.identity,transfer=self.transfer,grant=self.grant,objects=self.objects,
+                           trusted_manifest=self.manifest,trusted_policy=self.trusted_policy,now=self.now)
 
     def test_attempt_and_grant_bindings_are_exact_and_nonsecret(self):
         contract=self.contract()
@@ -35,20 +44,24 @@ class ViewerSourceV2Tests(unittest.TestCase):
             binding,transfer,grant=copy.deepcopy(self.identity),copy.deepcopy(self.transfer),copy.deepcopy(self.grant)
             {'binding':binding,'transfer':transfer,'grant':grant}[kind]['viewerAttemptId']='123e4567-e89b-42d3-a456-426614174001'
             with self.subTest(kind=kind),self.assertRaises(ValueError):
-                c.reconcile(binding=binding,transfer=transfer,grant=grant,objects=self.objects,now=self.now)
+                c.reconcile(binding=binding,transfer=transfer,grant=grant,objects=self.objects,
+                            trusted_manifest=self.manifest,trusted_policy=self.trusted_policy,now=self.now)
 
     def test_token_renewal_preserves_identity_but_closure_and_expiry_are_strict(self):
         original=self.contract();renewed=copy.deepcopy(self.grant)
         renewed['token']='y'*43;renewed['expiresAt']='2035-01-01T00:07:00.000Z'
-        self.assertEqual(c.reconcile(binding=self.identity,transfer=self.transfer,grant=renewed,objects=self.objects,now=self.now),original)
+        self.assertEqual(c.reconcile(binding=self.identity,transfer=self.transfer,grant=renewed,objects=self.objects,
+                                     trusted_manifest=self.manifest,trusted_policy=self.trusted_policy,now=self.now),original)
         for key,value in [('expiresAt','2035-01-01T00:11:00.000Z'),('objectIds',['other']),('nonce','changed')]:
             bad=copy.deepcopy(renewed);bad[key]=value
             with self.subTest(key=key),self.assertRaises(ValueError):
-                c.reconcile(binding=self.identity,transfer=self.transfer,grant=bad,objects=self.objects,now=self.now)
+                c.reconcile(binding=self.identity,transfer=self.transfer,grant=bad,objects=self.objects,
+                            trusted_manifest=self.manifest,trusted_policy=self.trusted_policy,now=self.now)
         bad_transfer=copy.deepcopy(self.transfer);bad_grant=copy.deepcopy(self.grant)
         bad_transfer['generation']=True;bad_grant['generation']=True
         with self.assertRaises(ValueError):
-            c.reconcile(binding=self.identity,transfer=bad_transfer,grant=bad_grant,objects=self.objects,now=self.now)
+            c.reconcile(binding=self.identity,transfer=bad_transfer,grant=bad_grant,objects=self.objects,
+                        trusted_manifest=self.manifest,trusted_policy=self.trusted_policy,now=self.now)
 
     def test_actual_viewer_c92_canonical_functions_match(self):
         repo=os.environ.get('VIEWER_C92_REPO',r'C:\Projects\viewer-download-retention-20261031')
@@ -67,6 +80,34 @@ class ViewerSourceV2Tests(unittest.TestCase):
                 self.assertEqual(wire,c.canonical_identity(identity))
                 self.assertEqual(digest,c.request_id(identity,self.objects[0],start,length))
 
+    def test_matching_malicious_transfer_and_grant_cannot_change_trusted_data_or_policy(self):
+        for field in ('byteSize','sha256'):
+            objects=copy.deepcopy(self.objects)
+            objects[0][field]=objects[0][field]+1 if field=='byteSize' else 'c'*64
+            with self.subTest(field=field),self.assertRaisesRegex(ValueError,'manifest mismatch'):
+                c.reconcile(binding=self.identity,transfer=self.transfer,grant=self.grant,objects=objects,
+                            trusted_manifest=self.manifest,trusted_policy=self.trusted_policy,now=self.now)
+        for field in ('requestBudget','byteBudget','attemptBudget'):
+            transfer,grant=copy.deepcopy(self.transfer),copy.deepcopy(self.grant)
+            transfer[field]+=1;grant[field]+=1
+            with self.subTest(field=field),self.assertRaisesRegex(ValueError,'policy mismatch'):
+                c.reconcile(binding=self.identity,transfer=transfer,grant=grant,objects=self.objects,
+                            trusted_manifest=self.manifest,trusted_policy=self.trusted_policy,now=self.now)
+        altered=copy.deepcopy(self.manifest);altered['objects'][0]['sha256']='c'*64
+        with self.assertRaisesRegex(ValueError,'manifest mismatch'):
+            c.reconcile(binding=self.identity,transfer=self.transfer,grant=self.grant,objects=self.objects,
+                        trusted_manifest=altered,trusted_policy=self.trusted_policy,now=self.now)
+        altered['sha256']=p.manifest_sha256(altered)
+        altered_objects=[{'id':o['id'],'byteSize':o['byteSize'],'sha256':o['sha256']} for o in altered['objects']]
+        with self.assertRaisesRegex(ValueError,'manifest mismatch'):
+            c.reconcile(binding=self.identity,transfer=self.transfer,grant=self.grant,objects=altered_objects,
+                        trusted_manifest=altered,trusted_policy=self.trusted_policy,now=self.now)
+        transfer,grant,policy=copy.deepcopy(self.transfer),copy.deepcopy(self.grant),copy.deepcopy(self.trusted_policy)
+        transfer['byteBudget']+=1;grant['byteBudget']+=1;policy['byteBudget']+=1
+        with self.assertRaisesRegex(ValueError,'invalid transfer budget'):
+            c.reconcile(binding=self.identity,transfer=transfer,grant=grant,objects=self.objects,
+                        trusted_manifest=self.manifest,trusted_policy=policy,now=self.now)
+
     def test_v2_replay_counts_attempts_and_reopen_never_resets_lineage(self):
         contract=self.contract(); rid=c.request_id(self.identity,self.objects[0],0,c.CHUNK)
         with tempfile.TemporaryDirectory() as root:
@@ -80,8 +121,9 @@ class ViewerSourceV2Tests(unittest.TestCase):
             other=c.request_id(changed['identity'],self.objects[0],0,c.CHUNK)
             with self.assertRaisesRegex(ValueError,'requires reconciliation'):
                 ledger.record_attempt(changed,object_id='synthetic-1',start=0,length=c.CHUNK,claimed_request_id=other)
-            z=ledger.record_attempt(contract,object_id='synthetic-1',start=0,length=c.CHUNK,claimed_request_id=rid)
-            self.assertEqual(z['attempts'],3)
+            for expected in range(3,7):
+                z=ledger.record_attempt(contract,object_id='synthetic-1',start=0,length=c.CHUNK,claimed_request_id=rid)
+                self.assertEqual(z['attempts'],expected)
             with self.assertRaisesRegex(ValueError,'budget exhausted'):
                 ledger.record_attempt(contract,object_id='synthetic-1',start=0,length=c.CHUNK,claimed_request_id=rid)
             ledger.close()
