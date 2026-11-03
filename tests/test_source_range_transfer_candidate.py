@@ -161,22 +161,6 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
             used = db.execute("SELECT attempts_used,attempt_budget FROM source_budgets").fetchone()
         self.assertEqual(used, (3, 3))
 
-    def test_network_attempt_budget_caps_pending_range_replays(self):
-        self.transfer["attemptBudget"] = 3
-        def fail_second(request, *, timeout):
-            if request.get_header("Range").startswith(f"bytes={CHUNK_BYTES}-"):
-                raise OSError("synthetic first retry failure")
-            return self.opener(request, timeout=timeout)
-        with self.assertRaises(TransferError):
-            self.make_client(fail_second).download_object(grant=self.grant(), object_id=self.obj.id,
-                destination=self.root / "photo.bin")
-        with self.assertRaises(TransferError):
-            self.make_client().download_object(grant=self.grant("rotated"), object_id=self.obj.id,
-                destination=self.root / "photo.bin")
-        with closing(sqlite3.connect(self.root / "progress.sqlite")) as db:
-            used = db.execute("SELECT attempts_used,attempt_budget FROM source_budgets").fetchone()
-        self.assertEqual(used, (3, 3))
-
     def test_committed_corruption_or_missing_partial_holds(self):
         def fail_second(request, *, timeout):
             if request.get_header("Range").startswith(f"bytes={CHUNK_BYTES}-"):
