@@ -71,7 +71,6 @@ class GuardedNativeClient:
             raise EngineUnavailable('guard proof unavailable')
         return value
 
-<<<<<<< HEAD
     def read_bound(self, job_claim, kind, *, line=0):
         value = self._json('read-bound', {'jobClaim': job_claim, 'kind': kind, 'line': line})
         if (set(value) != {'held', 'value'} or type(value['held']) is not bool
@@ -97,7 +96,6 @@ class GuardedNativeClient:
         finally:
             conn.close()
 
-=======
     def inspect_bound_mutation(self, envelope, operation):
         """Return a validated held-only observation from the authenticated peer."""
         value = self._json('inspect-bound-mutation', {'jobClaim': envelope, 'operation': operation})
@@ -112,7 +110,6 @@ class GuardedNativeClient:
             raise EngineUnavailable('guard proof unavailable')
         return value
 
->>>>>>> e41c061
     def upload(self, identifier, item):
         path = Path(item['path'])
         conn = self._connection()
