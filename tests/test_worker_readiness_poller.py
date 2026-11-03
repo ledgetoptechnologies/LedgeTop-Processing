@@ -60,6 +60,12 @@ class WorkerReadinessPollerTests(unittest.TestCase):
                 bearer='synthetic-read-token-0001', workerId='worker')},
                 NodeReadiness(('small',)), ssl_context=context)
 
+    def test_worker_and_cache_node_sets_must_match(self):
+        with self.assertRaises(ValueError):
+            WorkerReadinessPoller({'small': dict(origin='https://worker.invalid',
+                bearer='synthetic-read-token-0001', workerId='worker')},
+                NodeReadiness(('different',)), ssl_context=ssl.create_default_context())
+
     def test_real_tls_listener_requires_trusted_certificate_and_bearer(self):
         with tempfile.TemporaryDirectory() as directory:
             cert, key = Path(directory) / 'cert.pem', Path(directory) / 'key.pem'

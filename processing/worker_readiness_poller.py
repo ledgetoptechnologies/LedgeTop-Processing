@@ -17,6 +17,8 @@ class WorkerReadinessPoller:
                 or type(interval) not in (int, float) or not 1 <= interval <= 30
                 or (opener is not None and not callable(opener))):
             raise ValueError('invalid readiness poller configuration')
+        if set(workers) != cache.node_ids:
+            raise ValueError('readiness cache must cover exactly the configured workers')
         self._workers = {}
         for node, worker in workers.items():
             protocol._slug(node, 'node')

@@ -23,6 +23,10 @@ class NodeReadiness:
         self._pending = {}
         self._lock = threading.Lock()
 
+    @property
+    def node_ids(self):
+        return self._nodes
+
     def begin(self, node_id):
         """Invalidate prior readiness and return a ticket for one local probe."""
         if node_id not in self._nodes:
