@@ -301,7 +301,7 @@ class GuardedHTTPS(GuardedNativeProxyTests):
             release.set()
             thread.join(2)
             self.assertFalse(thread.is_alive())
-            self.assertEqual(result, [(200, {'accepted': True})])
+            self.assertEqual(result, [(200, {'accepted': True, 'uuid': self.job})])
             self.assertTrue(server.wait_drained(1))
             self.assertEqual(self.backend.counts()['initialize'], 1)
         finally:

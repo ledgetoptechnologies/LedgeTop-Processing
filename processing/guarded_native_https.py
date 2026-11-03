@@ -149,10 +149,10 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                 args = dict(bearer=auth[0][7:], protected_transport=True)
                 if self.path == '/v1/initialize' and set(request) == {'task'}:
                     adapter.initialize(request['task'], **args)
-                    result = {'accepted': True}
+                    result = {'accepted': True, 'uuid': request['task']['engine_uuid']}
                 elif self.path == '/v1/initialize-bound' and set(request) == {'task', 'jobClaim'}:
                     adapter.initialize(request['task'], job_claim=request['jobClaim'], **args)
-                    result = {'accepted': True, 'held': True}
+                    result = {'accepted': True, 'held': True, 'uuid': request['task']['engine_uuid']}
                 elif self.path == '/v1/inspect-bound-mutation' and set(request) == {'jobClaim', 'operation'}:
                     result = adapter.inspect_bound_mutation(request['jobClaim'], request['operation'], **args)
                 elif self.path == '/v1/read-bound' and set(request) == {'jobClaim', 'kind', 'line'}:

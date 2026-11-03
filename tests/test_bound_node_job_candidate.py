@@ -33,7 +33,7 @@ class BoundJobTests(GuardedHTTPS):
         server = self.start_listener()
         envelope = self.envelope()
         self.assertEqual(self.request(server, '/v1/initialize-bound', {'task': self.task, 'jobClaim': envelope}),
-                         (200, {'accepted': True, 'held': True}))
+                         (200, {'accepted': True, 'held': True, 'uuid': self.job}))
         request = dict(task=self.job, name=self.task['name'], outputs=None, options=[])
         operation = dict(operationId=self.proxy._op(self.job, 'init'), kind='init',
                          requestDigest=protocol.digest(request), nonce='b' * 64)

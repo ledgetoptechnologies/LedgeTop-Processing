@@ -58,15 +58,27 @@ class GuardedNativeClient:
     def initialize(self, task):
         data = {'task': {k: task[k] for k in ('name', 'engine_uuid', 'outputs', 'options')}}
         if self.job_claim is not None:
+            self._bound_task(task['engine_uuid'])
             data['jobClaim'] = self.job_claim
-        self._json('initialize-bound' if self.job_claim is not None else 'initialize', data)
+        result = self._json('initialize-bound' if self.job_claim is not None else 'initialize', data)
+        expected_keys = {'accepted', 'uuid', 'held'} if self.job_claim is not None else {'accepted', 'uuid'}
+        if (set(result) != expected_keys or result.get('accepted') is not True
+                or result.get('uuid') != task['engine_uuid']
+                or (self.job_claim is not None and result.get('held') is not True)):
+            raise EngineUnavailable('guard initialization acknowledgement unavailable')
 
     def action(self, action, identifier):
         if action != 'commit': raise EngineUnavailable('unsupported guarded operation')
         if self.operation_signer is not None:
+            self._bound_task(identifier)
             claim = self.operation_signer('commit', {'task': identifier})
-            return self._json('commit-bound', {'task': identifier, 'operationClaim': claim})
-        return self._json('commit', {'task': identifier})
+            result = self._json('commit-bound', {'task': identifier, 'operationClaim': claim})
+        else:
+            result = self._json('commit', {'task': identifier})
+        if (set(result) - {'uuid', 'success'} or result.get('uuid') != identifier
+                or ('success' in result and result['success'] is not True)):
+            raise EngineUnavailable('guard commit acknowledgement unavailable')
+        return result
 
     def inspect_mutation(self, claim):
         """Inspect only; returned evidence never authorizes replay or resume."""

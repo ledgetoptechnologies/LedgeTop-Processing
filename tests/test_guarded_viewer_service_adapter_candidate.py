@@ -6,6 +6,7 @@ import shutil
 import ssl
 import unittest
 import uuid
+from unittest.mock import patch
 
 from ops.native_node_fixture import ARCHIVE
 from processing import reference_protocol as protocol
@@ -22,6 +23,77 @@ from tests.test_viewer_service import ViewerServiceTests, FakeEngine, OPTIONS
 
 
 class GuardedViewerAdapterTests(BoundJobTests):
+    def _malformed_mutation_ack_holds_checkpoint(self, operation, response_body):
+        coordinator = ViewerServiceTests(methodName='runTest')
+        coordinator.setUp()
+        self.addCleanup(coordinator.tearDown)
+        coordinator.service.close(); coordinator.queue.close()
+        coordinator.config.prototype_state_dir = str(coordinator.root / 'malformed-ack-state')
+        coordinator.config.viewer_require_guard = True
+        coordinator.config.node_inventory = parse_node_inventory(json.dumps([
+            dict(id='main', physicalHostId='main', origin='http://192.0.2.1:3000',
+                 tokenEnv='NODE_TEST_TOKEN', maxPhotos=None, capabilities=['odm'])]), {})
+        coordinator.queue = Queue(coordinator.config.prototype_state_dir, node_ids=('main',),
+            treedar_node_ids=(), viewer_enabled=True, per_node_slots=True)
+        coordinator.engines = {'main': FakeEngine('main', coordinator.fleet)}
+        self.proxy._require_job_claim = True
+        self.commit_reply(True)
+        server = self.start_listener()
+        context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
+        context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
+        claims = {}
+        def factory(identity):
+            job = identity['viewerJobId']
+            self.job = identity['engineTaskId']
+            if job not in claims:
+                claims[job] = self.envelope(viewerJobId=job, viewerGeneration=identity['viewerGeneration'],
+                    engineTaskId=identity['engineTaskId'], nodeId=identity['nodeId'],
+                    environment=identity['environment'], requestSha256=identity['requestSha256'],
+                    nonce=hashlib.sha256(job.encode()).hexdigest())
+            claim = claims[job]
+            return GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10,
+                job_claim=claim, operation_signer=operation_signer(self.proxy, KEY, claim))
+        coordinator.service = ViewerService(coordinator.queue, coordinator.config,
+            engines=coordinator.engines, probe=lambda *_: {'ready': True, 'maxImages': None, 'taskQueueCount': 0},
+            guard_probe=lambda _: True, guarded_engine_factory=factory)
+        coordinator.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(x) for x in OPTIONS]}
+        coordinator.service._selected_options = lambda _: [dict(x) for x in OPTIONS]
+        identifier = coordinator.initialize(options=[])
+        coordinator.upload(identifier, name='photo.jpg', content=b'abc')
+        coordinator.service.commit(identifier)
+        handler = server.RequestHandlerClass
+        original = handler._reply
+        target = '/v1/initialize-bound' if operation == 'init' else '/v1/commit-bound'
+        def corrupt_response(instance, status, body):
+            if status == 200 and instance.path == target:
+                body = response_body(body)
+            return original(instance, status, body)
+        with patch.object(handler, '_reply', corrupt_response):
+            coordinator.service.tick()
+        task = coordinator.task(identifier)
+        checkpoint = coordinator.service.store.guarded_dispatch_checkpoint(identifier)
+        self.assertEqual(task['stage'], 'held')
+        self.assertEqual((checkpoint['operation'], checkpoint['state']), (operation, 'pending'))
+        self.assertEqual(coordinator.service.info(identifier)['status']['code'], 10)
+        self.assertEqual(self.backend.counts()['initialize'], 1)
+        self.assertEqual(self.backend.counts()['commit'], int(operation == 'commit'))
+        coordinator.service.tick()
+        self.assertEqual(coordinator.service.store.guarded_dispatch_checkpoint(identifier), checkpoint)
+        self.assertEqual(self.backend.counts()['initialize'], 1)
+        self.assertEqual(self.backend.counts()['commit'], int(operation == 'commit'))
+
+    def test_wrong_initialization_uuid_keeps_checkpoint_pending(self):
+        self._malformed_mutation_ack_holds_checkpoint('init', lambda body: {**body, 'uuid': str(uuid.uuid4())})
+
+    def test_rejected_initialization_ack_keeps_checkpoint_pending(self):
+        self._malformed_mutation_ack_holds_checkpoint('init', lambda body: {**body, 'accepted': False})
+
+    def test_wrong_commit_uuid_keeps_checkpoint_pending(self):
+        self._malformed_mutation_ack_holds_checkpoint('commit', lambda body: {**body, 'uuid': str(uuid.uuid4())})
+
+    def test_rejected_commit_ack_keeps_checkpoint_pending(self):
+        self._malformed_mutation_ack_holds_checkpoint('commit', lambda body: {**body, 'success': False})
+
     def test_factory_dispatches_two_distinct_assignments_with_per_job_claims(self):
         coordinator = ViewerServiceTests(methodName='runTest')
         coordinator.setUp()
