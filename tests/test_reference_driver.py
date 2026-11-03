@@ -390,6 +390,31 @@ class ReferenceDriverTests(unittest.TestCase):
                         self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], stage)
                     with NodeGate('engine') as gate:
                         self.assertEqual(gate.snapshot(), before)
+            for stage in ('failure_delivering', 'awaiting_failure_acceptance', 'completed'):
+                for payload in ('missing', 'null'):
+                    with self.subTest(stage=stage, payload=payload):
+                        altered = dict(data)
+                        if payload == 'missing':
+                            altered.pop('failure')
+                        else:
+                            altered['failure'] = None
+                        # A completed legacy failure is identified by the
+                        # worker phase even if its failure payload is gone.
+                        self.worker._phase(job['jobId'], 'failure_delivered')
+                        self.driver._save(job['jobId'], stage, altered)
+                        self.driver = self.make_driver()
+                        with patch.object(self.driver, '_background') as background, \
+                             patch.object(self.ledger, 'cleanup_candidates') as cleanup:
+                            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'guarded_terminal_stop_unverified'})
+                            background.assert_not_called()
+                            cleanup.assert_not_called()
+                        with NodeGate('engine') as gate:
+                            self.assertEqual(gate.snapshot(), before)
+            # A successful completed guarded execution is not treated as a
+            # historical failure solely because its payload lacks that field.
+            self.worker._phase(job['jobId'], 'delivered')
+            self.driver._save(job['jobId'], 'completed', altered)
+            self.driver._hold_legacy_guarded_failures()
 
     def test_unrelated_success_ack_does_not_advance_current_job(self):
         job = self.submit()

@@ -546,13 +546,23 @@ class ReferenceDriver:
         # terminal without physical-stop evidence. Fence those rows before
         # background acceptance, generic cleanup, or another claim can run.
         with self._db() as db:
-            rows = db.execute("""SELECT job, data FROM driver_jobs WHERE stage IN
+            rows = db.execute("""SELECT job, stage, data FROM driver_jobs WHERE stage IN
                 ('failure_delivering','awaiting_failure_acceptance','completed')""").fetchall()
         for row in rows:
+            if self._kind(row['job']) != 'odm':
+                continue
+            execution = self.worker._row(row['job'])
+            if not execution['host_guarded']:
+                continue
+            # The stage itself is proof this is a failure flow even if its
+            # payload is absent or damaged; do not run background first.
+            if row['stage'] != 'completed':
+                raise DriverHeld('guarded_terminal_stop_unverified')
             data = json.loads(row['data'])
-            if data.get('failure') is not None and self._kind(row['job']) == 'odm':
-                if self.worker._row(row['job'])['host_guarded']:
-                    raise DriverHeld('guarded_terminal_stop_unverified')
+            # A completed row is safe to pass only when the worker explicitly
+            # records successful delivery and no failure payload remains.
+            if execution['phase'] != 'delivered' or data.get('failure') is not None:
+                raise DriverHeld('guarded_terminal_stop_unverified')
 
     def _background(self):
         """One retained acknowledgement plus at most one separately fenced cleanup."""
