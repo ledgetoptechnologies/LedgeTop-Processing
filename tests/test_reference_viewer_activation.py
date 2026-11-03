@@ -280,6 +280,64 @@ class ViewerActivationTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             ReferenceStore(self.queue)
 
+    def envelope_v2(self):
+        return dict(schemaVersion=2, protocol='ltds-viewer-prepared-envelope-v2',
+            submission=copy.deepcopy(self.fixture['submission']), viewerTaskId=str(uuid.uuid4()),
+            viewerAttemptId=str(uuid.uuid4()), activationId=str(uuid.uuid4()))
+
+    def prepare_v2(self, envelope, principal='viewer-prod'):
+        return self.store.prepare_viewer_envelope_v2(envelope, authenticated_principal=principal,
+                                                     authenticated_environment='production')
+
+    def test_v2_replay_restart_and_identity_conflicts(self):
+        envelope = self.envelope_v2()
+        job, created = self.prepare_v2(envelope)
+        self.assertTrue(created)
+        self.assertEqual(self.prepare_v2(envelope), (job, False))
+        reopened = ReferenceStore(self.queue)
+        self.assertEqual(reopened.prepare_viewer_envelope_v2(envelope, authenticated_principal='viewer-prod', authenticated_environment='production'), (job, False))
+        for field in ('activationId', 'viewerTaskId', 'viewerAttemptId'):
+            altered = copy.deepcopy(envelope)
+            altered[field] = str(uuid.uuid4())
+            with self.assertRaises(Conflict): self.prepare_v2(altered)
+        with self.assertRaises(Conflict): self.prepare_v2(envelope, 'other-viewer')
+        self.assertIsNone(self.store.find_submission(envelope['submission']['submissionId'], environment='production'))
+        self.assertIsNone(self.store.next_for_node('cluster'))
+
+    def test_v2_concurrent_replay_and_unique_identity_rollback(self):
+        envelope = self.envelope_v2()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: self.prepare_v2(envelope), range(4)))
+        self.assertEqual(sum(int(created) for _, created in results), 1)
+        self.assertEqual(len({job['jobId'] for job, _ in results}), 1)
+        duplicate = copy.deepcopy(envelope)
+        duplicate['submission']['submissionId'] = str(uuid.uuid4())
+        with self.assertRaises(Conflict): self.prepare_v2(duplicate)
+        self.assertEqual(len(self.queue.list()), 1)
+
+    def test_v2_rejects_extra_fields_and_legacy_adoption(self):
+        envelope = self.envelope_v2()
+        with self.assertRaises(ValueError): self.prepare_v2(dict(envelope, principal='viewer-prod'))
+        checked = p.validate_submission(envelope['submission'], environment='production', capability_fingerprint=envelope['submission']['capabilityFingerprint'])
+        self.store.submit(checked)
+        with self.assertRaises(Conflict): self.prepare_v2(envelope)
+        self.assertEqual(len(self.queue.list()), 1)
+
+    def test_v2_activation_must_match_prepared_evidence(self):
+        envelope = self.envelope_v2()
+        job, _ = self.prepare_v2(envelope)
+        private = self.store.get(job['jobId'], private=True)['submission']
+        binding = dict(schemaVersion=1, protocol='ltds-viewer-activation-v1', activationId=envelope['activationId'],
+            principalId='viewer-prod', submissionId=private['submissionId'], jobId=job['jobId'], generation=job['generation'],
+            environment='production', viewerTaskId=envelope['viewerTaskId'], viewerAttemptId=envelope['viewerAttemptId'],
+            requestDigest=private['requestDigest'], manifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'])
+        with self.assertRaises(Conflict): self.activate(dict(binding, viewerTaskId=str(uuid.uuid4())))
+        self.activate(binding)
+        self.assertIsNone(self.claim(job))
+        with self.queue._db() as db:
+            db.execute('DELETE FROM reference_viewer_envelopes_v2 WHERE job_id=?', (job['jobId'],))
+        with self.assertRaises(Conflict): self.store.next_for_node('cluster')
+
     def test_persisted_v1_grant_never_starts_fetch_or_new_execution(self):
         # The old grant format cannot bind activation/authority/epoch. This
         # directly exercises persisted driver stages without opening a broker.

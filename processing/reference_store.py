@@ -45,6 +45,12 @@ _OWNER_SCHEMA = """CREATE TABLE reference_viewer_submission_owners (
  environment TEXT NOT NULL, request_digest TEXT NOT NULL, protocol TEXT NOT NULL)"""
 _SCHEMA_MARKER = """CREATE TABLE reference_viewer_activation_schema (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))"""
+_ENVELOPE_V2_SCHEMA = """CREATE TABLE reference_viewer_envelopes_v2 (
+ job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), principal_id TEXT NOT NULL,
+ environment TEXT NOT NULL, activation_id TEXT UNIQUE NOT NULL, viewer_task_id TEXT NOT NULL,
+ viewer_attempt_id TEXT NOT NULL, envelope_json TEXT NOT NULL, envelope_sha256 TEXT NOT NULL,
+ UNIQUE(principal_id, environment, viewer_attempt_id))"""
+_ENVELOPE_V2_DOMAIN = b'ltds-viewer-prepared-envelope-v2\x00'
 _PREPARED_PROTOCOL = 'ltds-viewer-prepared-submit-v1'
 
 
@@ -132,6 +138,7 @@ class ReferenceStore:
                   job_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, digest TEXT NOT NULL);
             """)
             self._init_viewer_activation_schema(db)
+            self._init_envelope_v2_schema(db)
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
@@ -177,6 +184,28 @@ class ReferenceStore:
                 raise Conflict('incompatible Viewer activation foreign key')
         if [tuple(row) for row in db.execute('SELECT singleton,version FROM reference_viewer_activation_schema')] != [(1,1)]:
             raise Conflict('incompatible Viewer activation schema version')
+
+    @staticmethod
+    def _init_envelope_v2_schema(db):
+        row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_viewer_envelopes_v2'").fetchone()
+        if row is None:
+            db.execute(_ENVELOPE_V2_SCHEMA)
+            row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_viewer_envelopes_v2'").fetchone()
+        if ' '.join(row[0].split()) != ' '.join(_ENVELOPE_V2_SCHEMA.split()):
+            raise Conflict('incompatible prepared envelope schema')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='reference_viewer_envelopes_v2'").fetchone():
+            raise Conflict('unexpected prepared envelope trigger')
+        indexes = db.execute('PRAGMA index_list(reference_viewer_envelopes_v2)').fetchall()
+        actual = set()
+        for index in indexes:
+            if not index['unique'] or index['partial'] or index['origin'] not in ('pk', 'u'):
+                raise Conflict('unexpected prepared envelope index')
+            actual.add(tuple(r['name'] for r in db.execute('PRAGMA index_info(' + index['name'] + ')')))
+        if actual != {('job_id',), ('activation_id',), ('principal_id','environment','viewer_attempt_id')}:
+            raise Conflict('incompatible prepared envelope indexes')
+        fk = db.execute('PRAGMA foreign_key_list(reference_viewer_envelopes_v2)').fetchall()
+        if len(fk) != 1 or (fk[0]['table'],fk[0]['from'],fk[0]['to'],fk[0]['on_update'],fk[0]['on_delete'],fk[0]['match']) != ('reference_jobs','job_id','job_id','NO ACTION','NO ACTION','NONE'):
+            raise Conflict('incompatible prepared envelope foreign key')
 
     def _row(self, db, job_id):
         has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
@@ -228,6 +257,7 @@ class ReferenceStore:
           FROM reference_jobs""").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(CAST(binding_json AS BLOB))+length(binding_sha256)),0) FROM reference_viewer_activation").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(principal_id)+length(environment)+length(request_digest)+length(protocol)),0) FROM reference_viewer_submission_owners").fetchone()[0]
+        used += db.execute("SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))+512),0) FROM reference_viewer_envelopes_v2").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),
                               ("reference_viewer_transfers", "acceptance_json"),
@@ -266,7 +296,26 @@ class ReferenceStore:
             raise Conflict('Viewer submission environment differs')
         return self._submit(validated, owner=(authenticated_principal, authenticated_environment))
 
-    def _submit(self, validated, *, owner):
+    def prepare_viewer_envelope_v2(self, envelope, *, authenticated_principal, authenticated_environment):
+        """Unmounted candidate; caller must supply a genuinely authenticated context."""
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        protocol._closed(envelope, ('schemaVersion','protocol','submission','viewerTaskId','viewerAttemptId','activationId'), 'prepared envelope')
+        if type(envelope['schemaVersion']) is not int or envelope['schemaVersion'] != 2 or envelope['protocol'] != 'ltds-viewer-prepared-envelope-v2':
+            raise ValueError('unsupported prepared envelope')
+        for field in ('viewerTaskId','viewerAttemptId','activationId'):
+            protocol._uuid(envelope[field], field)
+        raw = envelope['submission']
+        validated = protocol.validate_submission(raw, environment=authenticated_environment,
+            capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm','treedar'),
+            allowed_odm_options=set(raw['pipeline']['odm']['options']))
+        wire = _json(envelope)
+        if len(wire.encode('utf-8')) > protocol.MAX_BODY_BYTES:
+            raise ValueError('prepared envelope too large')
+        envelope_hash = hashlib.sha256(_ENVELOPE_V2_DOMAIN + wire.encode('utf-8')).hexdigest()
+        return self._submit(validated, owner=(authenticated_principal, authenticated_environment), envelope=(wire,envelope_hash,envelope['activationId'],envelope['viewerTaskId'],envelope['viewerAttemptId']))
+
+    def _submit(self, validated, *, owner, envelope=None):
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -288,11 +337,16 @@ class ReferenceStore:
                 if (recorded is None) != (owner is None) or (recorded is not None and
                         (recorded['principal_id'], recorded['environment']) != owner):
                     raise Conflict('submission ownership differs')
+                prior = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (old['job_id'],)).fetchone()
+                if (prior is None) != (envelope is None) or (prior is not None and
+                        (prior['principal_id'],prior['environment'],prior['envelope_json'],prior['envelope_sha256'],prior['activation_id'],prior['viewer_task_id'],prior['viewer_attempt_id']) !=
+                        (owner[0],owner[1],*envelope)):
+                    raise Conflict('prepared envelope differs')
                 return self._public(self._row(db, old["job_id"])), False
             pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
             if pending >= self.max_queued_jobs:
                 raise Conflict("reference pending job quota reached")
-            self._quota(db, len(encoded.encode("utf-8")) + (512 if owner else 0))
+            self._quota(db, len(encoded.encode("utf-8")) + (512 if owner else 0) + (len(envelope[0].encode("utf-8")) + 512 if envelope else 0))
             job_id = str(uuid.uuid4())
             # Namespaced request identity also prevents collisions with ordinary
             # multipart/legacy submission IDs in the shared jobs table.
@@ -304,7 +358,13 @@ class ReferenceStore:
                checked["manifestSha256"], checked["pipelineDigest"]))
             if owner is not None:
                 db.execute('INSERT INTO reference_viewer_submission_owners VALUES(?,?,?,?,?)',
-                    (job_id, owner[0], owner[1], checked['requestDigest'], _PREPARED_PROTOCOL))
+                    (job_id, owner[0], owner[1], checked['requestDigest'], 'ltds-viewer-prepared-envelope-v2' if envelope is not None else _PREPARED_PROTOCOL))
+            if envelope is not None:
+                try:
+                    db.execute('INSERT INTO reference_viewer_envelopes_v2 VALUES(?,?,?,?,?,?,?,?)',
+                        (job_id, owner[0], owner[1], envelope[2], envelope[3], envelope[4], envelope[0], envelope[1]))
+                except sqlite3.IntegrityError:
+                    raise Conflict('prepared envelope identity already bound') from None
             return self._public(self._row(db, job_id)), True
 
     def get(self, job_id, *, private=False):
@@ -358,11 +418,27 @@ class ReferenceStore:
             return None
         try:
             protocol._slug(owner['principal_id'], 'Viewer principal')
-            if (owner['protocol'] != _PREPARED_PROTOCOL or owner['environment'] != row['environment']
+            if (owner['protocol'] not in (_PREPARED_PROTOCOL, 'ltds-viewer-prepared-envelope-v2') or owner['environment'] != row['environment']
                     or owner['environment'] != row['queue_environment'] or owner['request_digest'] != row['request_digest']):
                 raise ValueError('submission owner binding changed')
         except (ValueError, TypeError, KeyError):
             raise Conflict('Viewer submission provenance invalid') from None
+        prepared = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
+        if (prepared is not None) != (owner['protocol'] == 'ltds-viewer-prepared-envelope-v2'):
+            raise Conflict('Viewer prepared envelope provenance missing')
+        if prepared is not None:
+            try:
+                value = json.loads(prepared['envelope_json'])
+                if (_json(value) != prepared['envelope_json'] or
+                    hashlib.sha256(_ENVELOPE_V2_DOMAIN + prepared['envelope_json'].encode('utf-8')).hexdigest() != prepared['envelope_sha256'] or
+                    (prepared['principal_id'],prepared['environment'],prepared['activation_id'],prepared['viewer_task_id'],prepared['viewer_attempt_id']) !=
+                    (owner['principal_id'],owner['environment'],value['activationId'],value['viewerTaskId'],value['viewerAttemptId']) or
+                    value['submission']['submissionId'] != row['submission_id'] or
+                    value['protocol'] != 'ltds-viewer-prepared-envelope-v2' or value['schemaVersion'] != 2 or
+                    value['submission'] != {k:v for k,v in json.loads(row['input_json']).items() if k not in ('environment','requestDigest','manifestSha256','pipelineDigest')}):
+                    raise ValueError('prepared evidence changed')
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                raise Conflict('Viewer prepared envelope evidence invalid') from None
         return owner
 
     def list(self, *, private=False):
@@ -423,7 +499,11 @@ class ReferenceStore:
                     != (row['job_id'], row['submission_id'], row['generation'], row['environment'],
                         row['request_digest'], row['manifest_sha'], row['pipeline_digest'])
                     or row['queue_environment'] != row['environment']
-                    or binding['principalId'] != owner['principal_id']):
+                    or binding['principalId'] != owner['principal_id']
+                    or (owner['protocol'] == 'ltds-viewer-prepared-envelope-v2' and
+                        (lambda e: e is None or (e['activation_id'],e['viewer_task_id'],e['viewer_attempt_id']) !=
+                          (binding['activationId'],binding['viewerTaskId'],binding['viewerAttemptId']))(
+                            db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()))):
                 raise ValueError('activation binding changed')
             return binding
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -449,6 +529,12 @@ class ReferenceStore:
             if owner is None or (owner['principal_id'], owner['environment']) != (
                     authenticated_principal, authenticated_environment):
                 raise Conflict('Viewer submission provenance required')
+            prepared = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (binding['jobId'],)).fetchone()
+            if prepared is not None:
+                if ((prepared['principal_id'],prepared['environment'],prepared['activation_id'],prepared['viewer_task_id'],prepared['viewer_attempt_id']) !=
+                    (binding['principalId'],binding['environment'],binding['activationId'],binding['viewerTaskId'],binding['viewerAttemptId'])
+                    or hashlib.sha256(_ENVELOPE_V2_DOMAIN + prepared['envelope_json'].encode('utf-8')).hexdigest() != prepared['envelope_sha256']):
+                    raise Conflict('prepared envelope activation differs')
             existing = self._activation(db, row)
             if existing is not None:
                 if _json(existing) != encoded:
