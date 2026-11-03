@@ -18,7 +18,7 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
-    if config.per_node_slots:
+    if config.per_node_slots and not config.node_inventory:
         from .config import require_distinct_node_hosts
         require_distinct_node_hosts(config.local_node_url, config.main_node_url)
     reference_settings = None

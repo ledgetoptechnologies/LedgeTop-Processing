@@ -490,6 +490,64 @@ class ViewerServiceTests(unittest.TestCase):
                     require_distinct_node_hosts(local, main)
         require_distinct_node_hosts('http://192.0.2.1:3001', 'http://192.0.2.2:3004')
 
+    def test_ordered_three_node_inventory_prefers_first_eligible_and_falls_through(self):
+        from processing.config import parse_node_inventory
+        self.service.close(); self.queue.close()
+        entries = [dict(id=name, physicalHostId=name, origin=f'http://192.0.2.{i}:3000',
+                        tokenEnv=f'NODE_{i}_TOKEN', maxPhotos=limit, capabilities=['odm'])
+                   for i, (name, limit) in enumerate((('tiny', 1), ('medium', 2), ('large', None)), 1)]
+        inventory = parse_node_inventory(json.dumps(entries), {})
+        self.config.node_inventory = inventory
+        self.config.prototype_state_dir = str(self.root / 'inventory-state')
+        self.engines = {n['id']: FakeEngine(n['id'], self.fleet) for n in inventory}
+        self.queue = Queue(self.config.prototype_state_dir, node_ids=tuple(n['id'] for n in inventory),
+                           treedar_node_ids=(), viewer_enabled=True, per_node_slots=True)
+        self.service = ViewerService(self.queue, self.config, engines=self.engines,
+            probe=lambda role, origin, token: {'ready': role not in self.unavailable, 'maxImages': None,
+                'taskQueueCount': sum(x.startswith(role + ':') for x in self.fleet.active)})
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
+        self.service._selected_options = lambda _node: [dict(item) for item in OPTIONS]
+        first = self.submit(); second = self.submit(); third = self.submit(count=3)
+        self.service.tick(); self.service.tick(); self.service.tick()
+        self.assertEqual([self.task(i)['node_id'] for i in (first, second, third)], ['tiny', 'medium', 'large'])
+        self.assertEqual(self.fleet.max_active, 3)
+        self.finish(first)
+        blocked = self.submit(count=3)
+        eligible = self.submit()
+        self.service.tick()
+        self.assertIsNone(self.task(blocked)['node_id'])
+        self.assertEqual(self.task(eligible)['node_id'], 'tiny')
+        self.finish(eligible); self.finish(third)
+        self.service.tick()
+        self.assertEqual(self.task(blocked)['node_id'], 'large')
+        staging = self.submit(environment='staging')
+        production = self.submit(environment='production')
+        self.finish(second); self.service.tick()
+        self.assertEqual(self.task(production)['node_id'], 'tiny')
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.service.tick()
+        self.assertEqual(self.task(staging)['node_id'], 'medium')
+        self.finish(staging); self.finish(blocked); self.finish(production)
+        self.service.tick()
+        self.unavailable.add('tiny')
+        now = datetime.now(timezone.utc).isoformat()
+        self.queue.schedule_node('medium', {'expectedRevision': 0, 'drainAt': now,
+            'notBefore': now, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+        fallback = self.submit()
+        self.service.tick()
+        self.assertEqual(self.task(fallback)['node_id'], 'large')
+
+    def test_inventory_rejects_invalid_caps_and_duplicate_hosts(self):
+        from processing.config import parse_node_inventory
+        valid = dict(id='n1', physicalHostId='host1', origin='http://192.0.2.1:3000',
+                     tokenEnv='NODE_TOKEN', maxPhotos=1, capabilities=['odm'])
+        for invalid in (0, -1, True, 1.5, '1000'):
+            with self.subTest(limit=invalid):
+                with self.assertRaises(ValueError):
+                    parse_node_inventory(json.dumps([{**valid, 'maxPhotos': invalid}]), {})
+        with self.assertRaises(ValueError):
+            parse_node_inventory(json.dumps([valid, {**valid, 'id':'n2', 'origin':'http://192.0.2.2:3000'}]), {})
+
     def test_opt_in_atomic_node_slot_blocks_simultaneous_claims(self):
         self.queue.per_node_slots = True
         first = self.submit()
@@ -500,6 +558,16 @@ class ViewerServiceTests(unittest.TestCase):
             claims = [f.result() for f in futures]
         self.assertEqual(sum(claim is not None for claim in claims), 1)
         self.assertEqual(sum(self.task(i)['job']['status'] == 'running' for i in (first, second)), 1)
+
+    def test_priority_skip_rechecks_production_under_queue_transaction(self):
+        self.queue.per_node_slots = True
+        staging = self.submit(environment='staging')
+        self.submit(environment='production')
+        claim = self.queue.claim({'workerId':'scheduler', 'nodeId':'main',
+            'profiles':[VIEWER_PROFILE], 'expectedJobId':self.task(staging)['job_id']},
+            allow_viewer_same_priority_skip=True)
+        self.assertIsNone(claim)
+        self.assertEqual(self.task(staging)['job']['status'], 'queued')
 
     def test_opt_in_other_coordinator_process_cannot_claim_same_database(self):
         self.queue.per_node_slots = True

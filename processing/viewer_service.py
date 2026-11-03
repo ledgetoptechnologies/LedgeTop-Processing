@@ -115,8 +115,12 @@ class ViewerService:
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
-        self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
-                                  'main': NativeEngine(config.main_node_url, config.main_node_token)}
+        self.inventory = getattr(config, 'node_inventory', ())
+        if self.inventory and (not queue.per_node_slots or tuple(n['id'] for n in self.inventory) != queue.node_ids):
+            raise ValueError('inventory requires matching ordered per-node queue')
+        self.engines = engines or ({n['id']: NativeEngine(n['origin'], n['token']) for n in self.inventory if 'odm' in n['capabilities']}
+                                  if self.inventory else {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
+                                  'main': NativeEngine(config.main_node_url, config.main_node_token)})
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -125,6 +129,8 @@ class ViewerService:
         self._downloads = {}
 
     def _catalog(self):
+        if self.inventory:
+            return catalog([(n['id'], n['origin'], n['token']) for n in self.inventory if 'odm' in n['capabilities']], inventory=True)
         return catalog([('local', self.config.local_node_url, self.config.local_node_token),
                         ('main', self.config.main_node_url, self.config.main_node_token)])
 
@@ -139,13 +145,21 @@ class ViewerService:
         self.options()
         jobs = self.queue.list()
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
-                'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'maxImages': None, 'maxParallelTasks': sum('odm' in n['capabilities'] for n in self.inventory) if self.inventory else (len(self.queue.node_ids) if self.queue.per_node_slots else 1), 'coordinator': True,
                 'ledgetopMaxInputBytes': self.store.max_input_bytes,
                 'ledgetopMaxUploadRequestBytes': MAX_UPLOAD_BYTES,
                 'ledgetopReservations': self.store.reservation_stats(),
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
     def _selected_options(self, node_id):
+        if self.inventory:
+            node = next((n for n in self.inventory if n['id'] == node_id and 'odm' in n['capabilities']), None)
+            if node is None:
+                raise Conflict('unknown selected node')
+            snapshot = discover_node(node['id'], node['origin'], node['token'], inventory=True)
+            if not snapshot['available']:
+                raise Conflict('selected engine options unavailable')
+            return snapshot['options']
         if node_id == 'cluster':
             role, origin, token = 'local', self.config.local_node_url, self.config.local_node_token
         elif node_id == 'main':
@@ -655,33 +669,70 @@ class ViewerService:
                 return
             task = self.store.task_for_job(queued[0]['id'])
             nodes = {}
-            for node, role, origin, token in (
-                    ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
-                    ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
-                nodes[node] = {**self.probe(role, origin, token),
-                               'state': self.queue.get_node(node)['state']}
-            occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
-            if any(node not in nodes for node in occupied):
-                return
-            cluster_busy = ('cluster' in occupied or
-                            (nodes['cluster'].get('ready') is True and
-                             type(nodes['cluster'].get('taskQueueCount')) is int and
-                             nodes['cluster']['taskQueueCount'] > 0))
-            for node in occupied:
-                nodes[node]['taskQueueCount'] = 1
-            decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
-                            self.config.local_max_photos, self.config.local_max_input_bytes,
-                            allow_main_fallback=self.queue.per_node_slots and cluster_busy)
-            if decision['decision'] == 'wait':
-                self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
-                return
-            node_id = 'cluster' if decision['decision'] == 'local' else 'main'
+            if self.inventory:
+                occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
+                if any(node not in self.queue.node_ids for node in occupied):
+                    return
+                available = []
+                for spec in self.inventory:
+                    if 'odm' not in spec['capabilities'] or spec['id'] in occupied:
+                        continue
+                    if self.queue.get_node(spec['id'])['state'] != 'active':
+                        continue
+                    report = self.probe(spec['id'], spec['origin'], spec['token'])
+                    if not isinstance(report, dict) or 'maxImages' not in report:
+                        continue
+                    limit = report.get('maxImages')
+                    if (report.get('ready') is not True or type(report.get('taskQueueCount')) is not int
+                            or report['taskQueueCount'] != 0
+                            or (limit is not None and (type(limit) is not int or limit < 1))):
+                        continue
+                    available.append((spec, limit))
+                node_id = None
+                top_environment = queued[0]['environment']
+                for candidate in queued:
+                    if candidate['environment'] != top_environment or candidate['profile'] != VIEWER_PROFILE:
+                        break
+                    current = self.store.task_for_job(candidate['id'])
+                    for spec, limit in available:
+                        if all(maximum is None or current['images_count'] <= maximum for maximum in (spec['maxPhotos'], limit)):
+                            task, node_id = current, spec['id']
+                            break
+                    if node_id is not None:
+                        break
+                if node_id is None:
+                    self.store.update(task['uuid'], phase='waiting_node', error='no_eligible_node')
+                    return
+            else:
+                for node, role, origin, token in (
+                        ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
+                        ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
+                    nodes[node] = {**self.probe(role, origin, token),
+                                   'state': self.queue.get_node(node)['state']}
+                occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
+                if any(node not in nodes for node in occupied):
+                    return
+                cluster_busy = ('cluster' in occupied or
+                                (nodes['cluster'].get('ready') is True and
+                                 type(nodes['cluster'].get('taskQueueCount')) is int and
+                                 nodes['cluster']['taskQueueCount'] > 0))
+                for node in occupied:
+                    nodes[node]['taskQueueCount'] = 1
+                decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
+                                self.config.local_max_photos, self.config.local_max_input_bytes,
+                                allow_main_fallback=self.queue.per_node_slots and cluster_busy)
+                if decision['decision'] == 'wait':
+                    self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
+                    return
+                node_id = 'cluster' if decision['decision'] == 'local' else 'main'
             # Submission uses the fleet-wide common catalog. At dispatch,
             # refresh the selected engine specifically so an unrelated node
             # outage does not strand an already accepted job.
             self._check_options(task['options'], node_id=node_id, evidence=task['option_evidence'])
-            job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
-                                   'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
+            claim_request = {'workerId': 'viewer-dispatch', 'nodeId': node_id,
+                             'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']}
+            job = (self.queue.claim(claim_request, allow_viewer_same_priority_skip=True)
+                   if self.inventory else self.queue.claim(claim_request))
             if not job:
                 return
             try:

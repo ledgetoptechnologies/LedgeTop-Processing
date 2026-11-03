@@ -74,6 +74,14 @@ class OptionsTests(unittest.TestCase):
     def discover(self):
         return discover_node('local', self.engine.origin, self.engine.token)
 
+    def test_inventory_catalog_discovers_three_arbitrary_ids(self):
+        result = catalog([(name, self.engine.origin, self.engine.token)
+                          for name in ('field-small', 'workstation', 'gpu-3')], inventory=True)
+        self.assertTrue(result['ready'])
+        self.assertEqual([n['role'] for n in result['nodes']], ['field-small', 'workstation', 'gpu-3'])
+        self.assertNotIn(self.engine.token, json.dumps(result))
+        self.assertEqual(result['commonOptions'], self.engine.options)
+
     def test_fresh_calls_reflect_added_removed_and_changed_engine_metadata(self):
         first = self.discover()
         original = copy.deepcopy(self.engine.options)

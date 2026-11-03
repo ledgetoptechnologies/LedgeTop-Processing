@@ -85,8 +85,8 @@ class Queue(Maintenance):
                  require_idle_existing=False, per_node_slots=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
-                or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
-            raise ValueError("node_ids must be unique configured slugs including cluster")
+                or len(set(node_ids)) != len(node_ids) or ('cluster' not in node_ids and not per_node_slots)):
+            raise ValueError("node_ids must be unique configured slugs")
         self._creator_pid = os.getpid()
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
@@ -97,7 +97,7 @@ class Queue(Maintenance):
         if treedar_node_ids is None:
             # Isolated legacy fixtures retain their original node capabilities.
             treedar_node_ids = self.node_ids
-        if (not isinstance(treedar_node_ids, (tuple, list)) or not treedar_node_ids
+        if (not isinstance(treedar_node_ids, (tuple, list)) or (not treedar_node_ids and not per_node_slots)
                 or any(not isinstance(node, str) or node not in self.node_ids for node in treedar_node_ids)
                 or len(set(treedar_node_ids)) != len(treedar_node_ids)):
             raise ValueError("treedar_node_ids must be unique configured node IDs")
@@ -154,7 +154,10 @@ class Queue(Maintenance):
             db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
             db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
             self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
-            db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
+            if 'cluster' not in self.node_ids and db.execute("SELECT 1 FROM jobs WHERE node_id IS NULL AND status IN ('running','held') LIMIT 1").fetchone():
+                raise RuntimeError('legacy node binding requires inspection')
+            if 'cluster' in self.node_ids:
+                db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
             db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
             self._init_maintenance(db)
 
@@ -249,23 +252,23 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             return self.public(row) if row else None
 
-    def claim(self, payload):
+    def claim(self, payload, *, allow_viewer_same_priority_skip=False):
         from contextlib import nullcontext
         from .admission_drain import AdmissionClosed
         gate = getattr(self, 'admission_drain', None)
         try:
             with gate.admit() if gate is not None else nullcontext():
-                return self._claim(payload)
+                return self._claim(payload, allow_viewer_same_priority_skip=allow_viewer_same_priority_skip)
         except AdmissionClosed:
             return None
 
-    def _claim(self, payload):
+    def _claim(self, payload, *, allow_viewer_same_priority_skip=False):
         expected = ['workerId']
         if isinstance(payload, dict):
             expected.extend(key for key in ('profiles', 'nodeId', 'expectedJobId') if key in payload)
         self.fields(payload, expected)
         self.slug(payload["workerId"])
-        node_id = payload.get('nodeId', 'cluster')
+        node_id = payload.get('nodeId', self.node_ids[0])
         self._known_node(node_id)
         expected_job = payload.get('expectedJobId')
         if expected_job is not None:
@@ -291,6 +294,16 @@ class Queue(Maintenance):
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
                 return None
+            if allow_viewer_same_priority_skip and self.per_node_slots and expected_job and row['id'] != expected_job:
+                candidate = db.execute("SELECT * FROM jobs WHERE id=? AND status='queued'", (expected_job,)).fetchone()
+                if (candidate is None or candidate['profile'] != VIEWER_PROFILE or row['profile'] != VIEWER_PROFILE
+                        or candidate['environment'] != row['environment']):
+                    return None
+                barrier = db.execute("SELECT 1 FROM jobs WHERE status='queued' AND environment=? AND seq<? AND profile<>? LIMIT 1",
+                                     (candidate['environment'], candidate['seq'], VIEWER_PROFILE)).fetchone()
+                if barrier:
+                    return None
+                row = candidate
             if row['profile'] == REFERENCE_PROFILE:
                 # Reference claims also persist an idempotent private envelope
                 # and enforce input-dependent routing in ReferenceStore.claim.

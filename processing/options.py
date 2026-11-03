@@ -103,9 +103,9 @@ def _contains_secret(value, token):
     return False
 
 
-def discover_node(role, origin, token=''):
+def discover_node(role, origin, token='', *, inventory=False):
     """Fetch a fresh snapshot; errors contain no URL, credential or server body."""
-    if role not in ROLES:
+    if (not inventory and role not in ROLES) or (inventory and (type(role) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', role))):
         raise ValueError('unknown configured node role')
     unavailable = {'role': role, 'configured': bool(origin), 'available': False,
                    'options': [], 'optionsSha256': None, 'capabilitiesSha256': None,
@@ -135,7 +135,7 @@ def discover_node(role, origin, token=''):
         return {**unavailable, 'reason': 'invalid_response_or_configuration'}
 
 
-def catalog(nodes):
+def catalog(nodes, *, inventory=False):
     """Exact-definition intersection across every configured node, never a cache.
 
     ``nodes`` contains at most the unique fixed roles local/main, each as
@@ -144,12 +144,12 @@ def catalog(nodes):
     the fleet catalog; healthy per-node snapshots remain available for inspection.
     """
     nodes = list(nodes)
-    if (not 1 <= len(nodes) <= 2 or any(not isinstance(node, (tuple, list)) or len(node) != 3 for node in nodes)
-            or any(node[0] not in ROLES for node in nodes)
+    if (not 1 <= len(nodes) <= (8 if inventory else 2) or any(not isinstance(node, (tuple, list)) or len(node) != 3 for node in nodes)
+            or (not inventory and any(node[0] not in ROLES for node in nodes))
             or len({node[0] for node in nodes}) != len(nodes)):
         raise ValueError('catalog requires unique fixed local/main node configurations')
     with ThreadPoolExecutor(max_workers=len(nodes)) as executor:
-        snapshots = list(executor.map(lambda node: discover_node(*node), nodes))
+        snapshots = list(executor.map(lambda node: discover_node(*node, inventory=True) if inventory else discover_node(*node), nodes))
     configured = [node for node in snapshots if node['configured']]
     ready = bool(configured) and all(node['available'] for node in configured)
     available = [node for node in configured if node['available']]
