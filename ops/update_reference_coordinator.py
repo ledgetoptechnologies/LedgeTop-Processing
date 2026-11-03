@@ -35,6 +35,8 @@ class _HistoricalTransport:
 legacy=_HistoricalTransport()
 NAME='ledgetop-processing-prototype-c3fcb3a'
 VOLUME=NAME+'-state'
+CLUSTER_PROJECT='lt-migration-1120ae14a8988e84513a4a8a46b78741'
+CLUSTER_NAME=CLUSTER_PROJECT+'-candidate'
 AUTHORITY='7131882e-38ce-4d3e-99cc-4ba5a94d2ee8'
 # The installed predecessor: the 693cb7e coordinator that the e2ccf489 update
 # created, from a read-only inspection of the live container on 2026-11-03.
@@ -628,12 +630,12 @@ class ReferenceCoordinatorUpdate:
     def cluster_idle(self,state):
         """Fixed existing private backend: no token/command arguments in proof."""
         from processing.container_update import ComposeNode
-        item=self.t.inspected('node-odx-gpu')
+        item=self.t.inspected(CLUSTER_NAME)
         labels=item['Config'].get('Labels') or {}
         bindings=item.get('NetworkSettings',{}).get('Ports',{}).get('3000/tcp')
-        if (item['Id']!=state['clusterContainerId'] or item['Name']!='/node-odx-gpu'
+        if (item['Id']!=state['clusterContainerId'] or item['Name']!='/'+CLUSTER_NAME
                 or item['Image']!=state['engineImages']['cluster'] or item['State']['Running'] is not True
-                or labels.get('com.docker.compose.project')!='ledgetop-cluster-node-private'
+                or labels.get('com.docker.compose.project')!=CLUSTER_PROJECT
                 or labels.get('com.docker.compose.service')!='nodeodm'
                 or bindings!=[{'HostIp':'127.0.0.1','HostPort':'13001'}]):raise Stopped('fixed_cluster_backend_changed')
         token=self.t.environment().get('LOCAL_NODE_TOKEN')
@@ -681,7 +683,7 @@ class ReferenceCoordinatorUpdate:
             raise Stopped('reviewed_terminal_job_count_required')
         nodes={row['id']:row for row in api.json('GET','/v1/prototype/nodes')['nodes']}
         if set(nodes)!={'main','cluster'} or any(row['state']!='active' for row in nodes.values()):raise Stopped('other_maintenance_present')
-        cluster=self.t.inspected('node-odx-gpu')
+        cluster=self.t.inspected(CLUSTER_NAME)
         if (not cluster['State']['Running'] or not re.fullmatch(r'[a-f0-9]{64}',cluster['Id'])
                 or not re.fullmatch(r'sha256:[0-9a-f]{64}',main_image)):raise Stopped('verified_processing_images_required')
         operation=uuid.uuid4().hex

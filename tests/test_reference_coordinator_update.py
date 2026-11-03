@@ -628,7 +628,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             def facts(self,item,**kwargs):return module.legacy.facts(item,**kwargs)
             def environment(self):return {key:value for key,value in self.application.items() if key!='PROCESSING_REFERENCE_CONFIG'}
             def inspected(self,identifier):
-                if identifier=='node-odx-gpu':return {'Id':'f'*64,'Image':'sha256:'+'f'*64,'State':{'Running':True}}
+                if identifier==module.CLUSTER_NAME:return {'Id':'f'*64,'Image':'sha256:'+'f'*64,'State':{'Running':True}}
                 matches=[item for key,item in self.containers.items() if key.startswith(identifier) or item['Name']=='/'+identifier]
                 if len(matches)!=1:raise module.Stopped('synthetic_identity_unavailable')
                 return copy.deepcopy(matches[0])
@@ -1125,8 +1125,8 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         def connection(address,**kwargs):
             self.assertEqual(address,('127.0.0.1',13001))
             return actual_connection(('127.0.0.1',int(fixture.origin.rsplit(':',1)[1])),**kwargs)
-        container=dict(Id='f'*64,Name='/node-odx-gpu',Image=self.state['engineImages']['cluster'],State={'Running':True},
-            Config={'Labels':{'com.docker.compose.project':'ledgetop-cluster-node-private','com.docker.compose.service':'nodeodm'}},
+        container=dict(Id='f'*64,Name='/'+module.CLUSTER_NAME,Image=self.state['engineImages']['cluster'],State={'Running':True},
+            Config={'Labels':{'com.docker.compose.project':module.CLUSTER_PROJECT,'com.docker.compose.service':'nodeodm'}},
             NetworkSettings={'Ports':{'3000/tcp':[{'HostIp':'127.0.0.1','HostPort':'13001'}]}})
         def docker(*args,**kwargs):
             if args[0]=='top':return 'PID COMMAND\n123 /usr/bin/node /var/www/index.js\n'
@@ -1138,6 +1138,15 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 patch.object(self.transport,'environment',return_value={'LOCAL_NODE_TOKEN':'private-existing-local-token'}), \
                 patch.object(self.transport,'inspected',return_value=container),patch.object(self.transport,'docker',side_effect=docker):
             self.updater.cluster_idle(self.state)
+            for field, replacement in (('Name', '/node-odx-gpu'), ('Id', '0' * 64),
+                                       ('Image', 'sha256:' + '0' * 64)):
+                with self.subTest(changed=field):
+                    original = container[field]
+                    container[field] = replacement
+                    try:
+                        with self.assertRaises(module.Stopped): self.updater.cluster_idle(self.state)
+                    finally:
+                        container[field] = original
             with fixture._db() as db:
                 db.execute("INSERT INTO tasks(uuid,name,options,committed,status) VALUES('00000000-0000-4000-8000-000000000001','synthetic','[]',1,40)")
             # Zero queue count alone cannot hide a retained completed task.
