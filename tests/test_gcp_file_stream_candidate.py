@@ -20,3 +20,13 @@ class FileStream(unittest.TestCase):
   self.assertEqual(validate_wire_quota(source_bytes=10,selected_bytes=20,evidence_page_bytes=[1,2],file_page_bytes=[3,4]),44)
   with self.assertRaises(ValueError):validate_wire_quota(source_bytes=10,selected_bytes=20,evidence_page_bytes=[1,2],file_page_bytes=None)
   with self.assertRaises(ValueError):validate_wire_quota(source_bytes=10,selected_bytes=20,evidence_page_bytes=[True,2],file_page_bytes=[3,4])
+
+class ExactQuota(unittest.TestCase):
+ def test_exact_72_mib_and_one_byte_over(self):
+  # 384 maximum-size signed pages per stream make exactly 24 MiB each,
+  # including the mandatory LF after each page.
+  pages=[65535]*384; twelve=12*1024*1024
+  self.assertEqual(validate_wire_quota(source_bytes=twelve,selected_bytes=twelve,evidence_page_bytes=pages,file_page_bytes=pages),72*1024*1024)
+  with self.assertRaises(ValueError):validate_wire_quota(source_bytes=twelve+1,selected_bytes=twelve,evidence_page_bytes=pages,file_page_bytes=pages)
+  extra=pages[:-1]+[65535,1]
+  with self.assertRaises(ValueError):validate_wire_quota(source_bytes=twelve,selected_bytes=twelve,evidence_page_bytes=extra,file_page_bytes=pages)
