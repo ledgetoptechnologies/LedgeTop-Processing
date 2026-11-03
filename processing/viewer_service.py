@@ -720,18 +720,36 @@ class ViewerService:
             # replacement process's engine object or runtime configuration.
             self.store.update(identifier, phase='init_pending',
                               node_guarded=getattr(engine, 'node_guarded', False) is True)
+            guarded = getattr(engine, 'node_guarded', False) is True
+            if guarded:
+                checkpoint = self.store.checkpoint_guarded_dispatch(identifier, 'init',
+                    {'requestSha256': hashlib.sha256(json.dumps(
+                        {key: task[key] for key in ('name', 'engine_uuid', 'options', 'outputs')},
+                        sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()})
             engine.initialize(task)
+            if guarded:
+                self.store.acknowledge_guarded_dispatch(identifier, checkpoint)
             self._check_dispatch_boundary(task)
             self.store.update(identifier, phase='initialized')
             for item in task['files']:
                 self._check_dispatch_boundary(task)
                 self.store.update(identifier, phase='upload_pending')
+                if guarded:
+                    checkpoint = self.store.checkpoint_guarded_dispatch(identifier, 'upload',
+                        {key: item[key] for key in ('name', 'bytes', 'sha256')})
                 engine.upload(task['engine_uuid'], item)
+                if guarded:
+                    self.store.acknowledge_guarded_dispatch(identifier, checkpoint)
                 self._check_dispatch_boundary(task)
                 self.store.update(identifier, phase='uploaded')
             self._check_dispatch_boundary(task)
             self.store.update(identifier, phase='commit_pending')
+            if guarded:
+                checkpoint = self.store.checkpoint_guarded_dispatch(identifier, 'commit',
+                    {'engine_uuid': task['engine_uuid']})
             engine.action('commit', task['engine_uuid'])
+            if guarded:
+                self.store.acknowledge_guarded_dispatch(identifier, checkpoint)
             self.store.update(identifier, phase='processing')
         except _DispatchInterrupted as exc:
             self._hold(self.store.task(identifier), str(exc))

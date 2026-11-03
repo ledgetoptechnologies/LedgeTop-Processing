@@ -159,6 +159,50 @@ class TaskStore:
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
                 PRIMARY KEY(uuid,generation))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_guarded_dispatch_checkpoint (
+                uuid TEXT PRIMARY KEY, generation INTEGER NOT NULL, job_id TEXT NOT NULL,
+                node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL,
+                sequence INTEGER NOT NULL, operation TEXT NOT NULL, evidence TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')))''')
+
+    def checkpoint_guarded_dispatch(self, identifier, operation, evidence):
+        """Save the exact pending mutation before sending; this is not node proof."""
+        if operation not in ('init', 'upload', 'commit') or type(evidence) is not dict:
+            raise ValueError('invalid guarded dispatch checkpoint')
+        encoded = canonical(evidence)
+        if len(encoded.encode('utf-8')) > 4096:
+            raise ValueError('guarded dispatch checkpoint too large')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, identifier)
+            if row['node_guarded'] != 1 or not all(row[key] for key in ('job_id','node_id','engine_uuid')):
+                raise Conflict('guarded task identity unavailable')
+            previous = db.execute('SELECT * FROM viewer_guarded_dispatch_checkpoint WHERE uuid=?', (identifier,)).fetchone()
+            if previous is not None and previous['state'] != 'acknowledged':
+                raise Conflict('guarded mutation requires reconciliation')
+            sequence = previous['sequence'] + 1 if previous is not None else 1
+            db.execute('''INSERT OR REPLACE INTO viewer_guarded_dispatch_checkpoint
+                (uuid,generation,job_id,node_id,engine_uuid,sequence,operation,evidence,state)
+                VALUES(?,?,?,?,?,?,?,?, 'pending')''', (identifier,row['generation'],row['job_id'],row['node_id'],
+                row['engine_uuid'],sequence,operation,encoded))
+            return sequence
+
+    def acknowledge_guarded_dispatch(self, identifier, sequence):
+        """Record an observed response; recovery must independently verify it."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, identifier)
+            changed = db.execute('''UPDATE viewer_guarded_dispatch_checkpoint SET state='acknowledged'
+                WHERE uuid=? AND sequence=? AND state='pending' AND generation=? AND job_id=?
+                AND node_id=? AND engine_uuid=?''', (identifier,sequence,row['generation'],row['job_id'],
+                row['node_id'],row['engine_uuid'])).rowcount
+            if changed != 1:
+                raise Conflict('guarded dispatch checkpoint changed')
+
+    def guarded_dispatch_checkpoint(self, identifier):
+        with self._lock, self.queue._db() as db:
+            row = db.execute('SELECT * FROM viewer_guarded_dispatch_checkpoint WHERE uuid=?', (identifier,)).fetchone()
+            return dict(row) if row is not None else None
 
     @staticmethod
     def _full_option_evidence(db, row):

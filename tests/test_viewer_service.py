@@ -1594,6 +1594,57 @@ else:
                                                          'workerStopped': True})
                 self.engines['cluster'].fail = None
 
+    def test_guarded_lost_upload_retains_exact_checkpoint_across_restart(self):
+        identifier = self.submit()
+        self.engines['cluster'].node_guarded = True
+        self.engines['cluster'].fail = 'upload'
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['status'], 'held')
+        checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
+        self.assertEqual((checkpoint['operation'], checkpoint['state']), ('upload', 'pending'))
+        self.assertEqual(checkpoint['job_id'], task['job_id'])
+        self.assertEqual(checkpoint['engine_uuid'], task['engine_uuid'])
+        self.assertEqual(json.loads(checkpoint['evidence']), {
+            key: task['files'][0][key] for key in ('name', 'bytes', 'sha256')})
+        calls = list(self.engines['cluster'].calls)
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.assertEqual(self.service.store.guarded_dispatch_checkpoint(identifier), checkpoint)
+        self.service.tick()
+        self.assertEqual(self.engines['cluster'].calls, calls)
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+
+    def test_guarded_success_checkpoints_commit_response(self):
+        identifier = self.submit()
+        self.engines['cluster'].node_guarded = True
+        self.service.tick()
+        task = self.task(identifier)
+        checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
+        self.assertEqual((checkpoint['operation'], checkpoint['state']), ('commit', 'acknowledged'))
+        self.assertEqual(json.loads(checkpoint['evidence']), {'engine_uuid': task['engine_uuid']})
+        self.assertEqual(checkpoint['sequence'], len(task['files']) + 2)
+
+    def test_guarded_checkpoint_is_durable_before_engine_upload(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        engine.node_guarded = True
+        original = engine.upload
+
+        def upload(task_uuid, item):
+            # A separate connection sees the checkpoint before the engine can
+            # mutate its input; a lost reply must not authorize a replay.
+            checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
+            self.assertEqual((checkpoint['operation'], checkpoint['state']), ('upload', 'pending'))
+            self.assertEqual(checkpoint['engine_uuid'], task_uuid)
+            self.assertEqual(json.loads(checkpoint['evidence'])['sha256'], item['sha256'])
+            return original(task_uuid, item)
+
+        engine.upload = upload
+        self.service.tick()
+        self.assertEqual(self.service.store.guarded_dispatch_checkpoint(identifier)['operation'], 'commit')
+
     def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
         identifier = self.submit()
         self.engines['cluster'].fail = 'commit'
