@@ -434,6 +434,25 @@ class ReferenceStore:
                 return None
             return dict(self._public(job), submissionId=job['submission_id'], requestDigest=job['request_digest'])
 
+    def find_viewer_envelope_v2(self, submission_id, *, authenticated_principal, authenticated_environment):
+        """Unmounted authenticated-boundary candidate, no secrets in response."""
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            found = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
+            if found is None: return None
+            row = self._row(db, found['job_id'])
+            owner = self._submission_owner(db, row)
+            if owner is None or (owner['principal_id'],owner['environment']) != (authenticated_principal,authenticated_environment):
+                return None
+            record = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
+            if record is None: return None
+            return dict(self._public(row), submissionId=row['submission_id'],
+                envelopeSha256=record['envelope_sha256'], viewerTaskId=record['viewer_task_id'],
+                viewerAttemptId=record['viewer_attempt_id'], activationId=record['activation_id'])
+
     def get_legacy_job(self, job_id, environment, *, private=False):
         """Environment-only callers cannot inspect principal-owned prepared jobs."""
         with self.queue._db() as db:
