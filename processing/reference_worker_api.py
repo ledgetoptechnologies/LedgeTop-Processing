@@ -93,19 +93,15 @@ class ReferenceWorkerAPI:
         return grant
 
     def _next(self, identity):
-        job = self.store.next_for_node(identity['node_id'])
-        if job is None:
-            return {'job': None, 'execution': None}
-        # Discovery remains advisory. Read the immutable submission and bind it
-        # to the same current global head within one SQLite read snapshot.
+        # Discovery remains advisory. Use the same eligibility decision as
+        # atomic claim and bind the immutable submission in that transaction.
         with self.store.queue._db() as db:
-            db.execute('BEGIN')
-            head = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
-            if (not head or head['id'] != job['jobId']
-                    or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()
-                    or self.store.queue._node(db, identity['node_id'])['state'] not in ('active', 'scheduled')):
-                raise Conflict('advisory queue head changed')
-            row = self.store._row(db, job['jobId'])
+            db.execute('BEGIN IMMEDIATE')
+            self.store.queue._refresh_nodes(db)
+            row = self.store._eligible_head(db, identity['node_id'])
+            if row is None:
+                return {'job': None, 'execution': None}
+            job = self.store._public(row)
             bound = ('jobId', 'generation', 'environment', 'manifestSha256', 'pipelineDigest')
             current = self.store._public(row)
             if any(current[key] != job[key] for key in bound) or current['status'] != 'queued':

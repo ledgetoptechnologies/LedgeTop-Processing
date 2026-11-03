@@ -146,17 +146,46 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.assertEqual(self.request('GET', '/next', token=VIEWER).status, 401)
         self.assertEqual(self.request('GET', '/next', protected=False).status, 503)
 
-    def test_next_changed_head_requests_retry_instead_of_misbinding_hint(self):
-        original = self.store.next_for_node
-        def changed(node_id):
-            job = original(node_id)
-            with self.queue._db() as db:
-                db.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (job['jobId'],))
-            return job
-        with patch.object(self.store, 'next_for_node', changed):
+    def test_next_binds_selection_and_execution_in_one_transaction(self):
+        # A separate advisory read would permit the queue head to change
+        # before the execution advice is bound to its immutable submission.
+        with patch.object(self.store, 'next_for_node', side_effect=AssertionError('separate snapshot')):
             response = self.request('GET', '/next')
-        self.assertEqual(response.status, 409)
-        self.assertEqual(response.body, {'error': 'worker_conflict'})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body['job']['jobId'], self.job['jobId'])
+        self.assertEqual(response.body['execution']['jobId'], self.job['jobId'])
+
+    def test_candidate_inventory_private_api_discovers_second_node_while_first_busy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queue = Queue(directory, reference_enabled=True, node_ids=('cluster', 'main'),
+                          treedar_node_ids=('main',), per_node_slots=True)
+            try:
+                inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                             dict(id='main', maxPhotos=None, capabilities=['odm'])]
+                store = ReferenceStore(queue, node_inventory=inventory,
+                    node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None})
+                identities = {WORKER: dict(node_id='cluster', worker_id='small', worker_instance_id='one'),
+                              OTHER: dict(node_id='main', worker_id='large', worker_instance_id='two')}
+                api = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers=identities)
+                jobs = []
+                for _ in range(2):
+                    raw = copy.deepcopy(self.fixture['submission']); raw['submissionId'] = str(uuid.uuid4())
+                    jobs.append(store.submit(validate_submission(raw, environment='staging',
+                        capability_fingerprint=raw['capabilityFingerprint']))[0])
+                def call(method, route, token, body=None):
+                    return api.handle(method, PREFIX + route, {'Authorization': 'Bearer ' + token},
+                        b'' if body is None else json.dumps(body).encode(), protected_transport=True)
+                self.assertEqual(call('GET', '/next', WORKER).body['job']['jobId'], jobs[0]['jobId'])
+                self.assertEqual(call('POST', '/claim', WORKER,
+                    {'jobId': jobs[0]['jobId'], 'claimRequestId': 'first'}).status, 200)
+                result = call('GET', '/next', OTHER)
+                self.assertEqual(result.status, 200)
+                self.assertEqual(result.body['job']['jobId'], jobs[1]['jobId'])
+                self.assertEqual(result.body['execution']['jobId'], jobs[1]['jobId'])
+                self.assertEqual(call('POST', '/claim', OTHER,
+                    {'jobId': jobs[1]['jobId'], 'claimRequestId': 'second'}).status, 200)
+            finally:
+                queue.close()
 
     def pipeline_submission(self, kind):
         raw = copy.deepcopy(self.fixture['submission'])
