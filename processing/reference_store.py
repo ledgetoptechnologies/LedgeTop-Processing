@@ -309,6 +309,28 @@ class ReferenceStore:
             raise ValueError('unsupported prepared envelope')
         for field in ('viewerTaskId','viewerAttemptId','activationId'):
             protocol._uuid(envelope[field], field)
+        # Lost-response recovery is a read of an already admitted immutable
+        # request, not a new admission under today's capability policy.
+        raw = envelope['submission']
+        if type(raw) is not dict:
+            raise ValueError('invalid submission')
+        protocol._uuid(raw.get('submissionId'), 'submissionId')
+        wire = _json(envelope)
+        if len(wire.encode('utf-8')) > protocol.MAX_BODY_BYTES:
+            raise ValueError('prepared envelope too large')
+        envelope_hash = hashlib.sha256(_ENVELOPE_V2_DOMAIN + wire.encode('utf-8')).hexdigest()
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            found = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (raw['submissionId'],)).fetchone()
+            if found is not None:
+                row = self._row(db, found['job_id'])
+                owner = self._submission_owner(db, row)
+                prior = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (found['job_id'],)).fetchone()
+                if (owner is None or prior is None or
+                    (owner['principal_id'],owner['environment'],prior['envelope_json'],prior['envelope_sha256']) !=
+                    (authenticated_principal,authenticated_environment,wire,envelope_hash)):
+                    raise Conflict('prepared envelope differs')
+                return self._public(row), False
         protocol._closed(trusted_policy, ('capabilityFingerprint','optionsFingerprint','allowedOdmOptions','availableEngines'), 'trusted policy')
         protocol._hash(trusted_policy['capabilityFingerprint'], 'trusted capability fingerprint')
         protocol._hash(trusted_policy['optionsFingerprint'], 'trusted options fingerprint')
@@ -322,10 +344,6 @@ class ReferenceStore:
             capability_fingerprint=trusted_policy['capabilityFingerprint'],
             options_fingerprint=trusted_policy['optionsFingerprint'], available_engines=tuple(engines),
             allowed_odm_options=set(options))
-        wire = _json(envelope)
-        if len(wire.encode('utf-8')) > protocol.MAX_BODY_BYTES:
-            raise ValueError('prepared envelope too large')
-        envelope_hash = hashlib.sha256(_ENVELOPE_V2_DOMAIN + wire.encode('utf-8')).hexdigest()
         return self._submit(validated, owner=(authenticated_principal, authenticated_environment), envelope=(wire,envelope_hash,envelope['activationId'],envelope['viewerTaskId'],envelope['viewerAttemptId']))
 
     def _submit(self, validated, *, owner, envelope=None):
@@ -548,10 +566,8 @@ class ReferenceStore:
                 raise Conflict('Viewer submission provenance required')
             prepared = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (binding['jobId'],)).fetchone()
             if prepared is not None:
-                if ((prepared['principal_id'],prepared['environment'],prepared['activation_id'],prepared['viewer_task_id'],prepared['viewer_attempt_id']) !=
-                    (binding['principalId'],binding['environment'],binding['activationId'],binding['viewerTaskId'],binding['viewerAttemptId'])
-                    or hashlib.sha256(_ENVELOPE_V2_DOMAIN + prepared['envelope_json'].encode('utf-8')).hexdigest() != prepared['envelope_sha256']):
-                    raise Conflict('prepared envelope activation differs')
+                # No authenticated current-policy revalidation contract exists yet.
+                raise Conflict('prepared v2 activation policy revalidation unavailable')
             reserved = db.execute('SELECT job_id FROM reference_viewer_envelopes_v2 WHERE (activation_id=? OR (principal_id=? AND environment=? AND viewer_attempt_id=?)) AND job_id!=?',
                 (binding['activationId'], binding['principalId'], binding['environment'], binding['viewerAttemptId'], binding['jobId'])).fetchone()
             if reserved:

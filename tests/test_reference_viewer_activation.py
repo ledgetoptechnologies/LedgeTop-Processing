@@ -328,6 +328,29 @@ class ViewerActivationTests(unittest.TestCase):
         with self.assertRaises(Conflict): self.prepare_v2(envelope)
         self.assertEqual(len(self.queue.list()), 1)
 
+    def test_v2_lost_response_recovery_survives_policy_change_without_readmission(self):
+        envelope = self.envelope_v2()
+        job, _ = self.prepare_v2(envelope)
+        policy = self.trusted_policy()
+        policy.update(capabilityFingerprint='0'*64, optionsFingerprint='1'*64,
+                      allowedOdmOptions=[], availableEngines=[])
+        def recover(value, principal='viewer-prod', environment='production'):
+            return self.store.prepare_viewer_envelope_v2(value, authenticated_principal=principal,
+                authenticated_environment=environment, trusted_policy=policy)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            self.assertEqual(list(pool.map(lambda _: recover(envelope), range(4))), [(job, False)] * 4)
+        for field in ('activationId', 'viewerTaskId', 'viewerAttemptId'):
+            changed = copy.deepcopy(envelope); changed[field] = str(uuid.uuid4())
+            with self.assertRaises(Conflict): recover(changed)
+        with self.assertRaises(Conflict): recover(envelope, principal='other-viewer')
+        with self.assertRaises(Conflict): recover(envelope, environment='staging')
+        fresh = self.envelope_v2(); fresh['submission']['submissionId'] = str(uuid.uuid4())
+        with self.assertRaises(ValueError): recover(fresh)
+        self.assertEqual(len(self.queue.list()), 1)
+        with self.queue._db() as db:
+            db.execute('DELETE FROM reference_viewer_envelopes_v2 WHERE job_id=?', (job['jobId'],))
+        with self.assertRaises(Conflict): recover(envelope)
+
     def test_v2_untrusted_capabilities_options_and_disabled_engine_rejected(self):
         for mutation in (
             lambda e: e['submission'].update(capabilityFingerprint='0'*64),
@@ -382,11 +405,12 @@ class ViewerActivationTests(unittest.TestCase):
             environment='production', viewerTaskId=envelope['viewerTaskId'], viewerAttemptId=envelope['viewerAttemptId'],
             requestDigest=private['requestDigest'], manifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'])
         with self.assertRaises(Conflict): self.activate(dict(binding, viewerTaskId=str(uuid.uuid4())))
-        self.activate(binding)
+        with self.assertRaisesRegex(Conflict, "policy revalidation unavailable"): self.activate(binding)
         self.assertIsNone(self.claim(job))
         with self.queue._db() as db:
             db.execute('DELETE FROM reference_viewer_envelopes_v2 WHERE job_id=?', (job['jobId'],))
-        with self.assertRaises(Conflict): self.store.next_for_node('cluster')
+        with self.assertRaises(Conflict):
+            self.store.find_viewer_submission(binding['submissionId'], authenticated_principal='viewer-prod', authenticated_environment='production')
 
     def test_persisted_v1_grant_never_starts_fetch_or_new_execution(self):
         # The old grant format cannot bind activation/authority/epoch. This

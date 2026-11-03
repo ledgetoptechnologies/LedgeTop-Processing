@@ -95,3 +95,12 @@ snapshot with capabilityFingerprint, optionsFingerprint, allowedOdmOptions and
 availableEngines. Fingerprints, option allowlist and engine availability must
 come from one authoritative coherent snapshot, never the submitted envelope.
 The caller and its policy provenance are not yet authenticated or implemented.
+
+Lost-response recovery of an exact owner-bound v2 envelope reads stored
+evidence without readmission under a changed capability policy. It does not
+authorize execution: v2 activation remains held until authenticated current
+policy revalidation exists, and grants remain held. Processing accepts negative
+integer and floating point ODM options while Viewer 793aa66 canonicalBytes
+rejects them. This cross-language encoding/allowed-value mismatch blocks the
+shared contract; do not silently narrow dynamic NodeODM options. Trusted policy
+must eventually define and validate numeric option semantics as well.
