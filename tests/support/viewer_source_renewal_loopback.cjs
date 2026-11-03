@@ -18,6 +18,9 @@ if (typeof viewerRoot !== 'string' || !path.isAbsolute(viewerRoot)
 
 const protocol = require(path.join(viewerRoot, 'apps/viewer/server/referenceProtocol.js'));
 const { createSourceRangeV2Handler } = require(path.join(viewerRoot, 'apps/viewer/server/sourceRangeV2Candidate.js'));
+// Synthetic renewal state only: the real Viewer renewal service and broker
+// are not exercised here. Passing this harness does not establish grant or
+// range-identity compatibility with Viewer.
 const pending = new Map();
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const canonical = value => protocol.canonicalBytes(value).toString('utf8');

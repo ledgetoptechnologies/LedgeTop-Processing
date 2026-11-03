@@ -1,10 +1,14 @@
-"""Opt-in cross-language test of Processing renewal against the Viewer route.
+"""Opt-in Processing renewal test against the Viewer route wrapper.
 
 Set LEDGETOP_VIEWER_SOURCE_DIR to a clean/local LedgeTop Operations checkout
 containing the candidate source-range handler. Traffic is confined to an
 ephemeral 127.0.0.1 HTTP listener; the configured Processing origin remains an
 HTTPS origin and the adapter is test-only. No live Viewer/Hub/NAS service is
 contacted and all photo bytes are synthetic.
+
+The renewal and acknowledgement services are test stubs; the range broker is
+not used. This test does not verify Viewer's real grant minting, persistence,
+renewal service, authorized range reads, or source identity compatibility.
 """
 import base64
 import io
@@ -84,7 +88,7 @@ class PairedViewerSourceRenewalTests(unittest.TestCase):
             raise AssertionError(f'Viewer bridge did not become ready: {self.node_stderr.read()[-2000:]}')
         return json.loads(ready_path.read_text(encoding='utf-8'))['port']
 
-    def test_reference_driver_uses_viewer_v2_renewal_routes_and_replays_after_lost_replies(self):
+    def test_reference_driver_replays_lost_replies_against_stubbed_renewal_routes(self):
         viewer_root = Path(VIEWER_SOURCE_DIR).resolve()
         for relative in (
             'apps/viewer/server/sourceRangeV2Candidate.js',
