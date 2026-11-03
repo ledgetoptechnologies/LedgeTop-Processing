@@ -198,6 +198,8 @@ class ImportConfirmationStore:
     exclusively controlled by the service identity, including on Windows.
     """
 
+    _table = _TABLE
+
     def __init__(self, path, *, trusted_loader):
         if not callable(trusted_loader):
             raise ValueError('trusted loader required')
@@ -229,7 +231,7 @@ class ImportConfirmationStore:
         with self._connect() as db:
             try:
                 db.execute('BEGIN IMMEDIATE')
-                db.execute(f'''CREATE TABLE IF NOT EXISTS {_TABLE} (
+                db.execute(f'''CREATE TABLE IF NOT EXISTS {self._table} (
                     job_id TEXT NOT NULL, generation INTEGER NOT NULL, environment TEXT NOT NULL,
                     confirmation_id TEXT NOT NULL UNIQUE, binding_sha256 TEXT NOT NULL,
                     confirmation_sha256 TEXT NOT NULL, canonical_bytes BLOB NOT NULL,
@@ -300,16 +302,16 @@ class ImportConfirmationStore:
         finally:
             db.close()
 
-    @staticmethod
-    def _check_schema(db):
+    @classmethod
+    def _check_schema(cls, db):
         columns = [(row['name'], row['type'], row['notnull'], row['pk'])
-                   for row in db.execute(f'PRAGMA table_info({_TABLE})')]
+                   for row in db.execute(f'PRAGMA table_info({cls._table})')]
         if columns != [('job_id', 'TEXT', 1, 1), ('generation', 'INTEGER', 1, 2),
                        ('environment', 'TEXT', 1, 3), ('confirmation_id', 'TEXT', 1, 0),
                        ('binding_sha256', 'TEXT', 1, 0), ('confirmation_sha256', 'TEXT', 1, 0),
                        ('canonical_bytes', 'BLOB', 1, 0)]:
             raise ImportConfirmationStoreHeld('store_schema_changed')
-        indexes = list(db.execute(f'PRAGMA index_list({_TABLE})'))
+        indexes = list(db.execute(f'PRAGMA index_list({cls._table})'))
         unique_columns = set()
         for index in indexes:
             if index['unique'] and not index['partial']:
@@ -318,7 +320,7 @@ class ImportConfirmationStore:
                 unique_columns.add(tuple(row['name'] for row in db.execute(f'PRAGMA index_info("{index_name}")')))
         if (('confirmation_id',) not in unique_columns
                 or ('job_id', 'generation', 'environment') not in unique_columns
-                or db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=? LIMIT 1", (_TABLE,)).fetchone()):
+                or db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=? LIMIT 1", (cls._table,)).fetchone()):
             raise ImportConfirmationStoreHeld('store_schema_changed')
 
     def _trusted(self, db, scope):
@@ -351,8 +353,8 @@ class ImportConfirmationStore:
                    'acceptedEnvelopes': context['accepted_envelopes']}
         return context, protocol.digest(binding)
 
-    @staticmethod
-    def _row(db, scope):
+    @classmethod
+    def _row(cls, db, scope):
         # Do not materialize an arbitrarily large/corrupt BLOB into Python.
         return db.execute(f'''SELECT
             CASE WHEN typeof(confirmation_id)='text' AND length(confirmation_id) BETWEEN 1 AND 128
@@ -363,7 +365,7 @@ class ImportConfirmationStore:
                  THEN confirmation_sha256 ELSE NULL END AS confirmation_sha256,
             CASE WHEN typeof(canonical_bytes)='blob' AND length(canonical_bytes) BETWEEN 1 AND ?
                  THEN canonical_bytes ELSE NULL END AS canonical_bytes
-            FROM {_TABLE} WHERE job_id=? AND generation=? AND environment=?''',
+            FROM {cls._table} WHERE job_id=? AND generation=? AND environment=?''',
             (MAX_INPUT_BYTES, scope['jobId'], scope['generation'], scope['environment'])).fetchone()
 
     @staticmethod
@@ -415,7 +417,7 @@ class ImportConfirmationStore:
                     result = RecordResult('replayed', verified.sha256)
                 else:
                     try:
-                        db.execute(f'''INSERT INTO {_TABLE} VALUES (?,?,?,?,?,?,?)''',
+                        db.execute(f'''INSERT INTO {self._table} VALUES (?,?,?,?,?,?,?)''',
                             (scope['jobId'], scope['generation'], scope['environment'],
                              verified.confirmation['confirmationId'], binding_sha, verified.sha256,
                              verified.canonical_bytes))
