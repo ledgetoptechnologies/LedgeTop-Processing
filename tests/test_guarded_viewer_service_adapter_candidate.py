@@ -1,4 +1,7 @@
 """ViewerService reads against a task-bound guarded mTLS node, synthetically."""
+import copy
+import hashlib
+import json
 import shutil
 import ssl
 import unittest
@@ -7,14 +10,102 @@ import uuid
 from ops.native_node_fixture import ARCHIVE
 from processing import reference_protocol as protocol
 from processing.guarded_native_client import GuardedNativeClient
-from processing.viewer_service import EngineUnavailable
+from processing.viewer_service import EngineUnavailable, ViewerService
+from processing.prototype import Queue
+from processing.config import parse_node_inventory
+from processing.node_gate import NodeGate
+from processing.host_mutation_journal import HostMutationJournal
 from tests.guarded_test_signer import operation_signer
 from tests.test_bound_node_job_candidate import BoundJobTests, KEY
 from tests.test_guarded_native_https import TOKEN
-from tests.test_viewer_service import ViewerServiceTests
+from tests.test_viewer_service import ViewerServiceTests, FakeEngine, OPTIONS
 
 
 class GuardedViewerAdapterTests(BoundJobTests):
+    def test_factory_dispatches_two_distinct_assignments_with_per_job_claims(self):
+        coordinator = ViewerServiceTests(methodName='runTest')
+        coordinator.setUp()
+        self.addCleanup(coordinator.tearDown)
+        coordinator.service.close(); coordinator.queue.close()
+        coordinator.config.prototype_state_dir = str(coordinator.root / 'guarded-factory-state')
+        coordinator.config.viewer_require_guard = True
+        coordinator.config.node_inventory = parse_node_inventory(json.dumps([
+            dict(id='main', physicalHostId='main', origin='http://192.0.2.1:3000',
+                 tokenEnv='NODE_TEST_TOKEN', maxPhotos=None, capabilities=['odm'])]), {})
+        coordinator.queue = Queue(coordinator.config.prototype_state_dir, node_ids=('main',),
+            treedar_node_ids=(), viewer_enabled=True, per_node_slots=True)
+        coordinator.engines = {'main': FakeEngine('main', coordinator.fleet)}
+        self.proxy._require_job_claim = True
+        self.commit_reply(True)
+        server = self.start_listener()
+        context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
+        context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
+        claims = {}
+        def factory(identity):
+            job = identity['viewerJobId']
+            self.job = identity['engineTaskId']
+            if job not in claims:
+                claims[job] = self.envelope(viewerJobId=job, viewerGeneration=identity['viewerGeneration'],
+                    engineTaskId=identity['engineTaskId'], nodeId=identity['nodeId'],
+                    environment=identity['environment'], requestSha256=identity['requestSha256'],
+                    nonce=hashlib.sha256(job.encode()).hexdigest())
+            claim = claims[job]
+            return GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10,
+                job_claim=claim, operation_signer=operation_signer(self.proxy, KEY, claim))
+        coordinator.service = ViewerService(coordinator.queue, coordinator.config,
+            engines=coordinator.engines, probe=lambda *_: {'ready': True, 'maxImages': None, 'taskQueueCount': 0},
+            guard_probe=lambda _: True, guarded_engine_factory=factory)
+        coordinator.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(x) for x in OPTIONS]}
+        coordinator.service._selected_options = lambda _: [dict(x) for x in OPTIONS]
+        def submit():
+            identifier = coordinator.initialize(options=[])
+            coordinator.upload(identifier, name='photo.jpg', content=b'abc')
+            coordinator.service.commit(identifier)
+            coordinator.service.tick()  # actual Viewer scheduler claims and dispatches
+            self.assertEqual(coordinator.task(identifier)['phase'], 'processing')
+            coordinator.service.tick()  # observe synthetic node completion
+            self.assertEqual(coordinator.service.info(identifier)['status']['code'], 40)
+            return identifier
+        first = submit()
+        first_task = coordinator.task(first)
+        old_client = coordinator.service._task_engine(first_task)
+        detached_claim = old_client.job_claim
+        detached_claim['claim']['engineTaskId'] = str(uuid.uuid4())
+        self.assertEqual(old_client.job_claim['claim']['engineTaskId'], first_task['engine_uuid'])
+        guarded_factory = coordinator.service._guarded_engine_factory
+        coordinator.service._guarded_engine_factory = None
+        with self.assertRaises(EngineUnavailable):
+            coordinator.service._task_engine(first_task)
+        coordinator.service._guarded_engine_factory = guarded_factory
+        original_claim = copy.deepcopy(claims[first_task['job_id']])
+        claims[first_task['job_id']]['claim']['viewerGeneration'] += 1
+        with self.assertRaises(EngineUnavailable):
+            coordinator.service._task_engine(first_task)
+        claims[first_task['job_id']] = original_claim
+        with coordinator.service.download(first)[0] as stream:
+            self.assertEqual(stream.read(), ARCHIVE)
+        # Explicitly simulate a matching *trusted* completion receipt. Real
+        # end-to-end authenticated outbox delivery is not wired by this test.
+        with NodeGate('physical-engine') as gate:
+            receipt = gate.snapshot()['reservation']['receiptId']
+            journal = HostMutationJournal(gate, receipt).open()
+            result = {**journal.job, 'status': 'succeeded', 'result': {'synthetic': True}}
+            journal.checkpoint_completion(engine_task=first_task['engine_uuid'], outbox_id='d'*64, payload=result)
+            journal.acknowledge_completion(outbox_id='d'*64, job_ack=result)
+            journal.close()
+        second = submit()
+        second_task = coordinator.task(second)
+        self.assertNotEqual(first_task['engine_uuid'], second_task['engine_uuid'])
+        self.assertNotEqual(first_task['job_id'], second_task['job_id'])
+        self.assertEqual(self.backend.counts()['initialize'], 2)
+        self.assertEqual(self.backend.counts()['upload'], 2)
+        self.assertEqual(self.backend.counts()['commit'], 2)
+        with self.assertRaises(EngineUnavailable):
+            old_client.read('/task/' + second_task['engine_uuid'] + '/info')
+        # Even the correct former task ID cannot read the new node reservation.
+        with self.assertRaises(EngineUnavailable):
+            old_client.read('/task/' + first_task['engine_uuid'] + '/info')
+
     def test_service_status_output_archive_use_bound_guard_and_hold_pending(self):
         coordinator = ViewerServiceTests(methodName='runTest')
         coordinator.setUp()

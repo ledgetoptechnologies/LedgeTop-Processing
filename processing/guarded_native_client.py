@@ -25,7 +25,17 @@ class GuardedNativeClient:
         self.host, self.port, self.context, self.bearer, self.timeout = host, port, context, bearer, timeout
         if (job_claim is None) != (operation_signer is None) or (operation_signer is not None and not callable(operation_signer)):
             raise ValueError('job claim and operation signer must be supplied together')
-        self.job_claim, self.operation_signer = job_claim, operation_signer
+        try:
+            self._job_claim = None if job_claim is None else json.loads(json.dumps(job_claim, allow_nan=False))
+        except (TypeError, ValueError, RecursionError):
+            raise ValueError('invalid job claim') from None
+        self.operation_signer = operation_signer
+
+    @property
+    def job_claim(self):
+        # Callers cannot alter this client's task binding through an envelope
+        # reference returned from the factory or from this property.
+        return None if self._job_claim is None else json.loads(json.dumps(self._job_claim, allow_nan=False))
 
     def _connection(self):
         return http.client.HTTPSConnection(self.host, self.port, context=self.context, timeout=self.timeout)

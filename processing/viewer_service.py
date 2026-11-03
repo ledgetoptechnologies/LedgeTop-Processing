@@ -168,7 +168,8 @@ class NativeEngine:
 
 
 class ViewerService:
-    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, guard_probe=None):
+    def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, guard_probe=None,
+                 guarded_engine_factory=None):
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
@@ -187,6 +188,9 @@ class ViewerService:
         self._require_guard = require_guard
         if self._require_guard and not callable(guard_probe):
             raise ValueError('guard readiness reader required')
+        if guarded_engine_factory is not None and (not self._require_guard or not callable(guarded_engine_factory)):
+            raise ValueError('guarded task clients require guard readiness and a callable factory')
+        self._guarded_engine_factory = guarded_engine_factory
         self._guard_probe = guard_probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -208,6 +212,37 @@ class ViewerService:
             return self._guard_probe(node_id) is True
         except Exception:
             return False
+
+    def _task_engine(self, task):
+        """Resolve an optional guarded client from immutable task identity.
+
+        The caller-provided factory must recover the same signed claim after
+        restart; the node verifies it against the durable binding. This opt-in
+        adapter does not provision keys or establish node ingress isolation.
+        """
+        if self._guarded_engine_factory is None:
+            engine = self.engines[task['node_id']]
+            if task.get('node_guarded') == 1 and getattr(engine, 'node_guarded', False) is not True:
+                raise EngineUnavailable('guarded task client unavailable')
+            return engine
+        from .guarded_native_client import GuardedNativeClient
+        from . import reference_protocol as protocol
+        request = {key: task[key] for key in ('name', 'engine_uuid', 'outputs', 'options')}
+        expected = {'viewerJobId': task['job_id'], 'viewerGeneration': task['generation'],
+                    'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
+                    'environment': task['environment'], 'requestSha256': protocol.digest(request)}
+        try:
+            # Pass only a detached copy. Neither task metadata nor a mutable
+            # factory argument is accepted as proof of the returned binding.
+            client = self._guarded_engine_factory(json.loads(json.dumps(expected)))
+            claim = client.job_claim['claim']
+            if (not isinstance(client, GuardedNativeClient) or client.operation_signer is None
+                    or type(claim) is not dict
+                    or any(type(claim.get(k)) is not type(v) or claim[k] != v for k, v in expected.items())):
+                raise ValueError('guarded client mismatch')
+            return client
+        except Exception:
+            raise EngineUnavailable('guarded task client unavailable') from None
 
     def _catalog(self):
         if self.inventory:
@@ -404,7 +439,7 @@ class ViewerService:
         task = self.store.task(identifier)
         if task['engine_uuid'] and task['node_id'] in self.engines and task['phase'] in ('processing', 'complete', 'cancel_pending', 'held'):
             try:
-                result = self.engines[task['node_id']].read('/task/' + task['engine_uuid'] + '/output', line=line)
+                result = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/output', line=line)
                 if not isinstance(result, list) or any(not isinstance(x, str) for x in result):
                     raise EngineUnavailable('engine_output_unavailable')
                 return result
@@ -545,7 +580,7 @@ class ViewerService:
         try:
             with os.fdopen(fd, 'wb') as output:
                 fd = None
-                with self.engines[task['node_id']].download(task['engine_uuid']) as response:
+                with self._task_engine(task).download(task['engine_uuid']) as response:
                     if getattr(response, 'status', 200) != 200:
                         raise EngineUnavailable('archive_unavailable')
                     media = response.headers.get('Content-Type', '').split(';')[0].lower()
@@ -670,7 +705,7 @@ class ViewerService:
                     partial.unlink()
                 total = 0
                 digest = hashlib.sha256()
-                with self.engines[task['node_id']].download(task['engine_uuid']) as response:
+                with self._task_engine(task).download(task['engine_uuid']) as response:
                     if getattr(response, 'status', 200) != 200:
                         raise EngineUnavailable('archive_unavailable')
                     media_type = response.headers.get('Content-Type', '').split(';')[0].lower()
@@ -741,7 +776,7 @@ class ViewerService:
                 raise Conflict('submission in progress; inspect before cancelling')
             self.store.update(identifier, phase='cancel_pending')
             try:
-                self.engines[task['node_id']].action('cancel', task['engine_uuid'])
+                self._task_engine(task).action('cancel', task['engine_uuid'])
             except Exception:
                 self._hold(task, 'cancel_ack_uncertain')
                 raise Conflict('cancellation acknowledgment uncertain') from None
@@ -765,7 +800,7 @@ class ViewerService:
         """Run one already-claimed submission; never replay a mutation on error."""
         try:
             task = self.store.task(identifier)
-            engine = self.engines[task['node_id']]
+            engine = self._task_engine(task)
             self._check_dispatch_boundary(task)
             # Persist the guard association with the first pending phase,
             # before issuing a mutation, so recovery is independent of the
@@ -844,7 +879,7 @@ class ViewerService:
         if now < due:
             return
         try:
-            info = self.engines[task['node_id']].read('/task/' + task['engine_uuid'] + '/info')
+            info = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/info')
             if (not isinstance(info, dict) or info.get('uuid') != task['engine_uuid']
                     or not isinstance(info.get('status'), dict)
                     or type(info['status'].get('code')) is not int
