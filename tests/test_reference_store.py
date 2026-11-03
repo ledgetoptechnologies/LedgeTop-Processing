@@ -313,6 +313,20 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertFalse(prepare_reference_job(self.store, self.submission)[1])
         self.assertIsNone(self.queue.claim({"workerId": "worker", "profiles": [PROFILE]}))
 
+    def test_historical_equal_receipt_ids_are_preserved_and_scanner_holds(self):
+        # The prior real store API accepted this shape; do not rewrite history.
+        from processing.reference_copy_hold_integrity import legacy_reserved_ids
+        job, result = self.result_ready()
+        receipt = self.receipt(job, result)
+        receipt['storageReceiptId'] = receipt['receiptId']
+        self.assertTrue(self.store.accept(job['jobId'], receipt)['created'])
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            with self.assertRaisesRegex(ValueError, 'ambiguous legacy receipt identity'):
+                legacy_reserved_ids(db)
+            retained=db.execute('SELECT receipt_json FROM reference_acceptances WHERE job_id=?',(job['jobId'],)).fetchone()
+            self.assertEqual(json.loads(retained[0]),receipt)
+
     def test_acceptance_subsets_and_changed_receipt(self):
         job, result = self.result_ready()
         receipt = self.receipt(job, result)

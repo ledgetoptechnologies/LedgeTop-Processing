@@ -70,3 +70,19 @@ preflights JSON depth and density before decoding, and applies bounded checks
 to adjacent legacy namespaces. This is not a full result-manifest/object or
 signature re-verifier. An authenticated independent-key verifier and
 transactionally consistent source/result custody remain release blockers.
+
+Historical compatibility: the earlier real `ReferenceStore.accept` path can
+persist a legacy receipt whose `receiptId` equals `storageReceiptId`. The
+stricter namespace scanner deliberately holds that record as ambiguous even
+though the old API accepted it. Operators must preserve the original receipt,
+stop any affected acceptance/cleanup transition, inventory all relevant
+journals and obtain an explicit reviewed reconciliation/migration plan; this
+candidate neither rewrites nor deletes historical records. Missing tables,
+unknown history, duplicate identities across namespaces or databases, and
+older writers remain a separate census and fencing requirement.
+
+The scanner constructs a minimal manifest-shaped value solely to reuse the
+legacy receipt's closed-schema and scalar checks. It does not validate against
+the real sealed result manifest, prove object custody, or verify a signature.
+Independent authenticated result/receipt verification and trusted keys remain
+required before use; all production holds remain.
