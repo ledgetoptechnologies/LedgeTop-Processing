@@ -86,3 +86,14 @@ policy changes, but activation and source execution stay held. The endpoint,
 principal registry, trusted dynamic option policy and numeric canonicalization
 still require Viewer agreement and independent review; no runtime image mounts
 this API or installs the optional dependency.
+
+The isolated successor requires ReferenceStore(jcs_runtime_enabled=True) to
+create or reopen v3 durable rows and fails startup without that capability or
+the rfc8785 dependency. This is not a downgrade fence for binaries predating
+this check: older code may ignore the marker or fail only when it reads rows.
+A deployment manager must prevent old images from starting against v3 state,
+with durable version metadata, pre-start compatibility checks and a tested
+rollback/migration plan; none is implemented here. Do not mount the API.
+Future image provisioning must install the existing hash-pinned candidate
+requirements with --require-hashes and review the dependency; the current
+production Dockerfile and image are unchanged.

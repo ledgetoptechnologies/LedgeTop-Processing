@@ -66,12 +66,15 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None):
+                 main_node_id=None, jcs_runtime_enabled=False):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
+        if type(jcs_runtime_enabled) is not bool:
+            raise ValueError('explicit JCS runtime flag required')
+        self.jcs_runtime_enabled = jcs_runtime_enabled
         self.queue = queue
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
@@ -139,6 +142,11 @@ class ReferenceStore:
             """)
             self._init_viewer_activation_schema(db)
             self._init_envelope_v2_schema(db)
+            if db.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
+                if not self.jcs_runtime_enabled:
+                    raise Conflict('JCS durable state requires enabled capable runtime')
+                try: import rfc8785
+                except ImportError: raise Conflict('JCS runtime dependency unavailable') from None
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
@@ -348,7 +356,10 @@ class ReferenceStore:
 
     def prepare_viewer_envelope_jcs_v3(self, raw, *, authenticated_principal, authenticated_environment, trusted_policy):
         """Unmounted v3. Exact authenticated replay reads durable evidence first."""
-        import rfc8785
+        if not self.jcs_runtime_enabled:
+            raise Conflict('JCS runtime not enabled')
+        try: import rfc8785
+        except ImportError: raise Conflict('JCS runtime dependency unavailable') from None
         from . import prepared_envelope_jcs_candidate as jcs
         protocol._slug(authenticated_principal, 'authenticated Viewer principal')
         protocol._environment(authenticated_environment)
