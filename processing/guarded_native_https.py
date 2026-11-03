@@ -135,7 +135,7 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                 from .node_gate import NodeGate
                 TaskStore._filename(name)
                 with NodeGate(adapter.engine_id) as gate:
-                    adapter._owner(gate, task)
+                    receipt = adapter._owner(gate, task)
                 if os.name == 'nt' or not hasattr(os, 'O_NOFOLLOW'):
                     raise ValueError('secure spool requires POSIX')
                 # Absolute time limit bounds a slow remote body, independently
@@ -179,6 +179,8 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                         raise ValueError('input digest mismatch')
                     if not self.server.input_complete(self.connection):
                         raise ValueError('upload expired')
+                    budget.bind_upload(filename, receipt=receipt, task=task, file_name=name,
+                                       sha256=expected, device=file_identity[0], inode=file_identity[1])
                     # Keep the file even on a lost/ambiguous engine response.
                     budget.transition(filename, stage, 'mutation_started'); stage = 'mutation_started'
                     retain = True

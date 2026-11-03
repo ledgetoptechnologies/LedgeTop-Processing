@@ -192,3 +192,65 @@ class GuardedNativeProxy:
                         and 'error' not in value and value.get('success') is not False)
             finally:
                 journal.close()
+
+    def recover_acknowledged_spool(self, budget, name):
+        """Reconcile one locally owned upload, never an uncertain mutation.
+
+        No network route calls this method. External exclusion of old/direct
+        writers and retention of the original source remain prerequisites.
+        """
+        if os.name == 'nt' or budget.root.absolute() != self.root or not budget._valid_name(name):
+            raise GateError('invalid recovery spool')
+        with NodeGate(self.engine_id) as gate:
+            record = budget.upload_identity(name)
+            if record is None:
+                raise MutationHeld('spool identity missing; inspection required')
+            size, stage, receipt, task, filename, sha256, device, inode = record
+            if stage not in ('mutation_started', 'discardable') or self._owner(gate, task) != receipt:
+                raise MutationHeld('spool ownership or stage uncertain')
+            self._task(task)
+            key = hashlib.sha256(TaskStore._filename(filename).encode('ascii')).hexdigest()
+            request_digest = protocol.digest(dict(task=task, name=filename, bytes=size, sha256=sha256))
+            ack_digest = protocol.digest(dict(task=task, kind='upload', requestDigest=request_digest,
+                                              validation='native-engine-contract-passed'))
+            journal = HostMutationJournal(gate, receipt).open()
+            try:
+                journal.require_done(self._op(task, 'upload', key), request_digest, ack_digest)
+            finally:
+                journal.close()
+            root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                root, path = os.fstat(root_fd), os.stat(self.root, follow_symlinks=False)
+                if (root.st_dev, root.st_ino) != (path.st_dev, path.st_ino):
+                    raise MutationHeld('spool directory changed')
+                try:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
+                except FileNotFoundError:
+                    if stage != 'discardable':
+                        raise MutationHeld('spool missing before discard') from None
+                else:
+                    try:
+                        info = os.fstat(fd)
+                        if ((info.st_dev, info.st_ino) != (device, inode) or not stat.S_ISREG(info.st_mode)
+                                or info.st_nlink != 1 or info.st_uid != os.geteuid()
+                                or info.st_mode & 0o077 or info.st_size != size):
+                            raise MutationHeld('spool identity changed')
+                        digest = hashlib.sha256()
+                        while True:
+                            block = os.read(fd, 1024 * 1024)
+                            if not block: break
+                            digest.update(block)
+                        current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                        if (current.st_dev, current.st_ino) != (device, inode) or digest.hexdigest() != sha256:
+                            raise MutationHeld('spool contents changed')
+                        if stage == 'mutation_started':
+                            budget.transition(name, stage, 'discardable')
+                        os.unlink(name, dir_fd=root_fd)
+                        os.fsync(root_fd)
+                    finally:
+                        os.close(fd)
+                # Make a previous unlink durable before releasing accounting.
+                os.fsync(root_fd)
+                budget.release_discarded(name, root_fd)
+            finally:
+                os.close(root_fd)

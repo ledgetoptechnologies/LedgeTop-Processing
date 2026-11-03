@@ -37,6 +37,9 @@ class GuardedSpoolBudget:
                        'name TEXT PRIMARY KEY, bytes INTEGER NOT NULL, stage TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS spool_policy ('
                        'id INTEGER PRIMARY KEY CHECK(id=1), cap INTEGER NOT NULL, floor INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS spool_upload_identity ('
+                       'name TEXT PRIMARY KEY, receipt TEXT NOT NULL, task TEXT NOT NULL, '
+                       'file_name TEXT NOT NULL, sha256 TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL)')
             db.execute('INSERT OR IGNORE INTO spool_policy VALUES(1,?,?)', (cap, floor))
             if db.execute('SELECT cap,floor FROM spool_policy WHERE id=1').fetchone() != (cap, floor):
                 raise SpoolBudgetError('spool policy differs; explicit reconciliation required')
@@ -94,6 +97,32 @@ class GuardedSpoolBudget:
             if result.rowcount != 1: raise SpoolBudgetError('spool reservation differs')
             db.commit()
 
+    def bind_upload(self, name, *, receipt, task, file_name, sha256, device, inode):
+        """Persist upload identity before any engine mutation may be issued."""
+        from .viewer_tasks import TaskStore
+        import uuid
+        if (not self._valid_name(name) or type(receipt) is not str or not re.fullmatch(r'[0-9a-f]{32}', receipt)
+                or type(task) is not str or str(uuid.UUID(task)) != task
+                or TaskStore._filename(file_name) is None or type(sha256) is not str
+                or not re.fullmatch(r'[0-9a-f]{64}', sha256)
+                or type(device) is not int or device < 0 or type(inode) is not int or inode < 1):
+            raise SpoolBudgetError('invalid upload identity')
+        with closing(self._connect()) as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT stage FROM spool_reservations WHERE name=?', (name,)).fetchone()
+            if row != ('spooled',):
+                raise SpoolBudgetError('upload spool is not ready')
+            db.execute('INSERT INTO spool_upload_identity VALUES(?,?,?,?,?,?,?)',
+                       (name, receipt, task, file_name, sha256, device, inode))
+            db.commit()
+
+    def upload_identity(self, name):
+        with closing(self._connect()) as db:
+            row = db.execute('SELECT r.bytes,r.stage,i.receipt,i.task,i.file_name,i.sha256,i.device,i.inode '
+                             'FROM spool_reservations r JOIN spool_upload_identity i ON r.name=i.name '
+                             'WHERE r.name=?', (name,)).fetchone()
+            return row
+
     def release_discarded(self, name, root_fd):
         if not self._valid_name(name): raise SpoolBudgetError('invalid spool name')
         with closing(self._connect()) as db:
@@ -107,6 +136,7 @@ class GuardedSpoolBudget:
                 raise SpoolBudgetError('spool file still exists')
             result = db.execute("DELETE FROM spool_reservations WHERE name=? AND stage='discardable'", (name,))
             if result.rowcount != 1: raise SpoolBudgetError('spool reservation is not discardable')
+            db.execute('DELETE FROM spool_upload_identity WHERE name=?', (name,))
             db.commit()
 
     def inspect(self):
