@@ -856,7 +856,10 @@ class ReferenceDriverTests(unittest.TestCase):
         # Reopening an older queue can leave an unsigned receipt recorded
         # before this environment was configured to require signed copies.
         self.store.viewer_required_environments = frozenset(('staging',))
-        self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        self.driver.step()
+        with self.driver._db() as db:
+            self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?',
+                                        (job['jobId'],)).fetchone()[0], 'awaiting_acceptance')
         self.assertEqual(self.ledger.cleanup_candidates(), [])
         self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
                           trusted_viewer_receipt_keys=signer.trusted_keys)

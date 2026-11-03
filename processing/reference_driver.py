@@ -409,7 +409,21 @@ class ReferenceDriver:
 
     def _apply_acceptance(self, job_id, receipts):
         source = self.execution_router if self.execution_router is not None else self.worker
-        return source.apply_viewer_acceptance(job_id, receipts)
+        observed = source.apply_viewer_acceptance(job_id, receipts)
+        if not self.worker.viewer_receipt_keys or not observed['fullyAccepted']:
+            return observed
+        # With Viewer verification keys configured, metadata-only acceptance is
+        # insufficient to stop polling. Read the durable ledger rather than
+        # trusting a relay or the accepted-metadata aggregate.
+        local = self._adapter(job_id)._row(job_id)
+        identity = json.loads(local['identity'])
+        reservation = identity['reservation']
+        with self.ledger._transaction() as db:
+            rows = db.execute('SELECT id,accepted_copy_verified FROM objects WHERE reservation=?',
+                              (reservation,)).fetchall()
+        accepted = set(observed['acceptedObjectIds'])
+        verified = {row['id'] for row in rows if row['accepted_copy_verified'] == 1}
+        return {**observed, 'fullyAccepted': bool(accepted) and accepted == verified}
 
     def _bind_claim(self, claim, data):
         self._validate_job(claim)
