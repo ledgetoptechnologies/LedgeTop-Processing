@@ -57,6 +57,18 @@ class PreparedAPITests(unittest.TestCase):
             env=copy.deepcopy(self.envelope); change(env)
             self.assertEqual(self.req('POST','/submissions',env).status,400)
         self.assertEqual(self.queue.list(),[])
+    def test_transport_duplicate_nested_json_and_size_are_rejected(self):
+        from processing import reference_protocol as protocol
+        headers={'Authorization':'Bearer '+TOKEN}
+        duplicate=b'{"submission":{"schemaVersion":1,"schemaVersion":1}}'
+        oversized=b' '*(protocol.MAX_BODY_BYTES+1)
+        for body in (duplicate, oversized):
+            result=self.api.handle('POST',PREFIX+'/submissions',headers,body,protected_transport=True)
+            self.assertEqual(result.status,400)
+        result=self.api.handle('POST',PREFIX+'/submissions',headers,json.dumps(self.envelope).encode(),protected_transport=False)
+        self.assertEqual(result.status,503)
+        self.assertEqual(self.queue.list(),[])
+
     def test_server_policy_is_copied_and_secrets_redacted_on_error(self):
         self.policy['capabilityFingerprint']='0'*64
         self.assertEqual(self.req('POST','/submissions',self.envelope).status,201)
