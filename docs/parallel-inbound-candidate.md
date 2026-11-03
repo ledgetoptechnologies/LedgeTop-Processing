@@ -6,6 +6,9 @@ to enable parallel uploads. Mutating operations on the same task serialize
 across `TaskStore` instances sharing one `Queue`; unrelated task IO can
 proceed under the opt-in. The queue retains its process ownership lease until
 the inflight mutation finishes, and `close()` refuses during that interval.
+Same-task control operations fail with a retryable conflict while an upload
+holds its fence, so a cancellation request cannot block the service-wide
+scheduler lock while waiting for a slow inbound stream.
 
 Tests exercise a slow upload against another task, same-task commit and
 cancellation, and process exit during a write. An interrupted `.incoming-*`

@@ -122,7 +122,7 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
         self.photo(name='first.jpg', data=b'first')
         second_store = TaskStore(self.queue, self.root / 'parallel-inputs')
         entered, release = threading.Event(), threading.Event()
-        errors, committed = [], []
+        errors = []
         class SlowStream(io.BytesIO):
             def read(self, size=-1):
                 if not entered.is_set():
@@ -137,21 +137,17 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
                 errors.append(error)
         thread = threading.Thread(target=upload)
         thread.start()
-        commit_thread = None
         try:
             self.assertTrue(entered.wait(5))
-            commit_thread = threading.Thread(target=lambda: committed.append(second_store.commit(self.identifier)))
-            commit_thread.start()
-            self.assertFalse(threading.Event().wait(0.05) or committed)
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                second_store.commit(self.identifier)
             with self.assertRaises(RuntimeError): self.queue.close()
         finally:
             release.set()
             thread.join(5)
-            if commit_thread: commit_thread.join(5)
         self.assertFalse(thread.is_alive())
-        self.assertFalse(commit_thread.is_alive())
         self.assertEqual(errors, [])
-        self.assertTrue(committed[0]['success'])
+        self.assertTrue(second_store.commit(self.identifier)['success'])
         self.assertEqual([f['name'] for f in self.store.task(self.identifier)['files']], ['first.jpg','second.jpg'])
 
     def test_parallel_upload_does_not_block_another_task(self):
@@ -192,7 +188,7 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
                            viewer_enabled=True, parallel_viewer_uploads=True)
         self.store = TaskStore(self.queue, self.root / 'parallel-inputs')
         self.initialize()
-        entered, release, cancelled = threading.Event(), threading.Event(), []
+        entered, release = threading.Event(), threading.Event()
         class SlowStream(io.BytesIO):
             def read(self, size=-1):
                 if not entered.is_set():
@@ -201,19 +197,15 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
                 return super().read(size)
         upload = threading.Thread(target=lambda: self.store.upload(self.identifier, 'first.jpg', SlowStream(b'first'), 5))
         upload.start()
-        cancel = None
         try:
             self.assertTrue(entered.wait(5))
-            cancel = threading.Thread(target=lambda: cancelled.append(self.store.cancel(self.identifier)))
-            cancel.start()
-            self.assertFalse(threading.Event().wait(0.05) or cancelled)
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                self.store.cancel(self.identifier)
         finally:
             release.set()
             upload.join(5)
-            if cancel: cancel.join(5)
         self.assertFalse(upload.is_alive())
-        self.assertFalse(cancel.is_alive())
-        self.assertTrue(cancelled[0]['success'])
+        self.assertTrue(self.store.cancel(self.identifier)['success'])
         task = self.store.task(self.identifier)
         self.assertEqual(task['stage'], 'cancelled')
         self.assertEqual(Path(task['files'][0]['path']).read_bytes(), b'first')

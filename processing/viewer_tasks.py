@@ -73,7 +73,11 @@ def sync_directory(path):
 def task_fenced(method):
     @wraps(method)
     def call(self, identifier, *args, **kwargs):
-        with self._task_fence(identifier):
+        # A control request can hold the scheduler's service lock. In the
+        # isolated parallel mode it must not wait for a slow upload while
+        # holding that lock; callers get a retryable conflict instead.
+        blocking = not self.queue.parallel_viewer_uploads or method.__name__ == 'upload'
+        with self._task_fence(identifier, blocking=blocking):
             return method(self, identifier, *args, **kwargs)
     return call
 
@@ -196,7 +200,7 @@ class TaskStore:
         return row
 
     @contextmanager
-    def _task_fence(self, identifier):
+    def _task_fence(self, identifier, *, blocking=True):
         checked_uuid(identifier)
         queue = self.queue
         if os.getpid() != queue._creator_pid:
@@ -207,8 +211,12 @@ class TaskStore:
                 entry = [threading.RLock(), 0]
                 queue._viewer_task_locks[identifier] = entry
             entry[1] += 1
+        acquired = False
         try:
-            with entry[0]:
+            acquired = entry[0].acquire(blocking=blocking)
+            if not acquired:
+                raise Conflict('task upload is in progress; retry later')
+            try:
                 # Keep the OS authority lock until even a slow stream finishes.
                 with queue._lifecycle_lock:
                     if queue._lock.closed:
@@ -219,6 +227,8 @@ class TaskStore:
                 finally:
                     with queue._lifecycle_lock:
                         queue._database_users -= 1
+            finally:
+                entry[0].release()
         finally:
             with queue._viewer_task_locks_guard:
                 entry[1] -= 1

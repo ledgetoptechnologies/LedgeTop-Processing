@@ -537,6 +537,42 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertTrue(tick_done.is_set())
         self.assertEqual(self.task(queued)['job']['status'], 'running')
 
+    def test_opt_in_slow_inbound_upload_rejects_cancel_without_blocking_other_dispatch(self):
+        self.queue.parallel_viewer_uploads = True
+        queued = self.submit()
+        incoming = self.initialize()
+        entered, release, done = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5): raise TimeoutError('test upload not released')
+                return super().read(size)
+        def upload():
+            try: self.service.upload(incoming, 'slow.jpg', SlowStream(b'abc'), 3)
+            except BaseException as exc: errors.append(exc)
+        def tick():
+            try: self.service.tick()
+            except BaseException as exc: errors.append(exc)
+            finally: done.set()
+        uploader, scheduler = threading.Thread(target=upload), threading.Thread(target=tick)
+        uploader.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                self.service.cancel(incoming)
+            scheduler.start()
+            self.assertTrue(done.wait(3), 'unrelated dispatch stalled behind inbound upload')
+            self.assertEqual(self.task(queued)['job']['status'], 'running')
+        finally:
+            release.set()
+            uploader.join(5)
+            if scheduler.ident is not None: scheduler.join(5)
+        self.assertFalse(uploader.is_alive())
+        self.assertFalse(scheduler.is_alive())
+        self.assertEqual(errors, [])
+
     def test_maintenance_drain_holds_inflight_transfer_before_next_mutation(self):
         self.queue.per_node_slots = True
         self.service._parallel_dispatch = True
