@@ -14,6 +14,8 @@ import socket
 import os
 import select
 import signal
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -181,23 +183,68 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
                 self.assertEqual(photo.read_bytes(), body)
                 budget = GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3)
                 self.assertEqual(budget.inspect()['reservations'][0]['stage'], 'mutation_started')
-                # Run reconciliation in a *new* node process, using only the
-                # persisted gate/journal and spool ledger from the first one.
-                recovery = os.fork()
-                if recovery == 0:
+                # Launch a fresh Python interpreter: no inherited adapter,
+                # SQLite connection, listener, or in-memory journal objects.
+                # It reopens the persisted node state, reconciles the spool,
+                # then serves a retried upload and the following commit.
+                program = r'''
+import sys
+from pathlib import Path
+import processing.node_gate as ng
+from processing.guarded_native_proxy import GuardedNativeProxy
+from processing.guarded_native_https import create_guarded_https_server
+from processing.guarded_spool_budget import GuardedSpoolBudget
+from processing.viewer_service import NativeEngine
+root, origin, authority, fingerprint, spool_name = sys.argv[1:]
+root = Path(root)
+ng.canonical_gate_path = lambda _: root / 'gate'
+spool = root / 'spool'
+adapter = GuardedNativeProxy(engine=NativeEngine(origin), engine_id='physical-engine',
+    node_id='main', worker_id='node-proxy', authority_id=authority,
+    coordinator_origin='https://coordinator.invalid', generation=1,
+    bearer='synthetic-guard-token-123456', spool_root=spool)
+adapter.recover_acknowledged_spool(GuardedSpoolBudget(spool, cap=20 * 1024 ** 3), spool_name)
+server = create_guarded_https_server(adapter, bind_host='127.0.0.1', port=0,
+    certificate=root / 'server.pem', private_key=root / 'server.key',
+    client_ca=root / 'client.pem', client_fingerprint=fingerprint, enabled=True)
+print(server.server_port, flush=True)
+server.serve_forever(poll_interval=.01)
+'''
+                self.commit_reply(True)
+                recovery = subprocess.Popen([sys.executable, '-u', '-c', program, str(self.root),
+                    self.backend.origin, self.authority, self.fingerprint, spools[0].name],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    ready, _, _ = select.select([recovery.stdout], [], [], 10)
+                    self.assertTrue(ready, 'fresh recovery listener did not start')
+                    line = recovery.stdout.readline().strip()
+                    self.assertTrue(line.isdigit(), 'fresh recovery listener exited')
+                    replacement = GuardedNativeClient('127.0.0.1', int(line), context, TOKEN, timeout=10)
+                    self.assertEqual(GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3).inspect()['reservations'], [])
+                    self.assertFalse(spools[0].exists())
+                    self.assertEqual(photo.read_bytes(), body)
+                    # A repeated upload is rejected rather than replayed; the
+                    # already-journaled task may proceed to a single commit.
+                    with self.assertRaises(EngineUnavailable):
+                        replacement.upload(self.job, dict(path=str(photo), name='photo.jpg',
+                                                           bytes=len(body), sha256=digest))
+                    self.assertEqual(self.backend.counts()['upload'], 1)
+                    self.assertEqual(GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3).inspect()['reservations'], [])
+                    self.assertEqual(list(self.spool.glob('incoming-*')), [])
+                    self.assertEqual(replacement.action('commit', self.job), {'uuid': self.job})
+                    self.assertEqual(self.backend.counts()['commit'], 1)
+                    self.assertEqual(self.journal(), [('init','done'), ('upload','done'), ('commit','done')])
+                    self.assertEqual(photo.read_bytes(), body)
+                    self.assertEqual(list(coordinator.iterdir()), [])
+                finally:
+                    recovery.terminate()
                     try:
-                        reopened = GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3)
-                        self.proxy.recover_acknowledged_spool(reopened, spools[0].name)
-                    except BaseException:
-                        os._exit(74)
-                    os._exit(0)
-                _, recovery_status = os.waitpid(recovery, 0)
-                self.assertEqual(os.waitstatus_to_exitcode(recovery_status), 0)
-                self.assertEqual(GuardedSpoolBudget(self.spool, cap=20 * 1024 ** 3).inspect()['reservations'], [])
-                self.assertFalse(spools[0].exists())
-                self.assertEqual(photo.read_bytes(), body)
-                self.assertEqual(self.backend.counts()['upload'], 1)
-                self.assertEqual(list(coordinator.iterdir()), [])
+                        recovery.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        recovery.kill()
+                        recovery.wait(timeout=5)
+                    recovery.stdout.close()
+                    recovery.stderr.close()
             finally:
                 os.close(read_fd)
                 if child is not None:
