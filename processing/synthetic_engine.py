@@ -57,6 +57,11 @@ class SyntheticEngine:
             task['files'][filename] = {'bytes': length, 'sha256': hashlib.sha256(body).hexdigest()}
             return {'success': True}
 
+    def upload_batch(self, identifier):
+        # Keep commit from interleaving with the multipart request, just as the
+        # real service's batch guard does. The lock is reentrant for upload().
+        return self.lock
+
     def commit(self, identifier):
         with self.lock:
             self._advance()
