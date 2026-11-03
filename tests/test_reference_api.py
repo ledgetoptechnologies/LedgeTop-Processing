@@ -8,7 +8,7 @@ from unittest.mock import patch
 from processing import reference_protocol as p
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
-from processing.reference_store import ReferenceStore, PROFILE
+from processing.reference_store import ReferenceStore, PROFILE, JCSRuntimeUnavailable
 from tests.viewer_receipt_signer import SyntheticViewerSigner
 from tests.reference_activation_fixture import prepare_reference_job, activate_reference_job
 
@@ -102,6 +102,11 @@ class ReferenceAPITests(unittest.TestCase):
              "range": "bytes=10-19"}, protected_transport=True)
         self.assertEqual((duplicate.status, duplicate.body), (400, {"error": "duplicate_header"}))
         self.assertEqual(calls, ["bytes=0-9"] * 3)
+
+    def test_runtime_unavailable_is_not_hidden_as_not_found(self):
+        with patch.object(self.store, 'get_legacy_job', side_effect=JCSRuntimeUnavailable('held')):
+            result = self.request('GET', '/jobs/job-1')
+        self.assertEqual((result.status,result.body),(503,{'error':'prepared_runtime_unavailable'}))
 
     def test_transport_auth_and_capabilities(self):
         self.assertEqual(self.request("GET", "/capabilities", protected=False).status, 503)

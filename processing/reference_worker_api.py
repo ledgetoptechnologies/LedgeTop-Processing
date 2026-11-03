@@ -11,6 +11,7 @@ from types import MappingProxyType
 
 from . import reference_protocol as protocol
 from .maintenance import Conflict
+from .reference_store import JCSRuntimeUnavailable
 from .reference_api import Response
 from .reference_transfer import validate_grant
 
@@ -91,7 +92,11 @@ class ReferenceWorkerAPI:
         if grant is None:
             raise Conflict("transfer grant not ready")
         try:
-            validate_grant(grant, job=job)
+            if (job.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
+                from .source_range_transfer import validate_source_grant
+                validate_source_grant(grant, job=job)
+            else:
+                validate_grant(grant, job=job)
         except ValueError:
             raise Conflict("persisted transfer grant is unavailable") from None
         return grant
@@ -210,6 +215,8 @@ class ReferenceWorkerAPI:
                     return Response(200, self.terminal.accepted(match[1], job['environment']))
                 return Response(200, self._grant(match[1], identity, claim_token))
             return self._error(404, "not_found")
+        except JCSRuntimeUnavailable:
+            return self._error(503, 'prepared_runtime_unavailable')
         except Conflict:
             return self._error(409, "worker_conflict")
         except (ValueError, TypeError):
