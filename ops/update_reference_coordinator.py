@@ -16,9 +16,13 @@ import re
 import select
 import socket
 import stat
+import sys
 import time
 import uuid
 from urllib.parse import urlencode
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ops.guarded_script import explicit_guard_source
 
 class _HistoricalTransport:
     """Defer the Linux-only historical helper until an operation uses it."""
@@ -128,66 +132,90 @@ def volume_census(root, *, uid=10001, offline=False):
     """
     import hashlib, json, os, sqlite3, stat
     from pathlib import Path
-    root=Path(root)
-    root_info=root.lstat()
-    assert stat.S_ISDIR(root_info.st_mode) and root_info.st_uid==uid and root_info.st_gid==uid
-    def encode(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
-    def sha(value):return hashlib.sha256(encode(value)).hexdigest()
-    allowed={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','viewer_files','viewer_incarnations',
-        'reference_jobs','reference_acceptances','reference_outbox','reference_claims','reference_worker_receipts',
-        'reference_transfer_grants','reference_worker_failures','reference_terminal_acceptances','owned_maintenance_schedules',
-        'reference_viewer_receipts','reference_viewer_transfers'}
-    files=[]
+    root = Path(root)
+    root_info = root.lstat()
+    if not (stat.S_ISDIR(root_info.st_mode) and root_info.st_uid == uid and (root_info.st_gid == uid)):
+        raise AssertionError()
+
+    def encode(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+
+    def sha(value):
+        return hashlib.sha256(encode(value)).hexdigest()
+    allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers'}
+    files = []
     for path in sorted(root.rglob('*')):
-        relative=path.relative_to(root).as_posix();info=path.lstat()
-        assert info.st_uid==uid and info.st_gid==uid and not stat.S_ISLNK(info.st_mode)
-        # The reviewed baseline contains system metadata and empty native dirs.
-        assert relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool')
-        if stat.S_ISDIR(info.st_mode):files.append(dict(path=relative,kind='directory',mode=stat.S_IMODE(info.st_mode)))
+        relative = path.relative_to(root).as_posix()
+        info = path.lstat()
+        if not (info.st_uid == uid and info.st_gid == uid and (not stat.S_ISLNK(info.st_mode))):
+            raise AssertionError()
+        if not relative in ('jobs.sqlite3', 'coordinator.lock', 'viewer-tasks', 'viewer-spool'):
+            raise AssertionError()
+        if stat.S_ISDIR(info.st_mode):
+            files.append(dict(path=relative, kind='directory', mode=stat.S_IMODE(info.st_mode)))
         else:
-            assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=67108864
-            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+            if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and (info.st_size <= 67108864)):
+                raise AssertionError()
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
             try:
-                before=os.fstat(fd);assert (before.st_dev,before.st_ino)==(info.st_dev,info.st_ino)
-                h=hashlib.sha256();size=0
+                before = os.fstat(fd)
+                if not (before.st_dev, before.st_ino) == (info.st_dev, info.st_ino):
+                    raise AssertionError()
+                h = hashlib.sha256()
+                size = 0
                 while True:
-                    data=os.read(fd,1048576)
-                    if not data:break
-                    size+=len(data);assert size<=info.st_size;h.update(data)
-                after=path.lstat()
-                assert size==info.st_size and (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
-            finally:os.close(fd)
-            files.append(dict(path=relative,kind='file',mode=stat.S_IMODE(info.st_mode),bytes=size,sha256=h.hexdigest()))
-    assert any(item['path']=='jobs.sqlite3' for item in files)
-    uri='file:'+str(root/'jobs.sqlite3')+'?mode=ro'+('&immutable=1' if offline else '')
-    db=sqlite3.connect(uri,uri=True,timeout=3)
+                    data = os.read(fd, 1048576)
+                    if not data:
+                        break
+                    size += len(data)
+                    if not size <= info.st_size:
+                        raise AssertionError()
+                    h.update(data)
+                after = path.lstat()
+                if not (size == info.st_size and (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)):
+                    raise AssertionError()
+            finally:
+                os.close(fd)
+            files.append(dict(path=relative, kind='file', mode=stat.S_IMODE(info.st_mode), bytes=size, sha256=h.hexdigest()))
+    if not any((item['path'] == 'jobs.sqlite3' for item in files)):
+        raise AssertionError()
+    uri = 'file:' + str(root / 'jobs.sqlite3') + '?mode=ro' + ('&immutable=1' if offline else '')
+    db = sqlite3.connect(uri, uri=True, timeout=3)
     try:
         db.execute('BEGIN')
-        assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
-        objects=[list(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
-        names={row[1] for row in objects if row[0]=='table'}
-        assert not names-allowed and {'jobs','coordinator_identity','nodes','reference_jobs','viewer_tasks'}<=names
-        assert not any(row[0] in ('trigger','view') for row in objects)
-        assert all(row[0]!='index' or row[1].startswith('sqlite_autoindex_') or row[1]=='viewer_engine_uuid' for row in objects)
-        tables={}
+        if not db.execute('PRAGMA quick_check').fetchone()[0] == 'ok':
+            raise AssertionError()
+        objects = [list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
+        names = {row[1] for row in objects if row[0] == 'table'}
+        if not (not names - allowed and {'jobs', 'coordinator_identity', 'nodes', 'reference_jobs', 'viewer_tasks'} <= names):
+            raise AssertionError()
+        if not not any((row[0] in ('trigger', 'view') for row in objects)):
+            raise AssertionError()
+        if not all((row[0] != 'index' or row[1].startswith('sqlite_autoindex_') or row[1] == 'viewer_engine_uuid' for row in objects)):
+            raise AssertionError()
+        tables = {}
         for name in sorted(names):
-            assert name in allowed
-            columns=[list(row) for row in db.execute('PRAGMA table_info("'+name+'")')]
-            rows=[]
-            for row in db.execute('SELECT * FROM "'+name+'"'):
-                rows.append([{'blob':value.hex()} if isinstance(value,bytes) else value for value in row])
+            if not name in allowed:
+                raise AssertionError()
+            columns = [list(row) for row in db.execute('PRAGMA table_info("' + name + '")')]
+            rows = []
+            for row in db.execute('SELECT * FROM "' + name + '"'):
+                rows.append([{'blob': value.hex()} if isinstance(value, bytes) else value for value in row])
             rows.sort(key=encode)
-            tables[name]=dict(count=len(rows),sha256=sha(rows),columns=columns)
-        authority=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
-        active=db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
-        assert active==0
+            tables[name] = dict(count=len(rows), sha256=sha(rows), columns=columns)
+        authority = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
+        active = db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
+        if not active == 0:
+            raise AssertionError()
         for name in names:
-            if name.startswith(('reference_','viewer_')) or name=='owned_maintenance_schedules':assert tables[name]['count']==0
-        node_columns=[row[1] for row in db.execute('PRAGMA table_info(nodes)')]
-        nodes={row[0]:dict(zip(node_columns,row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}
-        return dict(authorityId=authority,schema=objects,tables=tables,files=files,nodeRows=nodes,
-            rootMode=stat.S_IMODE(root_info.st_mode),sqliteQuickCheck='ok')
-    finally:db.close()
+            if name.startswith(('reference_', 'viewer_')) or name == 'owned_maintenance_schedules':
+                if not tables[name]['count'] == 0:
+                    raise AssertionError()
+        node_columns = [row[1] for row in db.execute('PRAGMA table_info(nodes)')]
+        nodes = {row[0]: dict(zip(node_columns, row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}
+        return dict(authorityId=authority, schema=objects, tables=tables, files=files, nodeRows=nodes, rootMode=stat.S_IMODE(root_info.st_mode), sqliteQuickCheck='ok')
+    finally:
+        db.close()
 
 
 def owned_schema():
@@ -279,7 +307,7 @@ comparison=dict(before);comparison.pop('rootMode');assert comparison==copied
 counts['fullCensusSha256']=hashlib.sha256(json.dumps(before,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 print(json.dumps(counts))
 '''
-    return legacy.BACKUP.replace('print(json.dumps(counts))',extra)
+    return explicit_guard_source(legacy.BACKUP.replace('print(json.dumps(counts))',extra))
 
 
 def copy_backup(transport,root,state):
@@ -293,7 +321,7 @@ s=p.parent.stat();assert s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077
 os.mkdir(p,0o700);os.chown(p,10001,10001)
 fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 '''
-    transport.command(['sudo','-n','python3','-c',installer,str(destination)])
+    transport.command(['sudo','-n','python3','-c',explicit_guard_source(installer),str(destination)])
     info=destination.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=10001 or info.st_gid!=10001 or stat.S_IMODE(info.st_mode)!=0o700):
         raise Stopped('private_numeric_uid_backup_required')
@@ -338,7 +366,7 @@ class ReferenceCoordinatorUpdate:
             raise Stopped('immutable_checkpoint_identity_changed')
 
     def census(self,state,*,offline=False,container=None):
-        code=inspect.getsource(volume_census)+'\nimport json\nprint(json.dumps(volume_census('+repr('/source' if offline else '/prototype-state')+',offline='+repr(offline)+')))'
+        code=explicit_guard_source(inspect.getsource(volume_census)+'\nimport json\nprint(json.dumps(volume_census('+repr('/source' if offline else '/prototype-state')+',offline='+repr(offline)+')))')
         if offline:
             if self.t.docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():raise Stopped('offline_volume_has_owner')
             raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
@@ -353,7 +381,7 @@ class ReferenceCoordinatorUpdate:
         raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
             '--cap-drop','ALL','--security-opt','no-new-privileges','--mount',
             'type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
-            '--entrypoint','python',state['image'],'-c',TLS_CENSUS)
+            '--entrypoint','python',state['image'],'-c',explicit_guard_source(TLS_CENSUS))
         return json.loads(raw)
 
     def cluster_idle(self,state):

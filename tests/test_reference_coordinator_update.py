@@ -1,6 +1,8 @@
 """Temporary real SQLite/HTTP, synthetic Docker/SSH boundaries; no host changes."""
 from contextlib import redirect_stdout
+import ast
 import copy
+import inspect
 import io
 import http.client
 import json
@@ -10,6 +12,8 @@ import shutil
 import socket
 import socketserver
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -30,6 +34,23 @@ SOURCE='c'*40
 NEW_ID='d'*64
 MAIN='sha256:'+'e'*64
 OPERATOR='synthetic-coordinator-update-operator'
+
+
+class GuardOptimizationTests(unittest.TestCase):
+    def test_direct_script_help_from_unrelated_directory_with_isolated_python(self):
+        env={k:v for k,v in os.environ.items() if k not in ('PYTHONPATH','PYTHONHOME','PYTHONSTARTUP')}
+        with tempfile.TemporaryDirectory() as cwd:
+            result=subprocess.run([sys.executable,'-I',str(Path(module.__file__).resolve()),'--help'],cwd=cwd,env=env,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('--receipt-dir',result.stdout)
+
+    def test_generated_guard_survives_optimization(self):
+        source=module.explicit_guard_source('assert False')
+        with self.assertRaises(AssertionError):exec(compile(source,'<guard>','exec',optimize=2),{})
+        sources=[inspect.getsource(module.volume_census),module.explicit_guard_source(module.TLS_CENSUS)]
+        if os.name=='posix':sources.append(module.backup_script())
+        for code in sources:
+            self.assertFalse(any(isinstance(node,ast.Assert) for node in ast.walk(ast.parse(code))))
 
 
 class Gates:
@@ -130,7 +151,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                     if any(str(value).startswith('label=') for value in args):return '\n'.join(item['Id'] for item in self.containers.values() if item['Config']['Labels'].get(module.LABEL)==owner.state['operation'])
                     return ''
                 if action in ('run','exec'):
-                    if args[-1]==module.TLS_CENSUS:return json.dumps([{'path':'runtime.json','uid':10001,'mode':0o600,'sha256':'a'*64}])
+                    if args[-1]==module.explicit_guard_source(module.TLS_CENSUS):return json.dumps([{'path':'runtime.json','uid':10001,'mode':0o600,'sha256':'a'*64}])
                     if action=='run':
                         assert '--network' in args and args[args.index('--network')+1]=='none'
                         assert 'type=volume,src='+module.VOLUME+',dst=/source,readonly' in args
@@ -495,7 +516,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         original=self.transport.docker
         def lose(*args,**kwargs):
             value=original(*args,**kwargs)
-            if args[-1]==module.TLS_CENSUS and self.gates.live:self.gates.dead=True
+            if args[-1]==module.explicit_guard_source(module.TLS_CENSUS) and self.gates.live:self.gates.dead=True
             return value
         with patch.object(self.transport,'docker',side_effect=lose):
             with self.assertRaises(module.Stopped):self.activate()
