@@ -19,6 +19,7 @@ import uuid
 from unittest.mock import patch
 from contextlib import redirect_stderr
 from http.server import ThreadingHTTPServer
+from email.message import Message
 
 from processing.app import make_handler, CoordinatorService
 from processing.reference_binary import BinaryResponse
@@ -104,6 +105,60 @@ class ReferenceRuntimeTests(unittest.TestCase):
         first, second = self.tls_patches()
         with first, second:
             return ReferenceRuntime(queue, self.config, self.settings(), discover=lambda: self.snapshot, **kwargs)
+
+    def test_held_inventory_runtime_restart_requires_fresh_readiness(self):
+        from processing.reference_protocol import validate_submission
+        inventory = (dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='main', maxPhotos=None, capabilities=['odm']))
+        self.config = replace(self.config, node_inventory=inventory, per_node_slots=True)
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True, per_node_slots=True)
+        runtime = None
+        try:
+            fixture = json.loads((Path(__file__).parents[1] / 'contracts/reference-v1.contract.json').read_text())
+            raw = fixture['submission']
+            runtime = self.runtime(queue, server_factory=lambda *_a, **_k: FakeServer())
+            job = runtime.store.submit(validate_submission(raw, environment='staging',
+                capability_fingerprint=raw['capabilityFingerprint']))[0]
+            self.assertIsNone(runtime.store.next_for_node('cluster'))
+            seen = threading.Event()
+            class Reply(io.BytesIO):
+                status = 200
+                def __init__(self, node):
+                    body = dict(nodeId=node, workerId='worker-' + node,
+                        observation=dict(ready=True, taskQueueCount=0, maxImages=None,
+                            availableScratchBytes=4096, outputBudgetBytes=1024))
+                    super().__init__(json.dumps(body).encode())
+                    self.headers = Message(); self.headers['Content-Type'] = 'application/json'
+            def opener(request, timeout):
+                node = 'cluster' if 'cluster.example' in request.full_url else 'main'
+                if node == 'main': seen.set()
+                return Reply(node)
+            runtime._readiness_poller._open = opener
+            runtime.start(); self.assertTrue(seen.wait(5))
+            self.assertEqual(runtime.store.next_for_node('cluster')['jobId'], job['jobId'])
+            claim = runtime.store.claim(job['jobId'], node_id='cluster', worker_id='worker-cluster',
+                worker_instance_id='instance-cluster', claim_request_id='restart-claim')
+            second_raw = copy.deepcopy(raw); second_raw['submissionId'] = str(uuid.uuid4())
+            second = runtime.store.submit(validate_submission(second_raw, environment='staging',
+                capability_fingerprint=second_raw['capabilityFingerprint']))[0]
+            runtime.close(); runtime = None; queue.close()
+            queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                          treedar_node_ids=('main',), reference_enabled=True, per_node_slots=True)
+            runtime = self.runtime(queue, server_factory=lambda *_a, **_k: FakeServer())
+            self.assertEqual(runtime.store.get(job['jobId'])['status'], 'held')
+            self.assertIsNone(runtime.store.next_for_node('cluster'))
+            runtime._readiness_poller._open = opener
+            runtime._readiness_poller.poll_once()
+            self.assertIsNone(runtime.store.next_for_node('cluster'))
+            self.assertEqual(runtime.store.next_for_node('main')['jobId'], second['jobId'])
+            replay = runtime.store.claim(job['jobId'], node_id='cluster', worker_id='worker-cluster',
+                worker_instance_id='instance-cluster', claim_request_id='restart-claim')
+            self.assertEqual(replay['claimToken'], claim['claimToken'])
+            self.assertEqual(replay['status'], 'held')
+        finally:
+            if runtime is not None: runtime.close()
+            queue.close()
 
     def test_disabled_default_preserves_native_queue_without_reference_profile(self):
         handler = make_handler(self.config)
