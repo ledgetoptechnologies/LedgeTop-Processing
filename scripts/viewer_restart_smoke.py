@@ -5,15 +5,20 @@ process on a temporary state directory, and the actual Viewer NodeOdmProvider
 driving one 20-file job. The coordinator is killed without cleanup (SIGKILL /
 TerminateProcess) and restarted on the same state: after the engine commit, after
 upload but before commit, after completion but before any result download, or
-after the first download. Checks that the job then completes, the engines received
+after the first download. With --files 40, it can also kill between the two
+upload batches of 20 (``batch``) or while the second batch is in flight
+(``in-batch``). With --archive-mib, the synthetic engine returns a larger stored
+archive, so the kill can land while the coordinator is fetching it from the
+engine (``fetching``) or while the Viewer is reading it (``streaming``). Checks that the job then completes, the engines received
 exactly one commit, and every download after the restart is byte-identical. Does not contact LAN nodes or modify Viewer. Requires Node.js
 and the trusted current Viewer adapter path:
 
-    python scripts/viewer_restart_smoke.py --viewer-adapter PATH [--kill-at running|uploaded|completed|downloaded]
+    python scripts/viewer_restart_smoke.py --viewer-adapter PATH [--kill-at KILL_POINT] [--files N] [--archive-mib N]
 """
 import argparse
 import hashlib
 from http.server import ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -24,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 
 CHILD = r'''
 import json, sys, threading
@@ -50,27 +56,39 @@ const p=new NodeOdmProvider({endpoint:process.env.SMOKE_ENDPOINT,token:process.e
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function retry(fn,label){const end=Date.now()+60000;for(;;){try{return await fn();}catch(e){if(Date.now()>end)throw Error(label+': '+e.message);await sleep(200);}}}
 (async()=>{
+ const killAt=process.env.SMOKE_KILL_AT,report={uploadRetries:0,streamInterrupted:null};
+ const hold=async stage=>{fs.writeFileSync(process.env.SMOKE_STAGE,stage);if(killAt!==stage)return;
+  const end=Date.now()+90000;while(!fs.existsSync(process.env.SMOKE_RESUME)){if(Date.now()>end)throw Error('restart never signalled');await sleep(50);}};
  const uuid=crypto.randomUUID();
  await p.initialize({uuid,name:'restart-probe',options:{'pc-ept':true}});
- const files=Array.from({length:20},(_,i)=>({relativePath:`image-${i}.jpg`,buffer:Buffer.from(`SYNTHETIC RESTART ${i}`)}));
- await p.upload(uuid,files);
+ const files=Array.from({length:Number(process.env.SMOKE_FILES)},(_,i)=>({relativePath:`image-${i}.jpg`,buffer:Buffer.from(`SYNTHETIC RESTART ${i} `.repeat(4096))}));
+ for(let i=0;i<files.length;i+=20){
+  if(i)await hold('batch');
+  if(i&&killAt==='in-batch')fs.writeFileSync(process.env.SMOKE_STAGE,'in-batch');
+  // A blind retry of the whole batch is what an adapter caller would do after a lost response.
+  await retry(async()=>{try{return await p.upload(uuid,files.slice(i,i+20));}catch(e){report.uploadRetries++;console.error('upload retry',e.message);throw e;}},'upload');
+ }
  fs.writeFileSync(process.env.SMOKE_STAGE,'uploaded');
  await retry(()=>p.commit(uuid),'commit');
  fs.writeFileSync(process.env.SMOKE_STAGE,'committed');
- const hold=async stage=>{fs.writeFileSync(process.env.SMOKE_STAGE,stage);if(process.env.SMOKE_KILL_AT!==stage)return;
-  const end=Date.now()+90000;while(!fs.existsSync(process.env.SMOKE_RESUME)){if(Date.now()>end)throw Error('restart never signalled');await sleep(50);}};
- const end=Date.now()+90000;let last;
+  const end=Date.now()+90000;let last;
  for(;;){let s;try{s=await p.status(uuid);}catch(e){s={status:'unreachable'};}
   if(s.status!==last){console.error('status',s.status);last=s.status;}
   if(s.status==='completed')break;
   assert(!['failed','cancelled','unknown'].includes(s.status),JSON.stringify(s));
   if(Date.now()>end)throw Error('timeout waiting for completion, last '+JSON.stringify(s));await sleep(150);}
  await hold('completed');
+ if(killAt==='streaming'){
+  const reader=(await retry(()=>p.downloadAll(uuid),'download')).body.getReader();
+  await reader.read();
+  await hold('streaming');
+  try{while(!(await reader.read()).done);report.streamInterrupted=false;}catch(e){report.streamInterrupted=true;}
+ }
  const a=Buffer.from(await (await retry(()=>p.downloadAll(uuid),'download')).arrayBuffer());
  await hold('downloaded');
  const b=Buffer.from(await (await retry(()=>p.downloadAll(uuid),'download')).arrayBuffer());
  assert.deepEqual(a,b);
- console.log(JSON.stringify({uuid,bytes:a.length,sha256:crypto.createHash('sha256').update(a).digest('hex')}));
+ console.log(JSON.stringify({uuid,bytes:a.length,sha256:crypto.createHash('sha256').update(a).digest('hex'),...report}));
 })().catch(e=>{console.error(e.message);process.exitCode=1;});
 '''
 
@@ -84,19 +102,49 @@ def free_port():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--viewer-adapter', required=True)
-    parser.add_argument('--kill-at', choices=('running', 'uploaded', 'completed', 'downloaded'), default='running')
+    parser.add_argument('--kill-at', choices=('running', 'uploaded', 'batch', 'in-batch', 'completed', 'fetching',
+                                              'streaming', 'downloaded'), default='running')
+    parser.add_argument('--files', type=int, default=20, help='photos to upload in batches of 20')
+    parser.add_argument('--archive-mib', type=int, default=0, help='synthetic stored archive size; 0 keeps the engine default')
     parser.add_argument('--node', default='node')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo))
     from processing.synthetic_engine import SyntheticEngine, handler_for
+    if args.kill_at in ('batch', 'in-batch') and args.files <= 20:
+        parser.error('batch kill points need --files above 20')
+    if args.kill_at in ('fetching', 'streaming') and args.archive_mib < 16:
+        parser.error('fetching and streaming kill points need --archive-mib of at least 16')
+    fetch_started = threading.Event()
+
+    class LargeArchiveEngine(SyntheticEngine):
+        """Stored (uncompressed) deterministic archive, served slowly when timing a fetch kill."""
+        def download(self, identifier):
+            small, _length = super().download(identifier)
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, 'w', zipfile.ZIP_STORED) as archive:
+                with zipfile.ZipFile(small) as original:
+                    for name in original.namelist():
+                        archive.writestr(name, original.read(name))
+                archive.writestr('synthetic-payload.bin', hashlib.shake_256(identifier.encode()).digest(args.archive_mib * 1024 ** 2))
+            output.seek(0)
+            slow = args.kill_at == 'fetching'
+
+            class Stream:
+                def read(self, size=-1):
+                    fetch_started.set()
+                    if slow:
+                        time.sleep(0.005)
+                    return output.read(size)
+            return Stream(), len(output.getvalue())
 
     servers, children, js = [], [], None
     with tempfile.TemporaryDirectory(prefix='viewer-restart-synthetic-') as directory:
         root = Path(directory)
         try:
             node_token = secrets.token_urlsafe(32)
-            engines = [SyntheticEngine(20, 4), SyntheticEngine(None, 4)]
+            engine_type = LargeArchiveEngine if args.archive_mib else SyntheticEngine
+            engines = [engine_type(args.files, 4), engine_type(None, 4)]
             origins = []
             for engine in engines:
                 server = ThreadingHTTPServer(('127.0.0.1', 0), handler_for(engine, node_token))
@@ -123,14 +171,17 @@ def main():
             env = {**os.environ, 'VIEWER_ADAPTER': str(Path(args.viewer_adapter).resolve()),
                    'SMOKE_ENDPOINT': 'http://127.0.0.1:' + str(spec['port']),
                    'SMOKE_TOKEN': spec['viewer'], 'SMOKE_STAGE': str(stage),
-                   'SMOKE_KILL_AT': args.kill_at, 'SMOKE_RESUME': str(root / 'resume')}
+                   'SMOKE_KILL_AT': args.kill_at, 'SMOKE_RESUME': str(root / 'resume'),
+                   'SMOKE_FILES': str(args.files)}
             js = subprocess.Popen([args.node, str(script)], env=env, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True)
 
             deadline = time.monotonic() + 60
             if args.kill_at == 'uploaded':
                 ready = lambda: stage.exists() and stage.read_text() in ('uploaded', 'committed')
-            elif args.kill_at in ('completed', 'downloaded'):
+            elif args.kill_at == 'fetching':
+                ready = fetch_started.is_set
+            elif args.kill_at in ('batch', 'in-batch', 'completed', 'streaming', 'downloaded'):
                 ready = lambda: stage.exists() and stage.read_text() == args.kill_at
             else:
                 ready = lambda: sum(e.commits for e in engines) >= 1
@@ -152,10 +203,15 @@ def main():
             total_commits = sum(e.commits for e in engines)
             assert total_commits == 1, f'engine commits {total_commits}, expected exactly 1'
             assert all(e.maximum_running <= 1 for e in engines)
+            received = [task['files'] for engine in engines for task in engine.tasks.values()]
+            assert len(received) == 1 and len(received[0]) == args.files, 'engine did not receive every photo exactly once'
+            if args.kill_at == 'streaming':
+                assert result['streamInterrupted'] is True, 'the kill did not interrupt the download stream'
             print(json.dumps({'killAt': args.kill_at, 'killedReturnCode': killed_rc,
                               'engineCommitsAtKill': commits_at_kill, 'engineCommitsTotal': total_commits,
                               'adapterStatusTrail': [l for l in stderr.splitlines() if l.startswith('status ')],
-                              'download': result, 'repeatDownloadIdentical': True, 'syntheticOnly': True},
+                              'download': result, 'repeatDownloadIdentical': True, 'syntheticOnly': True,
+                              'files': args.files, 'archiveMiB': args.archive_mib},
                              sort_keys=True))
             return 0
         except Exception as error:

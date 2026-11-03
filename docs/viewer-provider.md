@@ -109,11 +109,18 @@ engines and the real coordinator code. It needs Node.js and the trusted current
 Viewer source path. It exercises20-file upload batches, global TreeDar exclusion,
 production order, small/main routing, cancellation, duplicate commit, output
 cursors, environment authorization, download/hash equality and retained results.
-`scripts/viewer_restart_smoke.py --viewer-adapter PATH [--kill-at running|uploaded|completed|downloaded]`
-kills the coordinator without cleanup after the engine commit, after upload but
-before commit, after completion but before any result download, or after the
-first download. It restarts the coordinator on the same state and checks for
-exactly one engine commit and byte-identical downloads.
+`scripts/viewer_restart_smoke.py --viewer-adapter PATH [--kill-at POINT] [--files N] [--archive-mib N]`
+kills the coordinator without cleanup and restarts it on the same state. The kill points are:
+
+- after the engine commit, or after upload but before commit;
+- between upload batches, or while a batch is in flight (`--files 40`);
+- after completion, before any result download;
+- while the coordinator fetches a large archive from the engine, or while the
+  Viewer reads it (`--archive-mib 48`);
+- after the first download.
+
+It checks for exactly one engine commit, every photo received exactly once, and
+byte-identical downloads.
 
 Synthetic engine doubles are opt-in and never perform photogrammetry. Their ZIPs
 are explicitly labelled transport fixtures. Passing these checks does not prove
