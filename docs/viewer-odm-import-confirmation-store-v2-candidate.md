@@ -5,6 +5,11 @@ verifier with the durable first-confirmation journal. It uses a separate v2
 table and retains the older candidate table unchanged. It does not migrate,
 reconcile, or assert equivalence between records in the two versions. Neither
 table authorizes cleanup, execution, or publication. No endpoint is mounted.
+Both tables can contain records for the same job/generation/environment; the
+v2 record does not supersede, revoke, or validate the v1 record, and neither
+can be replayed as the other. A future consumer must not choose between them
+or release cleanup merely because one or both rows exist. Migration and any
+supersession semantics require their own authenticated protocol and review.
 
 The journal independently reloads job/generation/environment, prebound Viewer
 task and attempt, issuer pins, result manifest, and signed accepted-copy

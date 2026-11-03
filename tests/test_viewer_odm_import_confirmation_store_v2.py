@@ -7,10 +7,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from processing.viewer_import_confirmation_store import ImportConfirmationStoreHeld
+from processing.viewer_import_confirmation_store import ImportConfirmationStore, ImportConfirmationStoreHeld
 from processing.viewer_odm_import_confirmation_store_v2 import OdmImportConfirmationStoreV2
 from tests.test_viewer_import_confirmation_store import fixture_loader
 from tests.test_viewer_odm_import_confirmation_v2 import OdmImportConfirmationV2Tests
+from tests.test_viewer_import_confirmation import ViewerImportConfirmationTests
 
 
 @unittest.skipUnless(os.name == 'posix' and hasattr(os, 'O_DIRECTORY') and hasattr(os, 'O_NOFOLLOW'),
@@ -100,6 +101,32 @@ class OdmImportDurableV2Tests(unittest.TestCase):
         with patch('processing.viewer_import_confirmation_store._after_commit',side_effect=RuntimeError('lost reply')):
             with self.assertRaises(RuntimeError): self.store.record(self.scope,retained)
         self.assertEqual(OdmImportConfirmationStoreV2(self.path,trusted_loader=fixture_loader).record(self.scope,retained).state,'replayed')
+
+    def test_cross_version_same_scope_no_supersession_or_cross_replay(self):
+        v1=ViewerImportConfirmationTests('test_valid_signature_full_ordered_closure_and_exact_replay')
+        v1.setUp()
+        context=dict(expected=v1.expected,result_manifest=v1.manifest,accepted_envelopes=v1.envelopes,
+                     trusted_import_keys=v1.import_keys,trusted_copy_keys=v1.copy_signer.trusted_keys)
+        with self.store._connect() as db:
+            db.execute('CREATE TABLE trusted_import_v1_fixture(job_id TEXT,generation INTEGER,environment TEXT,payload TEXT)')
+            db.execute('INSERT INTO trusted_import_v1_fixture VALUES(?,?,?,?)',(*self.scope.values(),json.dumps(context)))
+        def v1_loader(db, scope):
+            row=db.execute('SELECT payload FROM trusted_import_v1_fixture WHERE job_id=? AND generation=? AND environment=?',
+                           (scope['jobId'],scope['generation'],scope['environment'])).fetchone()
+            return json.loads(row[0])
+        old=ImportConfirmationStore(self.path,trusted_loader=v1_loader)
+        old_first=old.record(self.scope,v1.confirmation)
+        self.assertIsNone(self.store.load_verified(self.scope))
+        new_first=self.store.record(self.scope,self.fixture.confirmation)
+        self.assertNotEqual(old_first.sha256,new_first.sha256)
+        with self.assertRaises(ImportConfirmationStoreHeld): old.record(self.scope,self.fixture.confirmation)
+        with self.assertRaises(ImportConfirmationStoreHeld): self.store.record(self.scope,v1.confirmation)
+        old=ImportConfirmationStore(self.path,trusted_loader=v1_loader)
+        new=OdmImportConfirmationStoreV2(self.path,trusted_loader=fixture_loader)
+        self.assertEqual(old.record(self.scope,v1.confirmation).state,'replayed')
+        self.assertEqual(new.record(self.scope,self.fixture.confirmation).state,'replayed')
+        self.assertEqual(old.load_verified(self.scope).sha256,old_first.sha256)
+        self.assertEqual(new.load_verified(self.scope).sha256,new_first.sha256)
 
 
 if __name__ == '__main__': unittest.main()
