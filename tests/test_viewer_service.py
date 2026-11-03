@@ -995,6 +995,24 @@ class ViewerServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate([{'name':'x','value':1}], [{'name':'x','type':'int','domain':'unknown domain'}])
 
+    def test_previous_full_catalog_policy_requires_reconciliation(self):
+        with self.assertRaises(Conflict):
+            self.service._check_options([], node_id='cluster', evidence=[], full_evidence=[])
+
+    def test_unrecognized_object_domains_and_invalid_json_fail_closed(self):
+        validate = ViewerService._option_values
+        option = [{'name':'x', 'value':2}]
+        for domain in ({}, {'step':2}, {'min':1, 'exclusiveMax':3},
+                       {'min':None}, {'min':4, 'max':3}, {'min':True}):
+            with self.subTest(domain=domain), self.assertRaises(ValueError):
+                validate(option, [{'name':'x','type':'int','domain':domain}])
+        validate(option, [{'name':'x','type':'int','domain':{'min':1,'max':3}}])
+        json_spec = [{'name':'x','type':'string','domain':'json'}]
+        for value in ('', ' ', 'NaN', '{'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate([{'name':'x','value':value}], json_spec)
+        validate([{'name':'x','value':'{"key":1}'}], json_spec)
+
     def test_inventory_rejects_invalid_caps_and_duplicate_hosts(self):
         from processing.config import parse_node_inventory
         valid = dict(id='n1', physicalHostId='host1', origin='http://192.0.2.1:3000',

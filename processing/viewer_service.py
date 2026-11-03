@@ -222,9 +222,11 @@ class ViewerService:
                         raise ValueError('option outside domain')
                     continue
                 elif domain in ('string', 'json') and kind in ('str', 'string'):
-                    if domain == 'json' and value:
-                        try: json.loads(value)
-                        except (ValueError, TypeError, RecursionError): raise ValueError('invalid JSON option') from None
+                    if domain == 'json':
+                        try:
+                            json.loads(value, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+                        except (ValueError, TypeError, RecursionError):
+                            raise ValueError('invalid JSON option') from None
                     continue
                 else:
                     try: domain = json.loads(domain)
@@ -238,6 +240,10 @@ class ViewerService:
                 if not any(type(value) is type(choice) and value == choice for choice in domain):
                     raise ValueError('option outside domain')
             elif type(domain) is dict:
+                if (not domain or not set(domain).issubset({'min', 'max'})
+                        or any(not finite(bound) for bound in domain.values())
+                        or ('min' in domain and 'max' in domain and domain['min'] > domain['max'])):
+                    raise ValueError('invalid option domain')
                 for key in ('min', 'max'):
                     bound = domain.get(key)
                     if bound is not None:
@@ -249,6 +255,8 @@ class ViewerService:
                 raise ValueError('invalid option domain')
 
     def _check_options(self, options, *, node_id=None, evidence=None, full_evidence=None, definitions=None):
+        if node_id is not None and full_evidence is not None:
+            raise Conflict('full catalog policy requires explicit task reconciliation')
         # A legacy task without saved explicit-option definitions retains the
         # conservative complete-fleet check.  Existing full-catalog evidence,
         # where present, remains integrity checked by the task store, but is
