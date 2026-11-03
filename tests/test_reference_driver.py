@@ -888,6 +888,24 @@ class ReferenceDriverTests(unittest.TestCase):
                           trusted_viewer_receipt_keys=signer.trusted_keys)
         self.assertEqual(self.driver.step()['state'], 'completed')
 
+    def test_completed_legacy_job_with_missing_ledger_object_is_held(self):
+        job = self.submit(); self.advance(job, 'awaiting_acceptance')
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        receipt = dict(schemaVersion=1, receiptId='missing-proof', storageReceiptId='missing-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']],
+            acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+        self.store.accept(job['jobId'], receipt)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        reservation = json.loads(self.worker._row(job['jobId'])['identity'])['reservation']
+        with self.ledger._transaction() as db:
+            db.execute('DELETE FROM objects WHERE reservation=?', (reservation,))
+        self.worker.viewer_receipt_keys = SyntheticViewerSigner().trusted_keys
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'completed_result_ledger_unavailable'})
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
+
 
 class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
     # Reuse durable coordinator/transport helpers, while replacing the patched
