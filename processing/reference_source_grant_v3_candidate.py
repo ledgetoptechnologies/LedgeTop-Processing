@@ -38,7 +38,7 @@ def _authority(authority):
         _id(authority[field], field)
 
 
-def validate(grant, *, trusted_state, now):
+def validate(grant, *, trusted_state, operational_limits, now):
     """Compare claims to independent state; no authentication is performed."""
     p._closed(grant, ('schemaVersion','protocol','accounting','authority','policy','expiresAt','bearer','nonce','objects'), 'source grant')
     if type(grant['schemaVersion']) is not int or grant['schemaVersion'] != 3 or grant['protocol'] != PROTOCOL:
@@ -48,32 +48,52 @@ def validate(grant, *, trusted_state, now):
         raise ValueError('grant expired or invalid')
     for field in ('bearer','nonce'):
         _id(grant[field], field)
-    if type(grant['objects']) is not list or not grant['objects'] or len(grant['objects']) > p.MAX_OBJECTS:
-        raise ValueError('invalid object closure')
-    for obj in grant['objects']:
-        p._closed(obj, ('id','byteSize','sha256'), 'source object')
-        _id(obj['id'], 'object ID')
-        p._integer(obj['byteSize'], 'object size')
-        p._hash(obj['sha256'], 'object digest')
-    if len({o['id'] for o in grant['objects']}) != len(grant['objects']):
-        raise ValueError('duplicate source object')
+    for objects in (grant['objects'], trusted_state['objects']):
+        if type(objects) is not list or not objects or len(objects) > p.MAX_OBJECTS:
+            raise ValueError('invalid object closure')
+        for obj in objects:
+            p._closed(obj, ('id','byteSize','sha256'), 'source object')
+            _id(obj['id'], 'object ID')
+            p._integer(obj['byteSize'], 'object size')
+            p._hash(obj['sha256'], 'object digest')
+        if len({o['id'] for o in objects}) != len(objects):
+            raise ValueError('duplicate source object')
+    total_bytes = sum(o['byteSize'] for o in grant['objects'])
+    p._integer(total_bytes, 'total source bytes')
+    p._closed(operational_limits, (*POLICY, 'totalSourceBytes'), 'operational limits')
+    for field in (*POLICY, 'totalSourceBytes'):
+        p._integer(operational_limits[field], field)
+    if total_bytes > operational_limits['totalSourceBytes']:
+        raise ValueError('source exceeds operational limit')
+    if any(grant['policy'][field] > operational_limits[field] for field in POLICY):
+        raise ValueError('policy exceeds operational limit')
+    if grant['policy']['byteBudget'] > total_bytes * grant['policy']['attemptBudget']:
+        raise ValueError('byte budget exceeds source attempt relationship')
     for value in (grant, trusted_state):
         _account(value['accounting'])
         _authority(value['authority'])
         p._closed(value['policy'], POLICY, 'source policy')
         for field in POLICY:
             p._integer(value['policy'][field], field)
-    if any(grant[key] != trusted_state[key] for key in ('accounting','authority','policy','objects')):
+    if any(p.canonical_json(grant[key]) != p.canonical_json(trusted_state[key]) for key in ('accounting','authority','policy','objects')):
         raise ValueError('source grant does not match independent trusted state')
     return hashlib.sha256(DOMAIN + p.canonical_json(grant['accounting'])).hexdigest()
 
 
 class SyntheticRangeLedger:
     """SQLite test model; exact replay is metadata only and serves no bytes."""
-    def __init__(self, path):
+    def __init__(self, path, *, operational_limits):
+        self.operational_limits = operational_limits
         self.db = sqlite3.connect(path, isolation_level=None, timeout=5)
         self.db.execute('PRAGMA foreign_keys=ON')
+        existing = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounting'").fetchone()
+        lineage = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lineage'").fetchone()
+        if existing and not lineage:
+            self.db.close()
+            raise ValueError('legacy ledger lacks durable budget lineage')
         self.db.executescript('''
+          CREATE TABLE IF NOT EXISTS lineage(environment TEXT NOT NULL, job_id TEXT NOT NULL,
+            generation INTEGER NOT NULL, identity TEXT NOT NULL, PRIMARY KEY(environment,job_id,generation));
           CREATE TABLE IF NOT EXISTS accounting(identity TEXT PRIMARY KEY, policy TEXT NOT NULL, objects TEXT NOT NULL,
             requests INTEGER NOT NULL, bytes INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS attempts(identity TEXT NOT NULL REFERENCES accounting(identity), attempt_id TEXT NOT NULL, PRIMARY KEY(identity,attempt_id));
@@ -86,7 +106,7 @@ class SyntheticRangeLedger:
         self.db.close()
 
     def charge(self, grant, *, trusted_state, now, request_id, attempt_id, object_id, offset, length):
-        identity = validate(grant, trusted_state=trusted_state, now=now)
+        identity = validate(grant, trusted_state=trusted_state, operational_limits=self.operational_limits, now=now)
         for value, name in ((request_id,'request ID'),(attempt_id,'attempt ID'),(object_id,'object ID')):
             _id(value, name)
         p._integer(offset, 'offset', allow_zero=True)
@@ -100,6 +120,13 @@ class SyntheticRangeLedger:
         objects = p.canonical_json(grant['objects']).decode('utf-8')
         self.db.execute('BEGIN IMMEDIATE')
         try:
+            account = grant['accounting']
+            parent = (account['environment'],account['jobId'],account['generation'])
+            lineage = self.db.execute('SELECT identity FROM lineage WHERE environment=? AND job_id=? AND generation=?', parent).fetchone()
+            if lineage is not None and lineage[0] != identity:
+                raise ValueError('successor identity requires lineage migration')
+            if lineage is None:
+                self.db.execute('INSERT INTO lineage VALUES(?,?,?,?)', (*parent,identity))
             row = self.db.execute('SELECT policy,objects,requests,bytes FROM accounting WHERE identity=?', (identity,)).fetchone()
             if row is None:
                 self.db.execute('INSERT INTO accounting VALUES(?,?,?,0,0)', (identity,policy,objects))

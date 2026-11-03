@@ -36,3 +36,14 @@ nonce/bearer authentication, persist epoch authority, and reconcile legacy
 ledger state without resetting budgets. Before implementation, inventory v2
 expiry, bearer, nonce, object closure, attempt, transfer/source and policy
 semantics, and agree on an explicit shared-version contract and test vectors.
+
+A durable synthetic parent lineage keyed by environment/job/generation now
+refuses any different accounting identity, including replacement reservation,
+source version or Viewer attempt. This is deliberately a hold, not migration;
+existing unlineaged ledgers are rejected. Atomic migration, full schema
+validation and historical reconciliation remain unimplemented. Caller snapshot
+comparison occurs before the SQLite write transaction; it is NOT an atomic
+epoch fence, including if authority changes between check and charge. No
+production authorization or transfer may rely on this model. Independently
+provided synthetic operational caps bound source and policy counts; typed
+object closure checks and source/attempt byte-budget relationship are enforced.
