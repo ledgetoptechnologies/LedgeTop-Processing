@@ -1,0 +1,46 @@
+"""Synthetic no-GCP single-DB prototype; no auth or execution authority."""
+import io,json,sqlite3
+from . import reference_protocol as p
+from . import viewer_dual_digest_binding_candidate as binding
+from . import paged_frame_receiver_candidate as frames
+from .viewer_import_confirmation_store import _preflight_stored_json
+from .viewer_paged_frame_candidate import _pairs
+
+class NoGcpHeld(ValueError):pass
+
+def stage(store,submission_id,statement,*,principal,environment,configured_authority,synthetic_viewer_provenance,synthetic_bundle,_fault=None):
+ try:
+  p._closed(synthetic_bundle,('binding','bindingSha256','source','selection','processingClosure','processingPages'),'synthetic bundle')
+  if any(statement[k] is not None for k in binding.PROVENANCE_FIELDS if k.startswith(('gcpEvidence','gcpFile'))):raise ValueError()
+  src,sel=synthetic_bundle['source'],synthetic_bundle['selection']
+  if type(src) is not bytes or type(sel) is not bytes or not 0<len(src)<=12*1024*1024 or not 0<len(sel)<=12*1024*1024:raise ValueError()
+  trusted=synthetic_bundle['binding'];expected=dict(datasetId=statement['viewerDatasetId'],datasetManifestSha256=statement['viewerDatasetManifestSha256'],principalId=principal,environment=environment,authorityId=configured_authority,viewerTaskId=statement['viewerTaskId'],viewerAttemptId=statement['viewerAttemptId'],pipelineDigest=statement['pipelineDigest'],sourcePageHashes=statement['sourcePageHashes'],sourceCount=statement['sourceCount'],selectedPageHashes=statement['selectedPageHashes'],selectedCount=statement['selectedCount'],inputManifestSha256=statement['viewerInputManifestSha256'])
+  if type(trusted) is not dict or any(trusted.get(k)!=v for k,v in expected.items()):raise ValueError()
+  # Deterministic Viewer ids; page/frame content validation happens below.
+  for line in sel.splitlines():
+   if len(line)>262144:raise ValueError()
+   _preflight_stored_json(line);f=json.loads(line,object_pairs_hook=_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+   for obj in f['records']:
+    if obj.get('type')!='dataset_file' or obj.get('pageObjectId')!=obj.get('datasetFileId'):raise ValueError()
+  with store.queue._db() as db:
+   db.execute('BEGIN IMMEDIATE')
+   result=binding._stage_owned(db,store,submission_id,statement,principal=principal,environment=environment,configured_authority=configured_authority,synthetic_viewer_provenance=synthetic_viewer_provenance)
+   if result is None:return None
+   if _fault:_fault('binding')
+   row=store._row(db,statement['jobId']);transport=json.loads(row['input_json'])['manifest']['objects']
+   objects=[o for page in synthetic_bundle['processingPages'] for o in page['body']['objects']]
+   if transport!=objects:raise ValueError()
+   stage_id=statement['jobId']
+   if not result['created']:
+    for kind,raw in (('source',src),('selected',sel)):
+     existing=b''.join(bytes(r[0])+b'\n' for r in db.execute('SELECT wire FROM candidate_frame_pages WHERE stage_id=? AND kind=? ORDER BY ordinal',(stage_id,kind)))
+     if raw!=existing:raise ValueError()
+   def on_page(kind,index):
+    if _fault:_fault(kind)
+   r=frames._stage_owned(db,stage_id,trusted_binding=trusted,expected_binding_sha256=synthetic_bundle['bindingSha256'],source_stream=io.BytesIO(src),selected_stream=io.BytesIO(sel),processing_closure=synthetic_bundle['processingClosure'],processing_pages=synthetic_bundle['processingPages'],_fault=on_page)
+   if _fault:_fault('verified')
+   for kind,prefix in (('source','source'),('selected','selected')):
+    sizes=[r[0] for r in db.execute('SELECT length(wire) FROM candidate_frame_pages WHERE stage_id=? AND kind=? ORDER BY ordinal',(stage_id,kind))]
+    if sizes!=statement[prefix+'PageBytes']:raise ValueError()
+   return {'state':'held_synthetic_no_gcp','created':result['created']}
+ except (ValueError,TypeError,KeyError,sqlite3.Error,UnicodeError,RuntimeError,AttributeError):raise NoGcpHeld('synthetic_no_gcp_unavailable') from None

@@ -62,3 +62,12 @@ verified raw source custody, JS correspondence provenance, revocation/fencing,
 old-binary downgrade protection or production schema migration. It always
 returns held. Process reopen tests are orderly and do not demonstrate power
 failure or host crash recovery.
+
+The `viewer_no_gcp_atomic_candidate` is a separate unmounted synthetic
+prototype. It binds finalized no-GCP Viewer source/selected frames to the
+prepared Processing transport objects and distinct dataset, input, and transport
+hashes in one coordinator-owned SQLite transaction. It uses test-injected
+provenance, buffered synthetic inputs and candidate tables; it supplies no
+signature, network authentication, current epoch, trusted source loader or
+production admission. Its held result cannot authorize processing or cleanup.
+A killed child test checks SQLite process recovery, not hardware power loss.
