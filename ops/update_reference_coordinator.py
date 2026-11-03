@@ -231,7 +231,7 @@ def volume_census(root, *, uid=10001, offline=False):
             if (name.startswith(('reference_','viewer_')) or name=='owned_maintenance_schedules') and tables[name]['count']!=0 and name not in retained_viewer:
                 raise AssertionError('nonempty guarded table')
         if 'viewer_tasks' in names:
-            if db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'").fetchone()[0]:
+            if db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage IN ('succeeded','failed','cancelled'))").fetchone()[0]:
                 raise AssertionError('nonterminal Viewer task')
             for name in sorted((retained_viewer & names) - {'viewer_tasks'}):
                 if db.execute('SELECT COUNT(*) FROM "'+name+'" WHERE uuid NOT IN (SELECT uuid FROM viewer_tasks)').fetchone()[0]:
@@ -356,14 +356,12 @@ counts['fullCensusSha256']=hashlib.sha256(json.dumps(before,sort_keys=True,separ
 print(json.dumps(counts))
 '''
     script=legacy.BACKUP.replace('print(json.dumps(counts))',extra)
-    # The historical installer requires empty Viewer tables. Here the census
-    # above already requires every retained task to be terminal and binds it.
-    empty_viewer="""  if 'viewer_tasks' in tables:
-   assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0]==0
-"""
-    if script.count(empty_viewer)!=1:raise Stopped('reviewed_backup_script_changed')
-    return explicit_guard_source(script.replace(empty_viewer,"""  if 'viewer_tasks' in tables:assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'").fetchone()[0]==0
-"""))
+    # The reviewed backup keeps only terminal Viewer tasks, the same rule as the
+    # census above; refuse a backup script that no longer states it.
+    terminal_viewer=("  if 'viewer_tasks' in tables:\n"
+        "   assert db.execute(\"SELECT COUNT(*) FROM viewer_tasks WHERE "+legacy.NOT_TERMINAL_VIEWER_TASK+"\").fetchone()[0]==0\n")
+    if script.count(terminal_viewer)!=1:raise Stopped('reviewed_backup_script_changed')
+    return explicit_guard_source(script)
 
 
 def copy_backup(transport,root,state):

@@ -2,6 +2,7 @@
 from contextlib import ExitStack, redirect_stdout
 import copy
 import importlib
+import inspect
 import io
 import json
 import os
@@ -117,6 +118,8 @@ class ReferenceInstallationTests(unittest.TestCase):
                 INSERT INTO coordinator_identity VALUES(1,'7131882e-38ce-4d3e-99cc-4ba5a94d2ee8');
                 CREATE TABLE viewer_tasks(removed INTEGER NOT NULL, phase TEXT NOT NULL, stage TEXT NOT NULL);
                 INSERT INTO viewer_tasks VALUES(0,'complete','succeeded');
+                INSERT INTO viewer_tasks VALUES(0,'complete','failed');
+                INSERT INTO viewer_tasks VALUES(1,'complete','cancelled');
             """)
 
         original_lstat, original_stat, original_fstat = Path.lstat, Path.stat, os.fstat
@@ -138,11 +141,23 @@ class ReferenceInstallationTests(unittest.TestCase):
                 patch("os.fstat", mapped_fstat), redirect_stdout(output):
             exec(compile(script, "<synthetic-viewer-backup>", "exec"), {"__name__": "__main__"})
         census = json.loads(output.getvalue())
-        self.assertEqual(census["databaseHistory"]["nativeViewerTasks"], 1)
+        self.assertEqual(census["databaseHistory"]["nativeViewerTasks"], 3)  # failed and cancelled are retained too
         self.assertEqual((target / "viewer-tasks" / "synthetic-task" / "retained.bin").read_bytes(),
             b"synthetic retained artifact")
         self.assertEqual((target / 'viewer-tasks' / 'synthetic-task' / 'large-synthetic.bin').stat().st_size,large.stat().st_size)
         self.assertEqual(census["bytes"], database.stat().st_size + len(b"synthetic retained artifact") + large.stat().st_size)
+
+    def test_every_viewer_retention_path_states_the_same_terminal_rule(self):
+        from ops import update_reference_coordinator as update
+        rule = self.install.NOT_TERMINAL_VIEWER_TASK
+        self.assertEqual(rule, "NOT (phase='complete' AND stage IN ('succeeded','failed','cancelled'))")
+        for name, source in (("BACKUP", self.install.BACKUP),
+                             ("OFFLINE_ROLLBACK_CENSUS", self.install.OFFLINE_ROLLBACK_CENSUS),
+                             ("volume_census", inspect.getsource(update.volume_census)),
+                             ("update backup_script", update.backup_script())):
+            with self.subTest(path=name):
+                self.assertIn(rule, source)
+                self.assertNotIn("stage='succeeded')", source)  # no succeeded-only variant remains
 
     def migration_fixture(self):
         """Real maintenance CAS state, synthetic Docker control/HTTP transport."""
