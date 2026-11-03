@@ -2,7 +2,7 @@ import json, subprocess, unittest, io, base64, hashlib, os
 from pathlib import Path
 from processing import gcp_evidence_stream_candidate as dec
 
-VIEWER=Path(os.environ.get('VIEWER_PAIRED_ROOT', r'C:\Users\fstor\.codex\worktrees\viewer-accepted-copy-ingest-wiring-20261103'))
+VIEWER=Path(os.environ.get('VIEWER_PAIRED_ROOT', r'C:\Users\fstor\.codex\worktrees\viewer-gcp-file-fixture-20261103'))
 REV='4ed7dcd566380c3c0cd7f03a765ee1badf2004d5'
 
 class ViewerFilePair(unittest.TestCase):
