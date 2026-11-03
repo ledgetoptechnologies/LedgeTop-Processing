@@ -222,6 +222,28 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.write_config()
         with self.assertRaises(RuntimeConfigurationError): self.settings()
 
+    def test_viewer_target_secret_cannot_reuse_inbound_legacy_credential(self):
+        signer = SyntheticViewerSigner()
+        secret_path = self.root / 'viewer-service-key.txt'
+        staged_token = base64.urlsafe_b64encode(b'z' * 32).decode().rstrip('=')
+        for schema in (4, 5):
+            self.value.update(schemaVersion=schema, viewerReceiptKeys=signer.trusted_keys,
+                viewerAcceptance={'production': {'origin': 'https://viewer.example',
+                    'keyId': 'viewer-service-v1', 'secretFile': str(secret_path)}})
+            if schema == 5:
+                self.value['stagedAckPrincipals'] = [
+                    {'environment': 'staging', 'principalId': 'viewer-a', 'bearer': staged_token}]
+            for secret in (self.config.api_token, self.config.viewer_token):
+                with self.subTest(schema=schema, legacy_kind='api' if secret == self.config.api_token else 'viewer'):
+                    secret_path.write_text(secret)
+                    if os.name != 'nt': secret_path.chmod(0o600)
+                    self.write_config()
+                    with self.assertRaises(RuntimeConfigurationError): self.settings()
+            secret_path.write_text('distinct-synthetic-viewer-service-key-material')
+            if os.name != 'nt': secret_path.chmod(0o600)
+            self.write_config()
+            self.assertIn('production', self.settings().viewer_acceptance_targets)
+
     def test_schema4_rejects_untrusted_or_incomplete_viewer_targets(self):
         signer = SyntheticViewerSigner()
         secret_path = self.root / 'viewer-service-key.txt'

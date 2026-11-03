@@ -210,7 +210,7 @@ def load_reference_settings(path, config):
                 except UnicodeError:
                     raise RuntimeConfigurationError("invalid Viewer service key file") from None
                 if (not 32 <= len(secret) <= 4096 or any(ord(char) < 33 or ord(char) > 126 for char in secret)
-                        or secret in credentials):
+                        or secret in credentials or secret in legacy):
                     raise RuntimeConfigurationError("invalid Viewer service key file")
                 credentials.append(secret)
                 target_secrets.append(secret)

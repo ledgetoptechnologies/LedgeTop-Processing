@@ -415,6 +415,110 @@ class ReferenceDriverTests(unittest.TestCase):
         with NodeGate('engine') as gate:
             self.assertIsNone(gate.snapshot()['reservation'])
 
+    def test_guarded_failed_and_cancelled_status_keep_gate_and_scratch_unmodified(self):
+        # NodeODM's status alone is not independent proof that the physical
+        # process stopped. In particular, code 50 must not free the node.
+        for code in (30, 50):
+            with self.subTest(code=code):
+                # Use a fresh real durable fixture per status so each retains
+                # its own bound gate and journal.
+                case = ReferenceDriverTests(methodName='runTest')
+                case.setUp()
+                try:
+                    case.worker.host_mutation_journal = True
+                    case.transport.code = code
+                    original = case.transport.action
+                    def action(kind, identifier):
+                        original(kind, identifier)
+                        return {'uuid': identifier}
+                    with patch.object(case.native, 'action', side_effect=action):
+                        job = case.submit()
+                        case.advance(job, 'executing')
+                        with case.driver._db() as db:
+                            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+                        reservation = data['reservation']['reservationId']
+                        with case.ledger._transaction() as db:
+                            before = dict(case.ledger._reservation(db, reservation))
+                        with NodeGate('engine') as gate:
+                            gate_before = gate.snapshot()
+                        result = case.driver.step()
+                        self.assertEqual(result, {'state': 'held', 'reason': 'guarded_terminal_stop_unverified'})
+                        with case.ledger._transaction() as db:
+                            self.assertEqual(dict(case.ledger._reservation(db, reservation)), before)
+                            self.assertEqual(tuple(db.execute('SELECT job,generation,reason FROM cleanup_holds WHERE reservation=?', (reservation,)).fetchone()),
+                                (job['jobId'], data['claim']['generation'], 'guarded_failure_unverified'))
+                        with NodeGate('engine') as gate:
+                            self.assertEqual(gate.snapshot(), gate_before)
+                        with case.failures._transaction() as db:
+                            self.assertEqual(db.execute('SELECT COUNT(*) FROM completions').fetchone()[0], 0)
+                        # Older versions may already have saved a failure stage.
+                        # That recovery path must not mark scratch terminal either.
+                        with self.assertRaisesRegex(DriverHeld, 'guarded_terminal_stop_unverified'):
+                            case.driver._prepare_failure(job['jobId'], data)
+                        with case.ledger._transaction() as db:
+                            self.assertEqual(dict(case.ledger._reservation(db, reservation)), before)
+                        case.driver = case.make_driver()
+                        self.assertEqual(case.driver.step()['reason'], 'guarded_terminal_stop_unverified')
+                finally:
+                    case.tearDown()
+
+    def test_legacy_guarded_failure_stages_fence_background_and_cleanup_after_restart(self):
+        self.worker.host_mutation_journal = True
+        original = self.transport.action
+        def action(kind, identifier):
+            original(kind, identifier)
+            return {'uuid': identifier}
+        with patch.object(self.native, 'action', side_effect=action):
+            job = self.submit()
+            self.advance(job, 'executing')
+            with self.driver._db() as db:
+                data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+            # Model persisted pre-fix records without pretending that any
+            # coordinator receipt or physical process stop has occurred.
+            data['failure'] = {'terminalState': 'cancelled'}
+            with NodeGate('engine') as gate:
+                before = gate.snapshot()
+            for stage in ('failure_delivering', 'awaiting_failure_acceptance', 'completed'):
+                with self.subTest(stage=stage):
+                    self.driver._save(job['jobId'], stage, data)
+                    self.driver = self.make_driver()
+                    with patch.object(self.driver, '_request') as request, \
+                         patch.object(self.driver, '_background') as background, \
+                         patch.object(self.ledger, 'cleanup_candidates') as cleanup:
+                        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'guarded_terminal_stop_unverified'})
+                        request.assert_not_called()
+                        background.assert_not_called()
+                        cleanup.assert_not_called()
+                    with self.driver._db() as db:
+                        self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0], stage)
+                    with NodeGate('engine') as gate:
+                        self.assertEqual(gate.snapshot(), before)
+            for stage in ('failure_delivering', 'awaiting_failure_acceptance', 'completed'):
+                for payload in ('missing', 'null'):
+                    with self.subTest(stage=stage, payload=payload):
+                        altered = dict(data)
+                        if payload == 'missing':
+                            altered.pop('failure')
+                        else:
+                            altered['failure'] = None
+                        # A completed legacy failure is identified by the
+                        # worker phase even if its failure payload is gone.
+                        self.worker._phase(job['jobId'], 'failure_delivered')
+                        self.driver._save(job['jobId'], stage, altered)
+                        self.driver = self.make_driver()
+                        with patch.object(self.driver, '_background') as background, \
+                             patch.object(self.ledger, 'cleanup_candidates') as cleanup:
+                            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'guarded_terminal_stop_unverified'})
+                            background.assert_not_called()
+                            cleanup.assert_not_called()
+                        with NodeGate('engine') as gate:
+                            self.assertEqual(gate.snapshot(), before)
+            # A successful completed guarded execution is not treated as a
+            # historical failure solely because its payload lacks that field.
+            self.worker._phase(job['jobId'], 'delivered')
+            self.driver._save(job['jobId'], 'completed', altered)
+            self.driver._hold_legacy_guarded_failures()
+
     def test_unrelated_success_ack_does_not_advance_current_job(self):
         job = self.submit()
         self.advance(job, 'delivering')

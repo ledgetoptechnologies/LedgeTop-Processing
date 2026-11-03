@@ -134,6 +134,9 @@ class ScratchLedger:
                   reservation TEXT NOT NULL, object TEXT NOT NULL, token TEXT NOT NULL UNIQUE,
                   expires REAL NOT NULL, state TEXT NOT NULL,
                   PRIMARY KEY(reservation,object));
+                CREATE TABLE IF NOT EXISTS cleanup_holds (
+                  reservation TEXT PRIMARY KEY, job TEXT NOT NULL,
+                  generation INTEGER NOT NULL, reason TEXT NOT NULL);
             """
             for statement in schema.split(";"):
                 if statement.strip():
@@ -599,13 +602,53 @@ class ScratchLedger:
                        "DO UPDATE SET state=excluded.state", (reservation_id, object_id, reference, kind, state))
 
     def _eligible(self, db, now):
+        if db.execute("SELECT 1 FROM metadata WHERE key='cleanup_census_hold'").fetchone():
+            raise PolicyConflict('cleanup census requires reconciliation')
         return db.execute("""SELECT o.*,r.generation FROM objects o JOIN reservations r
             ON r.id=o.reservation WHERE r.state='terminal' AND o.accepted IS NOT NULL
             AND o.accepted_copy_verified=1
             AND o.cleaned IS NULL AND MAX(o.accepted,r.terminal_at)<=?
+            AND NOT EXISTS(SELECT 1 FROM cleanup_holds h WHERE h.reservation=o.reservation)
             AND NOT EXISTS(SELECT 1 FROM cleanup_intents c WHERE c.reservation=o.reservation AND c.object=o.id)
             AND NOT EXISTS(SELECT 1 FROM pins p WHERE p.reservation=o.reservation
               AND p.object=o.id AND p.state!='released') ORDER BY o.reservation,o.id""", (now-self.grace,))
+
+    def arm_cleanup_census(self):
+        """Durably close current cleanup entry points before an offline census.
+
+        An existing intent may already be executing outside SQLite; report it
+        without pretending the hold can recall that executor. Older software
+        does not honor this marker and must be excluded separately. No automatic
+        release is provided until a complete census contract is implemented.
+        """
+        with self._transaction() as db:
+            db.execute("INSERT OR IGNORE INTO metadata VALUES('cleanup_census_hold','pending')")
+            marker = db.execute("SELECT value FROM metadata WHERE key='cleanup_census_hold'").fetchone()
+            if marker is None or marker[0] != 'pending':
+                raise PolicyConflict('cleanup census marker invalid')
+            active = db.execute("SELECT COUNT(*) FROM cleanup_intents WHERE state IS NOT 'cleaned'").fetchone()[0]
+            return {'state': 'held', 'existing_intents': active}
+
+    def hold_guarded_failure_cleanup(self, reservation_id, *, job_id, generation):
+        """Persist a no-cleanup fence for a guarded, unverified failure.
+
+        Existing intents may already be executing outside SQLite. Do not claim
+        that adding a hold can stop them; require offline reconciliation.
+        There is deliberately no automatic hold-release operation.
+        """
+        _integer(generation, 'generation', 1)
+        with self._transaction() as db:
+            row = self._reservation(db, reservation_id)
+            if (row['job'], row['generation']) != (job_id, generation):
+                raise PolicyConflict('cleanup hold reservation binding changed')
+            if db.execute('SELECT 1 FROM cleanup_intents WHERE reservation=? LIMIT 1', (reservation_id,)).fetchone():
+                raise PolicyConflict('existing cleanup intent requires reconciliation')
+            previous = db.execute('SELECT job,generation,reason FROM cleanup_holds WHERE reservation=?', (reservation_id,)).fetchone()
+            expected = (job_id, generation, 'guarded_failure_unverified')
+            if previous is not None and tuple(previous) != expected:
+                raise PolicyConflict('cleanup hold identity changed')
+            db.execute('INSERT OR IGNORE INTO cleanup_holds VALUES(?,?,?,?)',
+                       (reservation_id, *expected))
 
     def cleanup_candidates(self, *, max_count=100, max_bytes=1024**3):
         _integer(max_count, "max count"); _integer(max_bytes, "max bytes")
@@ -646,6 +689,10 @@ class ScratchLedger:
         """Recover a persisted fence; expired leases report uncertainty and retain it."""
         with self._transaction() as db:
             now = self._now(db)
+            if db.execute("SELECT 1 FROM metadata WHERE key='cleanup_census_hold'").fetchone():
+                raise PolicyConflict('cleanup census requires reconciliation')
+            if db.execute('SELECT 1 FROM cleanup_holds WHERE reservation=?', (reservation_id,)).fetchone():
+                raise PolicyConflict('cleanup is held for reconciliation')
             row = db.execute("""SELECT c.*,c.token AS intent_token,c.expires AS lease_expires,
                              o.path,o.sha,o.bytes,r.generation FROM cleanup_intents c
                              JOIN objects o ON o.reservation=c.reservation AND o.id=c.object
@@ -671,6 +718,8 @@ class ScratchLedger:
         if executor_attested is not True:
             raise PolicyConflict("cleanup executor attestation required")
         with self._transaction() as db:
+            if db.execute("SELECT 1 FROM metadata WHERE key='cleanup_census_hold'").fetchone():
+                raise PolicyConflict('cleanup census requires reconciliation')
             row = db.execute("SELECT o.*,r.generation FROM objects o JOIN reservations r "
                 "ON r.id=o.reservation WHERE o.reservation=? AND o.id=?", (reservation_id, object_id)).fetchone()
             if row is None or row["generation"] != generation or row["sha"] != sha256:
