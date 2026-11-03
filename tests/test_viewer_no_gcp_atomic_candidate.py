@@ -152,3 +152,20 @@ class NoGcpAtomic(unittest.TestCase):
   with self.queue._db() as db:db.execute("DELETE FROM candidate_frame_pages WHERE stage_id=? AND kind='source'",(self.statement['jobId'],))
   with self.assertRaises(NoGcpHeld):self.call()
   self.assertEqual(self.counts()[:2],(1,1))
+
+ def test_coherent_pair_missing_prepared_parent_holds(self):
+  self.assertTrue(self.call()['created'])
+  with self.queue._db() as db:db.execute('DELETE FROM reference_jobs WHERE job_id=?',(self.statement['jobId'],))
+  with self.assertRaises(NoGcpHeld):self.call()
+  self.assertEqual(self.counts(),(1,1,3))
+ def test_coherent_pair_missing_owner_holds(self):
+  self.assertTrue(self.call()['created'])
+  with self.queue._db() as db:db.execute('DELETE FROM reference_viewer_submission_owners WHERE job_id=?',(self.statement['jobId'],))
+  with self.assertRaises(NoGcpHeld):self.call()
+  self.assertEqual(self.counts(),(1,1,3))
+
+ def test_coherent_pair_owner_mismatch_holds(self):
+  self.assertTrue(self.call()['created'])
+  with self.queue._db() as db:db.execute("UPDATE reference_viewer_submission_owners SET environment='production' WHERE job_id=?",(self.statement['jobId'],))
+  with self.assertRaises(NoGcpHeld):self.call()
+  self.assertEqual(self.counts(),(1,1,3))

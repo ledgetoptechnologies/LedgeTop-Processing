@@ -21,6 +21,22 @@ def _history(db):
   "SELECT 1 FROM synthetic_viewer_dataset_transport_v1 b LEFT JOIN candidate_frame_receipts r ON r.stage_id=b.job_id WHERE r.stage_id IS NULL LIMIT 1",
   "SELECT 1 FROM candidate_frame_receipts r WHERE NOT EXISTS (SELECT 1 FROM candidate_frame_pages p WHERE p.stage_id=r.stage_id AND p.kind='source') OR NOT EXISTS (SELECT 1 FROM candidate_frame_pages p WHERE p.stage_id=r.stage_id AND p.kind='selected') OR NOT EXISTS (SELECT 1 FROM candidate_frame_pages p WHERE p.stage_id=r.stage_id AND p.kind='processing') LIMIT 1"):
   if db.execute(query).fetchone():raise ValueError('unmatched candidate history')
+ # Require each matched pair to retain the prepared job, queue parent,
+ # scoped owner, envelope and policy. This checks relational provenance only;
+ # it does not validate other jobs' signed payloads or current authorization.
+ if db.execute('SELECT 1 FROM synthetic_viewer_dataset_transport_v1 LIMIT 1').fetchone():
+  query="""SELECT 1 FROM synthetic_viewer_dataset_transport_v1 b
+   LEFT JOIN reference_jobs r ON r.job_id=b.job_id
+   LEFT JOIN jobs j ON j.id=b.job_id
+   LEFT JOIN reference_viewer_submission_owners o ON o.job_id=b.job_id
+   LEFT JOIN reference_viewer_envelopes_v2 e ON e.job_id=b.job_id
+   LEFT JOIN reference_viewer_v3_policy v ON v.job_id=b.job_id
+   WHERE r.job_id IS NULL OR j.id IS NULL OR o.job_id IS NULL OR e.job_id IS NULL OR v.job_id IS NULL
+      OR o.protocol IS NOT 'ltds-viewer-prepared-envelope-jcs-v3'
+      OR o.environment IS NOT r.environment OR o.environment IS NOT j.environment
+      OR o.request_digest IS NOT r.request_digest OR e.principal_id IS NOT o.principal_id
+      OR e.environment IS NOT o.environment LIMIT 1"""
+  if db.execute(query).fetchone():raise ValueError('missing prepared parent or owner')
 
 def initialize(db):
  """Create both synthetic namespaces together or reject partial history."""
