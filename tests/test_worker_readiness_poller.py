@@ -66,6 +66,20 @@ class WorkerReadinessPollerTests(unittest.TestCase):
                 bearer='synthetic-read-token-0001', workerId='worker')},
                 NodeReadiness(('different',)), ssl_context=ssl.create_default_context())
 
+    def test_unexpected_poller_failure_invalidates_observations(self):
+        cache = NodeReadiness(('small',))
+        poller = WorkerReadinessPoller({'small': dict(origin='https://worker.invalid',
+            bearer='synthetic-read-token-0001', workerId='worker')}, cache,
+            ssl_context=ssl.create_default_context())
+        ticket = cache.begin('small')
+        cache.publish('small', dict(ready=True, taskQueueCount=0, maxImages=None,
+            availableScratchBytes=1000, outputBudgetBytes=0), ticket=ticket)
+        poller.poll_once = lambda: (_ for _ in ()).throw(RuntimeError('synthetic failure'))
+        poller.start(); poller._thread.join(timeout=5)
+        self.assertFalse(poller.healthy())
+        self.assertIsNone(cache.get('small'))
+        poller.close()
+
     def test_real_tls_listener_requires_trusted_certificate_and_bearer(self):
         with tempfile.TemporaryDirectory() as directory:
             cert, key = Path(directory) / 'cert.pem', Path(directory) / 'key.pem'

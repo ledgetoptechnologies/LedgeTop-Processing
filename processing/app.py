@@ -480,6 +480,9 @@ class CoordinatorService:
                 if self.handler.reference_listener is not None and (
                         self._reference_thread is None or not self._reference_thread.is_alive()):
                     self._failed('reference_listener_exited', stop)
+                if (self.handler.reference_listener is not None and
+                        not self.handler.reference_listener.readiness_healthy()):
+                    self._failed('reference_readiness_exited', stop)
         except BaseException:
             self._failed('coordinator_start_failed', stop)
         finally:

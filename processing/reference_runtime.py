@@ -452,6 +452,9 @@ class ReferenceRuntime:
             if self._viewer_transfer_stop.wait(wait):
                 return
 
+    def readiness_healthy(self):
+        return self._readiness_poller is None or self._readiness_poller.healthy()
+
     def close(self):
         if self._readiness_poller is not None:
             self._readiness_poller.close()

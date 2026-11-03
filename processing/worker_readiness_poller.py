@@ -34,6 +34,9 @@ class WorkerReadinessPoller:
         self._stop = threading.Event()
         self._thread = None
 
+    def healthy(self):
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+
     def poll_once(self):
         for node, (origin, token, worker_id) in self._workers.items():
             if self._stop.is_set():
@@ -65,9 +68,16 @@ class WorkerReadinessPoller:
         if self._thread is not None:
             raise ValueError('readiness poller already started')
         def run():
-            while not self._stop.is_set():
-                self.poll_once()
-                self._stop.wait(self._interval)
+            try:
+                while not self._stop.is_set():
+                    self.poll_once()
+                    self._stop.wait(self._interval)
+            except Exception:
+                # Do not log exception text: a transport may include a token.
+                pass
+            finally:
+                for node in self._workers:
+                    self._cache.invalidate(node)
         self._thread = threading.Thread(target=run, name='reference-worker-readiness', daemon=False)
         self._thread.start()
 
