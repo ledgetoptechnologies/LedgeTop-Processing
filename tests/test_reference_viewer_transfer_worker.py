@@ -3,7 +3,9 @@ import copy
 import hashlib
 import unittest
 import uuid
+from unittest.mock import patch
 
+from processing.maintenance import Conflict
 from processing.reference_store import ReferenceStore
 from processing.reference_viewer_transfer_worker import ReferenceViewerTransferWorker
 from processing.viewer_acceptance_transfer import ViewerTransferUnavailable
@@ -35,6 +37,27 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             trusted_receipt_keys=self.signer.trusted_keys, clock=lambda: self.clock_value)
 
     def tearDown(self): self.fixture.tearDown()
+
+    def test_unrepresentable_result_does_not_strand_next_transfer(self):
+        real_ensure = self.store.ensure_viewer_transfer
+        invalid = 'unrepresentable-job'
+        self.sender.fail = False
+        def ensure(job_id):
+            if job_id == invalid:
+                raise Conflict('result cannot be represented')
+            return real_ensure(job_id)
+        with patch.object(self.store, 'pending_viewer_transfer_jobs',
+                          return_value=[invalid, self.job['jobId']]), \
+             patch.object(self.store, 'ensure_viewer_transfer', side_effect=ensure):
+            result = self.worker.run_once()
+        self.assertEqual(result, {'state': 'accepted', 'jobId': self.job['jobId']})
+        self.assertTrue(self.store.viewer_transfer_status(self.job['jobId'])['completed'])
+
+    def test_storage_failure_still_holds_transfer_worker(self):
+        with patch.object(self.store, 'ensure_viewer_transfer', side_effect=OSError('disk unavailable')):
+            self.assertEqual(self.worker.run_once(),
+                             {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'})
+        self.assertEqual(self.sender.calls, [])
 
     def test_stable_outbox_retries_and_signed_acceptance_completes_job(self):
         first = self.worker.run_once()

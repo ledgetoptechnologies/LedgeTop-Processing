@@ -41,8 +41,16 @@ class ReferenceViewerTransferWorker:
             return {'state': 'held', 'reason': 'viewer_transfer_clock_unavailable'}
         try:
             pending = self.store.pending_viewer_transfer_jobs(limit=20)
-            if pending:
-                self.store.ensure_viewer_transfer(pending[0])
+            # An unrepresentable sealed result must remain retained for
+            # reconciliation, but must not strand other ready transfers. Only
+            # skip explicit per-job conflicts; storage failures still hold the
+            # worker rather than silently masking a broken queue.
+            for candidate in pending:
+                try:
+                    self.store.ensure_viewer_transfer(candidate)
+                    break
+                except Conflict:
+                    continue
             claim = self.store.claim_viewer_transfer(now=now, lease_seconds=self.lease_seconds)
         except Exception:
             return {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'}
