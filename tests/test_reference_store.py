@@ -11,7 +11,10 @@ import uuid
 from processing import reference_protocol as p
 from processing.prototype import Queue, PROFILE as LEGACY_PROFILE
 from processing.maintenance import Conflict
-from processing.reference_store import ReferenceStore, PROFILE
+from processing.reference_failure import FailureReceiver
+from processing.reference_recovery import SCHEMA as RECOVERY_SCHEMA
+from processing.reference_store import ClaimReleased, MAX_CLAIM_RELEASES_PER_JOB, ReferenceStore, PROFILE
+from processing.reference_terminal import TerminalService
 
 
 class ReferenceStoreTests(unittest.TestCase):
@@ -28,6 +31,10 @@ class ReferenceStoreTests(unittest.TestCase):
     def tearDown(self):
         self.queue.close()
         self.directory.cleanup()
+
+    def release(self, job, binding, token):
+        return self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=token,
+            worker_attestation=p.release_attestation(job_id=job['jobId'], **binding))
 
     def new_submission(self):
         raw = copy.deepcopy(self.fixture["submission"])
@@ -183,8 +190,8 @@ class ReferenceStoreTests(unittest.TestCase):
                        claim_request_id='release-request')
         claim = self.store.claim(job['jobId'], **binding)
         token = claim['claimToken']
-        self.assertTrue(self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=token))
-        self.assertFalse(self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=token))
+        self.assertTrue(self.release(job, binding, token))
+        self.assertFalse(self.release(job, binding, token))
         self.assertEqual(self.store.get(job['jobId'])['phase'], 'waiting_capacity')
         with self.assertRaises(Conflict):
             self.store.claim(job['jobId'], **binding)
@@ -202,6 +209,106 @@ class ReferenceStoreTests(unittest.TestCase):
             self.store.claim_snapshot(job['jobId'], node_id='cluster', worker_id='worker',
                 worker_instance_id='instance', claim_token=token)
 
+    def test_release_requires_exact_worker_attestation_and_keeps_generation(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='attested')
+        token = self.store.claim(job['jobId'], **binding)['claimToken']
+        valid = p.release_attestation(job_id=job['jobId'], **binding)
+        changed = p.release_attestation(job_id=job['jobId'], **{**binding, 'claim_request_id': 'other'})
+        for attestation in (None, {}, changed, {**valid, 'attestationSha256': '0' * 64}):
+            with self.subTest(attestation=attestation), self.assertRaises(Conflict):
+                self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=token,
+                                                   worker_attestation=attestation)
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+        self.assertTrue(self.release(job, binding, token))
+        new = self.store.claim(job['jobId'], **{**binding, 'claim_request_id': 'attested-new'})
+        self.assertEqual(new['generation'], 1)
+
+    def test_release_refuses_any_worker_or_viewer_evidence(self):
+        FailureReceiver(self.store)
+        TerminalService(self.store)
+        with self.queue._db() as db:
+            db.execute(RECOVERY_SCHEMA)
+        inserts = {
+            'reference_worker_failures': "INSERT INTO reference_worker_failures VALUES(?,1,'f','p','{}','{}','pending_queue_completion')",
+            'reference_terminal_acceptances': "INSERT INTO reference_terminal_acceptances VALUES('t','s',?,1,'d','{}')",
+            'reference_recovery_receipts': "INSERT INTO reference_recovery_receipts VALUES('r',?,'e','s','{}','{}')",
+            'reference_worker_receipts': "INSERT INTO reference_worker_receipts VALUES('o','s',?,'{}')",
+            'reference_acceptances': "INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES('a',?,'d','{}')",
+            'reference_viewer_receipts': "INSERT INTO reference_viewer_receipts(receipt_id,storage_receipt_id,acceptance_receipt_id,job_id,digest,receipt_json) VALUES('v','s','a',?,'d','{}')",
+            'reference_viewer_transfers': "INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json) VALUES(?,'r','{}')",
+        }
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='reported')
+        token = self.store.claim(job['jobId'], **binding)['claimToken']
+        for table, statement in inserts.items():
+            with self.subTest(table=table):
+                with self.queue._db() as db:
+                    db.execute(statement, (job['jobId'],))
+                with self.assertRaises(Conflict):
+                    self.release(job, binding, token)
+                self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+                with self.queue._db() as db:
+                    db.execute(f'DELETE FROM {table}')
+        with self.subTest(table='reference_outbox'):
+            with self.queue._db() as db:
+                db.execute("INSERT INTO reference_outbox(identity,kind,payload_json,digest) VALUES('i','terminal',?,'d')",
+                           (json.dumps({'jobId': job['jobId']}),))
+            with self.assertRaises(Conflict):
+                self.release(job, binding, token)
+            with self.queue._db() as db:
+                db.execute('DELETE FROM reference_outbox')
+        self.assertTrue(self.release(job, binding, token))
+
+    def test_release_budget_bounds_tombstones_and_leaves_claim_owned(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')
+        for cycle in range(50):
+            request = {**binding, 'claim_request_id': 'cycle-' + str(cycle)}
+            claim = self.store.claim(job['jobId'], **request)
+            if cycle < MAX_CLAIM_RELEASES_PER_JOB:
+                self.assertTrue(self.release(job, request, claim['claimToken']))
+                continue
+            with self.assertRaisesRegex(Conflict, 'budget'):
+                self.release(job, request, claim['claimToken'])
+            break
+        self.assertEqual(cycle, MAX_CLAIM_RELEASES_PER_JOB)
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_released_claims').fetchone()[0],
+                             MAX_CLAIM_RELEASES_PER_JOB)
+
+    def test_release_refuses_changed_coordinator_authority(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='authority')
+        token = self.store.claim(job['jobId'], **binding)['claimToken']
+        with self.queue._db() as db:
+            db.execute("UPDATE coordinator_identity SET authority_id='different-authority'")
+        with self.assertRaises(Conflict):
+            self.release(job, binding, token)
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+
+    def test_closed_admission_replay_answers_released_like_open_claim(self):
+        from processing.admission_drain import AdmissionDrain
+        self.queue.admission_drain = AdmissionDrain(self.queue)
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='drain-release')
+        self.release(job, binding, self.store.claim(job['jobId'], **binding)['claimToken'])
+        with self.assertRaises(ClaimReleased):
+            self.store.claim(job['jobId'], **binding)
+        gate = self.queue.admission_drain
+        gate.set_closed(True, request_id=str(uuid.uuid4()), expected_generation=0, expected_closed=False,
+                        expected_authority=self.queue.authority_id)
+        with self.assertRaises(ClaimReleased):
+            self.store.claim(job['jobId'], **binding)
+        with self.assertRaises(Conflict) as other:
+            self.store.claim(job['jobId'], **{**binding, 'worker_instance_id': 'another'})
+        self.assertNotIsInstance(other.exception, ClaimReleased)
+
     def test_release_refuses_after_transfer_request(self):
         job, _ = self.store.submit(self.new_submission())
         binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
@@ -209,7 +316,7 @@ class ReferenceStoreTests(unittest.TestCase):
         claim = self.store.claim(job['jobId'], **binding)
         self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')
         with self.assertRaises(Conflict):
-            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+            self.release(job, binding, claim['claimToken'])
 
     def test_release_and_reservation_race_has_one_winner(self):
         job, _ = self.store.submit(self.new_submission())
@@ -222,7 +329,7 @@ class ReferenceStoreTests(unittest.TestCase):
             barrier.wait(timeout=5)
             try:
                 if kind == 'release':
-                    self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+                    self.release(job, binding, claim['claimToken'])
                 else:
                     self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster',
                         worker_identity=identity, claim_token=claim['claimToken'])
@@ -247,7 +354,7 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.queue._db() as db:
             db.execute('UPDATE jobs SET claim_hash=? WHERE id=?', ('0' * 64, job['jobId']))
         with self.assertRaises(Conflict):
-            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+            self.release(job, binding, claim['claimToken'])
         self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
 
     def test_released_claim_tombstone_survives_coordinator_restart(self):
@@ -255,7 +362,7 @@ class ReferenceStoreTests(unittest.TestCase):
         binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
                        claim_request_id='restart-release')
         old = self.store.claim(job['jobId'], **binding)
-        self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=old['claimToken'])
+        self.release(job, binding, old['claimToken'])
         before = self.store.get(job['jobId'])
         self.queue.close()
         self.queue = Queue(self.directory.name, node_ids=('cluster', 'node-2'))
@@ -266,7 +373,7 @@ class ReferenceStoreTests(unittest.TestCase):
                          ('waiting_capacity', before['manifestSha256'], before['pipelineDigest']))
         with self.assertRaises(Conflict):
             self.store.claim(job['jobId'], **binding)
-        self.assertFalse(self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=old['claimToken']))
+        self.assertFalse(self.release(job, binding, old['claimToken']))
         new = self.store.claim(job['jobId'], **{**binding, 'claim_request_id': 'restart-new'})
         self.assertNotEqual(new['claimToken'], old['claimToken'])
 

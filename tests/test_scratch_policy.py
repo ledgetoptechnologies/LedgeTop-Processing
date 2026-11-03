@@ -34,6 +34,22 @@ class ScratchPolicyTests(unittest.TestCase):
         values.update(kwargs)
         return self.ledger.reserve(**values)
 
+    def test_release_unstarted_frees_generation_only_before_any_allocation(self):
+        self.reserve()
+        before = self.ledger.available_scratch()
+        self.ledger.release_unstarted('r1')
+        self.ledger.release_unstarted('r1')
+        self.ledger.release_unstarted('never-reserved')
+        self.assertGreater(self.ledger.available_scratch(), before)
+        self.reserve(reservation_id='r2')
+        self.ledger.record_allocated('r2', 1)
+        with self.assertRaises(PolicyConflict):
+            self.ledger.release_unstarted('r2')
+        self.reserve(job_id='j2', reservation_id='r3')
+        self.ledger.set_engine_state('r3', 'engine_started')
+        with self.assertRaises(PolicyConflict):
+            self.ledger.release_unstarted('r3')
+
     def register(self):
         self.reserve()
         self.ledger.set_engine_state('r1', 'engine_started')

@@ -35,9 +35,15 @@ from .options import _validate_options
 from .reference_runtime import _UNSAFE
 from .reference_execution import ExecutionRouter, RouteConflict
 from .treedar_engine import TreeDarHeld
+from .scratch_policy import PolicyConflict
 
 
 PREFIX = '/ltds/worker/v1'
+# NodeODX can restart a retained task, so each readiness decision re-reads every
+# listed task. Beyond this bound a node stays not ready until tasks are removed.
+READINESS_TASK_CAP = 16
+# Before these end, no grant, transfer or engine mutation can have happened.
+RELEASABLE_STAGES = ('claim_pending', 'claimed', 'reservation_pending')
 
 
 class DriverHeld(ValueError):
@@ -208,6 +214,8 @@ class ReferenceDriver:
               created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
               claim_request TEXT UNIQUE NOT NULL, stage TEXT NOT NULL, data TEXT NOT NULL)''')
             db.execute('CREATE TABLE IF NOT EXISTS readiness_tasks (uuid TEXT PRIMARY KEY)')
+            db.execute('''CREATE TABLE IF NOT EXISTS driver_released_claims (
+              claim_request TEXT PRIMARY KEY, job TEXT NOT NULL, attestation TEXT NOT NULL)''')
             if 'background_checked' not in {row['name'] for row in db.execute('PRAGMA table_info(driver_jobs)')}:
                 db.execute('ALTER TABLE driver_jobs ADD COLUMN background_checked REAL NOT NULL DEFAULT 0')
             db.execute('CREATE TABLE IF NOT EXISTS driver_binding (singleton INTEGER PRIMARY KEY,binding TEXT NOT NULL)')
@@ -316,11 +324,17 @@ class ReferenceDriver:
             response = self._open(request, timeout=10)
         except HTTPError as error:
             status = error.code
-            error.close()
+            try:
+                # Only the exact bounded reason is used; others stay a plain 409.
+                answer = json.loads(error.read(256)) if status == 409 else None
+            except Exception:
+                answer = None
+            finally:
+                error.close()
             if status in (400, 401, 403, 404):
                 raise DriverHeld('control_request_rejected') from None
             if status == 409:
-                return status, None
+                return status, answer if answer == {'error': 'claim_released'} else None
             raise DriverWait('coordinator_unavailable') from None
         except Exception:
             raise DriverWait('coordinator_unavailable') from None
@@ -507,7 +521,7 @@ class ReferenceDriver:
         tasks = self.worker.engine.read('/task/list')
         if (type(info) is not dict or info.get('engineVersion') != self.worker.version
                 or type(info.get('taskQueueCount')) is not int or info['taskQueueCount'] != 0
-                or type(tasks) is not list or len(tasks) > p.MAX_OBJECTS):
+                or type(tasks) is not list or len(tasks) > READINESS_TASK_CAP):
             return False
         self._refresh_options()
         identifiers = []
@@ -518,20 +532,114 @@ class ReferenceDriver:
             identifiers.append(task['uuid'])
         if len(set(identifiers)) != len(identifiers):
             return False
+        # NodeODM /task/list supplies UUIDs, not terminal status, and a terminal
+        # task can be restarted. readiness_tasks is provenance only, never proof.
+        try:
+            for identifier in identifiers:
+                task = self.worker.engine.read('/task/' + identifier + '/info')
+                if (type(task) is not dict or task.get('uuid') != identifier or
+                        type(task.get('status')) is not dict or type(task['status'].get('code')) is not int
+                        or task['status']['code'] not in (30, 40, 50)):
+                    return False
+            after = self.worker.engine.read('/info')
+        except Exception:
+            return False
+        if (type(after) is not dict or after.get('engineVersion') != self.worker.version
+                or type(after.get('taskQueueCount')) is not int or after['taskQueueCount'] != 0):
+            return False
         with self._db() as db:
             known = {row[0] for row in db.execute('SELECT uuid FROM readiness_tasks')}
-        pending = [identifier for identifier in identifiers if identifier not in known]
-        # NodeODM /task/list supplies UUIDs, not terminal status. Spread unknown
-        # retained task checks across bounded polls; /info remains fresh each time.
-        for identifier in pending[:4]:
-            task = self.worker.engine.read('/task/' + identifier + '/info')
-            if (type(task) is not dict or task.get('uuid') != identifier or
-                    type(task.get('status')) is not dict or type(task['status'].get('code')) is not int
-                    or task['status']['code'] not in (30, 40, 50)):
-                return False
+            db.executemany('DELETE FROM readiness_tasks WHERE uuid=?', [(item,) for item in known - set(identifiers)])
+            db.executemany('INSERT OR IGNORE INTO readiness_tasks VALUES(?)', [(item,) for item in identifiers])
+        return True
+
+    def _release_attestation(self, job_id, request_id):
+        return p.release_attestation(job_id=job_id, claim_request_id=request_id, node_id=self.node_id,
+            worker_id=self.worker_id, worker_instance_id=self.worker_instance_id)
+
+    def prepare_release(self, job_id):
+        """Held candidate: durable worker-first tombstone for one unstarted claim.
+
+        Not connected to any route or daemon. From release_pending this driver
+        sends no reservation, so the coordinator may fence the request, and step
+        ends the row only on that exact released answer. Generation is kept: it
+        binds worker journals and Viewer receipts, so a bump is not safe here.
+        Scratch shortage is a hold, never a release: the same node would reclaim.
+        """
+        if self.combined_preparation is not None:
+            raise DriverHeld('release_not_permitted_in_prepare_profile')
+        if not self._lock.acquire(blocking=False):
+            raise DriverWait('driver_busy')
+        try:
+            if self._state_owner is not None:
+                self._state_owner.check(self.path.parent)
             with self._db() as db:
-                db.execute('INSERT OR IGNORE INTO readiness_tasks VALUES(?)', (identifier,))
-        return len(pending) <= 4
+                row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
+            if row is None:
+                raise DriverHeld('unknown_worker_claim')
+            data = json.loads(row['data'])
+            if row['stage'] == 'release_pending':
+                return data['releaseAttestation']
+            if row['stage'] not in RELEASABLE_STAGES:
+                raise DriverHeld('claim_not_releasable')
+            claim = data.get('claim')
+            if claim is not None and self.ledger.available_scratch() < (
+                    claim['submission']['manifest']['totalBytes'] + self.output_budget):
+                raise DriverHeld('insufficient_scratch_is_not_releasable')
+            data.update(releaseFrom=row['stage'], releaseAttestation=self._release_attestation(job_id, row['claim_request']))
+            self._save(job_id, 'release_pending', data)
+            return data['releaseAttestation']
+        finally:
+            self._lock.release()
+
+    def abandon_release(self, job_id):
+        """Resume after the coordinator durably refused this attestation.
+
+        The caller that presented the attestation must have had it refused and
+        must not present it again; a later release needs prepare_release.
+        """
+        if not self._lock.acquire(blocking=False):
+            raise DriverWait('driver_busy')
+        try:
+            if self._state_owner is not None:
+                self._state_owner.check(self.path.parent)
+            with self._db() as db:
+                row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
+            if row is None or row['stage'] != 'release_pending':
+                raise DriverHeld('release_not_pending')
+            data = json.loads(row['data'])
+            stage = data.pop('releaseFrom')
+            del data['releaseAttestation']
+            self._save(job_id, stage, data)
+            return {'state': stage, 'jobId': job_id}
+        finally:
+            self._lock.release()
+
+    def _claim_released(self, job_id, request_id):
+        # Replay is read-only for a persisted claim. A request that never reached
+        # the coordinator may claim here; it stays fenced from any further step.
+        status, answer = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
+        return status == 409 and answer == {'error': 'claim_released'}
+
+    def _finish_release(self, job_id, request_id, data):
+        """Terminal for this request: free local holds and forget the job row.
+
+        The coordinator cannot re-issue this request, and it never releases a
+        job past reservation, so no engine or transfer state exists here. The
+        row must leave driver_jobs: job is UNIQUE and a reclaim is a new request.
+        """
+        if self.combined_preparation is not None:
+            raise DriverHeld('claim_released_requires_reconciliation')
+        if 'reservation' in data:
+            try:
+                self.ledger.release_unstarted(data['reservation']['reservationId'])
+            except PolicyConflict:
+                raise DriverHeld('released_claim_reservation_not_unstarted') from None
+        attestation = p.canonical_json(self._release_attestation(job_id, request_id)).decode()
+        with self._db() as db:
+            db.execute('INSERT OR IGNORE INTO driver_released_claims VALUES(?,?,?)', (request_id, job_id, attestation))
+            db.execute('DELETE FROM driver_jobs WHERE job=? AND claim_request=?', (job_id, request_id))
+        return {'state': 'released', 'jobId': job_id}
 
     def _claim_binding(self, binding):
         with self._db() as db:
@@ -810,6 +918,10 @@ class ReferenceDriver:
             return {'state': 'claim_pending', 'jobId': job_id}
         job_id, request_id, stage = row['job'], row['claim_request'], row['stage']
         data = json.loads(row['data'])
+        if stage == 'release_pending':
+            if self._claim_released(job_id, request_id):
+                return self._finish_release(job_id, request_id, data)
+            return {'state': 'release_pending', 'jobId': job_id}
         if stage == 'claim_pending':
             if self.execution_router is not None or self.combined_preparation is not None:
                 self._advice(data.get('execution', {}), data.get('execution'))
@@ -817,6 +929,8 @@ class ReferenceDriver:
                 return {'state': 'not_ready', 'jobId': job_id}
             status, claim = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
             if status == 409:
+                if claim == {'error': 'claim_released'}:
+                    return self._finish_release(job_id, request_id, data)
                 return {'state': 'claim_pending', 'jobId': job_id}
             if claim['status'] != 'running':
                 raise DriverHeld('unstarted_claim_requires_reconciliation')
@@ -848,11 +962,19 @@ class ReferenceDriver:
                     manifestSha256=claim['manifestSha256'], byteBudget=min(p.MAX_SAFE_INTEGER, 3 * claim['submission']['manifest']['totalBytes']), nonce=secrets.token_hex(16))
                 self._save(job_id, 'reservation_pending', data)
             request = data['reservation']
-            self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
-                manifest_sha256=claim['manifestSha256'], input_bytes=claim['submission']['manifest']['totalBytes'], output_budget=self.output_budget,
-                environment=claim['environment'], ttl_seconds=self.transfer_ttl, worker_ready=True)
+            try:
+                self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
+                    manifest_sha256=claim['manifestSha256'], input_bytes=claim['submission']['manifest']['totalBytes'], output_budget=self.output_budget,
+                    environment=claim['environment'], ttl_seconds=self.transfer_ttl, worker_ready=True)
+            except PolicyConflict:
+                # A local failure must not outlive a fenced claim as a retry loop.
+                if self._claim_released(job_id, request_id):
+                    return self._finish_release(job_id, request_id, data)
+                raise
             status, public = self._request('POST', suffix + '/reservation', {'claimToken': token, 'transferRequest': request})
             if status == 409:
+                if self._claim_released(job_id, request_id):
+                    return self._finish_release(job_id, request_id, data)
                 return {'state': 'reservation_pending', 'jobId': job_id}
             claim.update(public)
             self._save(job_id, 'awaiting_grant', data)

@@ -8,11 +8,49 @@ import uuid
 
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore
-from processing.reference_protocol import validate_submission, ProtocolError, digest, canonical_json
+from processing.reference_protocol import validate_submission, ProtocolError, digest, canonical_json, release_attestation
 from processing.reference_failure import (FailureReceiver, FailureOutbox, make_failure,
     validate_failure, failure_sha256, BINDING)
 from processing.maintenance import Conflict
 from processing.worker_outbox import OutboxConflict
+
+
+class UnstartedClaimFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.queue = Queue(root / 'coordinator', reference_enabled=True)
+        self.store = ReferenceStore(self.queue)
+        raw = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
+        self.job = self.store.submit(validate_submission(raw, environment='staging',
+            capability_fingerprint=raw['capabilityFingerprint']))[0]
+        self.request = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance', claim_request_id='claim-1')
+        self.token = self.store.claim(self.job['jobId'], **self.request)['claimToken']
+        outbox = FailureOutbox(root / 'worker' / 'failures.sqlite')
+        outbox.persist(make_failure(job_id=self.job['jobId'], generation=1, environment='staging',
+            input_manifest_sha256=self.job['manifestSha256'], pipeline_digest=self.job['pipelineDigest'],
+            terminal_state='failed', error_code='engine_failed'), engine_terminal=True)
+        delivery = outbox.claim_next()
+        self.envelope = {key: delivery[key] for key in ('outboxId', 'payloadSha256', 'payload')}
+        self.receiver = FailureReceiver(self.store)
+
+    def tearDown(self):
+        self.queue.close()
+        self.temp.cleanup()
+
+    def test_sealed_failure_is_never_requeued_and_still_completes_failed(self):
+        with patch.object(self.queue, 'complete', side_effect=OSError('synthetic crash')):
+            with self.assertRaises(OSError):
+                self.receiver.receive(self.envelope, **self.request, claim_token=self.token)
+        self.assertEqual(self.receiver.get(self.job['jobId'], 1)['deliveryState'], 'pending_queue_completion')
+        with self.assertRaises(Conflict):
+            self.store.release_unstarted_claim(self.job['jobId'], **self.request, claim_token=self.token,
+                worker_attestation=release_attestation(job_id=self.job['jobId'], **self.request))
+        self.assertEqual(self.queue.get(self.job['jobId'])['status'], 'running')
+        self.assertIsNone(self.store.claim(self.job['jobId'], **dict(self.request, claim_request_id='claim-2')))
+        self.receiver.receive(self.envelope, **self.request, claim_token=self.token)
+        self.assertEqual(self.queue.get(self.job['jobId'])['status'], 'failed')
+        self.assertEqual(self.receiver.get(self.job['jobId'], 1)['deliveryState'], 'awaiting_viewer_failure_acceptance')
 
 
 class ReferenceFailureTests(unittest.TestCase):

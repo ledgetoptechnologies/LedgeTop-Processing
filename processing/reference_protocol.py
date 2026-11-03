@@ -100,6 +100,19 @@ def digest(value):
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
+def release_attestation(*, job_id, claim_request_id, node_id, worker_id, worker_instance_id):
+    """Exact worker-first tombstone statement for one unstarted claim request.
+
+    It names the request, not the token or generation, so a worker that lost the
+    claim response can still attest. It proves nothing about a physical engine.
+    """
+    record = dict(schemaVersion=1, type="worker-unstarted-release", jobId=job_id,
+                  claimRequestId=claim_request_id, nodeId=node_id, workerId=worker_id,
+                  workerInstanceId=worker_instance_id)
+    record["attestationSha256"] = digest(record)
+    return record
+
+
 def manifest_sha256(manifest):
     return digest({k: v for k, v in manifest.items() if k != "sha256"})
 
