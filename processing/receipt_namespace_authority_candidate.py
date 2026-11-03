@@ -43,7 +43,7 @@ class ReceiptNamespaceGate:
             attached=db.execute('PRAGMA database_list').fetchall()
             main=[row[2] for row in attached if row[1]=='main']
             if len(attached)!=1 or len(main)!=1 or Path(main[0]).absolute()!=q:raise ValueError()
-            rows=db.execute('SELECT singleton,authority_id FROM coordinator_identity').fetchall()
+            rows=db.execute("SELECT CASE WHEN typeof(singleton)='integer' THEN singleton END, CASE WHEN typeof(authority_id)='text' AND length(authority_id)<=36 THEN authority_id END FROM coordinator_identity LIMIT 2").fetchall()
             if len(rows)!=1 or rows[0][0]!=1 or rows[0][1]!=self.queue.authority_id:raise ValueError()
         except (OSError,ValueError,TypeError,sqlite3.Error):
             raise ReceiptNamespaceHeld('shared_receipt_database_required') from None
@@ -61,29 +61,37 @@ class ReceiptNamespaceGate:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
                 if required:raise ReceiptNamespaceHeld('receipt_namespace_missing')
                 return []
-            values=db.execute('SELECT '+columns+' FROM '+table+' LIMIT ?',(MAX_ROWS+1,)).fetchall()
-            if len(values)>MAX_ROWS:raise ReceiptNamespaceHeld('receipt_census_limit')
-            return values
+            def generate():
+                for index,row in enumerate(db.execute('SELECT '+columns+' FROM '+table+' LIMIT ?',(MAX_ROWS+1,))):
+                    if index>=MAX_ROWS:raise ReceiptNamespaceHeld('receipt_census_limit')
+                    yield row
+            return generate()
+        def safe_id(column):
+            return "CASE WHEN typeof("+column+")='text' AND length("+column+") BETWEEN 1 AND 128 THEN "+column+" END"
         def payload_budget(table,column):
             nonlocal total
-            row=db.execute('SELECT COUNT(*),COALESCE(SUM(length(CAST('+column+' AS BLOB))),0) FROM '+table).fetchone()
-            if row[0]>MAX_ROWS or row[1]>MAX_BYTES-total:raise ReceiptNamespaceHeld('receipt_census_limit')
-            total+=row[1]
+            row=db.execute("SELECT COUNT(*),COALESCE(SUM(CASE WHEN typeof("+column+")='text' THEN length("+column+") ELSE 0 END),0),COALESCE(SUM(CASE WHEN typeof("+column+")!='text' THEN 1 ELSE 0 END),0) FROM "+table).fetchone()
+            # Four bytes per character is a conservative UTF-8 upper bound;
+            # avoid allocating a BLOB for every potentially hostile value.
+            if row[0]>MAX_ROWS or row[2] or row[1]*4>MAX_BYTES-total:raise ReceiptNamespaceHeld('receipt_census_limit')
+            total+=row[1]*4
         try:
             payload_budget('reference_acceptances','receipt_json')
             payload_budget('reference_viewer_v3_copy_hold','payload_json')
-            for row in rows('reference_acceptances','receipt_id,receipt_json',True):
+            from .viewer_import_confirmation_store import _preflight_stored_json
+            for row in rows('reference_acceptances',safe_id('receipt_id')+',receipt_json',True):
                 raw=row[1]
                 if type(raw) is not str or len(raw.encode('utf-8'))>p.MAX_BODY_BYTES:raise ReceiptNamespaceHeld('receipt_census_limit')
+                _preflight_stored_json(raw.encode('utf-8'))
                 value=json.loads(raw)
                 if type(value) is not dict or row[0]!=value.get('receiptId'):raise ValueError()
                 add(row[0],'acceptance');add(value['storageReceiptId'],'acceptance-storage')
-            for row in rows('reference_viewer_receipts','receipt_id,storage_receipt_id',True):
+            for row in rows('reference_viewer_receipts',safe_id('receipt_id')+','+safe_id('storage_receipt_id'),True):
                 add(row[0],'viewer-copy');add(row[1],'viewer-storage')
-            for row in rows('reference_terminal_acceptances','receipt_id,storage_receipt_id'):
+            for row in rows('reference_terminal_acceptances',safe_id('receipt_id')+','+safe_id('storage_receipt_id'),True):
                 add(row[0],'terminal');add(row[1],'terminal-storage')
             for table in ('viewer_import_confirmations_candidate_v1','viewer_odm_import_confirmations_candidate_v2'):
-                for row in rows(table,'confirmation_id',True):add(row[0],table)
+                for row in rows(table,safe_id('confirmation_id'),True):add(row[0],table)
             # Validate all retained proof checksums and provenance before using IDs.
             held_copy_ids(db)
             for row in rows('reference_viewer_v3_copy_hold','payload_json',True):
@@ -99,7 +107,7 @@ class ReceiptNamespaceGate:
         for value in proposed:_id(value)
         if len(proposed)!=len(set(proposed)) or any(value in seen for value in proposed):
             raise ReceiptNamespaceHeld('receipt_namespace_collision')
-        return {'state':'clear','identities':count,'censusBytes':total}
+        return {'state':'local_scan_clear_history_unverified','identities':count,'censusBytes':total}
 
     def census(self):
         # No DDL or receipt data writes; queue connection retains its own lease.

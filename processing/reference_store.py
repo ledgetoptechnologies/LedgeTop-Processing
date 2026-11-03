@@ -692,6 +692,12 @@ class ReferenceStore:
         self._receipt_namespace_gate=gate
         return result
 
+    @staticmethod
+    def _receipt_namespace_writer_boundary_ready():
+        # Configuring cooperative objects does not exclude older binaries,
+        # unconfigured writers, or writes during sequential installation.
+        return False
+
     def verify_viewer_v3_copy_held(self, submission_id, payload, *, authenticated_principal, authenticated_environment, expected_authority_id, trusted_keys):
         """Candidate verifies and journals only; it never records acceptance or cleanup authority."""
         from .prepared_envelope_jcs_candidate import PROTOCOL as JCS_PROTOCOL
@@ -703,7 +709,7 @@ class ReferenceStore:
             db.execute('BEGIN IMMEDIATE');self._check_jcs_capability(db);self._require_viewer_authority(db,expected_authority_id)
             found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,JCS_PROTOCOL)
             if found is None: return None
-            if self._receipt_namespace_gate is None:
+            if self._receipt_namespace_gate is None or not self._receipt_namespace_writer_boundary_ready():
                 raise JCSRuntimeUnavailable('shared receipt namespace unavailable')
             try:self._receipt_namespace_gate.check_in_transaction(db)
             except ValueError:raise JCSRuntimeUnavailable('shared receipt namespace unavailable') from None
@@ -1462,6 +1468,11 @@ class ReferenceStore:
             old = db.execute("SELECT job_id,digest FROM reference_acceptances WHERE receipt_id=?", (checked["receiptId"],)).fetchone()
             if old and (old["job_id"], old["digest"]) != (job_id, receipt_digest):
                 raise Conflict("receipt ID already belongs to a different acceptance")
+            if self._receipt_namespace_gate is not None:
+                prior_viewer=db.execute('SELECT 1 FROM reference_viewer_receipts WHERE acceptance_receipt_id=?',(checked['receiptId'],)).fetchone() if viewer_checked is not None else None
+                proposed=(identities if not old else set()) | (viewer_identities if viewer_checked is not None and not prior_viewer else set())
+                try:self._receipt_namespace_gate.check_in_transaction(db,proposed=proposed)
+                except ValueError:raise Conflict('shared receipt namespace unavailable') from None
             if not old:
                 self._quota(db, len(encoded.encode("utf-8")))
                 db.execute("INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)",

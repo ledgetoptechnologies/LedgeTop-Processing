@@ -111,6 +111,9 @@ class TerminalService:
             receipt_digest = protocol.digest(checked)
             old = db.execute("SELECT * FROM reference_terminal_acceptances WHERE job_id=? AND generation=?",
                              (job_id, failure["generation"])).fetchone()
+            if self.store._receipt_namespace_gate is not None:
+                try:self.store._receipt_namespace_gate.check_in_transaction(db,proposed=() if old else (checked['receiptId'],checked['storageReceiptId']))
+                except ValueError:raise Conflict('shared receipt namespace unavailable') from None
             if old:
                 if (old["receipt_id"], old["storage_receipt_id"], old["digest"], old["receipt_json"]) != (
                         checked["receiptId"], checked["storageReceiptId"], receipt_digest, encoded):
