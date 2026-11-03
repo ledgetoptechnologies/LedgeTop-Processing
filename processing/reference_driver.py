@@ -788,6 +788,11 @@ class ReferenceDriver:
             self._save(job_id, 'fetching_pending', data)
             return {'state': 'fetching_pending', 'jobId': job_id}
         if stage in ('fetching_pending', 'processing_pending'):
+            if stage == 'processing_pending' and self._kind(job_id) == 'odm':
+                # Input transfer is complete, but engine start is not yet
+                # acknowledged. Keep the coordinator phase at fetching.
+                self._save(job_id, 'execution_pending', data)
+                return {'state': 'execution_pending', 'jobId': job_id}
             phase = 'fetching' if stage == 'fetching_pending' else 'processing'
             status, public = self._request('POST', suffix + '/phase', {'claimToken': token, 'phase': phase})
             if status == 409:
@@ -863,6 +868,22 @@ class ReferenceDriver:
                 if self._kind(job_id) == 'treedar':
                     arguments['provenance'] = data['provenance']
                 adapter.start(fresh, **arguments)
+            if self._kind(job_id) == 'odm':
+                # A durable local processing phase follows the engine commit
+                # acknowledgment. Pending/uncertain commits remain unreported.
+                if adapter._row(job_id)['phase'] != 'processing':
+                    raise DriverHeld('engine_start_unconfirmed')
+                observed = self.worker.engine.read('/task/' + job_id + '/info')
+                if (type(observed) is not dict or observed.get('uuid') != job_id
+                        or type(observed.get('status')) is not dict
+                        or type(observed['status'].get('code')) is not int
+                        or observed['status']['code'] not in (20, 30, 40, 50)):
+                    return {'state': 'execution_pending', 'jobId': job_id}
+                status, public = self._request('POST', suffix + '/phase',
+                    {'claimToken': token, 'phase': 'processing'})
+                if status == 409:
+                    return {'state': 'execution_pending', 'jobId': job_id}
+                claim.update(public)
             self._save(job_id, 'executing', data)
             return {'state': 'executing', 'jobId': job_id}
         if stage == 'executing':

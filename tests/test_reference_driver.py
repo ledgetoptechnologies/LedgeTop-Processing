@@ -389,6 +389,19 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'], 'held')
         self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
 
+    def test_odm_processing_phase_requires_engine_start_acknowledgment(self):
+        job = self.submit()
+        self.transport.code = 10
+        self.advance(job, 'execution_pending')
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'fetching')
+        self.assertFalse(any(call[0] == 'initialize' for call in self.transport.calls))
+        self.assertEqual(self.driver.step()['state'], 'execution_pending')
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'fetching')
+        self.transport.tasks[job['jobId']] = 20
+        self.assertEqual(self.driver.step()['state'], 'executing')
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'commit' for call in self.transport.calls), 1)
+
     def test_unrelated_failure_ack_does_not_release_current_job_gate(self):
         from processing.reference_failure import make_failure, _receipt
         # An earlier retained record is due first in the actual shared outbox.
