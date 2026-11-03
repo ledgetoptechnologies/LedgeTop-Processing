@@ -32,9 +32,15 @@ def stage(store,submission_id,statement,*,principal,environment,configured_autho
    if transport!=objects:raise ValueError()
    stage_id=statement['jobId']
    if not result['created']:
+    # SQL aggregate preflight precedes any BLOB materialization; replay then
+    # compares one bounded row at a time rather than joining the stored corpus.
+    frames._preflight_stored_pages(db,stage_id)
     for kind,raw in (('source',src),('selected',sel)):
-     existing=b''.join(bytes(r[0])+b'\n' for r in db.execute('SELECT wire FROM candidate_frame_pages WHERE stage_id=? AND kind=? ORDER BY ordinal',(stage_id,kind)))
-     if raw!=existing:raise ValueError()
+     stream=io.BytesIO(raw)
+     for r in db.execute('SELECT wire FROM candidate_frame_pages WHERE stage_id=? AND kind=? ORDER BY ordinal',(stage_id,kind)):
+      value=r[0]
+      if type(value) is not bytes or stream.readline(frames.MAX_FRAME_BYTES+2)!=value+b'\n':raise ValueError()
+     if stream.read(1)!=b'':raise ValueError()
    def on_page(kind,index):
     if _fault:_fault(kind)
    r=frames._stage_owned(db,stage_id,trusted_binding=trusted,expected_binding_sha256=synthetic_bundle['bindingSha256'],source_stream=io.BytesIO(src),selected_stream=io.BytesIO(sel),processing_closure=synthetic_bundle['processingClosure'],processing_pages=synthetic_bundle['processingPages'],_fault=on_page)

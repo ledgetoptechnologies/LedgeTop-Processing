@@ -73,3 +73,17 @@ class NoGcpAtomic(unittest.TestCase):
    else:bad['binding']['principalId']='forged'
    with self.subTest(mode=mode),self.assertRaises(NoGcpHeld):self.call(bad)
    self.assertEqual(self.counts(),(0,0,0))
+
+ def test_corrupt_stored_pages_rejected_before_replay_loading(self):
+  for mode in ('oversized','wrongtype','extra_pages'):
+   with self.subTest(mode=mode):
+    self.assertTrue(self.call()['created'])
+    with self.queue._db() as db:
+     if mode=='oversized':db.execute("UPDATE candidate_frame_pages SET wire=? WHERE stage_id=? AND kind='source'",(b'x'*(262144+1),self.statement['jobId']))
+     elif mode=='wrongtype':db.execute("UPDATE candidate_frame_pages SET wire='bad' WHERE stage_id=? AND kind='source'",(self.statement['jobId'],))
+     else:
+      for i in range(1,65):db.execute("INSERT INTO candidate_frame_pages VALUES(?,?,?,?)",(self.statement['jobId'],'source',i,b'{}'))
+    with self.assertRaises(NoGcpHeld):self.call()
+    # Restore only this task's synthetic database for the next subcase.
+    with self.queue._db() as db:
+     db.execute('DELETE FROM candidate_frame_pages WHERE stage_id=?',(self.statement['jobId'],));db.execute('DELETE FROM candidate_frame_receipts WHERE stage_id=?',(self.statement['jobId'],));db.execute('DELETE FROM synthetic_viewer_dataset_transport_v1 WHERE job_id=?',(self.statement['jobId'],))
