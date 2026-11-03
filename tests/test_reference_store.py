@@ -2,6 +2,7 @@ import copy
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 import tempfile
 import unittest
 import uuid
@@ -288,6 +289,23 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
         self.assertEqual(store.next_for_node('node-2')['jobId'], job['jobId'])
         self.assertIsNotNone(claim('node-2'))
+
+    def test_candidate_inventory_rechecks_maintenance_after_discovery(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        report = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                  'availableScratchBytes': 1000000, 'outputBudgetBytes': 1024}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: report)
+        job, _ = store.submit(self.new_submission())
+        self.assertEqual(store.next_for_node('cluster')['jobId'], job['jobId'])
+        now = datetime.now(timezone.utc).isoformat()
+        self.queue.schedule_node('cluster', {'expectedRevision': 0, 'drainAt': now,
+            'notBefore': now, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+        self.assertIsNone(store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance', claim_request_id='maintenance-race'))
+        self.assertEqual(store.next_for_node('node-2')['jobId'], job['jobId'])
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
 
     def test_candidate_inventory_bad_readiness_fails_closed(self):
         self.queue.per_node_slots = True
