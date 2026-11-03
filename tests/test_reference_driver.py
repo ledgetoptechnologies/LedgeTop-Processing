@@ -19,6 +19,7 @@ import zipfile
 
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
+from processing.maintenance import Conflict
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import ReferenceDriver, DriverHeld, DriverWait
 from processing.reference_engine_worker import ReferenceEngineWorker
@@ -264,16 +265,16 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertIsNone(self.store.private_transfer_grant(job['jobId']))
             response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
                 {'Authorization': 'Bearer ' + VIEWER}, json.dumps(grant).encode(), protected_transport=True)
-            self.assertEqual(response.status, 200)
-            self.assertTrue(response.body['accepted'])
-            replay = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
-                {'Authorization': 'Bearer ' + VIEWER}, json.dumps(grant).encode(), protected_transport=True)
-            self.assertEqual(replay.status, 200)
-            self.assertEqual(replay.body, response.body)
+            # The legacy environment bearer cannot control principal-owned jobs.
+            # Exercise grant persistence directly only as synthetic future-boundary behavior.
+            self.assertEqual(response.status, 404)
+            self.assertIsNone(self.store.private_transfer_grant(job['jobId']))
+            accepted = self.store.receive_transfer_grant(job['jobId'], grant)
+            self.assertTrue(accepted['accepted'])
+            self.assertEqual(self.store.receive_transfer_grant(job['jobId'], grant), accepted)
             changed = dict(grant, token='different-synthetic-transfer-token')
-            conflict = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
-                {'Authorization': 'Bearer ' + VIEWER}, json.dumps(changed).encode(), protected_transport=True)
-            self.assertEqual(conflict.status, 409)
+            with self.assertRaises(Conflict):
+                self.store.receive_transfer_grant(job['jobId'], changed)
             self.advance(job, 'awaiting_acceptance')
             self.assertEqual(download.call_count, 1)
 
@@ -742,17 +743,18 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
         payload = dict(acceptance=acceptance, viewerReceipt=self.viewer_signer.receipt(acceptance, result))
         response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/acceptance',
             {'Authorization': 'Bearer ' + VIEWER}, json.dumps(payload).encode(), protected_transport=True)
-        if response.status != 200:
-            raise AssertionError('synthetic Viewer acceptance was rejected')
-        return response.body
+        # There is no principal-authenticated acceptance route yet. The legacy
+        # environment bearer must be denied; store call simulates future wiring.
+        self.assertEqual(response.status, 404)
+        return self.store.accept(job['jobId'], acceptance, viewer_receipt=payload['viewerReceipt'],
+            trusted_viewer_receipt_keys=self.viewer_signer.trusted_keys)
 
     def accept_legacy_receipt(self, job, *, full):
         response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/acceptance',
             {'Authorization': 'Bearer ' + VIEWER}, json.dumps(self.acceptance(job, full=full)).encode(),
             protected_transport=True)
-        if response.status != 200:
-            raise AssertionError('synthetic legacy Viewer acceptance was rejected')
-        return response.body
+        self.assertEqual(response.status, 404)
+        return self.store.accept(job['jobId'], self.acceptance(job, full=full))
 
     def test_actual_native_http_cache_is_retained_after_full_viewer_copy_ack(self):
         job = self.submit(contents=(b'abc',))
