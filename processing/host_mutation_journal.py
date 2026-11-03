@@ -47,6 +47,10 @@ class HostMutationJournal:
         if 'hostMutationJournal' in state:
             raise GateError('guard journal already exists or needs inspection')
         name = 'mutations-' + uuid.uuid4().hex + '.sqlite'
+        # An older loader accepts unknown keys on schema 1. Atomically upgrade
+        # with the marker so it cannot release or reuse an uncertain node.
+        # Keep schema 2 after completion: downgrade needs external control.
+        state['schema'] = 2
         state['hostMutationJournal'] = {'receiptId': self.receipt_id, 'file': name}
         self.gate._save(state)
         path = self.gate.root / name

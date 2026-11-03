@@ -163,7 +163,9 @@ class NodeGate:
             if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
                 raise ValueError()
             state = json.loads(path.read_bytes())
-            if (not isinstance(state, dict) or state.get('schema') != 1
+            if (not isinstance(state, dict) or type(state.get('schema')) is not int
+                    or state['schema'] not in (1, 2)
+                    or (state['schema'] == 1 and 'hostMutationJournal' in state)
                     or state.get('engineId') != self.engine_id
                     or type(state.get('generation')) is not int or state['generation'] < 1
                     or not {'nodeId', 'coordinatorOrigin', 'authorityId', 'reservation'} <= state.keys()):
@@ -224,6 +226,7 @@ class NodeGate:
     def handover(self, node_id, origin, authority_id, expected_generation, *, old_worker_stopped, note):
         binding = _binding(node_id, origin, authority_id)
         state = self.snapshot()
+        self._journal_blocks_lifecycle(state)
         self._generation(state, expected_generation)
         if old_worker_stopped is not True or not isinstance(note, str) or not 1 <= len(note) <= 256:
             raise GateError('handover requires stopped-old-worker attestation and note')
@@ -241,6 +244,7 @@ class NodeGate:
     def reserve(self, node_id, origin, authority_id, generation, receipt_id):
         binding = _binding(node_id, origin, authority_id)
         state = self.snapshot()
+        self._journal_blocks_lifecycle(state)
         self._generation(state, generation)
         if any(state[key] != value for key, value in binding.items()):
             raise GateError('coordinator does not own this physical node')
