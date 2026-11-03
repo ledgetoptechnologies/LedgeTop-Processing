@@ -1,7 +1,8 @@
 """End-to-end source-range renewal against the real Viewer services (synthetic).
 
 Opt-in. Set ``LEDGETOP_VIEWER_SOURCE_DIR`` to a Viewer checkout with the
-attempt-bound source broker and grant renewal service (c92deb5 or later). The
+attempt-bound source broker, grant renewal service and the dispatcher fix that
+passes viewerAttemptId when minting (f9325892 or later). The
 Node host ``support/viewer_source_renewal_real.cjs`` runs the real Viewer
 migrations, reference dispatcher, source broker and renewal service on file
 databases; only the provider HTTP is faked. Processing drives it with the real
@@ -12,7 +13,9 @@ transfer, expiry, renewal, replay before and after a host restart, the
 acknowledgement, refusal of the expired authority, and resumption without
 resetting the cumulative range budget. Not covered: the Processing driver's
 renewal journal (``ReferenceDriver._source_range_grant``), production TLS/proxy
-mounting, and any live data.
+mounting and authentication (provider HTTP and protected transport are
+simulated), migrations on restart (the fixture drops admission triggers, so a
+restart reopens the migrated file), and any live data.
 """
 import hashlib
 import http.client
@@ -58,9 +61,9 @@ class _Response:
 
 
 class Host:
-    def __init__(self, state, *, inject=True):
+    def __init__(self, state):
         env = {**os.environ, 'LEDGETOP_VIEWER_SOURCE_DIR': str(Path(VIEWER_SOURCE_DIR).resolve()),
-               'PAIRED_STATE_DIR': str(state), 'PAIRED_INJECT_DISPATCH_ATTEMPT': '1' if inject else '0'}
+               'PAIRED_STATE_DIR': str(state)}
         self.process = subprocess.Popen([NODE, str(HOST)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         text=True)
         line = self.process.stdout.readline().split()
@@ -132,8 +135,8 @@ class RealViewerSourceRenewalTests(unittest.TestCase):
     def clock(self):
         return time.time() + self.offset
 
-    def start(self, **kwargs):
-        host = Host(self.root / 'state', **kwargs)
+    def start(self):
+        host = Host(self.root / 'state')
         self.hosts.append(host)
         if self.offset:
             host.control(op='clock', offsetMs=self.offset * 1000)
@@ -167,14 +170,15 @@ class RealViewerSourceRenewalTests(unittest.TestCase):
         row = value['usage'][0]
         return (row['requests_used'], row['bytes_used'], row['attempts_used']), value['grants']
 
-    @unittest.expectedFailure
     def test_real_dispatcher_mints_the_initial_grant(self):
-        # Viewer gap at c92deb5: sourceRangeV2TransferDispatcher calls
-        # mintGrant({...job, submission: {manifest}}), dropping viewerAttemptId,
-        # so the real broker refuses with INVALID_MANIFEST before any transfer.
-        host = self.start(inject=False)
+        # Regression for the Viewer dispatcher dropping viewerAttemptId when
+        # minting (fixed in f9325892); the real broker then refused with
+        # INVALID_MANIFEST before any transfer.
+        host = self.start()
         job = self.queued_job(host)
-        host.control(op='dispatch', transferRequest=job['transferRequest'])
+        grant = host.control(op='dispatch', transferRequest=job['transferRequest'])['grant']
+        self.assertEqual(validate_source_grant(grant, job=job, clock=self.clock).identity.viewer_attempt_id,
+                         job['submission']['viewerAttemptId'])
 
     def test_renewal_lifecycle_through_restart_keeps_one_budget_lineage(self):
         host = self.start()

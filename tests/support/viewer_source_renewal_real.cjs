@@ -82,16 +82,7 @@ const broker = new SourceRangeV2BrokerCandidate({ databasePath: path.join(broker
 const resolveSource = binding => ({ jobId: binding.jobId, generation: binding.generation, environment: binding.environment,
   manifestSha256: binding.manifestSha256, sourceVersion: binding.sourceVersion,
   objects: binding.manifest.objects.map(o => ({ id: o.id, path: source, byteSize: o.byteSize, sha256: o.sha256 })) });
-// Known Viewer gap at c92deb5: sourceRangeV2TransferDispatcher mints with
-// `submission: { manifest }`, dropping the viewerAttemptId the broker requires,
-// so the real broker refuses the initial grant with INVALID_MANIFEST. With
-// PAIRED_INJECT_DISPATCH_ATTEMPT=1 this host restores it from the transfer
-// request so the rest of the lifecycle can be exercised; without it the gap shows.
-const mintGrant = (job, options = {}) => {
-  if (process.env.PAIRED_INJECT_DISPATCH_ATTEMPT === '1' && job.submission && !('viewerAttemptId' in job.submission))
-    job = { ...job, submission: { ...job.submission, viewerAttemptId: job.transferRequest.viewerAttemptId } };
-  return broker.mintGrant({ job, resolveSource, ...options });
-};
+const mintGrant = (job, options = {}) => broker.mintGrant({ job, resolveSource, ...options });
 const renewalVault = new ReferenceTransferRenewalVault(db, { key: deriveReferenceTransferGrantKey(SECRET) });
 const renewals = new ReferenceTransferGrantRenewals(db, { now, vault: renewalVault });
 const grantVault = new ReferenceTransferGrantVault(db, { key: deriveReferenceTransferGrantKey(SECRET) });
