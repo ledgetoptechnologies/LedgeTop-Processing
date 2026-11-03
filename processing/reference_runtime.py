@@ -297,6 +297,7 @@ class ReferenceRuntime:
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
+        self._readiness_poller = None
         self._viewer_transfer_worker, self._viewer_transfer_thread = None, None
         self._viewer_transfer_stop = threading.Event()
         try:
@@ -318,8 +319,22 @@ class ReferenceRuntime:
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
+            inventory = getattr(config, 'node_inventory', ())
+            readiness_cache = None
+            if inventory:
+                from .node_readiness import NodeReadiness
+                from .worker_readiness_poller import WorkerReadinessPoller
+                if set(settings.workers) != {node['id'] for node in inventory}:
+                    raise RuntimeConfigurationError('readiness worker coverage changed')
+                readiness_cache = NodeReadiness(tuple(node['id'] for node in inventory), ttl_seconds=30)
+                readiness_workers = {node: {'origin': worker['resultOrigin'], 'bearer': worker['resultBearer'],
+                                           'workerId': worker['workerId']}
+                                     for node, worker in settings.workers.items()}
+                self._readiness_poller = WorkerReadinessPoller(readiness_workers, readiness_cache,
+                                                               ssl_context=worker_context)
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
-                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",
+                local_max_input_bytes=config.local_max_input_bytes, main_node_id=None if inventory else "main",
+                node_inventory=inventory, node_readiness=readiness_cache.get if readiness_cache else None,
                 viewer_required_environments=tuple(settings.viewer_acceptance_targets or ()))
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
@@ -395,11 +410,15 @@ class ReferenceRuntime:
         self._server, self._thread = server, thread
         try:
             thread.start()
+            if self._readiness_poller is not None:
+                self._readiness_poller.start()
             if self._viewer_transfer_worker is not None:
                 self._viewer_transfer_thread = threading.Thread(target=self._viewer_transfer_loop,
                     name="processing-viewer-acceptance", daemon=True)
                 self._viewer_transfer_thread.start()
         except Exception:
+            if self._readiness_poller is not None:
+                self._readiness_poller.close()
             self._viewer_transfer_stop.set()
             if self._viewer_transfer_thread is not None and self._viewer_transfer_thread.is_alive():
                 self._viewer_transfer_thread.join()
@@ -420,6 +439,9 @@ class ReferenceRuntime:
                 return
 
     def close(self):
+        if self._readiness_poller is not None:
+            self._readiness_poller.close()
+            self._readiness_poller = None
         self._viewer_transfer_stop.set()
         if self._viewer_transfer_thread is not None:
             self._viewer_transfer_thread.join()
