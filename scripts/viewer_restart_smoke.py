@@ -3,12 +3,13 @@
 Synthetic only: two in-process synthetic engines, the coordinator in a child
 process on a temporary state directory, and the actual Viewer NodeOdmProvider
 driving one 20-file job. The coordinator is killed without cleanup (SIGKILL /
-TerminateProcess) and restarted on the same state. Checks that the job then
-completes, the engines received exactly one commit, and repeated downloads are
-byte-identical. Does not contact LAN nodes or modify Viewer. Requires Node.js
+TerminateProcess) and restarted on the same state: after the engine commit, after
+upload but before commit, after completion but before any result download, or
+after the first download. Checks that the job then completes, the engines received
+exactly one commit, and every download after the restart is byte-identical. Does not contact LAN nodes or modify Viewer. Requires Node.js
 and the trusted current Viewer adapter path:
 
-    python scripts/viewer_restart_smoke.py --viewer-adapter PATH [--kill-at running|uploaded]
+    python scripts/viewer_restart_smoke.py --viewer-adapter PATH [--kill-at running|uploaded|completed|downloaded]
 """
 import argparse
 import hashlib
@@ -56,13 +57,17 @@ async function retry(fn,label){const end=Date.now()+60000;for(;;){try{return awa
  fs.writeFileSync(process.env.SMOKE_STAGE,'uploaded');
  await retry(()=>p.commit(uuid),'commit');
  fs.writeFileSync(process.env.SMOKE_STAGE,'committed');
+ const hold=async stage=>{fs.writeFileSync(process.env.SMOKE_STAGE,stage);if(process.env.SMOKE_KILL_AT!==stage)return;
+  const end=Date.now()+90000;while(!fs.existsSync(process.env.SMOKE_RESUME)){if(Date.now()>end)throw Error('restart never signalled');await sleep(50);}};
  const end=Date.now()+90000;let last;
  for(;;){let s;try{s=await p.status(uuid);}catch(e){s={status:'unreachable'};}
   if(s.status!==last){console.error('status',s.status);last=s.status;}
   if(s.status==='completed')break;
   assert(!['failed','cancelled','unknown'].includes(s.status),JSON.stringify(s));
   if(Date.now()>end)throw Error('timeout waiting for completion, last '+JSON.stringify(s));await sleep(150);}
+ await hold('completed');
  const a=Buffer.from(await (await retry(()=>p.downloadAll(uuid),'download')).arrayBuffer());
+ await hold('downloaded');
  const b=Buffer.from(await (await retry(()=>p.downloadAll(uuid),'download')).arrayBuffer());
  assert.deepEqual(a,b);
  console.log(JSON.stringify({uuid,bytes:a.length,sha256:crypto.createHash('sha256').update(a).digest('hex')}));
@@ -79,7 +84,7 @@ def free_port():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--viewer-adapter', required=True)
-    parser.add_argument('--kill-at', choices=('running', 'uploaded'), default='running')
+    parser.add_argument('--kill-at', choices=('running', 'uploaded', 'completed', 'downloaded'), default='running')
     parser.add_argument('--node', default='node')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
@@ -117,13 +122,16 @@ def main():
             script.write_text(JAVASCRIPT)
             env = {**os.environ, 'VIEWER_ADAPTER': str(Path(args.viewer_adapter).resolve()),
                    'SMOKE_ENDPOINT': 'http://127.0.0.1:' + str(spec['port']),
-                   'SMOKE_TOKEN': spec['viewer'], 'SMOKE_STAGE': str(stage)}
+                   'SMOKE_TOKEN': spec['viewer'], 'SMOKE_STAGE': str(stage),
+                   'SMOKE_KILL_AT': args.kill_at, 'SMOKE_RESUME': str(root / 'resume')}
             js = subprocess.Popen([args.node, str(script)], env=env, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True)
 
             deadline = time.monotonic() + 60
             if args.kill_at == 'uploaded':
                 ready = lambda: stage.exists() and stage.read_text() in ('uploaded', 'committed')
+            elif args.kill_at in ('completed', 'downloaded'):
+                ready = lambda: stage.exists() and stage.read_text() == args.kill_at
             else:
                 ready = lambda: sum(e.commits for e in engines) >= 1
             while not ready() and js.poll() is None and time.monotonic() < deadline:
@@ -135,6 +143,7 @@ def main():
             killed_rc = coordinator.returncode
             time.sleep(1)
             start_child()
+            (root / 'resume').write_text('restarted')
 
             stdout, stderr = js.communicate(timeout=150)
             if js.returncode:
