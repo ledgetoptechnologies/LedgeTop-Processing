@@ -35,6 +35,10 @@ class EngineUnavailable(OSError):
     pass
 
 
+class _DispatchInterrupted(Exception):
+    """A cooperative stop at a boundary, with all partial work retained."""
+
+
 class NativeEngine:
     def __init__(self, origin, token=''):
         self.origin, self.token = origin, token
@@ -572,16 +576,23 @@ class ViewerService:
         try:
             task = self.store.task(identifier)
             engine = self.engines[task['node_id']]
+            self._check_dispatch_boundary(task)
             self.store.update(identifier, phase='init_pending')
             engine.initialize(task)
+            self._check_dispatch_boundary(task)
             self.store.update(identifier, phase='initialized')
             for item in task['files']:
+                self._check_dispatch_boundary(task)
                 self.store.update(identifier, phase='upload_pending')
                 engine.upload(task['engine_uuid'], item)
+                self._check_dispatch_boundary(task)
                 self.store.update(identifier, phase='uploaded')
+            self._check_dispatch_boundary(task)
             self.store.update(identifier, phase='commit_pending')
             engine.action('commit', task['engine_uuid'])
             self.store.update(identifier, phase='processing')
+        except _DispatchInterrupted as exc:
+            self._hold(self.store.task(identifier), str(exc))
         except Exception:
             current = self.store.task(identifier)
             if current['phase'] == 'commit_pending':
@@ -591,6 +602,15 @@ class ViewerService:
         finally:
             with self._lock:
                 self._dispatch_threads.pop(identifier, None)
+
+    def _check_dispatch_boundary(self, task):
+        if self._stop.is_set():
+            raise _DispatchInterrupted('dispatch_interrupted_for_shutdown')
+        node = self.queue.get_node(task['node_id'])
+        if node['state'] not in ('active', 'scheduled'):
+            raise _DispatchInterrupted('dispatch_interrupted_for_maintenance')
+        if self._stop.is_set():
+            raise _DispatchInterrupted('dispatch_interrupted_for_shutdown')
 
     def _hold(self, task, reason):
         job = self.queue.get(task['job_id'])

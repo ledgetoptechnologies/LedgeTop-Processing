@@ -13,6 +13,20 @@ task-owned senders before releasing coordinator queue authority. A slow sender
 may therefore delay graceful shutdown; forced process death still needs the
 existing held/reconciliation path and has not been newly qualified here.
 
+Senders cooperatively check shutdown and node maintenance between engine
+mutations. If either is observed before commit, they hold the job and its slot
+without replaying partial work. An in-flight HTTP mutation cannot be stopped by
+these checks, and a stop can race the gap between a check and the next HTTP
+call: these checks are not a cross-process fence or a guarantee that no request
+starts after maintenance begins. A held submission also requires operator
+reconciliation before maintenance can complete.
+
+An additional synthetic characterization demonstrates a deployment blocker:
+the existing inbound `TaskStore.upload` holds the store-wide lock while reading
+and syncing a file, so a stalled upload can still block the scheduler and both
+nodes. Removing that lock needs a per-task identity fence and safe shared-space
+reservation; this candidate deliberately leaves it unchanged.
+
 Tests use fake engines and exact synthetic bytes. This candidate does not fence
 direct engine clients, another coordinator with separate state, or external
 filesystem writers; it does not reserve shared disk space. Node identity and

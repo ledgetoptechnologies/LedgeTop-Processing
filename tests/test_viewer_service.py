@@ -490,6 +490,83 @@ class ViewerServiceTests(unittest.TestCase):
             waiter.join(5)
         self.assertFalse(waiter.is_alive())
         self.assertTrue(drained.is_set())
+        self.assertEqual(self.task(first)['job']['status'], 'held')
+        self.assertEqual(self.task(first)['error'], 'dispatch_interrupted_for_shutdown')
+        self.assertFalse(any(call[0] == 'commit' for call in self.engines['cluster'].calls))
+
+    def test_slow_inbound_upload_still_blocks_scheduler_store_access(self):
+        """Characterizes a remaining deployment blocker, not desired behavior."""
+        queued = self.submit()
+        incoming = self.initialize()
+        entered, release, tick_done = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError('synthetic inbound timeout')
+                return super().read(size)
+        def upload():
+            try:
+                self.service.upload(incoming, 'slow.jpg', SlowStream(b'abc'), 3)
+            except BaseException as exc:
+                errors.append(exc)
+        def tick():
+            try:
+                self.service.tick()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                tick_done.set()
+        uploader = threading.Thread(target=upload)
+        scheduler = threading.Thread(target=tick)
+        uploader.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            scheduler.start()
+            self.assertFalse(tick_done.wait(0.1), 'scheduler unexpectedly passed the store-wide lock')
+        finally:
+            release.set()
+            uploader.join(5)
+            if scheduler.ident is not None:
+                scheduler.join(5)
+        self.assertFalse(uploader.is_alive())
+        self.assertFalse(scheduler.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(tick_done.is_set())
+        self.assertEqual(self.task(queued)['job']['status'], 'running')
+
+    def test_maintenance_drain_holds_inflight_transfer_before_next_mutation(self):
+        self.queue.per_node_slots = True
+        self.service._parallel_dispatch = True
+        entered, release = threading.Event(), threading.Event()
+        original_upload = self.engines['cluster'].upload
+        def slow_upload(identifier, item):
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError('synthetic transfer timeout')
+            return original_upload(identifier, item)
+        self.engines['cluster'].upload = slow_upload
+        identifier = self.submit(count=2)
+        self.service.tick()
+        self.assertTrue(entered.wait(5))
+        now = datetime.now(timezone.utc).isoformat()
+        node = self.queue.schedule_node('cluster', {'expectedRevision': 0, 'drainAt': now,
+            'notBefore': now, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+        try:
+            self.assertEqual(node['state'], 'draining')
+        finally:
+            release.set()
+            self.service.wait_for_transfers()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['status'], 'held')
+        self.assertEqual(task['error'], 'dispatch_interrupted_for_maintenance')
+        self.assertEqual(len([c for c in self.engines['cluster'].calls if c[0] == 'upload']), 1)
+        self.assertFalse(any(c[0] == 'commit' for c in self.engines['cluster'].calls))
+        with self.assertRaisesRegex(Conflict, 'owns running or held work'):
+            self.queue.begin_node_update('cluster', {'expectedRevision': node['revision'],
+                                                      'planId': node['planId']})
 
     def test_opt_in_held_treedar_blocks_its_host_only(self):
         self.queue.per_node_slots = True
