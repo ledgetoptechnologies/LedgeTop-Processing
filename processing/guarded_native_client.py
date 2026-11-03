@@ -1,4 +1,4 @@
-"""Experimental mTLS streaming writer; no runtime activation or read proxy.
+"""Experimental task-bound mTLS client; no runtime activation.
 
 The caller must supply a certificate-verifying SSL context, a trusted fixed
 endpoint, and an authenticated job-to-engine binding. Lost acknowledgments are
@@ -9,6 +9,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -80,6 +81,35 @@ class GuardedNativeClient:
                 or kind not in ('info', 'output')):
             raise EngineUnavailable('guard read unavailable')
         return value
+
+    def _bound_task(self, identifier):
+        """A fixed client can only represent the engine task in its signed claim."""
+        try:
+            expected = self.job_claim['claim']['engineTaskId']
+        except (KeyError, TypeError):
+            raise EngineUnavailable('guard job binding unavailable') from None
+        if type(identifier) is not str or type(expected) is not str or identifier != expected:
+            raise EngineUnavailable('guard job binding mismatch')
+
+    def read(self, route, *, line=0):
+        """ViewerService's narrow status/log interface, scoped to this claim."""
+        if type(route) is not str or type(line) is not int or line < 0:
+            raise EngineUnavailable('guard read unavailable')
+        matched = re.fullmatch(r'/task/([^/]+)/(info|output)', route)
+        if matched is None or (matched[2] == 'info' and line != 0):
+            raise EngineUnavailable('guard read unavailable')
+        self._bound_task(matched[1])
+        result = self.read_bound(self.job_claim, matched[2], line=line)
+        if result['held']:
+            raise EngineUnavailable('guard task held')
+        return result['value']
+
+    @contextmanager
+    def download(self, identifier):
+        """Open the bound archive; never accept a different task identifier."""
+        self._bound_task(identifier)
+        with self.download_bound(self.job_claim) as response:
+            yield response
 
     @contextmanager
     def download_bound(self, job_claim):
