@@ -51,3 +51,14 @@ A single pinned authority/database or independently fenced global ID index,
 historical collision audit and migration are required before deployment. Key
 and issuer uniqueness is enforced only within this API instance; a durable
 global registry and key rotation protocol remain missing.
+
+The bounded-scan successor performs a SQL type/length and aggregate-byte
+preflight for every selected field before materializing content, then streams
+rows. It verifies canonical payload, prepared JCS, stored input, policy hash,
+and activation manifest/pipeline/request bindings. These hashes are unkeyed:
+an actor who can coherently rewrite this trusted SQLite database can forge the
+namespace evidence; this scanner does not reverify signatures against an
+independent key registry. A test deliberately demonstrates that boundary.
+Authenticated current-key re-verification, trusted DB access controls, global
+namespace ownership and historical migration remain prerequisites; no hold is
+lifted.

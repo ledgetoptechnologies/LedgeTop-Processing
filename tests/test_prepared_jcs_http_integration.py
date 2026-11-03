@@ -377,6 +377,39 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                         reopened.accept(job['jobId'],acceptance)
                     with queue._db() as db:
                         db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_sha256=? WHERE job_id=?',(original_hold['payload_sha256'],job['jobId']))
+                    # Preflight must reject every oversized field before any
+                    # retained JSON reaches a Python parser.
+                    for table,column in (('reference_viewer_v3_copy_hold','payload_json'),('reference_viewer_envelopes_v2','envelope_json'),('reference_viewer_activation','binding_json'),('reference_jobs','input_json'),('reference_viewer_v3_policy','policy_json')):
+                        with self.subTest(table=table):
+                            with queue._db() as db:
+                                old_value=db.execute('SELECT '+column+' FROM '+table+' WHERE job_id=?',(job['jobId'],)).fetchone()[0]
+                                db.execute('UPDATE '+table+' SET '+column+'=? WHERE job_id=?',('x'*(rp.MAX_BODY_BYTES+1),job['jobId']))
+                            with patch('processing.reference_copy_hold_integrity.json.loads',side_effect=AssertionError('parser reached')):
+                                with queue._db() as db:
+                                    with self.assertRaises(Conflict): reopened._held_copy_ids(db)
+                            with queue._db() as db: db.execute('UPDATE '+table+' SET '+column+'=? WHERE job_id=?',(old_value,job['jobId']))
+                    with patch('processing.reference_copy_hold_integrity.MAX_SCAN_BYTES',1), patch('processing.reference_copy_hold_integrity.json.loads',side_effect=AssertionError('parser reached')):
+                        with queue._db() as db:
+                            with self.assertRaises(Conflict): reopened._held_copy_ids(db)
+                    # A coherent hash rewrite by a DB writer remains outside
+                    # this hash-only scanner's threat model; this demonstrates
+                    # why authenticated re-verification remains a release gate.
+                    with queue._db() as db:
+                        before=db.execute('SELECT payload_json,payload_sha256 FROM reference_viewer_v3_copy_hold WHERE job_id=?',(job['jobId'],)).fetchone()
+                        rewritten=json.loads(before['payload_json']);rewritten['acceptance']['receiptId']='db-writer-id'
+                        text=rp.canonical_json(rewritten).decode();digest=hashlib.sha256(text.encode()).hexdigest()
+                        db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_json=?,payload_sha256=? WHERE job_id=?',(text,digest,job['jobId']))
+                        self.assertIn('db-writer-id',reopened._held_copy_ids(db))
+                        db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_json=?,payload_sha256=? WHERE job_id=?',(before['payload_json'],before['payload_sha256'],job['jobId']))
+                    # Recomputed activation hash cannot excuse an inconsistent
+                    # manifest, pipeline or request binding.
+                    for field in ('manifestSha256','pipelineDigest','requestDigest'):
+                        with self.subTest(field=field), queue._db() as db:
+                            saved=db.execute('SELECT binding_json,binding_sha256 FROM reference_viewer_activation WHERE job_id=?',(job['jobId'],)).fetchone()
+                            altered=json.loads(saved['binding_json']);altered[field]='f'*64
+                            db.execute('UPDATE reference_viewer_activation SET binding_json=?,binding_sha256=? WHERE job_id=?',(rp.canonical_json(altered).decode(),rp.digest(altered),job['jobId']))
+                            with self.assertRaises(Conflict): reopened._held_copy_ids(db)
+                            db.execute('UPDATE reference_viewer_activation SET binding_json=?,binding_sha256=? WHERE job_id=?',(saved['binding_json'],saved['binding_sha256'],job['jobId']))
                     from processing.reference_terminal import TerminalService
                     terminal=TerminalService(reopened)
                     with queue._db() as db:
