@@ -10,6 +10,7 @@ from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
 from processing.reference_store import ReferenceStore, PROFILE
 from tests.viewer_receipt_signer import SyntheticViewerSigner
+from tests.reference_activation_fixture import prepare_reference_job, activate_reference_job
 
 
 STAGING = "synthetic-staging-token-0001"
@@ -45,13 +46,21 @@ class ReferenceAPITests(unittest.TestCase):
             headers if headers is not None else {"Authorization": "Bearer " + token},
             b"" if body is None else json.dumps(body).encode(), protected_transport=protected)
 
-    def submit(self):
-        response = self.request("POST", "/jobs", self.fixture["submission"])
-        self.assertEqual(response.status, 201)
-        return response.body
+    def legacy_job(self):
+        # Seed a pre-existing legacy record directly; this is not a public admission.
+        checked = p.validate_submission(self.fixture['submission'], environment='staging',
+            capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'])
+        return self.store.submit(checked)[0]
 
     def ready(self):
-        job = self.submit()
+        checked = p.validate_submission(self.fixture['submission'], environment='staging',
+            capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'])
+        job, _ = prepare_reference_job(self.store, checked)
+        activate_reference_job(self.store, job)
+        # Only seed a historical completed job; real new execution remains held.
+        ready_patch = patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)
+        ready_patch.start()
+        self.addCleanup(ready_patch.stop)
         binding = dict(node_id="cluster", worker_id="worker", worker_instance_id="instance", claim_request_id="claim-1")
         claim = self.store.claim(job["jobId"], **binding)
         self.store.reserve(job["jobId"], self.fixture["transferRequest"], node_id="cluster")
@@ -63,6 +72,11 @@ class ReferenceAPITests(unittest.TestCase):
         self.store.record_worker_result(job["jobId"], result, claim_token=claim["claimToken"], **binding)
         self.queue.complete(job["jobId"], {"claimToken": claim["claimToken"], "status": "succeeded", "result": {}})
         self.store.update_phase(job["jobId"], "awaiting_acceptance")
+        # Convert the synthetic finished record to a pre-existing legacy record
+        # so the real legacy result/receipt authorization path is exercised.
+        with self.queue._db() as db:
+            db.execute('DELETE FROM reference_viewer_activation WHERE job_id=?', (job['jobId'],))
+            db.execute('DELETE FROM reference_viewer_submission_owners WHERE job_id=?', (job['jobId'],))
         return job, result, claim["claimToken"]
 
     def test_result_range_header_lookup_is_case_insensitive_and_rejects_duplicates(self):
@@ -102,9 +116,9 @@ class ReferenceAPITests(unittest.TestCase):
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
     def test_submission_idempotency_environment_scoping_and_no_private_data(self):
-        job = self.submit()
+        job = self.legacy_job()
         replay = self.request("POST", "/jobs", self.fixture["submission"])
-        self.assertEqual((replay.status, replay.body["jobId"]), (200, job["jobId"]))
+        self.assertEqual((replay.status, replay.body), (503, {'error': 'viewer_prepared_submission_required'}))
         path = "/jobs/" + job["jobId"]
         self.assertEqual(self.request("GET", path).body, job)
         for suffix, method in (("", "GET"), ("/results", "GET"), ("/acceptance", "POST")):
@@ -137,14 +151,14 @@ class ReferenceAPITests(unittest.TestCase):
             self.assertEqual(self.request("POST", "/jobs", body).status, 400)
         self.assertEqual(self.store.list(), [])
 
-    def test_quota_conflicts_are_safe_and_atomic(self):
+    def test_admission_hold_precedes_quota_and_is_atomic(self):
         api = self.make_api(store=ReferenceStore(self.queue, max_metadata_bytes=1))
         response = self.request("POST", "/jobs", self.fixture["submission"], api=api)
-        self.assertEqual((response.status, response.body), (409, {"error": "reference_conflict"}))
+        self.assertEqual((response.status, response.body), (503, {"error": "viewer_prepared_submission_required"}))
         self.assertEqual(self.queue.list(), [])
 
     def test_unexpected_internal_error_never_returns_exception_or_credentials(self):
-        with patch.object(self.store, "submit", side_effect=RuntimeError(STAGING + " C:/private/path")):
+        with patch.object(p, "validate_submission", side_effect=RuntimeError(STAGING + " C:/private/path")):
             response = self.request("POST", "/jobs", self.fixture["submission"])
         self.assertEqual((response.status, response.body), (500, {"error": "internal_error"}))
         self.assertNotIn(STAGING, json.dumps(response.body))
@@ -210,7 +224,7 @@ class ReferenceAPITests(unittest.TestCase):
         body["manifest"]["sha256"] = p.manifest_sha256(body["manifest"])
         body["pipeline"]["treedar"].update(requested=True, inputObjectIds=["image-1"], provenanceReceiptId="provenance-1")
         self.assertEqual(self.request("POST", "/jobs", body).status, 400)
-        self.assertEqual(self.request("POST", "/jobs", body, api=api).status, 201)
+        self.assertEqual(self.request("POST", "/jobs", body, api=api).status, 503)
 
 
 if __name__ == "__main__":

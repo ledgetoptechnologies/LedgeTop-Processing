@@ -67,5 +67,6 @@ mock future-grant readiness; those tests do not establish v2 grant safety.
 The environment-only legacy POST /ltds/v1/jobs validates the request but
 returns 503 viewer_prepared_submission_required before inserting a job.
 Read-only access to already existing legacy job status remains available.
-The original reference API suite expects legacy admission and needs separate
-fixture migration; its downstream result and acceptance tests remain unqualified.
+The reference API tests seed synthetic historical legacy records to exercise
+status and acceptance; their completed-job setup uses a test-only mocked future
+grant and does not demonstrate live grant safety.
