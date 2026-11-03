@@ -22,3 +22,21 @@ this candidate. A safe effective-default contract and paired Viewer/engine
 validation are required before claiming that partial-fleet admission supports
 fallback between them. The per-node route and browser behavior are not
 qualified by these unit tests.
+
+`processing/effective_option_plan.py` is an unmounted, non-authorizing
+proposal for comparing a source and target catalog. Its caller must explicitly
+classify each changed default as a reviewed semantic pin or a node-local
+numeric execution setting. It never waives a missing definition, unknown type,
+unknown domain or ambiguous default; special workflow/file options cannot be
+pinned. It always returns `authorizesDispatch: false`, even for a proposal.
+The example `max-concurrency` classification preserves each node's own value;
+it does not change a running node or establish that this option is safe to
+classify. The actual catalogs still contain missing definitions, so this
+proposal holds rather than claiming that the existing PCs can fall back.
+
+An implementation that uses such plans must first authenticate and version the
+reviewed classification against the exact catalog versions, persist the
+effective options and their provenance with the job, enforce them unchanged at
+the actual node, fence stale writers and verify the resulting workflow. The
+current comparison does not establish those properties or prove engine-version
+equivalence.
