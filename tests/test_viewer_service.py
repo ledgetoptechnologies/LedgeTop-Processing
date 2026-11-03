@@ -229,12 +229,14 @@ class ViewerServiceTests(unittest.TestCase):
         from processing.viewer_http import ViewerFacade
         from processing.scratch_policy import ScratchLedger
         from processing.viewer_upload_capacity_candidate import ViewerUploadCapacity
+        from processing.viewer_spool_lock_candidate import SpoolLock
         from processing.viewer_limits import MAX_UPLOAD_BYTES
         from tests.test_viewer_http import multipart, BOUNDARY, MemoryHandler
         identifier=self.initialize()
         spool=self.root/'capacity-spool';spool.mkdir(mode=0o700)
         ledger=ScratchLedger(self.root/'capacity.sqlite',self.root,capacity_probe=lambda _:MAX_UPLOAD_BYTES+1000,safety_floor_bytes=100,clock=lambda:1)
-        gate=ViewerUploadCapacity(ledger,self.service.store,spool,synthetic_only=True)
+        lock=SpoolLock(spool) if os.name=='posix' else None
+        gate=ViewerUploadCapacity(ledger,self.service.store,spool,synthetic_only=True,spool_lock=lock)
         facade=ViewerFacade(self.service,'synthetic-production-token',temp_dir=spool,upload_capacity=gate)
         def request(path,body=b'',declared='6'):
             handler=MemoryHandler(path+'?token=synthetic-production-token',body,

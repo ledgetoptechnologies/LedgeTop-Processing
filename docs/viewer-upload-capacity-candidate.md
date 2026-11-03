@@ -17,7 +17,14 @@ Partial or duplicate batches keep their hold; commit requires exact input bytes.
 No release is provided. Existing clients and behavior remain unchanged unless
 the gate is explicitly injected. This is a synthetic prototype, not a release.
 
-The lock serializes only this Python object. It does not fence other processes,
+The optional synthetic `SpoolLock` holds a POSIX flock and fsynced dirty marker
+through upload parsing and TaskStore writes. A separate cooperating process is
+denied while the lock is held; a killed holder leaves the marker and later
+attempts hold. There is deliberately no automatic marker clearing or recovery.
+The lock root is caller-selected and no host-wide canonical identity or trusted
+reconciler is implemented. Removing a marker, recreating a lock, other launchers,
+inherited descriptors or surviving descendants are outside this experiment.
+It does not fence other processes,
 legacy coordinators, direct TaskStore callers, Docker, external filesystem
 writers, or multiple gates. Ledger and task accounting are separate databases;
 a crash can leave conservative holds or unindexed files requiring inspection.

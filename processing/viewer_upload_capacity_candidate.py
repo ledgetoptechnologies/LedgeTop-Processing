@@ -4,19 +4,25 @@ import json
 import os
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from .scratch_policy import PolicyConflict, ScratchLedger, _integer
 from .viewer_limits import MAX_UPLOAD_BYTES
+from .viewer_spool_lock_candidate import SpoolLock, SpoolHeld
 
 
 class ViewerUploadCapacity:
-    def __init__(self, ledger, store, spool, *, synthetic_only=False):
+    def __init__(self, ledger, store, spool, *, synthetic_only=False, spool_lock=None):
         if synthetic_only is not True:
             raise ValueError('held: cross-process spool fencing unavailable')
         if not isinstance(ledger, ScratchLedger):
             raise ValueError('ScratchLedger required')
         self.ledger, self.store = ledger, store
+        if spool_lock is not None and not isinstance(spool_lock, SpoolLock):
+            raise ValueError('synthetic spool lock required')
+        self.spool_lock = spool_lock
         self.spool = os.path.realpath(spool)
+        if spool_lock is not None and str(spool_lock.root) != self.spool:
+            raise ValueError('lock must use exact spool root')
         if any(os.stat(path).st_dev != os.stat(ledger.root).st_dev for path in (self.spool, store.root)):
             raise ValueError('spool and tasks must share reserved filesystem')
         self._lock = threading.RLock()
@@ -64,8 +70,12 @@ class ViewerUploadCapacity:
     @contextmanager
     def upload(self, identifier, environment, declared, body_bytes):
         with self._lock:
-            self._check(identifier, environment, declared, body_bytes)
-            yield
+            try:
+                with self.spool_lock.acquire() if self.spool_lock else nullcontext():
+                    self._check(identifier, environment, declared, body_bytes)
+                    yield
+            except SpoolHeld:
+                raise PolicyConflict('spool ownership unavailable') from None
 
     def file(self, identifier, environment, declared, filename, size):
         self._check(identifier, environment, declared, 1)
