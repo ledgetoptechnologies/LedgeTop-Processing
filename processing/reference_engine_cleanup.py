@@ -298,6 +298,11 @@ class EngineCacheCleanup:
             db.execute('UPDATE removals SET checked=(SELECT COALESCE(MAX(checked),0)+1 FROM removals) WHERE job=?', (row[0],))
         return self.remove(row[0])
 
+    def _require_import_confirmation(self, identity):
+        # Accepted-copy receipts establish custody, not Viewer model import.
+        # No authenticated, durable import confirmation contract exists yet.
+        raise _Held('viewer_import_confirmation_unavailable')
+
     def remove(self, job_id, *, viewer_receipts=None):
         """Admit one exact removal or read-only reconcile an existing intent.
 
@@ -356,6 +361,7 @@ class EngineCacheCleanup:
                     return {'state':'uncertain', 'jobId':job_id, 'reason':'remove_outcome_requires_reconciliation'}
                 self._verify_inputs(identity)
                 self._policy(identity)
+                self._require_import_confirmation(identity)
                 with self._db() as db:
                     db.execute("UPDATE removals SET phase='remove_pending',updated_at=CURRENT_TIMESTAMP WHERE job=?", (job_id,))
                 try:
