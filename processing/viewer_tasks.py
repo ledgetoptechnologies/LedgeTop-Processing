@@ -77,7 +77,7 @@ def task_fenced(method):
         # isolated parallel mode it must not wait for a slow upload while
         # holding that lock; callers get a retryable conflict instead.
         blocking = not self.queue.parallel_viewer_uploads or method.__name__ == 'upload'
-        with self._task_fence(identifier, blocking=blocking):
+        with self._task_fence(identifier, blocking=blocking, upload=method.__name__ == 'upload'):
             return method(self, identifier, *args, **kwargs)
     return call
 
@@ -200,7 +200,7 @@ class TaskStore:
         return row
 
     @contextmanager
-    def _task_fence(self, identifier, *, blocking=True):
+    def _task_fence(self, identifier, *, blocking=True, upload=False):
         checked_uuid(identifier)
         queue = self.queue
         if os.getpid() != queue._creator_pid:
@@ -208,12 +208,19 @@ class TaskStore:
         with queue._viewer_task_locks_guard:
             entry = queue._viewer_task_locks.get(identifier)
             if entry is None:
-                entry = [threading.RLock(), 0]
+                entry = [threading.RLock(), 0, 0]
                 queue._viewer_task_locks[identifier] = entry
             entry[1] += 1
-        acquired = False
+            if upload:
+                entry[2] += 1
+            elif not blocking and entry[2]:
+                entry[1] -= 1
+                raise Conflict('task upload is in progress; retry later')
+            # Controls reserve the mutex while holding the registry lock, so
+            # an upload cannot register between the count check and acquire.
+            preacquired = entry[0].acquire(blocking=False) if not blocking else False
         try:
-            acquired = entry[0].acquire(blocking=blocking)
+            acquired = entry[0].acquire() if blocking else preacquired
             if not acquired:
                 raise Conflict('task upload is in progress; retry later')
             try:
@@ -232,6 +239,8 @@ class TaskStore:
         finally:
             with queue._viewer_task_locks_guard:
                 entry[1] -= 1
+                if upload:
+                    entry[2] -= 1
                 if not entry[1]:
                     del queue._viewer_task_locks[identifier]
 

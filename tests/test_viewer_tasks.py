@@ -182,6 +182,45 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
 
+    def test_commit_cannot_overtake_registered_upload_waiter(self):
+        self.queue.close()
+        self.queue = Queue(self.root/'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root/'parallel-inputs')
+        self.initialize()
+        self.photo(name='first.jpg', data=b'first')
+        # Delay the upload after it registers as a waiter but before it
+        # acquires the task lock. A non-FIFO mutex could otherwise let commit
+        # overtake it during precisely this interval.
+        registered, release = threading.Event(), threading.Event()
+        class GateLock:
+            def __init__(self): self.lock = threading.RLock()
+            def acquire(self, blocking=True):
+                if threading.current_thread().name == 'upload-waiter':
+                    registered.set()
+                    if not release.wait(5): raise TimeoutError('waiter not released')
+                return self.lock.acquire(blocking=blocking)
+            def release(self): self.lock.release()
+        with self.queue._viewer_task_locks_guard:
+            self.queue._viewer_task_locks[self.identifier] = [GateLock(), 0, 0]
+        errors = []
+        def upload():
+            try: self.photo(name='second.jpg', data=b'second')
+            except Exception as error: errors.append(error)
+        worker = threading.Thread(target=upload, name='upload-waiter')
+        worker.start()
+        try:
+            self.assertTrue(registered.wait(5))
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                self.store.commit(self.identifier)
+        finally:
+            release.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(self.store.commit(self.identifier)['success'])
+        self.assertEqual(len(self.store.task(self.identifier)['files']), 2)
+
     def test_cancel_waits_for_inflight_upload_and_keeps_uploaded_bytes(self):
         self.queue.close()
         self.queue = Queue(self.root / 'parallel-queue', node_ids=('cluster','main'),

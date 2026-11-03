@@ -9,6 +9,8 @@ the inflight mutation finishes, and `close()` refuses during that interval.
 Same-task control operations fail with a retryable conflict while an upload
 holds its fence, so a cancellation request cannot block the service-wide
 scheduler lock while waiting for a slow inbound stream.
+Queued upload callers are counted before waiting on the per-task mutex; commit
+cannot overtake a registered upload waiter even if the mutex is non-FIFO.
 
 Tests exercise a slow upload against another task, same-task commit and
 cancellation, and process exit during a write. An interrupted `.incoming-*`
@@ -22,3 +24,6 @@ filesystems or establish an upload total in-flight across different tasks.
 Process exit was tested, not hardware power loss. Enabling it requires review,
 an upgrade/rollback exclusion plan, shared capacity control and integration
 with the outbound dispatch candidate; do not deploy it as-is.
+Viewer's existing submit worker retries generic failures only a limited number
+of times. It has not been qualified against repeated HTTP 409 conflicts; this
+candidate must not be described as guaranteeing eventual client retry.
