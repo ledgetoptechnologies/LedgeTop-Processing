@@ -865,6 +865,29 @@ class ReferenceDriverTests(unittest.TestCase):
                           trusted_viewer_receipt_keys=signer.trusted_keys)
         self.assertEqual(self.driver.step()['state'], 'completed')
 
+    def test_completed_legacy_unsigned_job_reopens_for_later_signed_copy(self):
+        job = self.submit(); self.advance(job, 'awaiting_acceptance')
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        receipt = dict(schemaVersion=1, receiptId='old-proof', storageReceiptId='old-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']],
+            acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+        self.store.accept(job['jobId'], receipt)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = signer.trusted_keys
+        self.store.viewer_required_environments = frozenset(('staging',))
+        self.driver = self.make_driver()
+        self.driver.step()
+        with self.driver._db() as db:
+            self.assertEqual(db.execute('SELECT stage FROM driver_jobs WHERE job=?',
+                                        (job['jobId'],)).fetchone()[0], 'awaiting_acceptance')
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+                          trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+
 
 class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
     # Reuse durable coordinator/transport helpers, while replacing the patched

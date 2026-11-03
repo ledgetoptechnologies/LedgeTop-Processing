@@ -557,6 +557,7 @@ class ReferenceDriver:
                 except Exception:return {'state':'held','reason':'worker_state_owner_unavailable'}
             self._active_step=DriverStepLease(self)
             self._hold_legacy_guarded_failures()
+            self._reopen_unverified_success()
             if self._combined_policy_initial is not None:
                 if self.combined_preparation is not self._combined_preparation_initial or self._combined_policy is not self._combined_policy_initial:raise DriverHeld('combined_profile_identity_changed')
                 self.combined_preparation.before_step(self._active_step)
@@ -607,6 +608,33 @@ class ReferenceDriver:
             if execution['phase'] != 'delivered' or data.get('failure') is not None:
                 self._hold_guarded_failure(execution)
                 raise DriverHeld('guarded_terminal_stop_unverified')
+
+    def _reopen_unverified_success(self):
+        """Resume one legacy completed success when signed copies are required."""
+        if not self.worker.viewer_receipt_keys:
+            return
+        with self._db() as db:
+            rows = db.execute("SELECT job,data FROM driver_jobs WHERE stage='completed' ORDER BY created").fetchall()
+        for row in rows:
+            data = json.loads(row['data'])
+            if data.get('failure') is not None:
+                continue
+            local = self._adapter(row['job'])._row(row['job'])
+            if not local['result']:
+                raise DriverHeld('completed_result_identity_unavailable')
+            identity = json.loads(local['identity'])
+            result = json.loads(local['result'])
+            expected = {obj['id'] for obj in result['objects']}
+            with self.ledger._transaction() as db:
+                objects = db.execute('SELECT id,accepted_copy_verified FROM objects WHERE reservation=?',
+                                     (identity['reservation'],)).fetchall()
+            if not expected or {obj['id'] for obj in objects} != expected:
+                raise DriverHeld('completed_result_ledger_unavailable')
+            if any(obj['accepted_copy_verified'] != 1 for obj in objects):
+                with self._db() as db:
+                    db.execute("UPDATE driver_jobs SET stage='awaiting_acceptance' WHERE job=? AND stage='completed'",
+                               (row['job'],))
+                return
 
     def _hold_guarded_failure(self, execution):
         identity = json.loads(execution['identity'])
