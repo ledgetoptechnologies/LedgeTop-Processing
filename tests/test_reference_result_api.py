@@ -61,6 +61,22 @@ class ReferenceResultAPITests(ResultsFixture, unittest.TestCase):
         self.assertEqual(self.request().status, 404)
         self.assertEqual(self.active_pins(), 0)
 
+    def test_readiness_requires_protected_authenticated_reader(self):
+        observation = {'ready': True, 'taskQueueCount': 0, 'maxImages': 1000,
+                       'availableScratchBytes': 4096, 'outputBudgetBytes': 1024}
+        self.api = ReferenceResultAPI(self.results, bearer_readers={TOKEN: dict(
+            node_id='cluster', worker_id='worker', environments=('staging',),
+            share_policy=lambda _: True)}, readiness_provider=lambda: observation)
+        path = PREFIX + '/readiness'
+        self.assertEqual(self.request(path=path, protected=False).status, 503)
+        self.assertEqual(self.request(path=path, token=VIEWER).status, 401)
+        response = self.request(path=path)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, {'nodeId': 'cluster', 'workerId': 'worker',
+                                        'observation': observation})
+        self.api.readiness_provider = lambda: None
+        self.assertEqual(self.request(path=path).status, 503)
+
     def test_required_generation_object_and_manifest_bindings(self):
         for headers, expected in (({'X-Result-Generation': '2'}, 409), ({'X-Result-Sha256': '0' * 64}, 409),
                                   ({'X-Result-Manifest-Sha256': '0' * 64}, 409), ({'X-Result-Generation': '0'}, 400),

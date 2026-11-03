@@ -18,7 +18,7 @@ PREFIX = "/ltds/worker/v1"
 
 
 class ReferenceResultAPI:
-    def __init__(self, results, *, bearer_readers):
+    def __init__(self, results, *, bearer_readers, readiness_provider=None):
         """Readers map bearer -> node_id/worker_id/environments/share_policy.
 
         share_policy(path-free persisted metadata) must return exactly True to
@@ -40,6 +40,9 @@ class ReferenceResultAPI:
                 protocol._environment(environment)
             readers[token] = MappingProxyType(dict(config, environments=frozenset(config["environments"])))
         self.results = results
+        if readiness_provider is not None and not callable(readiness_provider):
+            raise ValueError('readiness provider must be callable')
+        self.readiness_provider = readiness_provider
         self._readers = MappingProxyType(readers)
 
     @staticmethod
@@ -72,6 +75,18 @@ class ReferenceResultAPI:
         if reader is None:
             return self._error(401, "unauthorized")
         try:
+            if method == 'GET' and path == PREFIX + '/readiness' and self.readiness_provider is not None:
+                if body:
+                    return self._error(400, 'invalid_request')
+                report = self.readiness_provider()
+                from .node_readiness import NodeReadiness
+                cache = NodeReadiness((reader['node_id'],))
+                try:
+                    cache.publish(reader['node_id'], report, ticket=cache.begin(reader['node_id']))
+                except (TypeError, ValueError):
+                    return self._error(503, 'readiness_unavailable')
+                return Response(200, {'nodeId': reader['node_id'], 'workerId': reader['worker_id'],
+                                      'observation': cache.get(reader['node_id'])})
             match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/results/([A-Za-z0-9][A-Za-z0-9_-]{0,127})", path) if type(path) is str else None
             if method != "GET" or not match:
                 return self._error(404, "not_found")

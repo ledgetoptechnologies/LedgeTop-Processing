@@ -483,7 +483,8 @@ def _build_worker(config,owner,resources):
     result_api = ReferenceResultAPI(ReferenceResults(router if router is not None else worker,
         reader_session=session), bearer_readers={config['resultReadBearer']: dict(
         node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
-        share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
+        share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)},
+        readiness_provider=driver.readiness_report)
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_tls.load_cert_chain(config['serverCertFile'], config['serverKeyFile'])
     server = create_reference_http_server(result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)

@@ -203,6 +203,15 @@ class ReferenceDriverTests(unittest.TestCase):
         self.ledger.probe = lambda _: 10**9
         self.assertEqual(self.driver.step()['state'], 'awaiting_grant')
 
+    def test_readiness_report_uses_ledger_and_stops_advertising_after_claim_intent(self):
+        report = self.driver.readiness_report()
+        self.assertEqual(report['availableScratchBytes'], self.ledger.available_scratch())
+        self.assertEqual(report['outputBudgetBytes'], 1024 * 1024)
+        self.assertTrue(report['ready'])
+        self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertIsNone(self.driver.readiness_report())
+
     def supply_grants(self):
         for job in self.store.list(private=True):
             if job['phase'] == 'awaiting_transfer' and self.store.private_transfer_grant(job['jobId']) is None:

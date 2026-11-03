@@ -449,6 +449,34 @@ class ReferenceDriver:
         self._option_definitions = selected
         self.worker.allowed_options = frozenset(selected)
 
+    def readiness_report(self):
+        """Local advisory only; the real scratch reservation is still required."""
+        if not self._lock.acquire(blocking=False):
+            return None
+        try:
+            if self._state_owner is not None:
+                self._state_owner.check(self.path.parent)
+            with self._db() as db:
+                if db.execute("""SELECT 1 FROM driver_jobs WHERE stage NOT IN
+                    ('completed','awaiting_acceptance','awaiting_failure_acceptance') LIMIT 1""").fetchone():
+                    return None
+            if not self._ready():
+                return None
+            info = self.worker.engine.read('/info')
+            maximum = info.get('maxImages') if type(info) is dict else False
+            if (type(info) is not dict or 'maxImages' not in info
+                    or info.get('engineVersion') != self.worker.version
+                    or type(info.get('taskQueueCount')) is not int or info['taskQueueCount'] != 0
+                    or (maximum is not None and (type(maximum) is not int or maximum < 1))):
+                return None
+            return {'ready': True, 'taskQueueCount': 0, 'maxImages': maximum,
+                    'availableScratchBytes': self.ledger.available_scratch(),
+                    'outputBudgetBytes': self.output_budget}
+        except Exception:
+            return None
+        finally:
+            self._lock.release()
+
     def _ready(self):
         _, authority = self._request('GET', '/authority')
         if authority.get('authorityId') != self.worker.authority_id:
