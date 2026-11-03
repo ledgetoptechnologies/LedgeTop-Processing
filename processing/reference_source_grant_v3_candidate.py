@@ -63,18 +63,18 @@ def validate(grant, *, trusted_state, operational_limits, now):
     p._closed(operational_limits, (*POLICY, 'totalSourceBytes'), 'operational limits')
     for field in (*POLICY, 'totalSourceBytes'):
         p._integer(operational_limits[field], field)
-    if total_bytes > operational_limits['totalSourceBytes']:
-        raise ValueError('source exceeds operational limit')
-    if any(grant['policy'][field] > operational_limits[field] for field in POLICY):
-        raise ValueError('policy exceeds operational limit')
-    if grant['policy']['byteBudget'] > total_bytes * grant['policy']['attemptBudget']:
-        raise ValueError('byte budget exceeds source attempt relationship')
     for value in (grant, trusted_state):
         _account(value['accounting'])
         _authority(value['authority'])
         p._closed(value['policy'], POLICY, 'source policy')
         for field in POLICY:
             p._integer(value['policy'][field], field)
+    if total_bytes > operational_limits['totalSourceBytes']:
+        raise ValueError('source exceeds operational limit')
+    if any(grant['policy'][field] > operational_limits[field] for field in POLICY):
+        raise ValueError('policy exceeds operational limit')
+    if not total_bytes <= grant['policy']['byteBudget'] <= total_bytes * grant['policy']['attemptBudget']:
+        raise ValueError('byte budget violates source attempt relationship')
     if any(p.canonical_json(grant[key]) != p.canonical_json(trusted_state[key]) for key in ('accounting','authority','policy','objects')):
         raise ValueError('source grant does not match independent trusted state')
     return hashlib.sha256(DOMAIN + p.canonical_json(grant['accounting'])).hexdigest()
@@ -86,21 +86,60 @@ class SyntheticRangeLedger:
         self.operational_limits = operational_limits
         self.db = sqlite3.connect(path, isolation_level=None, timeout=5)
         self.db.execute('PRAGMA foreign_keys=ON')
-        existing = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounting'").fetchone()
-        lineage = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='lineage'").fetchone()
-        if existing and not lineage:
-            self.db.close()
-            raise ValueError('legacy ledger lacks durable budget lineage')
-        self.db.executescript('''
-          CREATE TABLE IF NOT EXISTS lineage(environment TEXT NOT NULL, job_id TEXT NOT NULL,
+        schema = """
+          CREATE TABLE lineage(environment TEXT NOT NULL, job_id TEXT NOT NULL,
             generation INTEGER NOT NULL, identity TEXT NOT NULL, PRIMARY KEY(environment,job_id,generation));
-          CREATE TABLE IF NOT EXISTS accounting(identity TEXT PRIMARY KEY, policy TEXT NOT NULL, objects TEXT NOT NULL,
+          CREATE TABLE accounting(identity TEXT PRIMARY KEY, policy TEXT NOT NULL, objects TEXT NOT NULL,
             requests INTEGER NOT NULL, bytes INTEGER NOT NULL);
-          CREATE TABLE IF NOT EXISTS attempts(identity TEXT NOT NULL REFERENCES accounting(identity), attempt_id TEXT NOT NULL, PRIMARY KEY(identity,attempt_id));
-          CREATE TABLE IF NOT EXISTS charges(identity TEXT NOT NULL REFERENCES accounting(identity),
+          CREATE TABLE attempts(identity TEXT NOT NULL REFERENCES accounting(identity), attempt_id TEXT NOT NULL, PRIMARY KEY(identity,attempt_id));
+          CREATE TABLE charges(identity TEXT NOT NULL REFERENCES accounting(identity),
             request_id TEXT NOT NULL, attempt_id TEXT NOT NULL, object_id TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL,
             PRIMARY KEY(identity,request_id));
-        ''')
+        """
+        names = {'lineage', 'accounting', 'attempts', 'charges'}
+        try:
+            self.db.execute('BEGIN IMMEDIATE')
+            actual_names = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            present = names & actual_names
+            if present and present != names:
+                raise ValueError('partial ledger schema requires reconciliation')
+            if not present:
+                for statement in schema.split(';'):
+                    if statement.strip(): self.db.execute(statement)
+            expected = sqlite3.connect(':memory:')
+            try:
+                expected.executescript(schema)
+                query = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE type IN ('table','index','trigger') AND tbl_name IN ('lineage','accounting','attempts','charges') ORDER BY type,name"
+                normalize = lambda rows: [(t,n,table,' '.join(sql.split()) if sql else None) for t,n,table,sql in rows]
+                if normalize(self.db.execute(query)) != normalize(expected.execute(query)):
+                    raise ValueError('incompatible ledger schema')
+            finally:
+                expected.close()
+            self._check_integrity()
+            self.db.execute('COMMIT')
+        except BaseException:
+            self.db.execute('ROLLBACK')
+            self.db.close()
+            raise
+
+    def _check_integrity(self):
+        if self.db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or self.db.execute('PRAGMA foreign_key_check').fetchone():
+            raise ValueError('ledger integrity check failed')
+        if self.db.execute("""SELECT 1 FROM accounting a WHERE
+            (SELECT COUNT(*) FROM lineage l WHERE l.identity=a.identity)!=1 OR
+            a.requests != (SELECT COUNT(*) FROM charges c WHERE c.identity=a.identity) OR
+            a.bytes != COALESCE((SELECT SUM(c.length) FROM charges c WHERE c.identity=a.identity),0)
+            LIMIT 1""").fetchone():
+            raise ValueError('ledger lineage or accounting mismatch')
+        if self.db.execute("""SELECT 1 FROM lineage l LEFT JOIN accounting a ON a.identity=l.identity
+            WHERE a.identity IS NULL LIMIT 1""").fetchone():
+            raise ValueError('orphan ledger lineage')
+        if self.db.execute("""SELECT 1 FROM charges c LEFT JOIN attempts t ON
+            t.identity=c.identity AND t.attempt_id=c.attempt_id WHERE t.identity IS NULL LIMIT 1""").fetchone():
+            raise ValueError('orphan transfer attempt')
+        if self.db.execute("""SELECT 1 FROM attempts t LEFT JOIN charges c ON
+            t.identity=c.identity AND t.attempt_id=c.attempt_id WHERE c.identity IS NULL LIMIT 1""").fetchone():
+            raise ValueError('attempt without a charge')
 
     def close(self):
         self.db.close()
@@ -120,6 +159,7 @@ class SyntheticRangeLedger:
         objects = p.canonical_json(grant['objects']).decode('utf-8')
         self.db.execute('BEGIN IMMEDIATE')
         try:
+            self._check_integrity()
             account = grant['accounting']
             parent = (account['environment'],account['jobId'],account['generation'])
             lineage = self.db.execute('SELECT identity FROM lineage WHERE environment=? AND job_id=? AND generation=?', parent).fetchone()

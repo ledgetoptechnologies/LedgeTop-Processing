@@ -90,6 +90,31 @@ class SourceGrantV3Tests(unittest.TestCase):
         grant['policy']['byteBudget'] = 9; state['policy']['byteBudget'] = 9
         with self.assertRaises(ValueError): validate(grant,trusted_state=state,operational_limits=self.limits,now=100)
 
+    def test_missing_lineage_and_corrupt_accounting_fail_closed(self):
+        self.charge()
+        self.ledger.db.execute('DELETE FROM lineage')
+        with self.assertRaisesRegex(ValueError, 'lineage'): self.charge('new',4)
+        self.ledger.close()
+        with self.assertRaisesRegex(ValueError, 'lineage'):
+            SyntheticRangeLedger(str(self.path), operational_limits=self.limits)
+
+    def test_partial_or_incompatible_schema_fails_closed(self):
+        self.ledger.close()
+        import sqlite3
+        db = sqlite3.connect(str(self.path))
+        db.execute('DROP TABLE lineage'); db.commit(); db.close()
+        with self.assertRaisesRegex(ValueError, 'partial'):
+            SyntheticRangeLedger(str(self.path), operational_limits=self.limits)
+
+    def test_malformed_policy_and_undersized_budget_rejected(self):
+        for bad in ({}, {'chunkBytes': 'bad', 'requestBudget': 1, 'byteBudget': 8, 'attemptBudget': 1}):
+            grant = copy.deepcopy(self.grant); grant['policy'] = bad
+            with self.assertRaises(ValueError): validate(grant,trusted_state=self.state,operational_limits=self.limits,now=100)
+        grant = copy.deepcopy(self.grant); state = copy.deepcopy(self.state)
+        grant['policy']['byteBudget'] = 7; state['policy']['byteBudget'] = 7
+        with self.assertRaisesRegex(ValueError, 'source attempt relationship'):
+            validate(grant,trusted_state=state,operational_limits=self.limits,now=100)
+
     def test_restart_retains_counts(self):
         self.charge(); self.ledger.close()
         self.ledger = SyntheticRangeLedger(str(self.path), operational_limits=self.limits); self.addCleanup(self.ledger.close)

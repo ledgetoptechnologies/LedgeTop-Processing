@@ -47,3 +47,12 @@ epoch fence, including if authority changes between check and charge. No
 production authorization or transfer may rely on this model. Independently
 provided synthetic operational caps bound source and policy counts; typed
 object closure checks and source/attempt byte-budget relationship are enforced.
+
+The model rejects partial or incompatible SQLite schema, missing lineage and
+inconsistent aggregate records before use. It still stores only an accounting
+hash rather than all parent identity material, and cannot prove a lineage was
+not maliciously rewritten; authenticated durable authority and reconciliation
+are required. Only that authority can determine whether a genuinely new job
+and generation exists. An ambiguous rollover must never receive a new budget.
+Pre-parse bounds, maximum TTL and atomic current-epoch enforcement are not
+implemented; this model remains inactive.
