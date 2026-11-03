@@ -41,19 +41,22 @@ def _verify_stored(db,stage_id,meta):
  with io.BufferedReader(_Rows(cursor)) as stream:
   return verify(stream,attempt_id=meta['attemptId'],evidence_sha256=meta['evidenceSha256'],page_hashes=meta['pageHashes'],page_bytes=meta['pageBytes'],decoded_bytes=meta['decodedBytes'])
 
-def stage(db,stage_id,*,metadata,stream,_fault=None):
+def _stage(db,stage_id,*,metadata,stream,_fault=None,_owned=False):
  """Dedicated DB test candidate; metadata must be independently trusted."""
- if db.in_transaction:raise EvidenceStageHeld('owned_transaction_required')
+ if db.in_transaction != _owned:raise EvidenceStageHeld('evidence_stage_unavailable')
  began=False
  try:
   _durability(db);p._slug(stage_id,'stage');_preflight_metadata(metadata)
   wire=p.canonical_json(metadata)
   if len(wire)>65536:raise ValueError()
-  db.execute('BEGIN IMMEDIATE');began=True
+
+  if not _owned:db.execute('BEGIN IMMEDIATE');began=True
   old=db.execute("SELECT CASE WHEN typeof(metadata)='text' AND instr(metadata,char(0))=0 AND length(metadata)<=65536 THEN metadata END FROM candidate_evidence WHERE stage_id=?",(stage_id,)).fetchone()
   if old is not None:
    if old[0]!=wire.decode():raise ValueError()
-   result=_verify_stored(db,stage_id,metadata);db.commit();return dict(result,created=False)
+   result=_verify_stored(db,stage_id,metadata);
+   if not _owned:db.commit()
+   return dict(result,created=False)
   if type(stream) not in (io.BytesIO,io.BufferedReader) or not stream.readable():raise ValueError()
   db.execute('INSERT INTO candidate_evidence VALUES(?,?)',(stage_id,wire.decode()))
   for index,(expected_hash,expected_size) in enumerate(zip(metadata['pageHashes'],metadata['pageBytes'])):
@@ -64,7 +67,17 @@ def stage(db,stage_id,*,metadata,stream,_fault=None):
    db.execute('INSERT INTO candidate_evidence_pages VALUES(?,?,?)',(stage_id,index,raw))
    if _fault:_fault(index)
   if stream.read(1)!=b'':raise ValueError()
-  result=_verify_stored(db,stage_id,metadata);db.commit();return dict(result,created=True)
+  result=_verify_stored(db,stage_id,metadata);
+  if not _owned:db.commit()
+  return dict(result,created=True)
  except (ValueError,TypeError,KeyError,sqlite3.Error,OSError,OverflowError,UnicodeError):
   if began and db.in_transaction:db.rollback()
   raise EvidenceStageHeld('evidence_stage_unavailable') from None
+
+
+def stage(db,stage_id,**kwargs):
+ return _stage(db,stage_id,**kwargs)
+
+def _stage_owned(db,stage_id,**kwargs):
+ if not db.in_transaction:raise EvidenceStageHeld('owned_transaction_required')
+ return _stage(db,stage_id,_owned=True,**kwargs)

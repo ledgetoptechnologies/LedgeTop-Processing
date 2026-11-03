@@ -15,12 +15,12 @@ from .maintenance import Conflict
 from . import prepared_envelope_jcs_candidate as jcs
 from .viewer_import_confirmation_store import _preflight_stored_json
 
-PROTOCOL='ltds-viewer-paged-source-journal-v1'
-DOMAIN=b'LTDS-VIEWER-PAGED-SOURCE-JOURNAL-V1\0'
+PROTOCOL='ltds-viewer-paged-source-snapshot-v1'
+DOMAIN=b'LTDS-VIEWER-PAGED-SOURCE-SNAPSHOT-V1\0'
 PURPOSE='paged-source-snapshot'
 MAX_BODY=65536
-MAX_TTL_SECONDS=3600
-FIELDS=('protocol','schemaVersion','issuerId','keyId','snapshotId','principalId','environment','coordinatorAuthorityId','jobId','generation','submissionId','activationId','viewerTaskId','viewerAttemptId','preparedEnvelopeSha256','datasetId','datasetManifestSha256','pipelineDigest','sourcePageHashes','sourcePageBytes','sourceCount','selectedPageHashes','selectedPageBytes','selectedCount','inputManifestSha256','processingClosureSha256','gcpEvidenceSha256','issuedAt','expiresAt','signature')
+MAX_TTL_SECONDS=900
+FIELDS=('protocol','schemaVersion','issuerId','keyId','snapshotId','principalId','environment','coordinatorAuthorityId','jobId','generation','submissionId','activationId','viewerTaskId','viewerAttemptId','preparedEnvelopeSha256','datasetId','datasetManifestSha256','pipelineDigest','sourcePageHashes','sourcePageBytes','sourceCount','selectedPageHashes','selectedPageBytes','selectedCount','inputManifestSha256','processingClosureSha256','gcpEvidenceVersion','gcpEvidencePageHashes','gcpEvidencePageBytes','gcpEvidencePageCount','gcpEvidenceByteCount','gcpEvidenceSha256','issuedAt','expiresAt','signature')
 
 class SnapshotHeld(ValueError):pass
 
@@ -54,7 +54,7 @@ class ServerSnapshotTrust:
  """Independently configured server policy; never construct from request data."""
  def __init__(self,*,authority_id,key_entries,clock_provider=None,max_future_skew_ms=60000):
   p._uuid(authority_id,'configured authority')
-  if type(max_future_skew_ms) is not int or not 0<=max_future_skew_ms<=300000:raise ValueError('invalid clock skew')
+  if type(max_future_skew_ms) is not int or not 0<=max_future_skew_ms<=60000:raise ValueError('invalid clock skew')
   for provider in (clock_provider,):
    if provider is not None and not callable(provider):raise ValueError('invalid provider')
   registry=pin_registry(key_entries)
@@ -63,10 +63,13 @@ class ServerSnapshotTrust:
   self.max_future_skew_ms=max_future_skew_ms
 
 DDL="CREATE TABLE paged_snapshot_journal_v1 (issuer_id TEXT NOT NULL, key_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, statement_sha256 TEXT NOT NULL, signed_bytes BLOB NOT NULL, job_id TEXT NOT NULL, principal_id TEXT NOT NULL, environment TEXT NOT NULL, authority_id TEXT NOT NULL, PRIMARY KEY(issuer_id,snapshot_id))"
+MARKER_DDL="CREATE TABLE paged_snapshot_journal_marker_v1 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))"
 
 def _check_schema(db):
  row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='paged_snapshot_journal_v1'").fetchone()
  if row is None or row[0]!=DDL:raise SnapshotHeld('snapshot_journal_schema_unavailable')
+ marker=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='paged_snapshot_journal_marker_v1'").fetchone()
+ if marker is None or marker[0]!=MARKER_DDL or [tuple(r) for r in db.execute('SELECT singleton,version FROM paged_snapshot_journal_marker_v1 LIMIT 2')]!=[(1,1)]:raise SnapshotHeld('snapshot_journal_schema_unavailable')
  indexes=db.execute("PRAGMA index_list('paged_snapshot_journal_v1')").fetchall()
  if len(indexes)!=1 or indexes[0][2]!=1 or indexes[0][3]!='pk':raise SnapshotHeld('snapshot_journal_schema_unavailable')
 
@@ -75,12 +78,15 @@ def initialize(db):
  if db.in_transaction:raise SnapshotHeld('snapshot_journal_schema_unavailable')
  db.execute('BEGIN IMMEDIATE')
  try:
-  if db.execute("SELECT 1 FROM sqlite_master WHERE name='paged_snapshot_journal_v1'").fetchone() is None:db.execute(DDL)
+  names={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE name IN ('paged_snapshot_journal_v1','paged_snapshot_journal_marker_v1')")}
+  if not names:
+   db.execute(DDL);db.execute(MARKER_DDL);db.execute('INSERT INTO paged_snapshot_journal_marker_v1 VALUES(1,1)')
+  elif len(names)!=2:raise SnapshotHeld('snapshot_journal_schema_unavailable')
   _check_schema(db);db.commit()
  except BaseException:
   db.rollback();raise
 
-def inspect(store,submission_id,raw,*,principal,environment,trust):
+def inspect(store,submission_id,raw,*,principal,environment,trust,stage_bundle=None,_fault=None):
  """Durably journal held metadata. `trust` must be provisioned independently.
 
  Principal and environment must come from authenticated server context.
@@ -100,7 +106,19 @@ def inspect(store,submission_id,raw,*,principal,environment,trust):
   p._environment(statement['environment'])
   for k in ('coordinatorAuthorityId','submissionId','activationId','viewerTaskId','viewerAttemptId'):p._uuid(statement[k],k)
   for k in ('preparedEnvelopeSha256','datasetManifestSha256','pipelineDigest','inputManifestSha256','processingClosureSha256'):p._hash(statement[k],k)
-  if statement['gcpEvidenceSha256'] is not None:raise ValueError('GCP contract unavailable')
+  evidence_keys=('gcpEvidenceVersion','gcpEvidencePageHashes','gcpEvidencePageBytes','gcpEvidencePageCount','gcpEvidenceByteCount','gcpEvidenceSha256')
+  if any(statement[k] is not None for k in evidence_keys):
+   if any(statement[k] is None for k in evidence_keys) or statement['gcpEvidenceVersion']!='ltds-viewer-gcp-evidence-chunks-v1':raise ValueError()
+   hashes=statement['gcpEvidencePageHashes'];sizes=statement['gcpEvidencePageBytes'];count=statement['gcpEvidencePageCount'];size=statement['gcpEvidenceByteCount']
+   if type(hashes) is not list or type(sizes) is not list or type(count) is not int or not 2<=count<=512 or len(hashes)!=count or len(sizes)!=count:raise ValueError()
+   p._integer(size,'evidence byte count')
+   if not count-1<=size<=min(16*1024*1024,(count-1)*46080):raise ValueError()
+   for value in hashes:p._hash(value,'evidence page hash')
+   for value in sizes:
+    p._integer(value,'evidence page bytes')
+    if value>65535:raise ValueError()
+   if sum(sizes)+count>24*1024*1024:raise ValueError()
+   p._hash(statement['gcpEvidenceSha256'],'GCP evidence')
   for k in ('generation','sourceCount','selectedCount'):p._integer(statement[k],k)
   if statement['sourceCount']>20000 or statement['selectedCount']>20000:raise ValueError()
   for k in ('sourcePageHashes','selectedPageHashes'):
@@ -154,12 +172,46 @@ def inspect(store,submission_id,raw,*,principal,environment,trust):
    def millis(value):
     delta=value-epoch0
     return (delta.days*86400+delta.seconds)*1000+delta.microseconds//1000
-   stored=db.execute('SELECT statement_sha256,signed_bytes,job_id,principal_id,environment,authority_id,key_id FROM paged_snapshot_journal_v1 WHERE issuer_id=? AND snapshot_id=?',(statement['issuerId'],statement['snapshotId'])).fetchone()
+   stored=db.execute("SELECT statement_sha256,CASE WHEN typeof(signed_bytes)='blob' AND length(signed_bytes)<=? THEN signed_bytes END,job_id,principal_id,environment,authority_id,key_id FROM paged_snapshot_journal_v1 WHERE issuer_id=? AND snapshot_id=?",(MAX_BODY,statement['issuerId'],statement['snapshotId'])).fetchone()
    if stored is not None:
     if tuple(stored)!=(statement_hash,raw,row['job_id'],principal,environment,expected_authority_id,statement['keyId']):raise ValueError('snapshot identity conflict')
-    return {'state':'held','reason':'snapshot_replay_status_only','statementSha256':statement_hash}
-   if now_ms+trust.max_future_skew_ms<millis(times[0]) or now_ms>=millis(times[1]):raise ValueError()
-   db.execute('INSERT INTO paged_snapshot_journal_v1 VALUES(?,?,?,?,?,?,?,?,?)',(statement['issuerId'],statement['keyId'],statement['snapshotId'],statement_hash,raw,row['job_id'],principal,environment,expected_authority_id))
-   return {'state':'held','reason':'signed_metadata_recorded_only','statementSha256':statement_hash}
+   else:
+    if now_ms+trust.max_future_skew_ms<millis(times[0]) or now_ms>=millis(times[1]):raise ValueError()
+    db.execute('INSERT INTO paged_snapshot_journal_v1 VALUES(?,?,?,?,?,?,?,?,?)',(statement['issuerId'],statement['keyId'],statement['snapshotId'],statement_hash,raw,row['job_id'],principal,environment,expected_authority_id))
+   if _fault:_fault('journal')
+   if type(stage_bundle) is not dict:raise ValueError('transactional staging unavailable')
+   p._closed(stage_bundle,('binding','bindingSha256','sourceStream','selectedStream','processingClosure','processingPages','evidenceStream'),'staging')
+   binding=stage_bundle['binding']
+   expected_binding=dict(datasetId=statement['datasetId'],datasetManifestSha256=statement['datasetManifestSha256'],principalId=principal,environment=environment,authorityId=expected_authority_id,viewerTaskId=statement['viewerTaskId'],viewerAttemptId=statement['viewerAttemptId'],pipelineDigest=statement['pipelineDigest'],sourcePageHashes=statement['sourcePageHashes'],sourceCount=statement['sourceCount'],selectedPageHashes=statement['selectedPageHashes'],selectedCount=statement['selectedCount'],inputManifestSha256=statement['inputManifestSha256'],processingClosureSha256=statement['processingClosureSha256'])
+   if type(binding) is not dict or any(binding.get(k)!=v for k,v in expected_binding.items()):raise ValueError('binding mismatch')
+   from . import paged_frame_receiver_candidate as frames
+   stage_id=hashlib.sha256((statement['issuerId']+'\0'+statement['snapshotId']).encode()).hexdigest()
+   if stored is not None:
+    # A status-only replay may omit streams; supplied streams must match exactly.
+    for kind,stream in (('source',stage_bundle['sourceStream']),('selected',stage_bundle['selectedStream'])):
+     if not hasattr(stream,'readline'):raise ValueError('invalid replay stream')
+     first=stream.readline(262146)
+     if first:
+      rows=db.execute('SELECT wire FROM candidate_frame_pages WHERE stage_id=? AND kind=? ORDER BY ordinal',(stage_id,kind))
+      line=first
+      for item in rows:
+       if line!=bytes(item[0])+b'\n':raise ValueError('changed replay stream')
+       line=stream.readline(262146)
+      if line:raise ValueError('extra replay data')
+   frames._stage_owned(db,stage_id,trusted_binding=binding,expected_binding_sha256=stage_bundle['bindingSha256'],source_stream=stage_bundle['sourceStream'],selected_stream=stage_bundle['selectedStream'],processing_closure=stage_bundle['processingClosure'],processing_pages=stage_bundle['processingPages'])
+   for kind,prefix in (('source','source'),('selected','selected')):
+    sizes=[r[0] for r in db.execute('SELECT length(wire) FROM candidate_frame_pages WHERE stage_id=? AND kind=? ORDER BY ordinal',(stage_id,kind))]
+    if sizes!=statement[prefix+'PageBytes']:raise ValueError('signed page sizes differ')
+   if _fault:_fault('frames')
+   generated=[]
+   for frame in db.execute("SELECT wire FROM candidate_frame_pages WHERE stage_id=? AND kind='source' ORDER BY ordinal",(stage_id,)):
+    generated.extend(record for record in json.loads(bytes(frame[0]).decode('utf8'))['records'] if record['type']=='attempt_generated_gcp')
+   if generated or statement['gcpEvidenceSha256'] is not None:
+    # The current evidence stream doesn't contain the generated GCP bytes.
+    # Do not commit a detached proof or silently omit required GCP semantics.
+    raise ValueError('generated GCP content binding unavailable')
+   if stage_bundle['evidenceStream'] is not None:raise ValueError('unexpected evidence')
+   if _fault:_fault('evidence')
+   return {'state':'held','reason':'snapshot_replay_status_only' if stored is not None else 'signed_pages_staged_only','statementSha256':statement_hash}
 
  except (ValueError,TypeError,KeyError,UnicodeError,OverflowError,InvalidSignature,Conflict,sqlite3.Error,OSError,RuntimeError,AttributeError):raise SnapshotHeld('snapshot_inspection_unavailable') from None

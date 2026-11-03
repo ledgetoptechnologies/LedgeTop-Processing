@@ -85,9 +85,9 @@ def _validated(db,stage_id,binding,pin,closure,processing_pages):
  with source('source') as left,source('selected') as right:
   return verify(left,right,source_hashes=binding['sourcePageHashes'],source_count=binding['sourceCount'],selected_hashes=binding['selectedPageHashes'],input_manifest_sha256=binding['inputManifestSha256'],processing_closure=closure,processing_pages=processing_pages,closure_sha256=binding['processingClosureSha256'],trusted_binding=binding,expected_binding_sha256=pin)
 
-def stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,selected_stream,processing_closure,processing_pages,_fault=None):
+def _stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,selected_stream,processing_closure,processing_pages,_fault=None,_owned=False):
  """Transactional candidate only; trusted_binding has NO authentication here."""
- if db.in_transaction:raise ReceiverHeld('staging_unavailable')
+ if db.in_transaction != _owned:raise ReceiverHeld('staging_unavailable')
  began_transaction=False
  try:
   _durability(db);_preflight_binding(trusted_binding)
@@ -97,7 +97,8 @@ def stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,se
   validate_pages(processing_closure,processing_pages,expected_closure_sha256=trusted_binding['processingClosureSha256'])
   binding_wire=p.canonical_json(trusted_binding);closure_wire=p.canonical_json(processing_closure)
   if len(binding_wire)>65536 or len(closure_wire)>65536:raise ValueError()
-  db.execute('BEGIN IMMEDIATE');began_transaction=True
+
+  if not _owned:db.execute('BEGIN IMMEDIATE');began_transaction=True
   old=db.execute("SELECT CASE WHEN typeof(binding_pin)='text' AND instr(binding_pin,char(0))=0 AND length(binding_pin)=64 THEN binding_pin END, CASE WHEN typeof(binding_json)='text' AND instr(binding_json,char(0))=0 AND length(binding_json)<=65536 THEN binding_json END, CASE WHEN typeof(closure_json)='text' AND instr(closure_json,char(0))=0 AND length(closure_json)<=65536 THEN closure_json END FROM candidate_frame_receipts WHERE stage_id=?",(stage_id,)).fetchone()
   if old:
    _preflight_stored_pages(db,stage_id)
@@ -110,7 +111,9 @@ def stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,se
     _preflight_stored_json(raw);processing_pages.append(json.loads(raw.decode('utf8'),object_pairs_hook=_pairs))
    if not 0<len(processing_pages)<=MAX_FRAMES:raise ValueError()
    result=_validated(db,stage_id,trusted_binding,expected_binding_sha256,processing_closure,processing_pages)
-   db.commit();return dict(result,created=False)
+
+   if not _owned:db.commit()
+   return dict(result,created=False)
   db.execute('INSERT INTO candidate_frame_receipts VALUES(?,?,?,?)',(stage_id,expected_binding_sha256,binding_wire.decode(),closure_wire.decode()))
   for index,page in enumerate(processing_pages):
    raw=p.canonical_json(page)
@@ -120,7 +123,17 @@ def stage(db,stage_id,*,trusted_binding,expected_binding_sha256,source_stream,se
   _bounded_frames(db,stage_id,'selected',selected_stream,trusted_binding['selectedPageHashes'],SELECTED_VERSION,SELECTED_DOMAIN,_fault)
   _preflight_stored_pages(db,stage_id)
   result=_validated(db,stage_id,trusted_binding,expected_binding_sha256,processing_closure,processing_pages)
-  db.commit();return dict(result,created=True)
+
+  if not _owned:db.commit()
+  return dict(result,created=True)
  except (sqlite3.Error,OSError,ValueError,TypeError,KeyError,UnicodeError,OverflowError,AttributeError):
   if began_transaction and db.in_transaction:db.rollback()
   raise ReceiverHeld('staging_unavailable') from None
+
+
+def stage(db,stage_id,**kwargs):
+ return _stage(db,stage_id,**kwargs)
+
+def _stage_owned(db,stage_id,**kwargs):
+ if not db.in_transaction:raise ReceiverHeld('owned_transaction_required')
+ return _stage(db,stage_id,_owned=True,**kwargs)

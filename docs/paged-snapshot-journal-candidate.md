@@ -1,5 +1,9 @@
 # Inactive synthetic replay journal
 
+This earlier description is superseded by `paged-snapshot-atomic-synthetic.md`
+for the isolated combined branch. The combined implementation uses the six
+nullable GCP metadata fields but still holds every GCP-bearing snapshot.
+
 This isolated experiment binds a canonical, independently signed synthetic
 statement to the existing prepared job in one SQLite write transaction. It
 checks the configured authority, principal/environment, owner, policy and
