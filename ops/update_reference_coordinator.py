@@ -42,7 +42,7 @@ MODE = 'reference-to-reference-v1'
 # Explicit preparation, immutable argument binding and every live fence remain.
 # Follow-up census compatibility includes the existing TerminalService table;
 # its reference_* zero-row admission fence remains unchanged.
-ACTIVATION_REVIEWED = True
+ACTIVATION_REVIEWED = False
 class Stopped(ValueError):pass
 
 
@@ -141,8 +141,10 @@ def volume_census(root, *, uid=10001, offline=False):
     for path in sorted(root.rglob('*')):
         relative=path.relative_to(root).as_posix();info=path.lstat()
         assert info.st_uid==uid and info.st_gid==uid and not stat.S_ISLNK(info.st_mode)
-        # The reviewed baseline contains system metadata and empty native dirs.
-        assert relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool')
+        # Preserve completed native Viewer tasks and their retained artifacts.
+        # Nothing else under the state volume is accepted by this updater.
+        assert (relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool')
+                or relative.startswith('viewer-tasks/'))
         if stat.S_ISDIR(info.st_mode):files.append(dict(path=relative,kind='directory',mode=stat.S_IMODE(info.st_mode)))
         else:
             assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=67108864
@@ -199,8 +201,16 @@ def volume_census(root, *, uid=10001, offline=False):
         authority=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
         active=db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
         assert active==0
+        # Terminal Viewer records and their file index are durable user state,
+        # not disposable cache. Hash them in the census above, and require each
+        # retained task to be complete before copying or replacing the image.
+        incomplete_viewer=db.execute("""SELECT COUNT(*) FROM viewer_tasks
+            WHERE NOT (phase='complete' AND stage='succeeded')""").fetchone()[0]
+        assert incomplete_viewer==0
+        retained_viewer_tables={'viewer_tasks','viewer_files','viewer_incarnations','viewer_option_evidence'}
         for name in names:
-            if (name.startswith(('reference_','viewer_')) or name=='owned_maintenance_schedules') and tables[name]['count']!=0:
+            if ((name.startswith(('reference_','viewer_')) and name not in retained_viewer_tables)
+                    or name=='owned_maintenance_schedules') and tables[name]['count']!=0:
                 raise AssertionError('nonempty guarded table')
         node_columns=[row[1] for row in db.execute('PRAGMA table_info(nodes)')]
         nodes={row[0]:dict(zip(node_columns,row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}

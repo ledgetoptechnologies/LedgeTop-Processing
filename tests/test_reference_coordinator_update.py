@@ -109,6 +109,39 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             db.execute("INSERT INTO viewer_reservations VALUES('synthetic','staging','synthetic','reserved')")
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
 
+    def test_terminal_viewer_task_files_are_retained_and_censused(self):
+        import hashlib,uuid
+        identifier=str(uuid.uuid4())
+        directory=self.volume/'viewer-tasks'/identifier
+        directory.mkdir(mode=0o700)
+        payload=b'synthetic retained viewer artifact'
+        artifact=directory/'retained.bin'
+        artifact.write_bytes(payload);artifact.chmod(0o600)
+        digest=hashlib.sha256(payload).hexdigest()
+        with self.queue._db() as db:
+            db.execute("""INSERT INTO viewer_tasks
+                (uuid,directory,name,options,outputs,environment,stage,phase)
+                VALUES(?,?,?,?,?,?,?,?)""",(identifier,identifier,'synthetic','[]','null',
+                'production','succeeded','complete'))
+            db.execute("INSERT INTO viewer_files VALUES(?,?,?,?,?,?,?)",
+                (identifier,'retained','retained.bin','retained.bin',len(payload),digest,0))
+            db.execute("INSERT INTO viewer_option_evidence VALUES(?,?,?,?)",
+                (identifier,1,'[]',hashlib.sha256(b'[]').hexdigest()))
+            db.execute("INSERT INTO viewer_incarnations VALUES(?,?,?,?,?)",
+                (identifier,1,None,'{}','[]'))
+        before=module.volume_census(self.volume,uid=os.geteuid())
+        copied=self.root/'retained-viewer-copy';shutil.copytree(self.volume,copied)
+        copied_artifact=copied/'viewer-tasks'/identifier/'retained.bin'
+        copied_artifact.write_bytes(payload+b'changed')
+        changed=module.volume_census(copied,uid=os.geteuid(),offline=True)
+        with self.assertRaises(module.Stopped):module.compatible(changed,before)
+        copied_artifact.write_bytes(payload);copied_artifact.chmod(0o600)
+        module.compatible(module.volume_census(copied,uid=os.geteuid(),offline=True),before)
+        self.assertEqual(artifact.read_bytes(),payload)
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_tasks SET phase='queued',removed=1 WHERE uuid=?",(identifier,))
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
     def test_nonempty_viewer_reservation_holds_under_optimized_python(self):
         with self.queue._db() as db:
             db.execute("INSERT INTO viewer_reservations VALUES('synthetic','staging','synthetic','reserved')")

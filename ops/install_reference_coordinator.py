@@ -38,7 +38,7 @@ MAIN_IMAGE = 'sha256:841177349ebcae8c467787b5a64507497560d346b964b5b157670a76f42
 NATIVE_PORTS = {'8080/tcp': [{'HostIp':'127.0.0.1','HostPort':'18080'}, {'HostIp':'192.168.50.89','HostPort':'3005'}]}
 REFERENCE_PORTS = dict(NATIVE_PORTS, **{'8443/tcp':[{'HostIp':'192.168.50.89','HostPort':'18443'}]})
 LOCK_PATH = ROOT.parent / 'coordinator-install.lock'
-ACTIVATION_REVIEWED = True  # Independent source review and 11 Linux fault tests passed.
+ACTIVATION_REVIEWED = False  # Completed-Viewer preservation changes require a fresh review.
 
 
 class CutoverStopped(ValueError):
@@ -175,13 +175,15 @@ def activity(api):
     # state through the existing owner container; never mistake a 404 for empty.
     query = """import json,sqlite3
 db=sqlite3.connect('file:/prototype-state/jobs.sqlite3?mode=ro',uri=True,timeout=3)
-try: print(json.dumps({'nativeViewerTasks':db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE removed=0').fetchone()[0]}))
+try: print(json.dumps({'incompleteViewerTasks':db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0], 'viewerTaskCount':db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0]}))
 finally: db.close()
 """
     native = json.loads(docker('exec','--user','10001:10001',NAME,'python','-c',query))
-    if native != {'nativeViewerTasks':0}:
-        raise CutoverStopped('native_viewer_tasks_present')
-    return dict(count=len(jobs), statusCounts=dict(Counter(job['status'] for job in jobs)), sha256=digest(rows))
+    if (type(native.get('incompleteViewerTasks')) is not int or native['incompleteViewerTasks'] != 0
+            or type(native.get('viewerTaskCount')) is not int or native['viewerTaskCount'] < 0):
+        raise CutoverStopped('native_viewer_task_active_or_unsettled')
+    return dict(count=len(jobs), statusCounts=dict(Counter(job['status'] for job in jobs)),
+        sha256=digest(rows), nativeViewerTasks=native['viewerTaskCount'])
 
 
 def ports(value):
@@ -320,6 +322,15 @@ def copy(src,dst,relative=''):
       total+=len(chunk);assert total<=info.st_size;sha.update(chunk);out.write(chunk)
      out.flush();os.fsync(write)
     current=entry.lstat();assert total==info.st_size and (current.st_dev,current.st_ino,current.st_size,current.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+    verify=hashlib.sha256();verified=0;check=os.open(output,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+     copied=os.fstat(check);assert stat.S_ISREG(copied.st_mode) and copied.st_nlink==1 and copied.st_uid==10001
+     while True:
+      chunk=os.read(check,1048576)
+      if not chunk:break
+      verified+=len(chunk);assert verified<=total;verify.update(chunk)
+    finally:os.close(check)
+    assert verified==total and verify.digest()==sha.digest()
    finally:os.close(read);os.close(write)
    counts['regularFiles']+=1;counts['bytes']+=total;manifest.append([rel,'file',stat.S_IMODE(info.st_mode),total,sha.hexdigest()])
 copy(source,target)
@@ -333,9 +344,11 @@ def database(path):
   assert not any(row['status'] in ('queued','running','held') for row in jobs)
   assert db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]=='7131882e-38ce-4d3e-99cc-4ba5a94d2ee8'
   tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-  for table in ('viewer_tasks','viewer_files','viewer_incarnations'):
-   if table in tables:assert db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0
-  return {'count':len(jobs),'sha256':hashlib.sha256(json.dumps(jobs,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+  viewer_tasks=db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0] if 'viewer_tasks' in tables else 0
+  if 'viewer_tasks' in tables:
+   assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0]==0
+  return {'count':len(jobs),'sha256':hashlib.sha256(json.dumps(jobs,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+   'nativeViewerTasks':viewer_tasks}
  finally:db.close()
 original=database(source/'jobs.sqlite3');assert database(target/'jobs.sqlite3')==original
 counts.update(sqliteQuickCheck='ok',databaseHistory=original,treeSha256=hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest())
@@ -539,9 +552,11 @@ try:
    status=r['status'],workerId=r['worker_id'],nodeId=r['node_id'],heldReason=r['held_reason'],
    result=json.loads(r['result']) if r['result'] else None,createdAt=r['created_at'],updatedAt=r['updated_at']))
  assert not any(s in ('queued','running','held') for s in statuses)
- native=db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE removed=0').fetchone()[0]
+ native=db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0]
+ incomplete=db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0]
+ assert incomplete==0
  reference=db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0]
- history=dict(count=len(rows),statusCounts=dict(Counter(statuses)),sha256=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest())
+ history=dict(count=len(rows),statusCounts=dict(Counter(statuses)),sha256=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest(),nativeViewerTasks=native)
  print(json.dumps(dict(authorityId=authority,history=history,nativeViewerTasks=native,referenceJobs=reference)))
 finally: db.close()
 """
@@ -555,7 +570,7 @@ def offline_rollback_precheck(state):
         '--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly','--entrypoint','python',
         state['image'],'-c',OFFLINE_ROLLBACK_CENSUS))
-    if result!=dict(authorityId=AUTHORITY,history=state['history'],nativeViewerTasks=0,referenceJobs=0):
+    if result!=dict(authorityId=AUTHORITY,history=state['history'],nativeViewerTasks=state['history']['nativeViewerTasks'],referenceJobs=0):
         raise CutoverStopped('offline_downgrade_baseline_changed')
 
 
