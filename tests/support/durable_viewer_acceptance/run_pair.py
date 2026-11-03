@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='lt-durable-acceptance-') as scratch:
         while time.monotonic() < deadline:
             if child.poll() is not None:
                 raise RuntimeError('test container exited before readiness: ' + child.stdout.read())
-            result = subprocess.run(['docker', 'port', name, '44443/tcp'], capture_output=True, text=True)
+            result = subprocess.run(['docker', 'port', name, '44443/tcp'], capture_output=True, text=True, timeout=5)
             if result.returncode == 0 and result.stdout.strip().startswith('127.0.0.1:'):
                 port = int(result.stdout.strip().rsplit(':', 1)[1])
                 origin = f'https://localhost:{port}'
@@ -56,9 +56,16 @@ with tempfile.TemporaryDirectory(prefix='lt-durable-acceptance-') as scratch:
         env['LT_TEST_ORIGIN'] = origin
         subprocess.run([sys.executable, str(HERE / 'run_e2e.py')], env=env, check=True, timeout=60)
     finally:
-        subprocess.run(['docker', 'stop', '--time', '3', name], capture_output=True, timeout=10)
         try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait(timeout=5)
+            subprocess.run(['docker', 'stop', '--time', '3', name], capture_output=True, timeout=10)
+        finally:
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+        # Killing the Docker CLI does not prove the daemon stopped its container.
+        check = subprocess.run(['docker', 'ps', '-a', '--filter', f'name=^/{name}$',
+                                '--format', '{{.Names}}'], capture_output=True, text=True, timeout=10)
+        if check.returncode != 0 or name in check.stdout.splitlines():
+            raise RuntimeError(f'test container cleanup could not be verified: {name}')
