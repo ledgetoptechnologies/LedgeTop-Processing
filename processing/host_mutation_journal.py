@@ -204,6 +204,17 @@ class HostMutationJournal:
             if last is None or last[1:] != ('commit', 'done'):
                 raise MutationHeld('completed commit evidence required')
 
+    def contains_operation(self, op_id):
+        """Check durable intent under the same gate lock used for mutation."""
+        self._ready()
+        try:
+            if str(uuid.UUID(op_id)) != op_id: raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise GateError('invalid operation identity') from None
+        with self._transaction():
+            self._validate_operations()
+            return self.db.execute('SELECT 1 FROM operations WHERE op_id=?', (op_id,)).fetchone() is not None
+
     def begin(self, op_id, kind, request_digest):
         """Record intent before mutation. A done replay returns its ack hash.
 
