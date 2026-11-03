@@ -129,9 +129,23 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                 self.assertEqual(post(activation,path)[0],409)
                 server.api=make_api(reopened,policy)
                 prefix='/ltds/prepared/v3/submissions/'+env['submission']['submissionId']
-                status_code,status=get(prefix+'/status');self.assertEqual(status_code,200);self.assertTrue(status['activated'])
+                status_code,status=get(prefix+'/status');self.assertEqual(status_code,200);self.assertTrue(status['activationRecorded']);self.assertFalse(status['dispatchReady']);self.assertEqual((status['schemaVersion'],status['view']),(1,'status'))
                 self.assertEqual(status['viewerAttemptId'],env['viewerAttemptId'])
                 self.assertEqual(get(prefix+'/status','synthetic-jcs-other-token-0001')[0],404)
+                # Corrupt private evidence must not distinguish another owner.
+                with queue._db() as db:
+                    original_digest=db.execute('SELECT envelope_sha256 FROM reference_viewer_envelopes_v2 WHERE job_id=?',(job['jobId'],)).fetchone()[0]
+                    db.execute('UPDATE reference_viewer_envelopes_v2 SET envelope_sha256=? WHERE job_id=?',('f'*64,job['jobId']))
+                for suffix in ('','/status','/result-manifest','/accepted-copies'):
+                    self.assertEqual(get(prefix+suffix,'synthetic-jcs-other-token-0001')[0],404)
+                self.assertEqual(get(prefix+'/status')[0],409)
+                with queue._db() as db:
+                    db.execute('UPDATE reference_viewer_envelopes_v2 SET envelope_sha256=? WHERE job_id=?',(original_digest,job['jobId']))
+                    db.execute("UPDATE reference_viewer_v3_policy SET policy_json='{}' WHERE job_id=?",(job['jobId'],))
+                code,held=get(prefix+'/status');self.assertEqual(code,200);self.assertTrue(held['activationRecorded']);self.assertFalse(held['dispatchReady'])
+                with queue._db() as db:
+                    db.execute('UPDATE reference_viewer_v3_policy SET policy_json=? WHERE job_id=?',(original,job['jobId']))
+
                 self.assertEqual(get(prefix+'/result-manifest')[0],503)
                 self.assertEqual(get(prefix+'/accepted-copies')[0],503)
                 # Synthetic DB injection only: no claim or live processing is performed.
@@ -144,7 +158,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                 self.assertEqual(get(prefix+'/result-manifest')[0],503)
                 with patch.object(ReferenceStore,'_v3_result_contract_ready',return_value=True):
                     code,body=get(prefix+'/result-manifest');self.assertEqual(code,200)
-                    self.assertEqual(body['resultManifest'],result)
+                    self.assertEqual((body['schemaVersion'],body['view']),(1,'result-manifest'));self.assertEqual(body['resultManifest'],result)
                     self.assertEqual(body['envelopeSha256'],found['envelopeSha256'])
                     self.assertEqual(get(prefix+'/result-manifest','synthetic-jcs-other-token-0001')[0],404)
                     server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy)

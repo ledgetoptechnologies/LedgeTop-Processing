@@ -541,6 +541,14 @@ class ReferenceStore:
                 return None
             return dict(self._public(job), submissionId=job['submission_id'], requestDigest=job['request_digest'])
 
+    @staticmethod
+    def _scoped_prepared_job_id(db, submission_id, principal, environment, expected_protocol):
+        """Filter only owner mapping before parsing any caller-inaccessible evidence."""
+        return db.execute("""SELECT r.job_id FROM reference_jobs r
+            JOIN reference_viewer_submission_owners o ON o.job_id=r.job_id
+            WHERE r.submission_id=? AND o.principal_id=? AND o.environment=? AND o.protocol=?""",
+            (submission_id,principal,environment,expected_protocol)).fetchone()
+
     def find_viewer_envelope_v2(self, submission_id, *, authenticated_principal, authenticated_environment, expected_protocol='ltds-viewer-prepared-envelope-v2'):
         """Unmounted authenticated-boundary candidate, no secrets in response."""
         protocol._uuid(submission_id, 'submission ID')
@@ -549,7 +557,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN')
             self._check_jcs_capability(db)
-            found = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
+            found = self._scoped_prepared_job_id(db, submission_id, authenticated_principal, authenticated_environment, expected_protocol)
             if found is None: return None
             row = self._row(db, found['job_id'])
             owner = self._submission_owner(db, row)
@@ -576,7 +584,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN')
             self._check_jcs_capability(db)
-            found=db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?',(submission_id,)).fetchone()
+            found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,JCS_PROTOCOL)
             if found is None: return None
             row=self._row(db,found['job_id']);owner=self._submission_owner(db,row)
             if owner is None or owner['protocol']!=JCS_PROTOCOL or (owner['principal_id'],owner['environment']) != (authenticated_principal,authenticated_environment): return None
@@ -587,7 +595,7 @@ class ReferenceStore:
                 viewerTaskId=envelope['viewer_task_id'],viewerAttemptId=envelope['viewer_attempt_id'],
                 activationId=envelope['activation_id'],envelopeSha256=envelope['envelope_sha256'])
             if view == 'status':
-                return dict(binding, status=row['status'], phase=row['phase'], activated=activation is not None)
+                return dict(binding, schemaVersion=1, view='status', status=row['status'], phase=row['phase'], activationRecorded=activation is not None, dispatchReady=False)
             # The current receipt tables accept unsigned legacy receipts and do
             # not carry the current principal-scoped verifier context. Never
             # represent them as verified v3 accepted copies.
@@ -604,7 +612,7 @@ class ReferenceStore:
                 if _json(result)!=row['result_json']: raise ValueError('result evidence changed')
             except (ValueError,TypeError,KeyError,json.JSONDecodeError):
                 raise Conflict('v3 result evidence invalid') from None
-            return dict(binding,resultManifest=result)
+            return dict(binding,schemaVersion=1,view='result-manifest',resultManifest=result)
 
     def get_legacy_job(self, job_id, environment, *, private=False):
         """Environment-only callers cannot inspect principal-owned prepared jobs."""
@@ -797,7 +805,7 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._check_jcs_capability(db)
-            found=db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
+            found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,jcs.PROTOCOL)
             if found is None: return None
             row=self._row(db,found['job_id'])
             owner=self._submission_owner(db,row)

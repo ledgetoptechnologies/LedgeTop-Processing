@@ -2,11 +2,12 @@
 
 Proposed principal-authenticated GET paths are
 `/ltds/prepared/v3/submissions/{submissionId}/status`, `/result-manifest`, and
-`/accepted-copies`. Status returns submissionId, jobId, generation,
+`/accepted-copies`. Status returns schemaVersion=1, view=status, submissionId, jobId, generation,
 environment, viewerTaskId, viewerAttemptId, activationId, envelopeSha256,
-status, phase and activated. Unknown or wrong-principal/environment returns 404.
+status, phase, activationRecorded and dispatchReady (always false while held).
+activationRecorded means historical binding only, never current authorization. Unknown or wrong-principal/environment returns 404.
 The result response proposes that same immutable binding plus `resultManifest`,
-only after activation, succeeded status, accepted phase, and a closed validated
+plus schemaVersion=1 and view=result-manifest, only after activation, succeeded status, accepted phase, and a closed validated
 persisted result with matching job, generation, environment and pipeline digest.
 
 Result-manifest remains hard-held with 503: current state does not prove the
