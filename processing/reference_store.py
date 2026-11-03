@@ -373,6 +373,10 @@ class ReferenceStore:
                 db.execute('INSERT INTO reference_viewer_submission_owners VALUES(?,?,?,?,?)',
                     (job_id, owner[0], owner[1], checked['requestDigest'], 'ltds-viewer-prepared-envelope-v2' if envelope is not None else _PREPARED_PROTOCOL))
             if envelope is not None:
+                collision = db.execute('SELECT 1 FROM reference_viewer_activation WHERE activation_id=? OR (principal_id=? AND environment=? AND viewer_attempt_id=?)',
+                    (envelope[2],owner[0],owner[1],envelope[4])).fetchone()
+                if collision:
+                    raise Conflict('prepared envelope identity already activated')
                 try:
                     db.execute('INSERT INTO reference_viewer_envelopes_v2 VALUES(?,?,?,?,?,?,?,?)',
                         (job_id, owner[0], owner[1], envelope[2], envelope[3], envelope[4], envelope[0], envelope[1]))
@@ -548,6 +552,10 @@ class ReferenceStore:
                     (binding['principalId'],binding['environment'],binding['activationId'],binding['viewerTaskId'],binding['viewerAttemptId'])
                     or hashlib.sha256(_ENVELOPE_V2_DOMAIN + prepared['envelope_json'].encode('utf-8')).hexdigest() != prepared['envelope_sha256']):
                     raise Conflict('prepared envelope activation differs')
+            reserved = db.execute('SELECT job_id FROM reference_viewer_envelopes_v2 WHERE (activation_id=? OR (principal_id=? AND environment=? AND viewer_attempt_id=?)) AND job_id!=?',
+                (binding['activationId'], binding['principalId'], binding['environment'], binding['viewerAttemptId'], binding['jobId'])).fetchone()
+            if reserved:
+                raise Conflict('activation identity reserved by another prepared job')
             existing = self._activation(db, row)
             if existing is not None:
                 if _json(existing) != encoded:

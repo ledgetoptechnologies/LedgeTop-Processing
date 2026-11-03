@@ -347,6 +347,32 @@ class ViewerActivationTests(unittest.TestCase):
         first = self.prepare_v2(envelope)
         self.assertEqual(self.prepare_v2(envelope), (first[0], False))
 
+    def test_v2_reservation_prevents_v1_activation_and_inverse(self):
+        envelope = self.envelope_v2()
+        self.prepare_v2(envelope)
+        _, v1 = self.submit()
+        for changed in (dict(v1, activationId=envelope['activationId']),
+                        dict(v1, viewerAttemptId=envelope['viewerAttemptId'])):
+            with self.assertRaises(Conflict): self.activate(changed)
+        _, prior = self.submit()
+        self.activate(prior)
+        for field in ('activationId', 'viewerAttemptId'):
+            other = self.envelope_v2()
+            other[field] = prior[field]
+            other['submission']['submissionId'] = str(uuid.uuid4())
+            with self.assertRaises(Conflict): self.prepare_v2(other)
+
+    def test_v2_prepare_and_v1_activation_race_only_one_reserves(self):
+        envelope = self.envelope_v2()
+        _, binding = self.submit()
+        binding['activationId'] = envelope['activationId']
+        def attempt(fn):
+            try: fn(); return True
+            except Conflict: return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, (lambda: self.prepare_v2(envelope), lambda: self.activate(binding))))
+        self.assertEqual(sum(outcomes), 1)
+
     def test_v2_activation_must_match_prepared_evidence(self):
         envelope = self.envelope_v2()
         job, _ = self.prepare_v2(envelope)
