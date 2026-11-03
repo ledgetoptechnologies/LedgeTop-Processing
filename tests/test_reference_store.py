@@ -226,6 +226,29 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(store.next_for_node('node-2')['jobId'], job['jobId'])
         self.assertIsNotNone(claim('node-2'))
 
+    def test_candidate_inventory_bad_readiness_fails_closed(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        observations = {'cluster': None, 'node-2': None}
+        store = ReferenceStore(self.queue, node_inventory=inventory,
+                               node_readiness=lambda name: observations[name])
+        job, _ = store.submit(self.new_submission())
+        malformed = (None, {}, {'ready': True, 'taskQueueCount': False, 'maxImages': None},
+                     {'ready': True, 'taskQueueCount': 0, 'maxImages': True},
+                     {'ready': True, 'taskQueueCount': 1, 'maxImages': None},
+                     {'ready': True, 'taskQueueCount': 0},
+                     {'ready': False, 'taskQueueCount': 0, 'maxImages': None})
+        for report in malformed:
+            with self.subTest(report=report):
+                observations['cluster'] = report
+                self.assertIsNone(store.next_for_node('cluster'))
+                self.assertIsNone(store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+                    worker_instance_id='instance', claim_request_id='bad-report'))
+                self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
+        observations['cluster'] = {'ready': True, 'taskQueueCount': 0, 'maxImages': 1}
+        self.assertEqual(store.next_for_node('cluster')['jobId'], job['jobId'])
+
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)
         with self.assertRaises(Conflict):
