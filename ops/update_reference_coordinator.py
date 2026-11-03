@@ -36,17 +36,25 @@ legacy=_HistoricalTransport()
 NAME='ledgetop-processing-prototype-c3fcb3a'
 VOLUME=NAME+'-state'
 AUTHORITY='7131882e-38ce-4d3e-99cc-4ba5a94d2ee8'
-OLD_ID = '7ebe34636518961ddb4398b545a6a73d0254a47a093b198cf5d2d8411345cd07'
-OLD_IMAGE = 'sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9'
-OLD_SOURCE = 'e2ccf489ab41160acff3f90e2b4bcd568f72cf24'
+# The installed predecessor: the 693cb7e coordinator that the e2ccf489 update
+# created, from a read-only inspection of the live container on 2026-11-03.
+OLD_ID = '525ca6e24ad3b9e57e2a3be36567471c10745a4aaa8ebc03c7f2d2f215dfb977'
+OLD_IMAGE = 'sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004'
+OLD_SOURCE = '693cb7eca32295da959a4f42399f317577ef8a8a'
+# Exact terminal job rows the predecessor held at that inspection (18 succeeded, 2 failed).
+REVIEWED_JOB_COUNT = 20
+# Private space for the restart preflight that reads through a hot rollback
+# journal. It counts against --memory 256m; jobs.sqlite3 is about 0.25 MiB.
+TMPFS = {'/tmp': 'rw,nosuid,nodev,noexec,size=64m,mode=1777'}
+# The retained Viewer tasks add about 1.2 GB that the backup copies once and
+# hashes twice; 120 seconds covered only the empty historical volume.
+BACKUP_TIMEOUT = 900
 LABEL = 'org.ledgetop.reference.update'
 MODE = 'reference-to-reference-v1'
-# Independent source review and frozen-source Linux/Windows plus actual dual-host
-# gate checks accepted source 890cd265c9ff9bad0e83aeddc1b096883200d335.
-# Explicit preparation, immutable argument binding and every live fence remain.
-# Follow-up census compatibility includes the existing TerminalService table;
-# its reference_* zero-row admission fence remains unchanged.
-ACTIVATION_REVIEWED = True
+# The 693cb7e predecessor pins and the /tmp tmpfs are new and not yet reviewed
+# against the live host. Explicit preparation, immutable argument binding and
+# every live fence remain; activation and rollback stay refused until review.
+ACTIVATION_REVIEWED = False
 class Stopped(ValueError):pass
 
 
@@ -149,12 +157,16 @@ def volume_census(root, *, uid=10001, offline=False):
         info = path.lstat()
         if not (info.st_uid == uid and info.st_gid == uid and (not stat.S_ISLNK(info.st_mode))):
             raise AssertionError()
-        if not relative in ('jobs.sqlite3', 'coordinator.lock', 'viewer-tasks', 'viewer-spool'):
+        # The reviewed baseline contains system metadata, an empty spool, and
+        # retained terminal Viewer task directories. Those are client inputs
+        # and results: every byte is hashed so update and rollback preserve them.
+        retained = relative.startswith('viewer-tasks/')
+        if not (relative in ('jobs.sqlite3', 'coordinator.lock', 'viewer-tasks', 'viewer-spool') or retained):
             raise AssertionError()
         if stat.S_ISDIR(info.st_mode):
             files.append(dict(path=relative, kind='directory', mode=stat.S_IMODE(info.st_mode)))
         else:
-            if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and (info.st_size <= 67108864)):
+            if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and (info.st_size <= (21474836480 if retained else 67108864))):
                 raise AssertionError()
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
             try:
@@ -224,10 +236,18 @@ def volume_census(root, *, uid=10001, offline=False):
         active = db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
         if not active == 0:
             raise AssertionError()
+        # Terminal Viewer tasks are retained, never removed for an update. Any
+        # nonterminal task, reservation or orphaned task row holds instead.
+        retained_viewer = {'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'viewer_option_evidence'}
         for name in names:
-            if name.startswith(('reference_', 'viewer_')) or name == 'owned_maintenance_schedules':
-                if not tables[name]['count'] == 0:
-                    raise AssertionError('nonempty guarded table')
+            if (name.startswith(('reference_', 'viewer_')) or name == 'owned_maintenance_schedules') and tables[name]['count'] != 0 and name not in retained_viewer:
+                raise AssertionError('nonempty guarded table')
+        if 'viewer_tasks' in names:
+            if db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'").fetchone()[0]:
+                raise AssertionError('nonterminal Viewer task')
+            for name in sorted((retained_viewer & names) - {'viewer_tasks'}):
+                if db.execute('SELECT COUNT(*) FROM "' + name + '" WHERE uuid NOT IN (SELECT uuid FROM viewer_tasks)').fetchone()[0]:
+                    raise AssertionError('orphaned Viewer task row')
         node_columns = [row[1] for row in db.execute('PRAGMA table_info(nodes)')]
         nodes = {row[0]: dict(zip(node_columns, row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}
         return dict(authorityId=authority, schema=objects, tables=tables, files=files, nodeRows=nodes, rootMode=stat.S_IMODE(root_info.st_mode), sqliteQuickCheck='ok')
@@ -429,7 +449,15 @@ comparison=dict(before);comparison.pop('rootMode');assert comparison==copied
 counts['fullCensusSha256']=hashlib.sha256(json.dumps(before,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 print(json.dumps(counts))
 '''
-    return explicit_guard_source(legacy.BACKUP.replace('print(json.dumps(counts))',extra))
+    script=legacy.BACKUP.replace('print(json.dumps(counts))',extra)
+    # The historical installer requires empty Viewer tables. Here the census
+    # above already requires every retained task to be terminal and binds it.
+    empty_viewer="""  for table in ('viewer_tasks','viewer_files','viewer_incarnations'):
+   if table in tables:assert db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0
+"""
+    if script.count(empty_viewer)!=1:raise Stopped('reviewed_backup_script_changed')
+    return explicit_guard_source(script.replace(empty_viewer,"""  if 'viewer_tasks' in tables:assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'").fetchone()[0]==0
+"""))
 
 
 def copy_backup(transport,root,state):
@@ -450,7 +478,7 @@ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     return json.loads(transport.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
         '--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script(),timeout=120))
+        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script(),timeout=BACKUP_TIMEOUT))
 
 
 class ReferenceCoordinatorUpdate:
@@ -496,7 +524,7 @@ class ReferenceCoordinatorUpdate:
                 '--entrypoint','python',state['image'],'-c',code)
         else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
         result=json.loads(raw)
-        if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=12:raise Stopped('reviewed_idle_history_required')
+        if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=REVIEWED_JOB_COUNT:raise Stopped('reviewed_idle_history_required')
         return result
 
     def tls(self,state):
@@ -536,7 +564,8 @@ class ReferenceCoordinatorUpdate:
     def original(self,state=None):
         item=self.t.inspected(NAME)
         if (item['Id']!=OLD_ID or item['Image']!=OLD_IMAGE or not item['State']['Running']
-                or item['State'].get('Health',{}).get('Status')!='healthy'):raise Stopped('exact_current_reference_primary_required')
+                or item['State'].get('Health',{}).get('Status')!='healthy'
+                or item['HostConfig'].get('Tmpfs')):raise Stopped('exact_current_reference_primary_required')
         facts=self.t.facts(item,reference=True);self.t.sole_owner(OLD_ID)
         if self.t.image(OLD_IMAGE)['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=OLD_SOURCE:
             raise Stopped('predecessor_source_changed')
@@ -545,7 +574,7 @@ class ReferenceCoordinatorUpdate:
         return item,facts
 
     def activity(self,state,api):
-        if self.t.activity(api)!=state['history']:raise Stopped('public_history_or_native_activity_changed')
+        if self.t.activity(api,retained_viewer=True)!=state['history']:raise Stopped('public_history_or_native_activity_changed')
 
     def prepare(self,target,source_commit,main_image):
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',target) or not re.fullmatch(r'[0-9a-f]{40}',source_commit):raise Stopped('immutable_candidate_required')
@@ -556,8 +585,8 @@ class ReferenceCoordinatorUpdate:
         if (candidate['Id']!=target or candidate['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=source_commit
                 or any(candidate['Config'].get(key)!=old['Config'].get(key) for key in ('User','WorkingDir','Cmd','Entrypoint','Healthcheck'))):
             raise Stopped('candidate_recipe_or_source_not_verified')
-        _env,api,_operator=self.t.local_clients();history=self.t.activity(api)
-        if history['count']!=12:raise Stopped('reviewed_twelve_terminal_jobs_required')
+        _env,api,_operator=self.t.local_clients();history=self.t.activity(api,retained_viewer=True)
+        if history['count']!=REVIEWED_JOB_COUNT:raise Stopped('reviewed_terminal_job_count_required')
         nodes={row['id']:row for row in api.json('GET','/v1/prototype/nodes')['nodes']}
         if set(nodes)!={'main','cluster'} or any(row['state']!='active' for row in nodes.values()):raise Stopped('other_maintenance_present')
         cluster=self.t.inspected('node-odx-gpu')
@@ -599,6 +628,7 @@ class ReferenceCoordinatorUpdate:
                 or item['Config'].get('Labels',{}).get(LABEL)!=state['operation']
                 or item['Name'] not in ('/'+NAME,'/'+state['failedName'])):raise Stopped('foreign_candidate_refused')
         self.t.facts(item,reference=True)
+        if item['HostConfig'].get('Tmpfs')!=TMPFS:raise Stopped('candidate_tmpfs_changed')
         if application_environment(self.t,item)!=state['applicationEnvironmentSha256']:raise Stopped('candidate_application_environment_changed')
         self.save(state,newContainerId=item['Id']);return item
 
@@ -628,7 +658,7 @@ class ReferenceCoordinatorUpdate:
 
     def create_args(self,state):
         return ('create','--name',NAME,'--pull=never','--init','--restart','unless-stopped','--network','bridge',
-            '--read-only','--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
+            '--read-only','--tmpfs','/tmp:'+TMPFS['/tmp'],'--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
             '--pids-limit','64','--cpus','0.5','--memory','256m','--memory-swap','512m','--ipc','private','--shm-size','64m',
             '--log-driver','json-file','--workdir','/app','--env-file',str(legacy.NATIVE_ENV),'-e','PROCESSING_REFERENCE_CONFIG='+legacy.CONFIG_PATH,
             '--mount','type=volume,src='+VOLUME+',dst=/prototype-state',
