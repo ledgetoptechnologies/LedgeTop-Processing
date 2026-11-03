@@ -130,6 +130,22 @@ class HostMutationJournalTests(unittest.TestCase):
                     journal.acknowledge(self.init, 'c' * 64)
             journal.close()
 
+    def test_local_reconciliation_check_never_releases_or_accepts_unknown(self):
+        with NodeGate(self.engine) as gate:
+            journal = HostMutationJournal(gate, self.receipt).open()
+            with self.assertRaises(MutationHeld): journal.check_reconciliation_ready()
+            op = str(uuid.uuid4())
+            journal.begin(op, 'commit', 'e' * 64)
+            with self.assertRaises(MutationHeld): journal.check_reconciliation_ready()
+            journal.acknowledge(op, 'f' * 64)
+            journal.check_reconciliation_ready()
+            self.assertIsNotNone(gate.snapshot()['reservation'])
+            journal.db.execute('UPDATE operations SET ack_digest=NULL WHERE op_id=?', (op,))
+            journal.db.commit()
+            with self.assertRaises(GateError): journal.check_reconciliation_ready()
+            self.assertIsNotNone(gate.snapshot()['reservation'])
+            journal.close()
+
     def test_missing_journal_is_not_recreated(self):
         with NodeGate(self.engine) as gate:
             journal = HostMutationJournal(gate, self.receipt)

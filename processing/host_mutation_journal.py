@@ -114,13 +114,33 @@ class HostMutationJournal:
             raise
 
     def _validate_operations(self):
-        # Invalid acknowledgments must never look like permission to send again.
-        for state, digest in self.db.execute('SELECT state,ack_digest FROM operations'):
-            if state == 'pending' and digest is None:
-                continue
-            if state == 'done' and isinstance(digest, str) and _HASH.fullmatch(digest):
-                continue
-            raise GateError('guard journal malformed; inspection required')
+        # Invalid rows must never look like permission to send or release.
+        previous = None
+        for seq, op_id, kind, request, digest, state in self.db.execute(
+                'SELECT seq,op_id,kind,request_digest,ack_digest,state FROM operations ORDER BY seq'):
+            try:
+                valid_id = str(uuid.UUID(op_id)) == op_id
+            except (ValueError, TypeError, AttributeError):
+                valid_id = False
+            valid_order = ((previous is None and seq == 1 and kind == 'init') or
+                           (previous is not None and seq == previous[0] + 1
+                            and previous[1] != 'commit' and kind in ('upload', 'commit')
+                            and previous[2] == 'done'))
+            if (not valid_id or not valid_order or not isinstance(request, str)
+                    or not _HASH.fullmatch(request)
+                    or not ((state == 'pending' and digest is None) or
+                            (state == 'done' and isinstance(digest, str) and _HASH.fullmatch(digest)))):
+                raise GateError('guard journal malformed; inspection required')
+            previous = (seq, kind, state)
+        return previous
+
+    def check_reconciliation_ready(self):
+        """Check local evidence only; this does not authorize or release a gate."""
+        self._ready()
+        with self._transaction():
+            last = self._validate_operations()
+            if last is None or last[1:] != ('commit', 'done'):
+                raise MutationHeld('completed commit evidence required')
 
     def begin(self, op_id, kind, request_digest):
         """Record intent before mutation. A done replay returns its ack hash.
