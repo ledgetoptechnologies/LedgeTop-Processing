@@ -40,6 +40,12 @@ class WorkerReadinessPollerTests(unittest.TestCase):
         poller.poll_once()
         self.assertEqual(cache.get('small'), observation)
         self.assertEqual(calls, [('https://worker.invalid:444/ltds/worker/v1/readiness', 3)])
+        poller.close()
+        self.assertIsNone(cache.get('small'))
+        poller = WorkerReadinessPoller({'small': dict(origin='https://worker.invalid:444',
+            bearer='synthetic-read-token-0001', workerId='worker')}, cache,
+            ssl_context=ssl.create_default_context(), opener=opener)
+        poller.poll_once()
         answer[0]['workerId'] = 'different'
         poller.poll_once()
         self.assertIsNone(cache.get('small'))

@@ -37,6 +37,9 @@ class WorkerReadinessPoller:
             if self._stop.is_set():
                 return
             ticket = self._cache.begin(node)
+            if self._stop.is_set():
+                self._cache.invalidate(node)
+                return
             try:
                 request = Request(origin + '/ltds/worker/v1/readiness',
                     headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'})
@@ -68,6 +71,10 @@ class WorkerReadinessPoller:
 
     def close(self):
         self._stop.set()
+        for node in self._workers:
+            self._cache.invalidate(node)
         if self._thread is not None:
             self._thread.join()
             self._thread = None
+        for node in self._workers:
+            self._cache.invalidate(node)
