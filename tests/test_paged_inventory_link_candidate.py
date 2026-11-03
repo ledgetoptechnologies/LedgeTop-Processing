@@ -1,5 +1,6 @@
 import copy
 import unittest
+from unittest.mock import patch
 from processing.large_paged_manifest_candidate import build,_digest
 from processing.paged_inventory_link_candidate import link,inventory_digest,mapping_digest,binding_digest,InventoryLinkHeld
 
@@ -19,6 +20,17 @@ class PagedInventoryLinkTests(unittest.TestCase):
   for key,value in [('inventorySha256','f'*64),('mappingSha256','f'*64),('closureSha256','f'*64),('viewerAttemptId','5a410780-c3bc-46d1-903a-5713673a5399'),('datasetId','dataset-2')]:
    binding=dict(self.binding);binding[key]=value
    with self.subTest(key=key),self.assertRaises(InventoryLinkHeld):link(self.closure,self.pages,inventory=self.inventory,mapping=self.mapping,trusted_binding=binding,expected_link_sha256=binding_digest(binding))
+ def test_preflight_rejects_bool_size_and_large_fields_before_hashing(self):
+  inv=copy.deepcopy(self.inventory);inv['processing'][0]['byteSize']=True
+  self.assertTrue(inv['processing'][0]['byteSize']==1)  # The source value must not equal a one-byte integer by coercion.
+  with patch('rfc8785.dumps',side_effect=AssertionError('whole inventory serialized')):
+   with self.assertRaises(InventoryLinkHeld):inventory_digest(inv)
+   with self.assertRaises(InventoryLinkHeld):link(self.closure,self.pages,inventory=inv,mapping=self.mapping,trusted_binding=self.binding,expected_link_sha256=binding_digest(self.binding))
+  inv=copy.deepcopy(self.inventory);inv['processing'][0]['relativePath']='x'*1000000
+  with patch('rfc8785.dumps',side_effect=AssertionError('whole inventory serialized')):
+   with self.assertRaises(InventoryLinkHeld):inventory_digest(inv)
+  with patch('processing.paged_inventory_link_candidate.p.canonical_json',side_effect=AssertionError('mapping serialized')):
+   with self.assertRaises(InventoryLinkHeld):mapping_digest([dict(pageObjectId='x'*1000000,datasetFileId='id')])
  def test_independent_binding_pin_covers_caller_and_epoch(self):
   for key,value in [('principalId','viewer-2'),('authorityId','authority-2'),('environment','production'),('revocationEpoch',2)]:
    altered=dict(self.binding);altered[key]=value
@@ -38,7 +50,7 @@ class PagedInventoryLinkTests(unittest.TestCase):
    if how=='path':inv['processing'][512]['relativePath']='other/DIFFERENT.JPG'
    elif how=='bytes':inv['processing'][0]['byteSize']+=1
    else:inv['generated']=[{'snapshotId':self.binding['viewerAttemptId']}]
-   binding=dict(self.binding,inventorySha256=inventory_digest(inv))
+   binding=dict(self.binding,inventorySha256=inventory_digest(inv)) if how!='generated' else dict(self.binding)
    with self.subTest(how=how),self.assertRaises(InventoryLinkHeld):link(self.closure,self.pages,inventory=inv,mapping=self.mapping,trusted_binding=binding,expected_link_sha256=binding_digest(binding))
 
 if __name__=='__main__':unittest.main()

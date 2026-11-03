@@ -1,5 +1,7 @@
 """Inactive linkage proposal; all trust inputs must come from a future verified loader."""
 import hashlib
+import re
+import unicodedata
 from importlib.metadata import version
 from . import reference_protocol as p
 from .large_paged_manifest_candidate import validate as validate_pages
@@ -12,8 +14,31 @@ MAX_MAPPING_BYTES=4*1024*1024
 
 class InventoryLinkHeld(ValueError):pass
 
+def _preflight_inventory(inventory):
+ p._closed(inventory,('protocol','schemaVersion','dataset','binding','processing','retained','generated'),'inventory')
+ if inventory['protocol']!='ltds-source-inventory-v1' or type(inventory['schemaVersion']) is not int or inventory['schemaVersion']!=1:raise ValueError()
+ p._closed(inventory['dataset'],('id','manifestSha256'),'dataset');p._slug(inventory['dataset']['id'],'dataset ID');p._hash(inventory['dataset']['manifestSha256'],'dataset hash')
+ p._closed(inventory['binding'],('viewerTaskId','viewerAttemptId','pipelineDigest'),'binding')
+ p._uuid(inventory['binding']['viewerTaskId'],'task');p._uuid(inventory['binding']['viewerAttemptId'],'attempt');p._hash(inventory['binding']['pipelineDigest'],'pipeline')
+ if type(inventory['generated']) is not list or inventory['generated']:raise ValueError()
+ processing,retained=inventory['processing'],inventory['retained']
+ if type(processing) is not list or type(retained) is not list or not processing or len(processing)+len(retained)>20000:raise ValueError()
+ estimate=2048
+ for obj in (*processing,*retained):
+  p._closed(obj,('datasetFileId','relativePath','byteSize','sha256','processingRole','contentType'),'source')
+  p._slug(obj['datasetFileId'],'dataset file ID');p._integer(obj['byteSize'],'file byteSize',allow_zero=True);p._hash(obj['sha256'],'source digest')
+  path=obj['relativePath'];role=obj['processingRole'];mime=obj['contentType']
+  if type(path) is not str or not path or len(path)>4096 or len(path.encode('utf8'))>4096 or path.startswith('/') or '\\' in path or re.match(r'^[A-Za-z]:',path) or any(unicodedata.category(ch).startswith('C') for ch in path):raise ValueError()
+  if any(not part or part in ('.','..') or len(part.encode('utf8'))>255 for part in path.split('/')):raise ValueError()
+  if type(role) is not str or not re.fullmatch(r'[a-z][a-z0-9_-]{0,79}',role):raise ValueError()
+  if type(mime) is not str or len(mime)>127 or not re.fullmatch(r'[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+',mime):raise ValueError()
+  # Each row is field-bounded before this small per-row serialization.
+  estimate+=len(p.canonical_json(obj))+1
+  if estimate>MAX_INVENTORY_BYTES:raise ValueError()
+
 def inventory_digest(inventory):
  try:
+  _preflight_inventory(inventory)
   import rfc8785
   if version('rfc8785')!='0.1.4':raise ValueError()
   wire=rfc8785.dumps(inventory)
@@ -24,9 +49,12 @@ def inventory_digest(inventory):
 def mapping_digest(mapping):
  try:
   if type(mapping) is not list or not 0<len(mapping)<=25000:raise ValueError()
+  estimate=2
   for item in mapping:
    p._closed(item,('pageObjectId','datasetFileId'),'mapping')
    p._slug(item['pageObjectId'],'page ID');p._slug(item['datasetFileId'],'dataset ID')
+   estimate+=len(p.canonical_json(item))+1
+   if estimate>MAX_MAPPING_BYTES:raise ValueError()
   wire=p.canonical_json(mapping)
   if len(wire)>MAX_MAPPING_BYTES:raise ValueError()
   return hashlib.sha256(MAPPING_DOMAIN+wire).hexdigest()
