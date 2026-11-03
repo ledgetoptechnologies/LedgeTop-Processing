@@ -11,6 +11,10 @@ holds its fence, so a cancellation request cannot block the service-wide
 scheduler lock while waiting for a slow inbound stream.
 Queued upload callers are counted before waiting on the per-task mutex; commit
 cannot overtake a registered upload waiter even if the mutex is non-FIFO.
+The HTTP adapter fences the entire registered multipart request, including
+parsing and gaps between files. A separate HTTP request that has not reached
+the fence is not counted; arbitrary concurrent callers still need a declared
+input manifest or count before commit is trustworthy.
 
 Tests exercise a slow upload against another task, same-task commit and
 cancellation, and process exit during a write. An interrupted `.incoming-*`

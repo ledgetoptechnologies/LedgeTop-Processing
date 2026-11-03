@@ -204,6 +204,10 @@ class ViewerService:
     def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         return self.store.upload(identifier, filename, stream, length, environment, capability)
 
+    def upload_batch(self, identifier):
+        """Fence the whole multipart request, including gaps between files."""
+        return self.store._task_fence(identifier, upload=True)
+
     def commit(self, identifier, environment=None, capability=None):
         return self.store.commit(identifier, environment, capability)
 

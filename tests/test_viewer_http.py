@@ -76,6 +76,10 @@ class Service:
         self.tasks[identifier]['imagesCount'] += 1
         return {'success': True}
 
+    def upload_batch(self, identifier):
+        from contextlib import nullcontext
+        return nullcontext()
+
     def commit(self, identifier):
         self.info(identifier)
         self.calls.append(('commit', identifier))

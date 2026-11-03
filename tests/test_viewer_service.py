@@ -573,6 +573,33 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertFalse(scheduler.is_alive())
         self.assertEqual(errors, [])
 
+    def test_multipart_batch_fence_covers_gap_between_files(self):
+        self.queue.parallel_viewer_uploads = True
+        incoming = self.initialize()
+        first_done, resume = threading.Event(), threading.Event()
+        errors = []
+        def batch():
+            try:
+                with self.service.upload_batch(incoming):
+                    self.service.upload(incoming, 'first.jpg', io.BytesIO(b'first'), 5)
+                    first_done.set()
+                    if not resume.wait(5): raise TimeoutError('test batch not released')
+                    self.service.upload(incoming, 'second.jpg', io.BytesIO(b'second'), 6)
+            except BaseException as exc: errors.append(exc)
+        worker = threading.Thread(target=batch)
+        worker.start()
+        try:
+            self.assertTrue(first_done.wait(5))
+            with self.assertRaisesRegex(Conflict, 'upload is in progress'):
+                self.service.commit(incoming)
+        finally:
+            resume.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(self.service.commit(incoming)['success'])
+        self.assertEqual(len(self.task(incoming)['files']), 2)
+
     def test_maintenance_drain_holds_inflight_transfer_before_next_mutation(self):
         self.queue.per_node_slots = True
         self.service._parallel_dispatch = True

@@ -405,17 +405,18 @@ class ViewerFacade:
             identifier = task_uuid(unquote(upload[1]))
             self._authorize(identifier, environment, handler)
             count, seen = 0, set()
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                if name != 'images':
-                    raise RequestError(400, 'invalid_upload_form')
-                filename = safe_filename(filename)
-                if filename.casefold() in seen or not size:
-                    raise RequestError(400, 'duplicate_or_empty_upload')
-                seen.add(filename.casefold())
-                capability=self._capability(handler)
-                if capability is None:self.service.upload(identifier, filename, stream, size)
-                else:self.service.upload(identifier, filename, stream, size, environment, capability)
-                count += 1
+            with self.service.upload_batch(identifier):
+                for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
+                    if name != 'images':
+                        raise RequestError(400, 'invalid_upload_form')
+                    filename = safe_filename(filename)
+                    if filename.casefold() in seen or not size:
+                        raise RequestError(400, 'duplicate_or_empty_upload')
+                    seen.add(filename.casefold())
+                    capability=self._capability(handler)
+                    if capability is None:self.service.upload(identifier, filename, stream, size)
+                    else:self.service.upload(identifier, filename, stream, size, environment, capability)
+                    count += 1
             if not count:
                 raise RequestError(400, 'empty_upload')
             self._reply(handler, 200, {'success': True})
