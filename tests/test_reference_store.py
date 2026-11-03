@@ -62,6 +62,19 @@ class ReferenceStoreTests(unittest.TestCase):
                        resultManifestSha256=result["resultManifestSha256"])
         return receipt
 
+    def test_tightened_environment_rejects_unsigned_legacy_acceptance(self):
+        job, result = self.result_ready()
+        receipt = self.receipt(job, result)
+        self.assertFalse(self.store.acceptance_receipts(job['jobId'])['viewerCopyRequired'])
+        self.store.viewer_required_environments = frozenset(('staging',))
+        self.assertTrue(self.store.acceptance_receipts(job['jobId'])['viewerCopyRequired'])
+        with self.assertRaises(Conflict):
+            self.store.accept(job['jobId'], receipt)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances WHERE job_id=?',
+                                       (job['jobId'],)).fetchone()[0], 0)
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+
     def test_retry_transfer_budget_has_explicit_three_copy_ceiling(self):
         job, _ = self.store.submit(self.submission)
         self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',

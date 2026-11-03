@@ -769,7 +769,9 @@ class ReferenceStore:
                                   (job_id,)).fetchone()
             if row['viewer_receipt_required'] not in (0, 1):
                 raise Conflict('legacy Viewer acceptance policy requires reconciliation')
-            if (row['viewer_receipt_required'] == 1 or transfer is not None) and viewer_receipt is None:
+            require_viewer = (row['viewer_receipt_required'] == 1 or transfer is not None
+                              or row['environment'] in self.viewer_required_environments)
+            if require_viewer and viewer_receipt is None:
                 raise Conflict('signed Viewer accepted-copy receipt required')
             accepted_manifest = result
             if (transfer and transfer['receipt_id'] == (receipt.get('receiptId') if type(receipt) is dict else None)
@@ -853,7 +855,6 @@ class ReferenceStore:
                         (viewer_checked['receiptId'], viewer_checked['storageReceiptId'], checked['receiptId'],
                          job_id, viewer_digest, viewer_encoded))
             accepted = set()
-            require_viewer = row['viewer_receipt_required'] == 1 or transfer is not None
             if require_viewer:
                 from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
                 prior_rows = db.execute("SELECT a.receipt_json,a.digest,v.receipt_json,v.digest,v.receipt_id,v.storage_receipt_id "
