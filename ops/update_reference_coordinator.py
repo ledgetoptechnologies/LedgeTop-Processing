@@ -444,11 +444,13 @@ assert result
 print(json.dumps(dict(root=dict(dev=rs.st_dev,ino=rs.st_ino,uid=rs.st_uid,gid=rs.st_gid,mode=stat.S_IMODE(rs.st_mode)),files=result)))
 """
 
-# The predecessor's reference_runtime accepts runtime configuration
-# schemaVersion 1-3 only; the candidate accepts 1-5. Rollback restarts the
-# predecessor against the same read-only mount, so its exact bytes and
+# The predecessor's loader accepts runtime configuration schemaVersion 1-3;
+# the candidate accepts 1-5. Version 3 requires stagedAckPrincipals, which the
+# predecessor's runtime refuses (STAGED_ACK_SCHEMA_QUALIFIED is False there;
+# the real 7fae9385 image exits on a v3 config), so only 1 and 2 restart it.
+# Rollback restarts it against the same read-only mount: the exact bytes and
 # version are captured at preparation and any change refuses rollback.
-PREDECESSOR_CONFIG_VERSIONS = (1, 2, 3)
+PREDECESSOR_CONFIG_VERSIONS = (1, 2)
 CONFIG_CENSUS = """import hashlib,json,os,stat
 p='/run/processing-reference/runtime.json'
 s=os.lstat(p);assert stat.S_ISREG(s.st_mode) and s.st_uid==10001 and s.st_gid==10001 and s.st_nlink==1 and s.st_size<=1048576

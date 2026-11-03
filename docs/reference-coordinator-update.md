@@ -215,8 +215,10 @@ requires reconciliation"), the job is never queued for Viewer transfer, and the
 transfer worker holds with `viewer_acceptance_policy_requires_reconciliation`.
 Any such row also fails a later update census.
 
-The predecessor accepts runtime configuration `schemaVersion` 1-3; the candidate
-accepts 1-5. Prepare records the exact `runtime.json` bytes, SHA-256 and
+The predecessor's loader accepts runtime configuration `schemaVersion` 1-3 and
+the candidate's 1-5, but version 3 requires staged principals that the
+predecessor's runtime refuses: the real predecessor image exits on a v3 or v4
+config. Only versions 1 and 2 are accepted. Prepare records the exact `runtime.json` bytes, SHA-256 and
 version (`predecessorConfig`) and refuses a version the predecessor cannot
 read. Rollback reads it again before any mutation and before starting the
 predecessor, and refuses unless it is byte-identical to the capture. These are
