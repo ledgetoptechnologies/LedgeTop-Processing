@@ -34,7 +34,7 @@ class RealWorkerViewerCleanupTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);q=None;children=[]
    try:
-    q=Queue(root/'coordinator',reference_enabled=True);store=ReferenceStore(q)
+    q=Queue(root/'coordinator',reference_enabled=True);store=ReferenceStore(q,viewer_required_environments=('staging',))
     submitted=store.submit(validate_submission(fixture['submission'],environment='staging',capability_fingerprint=fixture['submission']['capabilityFingerprint']))[0]
     identity=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_request_id='claim-1')
     claim=store.claim(submitted['jobId'],**identity);identity['claim_token']=claim['claimToken']

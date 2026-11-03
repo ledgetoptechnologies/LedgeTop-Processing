@@ -26,3 +26,12 @@ unrepresentable results, retaining them for later reconciliation. The cursor
 is in memory and resets on worker restart: repeated restarts before the worker
 reaches a later page could still delay those jobs. It is not a durable
 quarantine or a replacement for operator-visible reconciliation.
+
+Reference submissions now persist whether their configured environment
+requires a signed Viewer receipt. That policy survives a later configuration
+change, and only signed accepted objects count towards completion when the
+policy or an existing Viewer transfer requires it. Legacy jobs with no policy
+remain ambiguous and are held for reconciliation; a transfer marked complete
+without a signed Viewer receipt is also surfaced as needing reconciliation.
+The migration does not establish the history of old records, fence older
+binaries, or reconcile a pre-existing unsigned completion automatically.

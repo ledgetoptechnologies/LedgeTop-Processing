@@ -24,6 +24,7 @@ class RealViewerLostCommitTests(unittest.TestCase):
   self.assertEqual(subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),'4df1a77bc4a4070558a52177275ac7fdb942ebaa')
   self.assertEqual(subprocess.check_output(['git','status','--porcelain'],cwd=root,text=True).strip(),'')
   fixture=ReferenceAPITests('runTest');fixture.setUp();container=None
+  fixture.store=ReferenceStore(fixture.queue,viewer_required_environments=('staging',));fixture.api=fixture.make_api()
   try:
    job,result,_=fixture.ready()
    with tempfile.TemporaryDirectory() as tmp:

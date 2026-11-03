@@ -279,7 +279,8 @@ class ReferenceRuntime:
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
-                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main")
+                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main",
+                viewer_required_environments=tuple(settings.viewer_acceptance_targets or ()))
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},

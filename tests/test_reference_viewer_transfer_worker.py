@@ -6,7 +6,7 @@ import uuid
 from unittest.mock import patch
 
 from processing.maintenance import Conflict
-from processing.reference_store import ReferenceStore
+from processing.reference_store import ReferenceStore, ViewerTransferJobConflict
 from processing.reference_viewer_transfer_worker import ReferenceViewerTransferWorker
 from processing.viewer_acceptance_transfer import ViewerTransferUnavailable
 from tests.test_reference_api import ReferenceAPITests
@@ -27,6 +27,8 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
     def setUp(self):
         self.fixture = ReferenceAPITests()
         self.fixture.setUp()
+        self.fixture.store = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
+        self.fixture.api = self.fixture.make_api()
         self.job, self.result, _ = self.fixture.ready()
         self.signer = SyntheticViewerSigner()
         self.clock_value = 100.0
@@ -44,7 +46,7 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         self.sender.fail = False
         def ensure(job_id):
             if job_id == invalid:
-                raise Conflict('result cannot be represented')
+                raise ViewerTransferJobConflict('result cannot be represented')
             return real_ensure(job_id)
         with patch.object(self.store, 'pending_viewer_transfer_page',
                           return_value=[('a', invalid), ('b', self.job['jobId'])]), \
@@ -59,6 +61,103 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
                              {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'})
         self.assertEqual(self.sender.calls, [])
 
+    def test_global_metadata_quota_is_not_treated_as_a_job_conflict(self):
+        with patch.object(self.store, '_quota', side_effect=Conflict('reference metadata quota reached')):
+            self.assertEqual(self.worker.run_once(),
+                             {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'})
+        self.assertIsNone(self.worker._discovery_after)
+        self.assertEqual(self.sender.calls, [])
+
+    def test_exact_full_conflicted_page_then_empty_page_stays_held(self):
+        first = [('2000', 'bad-%02d' % i) for i in range(20)]
+        with patch.object(self.store, 'pending_viewer_transfer_page', side_effect=[first, [], []]), \
+             patch.object(self.store, 'ensure_viewer_transfer',
+                          side_effect=ViewerTransferJobConflict('result invalid')):
+            held = {'state': 'held', 'reason': 'viewer_transfer_jobs_need_reconciliation'}
+            self.assertEqual(self.worker.run_once(), held)
+            self.assertEqual(self.worker.run_once(), held)
+            self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+
+    def _full_acceptance(self):
+        receipt = copy.deepcopy(self.fixture.fixture['acceptance'])
+        receipt.update(jobId=self.job['jobId'], pipelineDigest=self.job['pipelineDigest'],
+                       resultManifestSha256=self.result['resultManifestSha256'],
+                       acceptedObjectIds=sorted(o['id'] for o in self.result['objects']))
+        return receipt
+
+    def test_viewer_targeted_api_rejects_unsigned_acceptance_and_allows_signed(self):
+        targeted = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
+        # Reopen without the Viewer environment: durable job policy must win.
+        reopened = ReferenceStore(self.fixture.queue)
+        api = self.fixture.make_api(store=reopened)
+        route = '/jobs/' + self.job['jobId'] + '/acceptance'
+        receipt = self._full_acceptance()
+        self.assertEqual(self.fixture.request('POST', route, receipt, api=api).status, 409)
+        self.assertEqual(targeted.get(self.job['jobId'])['phase'], 'awaiting_acceptance')
+        self.assertEqual(targeted.acceptance_receipts(self.job['jobId'])['receipts'], [])
+        signed = self.fixture.viewer_signer.receipt(receipt, self.result)
+        response = self.fixture.request('POST', route, {'acceptance': receipt, 'viewerReceipt': signed}, api=api)
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.body['fullyAccepted'])
+
+    def test_ambiguous_legacy_unsigned_completion_stays_held(self):
+        receipt = self._full_acceptance()
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
+        self.assertEqual(self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance', receipt).status, 200)
+        self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'completed')
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=NULL WHERE job_id=?', (self.job['jobId'],))
+        targeted = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
+        self.sender.fail = False
+        worker = ReferenceViewerTransferWorker(targeted, self.sender,
+            trusted_receipt_keys=self.signer.trusted_keys, clock=lambda: self.clock_value)
+        self.assertEqual(worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+        self.assertIsNone(targeted.viewer_transfer_status(self.job['jobId']))
+        with self.assertRaises(Conflict):
+            targeted.accept(self.job['jobId'], receipt)
+        self.assertEqual(targeted.get(self.job['jobId'])['phase'], 'completed')
+
+    def test_prior_unsigned_partial_does_not_complete_signed_partial(self):
+        first = self._full_acceptance()
+        first['acceptedObjectIds'] = ['result-1']
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
+        self.assertEqual(self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance', first).status, 200)
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=1 WHERE job_id=?', (self.job['jobId'],))
+        targeted = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
+        api = self.fixture.make_api(store=targeted)
+        second = self._full_acceptance()
+        second.update(receiptId=str(uuid.uuid4()), storageReceiptId=str(uuid.uuid4()), acceptedObjectIds=['result-2'])
+        signed = self.fixture.viewer_signer.receipt(second, self.result)
+        response = self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance',
+                                        {'acceptance': second, 'viewerReceipt': signed}, api=api)
+        self.assertEqual(response.status, 200)
+        self.assertFalse(response.body['fullyAccepted'])
+        self.assertEqual(response.body['acceptedObjectIds'], ['result-2'])
+        self.assertEqual(targeted.get(self.job['jobId'])['phase'], 'awaiting_acceptance')
+
+    def test_signed_subset_cannot_complete_full_durable_transfer(self):
+        targeted = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
+        full = targeted.ensure_viewer_transfer(self.job['jobId'])
+        subset = dict(full, acceptedObjectIds=['result-1'])
+        signed = self.fixture.viewer_signer.receipt(subset, self.result)
+        api = self.fixture.make_api(store=targeted)
+        response = self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance',
+                                        {'acceptance': subset, 'viewerReceipt': signed}, api=api)
+        self.assertEqual(response.status, 409)
+        self.assertFalse(targeted.viewer_transfer_status(self.job['jobId'])['completed'])
+        self.assertEqual(targeted.acceptance_receipts(self.job['jobId'])['receipts'], [])
+
+    def test_completed_transfer_without_signed_receipt_requires_reconciliation(self):
+        self.store.ensure_viewer_transfer(self.job['jobId'])
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE reference_viewer_transfers SET completed_at='2026-01-01' WHERE job_id=?", (self.job['jobId'],))
+        self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+        self.assertEqual(self.store.acceptance_receipts(self.job['jobId'])['receipts'], [])
+        self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'awaiting_acceptance')
+
     def test_full_page_of_conflicts_does_not_starve_later_job(self):
         self.sender.fail = False
         with self.fixture.queue._db() as db:
@@ -67,9 +166,9 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
                 db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,?)",
                            (bad, bad, 'staging', 'reference-pipeline-v1', 'succeeded'))
                 db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,
-                    environment,input_json,manifest_sha,pipeline_digest,generation,phase,result_json,created_at)
+                    environment,input_json,manifest_sha,pipeline_digest,generation,phase,result_json,created_at,viewer_receipt_required)
                     SELECT ?,?,request_digest,environment,input_json,manifest_sha,pipeline_digest,
-                    generation,'awaiting_acceptance',?,'2000-01-01 00:00:00'
+                    generation,'awaiting_acceptance',?,'2000-01-01 00:00:00',1
                     FROM reference_jobs WHERE job_id=?""", (bad, bad, 'not-json' if i == 0 else '{}', self.job['jobId']))
         self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_transfer_jobs_need_reconciliation'})
         self.assertEqual(self.worker.run_once(), {'state': 'accepted', 'jobId': self.job['jobId']})
@@ -118,7 +217,7 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         queue = Queue(temp.name, node_ids=('cluster', 'main'), treedar_node_ids=('main',), reference_enabled=True)
         self.addCleanup(queue.close)
-        store = ReferenceStore(queue, main_node_id='main')
+        store = ReferenceStore(queue, main_node_id='main', viewer_required_environments=('staging',))
         request = copy.deepcopy(self.fixture.fixture['submission'])
         request['submissionId'] = str(uuid.uuid4())
         manifest = request['manifest']

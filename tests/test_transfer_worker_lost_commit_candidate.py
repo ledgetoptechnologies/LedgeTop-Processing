@@ -10,6 +10,7 @@ from tests.viewer_receipt_signer import SyntheticViewerSigner
 class TransferWorkerLostCommitTests(unittest.TestCase):
  def test_lost_viewer_commit_reply_reopens_store_without_reupload(self):
   fixture=ReferenceAPITests('runTest');fixture.setUp()
+  fixture.store=ReferenceStore(fixture.queue,viewer_required_environments=('staging',));fixture.api=fixture.make_api()
   try:
    job,result,_=fixture.ready();signer=SyntheticViewerSigner();viewer=FakeViewer(signer)
    viewer.fail_after_commit=True

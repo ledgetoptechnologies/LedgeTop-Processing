@@ -35,6 +35,10 @@ _NORMALIZED = {"schemaVersion", "submissionId", "manifest", "pipeline", "capabil
                "environment", "requestDigest", "manifestSha256", "pipelineDigest"}
 
 
+class ViewerTransferJobConflict(Conflict):
+    """A particular sealed result requires reconciliation before transfer."""
+
+
 def _json(value):
     return protocol.canonical_json(value).decode("utf-8")
 
@@ -47,13 +51,18 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None):
+                 main_node_id=None, viewer_required_environments=()):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
         self.queue = queue
+        if not isinstance(viewer_required_environments, (tuple, list, set, frozenset)):
+            raise ValueError('invalid Viewer acceptance environments')
+        self.viewer_required_environments = frozenset(viewer_required_environments)
+        for environment in self.viewer_required_environments:
+            protocol._environment(environment)
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
         for value in (local_max_photos, local_max_input_bytes):
@@ -121,6 +130,10 @@ class ReferenceStore:
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
+            job_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_jobs)')}
+            if 'viewer_receipt_required' not in job_columns:
+                # Legacy NULL is deliberately ambiguous until reconciled.
+                db.execute('ALTER TABLE reference_jobs ADD COLUMN viewer_receipt_required INTEGER')
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
 
@@ -223,9 +236,10 @@ class ReferenceStore:
             db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
                        (job_id, "reference:" + checked["submissionId"], checked["environment"], PROFILE))
             db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,environment,input_json,
-              manifest_sha,pipeline_digest,phase) VALUES(?,?,?,?,?,?,?,'queued')""",
+              manifest_sha,pipeline_digest,phase,viewer_receipt_required) VALUES(?,?,?,?,?,?,?,'queued',?)""",
               (job_id, checked["submissionId"], checked["requestDigest"], checked["environment"], encoded,
-               checked["manifestSha256"], checked["pipelineDigest"]))
+               checked["manifestSha256"], checked["pipelineDigest"],
+               int(checked['environment'] in self.viewer_required_environments)))
             return self._public(self._row(db, job_id)), True
 
     def get(self, job_id, *, private=False):
@@ -564,8 +578,12 @@ class ReferenceStore:
             if not row["result_json"] or row["phase"] not in ("awaiting_acceptance", "completed"):
                 raise Conflict("result is not ready for acceptance")
             result = json.loads(row["result_json"])
-            transfer = db.execute('SELECT receipt_id,viewer_manifest_json FROM reference_viewer_transfers WHERE job_id=?',
+            transfer = db.execute('SELECT receipt_id,viewer_manifest_json,acceptance_json FROM reference_viewer_transfers WHERE job_id=?',
                                   (job_id,)).fetchone()
+            if row['viewer_receipt_required'] not in (0, 1):
+                raise Conflict('legacy Viewer acceptance policy requires reconciliation')
+            if (row['viewer_receipt_required'] == 1 or transfer is not None) and viewer_receipt is None:
+                raise Conflict('signed Viewer accepted-copy receipt required')
             accepted_manifest = result
             if (transfer and transfer['receipt_id'] == (receipt.get('receiptId') if type(receipt) is dict else None)
                     and transfer['viewer_manifest_json']):
@@ -582,6 +600,9 @@ class ReferenceStore:
                         input_manifest_sha256=row['manifest_sha'])
                 except (TypeError, ValueError):
                     raise Conflict('acceptance does not match the persisted result manifest') from None
+            if transfer and transfer['receipt_id'] == checked['receiptId']:
+                if checked != json.loads(transfer['acceptance_json']):
+                    raise Conflict('Viewer acceptance differs from durable transfer')
             identities = {checked['receiptId'], checked['storageReceiptId']}
             viewer_checked = None
             if viewer_receipt is not None:
@@ -645,7 +666,11 @@ class ReferenceStore:
                         (viewer_checked['receiptId'], viewer_checked['storageReceiptId'], checked['receiptId'],
                          job_id, viewer_digest, viewer_encoded))
             accepted = set()
-            for item in db.execute("SELECT receipt_json FROM reference_acceptances WHERE job_id=?", (job_id,)):
+            require_viewer = row['viewer_receipt_required'] == 1 or transfer is not None
+            sql = ("SELECT a.receipt_json FROM reference_acceptances a JOIN reference_viewer_receipts v "
+                   "ON v.acceptance_receipt_id=a.receipt_id WHERE a.job_id=? AND v.job_id=a.job_id"
+                   if require_viewer else "SELECT receipt_json FROM reference_acceptances WHERE job_id=?")
+            for item in db.execute(sql, (job_id,)):
                 accepted.update(json.loads(item[0])["acceptedObjectIds"])
             fully = accepted == {obj["id"] for obj in result["objects"]}
             if fully:
@@ -672,7 +697,7 @@ class ReferenceStore:
                     generation=row['generation'], environment=row['environment'],
                     pipeline_digest=row['pipeline_digest'])
             except (TypeError, ValueError):
-                raise Conflict('result cannot be represented by the Viewer acceptance protocol') from None
+                raise ViewerTransferJobConflict('result cannot be represented by the Viewer acceptance protocol') from None
             ordered_ids = [obj['id'] for obj in viewer_manifest['objects']]
             accepted_ids = ordered_ids if viewer_manifest['schemaVersion'] == 2 else sorted(ordered_ids)
             acceptance = dict(schemaVersion=1, receiptId=str(uuid.uuid4()),
@@ -685,7 +710,7 @@ class ReferenceStore:
                 checked = validate_viewer_acceptance(acceptance, result_manifest=viewer_manifest,
                     input_manifest_sha256=row['manifest_sha'])
             except (TypeError, ValueError):
-                raise Conflict('Viewer acceptance manifest binding is invalid') from None
+                raise ViewerTransferJobConflict('Viewer acceptance manifest binding is invalid') from None
             encoded = _json(checked)
             manifest_encoded = _json(viewer_manifest)
             existing = db.execute('SELECT receipt_id,acceptance_json,viewer_manifest_json,attempts,completed_at FROM reference_viewer_transfers WHERE job_id=?',
@@ -699,7 +724,7 @@ class ReferenceStore:
                     # wire binding requires explicit reconciliation.
                     if previous['resultManifestSha256'] != viewer_manifest['resultManifestSha256'] and (
                             existing['attempts'] or existing['completed_at']):
-                        raise Conflict('Viewer transfer contract changed after an attempt; reconciliation required')
+                        raise ViewerTransferJobConflict('Viewer transfer contract changed after an attempt; reconciliation required')
                     checked = dict(checked, receiptId=previous['receiptId'],
                         storageReceiptId=previous['storageReceiptId'], acceptedAt=previous['acceptedAt'])
                     checked = validate_viewer_acceptance(checked, result_manifest=viewer_manifest,
@@ -717,9 +742,9 @@ class ReferenceStore:
                     checked['jobId'], checked['generation'], checked['environment'],
                     checked['inputManifestSha256'], checked['pipelineDigest'],
                     checked['resultManifestSha256'], checked['acceptedObjectIds']):
-                    raise Conflict('Viewer transfer binding changed')
+                    raise ViewerTransferJobConflict('Viewer transfer binding changed')
                 if previous_manifest != viewer_manifest:
-                    raise Conflict('Viewer result manifest changed on durable transfer')
+                    raise ViewerTransferJobConflict('Viewer result manifest changed on durable transfer')
                 return previous
             self._quota(db, len(encoded.encode('utf-8')) + len(manifest_encoded.encode('utf-8')))
             db.execute('INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json,viewer_manifest_json) VALUES(?,?,?,?)',
@@ -730,11 +755,27 @@ class ReferenceStore:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('invalid Viewer transfer discovery limit')
         with self.queue._db() as db:
+            phase, params = self._viewer_pending_phase()
             rows = db.execute('''SELECT r.job_id FROM reference_jobs r
-                WHERE r.phase='awaiting_acceptance' AND r.result_json IS NOT NULL
+                WHERE ''' + phase + ''' AND r.result_json IS NOT NULL
                 AND NOT EXISTS (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id)
-                ORDER BY r.created_at,r.job_id LIMIT ?''', (limit,)).fetchall()
+                ORDER BY r.created_at,r.job_id LIMIT ?''', (*params, limit)).fetchall()
             return [row['job_id'] for row in rows]
+
+    def _viewer_pending_phase(self):
+        return ("(r.viewer_receipt_required=1 AND (r.phase='awaiting_acceptance' OR "
+                "(r.phase='completed' AND NOT EXISTS (SELECT 1 FROM reference_viewer_receipts v WHERE v.job_id=r.job_id))))", ())
+
+    def has_viewer_acceptance_reconciliation(self):
+        """Surface ambiguous legacy policies and unsigned completed transfers."""
+        with self.queue._db() as db:
+            return db.execute('''SELECT 1 FROM reference_jobs r
+                WHERE r.result_json IS NOT NULL AND r.phase IN ('awaiting_acceptance','completed')
+                AND ((r.viewer_receipt_required IS NULL OR r.viewer_receipt_required NOT IN (0,1))
+                  OR (r.viewer_receipt_required=1 AND EXISTS
+                      (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id AND t.completed_at IS NOT NULL)
+                      AND NOT EXISTS (SELECT 1 FROM reference_viewer_receipts v WHERE v.job_id=r.job_id)))
+                LIMIT 1''').fetchone() is not None
 
     def pending_viewer_transfer_page(self, *, limit=20, after=None):
         """Return a bounded keyset page; callers may wrap after reaching its end."""
@@ -744,14 +785,15 @@ class ReferenceStore:
                                   or any(type(v) is not str or not v for v in after)):
             raise ValueError('invalid Viewer transfer discovery cursor')
         with self.queue._db() as db:
-            params = []
+            phase, phase_params = self._viewer_pending_phase()
+            params = list(phase_params)
             cursor = ''
             if after is not None:
                 cursor = ' AND (r.created_at > ? OR (r.created_at = ? AND r.job_id > ?))'
                 params.extend((after[0], after[0], after[1]))
             params.append(limit)
             rows = db.execute('''SELECT r.job_id,r.created_at FROM reference_jobs r
-                WHERE r.phase='awaiting_acceptance' AND r.result_json IS NOT NULL
+                WHERE ''' + phase + ''' AND r.result_json IS NOT NULL
                 AND NOT EXISTS (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id)'''
                 + cursor + ' ORDER BY r.created_at,r.job_id LIMIT ?', params).fetchall()
             return [(row['created_at'], row['job_id']) for row in rows]

@@ -3,6 +3,7 @@ import re
 import time
 
 from .maintenance import Conflict
+from .reference_store import ViewerTransferJobConflict
 from .viewer_acceptance_transfer import ViewerTransferUnavailable
 
 
@@ -24,6 +25,7 @@ class ReferenceViewerTransferWorker:
             raise ValueError('Viewer acceptance receipt pins are required')
         self.clock, self.lease_seconds = clock, lease_seconds
         self._discovery_after = None
+        self._discovery_conflicts = False
 
     @staticmethod
     def _reason(error):
@@ -40,7 +42,7 @@ class ReferenceViewerTransferWorker:
         now = self.clock()
         if type(now) not in (int, float) or now < 0:
             return {'state': 'held', 'reason': 'viewer_transfer_clock_unavailable'}
-        discovery_conflict = False
+        discovery_conflict = self._discovery_conflicts
         try:
             pending = self.store.pending_viewer_transfer_page(limit=20, after=self._discovery_after)
             # An unrepresentable sealed result must remain retained for
@@ -51,20 +53,27 @@ class ReferenceViewerTransferWorker:
                 try:
                     self.store.ensure_viewer_transfer(candidate)
                     self._discovery_after = None
+                    self._discovery_conflicts = False
                     break
-                except Conflict:
+                except ViewerTransferJobConflict:
                     discovery_conflict = True
                     continue
             else:
                 # When a whole page is unrepresentable, advance next time;
                 # at the end wrap around so held jobs can be retried later.
                 self._discovery_after = pending[-1] if len(pending) == 20 else None
+                self._discovery_conflicts = discovery_conflict if self._discovery_after else False
             claim = self.store.claim_viewer_transfer(now=now, lease_seconds=self.lease_seconds)
         except Exception:
             return {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'}
         if claim is None:
             if discovery_conflict:
                 return {'state': 'held', 'reason': 'viewer_transfer_jobs_need_reconciliation'}
+            try:
+                if self.store.has_viewer_acceptance_reconciliation():
+                    return {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'}
+            except Exception:
+                return {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'}
             return {'state': 'idle'}
         job_id, lease_token = claim['jobId'], claim['leaseToken']
         try:
