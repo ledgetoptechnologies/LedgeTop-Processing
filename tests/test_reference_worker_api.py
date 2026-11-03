@@ -200,6 +200,28 @@ class ReferenceWorkerAPITests(unittest.TestCase):
             raw['manifest']['sha256'] = digest({k: v for k, v in raw['manifest'].items() if k != 'sha256'})
         return raw
 
+    def test_inventory_requires_every_requested_engine(self):
+        for kind, expected in (('treedar', True), ('combined', False)):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                queue = Queue(directory, reference_enabled=True, node_ids=('cluster', 'main'),
+                              treedar_node_ids=('main',), per_node_slots=True)
+                try:
+                    inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                                 dict(id='main', maxPhotos=None, capabilities=['treedar'])]
+                    store = ReferenceStore(queue, node_inventory=inventory,
+                        node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None})
+                    raw = self.pipeline_submission(kind)
+                    job = store.submit(validate_submission(raw, environment='staging',
+                        capability_fingerprint=raw['capabilityFingerprint'],
+                        available_engines=('odm', 'treedar')))[0]
+                    result = store.next_for_node('main')
+                    self.assertEqual(result is not None, expected)
+                    if expected:
+                        self.assertEqual(result['jobId'], job['jobId'])
+                    self.assertIsNone(store.next_for_node('cluster'))
+                finally:
+                    queue.close()
+
     def test_next_kinds_follow_stored_pipeline_and_fixed_node_global_head(self):
         for kind in ('odm', 'treedar', 'combined'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:

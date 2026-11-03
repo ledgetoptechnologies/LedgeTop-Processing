@@ -369,8 +369,9 @@ class ReferenceStore:
             submission = json.loads(row['input_json'])
             photos = submission['manifest']['inputCounts']['images']
             for spec, limit in available:
-                if ('odm' not in spec['capabilities'] or
-                    (submission['pipeline']['treedar']['requested'] and spec['id'] not in self.queue.treedar_node_ids)):
+                if ((submission['pipeline']['odm']['requested'] and 'odm' not in spec['capabilities']) or
+                    (submission['pipeline']['treedar']['requested'] and
+                     ('treedar' not in spec['capabilities'] or spec['id'] not in self.queue.treedar_node_ids))):
                     continue
                 if all(cap is None or photos <= cap for cap in (spec['maxPhotos'], limit)):
                     return row if spec['id'] == node_id else None
