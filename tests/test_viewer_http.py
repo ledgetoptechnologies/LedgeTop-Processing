@@ -319,6 +319,38 @@ class ViewerHTTPTests(unittest.TestCase):
                 Content_Type='multipart/form-data; boundary=' + BOUNDARY)
         self.assertEqual(handler.status, 400)
 
+    def test_opt_in_capacity_real_handler_partial_retry_and_commit(self):
+        from tests.test_viewer_upload_capacity_candidate import Store
+        from processing.scratch_policy import ScratchLedger
+        from processing.viewer_upload_capacity_candidate import ViewerUploadCapacity
+        from processing.viewer_limits import MAX_UPLOAD_BYTES
+        self.initialize()
+        store = Store(self.spool.name)
+        self.addCleanup(store.db.close)
+        store.db.execute('UPDATE viewer_tasks SET uuid=?', (IDENTIFIER,)); store.db.commit()
+        self.service.store = store
+        ledger = ScratchLedger(Path(self.spool.name)/'ledger.sqlite', self.spool.name,
+            capacity_probe=lambda _: MAX_UPLOAD_BYTES+1000, safety_floor_bytes=100, clock=lambda:1)
+        self.facade.upload_capacity = ViewerUploadCapacity(ledger,store,self.spool.name)
+        original = self.service.upload
+        def upload(identifier,filename,stream,length):
+            result=original(identifier,filename,stream,length)
+            if not store.db.execute('SELECT 1 FROM viewer_files WHERE uuid=? AND name_key=?',(identifier,filename)).fetchone():
+                store.db.execute('INSERT INTO viewer_files VALUES(?,?,?)',(identifier,filename,length));store.db.commit()
+            return result
+        with patch.object(self.service,'upload',side_effect=upload):
+            for _ in range(2):
+                handler=self.memory('/task/new/upload/'+IDENTIFIER,multipart([('images','a.jpg',b'123')]),
+                    Content_Type='multipart/form-data; boundary='+BOUNDARY,X_LTDS_Declared_Input_Bytes='6')
+                self.assertEqual(handler.status,200)
+            handler=self.memory('/task/new/commit/'+IDENTIFIER,X_LTDS_Declared_Input_Bytes='6')
+            self.assertEqual(handler.status,503)
+            handler=self.memory('/task/new/upload/'+IDENTIFIER,multipart([('images','b.jpg',b'456')]),
+                Content_Type='multipart/form-data; boundary='+BOUNDARY,X_LTDS_Declared_Input_Bytes='6')
+            self.assertEqual(handler.status,200)
+            handler=self.memory('/task/new/commit/'+IDENTIFIER,X_LTDS_Declared_Input_Bytes='6')
+            self.assertEqual(handler.status,200)
+
     def test_body_limits_chunked_and_truncation_fail_before_execution(self):
         handler = MemoryHandler('/task/new/init?token=' + TOKEN,
             Content_Length=str(MAX_FORM_BYTES + 1), set_uuid=IDENTIFIER)
