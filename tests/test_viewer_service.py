@@ -877,6 +877,24 @@ class ViewerServiceTests(unittest.TestCase):
                     require_distinct_node_hosts(local, main)
         require_distinct_node_hosts('http://192.0.2.1:3001', 'http://192.0.2.2:3004')
 
+    def test_guard_readiness_alone_does_not_enforce_node_mutation_boundary(self):
+        # This regression captures a limitation, not a deployable guarantee:
+        # a True snapshot with an unguarded engine still sends native writes.
+        # Activation requires a separately verified, authenticated node-local
+        # mutation transport; the reader itself cannot prove that property.
+        self.service.close()
+        self.config.viewer_require_guard = True
+        self.service = ViewerService(self.queue, self.config, engines=self.engines,
+            probe=self.probe, guard_probe=lambda _: True)
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
+        self.service._selected_options = lambda _: [dict(item) for item in OPTIONS]
+        identifier = self.submit()
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['node_id'], 'cluster')
+        self.assertIn(('initialize', task['engine_uuid']), self.engines['cluster'].calls)
+        self.assertIn(('commit', task['engine_uuid']), self.engines['cluster'].calls)
+
     def test_guarded_inventory_skips_guard_unavailable_then_recovers(self):
         from processing.config import parse_node_inventory
         self.service.close(); self.queue.close()

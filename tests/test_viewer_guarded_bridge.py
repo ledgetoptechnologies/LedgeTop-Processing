@@ -156,6 +156,24 @@ class ViewerGuardedBridgeTests(unittest.TestCase):
         self.assertFalse(self.service.info(second).get('ledgetopHeld', False))
         self.assertEqual(self.native_fixture.counts()['initialize'], 1)
 
+    def test_guard_snapshot_race_requires_mutation_side_reservation(self):
+        def racing_guard(node):
+            if node != 'cluster': return False
+            with NodeGate('synthetic-physical-engine') as gate:
+                state = gate.snapshot()
+                self.assertIsNone(state['reservation'])
+                # Another client obtains the physical node after the snapshot.
+                gate.reserve('cluster', 'https://coordinator.invalid', state['authorityId'],
+                             state['generation'], 'a' * 32)
+            return True
+        self.enable_guard_reader(racing_guard)
+        identifier = self.submit()
+        self.service.tick()
+        self.assertTrue(self.service.info(identifier).get('ledgetopHeld'))
+        self.assertEqual(self.native_fixture.counts()['initialize'], 0)
+        with NodeGate('synthetic-physical-engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['receiptId'], 'a' * 32)
+
     def test_guard_reader_error_fails_closed_then_recovers(self):
         reachable = [False]
         def guard_ready(node):
