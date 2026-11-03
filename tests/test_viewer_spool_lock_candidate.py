@@ -36,3 +36,11 @@ with SpoolLock(sys.argv[1]).acquire():
         with tempfile.TemporaryDirectory() as root:
             with SpoolLock(root).acquire(): self.assertTrue((Path(root)/'viewer-spool.dirty').exists())
             with SpoolLock(root).acquire(): pass
+
+    def test_body_file_exists_propagates_and_keeps_dirty_hold(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(FileExistsError,'upload collision'):
+                with SpoolLock(root).acquire(): raise FileExistsError('upload collision')
+            self.assertTrue((Path(root)/'viewer-spool.dirty').exists())
+            with self.assertRaisesRegex(SpoolHeld,'reconciliation'):
+                with SpoolLock(root).acquire(): pass

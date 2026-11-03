@@ -36,7 +36,10 @@ class SpoolLock:
             try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError: raise SpoolHeld('spool busy') from None
             acquired=True;self._root()
-            marker=os.open(self.marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            try:
+                marker=os.open(self.marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            except FileExistsError:
+                raise SpoolHeld('prior spool operation requires reconciliation') from None
             try: os.fsync(marker)
             finally: os.close(marker)
             rootfd=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY)
@@ -44,8 +47,6 @@ class SpoolLock:
             finally: os.close(rootfd)
             yield
             clean=True
-        except FileExistsError:
-            raise SpoolHeld('prior spool operation requires reconciliation') from None
         finally:
             try:
                 if acquired and clean:
