@@ -212,6 +212,50 @@ class RealViewerSourceRenewalTests(unittest.TestCase):
         changed={**grant,'viewerAttemptId':'00000000-0000-4000-8000-000000000002'}
         with self.assertRaises(TransferError):validate_source_grant(changed,job=job,clock=self.clock)
 
+    def test_actual_prepared_store_and_driver_remain_unconditionally_held(self):
+        # No readiness predicate is patched. The real Viewer submission is
+        # prepared durably, but source activation/claims/driver stay closed.
+        from processing.prototype import Queue
+        from processing.reference_store import ReferenceStore, PROFILE, JCSRuntimeUnavailable
+        from processing.prepared_envelope_jcs_candidate import PROTOCOL
+        from processing.reference_driver import ReferenceDriver, DriverHeld
+        from processing.maintenance import Conflict
+        host=self.start(); viewer=host.control(op='submission'); submission=viewer['submission']
+        q=Queue(self.root/'coordinator');q.allowed_profiles.add(PROFILE)
+        try:
+            store=ReferenceStore(q,jcs_runtime_enabled=True)
+            env=dict(schemaVersion=3,protocol=PROTOCOL,submission=submission,
+                viewerTaskId=str(uuid.uuid4()),viewerAttemptId=viewer['attemptId'],activationId=str(uuid.uuid4()))
+            policy=dict(capabilityFingerprint=submission['capabilityFingerprint'],
+                optionsFingerprint=submission['pipeline']['odm']['optionsFingerprint'],
+                availableEngines=['odm'],optionDefinitions={'dsm':{'type':'bool','domain':None}})
+            job,created=store.prepare_viewer_envelope_jcs_v3(json.dumps(env).encode(),
+                authenticated_principal='viewer-a',authenticated_environment='staging',trusted_policy=policy,
+                expected_authority_id=q.authority_id)
+            self.assertTrue(created)
+            found=store.find_viewer_envelope_v2(submission['submissionId'],authenticated_principal='viewer-a',
+                authenticated_environment='staging',expected_protocol=PROTOCOL,expected_authority_id=q.authority_id)
+            activation=dict(activationId=env['activationId'],viewerTaskId=env['viewerTaskId'],
+                viewerAttemptId=env['viewerAttemptId'],envelopeSha256=found['envelopeSha256'])
+            with self.assertRaisesRegex(JCSRuntimeUnavailable,'source provenance contract unavailable'):
+                store.activate_viewer_envelope_jcs_v3(submission['submissionId'],activation,
+                    authenticated_principal='viewer-a',authenticated_environment='staging',trusted_policy=policy,
+                    expected_authority_id=q.authority_id)
+            self.assertIsNone(store.claim(job['jobId'],node_id='cluster',worker_id='synthetic-worker',
+                worker_instance_id='synthetic-instance',claim_request_id='synthetic-claim'))
+            attempted={**job,'submission':submission,'sourceViewerAttemptId':viewer['attemptId']}
+            expiry=time.strftime('%Y-%m-%dT%H:%M:%S.000Z',time.gmtime(time.time()+3600))
+            transfer=build_source_transfer_request(attempted,reservation_id='synthetic-reservation',expires_at=expiry,nonce='synthetic-nonce')
+            with self.assertRaisesRegex(Conflict,'Viewer activation required'):
+                store.reserve(job['jobId'],transfer,node_id='cluster')
+            with self.assertRaisesRegex(DriverHeld,'activation_bound_grant_unavailable'):
+                ReferenceDriver._require_activation_bound_grant(None)
+            with q._db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_viewer_activation').fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_claims').fetchone()[0],0)
+                self.assertIsNone(db.execute('SELECT transfer_json FROM reference_jobs WHERE job_id=?',(job['jobId'],)).fetchone()[0])
+        finally:q.close()
+
     def test_renewal_lifecycle_through_restart_keeps_one_budget_lineage(self):
         host = self.start()
         job = self.queued_job(host)
