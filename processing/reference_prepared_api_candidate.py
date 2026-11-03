@@ -87,6 +87,14 @@ class PreparedSubmissionAPI:
         identity = self._authenticate(headers)
         if identity is None: return Response(401, {'error':'unauthorized'})
         principal, environment = identity
+        if type(path) is str and (path == '/ltds/prepared/v3/submissions' or path.startswith('/ltds/prepared/v3/submissions/')):
+            values = [v for k,v in headers.items() if type(k) is str and k.lower() == 'x-ltds-expected-coordinator-authority']
+            if len(values)!=1 or type(values[0]) is not str:
+                return Response(400, {'error':'authority_pin_required'})
+            try: p._uuid(values[0], 'coordinator authority pin')
+            except ValueError: return Response(400, {'error':'authority_pin_required'})
+            if not hmac.compare_digest(values[0], self._expected_authority_id or ''):
+                return Response(503, {'error':'prepared_runtime_unavailable'})
         try:
             if method == 'POST' and path == '/ltds/prepared/v3/submissions' and self._jcs_policies is not None:
                 job, created = self.store.prepare_viewer_envelope_jcs_v3(body, authenticated_principal=principal,
@@ -105,6 +113,14 @@ class PreparedSubmissionAPI:
                 outcome=self.store.read_viewer_v3_job(view[1], authenticated_principal=principal,
                     authenticated_environment=environment, view=view[2], expected_authority_id=self._expected_authority_id)
                 return Response(200,dict(outcome,authorityId=self._expected_authority_id)) if outcome is not None else Response(404,{'error':'not_found'})
+            delivery = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/(source-grant|accepted-copies)', path) if type(path) is str else None
+            if method == 'POST' and delivery and self._jcs_policies is not None:
+                if type(body) is not bytes or len(body)>p.MAX_BODY_BYTES: raise ValueError('bounded body required')
+                owned = self.store.find_viewer_envelope_v2(delivery[1], authenticated_principal=principal,
+                    authenticated_environment=environment, expected_protocol='ltds-viewer-prepared-envelope-jcs-v3',
+                    expected_authority_id=self._expected_authority_id)
+                if owned is None: return Response(404, {'error':'not_found'})
+                return Response(503, {'error':'delivery_verification_unavailable'})
             activation = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/activation', path) if type(path) is str else None
             if method == 'POST' and activation and self._jcs_policies is not None:
                 request = p.decode_submission(body)
