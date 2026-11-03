@@ -133,6 +133,9 @@ class ReferenceStore:
                   request_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL REFERENCES reference_jobs(job_id),
                   node_id TEXT NOT NULL, worker_id TEXT NOT NULL, instance_id TEXT NOT NULL,
                   token TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS reference_released_claims (
+                  request_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                  worker_id TEXT NOT NULL, instance_id TEXT NOT NULL, token_hash TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reference_worker_receipts (
                   outbox_id TEXT PRIMARY KEY, payload_sha TEXT NOT NULL,
                   job_id TEXT NOT NULL, receipt_json TEXT NOT NULL);
@@ -212,6 +215,8 @@ class ReferenceStore:
             used += db.execute('SELECT COALESCE(SUM(length(CAST(viewer_manifest_json AS BLOB))),0) FROM reference_viewer_transfers').fetchone()[0]
         used += db.execute("""SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(node_id)+
           length(worker_id)+length(instance_id)+length(token)),0) FROM reference_claims""").fetchone()[0]
+        used += db.execute("""SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(node_id)+
+          length(worker_id)+length(instance_id)+length(token_hash)),0) FROM reference_released_claims""").fetchone()[0]
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone():
             used += db.execute('SELECT COALESCE(SUM(length(CAST(failure_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0) FROM reference_worker_failures').fetchone()[0]
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_terminal_acceptances'").fetchone():
@@ -428,6 +433,10 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
+            released = db.execute('SELECT 1 FROM reference_released_claims WHERE request_id=?',
+                                  (claim_request_id,)).fetchone()
+            if released:
+                raise Conflict('claim request was released')
             old = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if old:
                 if (old["job_id"], old["node_id"], old["worker_id"], old["instance_id"]) != (
@@ -452,6 +461,46 @@ class ReferenceStore:
             db.execute("""INSERT INTO reference_claims(request_id,job_id,node_id,worker_id,instance_id,token)
               VALUES(?,?,?,?,?,?)""", (claim_request_id, job_id, node_id, worker_id, worker_instance_id, token))
             return self._record(self._row(db, job_id), True)
+
+    def release_unstarted_claim(self, job_id, *, node_id, worker_id, worker_instance_id,
+                                claim_request_id, claim_token):
+        """Held candidate: fence an authenticated claim before any transfer grant.
+
+        This method has no HTTP route and is not connected to the worker. It
+        does not prove the physical engine stayed idle; activation requires
+        independently validated node fencing and a durable worker handshake.
+        """
+        self.queue._known_node(node_id); self.queue.slug(worker_id)
+        for value in (worker_instance_id, claim_request_id):
+            protocol._slug(value, 'claim identifier')
+        if type(claim_token) is not str or not claim_token.isascii():
+            raise ValueError('invalid claim token')
+        digest = hashlib.sha256(claim_token.encode()).hexdigest()
+        binding = (job_id, node_id, worker_id, worker_instance_id, digest)
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM reference_released_claims WHERE request_id=?',
+                             (claim_request_id,)).fetchone()
+            if old:
+                if tuple(old[k] for k in ('job_id', 'node_id', 'worker_id', 'instance_id', 'token_hash')) != binding:
+                    raise Conflict('released claim binding changed')
+                return False
+            row = self._row(db, job_id)
+            claim = db.execute('SELECT * FROM reference_claims WHERE request_id=?',
+                               (claim_request_id,)).fetchone()
+            if (claim is None or tuple(claim[k] for k in ('job_id', 'node_id', 'worker_id', 'instance_id')) != binding[:4]
+                    or not hmac.compare_digest(claim['token'], claim_token)
+                    or row['status'] != 'running' or row['phase'] not in ('queued', 'waiting_capacity')
+                    or row['transfer_json'] is not None or row['result_json'] is not None
+                    or row['private_grant_json'] is not None):
+                raise Conflict('claim cannot be safely released')
+            self._quota(db, sum(len(x) for x in (claim_request_id, *binding)))
+            db.execute('INSERT INTO reference_released_claims VALUES(?,?,?,?,?,?)',
+                       (claim_request_id, *binding))
+            db.execute('DELETE FROM reference_claims WHERE request_id=?', (claim_request_id,))
+            db.execute("UPDATE jobs SET status='queued',worker_id=NULL,node_id=NULL,claim_hash=NULL WHERE id=?", (job_id,))
+            db.execute("UPDATE reference_jobs SET phase='waiting_capacity',node_id=NULL WHERE job_id=?", (job_id,))
+            return True
 
     def claim_snapshot(self, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
         """Observe one owned claim in a read transaction; never replay a claim.

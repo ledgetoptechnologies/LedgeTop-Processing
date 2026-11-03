@@ -175,6 +175,32 @@ class ReferenceStoreTests(unittest.TestCase):
             claims = list(pool.map(claim, range(2)))
         self.assertEqual(sum(value is not None for value in claims), 1)
 
+    def test_released_unstarted_claim_is_fenced_from_replay(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='release-request')
+        claim = self.store.claim(job['jobId'], **binding)
+        token = claim['claimToken']
+        self.assertTrue(self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=token))
+        self.assertFalse(self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=token))
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'waiting_capacity')
+        with self.assertRaises(Conflict):
+            self.store.claim(job['jobId'], **binding)
+        new = self.store.claim(job['jobId'], **{**binding, 'claim_request_id': 'new-request'})
+        self.assertNotEqual(new['claimToken'], token)
+        with self.assertRaises(Conflict):
+            self.store.claim_snapshot(job['jobId'], node_id='cluster', worker_id='worker',
+                worker_instance_id='instance', claim_token=token)
+
+    def test_release_refuses_after_transfer_request(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='release-after-reserve')
+        claim = self.store.claim(job['jobId'], **binding)
+        self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')
+        with self.assertRaises(Conflict):
+            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+
     def test_candidate_inventory_skips_ineligible_head_without_bypassing_production(self):
         self.queue.per_node_slots = True
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
