@@ -630,6 +630,16 @@ class ReferenceDriver:
             if not expected or {obj['id'] for obj in objects} != expected:
                 raise DriverHeld('completed_result_ledger_unavailable')
             if any(obj['accepted_copy_verified'] != 1 for obj in objects):
+                # Recheck authoritative policy before reopening a completed
+                # legacy job. This is at most one network read per step and
+                # keeps observing later policy tightening on subsequent scans.
+                claim = data['claim']
+                status, relay = self._request('GET', '/jobs/' + row['job'] + '/acceptance',
+                                              claim_token=claim['claimToken'])
+                if (status != 409 and type(relay) is dict and relay.get('viewerCopyRequired') is False
+                        and data.get('viewerCopyRequired') is not True):
+                    self._legacy_scan_cursor = row['created']
+                    return
                 with self._db() as db:
                     db.execute("UPDATE driver_jobs SET stage='awaiting_acceptance' WHERE job=? AND stage='completed'",
                                (row['job'],))

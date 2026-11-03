@@ -1003,6 +1003,27 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertNotIn('viewerCopyRequired', data)
         self.assertEqual(self.ledger.cleanup_candidates(), [])
 
+    def test_explicit_legacy_job_with_keys_does_not_reopen_repeatedly(self):
+        signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = signer.trusted_keys
+        job = self.submit(); self.advance(job, 'awaiting_acceptance')
+        _, receipt = self._full_receipt(job, 'legacy-with-keys')
+        self.store.accept(job['jobId'], receipt)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        stages = []
+        original = self.driver._save
+        def watch(job_id, stage, data):
+            stages.append(stage)
+            return original(job_id, stage, data)
+        self.driver._save = watch
+        self.driver.step(); self.driver.step()
+        self.assertEqual(stages, [])
+        self.assertEqual(self._stage(job)[0], 'completed')
+        # A later authoritative policy tightening is still noticed.
+        self.store.viewer_required_environments = frozenset(('staging',))
+        for _ in range(3): self.driver.step()
+        self.assertEqual(self._stage(job)[0], 'awaiting_acceptance')
+
     def test_null_legacy_policy_is_held_for_reconciliation(self):
         signer = SyntheticViewerSigner()
         self.worker.viewer_receipt_keys = signer.trusted_keys
