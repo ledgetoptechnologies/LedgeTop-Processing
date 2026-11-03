@@ -24,3 +24,18 @@ an enforced deployment. Direct engine access and old node binaries must be
 excluded independently. A crash after reserving the gate but before creating or
 binding the journal remains held for explicit reconciliation. No live state or
 services are modified by this candidate.
+
+Replay protection: a separate durable ledger consumes the signed nonce under
+NodeGate before the reservation or any native mutation. An exact replay while
+its original reservation is active returns held without another mutation; a
+changed claim using the same nonce or any replay after retirement is refused.
+The ledger marker is persisted with gate schema 2 before its file is created;
+missing or incomplete ledgers are held instead of being silently recreated.
+A crash after nonce consumption but before reservation likewise requires
+reconciliation. Schema 2 excludes the checked 693cb7e gate loader, but later
+or unrelated older code, alternate state paths, direct database tampering and
+rollback of the whole state still need external controls.
+
+The claim additionally binds production/staging and the exact configured
+coordinator origin. This does not independently prove either value: the shared
+signing key is still the trust boundary and is not a job-scoped credential.

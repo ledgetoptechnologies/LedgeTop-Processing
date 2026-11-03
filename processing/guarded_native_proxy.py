@@ -128,11 +128,14 @@ class GuardedNativeProxy:
         if job_claim is not None:
             from .node_job_claim import verify_job_claim
             verified = verify_job_claim(job_claim, self._job_claim_key, node=self.node_id,
-                authority=self.authority_id, gate_generation=self.generation, task=identifier)
+                authority=self.authority_id, gate_generation=self.generation, task=identifier, origin=self.origin)
             if verified['requestSha256'] != protocol.digest(task):
                 raise GateError('job claim request differs')
         with NodeGate(self.engine_id) as gate:
             receipt = secrets.token_hex(16)
+            if verified is not None:
+                from .job_claim_ledger import JobClaimLedger
+                JobClaimLedger(gate).consume(verified, receipt)
             gate.reserve(self.node_id, self.origin, self.authority_id, self.generation, receipt)
             gate.bind(receipt, dict(id=identifier, workerId=self.worker_id,
                 nodeId=self.node_id, authorityId=self.authority_id))
@@ -253,7 +256,7 @@ class GuardedNativeProxy:
         task = claim.get('engineTaskId') if isinstance(claim, dict) else None
         self._task(task)
         verified = verify_job_claim(envelope, self._job_claim_key, node=self.node_id,
-            authority=self.authority_id, gate_generation=self.generation, task=task, admission=False)
+            authority=self.authority_id, gate_generation=self.generation, task=task, origin=self.origin, admission=False)
         with NodeGate(self.engine_id) as gate:
             receipt = self._owner(gate, task)
             journal = HostMutationJournal(gate, receipt).open()

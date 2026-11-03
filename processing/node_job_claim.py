@@ -14,7 +14,7 @@ from . import reference_protocol as protocol
 from .node_gate import GateError
 
 _FIELDS = {'schema', 'viewerJobId', 'viewerGeneration', 'engineTaskId', 'nodeId',
-           'authorityId', 'gateGeneration', 'requestSha256', 'nonce', 'expiresAt'}
+           'authorityId', 'gateGeneration', 'coordinatorOrigin', 'environment', 'requestSha256', 'nonce', 'expiresAt'}
 _HASH = re.compile(r'[0-9a-f]{64}\Z')
 
 
@@ -25,7 +25,7 @@ def _uuid(value):
         return False
 
 
-def verify_job_claim(envelope, key, *, node, authority, gate_generation, task, now=None, admission=True):
+def verify_job_claim(envelope, key, *, node, authority, gate_generation, task, origin, now=None, admission=True):
     if not isinstance(key, bytes) or len(key) < 32 or len(key) > 4096:
         raise GateError('job claim verification unavailable')
     if type(envelope) is not dict or set(envelope) != {'claim', 'mac'}:
@@ -33,6 +33,8 @@ def verify_job_claim(envelope, key, *, node, authority, gate_generation, task, n
     claim, mac = envelope['claim'], envelope['mac']
     if (type(claim) is not dict or set(claim) != _FIELDS or type(mac) is not str or not _HASH.fullmatch(mac)
             or claim['schema'] != 'ledgetop-node-job-claim-v1'
+            or claim['environment'] not in ('production', 'staging')
+            or claim['coordinatorOrigin'] != origin
             or not _uuid(claim['viewerJobId']) or not _uuid(claim['engineTaskId'])
             or not _uuid(claim['authorityId'])
             or type(claim['viewerGeneration']) is not int or claim['viewerGeneration'] < 1

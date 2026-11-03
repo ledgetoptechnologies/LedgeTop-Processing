@@ -16,7 +16,8 @@ class BoundJobTests(GuardedHTTPS):
     def envelope(self, **changes):
         claim = dict(schema='ledgetop-node-job-claim-v1', viewerJobId=str(uuid.uuid4()),
                      viewerGeneration=4, engineTaskId=self.job, nodeId='main',
-                     authorityId=self.authority, gateGeneration=1,
+                     authorityId=self.authority, gateGeneration=1, coordinatorOrigin='https://coordinator.invalid',
+                     environment='production',
                      requestSha256=protocol.digest(self.task), nonce='a' * 64,
                      expiresAt=int(time.time()) + 300)
         claim.update(changes)
@@ -42,7 +43,8 @@ class BoundJobTests(GuardedHTTPS):
                                     {'jobClaim': envelope, 'operation': operation})
         self.assertEqual((code, result['state'], result['held']), (200, 'done', True))
         for changed in (self.envelope(viewerJobId=str(uuid.uuid4())),
-                        self.envelope(viewerGeneration=5),
+                        self.envelope(viewerGeneration=5), self.envelope(environment='staging'),
+                        self.envelope(coordinatorOrigin='https://other.invalid'),
                         self.envelope(engineTaskId=str(uuid.uuid4())),
                         {'claim': envelope['claim'], 'mac': '0' * 64}):
             self.assertEqual(self.request(server, '/v1/inspect-bound-mutation',
