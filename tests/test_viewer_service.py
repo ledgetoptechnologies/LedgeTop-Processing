@@ -837,6 +837,34 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(first)['job']['status'], 'succeeded')
         self.assertIn(self.task(second)['job']['status'], ('running', 'held'))
 
+    def test_restart_offline_node_retains_result_and_other_node_can_advance_queue(self):
+        self.queue.per_node_slots = True
+        first, second, waiting = self.submit(), self.submit(), self.submit()
+        self.service.tick(); self.service.tick()
+        original = {i: (self.task(i)['node_id'], self.task(i)['engine_uuid'])
+                    for i in (first, second)}
+        self.assertEqual([original[i][0] for i in (first, second)], ['cluster', 'main'])
+        self.service.close(); self.queue.close()
+        self.engines['cluster'].finish(original[first][1])
+        self.engines['cluster'].read_unavailable = True
+        self.engines['main'].finish(original[second][1])
+        self.make_queue_service(); self.queue.per_node_slots = True
+        self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'], 'held')
+        self.assertEqual(self.service.info(first)['status']['code'], 10)
+        self.assertEqual(self.task(second)['job']['status'], 'succeeded')
+        self.assertEqual(self.task(waiting)['node_id'], 'main')
+        self.assertEqual(self.task(first)['engine_uuid'], original[first][1])
+        self.assertEqual(len(self.fleet.commits), 3)
+        self.engines['cluster'].read_unavailable = False
+        self.service._backoff[first] = (0, self.service._backoff[first][1])
+        self.service.tick()
+        self.assertEqual(self.service.info(first)['status']['code'], 40)
+        with self.service.download(first)[0] as stream:
+            self.assertEqual(stream.read(), self.engines['cluster'].archive)
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.engines['cluster'].calls), 1)
+        self.assertEqual(self.task(waiting)['node_id'], 'main')
+
     def test_reconciliation_failure_holds_one_job_but_polls_other(self):
         self.queue.per_node_slots = True
         first = self.submit()
