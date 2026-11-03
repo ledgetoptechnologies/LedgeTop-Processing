@@ -14,8 +14,9 @@ MAX_ENGINE_OBJECTS = 10000
 MAX_SOURCES = 20000
 MAX_AUXILIARY = 10000
 MAX_RAW_BYTES = 12 * 1024 * 1024
+MAX_EVIDENCE_BYTES = 12 * 1024 * 1024  # Separate provisional bound, not Viewer 64 MiB.
 MAX_NODES = 200000
-MAX_CORRESPONDENCES = 100000
+MAX_CORRESPONDENCES = 10000  # Viewer allows 100k; larger evidence remains held here.
 MAX_GENERATED_GCP_BYTES = 16 * 1024 * 1024
 _ROLE = re.compile(r'[a-z][a-z0-9_-]{0,79}\Z')
 _MEDIA = re.compile(r'[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+\Z')
@@ -53,6 +54,25 @@ def _parse(raw):
         if type(item) is dict: todo.extend(item.values())
         elif type(item) is list: todo.extend(item)
     return value
+
+
+def decode_viewer_gcp_evidence(raw):
+    """Bound encoded evidence rows/structure before allocating JSON objects."""
+    if type(raw) is not bytes or len(raw)>MAX_EVIDENCE_BYTES: raise ValueError('bounded evidence bytes required')
+    quoted=False;escaped=False; objects=0; separators=0
+    for byte in raw:
+        if quoted:
+            if escaped: escaped=False
+            elif byte==92: escaped=True
+            elif byte==34: quoted=False
+        elif byte==34: quoted=True
+        elif byte==123:
+            objects+=1
+            if objects>MAX_CORRESPONDENCES+2: raise ValueError('evidence row bound exceeded')
+        elif byte in (44,91):
+            separators+=1
+            if separators>MAX_NODES: raise ValueError('evidence structure bound exceeded')
+    return _parse(raw)
 
 
 def reference_v1_names(processing):
@@ -142,7 +162,7 @@ def validate(raw, *, expected, authoritative_dataset, trusted_selection, trusted
     actual=sorted(({key:obj[key] for key in fields} for obj in sources),key=lambda obj:obj['datasetFileId'])
     trusted=[]
     for obj in authoritative_dataset['files']:
-        p._closed(obj, (*fields,'mimeType'), 'authoritative file')
+        p._closed(obj, (*fields,'mimeType','imageWidth','imageHeight'), 'authoritative file')
         resolved={key:obj[key] for key in fields}
         if resolved['contentType'] is None: resolved['contentType']=obj['mimeType']
         trusted.append(resolved)
@@ -179,21 +199,27 @@ def validate(raw, *, expected, authoritative_dataset, trusted_selection, trusted
                 or len(generated_gcp_bytes) != aux['byteSize']
                 or hashlib.sha256(generated_gcp_bytes).hexdigest() != aux['sha256']):
             raise ValueError('generated GCP source or bytes mismatch')
-        p._closed(trusted_gcp_evidence, ('snapshot','correspondences'), 'trusted GCP evidence')
+        trusted_gcp_evidence=decode_viewer_gcp_evidence(trusted_gcp_evidence)
+        p._closed(trusted_gcp_evidence, ('schemaVersion','snapshot','correspondences'), 'trusted GCP evidence')
+        if type(trusted_gcp_evidence['schemaVersion']) is not int or trusted_gcp_evidence['schemaVersion'] != 1:
+            raise ValueError('unsupported GCP evidence')
         if p.canonical_json(aux) != p.canonical_json(trusted_gcp_evidence['snapshot']):
             raise ValueError('trusted GCP snapshot mismatch')
         rows=trusted_gcp_evidence['correspondences']
         if type(rows) is not list or len(rows)>MAX_CORRESPONDENCES or len(rows)!=aux['correspondenceCount']:
             raise ValueError('trusted GCP correspondence mismatch')
         for row in rows:
-            p._closed(row, ('sourceGcpDatasetFileId','imageDatasetFileId','pointId','longitude','latitude','elevationM','pixelX','pixelY'), 'GCP correspondence')
+            p._closed(row, ('correspondenceId','gcpPointId','gcpSetId','externalId','label','latitude','longitude','elevationM',
+                            'sourceGcpDatasetFileId','sourceGcpSha256','sourceGcpRelativePath',
+                            'imageDatasetFileId','imageRelativePath','imageWidth','imageHeight','pixelX','pixelY'), 'GCP correspondence')
             if type(row['sourceGcpDatasetFileId']) is not str or type(row['imageDatasetFileId']) is not str:
                 raise ValueError('invalid GCP correspondence')
         if (sorted({r['sourceGcpDatasetFileId'] for r in rows}) != gcp_ids
                 or sorted({r['imageDatasetFileId'] for r in rows}) != image_ids):
             raise ValueError('trusted GCP correspondence mismatch')
         from .gcp_snapshot_semantics_candidate import validate_gcp_semantics
-        validate_gcp_semantics(generated_gcp_bytes,processing=processing,correspondences=rows)
+        validate_gcp_semantics(generated_gcp_bytes,processing=processing,retained=retained,
+                               authoritative_files=authoritative_dataset['files'],correspondences=rows)
     elif generated_gcp_bytes is not None:
         raise ValueError('unexpected GCP bytes')
     elif trusted_gcp_evidence is not None:

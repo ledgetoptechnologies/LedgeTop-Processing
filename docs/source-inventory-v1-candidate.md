@@ -74,9 +74,22 @@ Additional synthetic tests call the actual Viewer `gcpOdm.js` from commit
 `793aa66ba0c515287a8cfe1eebc3b763b01d2cef` (Git blob
 `81dc6b7bd20cc3505cd3a33e8222ba5acb9e845c`) and compare its output with the
 semantic checker. Viewer currently snapshots bytes/count at attempt creation,
-but the source implementation examined does not freeze the corresponding rows;
-reading subsequently mutable marks as proof is unsafe. Exact trusted evidence
+at commit `793aa66` the source implementation did not freeze corresponding
+rows. Viewer migration 44 now proposes per-attempt immutable evidence with full
+correspondence, point and set IDs, raw source ID/hash/path, image ID/path and
+nullable dimensions. This candidate matches that row shape, validates identity,
+source mapping, original spelling, dimensions and pixel bounds, and preserves
+the supplied capture order. It has no authenticated Viewer loader; reading
+subsequently mutable marks as proof remains unsafe. Exact trusted evidence
 provenance and numeric bounds must be agreed before any integration.
+
+Evidence bytes are independently bounded to 12 MiB and 10,000 correspondence
+objects with structural preflight before JSON allocation. Viewer currently
+permits 64 MiB and 100,000 rows, so this candidate holds larger evidence and is
+not capacity-compatible. Agreement on an authenticated, byte/hash-bound,
+incrementally parsed evidence stream, row/depth/string limits, per-process
+memory budget, backpressure and durable spool is required before adopting the
+larger ceiling; increasing a full-tree parser's byte cap is not sufficient.
 The candidate deliberately holds some inputs the current Viewer generator can
 emit: colliding ASCII case-insensitive basenames, non-ASCII basenames, duplicate
 point/image or identical rendered rows, and coordinates or pixels outside its

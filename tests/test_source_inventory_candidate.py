@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import unittest
+from unittest.mock import patch
 
 from processing import source_inventory_candidate as candidate
 
@@ -25,22 +26,24 @@ class SourceInventoryCandidateTests(unittest.TestCase):
                 imageDatasetFileIds=['photo-1','photo-2'],correspondenceCount=3)])
         fields=('datasetFileId','relativePath','byteSize','sha256','contentType')
         self.authoritative=dict(id='dataset-1',manifestSha256='a'*64,files=sorted(
-            [{**{key:v[key] for key in fields},'mimeType':v['contentType']} for v in self.inv['processing']+self.inv['retained']],key=lambda v:v['datasetFileId']))
+            [{**{key:v[key] for key in fields},'mimeType':v['contentType'],'imageWidth':6000 if v['processingRole']=='image' else None,'imageHeight':4000 if v['processingRole']=='image' else None} for v in self.inv['processing']+self.inv['retained']],key=lambda v:v['datasetFileId']))
         self.selection={k:self.expected[k] for k in ('viewerTaskId','viewerAttemptId','pipelineDigest')}
         self.selection.update(gcpRequired=True,files=sorted(
             [dict(datasetFileId=v['datasetFileId'],processingRole=v['processingRole'],disposition=disposition)
              for disposition, group in (('processing',self.inv['processing']),('retained',self.inv['retained']))
              for v in group],key=lambda v:v['datasetFileId']))
-        self.evidence=dict(snapshot=copy.deepcopy(self.inv['generated'][0]),correspondences=[
-            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-1',pointId='point-1',longitude=-88,latitude=44,elevationM=100,pixelX=1,pixelY=2),
-            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-1',pointId='point-2',longitude=-88,latitude=44,elevationM=100,pixelX=3,pixelY=4),
-            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-2',pointId='point-3',longitude=-88,latitude=44,elevationM=100,pixelX=5,pixelY=6)])
+        def row(i,image,x,y):return dict(correspondenceId=f'mark-{i}',gcpPointId=f'point-{i}',gcpSetId='set-1',externalId=f'P{i}',label=f'P{i}',
+            sourceGcpDatasetFileId='csv-1',sourceGcpSha256='e'*64,sourceGcpRelativePath='Original/GCP.csv',imageDatasetFileId=image,
+            imageRelativePath=self.inv['processing'][int(image[-1])-1]['relativePath'],imageWidth=6000,imageHeight=4000,
+            longitude=-88,latitude=44,elevationM=100,pixelX=x,pixelY=y)
+        self.evidence=dict(schemaVersion=1,snapshot=copy.deepcopy(self.inv['generated'][0]),correspondences=[
+            row(1,'photo-1',1,2),row(2,'photo-1',3,4),row(3,'photo-2',5,6)])
 
     def validate(self, inventory=None, *, expected=None, gcp=None):
         raw=json.dumps(self.inv if inventory is None else inventory,ensure_ascii=False).encode()
         return candidate.validate(raw,expected=self.expected if expected is None else expected,
                                   authoritative_dataset=self.authoritative,trusted_selection=self.selection,
-                                  trusted_gcp_evidence=self.evidence,
+                                  trusted_gcp_evidence=json.dumps(self.evidence).encode(),
                                   generated_gcp_bytes=self.gcp if gcp is None else gcp)
 
     def test_exact_paths_bytes_and_immutable_binding(self):
@@ -109,9 +112,9 @@ class SourceInventoryCandidateTests(unittest.TestCase):
         self.inv['generated'][0]['correspondenceCount']=1
         self.gcp=b'EPSG:4326\n-88 44 100 1 2 00000.jpg\n'
         self.inv['generated'][0].update(byteSize=len(self.gcp),sha256=hashlib.sha256(self.gcp).hexdigest())
-        self.evidence=dict(snapshot=copy.deepcopy(self.inv['generated'][0]),correspondences=[dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-00000',pointId='point-1',longitude=-88,latitude=44,elevationM=100,pixelX=1,pixelY=2)])
+        self.evidence=dict(schemaVersion=1,snapshot=copy.deepcopy(self.inv['generated'][0]),correspondences=[dict(correspondenceId='mark-1',gcpPointId='point-1',gcpSetId='set-1',externalId='P1',label='P1',sourceGcpDatasetFileId='csv-1',sourceGcpSha256='e'*64,sourceGcpRelativePath='Original/GCP.csv',imageDatasetFileId='photo-00000',imageRelativePath='photos/00000.jpg',imageWidth=6000,imageHeight=4000,longitude=-88,latitude=44,elevationM=100,pixelX=1,pixelY=2)])
         fields=('datasetFileId','relativePath','byteSize','sha256','contentType')
-        self.authoritative['files']=sorted([{**{k:v[k] for k in fields},'mimeType':v['contentType']} for v in self.inv['processing']+self.inv['retained']],key=lambda v:v['datasetFileId'])
+        self.authoritative['files']=sorted([{**{k:v[k] for k in fields},'mimeType':v['contentType'],'imageWidth':6000 if v['processingRole']=='image' else None,'imageHeight':4000 if v['processingRole']=='image' else None} for v in self.inv['processing']+self.inv['retained']],key=lambda v:v['datasetFileId'])
         self.selection['files']=sorted([dict(datasetFileId=v['datasetFileId'],processingRole=v['processingRole'],disposition=disposition)
             for disposition,group in (('processing',self.inv['processing']),('retained',self.inv['retained'])) for v in group],key=lambda v:v['datasetFileId'])
         self.validate()
@@ -124,13 +127,33 @@ class SourceInventoryCandidateTests(unittest.TestCase):
         self.evidence['correspondences'][0]['imageDatasetFileId']='other'
         with self.assertRaisesRegex(ValueError,'correspondence mismatch'):self.validate()
 
+    def test_viewer_fields_source_dimensions_and_unique_identity(self):
+        changes=[('sourceGcpSha256','0'*64),('sourceGcpRelativePath','wrong.csv'),
+                 ('imageRelativePath','other.jpg'),('imageWidth',5),('pixelX',6000),
+                 ('elevationM',100001),('longitude',181)]
+        for key,value in changes:
+            original=copy.deepcopy(self.evidence);self.evidence['correspondences'][0][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):self.validate()
+            self.evidence=original
+        self.evidence['correspondences'][1]['correspondenceId']=self.evidence['correspondences'][0]['correspondenceId']
+        with self.assertRaises(ValueError):self.validate()
+
+    def test_evidence_bounds_precede_json_allocation(self):
+        with patch.object(candidate,'MAX_CORRESPONDENCES',2):
+            raw=b'{"snapshot":{},"correspondences":[{},{},{}]}'
+            with patch.object(candidate,'_parse',side_effect=AssertionError('parser must not run')):
+                with self.assertRaisesRegex(ValueError,'row bound'):candidate.decode_viewer_gcp_evidence(raw)
+        with patch.object(candidate,'MAX_EVIDENCE_BYTES',8):
+            with patch.object(candidate,'_parse',side_effect=AssertionError('parser must not run')):
+                with self.assertRaisesRegex(ValueError,'bounded evidence'):candidate.decode_viewer_gcp_evidence(b' '*9)
+
     def test_twenty_thousand_custody_sources_with_ten_thousand_engine_objects(self):
         photo=self.inv['processing'][0]; aux=self.inv['retained'][0]
         self.inv['processing']=[dict(photo,datasetFileId=f'photo-{i:05d}',relativePath=f'photos/{i:05d}.jpg') for i in range(10000)]
         self.inv['retained']=[dict(aux,datasetFileId=f'admin-{i:05d}',relativePath=f'other/{i:05d}.txt',processingRole='administrative') for i in range(10000)]
         self.inv['generated']=[]; self.selection['gcpRequired']=False
         fields=('datasetFileId','relativePath','byteSize','sha256','contentType')
-        self.authoritative['files']=sorted([{**{k:v[k] for k in fields},'mimeType':v['contentType']}
+        self.authoritative['files']=sorted([{**{k:v[k] for k in fields},'mimeType':v['contentType'],'imageWidth':6000 if v['processingRole']=='image' else None,'imageHeight':4000 if v['processingRole']=='image' else None}
             for v in self.inv['processing']+self.inv['retained']],key=lambda v:v['datasetFileId'])
         self.selection['files']=sorted([dict(datasetFileId=v['datasetFileId'],processingRole=v['processingRole'],disposition=disposition)
             for disposition,group in (('processing',self.inv['processing']),('retained',self.inv['retained'])) for v in group],key=lambda v:v['datasetFileId'])
