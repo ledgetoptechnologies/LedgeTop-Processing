@@ -6,6 +6,8 @@ Viewer output ingestion. No network, Docker, real datasets or host writes.
 
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import sys
 import io
 import json
 import os
@@ -417,6 +419,37 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertIsNone(self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'}))
         self.assertEqual(self.queue.get(tree['id'])['status'], 'queued')
 
+    def test_opt_in_main_busy_does_not_route_large_job_to_cluster(self):
+        self.queue.per_node_slots = True
+        self.config.local_max_photos = 1
+        first = self.submit(count=2)
+        self.service.tick()
+        second = self.submit(count=2)
+        self.service.tick()
+        self.assertEqual(self.task(first)['node_id'], 'main')
+        self.assertIsNone(self.task(second)['node_id'])
+        self.assertEqual(self.engines['cluster'].calls, [])
+
+    def test_opt_in_reopen_preserves_both_running_engine_identities(self):
+        self.queue.per_node_slots = True
+        first = self.submit()
+        second = self.submit()
+        self.service.tick()
+        self.service.tick()
+        original = [(self.task(i)['node_id'], self.task(i)['engine_uuid']) for i in (first, second)]
+        self.assertEqual({node for node, _ in original}, {'cluster', 'main'})
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.queue.per_node_slots = True
+        self.service.tick()
+        self.assertEqual([(self.task(i)['node_id'], self.task(i)['engine_uuid']) for i in (first, second)], original)
+        self.assertEqual(len(self.fleet.commits), 2)
+        self.finish(first)
+        self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'], 'succeeded')
+        self.assertIn(self.task(second)['job']['status'], ('running', 'held'))
+
     def test_opt_in_does_not_fallback_for_unavailable_cluster(self):
         self.queue.per_node_slots = True
         self.unavailable.add('cluster')
@@ -434,6 +467,28 @@ class ViewerServiceTests(unittest.TestCase):
             claims = [f.result() for f in futures]
         self.assertEqual(sum(claim is not None for claim in claims), 1)
         self.assertEqual(sum(self.task(i)['job']['status'] == 'running' for i in (first, second)), 1)
+
+    def test_opt_in_other_coordinator_process_cannot_claim_same_database(self):
+        self.queue.per_node_slots = True
+        task = self.submit()
+        script = '''
+import sys
+from processing.prototype import Queue
+try:
+    q = Queue(sys.argv[1], node_ids=('cluster','main'), viewer_enabled=True, per_node_slots=True)
+except RuntimeError as e:
+    sys.exit(0 if str(e) == 'prototype state already owned' else 2)
+else:
+    try:
+        q.claim({'workerId':'other', 'nodeId':'cluster', 'profiles':['odm-viewer-v1']})
+    finally:
+        q.close()
+    sys.exit(3)
+'''
+        result = subprocess.run([sys.executable, '-c', script, str(self.root / 'state')],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.task(task)['job']['status'], 'queued')
 
     def test_tree_running_and_held_block_all_photogrammetry(self):
         tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})
