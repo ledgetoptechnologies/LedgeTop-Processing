@@ -5,6 +5,10 @@ services:
     init: true
     restart: unless-stopped
     read_only: true
+    # Private space for a restart preflight that must read through a crashed
+    # write transaction without writing to the state volume.
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
     user: "10001:10001"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

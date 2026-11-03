@@ -17,7 +17,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
+import tempfile
 import time
 
 AUTHORITY = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
@@ -34,14 +36,12 @@ def existing_authority(state_dir):
     path = Path(state_dir) / 'jobs.sqlite3'
     if not path.is_file():
         return None
-    db = sqlite3.connect('file:' + str(path) + '?mode=ro', uri=True)
-    try:
+    def read(db):
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_identity'").fetchone():
             return None
         row = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
         return row[0] if row else None
-    finally:
-        db.close()
+    return _read_committed(path, read)
 
 
 class AuthorityLease:
@@ -104,8 +104,42 @@ def required(state_dir):
     path = Path(state_dir) / 'jobs.sqlite3'
     if not path.is_file():
         return False
-    db = sqlite3.connect('file:' + str(path) + '?mode=ro', uri=True)
+    return _read_committed(path, lambda db: db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone() is not None)
+
+
+def _read_committed(path, read):
+    """Read the committed state without writing to the state volume.
+
+    A coordinator killed inside a write transaction leaves a hot rollback
+    journal, and a read-only connection then refuses to read rather than roll
+    it back. The rollback is a state write, so it must wait for the lease and
+    the volume lock. Until then, read a private copy that SQLite may roll back,
+    and leave the original database and journal untouched.
+    """
     try:
-        return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_authority_lease'").fetchone() is not None
+        return _query(path, read, 'ro')
+    except sqlite3.OperationalError:
+        journal = Path(str(path) + '-journal')
+        if not journal.is_file() or journal.stat().st_size == 0:
+            raise
+    stamp = lambda: [(item.stat().st_size, item.stat().st_mtime_ns) for item in (path, journal)]
+    try:
+        before = stamp()
+        with tempfile.TemporaryDirectory(prefix='coordinator-preflight-') as private:
+            copy = Path(private) / 'jobs.sqlite3'
+            shutil.copyfile(path, copy)
+            shutil.copyfile(journal, str(copy) + '-journal')
+            if stamp() != before:
+                raise OSError('state changed while copying')
+            return _query(copy, read, 'rw')
+    except (OSError, sqlite3.Error):
+        raise LeaseUnavailable('authority_preflight_hot_journal_unreadable') from None
+
+
+def _query(path, read, mode):
+    db = sqlite3.connect('file:' + str(path) + '?mode=' + mode, uri=True)
+    try:
+        return read(db)
     finally:
         db.close()
