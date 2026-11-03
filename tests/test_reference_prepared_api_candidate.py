@@ -1,4 +1,5 @@
 import copy
+import http.client
 import json
 from pathlib import Path
 import tempfile
@@ -70,12 +71,26 @@ class PreparedAPITests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body=self.rfile.read(int(self.headers.get('content-length','0')))
-                result=api.handle('POST',self.path,dict(self.headers),body,protected_transport=True)
+                result=api.handle('POST',self.path,self.headers,body,protected_transport=True)
                 raw=json.dumps(result.body).encode(); self.send_response(result.status); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw)
             def log_message(self,*args): pass
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
         thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
         try:
+            payload=json.dumps(self.envelope).encode()
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+            try:
+                conn.putrequest('POST',PREFIX+'/submissions')
+                conn.putheader('Authorization','Bearer '+TOKEN)
+                conn.putheader('Authorization','Bearer '+OTHER)
+                conn.putheader('Content-Length',str(len(payload)))
+                conn.endheaders(payload)
+                result=conn.getresponse()
+                self.assertEqual(result.status,401)
+                result.read()
+            finally:
+                conn.close()
+            self.assertEqual(self.queue.list(),[])
             request=Request('http://127.0.0.1:%s%s/submissions'%(server.server_port,PREFIX), data=json.dumps(self.envelope).encode(),headers={'Authorization':'Bearer '+TOKEN},method='POST')
             with urlopen(request,timeout=5) as response:
                 self.assertEqual(response.status,201); self.assertIn('jobId',json.load(response))

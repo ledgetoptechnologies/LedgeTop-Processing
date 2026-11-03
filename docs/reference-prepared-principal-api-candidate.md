@@ -25,3 +25,9 @@ serialization; it is explicitly stopped and is not a production transport.
 Shared Viewer/Processing canonicalization for negative/floating options remains
 unresolved and blocks integration. Endpoint path and wire response are proposals
 subject to joint Viewer review.
+
+A listener must preserve repeated wire headers when calling this adapter, or
+reject multiple Authorization headers using the server's multivalue API before
+any conversion to a dictionary. Collapsing headers can defeat duplicate-token
+rejection. The loopback test sends repeated Authorization headers over HTTP and
+confirms a 401 with no job inserted.
