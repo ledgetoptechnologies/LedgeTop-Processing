@@ -8,8 +8,10 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from processing.guarded_native_https import create_guarded_https_server
+from processing.guarded_native_https import _check_local_node_binding
 from processing.guarded_native_client import GuardedNativeClient
 from processing.node_gate import GateError
 from processing.viewer_service import NativeEngine
@@ -73,6 +75,60 @@ class GuardedHTTPS(GuardedNativeProxyTests):
             with self.subTest(field=name), patch.object(self.proxy, name, value):
                 with self.assertRaises((ValueError, GateError)): self.start_listener()
                 self.assertFalse((self.spool / '.guarded-spool.sqlite3').exists())
+
+    def test_listener_refuses_divergent_effective_client_target(self):
+        with patch.object(self.proxy.engine.client, 'parsed', urlsplit('http://192.0.2.1:3000')):
+            with self.assertRaises(ValueError): self.start_listener()
+        self.assertFalse((self.spool / '.guarded-spool.sqlite3').exists())
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+
+    def test_listener_refuses_engine_replacement_during_startup(self):
+        def replace_after_check(adapter):
+            checked = _check_local_node_binding(adapter)
+            adapter.engine = NativeEngine('http://127.0.0.1:1')
+            return checked
+        with patch('processing.guarded_native_https._check_local_node_binding', side_effect=replace_after_check):
+            with self.assertRaises(ValueError): self.start_listener()
+        self.assertFalse((self.spool / '.guarded-spool.sqlite3').exists())
+
+    def test_changed_target_after_listener_is_held_without_engine_mutation(self):
+        server = self.start_listener()
+        self.proxy.engine.client.parsed = urlsplit('http://192.0.2.1:3000')
+        self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 409)
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+
+    def test_replaced_engine_after_listener_is_held_without_engine_mutation(self):
+        server = self.start_listener()
+        self.proxy.engine = NativeEngine('http://192.0.2.1:3000')
+        self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 409)
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+
+    def test_engine_replacement_during_dispatch_uses_captured_engine(self):
+        server = self.start_listener()
+        engine = self.proxy.engine
+        original = engine.initialize
+        def initialize(task):
+            self.proxy.engine = NativeEngine('http://192.0.2.1:3000')
+            return original(task)
+        with patch.object(engine, 'initialize', side_effect=initialize):
+            self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 200)
+        self.assertEqual(self.backend.counts()['initialize'], 1)
+
+    def test_connection_uses_pinned_target_if_parsed_changes_during_connect(self):
+        server = self.start_listener()
+        original = http.client.HTTPConnection
+        targets = []
+        def connect(host, port, **kwargs):
+            targets.append((host, port))
+            # Simulate another thread changing the ordinary client state after
+            # its per-mutation check but before the socket is constructed.
+            self.proxy.engine.client.parsed = urlsplit('http://192.0.2.1:3000')
+            return original(host, port, **kwargs)
+        with patch('processing.odx_smoke_worker.http.client.HTTPConnection', side_effect=connect):
+            self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 200)
+        expected = urlsplit(self.backend.origin)
+        self.assertEqual(targets, [(expected.hostname, expected.port)])
+        self.assertEqual(self.backend.counts()['initialize'], 1)
 
     def test_real_mutual_tls_and_private_engine_http(self):
         server = self.start_listener()

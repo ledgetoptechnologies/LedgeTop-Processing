@@ -66,7 +66,8 @@ class Client:
             raise SmokeError('invalid credential')
 
     def request(self, method, route, body=b'', headers=None, limit=65536,
-                file=None, prefix=b'', suffix=b'', expected_hash=None, timeout=30):
+                file=None, prefix=b'', suffix=b'', expected_hash=None, timeout=30,
+                _fixed_target=None):
         connection = None
         try:
             headers = dict(headers or {})
@@ -75,8 +76,12 @@ class Client:
                     route += '?' + urlencode({'token': self.token})
                 else:
                     headers['Authorization'] = 'Bearer ' + self.token
-            kind = http.client.HTTPSConnection if self.parsed.scheme == 'https' else http.client.HTTPConnection
-            connection = kind(self.parsed.hostname, self.parsed.port, timeout=timeout)
+            # Guarded callers pass an already-validated immutable endpoint for
+            # this request. Capture it once so an ordinary client attribute
+            # change cannot redirect a mutation between validation and connect.
+            target = self.parsed if _fixed_target is None else _fixed_target
+            kind = http.client.HTTPSConnection if target.scheme == 'https' else http.client.HTTPConnection
+            connection = kind(target.hostname, target.port, timeout=timeout)
             if file is None:
                 connection.request(method, route, body=body, headers=headers)
             else:

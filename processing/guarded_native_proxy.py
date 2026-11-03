@@ -69,6 +69,25 @@ class GuardedNativeProxy:
         except (ValueError, TypeError, AttributeError):
             raise GateError('invalid engine task identity') from None
 
+    def bind_listener_engine(self, engine):
+        """Capture the validated engine object for this listener lifetime."""
+        if self.engine is not engine:
+            raise GateError('guarded native engine changed during startup')
+        previous = getattr(self, '_listener_engine', None)
+        if previous is not None and previous is not self.engine:
+            raise GateError('guarded native engine changed')
+        self._listener_engine = self.engine
+
+    def _mutation_engine(self):
+        bound = getattr(self, '_listener_engine', None)
+        if bound is not None:
+            if self.engine is not bound:
+                raise GateError('guarded native engine changed')
+            # Use the captured object throughout this mutation, even if an
+            # ordinary attribute is changed concurrently after this check.
+            return bound
+        return self.engine
+
     def _owner(self, gate, task):
         state = gate.snapshot()
         if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
@@ -101,6 +120,7 @@ class GuardedNativeProxy:
 
     def initialize(self, task, *, bearer, protected_transport, job_claim=None):
         self._auth(bearer, protected_transport)
+        engine = self._mutation_engine()
         if type(task) is not dict or set(task) != {'name', 'engine_uuid', 'outputs', 'options'}:
             raise GateError('invalid task')
         identifier = task['engine_uuid']
@@ -163,12 +183,13 @@ class GuardedNativeProxy:
                     if current_claim != verified or protocol.digest(task) != verified['requestSha256']:
                         raise GateError('job claim changed before mutation')
                 self._mutate(journal, self._op(identifier, 'init'), 'init', request,
-                    lambda: self.engine.initialize(task), before_action=pre_issue)
+                    lambda: engine.initialize(task), before_action=pre_issue)
             finally:
                 journal.close()
 
     def upload(self, task, item, *, bearer, protected_transport):
         self._auth(bearer, protected_transport)
+        engine = self._mutation_engine()
         self._task(task)
         if (type(item) is not dict or set(item) != {'path','name','bytes','sha256'}
                 or type(item['name']) is not str or not item['name']
@@ -204,7 +225,7 @@ class GuardedNativeProxy:
                 if journal.contains_operation(op):
                     raise DuplicateGuardedUpload('prior upload intent already exists')
                 try:
-                    self._mutate(journal, op, 'upload', request, lambda: self.engine.upload(task, item))
+                    self._mutate(journal, op, 'upload', request, lambda: engine.upload(task, item))
                 except UnissuedGuardedUpload:
                     # Once begin may have committed, no downstream exception
                     # can establish that this request did not mutate NodeODM.
@@ -221,12 +242,13 @@ class GuardedNativeProxy:
 
     def commit(self, task, *, bearer, protected_transport):
         self._auth(bearer, protected_transport)
+        engine = self._mutation_engine()
         self._task(task)
         with NodeGate(self.engine_id) as gate:
             journal = HostMutationJournal(gate, self._owner(gate, task)).open()
             try:
                 return self._mutate(journal, self._op(task, 'commit'), 'commit', dict(task=task),
-                    lambda: self.engine.action('commit', task),
+                    lambda: engine.action('commit', task),
                     lambda value: type(value) is dict and value.get('uuid') == task
                         and 'error' not in value and value.get('success') is not False)
             finally:

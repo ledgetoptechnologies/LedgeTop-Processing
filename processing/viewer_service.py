@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 import zipfile
+from urllib.parse import urlsplit
 
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
@@ -40,10 +41,52 @@ class _DispatchInterrupted(Exception):
     """A cooperative stop at a boundary, with all partial work retained."""
 
 
+class _PinnedLoopbackClient(Client):
+    """A private mutation client with a fixed validated connection target."""
+    def __init__(self, origin):
+        super().__init__(origin)
+        self.__target = urlsplit(self.origin)
+
+    def request(self, *args, **kwargs):
+        if '_fixed_target' in kwargs:
+            raise SmokeError('fixed node target cannot be overridden')
+        return super().request(*args, _fixed_target=self.__target, **kwargs)
+
+
 class NativeEngine:
     def __init__(self, origin, token=''):
         self.origin, self.token = origin, token
         self.client = Client(origin)
+
+    def pin_guarded_local(self, expected_origin):
+        """Pin a previously checked loopback origin for mutation calls only."""
+        expected = urlsplit(expected_origin.rstrip('/'))
+        if (self.origin != expected_origin or self.client.origin != expected_origin.rstrip('/')
+                or self.client.parsed != expected
+                or expected.scheme != 'http' or expected.hostname not in ('127.0.0.1', '::1')
+                or expected.port is None or expected.username or expected.password
+                or expected.path not in ('', '/') or expected.query or expected.fragment):
+            raise ValueError('native engine target differs')
+        if hasattr(self, '_guarded_client'):
+            # A failed listener startup can be retried without weakening the
+            # previously pinned target.
+            self._mutation_client()
+            return
+        self._guarded_origin = expected_origin
+        self._guarded_client = _PinnedLoopbackClient(expected_origin)
+        self.client = self._guarded_client
+
+    def _mutation_client(self):
+        pinned = getattr(self, '_guarded_client', None)
+        if pinned is not None:
+            if (self.client is not pinned or self.origin != self._guarded_origin
+                    or pinned.origin != self._guarded_origin.rstrip('/')
+                    or pinned.parsed != urlsplit(self._guarded_origin.rstrip('/'))):
+                raise SmokeError('guarded native target changed')
+            # The captured client uses its pinned endpoint even if its parsed
+            # attribute changes concurrently after this check.
+            return pinned
+        return self.client
 
     def route(self, route, **query):
         if self.token:
@@ -76,7 +119,7 @@ class NativeEngine:
         fields = {'name': task['name'], 'options': json.dumps(task['options'])}
         if task['outputs'] is not None:
             fields['outputs'] = json.dumps(task['outputs'])
-        result = self.client.json('POST', self.route('/task/new/init'), fields=fields,
+        result = self._mutation_client().json('POST', self.route('/task/new/init'), fields=fields,
                                   headers={'set-uuid': task['engine_uuid']})
         if not isinstance(result, dict) or result.get('uuid') != task['engine_uuid']:
             raise SmokeError('engine initialization identity uncertain')
@@ -88,7 +131,7 @@ class NativeEngine:
         boundary = 'processing-' + uuid.uuid4().hex
         prefix = (f'--{boundary}\r\nContent-Disposition: form-data; name="images"; '
                   f'filename="{item["name"]}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode('ascii')
-        raw = self.client.request('POST', self.route('/task/new/upload/' + identifier),
+        raw = self._mutation_client().request('POST', self.route('/task/new/upload/' + identifier),
             headers={'Content-Type': 'multipart/form-data; boundary=' + boundary},
             file=path, prefix=prefix, suffix=f'\r\n--{boundary}--\r\n'.encode(),
             expected_hash=item['sha256'], timeout=120)
@@ -99,10 +142,10 @@ class NativeEngine:
     def action(self, action, identifier):
         if action == 'commit':
             route, fields = '/task/new/commit/' + identifier, None
-            result = self.client.json('POST', self.route(route))
+            result = self._mutation_client().json('POST', self.route(route))
         else:
             route = '/task/' + action
-            raw = self.client.request('POST', self.route(route), body=urlencode({'uuid': identifier}).encode(),
+            raw = self._mutation_client().request('POST', self.route(route), body=urlencode({'uuid': identifier}).encode(),
                                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
             result = json.loads(raw)
         if (not isinstance(result, dict) or 'error' in result or result.get('success') is False

@@ -35,15 +35,19 @@ def _check_local_node_binding(adapter):
     from .guarded_native_proxy import GuardedNativeProxy
     from .node_gate import NodeGate
     from .viewer_service import NativeEngine
-    if type(adapter) is not GuardedNativeProxy or type(adapter.engine) is not NativeEngine:
+    if type(adapter) is not GuardedNativeProxy:
         raise ValueError('fixed native node adapter required')
-    origin = adapter.engine.origin
+    engine = adapter.engine
+    if type(engine) is not NativeEngine:
+        raise ValueError('fixed native node adapter required')
+    origin = engine.origin
     try:
         parsed = urlsplit(origin)
         if (parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', '::1')
                 or parsed.username or parsed.password or parsed.path not in ('', '/')
                 or parsed.query or parsed.fragment or parsed.port is None
-                or adapter.engine.client.origin != origin.rstrip('/')):
+                or engine.client.origin != origin.rstrip('/')
+                or engine.client.parsed != urlsplit(origin.rstrip('/'))):
             raise ValueError()
     except (AttributeError, TypeError, ValueError):
         raise ValueError('fixed loopback native engine required') from None
@@ -52,6 +56,7 @@ def _check_local_node_binding(adapter):
         if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
                 adapter.node_id, adapter.authority_id, adapter.origin, adapter.generation):
             raise ValueError('local node gate binding differs')
+    return engine, origin
 
 
 def create_guarded_https_server(adapter, *, bind_host, port, certificate, private_key,
@@ -72,7 +77,13 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
         raise ValueError('bounded upload deadline required')
     # Do this before allocating a spool ledger or binding a listener. The
     # gate is checked again for every mutation; it may change after startup.
-    _check_local_node_binding(adapter)
+    engine, origin = _check_local_node_binding(adapter)
+    # The engine owns a dedicated mutation client whose effective connection
+    # target cannot be redirected by changing the ordinary parsed attribute.
+    if adapter.engine is not engine:
+        raise ValueError('native engine changed during startup')
+    engine.pin_guarded_local(origin)
+    adapter.bind_listener_engine(engine)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(certificate, private_key)
