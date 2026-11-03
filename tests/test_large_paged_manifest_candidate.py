@@ -1,5 +1,7 @@
 import copy
 import unittest
+from unittest.mock import patch
+from processing import reference_protocol as rp
 from processing.large_paged_manifest_candidate import build,validate,PagedManifestError,_digest,MAX_OBJECTS,MAX_PAGE_OBJECTS
 
 class LargePagedManifestTests(unittest.TestCase):
@@ -29,6 +31,14 @@ class LargePagedManifestTests(unittest.TestCase):
   closure,pages=build([obj])
   self.assertEqual(pages[0]['sha256'],'c0f512a2a64fc24849b4cee33c5239773bc665f7b1085c4c0b7f0b94d77a05c2')
   self.assertEqual(_digest(closure),'0987a3830b10ca7c53a9ddc72138fa05a70fa0df96b5353fcbb039fcba6fa7a8')
+ def test_builder_rejects_large_page_before_serializing_page_copy(self):
+  values=[dict(id=f'i-{i:04}',name=f'{i:04}'+('x'*240)+'.jpg',byteSize=1,sha256='a'*64,kind='image',mediaType='x'*127) for i in range(512)]
+  original=rp.canonical_json
+  def guarded(value):
+   if type(value) is dict and value.get('objects'):raise AssertionError('page copied before preflight')
+   return original(value)
+  with patch('processing.large_paged_manifest_candidate.p.canonical_json',side_effect=guarded):
+   with self.assertRaises(PagedManifestError):build(values)
  def test_detached_pages_from_caller(self):
   values=[dict(self.objects[0])];closure,pages=build(values);values[0]['name']='changed.JPG'
   self.assertEqual(pages[0]['body']['objects'][0]['name'],'DJI_00000.JPG')

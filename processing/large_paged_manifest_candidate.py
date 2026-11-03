@@ -25,7 +25,20 @@ def build(objects):
  """Prepare bounded metadata only; caller must not treat this as authorization."""
  if type(objects) is not list or not 0 < len(objects) <= MAX_OBJECTS: raise PagedManifestError('object count')
  try:
-  for obj in objects:_check_object(obj)
+  seen=set();names=set();total_bytes=0;metadata_bytes=0
+  for start in range(0,len(objects),MAX_PAGE_OBJECTS):
+   idx=start//MAX_PAGE_OBJECTS
+   if idx>=MAX_PAGES:raise ValueError()
+   page_size=len(p.canonical_json({'index':idx,'objects':[]}))
+   for offset,obj in enumerate(objects[start:start+MAX_PAGE_OBJECTS]):
+    _check_object(obj)
+    if obj['id'] in seen or obj['name'].casefold() in names:raise ValueError()
+    seen.add(obj['id']);names.add(obj['name'].casefold());total_bytes+=obj['byteSize']
+    if total_bytes>p.MAX_SAFE_INTEGER:raise ValueError()
+    page_size+=len(p.canonical_json(obj))+(1 if offset else 0)
+    if page_size>MAX_PAGE_BYTES:raise ValueError()
+   metadata_bytes+=page_size
+   if metadata_bytes>MAX_TOTAL_BYTES:raise ValueError()
  except (ValueError,TypeError,KeyError):raise PagedManifestError('invalid paged manifest') from None
  pages=[]
  for start in range(0,len(objects),MAX_PAGE_OBJECTS):
