@@ -1,5 +1,6 @@
 """Actual pinned Viewer exporter to held Processing receiver, synthetic data only."""
 import base64
+import hashlib
 import io
 import json
 import os
@@ -13,9 +14,10 @@ from processing.large_paged_manifest_candidate import build, _digest
 from processing.paged_frame_receiver_candidate import initialize, stage, ReceiverHeld
 from processing.viewer_selected_frames_candidate import binding_digest
 from processing.viewer_paged_frame_candidate import verify as verify_source, FrameHeld
+from processing import reference_protocol as protocol
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN = 'a6ed23b38ea66171fc8884867840b2d699062926'
+PIN = '63970eaf056ec80230ceabd508823916c78e4af2'
 
 class PagedViewerPair(unittest.TestCase):
  @classmethod
@@ -46,6 +48,20 @@ class PagedViewerPair(unittest.TestCase):
  def test_export_receiver_and_fail_closed(self):
   self.assertEqual(self.export['state'],'held_authenticated_source_unavailable')
   self.assertEqual(self.binding['selectedCount'],16834)
+  for wire,pins,domain in ((self.source,self.binding['sourcePageHashes'],b'ltds-viewer-source-frame-v1\0'),(self.selected,self.binding['selectedPageHashes'],b'ltds-viewer-selected-frame-v1\0')):
+   lines=wire.splitlines(keepends=True)
+   self.assertEqual(len(lines),33);self.assertEqual(len(lines),len(pins))
+   for index,(line,pin) in enumerate(zip(lines,pins)):
+    self.assertTrue(line.endswith(b'\n'));raw=line[:-1]
+    self.assertLessEqual(len(raw),256*1024)
+    frame=json.loads(raw);self.assertEqual(frame['index'],index)
+    self.assertEqual(protocol.canonical_json(frame),raw)
+    self.assertEqual(hashlib.sha256(domain+raw).hexdigest(),pin)
+   self.assertEqual(sum(map(len,lines)),len(wire))
+  selected=[r for line in self.selected.splitlines() for r in json.loads(line)['records']]
+  self.assertEqual([r['ordinal'] for r in selected],list(range(16834)))
+  self.assertEqual([r['pageObjectId'] for r in selected[:16832]],[f'photo-{i:05}' for i in range(16832)])
+  self.assertEqual(selected[-2]['pageObjectId'],'lidar');self.assertEqual(selected[-1]['type'],'attempt_generated_gcp')
   with tempfile.TemporaryDirectory(prefix='paged-viewer-pair-') as directory:
    db=sqlite3.connect(str(Path(directory)/'synthetic.sqlite'))
    try:
@@ -60,18 +76,17 @@ class PagedViewerPair(unittest.TestCase):
     with self.assertRaises(ReceiverHeld):run('reordered',selected=b''.join([lines[1],lines[0],*lines[2:]]))
    finally:db.close()
 
- def test_actual_mixed_case_gcp_order_is_not_wire_compatible(self):
+ def test_actual_mixed_case_gcp_order_is_accepted(self):
   out=subprocess.run(['node',str(ROOT/'tests/support/viewer_paged_pair.cjs'),'mixed'],cwd=ROOT,capture_output=True,text=True,encoding='utf8',check=True,timeout=30)
   exported=json.loads(out.stdout)
-  self.assertEqual([f['datasetFileId'] for f in exported['generatedGcp']['sourceFiles']],['control','Control'])
-  with self.assertRaises(FrameHeld):
-   verify_source(io.BytesIO(base64.b64decode(exported['sourceFrames'])),expected_page_hashes=exported['sourcePageHashes'],expected_items=exported['sourceCount'])
+  self.assertEqual([f['datasetFileId'] for f in exported['generatedGcp']['sourceFiles']],['Control','control'])
+  result=verify_source(io.BytesIO(base64.b64decode(exported['sourceFrames'])),expected_page_hashes=exported['sourcePageHashes'],expected_items=exported['sourceCount'])
+  self.assertEqual(result['state'],'held_no_viewer_authority_or_mapping')
 
  def test_path_and_mime_boundaries_hold(self):
-  out=subprocess.run(['node',str(ROOT/'tests/support/viewer_paged_pair.cjs'),'path'],cwd=ROOT,capture_output=True,text=True,encoding='utf8',check=True,timeout=30)
-  exported=json.loads(out.stdout)
-  with self.assertRaises(FrameHeld):
-   verify_source(io.BytesIO(base64.b64decode(exported['sourceFrames'])),expected_page_hashes=exported['sourcePageHashes'],expected_items=exported['sourceCount'])
+  out=subprocess.run(['node',str(ROOT/'tests/support/viewer_paged_pair.cjs'),'path'],cwd=ROOT,capture_output=True,text=True,encoding='utf8',timeout=30)
+  self.assertNotEqual(out.returncode,0)
+  self.assertIn('unsupported_source_file',out.stderr)
   out=subprocess.run(['node',str(ROOT/'tests/support/viewer_paged_pair.cjs'),'mime'],cwd=ROOT,capture_output=True,text=True,encoding='utf8',timeout=30)
   self.assertNotEqual(out.returncode,0)
   self.assertIn('unsupported_image_media_type',out.stderr)
