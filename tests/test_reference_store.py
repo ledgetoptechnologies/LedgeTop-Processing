@@ -527,19 +527,19 @@ class ReferenceStoreTests(unittest.TestCase):
             db.execute("INSERT INTO reference_worker_failures VALUES(?,?,?,?,?,?,'pending_queue_completion')",
                        (job['jobId'], 1, 'a' * 64, 'b' * 64, '{}', '{}'))
         with self.assertRaises(Conflict):
-            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+            self.release(job, binding, claim['claimToken'])
         with self.queue._db() as db:
             db.execute('DELETE FROM reference_worker_failures WHERE job_id=?', (job['jobId'],))
             db.execute('INSERT INTO reference_worker_receipts VALUES(?,?,?,?)',
                        ('outbox-id', 'c' * 64, job['jobId'], '{}'))
         with self.assertRaises(Conflict):
-            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+            self.release(job, binding, claim['claimToken'])
         with self.queue._db() as db:
             db.execute('DELETE FROM reference_worker_receipts WHERE job_id=?', (job['jobId'],))
             db.execute('INSERT INTO reference_outbox(identity,kind,payload_json,digest) VALUES(?,?,?,?)',
                        ('synthetic-outbox', 'synthetic', json.dumps({'jobId': job['jobId']}), 'd' * 64))
         with self.assertRaises(Conflict):
-            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+            self.release(job, binding, claim['claimToken'])
         self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
 
     def test_release_refuses_changed_coordinator_authority(self):
@@ -550,7 +550,7 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.queue._db() as db:
             db.execute('UPDATE coordinator_identity SET authority_id=? WHERE singleton=1', (str(uuid.uuid4()),))
         with self.assertRaises(Conflict):
-            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+            self.release(job, binding, claim['claimToken'])
 
     def test_released_claim_tombstone_survives_coordinator_restart(self):
         job, _ = self.store.submit(self.new_submission())
