@@ -251,7 +251,7 @@ def candidate_loader(target, operation):
         '--read-only','--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
         '--env-file',NATIVE_ENV,'-e','PROCESSING_REFERENCE_CONFIG=' + CONFIG_PATH,
         '--mount','type=bind,src=' + str(TLS_MOUNT) + ',dst=/run/processing-reference,readonly',
-        '--entrypoint','python',target,'-c',LOADER)
+        '--entrypoint','python',target,'-c',explicit_guard_source(LOADER))
     if json.loads(result) != dict(settingsValid=True,uidValidated=10001,stagingOnly=True):
         raise CutoverStopped('candidate_uid_or_settings_validation_failed')
 

@@ -9,6 +9,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -33,6 +34,23 @@ class ReferenceInstallationTests(unittest.TestCase):
                     return {"jobs": []}
                 raise AssertionError("unexpected prototype route")
         return API()
+
+    def test_candidate_loader_staging_guard_survives_optimized_python(self):
+        settings=SimpleNamespace(listener={'certificate':'synthetic','privateKey':'synthetic','clientCA':'synthetic'},viewer_bearers={'token':'staging'})
+        def run(source):
+            output=io.StringIO()
+            with patch('processing.config.from_environment',return_value=object()), \
+                 patch('processing.reference_runtime.load_reference_settings',return_value=settings), \
+                 patch('ssl.SSLContext'), patch('ssl.create_default_context'), redirect_stdout(output):
+                exec(compile(source,'<synthetic-loader>','exec',optimize=2),{})
+            return output.getvalue()
+        def docker(*args):return run(args[-1])
+        with patch.object(self.install,'docker',side_effect=docker):
+            self.install.candidate_loader('synthetic-image','synthetic-operation')
+            settings.viewer_bearers={'token':'production'}
+            # The untransformed script demonstrates the prior optimized bug.
+            self.assertTrue(json.loads(run(self.install.LOADER))['stagingOnly'])
+            with self.assertRaises(AssertionError):self.install.candidate_loader('synthetic-image','synthetic-operation')
 
     def test_activity_uses_supported_native_info_and_readonly_task_aggregate(self):
         routes, aggregate_calls = [], []
