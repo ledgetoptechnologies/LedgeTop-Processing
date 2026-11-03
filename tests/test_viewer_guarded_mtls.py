@@ -6,6 +6,7 @@ isolation and completion/release are deliberately not implemented here.
 """
 import hashlib
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import shutil
@@ -19,7 +20,9 @@ import uuid
 from processing.guarded_native_https import create_guarded_https_server
 from processing.viewer_service import EngineUnavailable
 from processing.prototype import Conflict
+from processing.viewer_http import ViewerFacade
 from tests.test_viewer_guarded_bridge import ViewerGuardedBridgeTests, TOKEN
+from urllib.parse import urlencode
 
 
 class SyntheticMTLSBridge:
@@ -221,6 +224,33 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         self.assertTrue(self.service.info(identifier).get('ledgetopHeld'))
         self.assertEqual(self.service.info(identifier)['status']['code'], 10)
         before = self.native_fixture.counts()
+        task_before = self.service.store.task(identifier)
+        facade = ViewerFacade(self.service, TOKEN, TOKEN + '-staging', temp_dir=str(self.root))
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_POST(self): facade.handle(self)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=.01))
+        thread.start()
+        try:
+            for action in ('cancel', 'remove'):
+                connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+                try:
+                    connection.request('POST', '/task/' + action + '?' + urlencode({'token': TOKEN}),
+                                       urlencode({'uuid': identifier}),
+                                       {'Content-Type': 'application/x-www-form-urlencoded'})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 409)
+                    response.read()
+                finally:
+                    connection.close()
+                self.assertEqual(self.service.store.task(identifier), task_before)
+        finally:
+            server.shutdown(); thread.join(3); server.server_close()
+            self.assertFalse(thread.is_alive())
+        for method in (self.service.store.cancel, self.service.store.cancel_never_started, self.service.store.remove):
+            with self.assertRaises(Conflict): method(identifier)
+        self.assertEqual(self.service.store.task(identifier), task_before)
         with self.assertRaises(Conflict):
             self.service.store.complete_engine_task(task, status, result)
         with self.assertRaises(Conflict):

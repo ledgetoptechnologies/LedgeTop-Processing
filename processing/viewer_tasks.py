@@ -827,6 +827,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier)
+            self._reject_guarded_pending_action(row)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
                 raise Conflict('active engine task requires confirmed cancellation')
@@ -854,6 +855,11 @@ class TaskStore:
                 and job['result'] == canonical({'cancelled':True})
                 and row['stage'] == 'cancelled' and row['phase'] == 'cancelled')
 
+    @staticmethod
+    def _reject_guarded_pending_action(row):
+        if row['node_guarded'] == 1 and row['phase'] in ('init_pending', 'upload_pending', 'commit_pending'):
+            raise Conflict('guarded mutation requires reconciliation')
+
     @task_fenced
     def cancel_never_started(self, identifier):
         """Cancel or acknowledge an unambiguously unclaimed job atomically."""
@@ -861,6 +867,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row=self._row(db,identifier)
+            self._reject_guarded_pending_action(row)
             job=self._job(db,row)
             if self._cancelled_never_started(db, row, job):
                 return {'success':True,'uuid':identifier}
@@ -880,6 +887,7 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier, removed=True)
+            self._reject_guarded_pending_action(row)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
                 raise Conflict('active engine task cannot be removed')
