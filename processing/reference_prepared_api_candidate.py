@@ -9,6 +9,7 @@ import hmac
 import re
 from . import reference_protocol as p
 from .maintenance import Conflict
+from .reference_store import JCSRuntimeUnavailable
 from .reference_api import Response
 
 PREFIX = '/ltds/prepared/v2'
@@ -45,6 +46,8 @@ class PreparedSubmissionAPI:
                 or len(set(opts)) != len(opts) or type(engines) not in (list,tuple)
                 or any(type(x) is not str or x not in ('odm','treedar') for x in engines) or len(set(engines)) != len(engines)):
                 raise ValueError('invalid server policy')
+        if jcs_policies is not None and not store.jcs_runtime_enabled:
+            raise ValueError('JCS API requires capable store')
         if jcs_policies is not None:
             from .prepared_envelope_jcs_candidate import _validate_definition
             p._closed(jcs_policies, ('production','staging'), 'JCS server policies')
@@ -104,6 +107,7 @@ class PreparedSubmissionAPI:
                     authenticated_environment=environment)
                 return Response(200, result) if result is not None else Response(404, {'error':'not_found'})
             return Response(404, {'error':'not_found'})
+        except JCSRuntimeUnavailable: return Response(503, {'error':'prepared_runtime_unavailable'})
         except Conflict: return Response(409, {'error':'prepared_conflict'})
         except (TypeError, ValueError): return Response(400, {'error':'invalid_request'})
         except Exception: return Response(500, {'error':'internal_error'})

@@ -15,6 +15,7 @@ import sqlite3
 import stat
 import time
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 
 from .maintenance import Conflict
@@ -63,6 +64,10 @@ def _reason(value):
         raise ValueError("error must be a bounded reason code")
 
 
+class JCSRuntimeUnavailable(Conflict):
+    pass
+
+
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
@@ -75,6 +80,13 @@ class ReferenceStore:
         if type(jcs_runtime_enabled) is not bool:
             raise ValueError('explicit JCS runtime flag required')
         self.jcs_runtime_enabled = jcs_runtime_enabled
+        if jcs_runtime_enabled:
+            try:
+                import rfc8785
+                from importlib.metadata import version
+                if version('rfc8785') != '0.1.4': raise ImportError('unexpected JCS version')
+            except (ImportError, ModuleNotFoundError):
+                raise JCSRuntimeUnavailable('pinned JCS runtime dependency unavailable') from None
         self.queue = queue
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
@@ -92,6 +104,14 @@ class ReferenceStore:
         initial = database.lstat()
         if not stat.S_ISREG(initial.st_mode) or (os.name != "nt" and initial.st_uid != os.geteuid()):
             raise ValueError("owned regular queue database required")
+        # Read-only compatibility preflight before chmod or schema writes.
+        try:
+            with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as preflight:
+                owners = preflight.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_viewer_submission_owners'").fetchone()
+                if owners and not jcs_runtime_enabled and preflight.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
+                    raise JCSRuntimeUnavailable('JCS durable state requires enabled capable runtime')
+        except sqlite3.Error:
+            raise Conflict('JCS compatibility preflight unavailable') from None
         descriptor = os.open(database, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         try:
             observed, current = os.fstat(descriptor), database.lstat()
@@ -142,11 +162,12 @@ class ReferenceStore:
             """)
             self._init_viewer_activation_schema(db)
             self._init_envelope_v2_schema(db)
+            self._check_jcs_capability(db)
             if db.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
                 if not self.jcs_runtime_enabled:
-                    raise Conflict('JCS durable state requires enabled capable runtime')
+                    raise JCSRuntimeUnavailable('JCS durable state requires enabled capable runtime')
                 try: import rfc8785
-                except ImportError: raise Conflict('JCS runtime dependency unavailable') from None
+                except ImportError: raise JCSRuntimeUnavailable('JCS runtime dependency unavailable') from None
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
@@ -215,7 +236,13 @@ class ReferenceStore:
         if len(fk) != 1 or (fk[0]['table'],fk[0]['from'],fk[0]['to'],fk[0]['on_update'],fk[0]['on_delete'],fk[0]['match']) != ('reference_jobs','job_id','job_id','NO ACTION','NO ACTION','NONE'):
             raise Conflict('incompatible prepared envelope foreign key')
 
+    def _check_jcs_capability(self, db):
+        if not self.jcs_runtime_enabled and db.execute(
+            "SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
+            raise JCSRuntimeUnavailable('JCS durable state requires enabled capable runtime')
+
     def _row(self, db, job_id):
+        self._check_jcs_capability(db)
         has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
         failure_columns = 'f.failure_json AS terminal_failure_json,f.delivery_state AS failure_delivery_state' if has_failure else 'NULL AS terminal_failure_json,NULL AS failure_delivery_state'
         failure_join = 'LEFT JOIN reference_worker_failures f ON f.job_id=r.job_id AND f.generation=r.generation' if has_failure else ''
@@ -329,6 +356,7 @@ class ReferenceStore:
         envelope_hash = hashlib.sha256(_ENVELOPE_V2_DOMAIN + wire.encode('utf-8')).hexdigest()
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._check_jcs_capability(db)
             found = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (raw['submissionId'],)).fetchone()
             if found is not None:
                 row = self._row(db, found['job_id'])
@@ -357,9 +385,9 @@ class ReferenceStore:
     def prepare_viewer_envelope_jcs_v3(self, raw, *, authenticated_principal, authenticated_environment, trusted_policy):
         """Unmounted v3. Exact authenticated replay reads durable evidence first."""
         if not self.jcs_runtime_enabled:
-            raise Conflict('JCS runtime not enabled')
+            raise JCSRuntimeUnavailable('JCS runtime not enabled')
         try: import rfc8785
-        except ImportError: raise Conflict('JCS runtime dependency unavailable') from None
+        except ImportError: raise JCSRuntimeUnavailable('JCS runtime dependency unavailable') from None
         from . import prepared_envelope_jcs_candidate as jcs
         protocol._slug(authenticated_principal, 'authenticated Viewer principal')
         protocol._environment(authenticated_environment)
@@ -377,6 +405,7 @@ class ReferenceStore:
         digest = hashlib.sha256(jcs.DOMAIN + canonical).hexdigest()
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._check_jcs_capability(db)
             existing = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (value['submission']['submissionId'],)).fetchone()
             if existing is not None:
                 row = self._row(db, existing['job_id'])
@@ -405,6 +434,7 @@ class ReferenceStore:
         encoded = _json(checked)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             old = db.execute("SELECT job_id,request_digest,environment FROM reference_jobs WHERE submission_id=?",
                              (checked["submissionId"],)).fetchone()
             if old:
@@ -451,6 +481,8 @@ class ReferenceStore:
 
     def get(self, job_id, *, private=False):
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             return self._record(self._row(db, job_id), private)
 
     def find_submission(self, submission_id, *, environment):
@@ -458,6 +490,8 @@ class ReferenceStore:
         protocol._uuid(submission_id, 'submission ID')
         protocol._environment(environment)
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=? AND environment=?',
                              (submission_id, environment)).fetchone()
             if not row:
@@ -472,6 +506,7 @@ class ReferenceStore:
         protocol._environment(authenticated_environment)
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._check_jcs_capability(db)
             found = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
             if found is None:
                 return None
@@ -488,6 +523,7 @@ class ReferenceStore:
         protocol._environment(authenticated_environment)
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._check_jcs_capability(db)
             found = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
             if found is None: return None
             row = self._row(db, found['job_id'])
@@ -504,6 +540,7 @@ class ReferenceStore:
         """Environment-only callers cannot inspect principal-owned prepared jobs."""
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._check_jcs_capability(db)
             try:
                 job = self._row(db, job_id)
             except Conflict:
@@ -553,6 +590,8 @@ class ReferenceStore:
 
     def list(self, *, private=False):
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             ids = [row[0] for row in db.execute("SELECT job_id FROM reference_jobs ORDER BY created_at,job_id")]
             return [self._record(self._row(db, job_id), private) for job_id in ids]
 
@@ -634,6 +673,7 @@ class ReferenceStore:
         digest = protocol.digest(binding)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = self._row(db, binding['jobId'])
             owner = self._submission_owner(db, row)
             if owner is None or (owner['principal_id'], owner['environment']) != (
@@ -675,6 +715,7 @@ class ReferenceStore:
         self.queue._known_node(node_id)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             self.queue._refresh_nodes(db)
             if (self.queue._node(db, node_id)['state'] not in ('active', 'scheduled')
                     or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()):
@@ -708,6 +749,7 @@ class ReferenceStore:
             raise Conflict("reference profile disabled")
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             if self._activation(db, row) is None:
                 return None
@@ -756,11 +798,13 @@ class ReferenceStore:
         """
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._check_jcs_capability(db)
             return self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
                 worker_instance_id=worker_instance_id, claim_token=claim_token)
 
     def _claim_snapshot(self, db, job_id, *, node_id, worker_id, worker_instance_id, claim_token):
         """Same authenticated observation inside an existing transaction."""
+        self._check_jcs_capability(db)
         self.queue._known_node(node_id)
         protocol._uuid(job_id, 'jobId')
         protocol._slug(worker_id, 'worker ID')
@@ -822,6 +866,7 @@ class ReferenceStore:
         _reason(error)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             if phase in ('awaiting_transfer', 'fetching', 'processing'):
                 if self._activation(db, row) is None:
@@ -892,6 +937,7 @@ class ReferenceStore:
         encoded = _json(transfer_request)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             if self._activation(db, row) is None:
                 raise Conflict('Viewer activation required')
@@ -930,6 +976,7 @@ class ReferenceStore:
     def set_result_manifest(self, job_id, result):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             return self._seal_result(db, row, result, allow_recovery=False)
 
@@ -943,6 +990,7 @@ class ReferenceStore:
         from .reference_transfer import validate_grant
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             if self._activation(db, row) is None:
                 raise Conflict('Viewer activation required')
@@ -983,6 +1031,7 @@ class ReferenceStore:
         """PRIVATE worker boundary; never serialize as part of public status."""
         with self.queue._db() as db:
             db.execute('BEGIN')
+            self._check_jcs_capability(db)
             reference = self._row(db, job_id)
             if self._activation(db, reference) is None:
                 raise Conflict('Viewer activation required')
@@ -1023,6 +1072,7 @@ class ReferenceStore:
         """
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             claim = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if (not claim or (claim["job_id"], claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
@@ -1036,6 +1086,7 @@ class ReferenceStore:
     def accept(self, job_id, receipt, *, viewer_receipt=None, trusted_viewer_receipt_keys=None):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             if not row["result_json"] or row["phase"] not in ("awaiting_acceptance", "completed"):
                 raise Conflict("result is not ready for acceptance")
@@ -1139,6 +1190,7 @@ class ReferenceStore:
             raise ValueError('invalid acceptance time')
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             if not row['result_json'] or row['phase'] not in ('awaiting_acceptance', 'completed'):
                 raise Conflict('result is not ready for Viewer transfer')
@@ -1206,6 +1258,8 @@ class ReferenceStore:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('invalid Viewer transfer discovery limit')
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             rows = db.execute('''SELECT r.job_id FROM reference_jobs r
                 WHERE r.phase='awaiting_acceptance' AND r.result_json IS NOT NULL
                 AND NOT EXISTS (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id)
@@ -1218,6 +1272,7 @@ class ReferenceStore:
             raise ValueError('invalid Viewer transfer lease')
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = db.execute('''SELECT job_id,receipt_id,acceptance_json,viewer_manifest_json,attempts FROM reference_viewer_transfers
                 WHERE completed_at IS NULL AND next_attempt<=? AND (lease_until IS NULL OR lease_until<=?)
                 ORDER BY next_attempt,created_at,job_id LIMIT 1''', (now, now)).fetchone()
@@ -1238,6 +1293,7 @@ class ReferenceStore:
             raise ValueError('invalid Viewer transfer time')
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = db.execute('SELECT attempts,lease_token,completed_at FROM reference_viewer_transfers WHERE job_id=?',
                              (job_id,)).fetchone()
             if not row or row['completed_at'] is not None or not lease_token or row['lease_token'] != lease_token:
@@ -1250,6 +1306,8 @@ class ReferenceStore:
     def viewer_transfer_status(self, job_id):
         """Secret-free durable status for tests and operator diagnostics."""
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = db.execute('SELECT receipt_id,attempts,next_attempt,last_error,completed_at FROM reference_viewer_transfers WHERE job_id=?',
                              (job_id,)).fetchone()
             if not row:
@@ -1268,6 +1326,7 @@ class ReferenceStore:
         content_digest = protocol.digest({"kind": kind, "payload": payload})
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = self._row(db, payload["jobId"])
             protocol._integer(payload["generation"], "generation")
             if (row["generation"], row["environment"]) != (payload["generation"], payload["environment"]):
@@ -1285,6 +1344,8 @@ class ReferenceStore:
     def acceptance_receipts(self, job_id):
         """PRIVATE worker relay; only signed Viewer receipts may prove accepted copies."""
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             row = self._row(db, job_id)
             receipts = []
             for item in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances WHERE job_id=? ORDER BY receipt_id', (job_id,)):
@@ -1299,12 +1360,16 @@ class ReferenceStore:
             raise ValueError("invalid outbox limit")
         now = time.time() if now is None else now
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             return [{"identity": row["identity"], "kind": row["kind"],
                      "payload": json.loads(row["payload_json"]), "attempts": row["attempts"]}
                     for row in db.execute("SELECT * FROM reference_outbox WHERE acknowledged=0 AND next_attempt<=? ORDER BY created_at,identity LIMIT ?", (now, limit))]
 
     def acknowledge_outbox(self, identity):
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._check_jcs_capability(db)
             if not db.execute("UPDATE reference_outbox SET acknowledged=1 WHERE identity=?", (identity,)).rowcount:
                 raise Conflict("unknown outbox identity")
 
@@ -1312,6 +1377,7 @@ class ReferenceStore:
         now = time.time() if now is None else now
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_jcs_capability(db)
             row = db.execute("SELECT attempts,acknowledged FROM reference_outbox WHERE identity=?", (identity,)).fetchone()
             if not row or row["acknowledged"]:
                 raise Conflict("outbox item unavailable")

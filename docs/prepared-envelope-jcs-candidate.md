@@ -97,3 +97,17 @@ rollback/migration plan; none is implemented here. Do not mount the API.
 Future image provisioning must install the existing hash-pinned candidate
 requirements with --require-hashes and review the dependency; the current
 production Dockerfile and image are unchanged.
+
+The isolated startup-fence candidate checks the pinned dependency before
+ReferenceStore schema mutation, uses a read-only v3-state preflight before
+its chmod/schema path, and rechecks inside store transactions. A previously
+opened disabled ReferenceStore rejects subsequent guarded operations if a v3
+record appeared. Queue initialization occurs earlier and may itself modify its
+database; this is not a process-wide pre-start fence. Older executables do
+not implement this check and remain unsafe for downgrade. Broad guarded reads
+now acquire SQLite transactions; performance has not been assessed. The
+subprocess test kills a process after prepare commit, plus an isolated SQLite
+transaction test exits before commit; it does not simulate all filesystem or
+power-failure cases. Two Queue authorities in one state directory are blocked
+by the existing exclusive ownership lock; race tests using one Queue are
+thread serialized and are not independent-authority race evidence.
