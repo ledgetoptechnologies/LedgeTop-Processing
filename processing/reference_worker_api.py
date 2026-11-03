@@ -83,7 +83,7 @@ class ReferenceWorkerAPI:
         job = self._owned_job(job_id, identity, claim_token)
         if job["status"] != "running" or job["phase"] != "awaiting_transfer":
             raise Conflict("worker cannot fetch in this execution state")
-        grant = self.store.private_transfer_grant(job_id)
+        grant = self.store.private_transfer_grant(job_id, worker_identity=identity, claim_token=claim_token)
         if grant is None:
             raise Conflict("transfer grant not ready")
         try:

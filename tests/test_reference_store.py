@@ -196,6 +196,8 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.store.update_phase(job['jobId'], 'fetching', worker_identity=identity, claim_token=token)
         with self.assertRaises(Conflict):
+            self.store.private_transfer_grant(job['jobId'], worker_identity=identity, claim_token=token)
+        with self.assertRaises(Conflict):
             self.store.claim_snapshot(job['jobId'], node_id='cluster', worker_id='worker',
                 worker_instance_id='instance', claim_token=token)
 

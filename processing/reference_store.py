@@ -698,10 +698,14 @@ class ReferenceStore:
                  ('reservationId', 'generation', 'manifestSha256', 'nonce')} |
                 {'accepted': True, 'grantSha256': protocol.digest(grant)})
 
-    def private_transfer_grant(self, job_id):
+    def private_transfer_grant(self, job_id, *, worker_identity=None, claim_token=None):
         """PRIVATE worker boundary; never serialize as part of public status."""
         with self.queue._db() as db:
-            self._row(db, job_id)
+            db.execute('BEGIN')
+            self._check_worker_claim(db, job_id, worker_identity, claim_token)
+            job = self._row(db, job_id)
+            if worker_identity is not None and (job['status'] != 'running' or job['phase'] != 'awaiting_transfer'):
+                raise Conflict('worker grant is not available in this phase')
             row = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
             return json.loads(row[0]) if row else None
 
