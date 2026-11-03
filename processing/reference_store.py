@@ -814,8 +814,9 @@ class ReferenceStore:
             raise ValueError('invalid Viewer acceptance audit cursor')
         with self.queue._db() as db:
             ambiguous = db.execute('''SELECT 1 FROM reference_jobs r
-                WHERE r.result_json IS NOT NULL AND r.phase IN ('awaiting_acceptance','completed')
+                WHERE r.phase IN ('awaiting_acceptance','completed')
                 AND ((r.viewer_receipt_required IS NULL OR r.viewer_receipt_required NOT IN (0,1))
+                  OR (r.viewer_receipt_required=1 AND r.result_json IS NULL)
                   OR (r.viewer_receipt_required=1 AND EXISTS
                       (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id
                        AND t.completed_at IS NOT NULL) AND NOT ''' + self._viewer_full_coverage_sql() + '''))

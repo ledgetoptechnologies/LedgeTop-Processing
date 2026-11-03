@@ -161,6 +161,24 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         self.assertEqual(self.store.acceptance_receipts(self.job['jobId'])['receipts'], [])
         self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'awaiting_acceptance')
 
+    def test_missing_viewer_result_in_terminal_or_acceptance_phase_is_held(self):
+        for phase in ('awaiting_acceptance', 'completed'):
+            with self.subTest(phase=phase):
+                with self.fixture.queue._db() as db:
+                    db.execute('UPDATE reference_jobs SET result_json=NULL,phase=? WHERE job_id=?',
+                               (phase, self.job['jobId']))
+                self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+                self.assertEqual(self.sender.calls, [])
+
+    def test_missing_legacy_result_is_held_but_explicit_nonviewer_is_not(self):
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE reference_jobs SET result_json=NULL,phase='completed',viewer_receipt_required=NULL WHERE job_id=?",
+                       (self.job['jobId'],))
+        self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
+        self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+
     def test_legacy_completed_transfer_with_unrelated_signed_partial_is_held(self):
         partial = self._full_acceptance()
         partial['acceptedObjectIds'] = ['result-1']
