@@ -634,8 +634,13 @@ class ReferenceDriver:
                 # legacy job. This is at most one network read per step and
                 # keeps observing later policy tightening on subsequent scans.
                 claim = data['claim']
-                status, relay = self._request('GET', '/jobs/' + row['job'] + '/acceptance',
-                                              claim_token=claim['claimToken'])
+                try:
+                    status, relay = self._request('GET', '/jobs/' + row['job'] + '/acceptance',
+                                                  claim_token=claim['claimToken'])
+                except Exception:
+                    # An unavailable coordinator must not stop an unrelated
+                    # active engine stage. Retry this same row later.
+                    return
                 if (status != 409 and type(relay) is dict and relay.get('viewerCopyRequired') is False
                         and data.get('viewerCopyRequired') is not True):
                     self._legacy_scan_cursor = row['created']

@@ -1024,6 +1024,23 @@ class ReferenceDriverTests(unittest.TestCase):
         for _ in range(3): self.driver.step()
         self.assertEqual(self._stage(job)[0], 'awaiting_acceptance')
 
+    def test_offline_legacy_policy_check_does_not_stop_active_job(self):
+        first = self.submit(); self.advance(first, 'awaiting_acceptance')
+        _, receipt = self._full_receipt(first, 'offline-legacy')
+        self.store.accept(first['jobId'], receipt)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+        second = self.submit(); self.advance(second, 'executing')
+        self.worker.viewer_receipt_keys = SyntheticViewerSigner().trusted_keys
+        original = self.driver._request
+        def offline_policy(method, path, *args, **kwargs):
+            if path == '/jobs/' + first['jobId'] + '/acceptance':
+                raise OSError('synthetic coordinator outage')
+            return original(method, path, *args, **kwargs)
+        self.driver._request = offline_policy
+        self.assertEqual(self.driver.step()['state'], 'delivering')
+        self.assertEqual(self._stage(first)[0], 'completed')
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+
     def test_null_legacy_policy_is_held_for_reconciliation(self):
         signer = SyntheticViewerSigner()
         self.worker.viewer_receipt_keys = signer.trusted_keys
