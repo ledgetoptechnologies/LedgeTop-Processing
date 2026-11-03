@@ -12,7 +12,7 @@ import re
 import sqlite3
 import uuid
 
-from .node_gate import GateError
+from .node_gate import GateError, _digest
 
 _HASH = re.compile(r'[0-9a-f]{64}\Z')
 
@@ -27,17 +27,17 @@ class HostMutationJournal:
     def __init__(self, gate, receipt_id):
         self.gate, self.receipt_id = gate, receipt_id
         state, reservation = gate._reservation(receipt_id)
-        if reservation['job'] is None or reservation['completionDigest'] is not None:
+        if reservation['job'] is None:
             raise GateError('guard requires an active bound reservation')
         self.generation = state['generation']
         self.job = dict(reservation['job'])
         self._identity = (receipt_id, str(self.generation), self.job['id'], gate.engine_id)
         self.db = None
 
-    def _current(self):
+    def _current(self, *, allow_completion=False):
         state, reservation = self.gate._reservation(self.receipt_id)
         if (state['generation'] != self.generation or reservation['job'] != self.job
-                or reservation['completionDigest'] is not None):
+                or (reservation['completionDigest'] is not None and not allow_completion)):
             raise GateError('node reservation changed')
         return state
 
@@ -47,6 +47,10 @@ class HostMutationJournal:
         if 'hostMutationJournal' in state:
             raise GateError('guard journal already exists or needs inspection')
         name = 'mutations-' + uuid.uuid4().hex + '.sqlite'
+        # An older loader accepts unknown keys on schema 1. Atomically upgrade
+        # with the marker so it cannot release or reuse an uncertain node.
+        # Keep schema 2 after completion: downgrade needs external control.
+        state['schema'] = 2
         state['hostMutationJournal'] = {'receiptId': self.receipt_id, 'file': name}
         self.gate._save(state)
         path = self.gate.root / name
@@ -68,13 +72,21 @@ class HostMutationJournal:
         return self
 
     def open(self):
-        state = self._current()
+        state = self._current(allow_completion=True)
         marker = state.get('hostMutationJournal')
-        if (not isinstance(marker, dict) or set(marker) != {'receiptId', 'file'}
+        if (not isinstance(marker, dict) or set(marker) not in ({'receiptId', 'file'}, {'receiptId', 'file', 'completion'})
                 or marker['receiptId'] != self.receipt_id
                 or not isinstance(marker['file'], str)
                 or not re.fullmatch(r'mutations-[0-9a-f]{32}\.sqlite', marker['file'])):
             raise GateError('guard journal marker missing or invalid')
+        completion = marker.get('completion')
+        if ((completion is None) != (state['reservation']['completionDigest'] is None)
+                or (completion is not None and
+                    (not isinstance(completion, dict) or set(completion) != {'engineTask', 'outboxId'}
+                     or completion['engineTask'] != self.job['id']
+                     or not isinstance(completion['outboxId'], str)
+                     or not _HASH.fullmatch(completion['outboxId'])))):
+            raise GateError('guard completion marker invalid')
         path = self.gate.root / marker['file']
         if path.is_symlink() or not path.is_file():
             raise GateError('guard journal missing; inspection required')
@@ -87,6 +99,55 @@ class HostMutationJournal:
             self.close()
             raise GateError('guard journal invalid; inspection required') from error
         return self
+
+    def checkpoint_completion(self, *, engine_task, outbox_id, payload):
+        """Atomically bind durable completion to this journal without releasing it.
+
+        Caller must first independently verify terminal engine identity and persist
+        its validated result to the outbox. This checkpoint does not authenticate
+        engine or receipt transports and does not exclude non-cooperating writers.
+        """
+        state = self._current(allow_completion=True)
+        if self.db is None: raise GateError('guard journal not open')
+        if engine_task != self.job['id'] or not isinstance(outbox_id, str) or not _HASH.fullmatch(outbox_id):
+            raise GateError('invalid terminal identity')
+        with self._transaction():
+            last = self._validate_operations()
+            if last is None or last[1:] != ('commit', 'done'):
+                raise MutationHeld('completed commit evidence required')
+        marker = state.get('hostMutationJournal')
+        if not isinstance(marker, dict) or marker.get('receiptId') != self.receipt_id:
+            raise GateError('guard journal identity changed')
+        completion = {'engineTask': engine_task, 'outboxId': outbox_id}
+        digest = _digest(payload)
+        if marker.get('completion', completion) != completion:
+            raise GateError('guarded completion identity changed')
+        if state['reservation']['completionDigest'] not in (None, digest):
+            raise GateError('guarded completion differs')
+        marker['completion'] = completion
+        state['reservation']['completionDigest'] = digest
+        self.gate._save(state)
+
+    def acknowledge_completion(self, *, outbox_id, job_ack):
+        """Release only after caller verifies an authenticated durable receipt.
+
+        The journal file is retained; only the gate marker and reservation are
+        atomically retired. This is not permission to clean result files.
+        """
+        self.check_reconciliation_ready()
+        state = self._current(allow_completion=True)
+        marker = state.get('hostMutationJournal')
+        expected = {'engineTask': self.job['id'], 'outboxId': outbox_id}
+        if not isinstance(marker, dict) or marker.get('completion') != expected:
+            raise GateError('guarded completion checkpoint mismatch')
+        identity, digest = self.gate._job(state, job_ack), _digest(job_ack)
+        if identity != self.job or digest != state['reservation']['completionDigest']:
+            raise GateError('completion acknowledgment does not match durable result')
+        state['reservation'] = None
+        state['lastAcknowledgment'] = {'receiptId': self.receipt_id, 'job': identity,
+            'completionDigest': digest, 'generation': state['generation'], 'kind': 'completion'}
+        del state['hostMutationJournal']
+        self.gate._save(state)
 
     def _open(self, path):
         if self.db is not None: raise GateError('guard journal already open')
@@ -136,7 +197,8 @@ class HostMutationJournal:
 
     def check_reconciliation_ready(self):
         """Check local evidence only; this does not authorize or release a gate."""
-        self._ready()
+        self._current(allow_completion=True)
+        if self.db is None: raise GateError('guard journal not open')
         with self._transaction():
             last = self._validate_operations()
             if last is None or last[1:] != ('commit', 'done'):

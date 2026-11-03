@@ -232,10 +232,17 @@ class ReferenceEngineWorker:
         """Read-only engine reconciliation; terminal files stay until Viewer ACK."""
         with NodeGate(self.engine_id) as gate:
             row = self._row(job_id)
-            if row['host_guarded']:
-                raise WorkerHeld('host journal reconciliation is not implemented; execution remains held')
             if row['outbox_id']:
                 return row['outbox_id']
+            if row['host_guarded']:
+                try:
+                    journal = HostMutationJournal(gate, row['receipt']).open()
+                    try:
+                        journal.check_reconciliation_ready()
+                    finally:
+                        journal.close()
+                except GateError as error:
+                    raise WorkerHeld('host journal requires reconciliation') from error
             if row['phase'] == 'downloading':
                 raise WorkerHeld('uncertain archive download is retained for reconciliation')
             if row['phase'] not in ('commit_pending', 'processing', 'archive_open_pending', 'archive_pending', 'archive_ready'):
@@ -302,8 +309,15 @@ class ReferenceEngineWorker:
                 pipeline_digest=job['pipelineDigest'], result_manifest_sha256=result['resultManifestSha256'],
                 result_manifest=result, owned_prefix='jobs/' + reservation,
                 local_objects={'odm-archive': relative})
-            gate.prepare_completion(row['receipt'], dict(status='succeeded',
-                result={'resultManifestSha256': result['resultManifestSha256']}))
+            completion = dict(status='succeeded', result={'resultManifestSha256': result['resultManifestSha256']})
+            if row['host_guarded']:
+                journal = HostMutationJournal(gate, row['receipt']).open()
+                try:
+                    journal.checkpoint_completion(engine_task=job_id, outbox_id=outbox_id, payload=completion)
+                finally:
+                    journal.close()
+            else:
+                gate.prepare_completion(row['receipt'], completion)
             with self._db() as db:
                 db.execute('UPDATE executions SET phase=\'awaiting_delivery\', result=?,outbox_id=? WHERE job=?',
                            (p.canonical_json(result).decode(), outbox_id, job_id))
@@ -321,10 +335,31 @@ class ReferenceEngineWorker:
             completion = self.outbox.get(row['outbox_id'])
             if completion['state'] != 'acknowledged':
                 raise WorkerHeld('coordinator has not acknowledged the completion')
+            identity = json.loads(row['identity'])
+            job = identity['job']
+            payload = completion['payload']
+            result_sha = json.loads(row['result'])['resultManifestSha256']
+            if (payload['jobId'] != job_id or payload['generation'] != job['generation']
+                    or payload['environment'] != job['environment']
+                    or payload['inputManifestSha256'] != job['manifestSha256']
+                    or payload['pipelineDigest'] != job['pipelineDigest']
+                    or payload['resultManifestSha256'] != result_sha):
+                raise WorkerHeld('acknowledged outbox identity differs from execution')
             job_ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
                 authorityId=self.authority_id, status='succeeded',
                 result={'resultManifestSha256': json.loads(row['result'])['resultManifestSha256']})
-            gate.acknowledge(row['receipt'], job_ack)
+            if gate.completion_acknowledged(row['receipt'], job_ack):
+                # An earlier attempt released this job, potentially before a
+                # different reservation arrived. Never mutate the new owner.
+                pass
+            elif row['host_guarded'] and gate.snapshot()['reservation'] is not None:
+                journal = HostMutationJournal(gate, row['receipt']).open()
+                try:
+                    journal.acknowledge_completion(outbox_id=row['outbox_id'], job_ack=job_ack)
+                finally:
+                    journal.close()
+            else:
+                gate.acknowledge(row['receipt'], job_ack)
             self._phase(job_id, 'delivered')
 
     def apply_viewer_acceptance(self, job_id, receipts):
