@@ -12,7 +12,7 @@ from processing.prototype import Queue
 from processing.reference_store import ReferenceStore,PROFILE
 from processing import reference_protocol as p
 from processing.prepared_envelope_jcs_candidate import PROTOCOL as PREPARED
-from processing.paged_snapshot_signature_candidate import PROTOCOL,DOMAIN,pin_registry,inspect,SnapshotHeld
+from processing.paged_snapshot_signature_candidate import PROTOCOL,DOMAIN,pin_registry,inspect,SnapshotHeld,ServerSnapshotTrust
 
 class PagedSnapshotSignatureTests(unittest.TestCase):
  def setUp(self):
@@ -25,15 +25,19 @@ class PagedSnapshotSignatureTests(unittest.TestCase):
   self.job,_=self.store.prepare_viewer_envelope_jcs_v3(json.dumps(self.env).encode(),authenticated_principal='viewer-a',authenticated_environment='staging',trusted_policy=self.policy,expected_authority_id=self.queue.authority_id)
   found=self.store.find_viewer_envelope_v2(self.env['submission']['submissionId'],authenticated_principal='viewer-a',authenticated_environment='staging',expected_protocol=PREPARED,expected_authority_id=self.queue.authority_id)
   self.private=Ed25519PrivateKey.generate();pem=self.private.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-  self.config=[dict(principalId='viewer-a',environment='staging',issuerId='issuer-1',keyId='key-1',purpose='paged-source-snapshot',publicKeyPem=pem)];self.registry=pin_registry(self.config)
+  self.config=[dict(coordinatorAuthorityId=self.queue.authority_id,principalId='viewer-a',environment='staging',issuerId='issuer-1',keyId='key-1',purpose='paged-source-snapshot',publicKeyPem=pem)];self.registry=pin_registry(self.config)
   self.statement=dict(protocol=PROTOCOL,schemaVersion=1,issuerId='issuer-1',keyId='key-1',snapshotId='snapshot-1',principalId='viewer-a',environment='staging',coordinatorAuthorityId=self.queue.authority_id,jobId=self.job['jobId'],generation=self.job['generation'],submissionId=self.env['submission']['submissionId'],activationId=self.env['activationId'],viewerTaskId=self.env['viewerTaskId'],viewerAttemptId=self.env['viewerAttemptId'],preparedEnvelopeSha256=found['envelopeSha256'],datasetId=self.env['submission']['manifest']['id'],datasetManifestSha256=self.env['submission']['manifest']['sha256'],pipelineDigest=p.digest(self.env['submission']['pipeline']),sourcePageHashes=['1'*64],sourcePageBytes=[100],sourceCount=1,selectedPageHashes=['2'*64],selectedPageBytes=[120],selectedCount=1,inputManifestSha256='3'*64,processingClosureSha256='4'*64,gcpEvidenceSha256=None,sourceRevision='revision-1',revocationEpoch=3,issuedAt='2030-01-01T00:00:00.000Z',expiresAt='2030-01-01T01:00:00.000Z')
   self.pin=self.statement_hash(self.statement)
  def statement_hash(self,statement):return hashlib.sha256(DOMAIN+p.canonical_json({k:v for k,v in statement.items() if k!='signature'})).hexdigest()
  def sign(self,value=None,key=None):
   value=copy.deepcopy(self.statement if value is None else value);sig=(key or self.private).sign(DOMAIN+p.canonical_json(value));value['signature']=base64.urlsafe_b64encode(sig).decode().rstrip('=');return p.canonical_json(value)
  def call(self,raw=None,**kwargs):
-  args=dict(principal='viewer-a',environment='staging',expected_authority_id=self.queue.authority_id,key_registry=self.registry,epoch_provider=lambda *_:3,snapshot_pin_provider=lambda *_:self.pin);args.update(kwargs)
-  return inspect(self.store,self.env['submission']['submissionId'],self.sign() if raw is None else raw,**args)
+  principal=kwargs.pop('principal','viewer-a');environment=kwargs.pop('environment','staging')
+  authority=kwargs.pop('expected_authority_id',self.queue.authority_id);entries=kwargs.pop('key_entries',self.config)
+  clock=kwargs.pop('clock_provider',lambda:1893457800000);epoch=kwargs.pop('epoch_provider',lambda *_:3);snapshot=kwargs.pop('snapshot_pin_provider',lambda *_:self.pin)
+  self.assertFalse(kwargs)
+  trust=ServerSnapshotTrust(authority_id=authority,key_entries=entries,clock_provider=clock,epoch_provider=epoch,snapshot_pin_provider=snapshot)
+  return inspect(self.store,self.env['submission']['submissionId'],self.sign() if raw is None else raw,principal=principal,environment=environment,trust=trust)
  def test_valid_exact_replay_and_reopen_are_held_without_writes(self):
   before=hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest();first=self.call();second=self.call();self.assertEqual(first,second);self.assertEqual(first['reason'],'atomic_staging_unavailable')
   self.store=ReferenceStore(self.queue,jcs_runtime_enabled=True);self.assertEqual(self.call(),first);self.assertEqual(hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest(),before)
@@ -53,8 +57,28 @@ class PagedSnapshotSignatureTests(unittest.TestCase):
  def test_wrong_configured_authority_cannot_inspect_or_write(self):
   wrong=str(uuid.uuid4());changed=copy.deepcopy(self.statement);changed['coordinatorAuthorityId']=wrong;pin=self.statement_hash(changed)
   before=hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest()
-  with self.assertRaises(SnapshotHeld):self.call(raw=self.sign(changed),expected_authority_id=wrong,snapshot_pin_provider=lambda *_:pin)
+  with self.assertRaises(SnapshotHeld):self.call(raw=self.sign(changed),expected_authority_id=wrong,key_entries=[dict(self.config[0],coordinatorAuthorityId=wrong)],snapshot_pin_provider=lambda *_:pin)
   self.assertEqual(hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest(),before)
+ def test_missing_or_invalid_server_clock_holds(self):
+  self.assertEqual(self.call(clock_provider=None)['reason'],'trusted_clock_unavailable')
+  self.assertEqual(self.call(clock_provider=lambda:True)['reason'],'trusted_clock_unavailable')
+  def unavailable():raise RuntimeError('clock unavailable')
+  self.assertEqual(self.call(clock_provider=unavailable)['reason'],'trusted_clock_unavailable')
+ def test_expired_future_and_skew_boundaries(self):
+  for now in (1893459600000,1893455939999):
+   with self.subTest(now=now),self.assertRaises(SnapshotHeld):self.call(clock_provider=lambda:now)
+  self.assertEqual(self.call(clock_provider=lambda:1893455940000)['reason'],'atomic_staging_unavailable')
+  self.assertEqual(self.call(clock_provider=lambda:1893459599999)['reason'],'atomic_staging_unavailable')
+ def test_key_entitlement_must_match_configured_authority(self):
+  wrong=str(uuid.uuid4())
+  with self.assertRaises(ValueError):ServerSnapshotTrust(authority_id=self.queue.authority_id,key_entries=[dict(self.config[0],coordinatorAuthorityId=wrong)])
+  with self.assertRaises(SnapshotHeld):pin_registry(self.config+[dict(self.config[0],coordinatorAuthorityId=wrong)])
+ def test_rotation_accepts_new_scope_and_rejects_retired_key(self):
+  newer=Ed25519PrivateKey.generate();pem=newer.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+  new_entry=dict(self.config[0],keyId='key-2',publicKeyPem=pem)
+  rotated=copy.deepcopy(self.statement);rotated['keyId']='key-2';pin=self.statement_hash(rotated)
+  self.assertEqual(self.call(raw=self.sign(rotated,key=newer),key_entries=self.config+[new_entry],snapshot_pin_provider=lambda *_:pin)['reason'],'atomic_staging_unavailable')
+  with self.assertRaises(SnapshotHeld):self.call(key_entries=[new_entry])
  def test_provider_cannot_write_through_read_only_inspection(self):
   before=hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest()
   def malicious(db,*_):

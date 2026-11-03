@@ -6,7 +6,8 @@ import json
 import re
 import sqlite3
 from datetime import datetime,timezone
-from cryptography.exceptions import InvalidSignature
+from types import MappingProxyType
+from cryptography.exceptions import InvalidSignature,UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from . import reference_protocol as p
@@ -36,27 +37,42 @@ def pin_registry(registry):
   if type(registry) is not list or not 0<len(registry)<=32:raise ValueError()
   out={};owners={}
   for entry in registry:
-   p._closed(entry,('principalId','environment','issuerId','keyId','purpose','publicKeyPem'),'key')
+   p._closed(entry,('coordinatorAuthorityId','principalId','environment','issuerId','keyId','purpose','publicKeyPem'),'key')
+   p._uuid(entry['coordinatorAuthorityId'],'key authority')
    for key in ('principalId','issuerId','keyId'):p._slug(entry[key],key)
    p._environment(entry['environment'])
    if entry['purpose']!=PURPOSE or type(entry['publicKeyPem']) is not str or len(entry['publicKeyPem'])>8192:raise ValueError()
    key=serialization.load_pem_public_key(entry['publicKeyPem'].encode('ascii'))
    if not isinstance(key,Ed25519PublicKey):raise ValueError()
-   raw=key.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw);scope=(entry['principalId'],entry['environment']);identity=(*scope,entry['issuerId'],entry['keyId'])
+   raw=key.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw);scope=(entry['coordinatorAuthorityId'],entry['principalId'],entry['environment']);identity=(*scope,entry['issuerId'],entry['keyId'])
    if identity in out or (raw in owners and owners[raw]!=scope):raise ValueError()
    owners[raw]=scope;out[identity]=key
   return out
- except (ValueError,TypeError,KeyError,UnicodeError):raise SnapshotHeld('invalid_key_registry') from None
+ except (ValueError,TypeError,KeyError,UnicodeError,UnsupportedAlgorithm):raise SnapshotHeld('invalid_key_registry') from None
 
-def inspect(store,submission_id,raw,*,principal,environment,expected_authority_id,key_registry,epoch_provider=None,snapshot_pin_provider=None):
- """Read-only synthetic inspection; providers are independent server-owned seams.
+class ServerSnapshotTrust:
+ """Independently configured server policy; never construct from request data."""
+ def __init__(self,*,authority_id,key_entries,clock_provider=None,epoch_provider=None,snapshot_pin_provider=None,max_future_skew_ms=60000):
+  p._uuid(authority_id,'configured authority')
+  if type(max_future_skew_ms) is not int or not 0<=max_future_skew_ms<=300000:raise ValueError('invalid clock skew')
+  for provider in (clock_provider,epoch_provider,snapshot_pin_provider):
+   if provider is not None and not callable(provider):raise ValueError('invalid provider')
+  registry=pin_registry(key_entries)
+  if any(key[0]!=authority_id for key in registry):raise ValueError('key authority differs')
+  self.authority_id=authority_id;self.registry=MappingProxyType(registry);self.clock_provider=clock_provider
+  self.epoch_provider=epoch_provider;self.snapshot_pin_provider=snapshot_pin_provider;self.max_future_skew_ms=max_future_skew_ms
 
- `principal`/`environment` must come from authentication, registry and provider
- configuration must be independently managed. No real provider exists here.
- No result of this function authorizes ingestion, dispatch, fetch or cleanup.
+def inspect(store,submission_id,raw,*,principal,environment,trust):
+ """Read-only held inspection. `trust` must be provisioned independently.
+
+ Principal and environment must come from authenticated server context.
+ Provider seams are server configuration only, never request/body parameters.
+ No result authorizes ingestion, dispatch, fetch or cleanup.
  """
  try:
-  p._uuid(submission_id,'submission');p._slug(principal,'principal');p._environment(environment);p._uuid(expected_authority_id,'authority')
+  if type(trust) is not ServerSnapshotTrust:raise ValueError()
+  expected_authority_id=trust.authority_id
+  p._uuid(submission_id,'submission');p._slug(principal,'principal');p._environment(environment)
   if type(raw) is not bytes or not 0<len(raw)<=MAX_BODY:raise ValueError()
   _preflight_stored_json(raw)
   statement=json.loads(raw.decode('utf8'),object_pairs_hook=_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
@@ -90,7 +106,7 @@ def inspect(store,submission_id,raw,*,principal,environment,expected_authority_i
   if type(sig) is not str or len(sig)!=86:raise ValueError()
   signature=base64.urlsafe_b64decode(sig+'==')
   if len(signature)!=64 or base64.urlsafe_b64encode(signature).decode().rstrip('=')!=sig:raise ValueError()
-  key=key_registry.get((principal,environment,statement['issuerId'],statement['keyId']))
+  key=trust.registry.get((expected_authority_id,principal,environment,statement['issuerId'],statement['keyId']))
   if key is None:raise ValueError()
   unsigned={k:v for k,v in statement.items() if k!='signature'};wire=p.canonical_json(unsigned)
   key.verify(signature,DOMAIN+wire)
@@ -112,9 +128,18 @@ def inspect(store,submission_id,raw,*,principal,environment,expected_authority_i
    expected=(row['job_id'],row['generation'],envelope['activation_id'],envelope['viewer_task_id'],envelope['viewer_attempt_id'],digest,normalized['manifest']['id'],normalized['manifestSha256'],normalized['pipelineDigest'])
    actual=tuple(statement[k] for k in ('jobId','generation','activationId','viewerTaskId','viewerAttemptId','preparedEnvelopeSha256','datasetId','datasetManifestSha256','pipelineDigest'))
    if actual!=expected:raise ValueError()
-   if epoch_provider is None or snapshot_pin_provider is None:return {'state':'held','reason':'trusted_snapshot_or_epoch_unavailable'}
-   epoch=epoch_provider(db,principal,environment,expected_authority_id)
-   pin=snapshot_pin_provider(db,row['job_id'],statement['snapshotId'])
+   if trust.clock_provider is None:return {'state':'held','reason':'trusted_clock_unavailable'}
+   try:now_ms=trust.clock_provider()
+   except Exception:return {'state':'held','reason':'trusted_clock_unavailable'}
+   if type(now_ms) is not int or not 0<=now_ms<=p.MAX_SAFE_INTEGER:return {'state':'held','reason':'trusted_clock_unavailable'}
+   epoch0=datetime(1970,1,1,tzinfo=timezone.utc)
+   def millis(value):
+    delta=value-epoch0
+    return (delta.days*86400+delta.seconds)*1000+delta.microseconds//1000
+   if now_ms+trust.max_future_skew_ms<millis(times[0]) or now_ms>=millis(times[1]):raise ValueError()
+   if trust.epoch_provider is None or trust.snapshot_pin_provider is None:return {'state':'held','reason':'trusted_snapshot_or_epoch_unavailable'}
+   epoch=trust.epoch_provider(db,principal,environment,expected_authority_id)
+   pin=trust.snapshot_pin_provider(db,row['job_id'],statement['snapshotId'])
    if type(epoch) is not int or epoch!=statement['revocationEpoch'] or type(pin) is not str or not hmac.compare_digest(pin,statement_hash):raise ValueError()
    return {'state':'held','reason':'atomic_staging_unavailable','statementSha256':statement_hash}
  except (ValueError,TypeError,KeyError,UnicodeError,OverflowError,InvalidSignature,Conflict,sqlite3.Error,OSError,RuntimeError,AttributeError):raise SnapshotHeld('snapshot_inspection_unavailable') from None
