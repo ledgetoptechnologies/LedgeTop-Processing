@@ -338,7 +338,7 @@ class TaskStore:
             raise ValueError('safe supported input basename required')
         return name.casefold()
 
-    def upload(self, identifier, filename, stream, length, environment=None, capability=None, *, expected_generation=None, expected_sha256=None):
+    def upload(self, identifier, filename, stream, length, environment=None, capability=None, *, expected_generation=None, expected_sha256=None, expected_batch=None):
         key = self._filename(filename)
         if type(length) is not int or length <= 0:
             raise ValueError('invalid input length')
@@ -388,6 +388,11 @@ class TaskStore:
                     row = self._row(db, identifier)
                     if row['stage'] != 'uploading' or row['job_id'] or (expected_generation is not None and row['generation'] != expected_generation):
                         raise Conflict('task is no longer accepting uploads')
+                    if expected_batch is not None:
+                        batch_id, batch_digest = expected_batch
+                        batch=db.execute('SELECT task_id,generation,environment,digest FROM held_batch_intent_v1 WHERE batch_id=?',(batch_id,)).fetchone()
+                        if batch is None or (batch['task_id'],batch['generation'],batch['environment'],batch['digest']) != (identifier,expected_generation,environment,batch_digest):
+                            raise Conflict('batch intent changed')
                     existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                           (identifier, key)).fetchone()
                     if existing:
