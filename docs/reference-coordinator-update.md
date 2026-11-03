@@ -3,20 +3,21 @@
 `ops/update_reference_coordinator.py` is a separate source executor for updating
 the existing reference coordinator. It does not reuse the native predecessor
 selection or change the historical installer/frozen operation artifacts. Import
-does nothing. The activation CLI is enabled after independent source review,
-the frozen 894-case Linux run (890 passed, four Node skips covered on Windows),
-and the actual two-PC gate preflight recorded for source `890cd26` in
-`docs/evidence/coordinator-gate-preflight-20261028.json`. An explicit new prepared
-operation and every immutable binding/live fence are still required. These
-checks do not themselves install the replacement coordinator.
+does nothing. Source `890cd26` passed independent review, the frozen 894-case
+Linux run and the two-PC gate preflight in
+`docs/evidence/coordinator-gate-preflight-20261028.json`. Retargeting to the
+installed `693cb7e` predecessor, retained Viewer tasks and the pinned additive
+migration are not yet reviewed against the live host, so `ACTIVATION_REVIEWED`
+is false: activation and rollback are refused; only prepare runs.
 
 ## Exact operation binding
 
-The reviewed predecessor is container
-`7ebe34636518961ddb4398b545a6a73d0254a47a093b198cf5d2d8411345cd07`, image
-`sha256:48651a4f4b0ab88f9c4969ed2536344842ff974d262e1aa9c5bdff5e27b38de9`,
-source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`. The executor revalidates
-these identities. The much older native container beginning `6300` is never
+The pinned predecessor is container
+`525ca6e24ad3b9e57e2a3be36567471c10745a4aaa8ebc03c7f2d2f215dfb977`, image
+`sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004`,
+source `693cb7eca32295da959a4f42399f317577ef8a8a`, with exactly 20 terminal jobs
+and no tmpfs. The candidate is created with only a private 64 MiB `/tmp` tmpfs
+added. The executor revalidates these identities. The much older native container beginning `6300` is never
 selected or modified. The sole authority and exact original state volume remain
 unchanged. A new schema-version-2 checkpoint explicitly records mode
 `reference-to-reference-v1`; historical schema-version-1 checkpoints are refused.
@@ -109,8 +110,13 @@ test factories are synthetic boundaries only.
 Prepare hashes the full public job history and captures every SQLite schema
 object, table column and row digest, including private job fields and empty
 receipt/claim/outbox tables. It also hashes each allowed state file. Symlinks,
-hardlinks, unexpected files/tables/indexes/triggers/views, active jobs, native
-rows, reference rows and owned-schedule rows fail closed. No job/receipt contents
+hardlinks, unexpected files/tables/indexes/triggers/views, active jobs, reference
+rows, reservations and owned-schedule rows fail closed. Viewer tasks are kept
+only when `phase='complete' AND stage IN ('succeeded','failed','cancelled')`
+(`TERMINAL_VIEWER_TASK`, shared by install, update, backup and rollback); their
+`viewer_files`/`viewer_incarnations`/`viewer_option_evidence` rows must not be
+orphaned, and every file under `viewer-tasks/` (client inputs and results, up to
+20 GiB each) is hashed by path, mode, size and SHA-256. No job/receipt contents
 are exported. Only system node rows are retained privately to prove exact CAS
 transitions.
 
@@ -188,12 +194,34 @@ pinned candidate start-up migration (`MIGRATION_TABLES`/`MIGRATION_COLUMNS`):
 empty `reference_viewer_receipts`, `reference_viewer_transfers` and
 `viewer_full_option_evidence`, plus `viewer_tasks.full_option_evidence_required`,
 `viewer_tasks.node_guarded` and `reference_jobs.viewer_receipt_required`. Only
-items absent from the drained baseline count as additions; column DDL is replayed
-in memory over the baseline table DDL and must match exactly, and the census's
-zero-row fence proves the defaults. The predecessor names every INSERT column on
-those tables, so rollback accepts this migration (not the Viewer reservation
-tables). Nonempty rows, extra columns/indexes/triggers, or any other addition
-are refused. If a
+items absent from the drained baseline count as additions, and a table must lack
+all of its pinned columns. Column DDL is replayed in memory over the baseline
+table DDL and must match exactly. New tables must be empty. Because retained
+terminal `viewer_tasks` rows are nonzero, the census also emits, for each table
+with pinned columns, a hash of its rows projected onto the non-pinned columns
+and a NULL-aware count (`IS NOT default`) of rows whose pinned column differs
+from its default (0, 0 and NULL). Row contents never leave the helper. A column
+addition is accepted only when the observed projection equals the baseline
+full-row hash, counts match and every non-default count is zero. The
+predecessor names every INSERT column on those tables, so the census accepts
+this migration for rollback (not the Viewer reservation tables). Nonempty rows,
+extra columns/indexes/triggers, or any other addition are refused.
+
+Legacy policy: rows the predecessor inserts on migrated state omit the pinned
+columns. `viewer_tasks` rows get 0/0 (no full option evidence, not node
+guarded). `reference_jobs.viewer_receipt_required` is NULL, which the candidate
+treats as ambiguous: acceptance is refused ("legacy Viewer acceptance policy
+requires reconciliation"), the job is never queued for Viewer transfer, and the
+transfer worker holds with `viewer_acceptance_policy_requires_reconciliation`.
+Any such row also fails a later update census.
+
+The predecessor accepts runtime configuration `schemaVersion` 1-3; the candidate
+accepts 1-5. Prepare records the exact `runtime.json` bytes, SHA-256 and
+version (`predecessorConfig`) and refuses a version the predecessor cannot
+read. Rollback reads it again before any mutation and before starting the
+predecessor, and refuses unless it is byte-identical to the capture. These are
+schema and configuration rules only; the real predecessor image on migrated
+state still needs qualification before the gates open. If a
 stopped-volume fence fails, the executor may restart only the exact unchanged
 candidate, verify its health and retain nodes fenced. It never starts the old
 binary over incompatible state or restores the snapshot over admitted records.

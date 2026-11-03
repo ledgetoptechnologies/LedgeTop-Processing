@@ -232,7 +232,24 @@ def volume_census(root, *, uid=10001, offline=False):
                 rows.append([{'blob': value.hex()} if isinstance(value, bytes) else value for value in row])
             rows.sort(key=encode)
             tables[name] = dict(count=len(rows), sha256=sha(rows), columns=columns)
-        authority = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
+        # Pinned additive columns and defaults (MIGRATION_COLUMNS; tested equal).
+        # Rows never leave this helper: only a hash of each row projected onto
+        # the other columns, and a NULL-aware count of non-default values per
+        # pinned column. Without pinned columns the projection is the full row.
+        pinned = {'viewer_tasks': {'full_option_evidence_required': 0, 'node_guarded': 0}, 'reference_jobs': {'viewer_receipt_required': None}}
+        for name in sorted(names & set(pinned)):
+            present = [column[1] for column in tables[name]['columns']]
+            kept = [column for column in present if column not in pinned[name]]
+            if not kept or any('"' in column for column in present):
+                raise AssertionError('unreviewed pinned table columns')
+            rows = []
+            for row in db.execute('SELECT ' + ','.join('"' + column + '"' for column in kept) + ' FROM "' + name + '"'):
+                rows.append([{'blob': value.hex()} if isinstance(value, bytes) else value for value in row])
+            rows.sort(key=encode)
+            tables[name]['projectedSha256'] = sha(rows)
+            tables[name]['nonDefault'] = {column: db.execute('SELECT COUNT(*) FROM "' + name + '" WHERE "' + column + '" IS NOT ?', (default,)).fetchone()[0]
+                for column, default in sorted(pinned[name].items()) if column in present}
+        authority =db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
         active = db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
         if not active == 0:
             raise AssertionError()
@@ -335,8 +352,11 @@ def normalized_schema(rows):
 def remove_migration(a,b):
     """Strip only pinned additions absent from baseline; never reads rows.
 
-    The census fences every reference_*/viewer_* table to zero rows, so both
-    sides having zero rows proves every row holds each pinned default.
+    Pinned tables stay empty. Retained terminal viewer_tasks rows are kept, so
+    a pinned column is accepted only when the observed rows projected onto the
+    baseline columns hash exactly to the baseline rows, the counts match, and
+    no row holds a value other than the pinned default (NULL-aware). A table
+    with only some of its pinned columns is not a reviewed base.
     """
     pinned=normalized_schema(migration_schema())
     for name in sorted({row[2] for row in pinned}):
@@ -347,16 +367,21 @@ def remove_migration(a,b):
     for table in sorted({item[0] for item in MIGRATION_COLUMNS}):
         if table not in a['tables'] or table not in b['tables']:continue
         present={column[1] for column in b['tables'][table]['columns']}
-        statements=[statement for name,column,statement in MIGRATION_COLUMNS if name==table and column not in present]
+        added=[column for name,column,_statement in MIGRATION_COLUMNS if name==table and column not in present]
+        statements=[statement for name,column,statement in MIGRATION_COLUMNS if name==table and column in added]
         if not statements:continue
+        if len(added)!=sum(name==table for name,_column,_statement in MIGRATION_COLUMNS):raise Stopped('unreviewed_migration_base')
         original=[row for row in b['schema'] if row[0]=='table' and row[1]==table]
         observed=[row for row in a['schema'] if row[0]=='table' and row[1]==table]
         if len(original)!=1:raise Stopped('unreviewed_migration_base')
         schema,columns=migrated_table(original[0],statements)
-        if (observed!=schema or a['tables'][table]['columns']!=columns
-                or a['tables'][table]['count']!=0 or b['tables'][table]['count']!=0):raise Stopped('unreviewed_migration_columns_or_rows')
+        before,after=b['tables'][table],a['tables'][table]
+        if (observed!=schema or after['columns']!=columns or after['count']!=before['count']
+                or before.get('projectedSha256')!=before['sha256'] or before.get('nonDefault')!={}
+                or after.get('projectedSha256')!=before['sha256']
+                or after.get('nonDefault')!={column:0 for column in added}):raise Stopped('unreviewed_migration_columns_or_rows')
         a['schema']=[original[0] if row in observed else row for row in a['schema']]
-        a['tables'][table]['columns']=b['tables'][table]['columns']
+        a['tables'][table]=json.loads(canonical(before))
 
 
 def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False, allow_migration=False):
@@ -366,6 +391,8 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
     rollback gate: an older binary's behavior on that schema is unqualified.
     The pinned migration is also accepted for rollback: the predecessor names
     every viewer_tasks/reference_jobs INSERT column and ignores unknown tables.
+    That is a census rule only; the activation and rollback gates stay closed
+    until the predecessor image itself is qualified on migrated state.
     """
     a,b=json.loads(canonical(observed)),json.loads(canonical(baseline))
     for value in (a,b):
@@ -415,6 +442,30 @@ for p in sorted(root.rglob('*')):
  finally:os.close(fd)
 assert result
 print(json.dumps(dict(root=dict(dev=rs.st_dev,ino=rs.st_ino,uid=rs.st_uid,gid=rs.st_gid,mode=stat.S_IMODE(rs.st_mode)),files=result)))
+"""
+
+# The predecessor's reference_runtime accepts runtime configuration
+# schemaVersion 1-3 only; the candidate accepts 1-5. Rollback restarts the
+# predecessor against the same read-only mount, so its exact bytes and
+# version are captured at preparation and any change refuses rollback.
+PREDECESSOR_CONFIG_VERSIONS = (1, 2, 3)
+CONFIG_CENSUS = """import hashlib,json,os,stat
+p='/run/processing-reference/runtime.json'
+s=os.lstat(p);assert stat.S_ISREG(s.st_mode) and s.st_uid==10001 and s.st_gid==10001 and s.st_nlink==1 and s.st_size<=1048576
+fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+try:
+ a=os.fstat(fd);assert (a.st_dev,a.st_ino)==(s.st_dev,s.st_ino);raw=b''
+ while True:
+  b=os.read(fd,65536)
+  if not b:break
+  raw+=b;assert len(raw)<=s.st_size
+finally:os.close(fd)
+assert len(raw)==s.st_size
+def unique(pairs):
+ assert len({k for k,_ in pairs})==len(pairs);return dict(pairs)
+value=json.loads(raw,object_pairs_hook=unique)
+version=value.get('schemaVersion') if type(value) is dict else None
+print(json.dumps(dict(path='runtime.json',bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),schemaVersion=version if type(version) is int else None)))
 """
 
 
@@ -532,6 +583,25 @@ class ReferenceCoordinatorUpdate:
             '--entrypoint','python',state['image'],'-c',explicit_guard_source(TLS_CENSUS))
         return json.loads(raw)
 
+    def predecessor_config(self,state):
+        """Exact runtime configuration the predecessor reads when restarted."""
+        raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
+            '--cap-drop','ALL','--security-opt','no-new-privileges','--mount',
+            'type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
+            '--entrypoint','python',state['image'],'-c',explicit_guard_source(CONFIG_CENSUS))
+        value=json.loads(raw)
+        if (type(value) is not dict or set(value)!={'path','bytes','sha256','schemaVersion'} or value['path']!='runtime.json'
+                or type(value['bytes']) is not int or type(value['sha256']) is not str or not re.fullmatch(r'[a-f0-9]{64}',value['sha256'])
+                or type(value['schemaVersion']) is not int or value['schemaVersion'] not in PREDECESSOR_CONFIG_VERSIONS):
+            raise Stopped('predecessor_config_schema_unsupported')
+        return value
+
+    def rollback_config(self,state):
+        """Rollback stays closed unless the predecessor reads the captured config."""
+        captured=state.get('predecessorConfig')
+        if (type(captured) is not dict or captured.get('schemaVersion') not in PREDECESSOR_CONFIG_VERSIONS
+                or self.predecessor_config(state)!=captured):raise Stopped('predecessor_config_changed_rollback_refused')
+
     def cluster_idle(self,state):
         """Fixed existing private backend: no token/command arguments in proof."""
         from processing.container_update import ComposeNode
@@ -601,7 +671,7 @@ class ReferenceCoordinatorUpdate:
         for name in (state['rollbackName'],state['failedName']):
             if self.t.docker('ps','--all','--filter','name=^/'+name+'$','--format','{{.ID}}').strip():raise Stopped('retention_name_exists')
         self.save(state);self.t.candidate_loader(target,operation)
-        self.save(state,'prepared',baseline=self.census(state),tls=self.tls(state))
+        self.save(state,'prepared',baseline=self.census(state),tls=self.tls(state),predecessorConfig=self.predecessor_config(state))
         return state
 
     def check(self,state,gates):
@@ -791,7 +861,7 @@ class ReferenceCoordinatorUpdate:
         self.validate(state)
         if state.get('reopeningStarted') or state.get('pendingPlan'):raise Stopped('reopen_or_schedule_uncertainty_prevents_rollback')
         with self.gate_factory() as gates:
-            self.check(state,gates);item=self.candidate(state)
+            self.check(state,gates);self.rollback_config(state);item=self.candidate(state)
             old=self.t.inspected(OLD_ID)
             if old['State']['Running']:
                 if state['phase']!='rollback_start_old_pending' or old['Name']!='/'+NAME:
@@ -818,6 +888,7 @@ class ReferenceCoordinatorUpdate:
             if old['Name']!='/'+NAME:
                 self.save(state,'rollback_rename_old_pending');self.mutation(state,gates,'rename',OLD_ID,NAME)
             if not old['State']['Running']:
+                self.rollback_config(state)
                 self.save(state,'rollback_start_old_pending');self.mutation(state,gates,'start',OLD_ID)
             self.finish_rollback(state,gates)
         return state

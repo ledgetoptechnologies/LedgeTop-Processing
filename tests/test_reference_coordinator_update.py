@@ -98,10 +98,10 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.probe.start();self.addCleanup(self.probe.stop)
         self.state=self.updater.prepare(TARGET,SOURCE,MAIN)
 
-    def retain_viewer_tasks(self):
-        """Two completed Viewer tasks with nested inputs and results (client deliverables)."""
-        self.retained={}
-        for index in range(2):
+    def retain_viewer_tasks(self,indices=range(2),stages=()):
+        """Completed Viewer tasks with nested inputs and results (client deliverables)."""
+        if not indices.start:self.retained={}
+        for index in indices:
             identifier=str(__import__('uuid').uuid4());directory='task-'+str(index)
             base=self.volume/'viewer-tasks'/directory;(base/'images').mkdir(parents=True,mode=0o700)
             for relative,content in (('images/IMG_0001.JPG',b'synthetic photo '*64+bytes([index])),
@@ -110,7 +110,8 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 self.retained['viewer-tasks/'+directory+'/'+relative]=content
             with self.queue._db() as db:
                 db.execute("""INSERT INTO viewer_tasks(uuid,directory,name,options,outputs,environment,stage,phase,archive_path)
-                    VALUES(?,?,?,'[]','[]','production','succeeded','complete',?)""",(identifier,directory,'retained-'+str(index),str(base/'all.zip')))
+                    VALUES(?,?,?,'[]','[]','production',?,'complete',?)""",(identifier,directory,'retained-'+str(index),
+                    dict(stages).get(index,'succeeded'),str(base/'all.zip')))
                 db.execute("INSERT INTO viewer_files VALUES(?,'img_0001.jpg','IMG_0001.JPG',?,1024,?,1)",(identifier,str(base/'images/IMG_0001.JPG'),'a'*64))
                 db.execute("INSERT INTO viewer_incarnations VALUES(?,1,NULL,'{}','[]')",(identifier,))
 
@@ -409,12 +410,166 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.assertRaises(module.Stopped):module.compatible(changed,after,**allow)
         with self.assertRaises(module.Stopped):module.compatible(after,before,allow_owned=True,allow_viewer_additions=True)
 
+    def five_retained(self):
+        """Five live-like terminal tasks (succeeded, failed, cancelled) on the old schema."""
+        self.retain_viewer_tasks(range(2,5),stages=((2,'failed'),(3,'cancelled')))
+        with self.queue._db() as db:
+            identifier=db.execute("SELECT uuid FROM viewer_tasks WHERE directory='task-4'").fetchone()[0]
+            db.execute("INSERT INTO viewer_option_evidence VALUES(?,1,'[]',?)",(identifier,__import__('hashlib').sha256(b'[]').hexdigest()))
+        before=self.old_volume()
+        self.assertEqual(before['tables']['viewer_tasks']['count'],5)
+        self.assertEqual((before['tables']['viewer_tasks']['projectedSha256'],before['tables']['viewer_tasks']['nonDefault']),
+                         (before['tables']['viewer_tasks']['sha256'],{}))
+        return before
+
+    def assert_projected_rows(self,before):
+        after=module.volume_census(self.volume,uid=os.geteuid())
+        for table,count in (('viewer_tasks',5),('reference_jobs',0)):
+            self.assertEqual((after['tables'][table]['count'],after['tables'][table]['projectedSha256']),
+                             (count,before['tables'][table]['sha256']))
+            self.assertEqual(set(after['tables'][table]['nonDefault'].values()),{0})
+        for table in ('viewer_files','viewer_incarnations','viewer_option_evidence'):
+            self.assertEqual(after['tables'][table],before['tables'][table])
+        self.assert_retained_viewer_bytes()
+        return after
+
+    def test_census_pinned_defaults_equal_the_pinned_migration(self):
+        tree=ast.parse(inspect.getsource(module.volume_census))
+        pinned=[ast.literal_eval(node.value) for node in ast.walk(tree)
+                if isinstance(node,ast.Assign) and getattr(node.targets[0],'id',None)=='pinned']
+        self.assertEqual(len(pinned),1)
+        self.assertEqual({(table,column) for table,columns in pinned[0].items() for column in columns},
+                         {(table,column) for table,column,_statement in module.MIGRATION_COLUMNS})
+        for table,column,statement in module.MIGRATION_COLUMNS:
+            db=sqlite3.connect(':memory:')
+            try:
+                db.execute('CREATE TABLE '+table+' (id INTEGER PRIMARY KEY)');db.execute('INSERT INTO '+table+'(id) VALUES(1)')
+                db.execute(statement)
+                self.assertEqual(db.execute('SELECT '+column+' FROM '+table).fetchone()[0],pinned[0][table][column])
+            finally:db.close()
+
+    def test_old_volume_five_retained_tasks_migrate_through_update(self):
+        before=self.five_retained()
+        self.assertEqual(self.activate()['phase'],'completed')
+        self.assertTrue({'full_option_evidence_required','node_guarded'}<=set(self.columns('viewer_tasks')))
+        self.assert_projected_rows(before)
+
+    def test_old_volume_five_retained_tasks_rollback_accepts_exact_migration(self):
+        before=self.five_retained();self.fail_after_start()
+        self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back')
+        restored=self.transport.inspected(module.NAME)
+        self.assertEqual((restored['Id'],restored['Image']),(module.OLD_ID,module.OLD_IMAGE))
+        # The additive schema stays; every retained row and byte is unchanged.
+        self.assertIn('node_guarded',self.columns('viewer_tasks'))
+        self.assert_projected_rows(before)
+        self.assertFalse(self.state['databaseRestored'])
+
+    def test_retained_row_migration_negative_cases(self):
+        before=self.five_retained();old=self.root/'five-old-copy';shutil.copytree(self.volume,old)
+        self.migrate();after=module.volume_census(self.volume,uid=os.geteuid())
+        allow=dict(allow_owned=True,allow_viewer_additions=True,allow_migration=True)
+        module.compatible(after,before,**allow)
+        def variant(name,statements,base=self.volume):
+            target=self.root/name;shutil.copytree(base,target)
+            db=sqlite3.connect(target/'jobs.sqlite3')
+            try:
+                with db:
+                    for statement in statements:db.execute(statement)
+            finally:db.close()
+            return module.volume_census(target,uid=os.geteuid(),offline=True)
+        for name,statements in (
+                ('nondefault-pinned',["UPDATE viewer_tasks SET node_guarded=1 WHERE directory='task-0'"]),
+                ('nondefault-evidence',["UPDATE viewer_tasks SET full_option_evidence_required=1 WHERE directory='task-2'"]),
+                ('old-column-drift',["UPDATE viewer_tasks SET name='altered' WHERE directory='task-3'"]),
+                ('row-removed',[*("DELETE FROM "+table+" WHERE uuid IN (SELECT uuid FROM viewer_tasks WHERE directory='task-4')"
+                    for table in ('viewer_files','viewer_incarnations','viewer_option_evidence')),"DELETE FROM viewer_tasks WHERE directory='task-4'"]),
+                ('extra-column',['ALTER TABLE viewer_tasks ADD COLUMN unreviewed INTEGER NOT NULL DEFAULT 0'])):
+            with self.subTest(case=name):
+                with self.assertRaisesRegex(module.Stopped,'unreviewed_migration|full_census_changed'):
+                    module.compatible(variant(name,statements),before,**allow)
+        for name,statements in (
+                ('nonterminal',["UPDATE viewer_tasks SET phase='processing' WHERE directory='task-1'"]),
+                ('unreviewed-table',['CREATE TABLE viewer_unreviewed (uuid TEXT PRIMARY KEY)']),
+                ('nonempty-pinned-table',["INSERT INTO viewer_full_option_evidence VALUES((SELECT uuid FROM viewer_tasks WHERE directory='task-0'),1,'[]','x')"])):
+            with self.subTest(case=name):
+                with self.assertRaises(AssertionError):variant(name,statements)
+        # A base holding only part of a table's pinned columns is not reviewed.
+        partial=variant('partial-base',['ALTER TABLE viewer_tasks ADD COLUMN node_guarded INTEGER NOT NULL DEFAULT 0 CHECK(node_guarded IN (0,1))'],old)
+        with self.assertRaisesRegex(module.Stopped,'unreviewed_migration_base'):module.compatible(after,partial,**allow)
+        # NULL-aware non-default counts: NULL differs from 0 and 0 from NULL.
+        for table,column,value in (('viewer_tasks','node_guarded',1),('reference_jobs','viewer_receipt_required',1)):
+            with self.subTest(crafted=column):
+                crafted=copy.deepcopy(after);crafted['tables'][table]['nonDefault'][column]=value
+                with self.assertRaises(module.Stopped):module.compatible(crafted,before,**allow)
+        db=sqlite3.connect(':memory:')
+        try:
+            db.execute('CREATE TABLE t (v INTEGER)');db.executemany('INSERT INTO t VALUES(?)',[(None,),(0,),(1,)])
+            self.assertEqual([db.execute('SELECT COUNT(*) FROM t WHERE v IS NOT ?',(default,)).fetchone()[0] for default in (None,0)],[2,2])
+        finally:db.close()
+
+    def test_legacy_null_viewer_receipt_policy_is_held(self):
+        """Rows the predecessor inserts on migrated state get the legacy policy."""
+        from processing.maintenance import Conflict
+        self.five_retained();self.migrate()
+        job_id=str(__import__('uuid').uuid4())
+        with self.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,'staging','reference-pipeline-v1','succeeded')",
+                       (job_id,'reference:synthetic-legacy'))
+            # Exact 693cb7e column lists: neither names a pinned column.
+            db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,environment,input_json,
+              manifest_sha,pipeline_digest,phase) VALUES(?,?,?,?,?,?,?,'queued')""",
+              (job_id,'synthetic-legacy','a'*64,'staging','{}','b'*64,'c'*64))
+            db.execute('''INSERT OR REPLACE INTO viewer_tasks
+                (uuid,generation,directory,name,options,outputs,environment,option_evidence_required)
+                VALUES(?,?,?,?,?,?,?,?)''',('synthetic-legacy-task',1,'synthetic-legacy-task','n','[]','[]','staging',0))
+            self.assertIsNone(db.execute('SELECT viewer_receipt_required FROM reference_jobs WHERE job_id=?',(job_id,)).fetchone()[0])
+            self.assertEqual(tuple(db.execute("SELECT full_option_evidence_required,node_guarded FROM viewer_tasks WHERE uuid='synthetic-legacy-task'").fetchone()),(0,0))
+            db.execute("UPDATE reference_jobs SET phase='completed',result_json='{}' WHERE job_id=?",(job_id,))
+        store=ReferenceStore(self.queue,viewer_required_environments=('staging',))
+        self.assertEqual(store.audit_viewer_acceptance_page(),{'state':'reconcile'})
+        self.assertEqual(store.pending_viewer_transfer_jobs(),[])
+        with self.assertRaisesRegex(Conflict,'legacy Viewer acceptance policy requires reconciliation'):store.accept(job_id,{})
+        # A later update census holds on any predecessor-admitted row.
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_prepare_refuses_predecessor_config_it_cannot_read(self):
+        for version in (4,5,None):
+            with self.subTest(version=version):
+                self.transport.config=dict(self.transport.config,schemaVersion=version)
+                operation=self.root/('config-'+str(version));operation.mkdir(mode=0o700)
+                updater=module.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+                with self.assertRaisesRegex(module.Stopped,'predecessor_config_schema_unsupported'):updater.prepare(TARGET,SOURCE,MAIN)
+        self.assertEqual(self.transport.calls,[])
+
+    def test_rollback_refused_when_predecessor_config_changes(self):
+        self.five_retained()
+        self.assertEqual(self.state['predecessorConfig'],{'path':'runtime.json','bytes':512,'sha256':'a'*64,'schemaVersion':3})
+        self.fail_after_start()
+        calls=len(self.transport.calls)
+        for name,change in (('v4',dict(schemaVersion=4,sha256='4'*64)),('v5',dict(schemaVersion=5)),
+                            ('same-version-new-bytes',dict(sha256='f'*64,bytes=513)),('unparsed',dict(schemaVersion=None))):
+            with self.subTest(case=name):
+                self.transport.config=dict(self.state['predecessorConfig'],**change)
+                with self.assertRaisesRegex(module.Stopped,'predecessor_config'):self.updater.rollback(self.state)
+                self.assertEqual(len(self.transport.calls),calls)
+                self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+                self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+        # A checkpoint without the captured config never starts the predecessor.
+        self.transport.config=dict(self.state['predecessorConfig'])
+        captured=self.state.pop('predecessorConfig')
+        with self.assertRaisesRegex(module.Stopped,'predecessor_config'):self.updater.rollback(self.state)
+        self.state['predecessorConfig']=captured
+        self.assertEqual(len(self.transport.calls),calls)
+        self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back')
+        self.assert_retained_viewer_bytes()
+
     def make_transport(self):
         owner=self
         class Transport:
             save=staticmethod(module.legacy.save);private_file=staticmethod(module.legacy.private_file)
             def __init__(self):
                 self.calls=[];self.loss=None;self.hook=None
+                self.config={'path':'runtime.json','bytes':512,'sha256':'a'*64,'schemaVersion':3}
                 self.application={'PROCESSING_API_TOKEN':TOKEN,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OPERATOR,
                     'PROCESSING_REFERENCE_CONFIG':module.legacy.CONFIG_PATH}
                 self.old=self.container(module.OLD_ID,module.OLD_IMAGE,module.NAME,True)
@@ -465,6 +620,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                     return ''
                 if action in ('run','exec'):
                     if args[-1]==module.explicit_guard_source(module.TLS_CENSUS):return json.dumps([{'path':'runtime.json','uid':10001,'mode':0o600,'sha256':'a'*64}])
+                    if args[-1]==module.explicit_guard_source(module.CONFIG_CENSUS):return json.dumps(self.config)
                     if action=='run':
                         assert '--network' in args and args[args.index('--network')+1]=='none'
                         assert 'type=volume,src='+module.VOLUME+',dst=/source,readonly' in args
