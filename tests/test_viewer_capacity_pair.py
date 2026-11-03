@@ -3,7 +3,7 @@
 Viewer SQLite declaration is real; coordinator restarts within the test process.
 Capability advertisement and storage budget are synthetic; no live auth.
 """
-import json,os,subprocess,tempfile,threading,unittest
+import json,os,queue,subprocess,tempfile,threading,unittest
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from types import SimpleNamespace
@@ -37,15 +37,24 @@ class ViewerCapacityPair(unittest.TestCase):
  def stop(self):
   if self.server is not None:
    self.server.shutdown();self.server.server_close();self.thread.join(timeout=5);self.service.close();self.queue.close();self.server=None
- def run_node(self,mode='valid'):
+ def run_node(self,mode='valid',expected_exit=0):
   viewer=os.environ.get('PINNED_VIEWER_ROOT')
   if not viewer: self.fail('PINNED_VIEWER_ROOT required; no skip')
-  expected=os.environ.get('VIEWER_COMMIT','5a26155d2a2e4a52f8369d96d255ef9966dca2b5')
+  expected=os.environ.get('VIEWER_COMMIT','2982f8da54df60241440ecf2a680111a92b2ce46')
   self.assertEqual(subprocess.check_output(['git','rev-parse','HEAD'],cwd=viewer,text=True).strip(),expected)
   self.assertFalse(subprocess.check_output(['git','status','--porcelain'],cwd=viewer,text=True).strip())
   args=dict(viewer=viewer,origin='http://127.0.0.1:'+str(self.server.server_port),token=TOKEN,root=str(self.root),mode=mode)
+  if mode=='upload-die':
+   proc=subprocess.Popen(['node','tests/support/viewer_capacity_pair.cjs'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+   try:
+    proc.stdin.write(json.dumps(args));proc.stdin.close();output=queue.Queue();reader=threading.Thread(target=lambda:output.put(proc.stdout.readline()),daemon=True);reader.start()
+    self.assertEqual(output.get(timeout=20).strip(),'UPLOAD_ACCEPTED');proc.kill();proc.wait(timeout=10);reader.join(timeout=5);self.assertFalse(reader.is_alive());self.assertNotEqual(proc.returncode,0)
+   finally:
+    if proc.poll() is None:proc.kill();proc.wait(timeout=10)
+    proc.stdout.close();proc.stderr.close()
+   return None
   proc=subprocess.run(['node','tests/support/viewer_capacity_pair.cjs'],input=json.dumps(args),capture_output=True,text=True,timeout=30)
-  self.assertEqual(proc.returncode,0,msg=proc.stderr);return json.loads(proc.stdout)
+  self.assertEqual(proc.returncode,expected_exit,msg=proc.stderr);return json.loads(proc.stdout) if proc.stdout else None
  def test_real_worker_and_provider(self):
   result=self.run_node();self.assertTrue(result['completed'],msg=str(result));task=self.service.store.task(result['uuid']);self.assertEqual(task['input_bytes'],result['expectedTotal']);self.assertIsNotNone(task['job_id']);self.assertTrue(result['commitReplay']);self.assertGreaterEqual(len(result['observations']),3);self.assertTrue(all(r['total']=='10' for r in result['observations'] if 'total' in r))
   # The worker Node process already exited. Reopen the real Viewer SQLite
@@ -74,3 +83,16 @@ class ViewerCapacityPair(unittest.TestCase):
 
  def test_capability_outage_is_deferred_then_retries(self):
   result=self.run_node('outage-retry');self.assertTrue(result['completed'],msg=str(result));self.assertEqual(result['retry']['firstUploadCount'],0);self.assertEqual(result['retry']['firstStatus'],'admitted');self.assertEqual(result['retry']['firstJob'],'pending');self.assertEqual(result['retry']['afterPhase'],'committed');self.assertEqual(self.service.store.task(result['uuid'])['input_bytes'],10)
+
+ def test_deferred_outage_survives_worker_process_restart(self):
+  first=self.run_node('outage-first');self.assertIsNone(first['error']);self.assertEqual(first['retry']['firstJob'],'pending');self.assertEqual(first['retry']['firstUploadCount'],0);self.assertFalse(any(r.get('route')=='/task/new/init' for r in first['observations']));self.assertIsNone(first['declaration'])
+  second=self.run_node('outage-recover');self.assertTrue(second['completed'],msg=str(second));self.assertEqual(second['attemptId'],first['attemptId']);self.assertEqual(second['uuid'],first['uuid']);self.assertEqual(second['declaration'],10)
+  self.assertEqual(sum(r.get('route')=='/task/new/init' for r in second['observations']),1);self.assertEqual(sum('/upload/' in r.get('route','') for r in second['observations']),2);self.assertEqual(self.service.store.task(second['uuid'])['input_bytes'],10)
+  with self.queue._db() as db:self.assertEqual(db.execute('SELECT count(*) FROM jobs').fetchone()[0],1)
+
+ def test_worker_death_after_upload_holds_ambiguous_without_retry(self):
+  self.run_node('upload-die')
+  with self.queue._db() as db:
+   row=db.execute('SELECT uuid,job_id FROM viewer_tasks').fetchone();self.assertIsNone(row['job_id']);identifier=row['uuid']
+  self.assertEqual(self.service.store.task(identifier)['input_bytes'],7)
+  recovered=self.run_node('upload-recover');self.assertEqual(recovered['uuid'],identifier);self.assertFalse(recovered['completed'],msg=str(recovered));self.assertEqual(recovered['retry']['afterError'],'provider_upload_acceptance_unknown');self.assertEqual(recovered['retry']['afterJob'],'pending');self.assertFalse(any('/upload/' in r.get('route','') or r.get('route')=='/task/new/init' for r in recovered['observations']));self.assertEqual(self.service.store.task(identifier)['input_bytes'],7)
