@@ -1,0 +1,332 @@
+{
+ "description": "Shared integer vectors for the source-range v2 transfer budgets. Synthetic only; not a capacity qualification.",
+ "chunkBytes": 8388608,
+ "maxSafeInteger": 9007199254740991,
+ "profiles": {
+  "current-v2-3x": {
+   "status": "current wire behavior (Processing #342 build_source_transfer_request @ 1c79a8af; Viewer #429 broker @ d7589f2f accepts any budget at or above the minimums)",
+   "requestBudget": "baseRequests",
+   "byteBudget": "min(maxSafeInteger, 3 * totalBytes)",
+   "attemptBudget": "min(maxSafeInteger, 3 * baseRequests)",
+   "caps": "none beyond safe integers; the Viewer manifest validator allows at most 10,000 objects"
+  },
+  "proposed-range-policy-1.5x": {
+   "status": "PROPOSAL ONLY, not wire behavior: needs the Viewer owner and Beau to agree. Budgets follow Viewer #415's ceil(3x/2); its 16 MiB chunk is replaced by the implemented 8 MiB",
+   "requestBudget": "ceil(3 * baseRequests / 2)",
+   "byteBudget": "min(maxSafeInteger, ceil(3 * totalBytes / 2))",
+   "attemptBudget": "ceil(3 * baseRequests / 2)",
+   "caps": "objects 1..268435456 bytes, at most 10,000 objects, manifest at most 68719476736 bytes, at most 20,000 base requests"
+  }
+ },
+ "semantics": "Both implementations charge requestBudget and byteBudget once per unique canonical range and attemptBudget on every HTTP attempt, so byteBudget above totalBytes has no effect today.",
+ "vectors": [
+  {
+   "name": "one byte",
+   "objects": [
+    [
+     1,
+     1
+    ]
+   ],
+   "objectCount": 1,
+   "totalBytes": 1,
+   "baseRequests": 1,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 1,
+     "byteBudget": 3,
+     "attemptBudget": 3
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 2,
+     "byteBudget": 2,
+     "attemptBudget": 2,
+     "accepted": true,
+     "rejectReasons": []
+    }
+   }
+  },
+  {
+   "name": "exact chunk",
+   "objects": [
+    [
+     8388608,
+     1
+    ]
+   ],
+   "objectCount": 1,
+   "totalBytes": 8388608,
+   "baseRequests": 1,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 1,
+     "byteBudget": 25165824,
+     "attemptBudget": 3
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 2,
+     "byteBudget": 12582912,
+     "attemptBudget": 2,
+     "accepted": true,
+     "rejectReasons": []
+    }
+   }
+  },
+  {
+   "name": "chunk plus one",
+   "objects": [
+    [
+     8388609,
+     1
+    ]
+   ],
+   "objectCount": 1,
+   "totalBytes": 8388609,
+   "baseRequests": 2,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 2,
+     "byteBudget": 25165827,
+     "attemptBudget": 6
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 3,
+     "byteBudget": 12582914,
+     "attemptBudget": 3,
+     "accepted": true,
+     "rejectReasons": []
+    }
+   }
+  },
+  {
+   "name": "mixed small",
+   "objects": [
+    [
+     8388608,
+     2
+    ],
+    [
+     3,
+     1
+    ]
+   ],
+   "objectCount": 3,
+   "totalBytes": 16777219,
+   "baseRequests": 3,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 3,
+     "byteBudget": 50331657,
+     "attemptBudget": 9
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 5,
+     "byteBudget": 25165829,
+     "attemptBudget": 5,
+     "accepted": true,
+     "rejectReasons": []
+    }
+   }
+  },
+  {
+   "name": "zero-byte object present",
+   "objects": [
+    [
+     0,
+     1
+    ],
+    [
+     5,
+     1
+    ]
+   ],
+   "objectCount": 2,
+   "totalBytes": 5,
+   "baseRequests": 1,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 1,
+     "byteBudget": 15,
+     "attemptBudget": 3
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 2,
+     "byteBudget": 8,
+     "attemptBudget": 2,
+     "accepted": false,
+     "rejectReasons": [
+      "zero-byte object"
+     ]
+    }
+   }
+  },
+  {
+   "name": "about 50 GB of 25 MiB photos",
+   "objects": [
+    [
+     26214400,
+     2000
+    ]
+   ],
+   "objectCount": 2000,
+   "totalBytes": 52428800000,
+   "baseRequests": 8000,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 8000,
+     "byteBudget": 157286400000,
+     "attemptBudget": 24000
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 12000,
+     "byteBudget": 78643200000,
+     "attemptBudget": 12000,
+     "accepted": true,
+     "rejectReasons": []
+    }
+   }
+  },
+  {
+   "name": "10,000 one-byte objects",
+   "objects": [
+    [
+     1,
+     10000
+    ]
+   ],
+   "objectCount": 10000,
+   "totalBytes": 10000,
+   "baseRequests": 10000,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 10000,
+     "byteBudget": 30000,
+     "attemptBudget": 30000
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 15000,
+     "byteBudget": 15000,
+     "attemptBudget": 15000,
+     "accepted": true,
+     "rejectReasons": []
+    }
+   }
+  },
+  {
+   "name": "manifest exactly 64 GiB of 256 MiB objects",
+   "objects": [
+    [
+     268435456,
+     256
+    ]
+   ],
+   "objectCount": 256,
+   "totalBytes": 68719476736,
+   "baseRequests": 8192,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 8192,
+     "byteBudget": 206158430208,
+     "attemptBudget": 24576
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 12288,
+     "byteBudget": 103079215104,
+     "attemptBudget": 12288,
+     "accepted": true,
+     "rejectReasons": []
+    }
+   }
+  },
+  {
+   "name": "manifest 64 GiB plus one byte",
+   "objects": [
+    [
+     268435456,
+     256
+    ],
+    [
+     1,
+     1
+    ]
+   ],
+   "objectCount": 257,
+   "totalBytes": 68719476737,
+   "baseRequests": 8193,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 8193,
+     "byteBudget": 206158430211,
+     "attemptBudget": 24579
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 12290,
+     "byteBudget": 103079215106,
+     "attemptBudget": 12290,
+     "accepted": false,
+     "rejectReasons": [
+      "manifest over 64 GiB"
+     ]
+    }
+   }
+  },
+  {
+   "name": "object 256 MiB plus one byte",
+   "objects": [
+    [
+     268435457,
+     1
+    ]
+   ],
+   "objectCount": 1,
+   "totalBytes": 268435457,
+   "baseRequests": 33,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 33,
+     "byteBudget": 805306371,
+     "attemptBudget": 99
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 50,
+     "byteBudget": 402653186,
+     "attemptBudget": 50,
+     "accepted": false,
+     "rejectReasons": [
+      "object over 256 MiB"
+     ]
+    }
+   }
+  },
+  {
+   "name": "safe-integer clamp on 3x bytes",
+   "objects": [
+    [
+     4503599627370496,
+     1
+    ]
+   ],
+   "objectCount": 1,
+   "totalBytes": 4503599627370496,
+   "baseRequests": 536870912,
+   "profiles": {
+    "current-v2-3x": {
+     "requestBudget": 536870912,
+     "byteBudget": 9007199254740991,
+     "attemptBudget": 1610612736
+    },
+    "proposed-range-policy-1.5x": {
+     "requestBudget": 805306368,
+     "byteBudget": 6755399441055744,
+     "attemptBudget": 805306368,
+     "accepted": false,
+     "rejectReasons": [
+      "object over 256 MiB",
+      "manifest over 64 GiB",
+      "over 20,000 base requests"
+     ]
+    }
+   }
+  }
+ ]
+}
