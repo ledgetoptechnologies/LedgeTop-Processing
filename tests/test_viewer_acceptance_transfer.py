@@ -62,7 +62,8 @@ class FakeViewer:
         assert h["x-ltds-signature"] == expected_signature
         self.calls.append((method, path))
         api_version = "v2" if "/reference/v2/" in parsed.path else "v1"
-        base = f"/api/v1/reference/{api_version}/acceptances/receipt-test"
+        receipt_id = parsed.path.split("/")[6]
+        base = f"/api/v1/reference/{api_version}/acceptances/{receipt_id}"
 
         def response(status, value):
             code, data = self._json(status, value)
