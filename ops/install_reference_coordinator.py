@@ -256,7 +256,7 @@ from processing.reference_runtime import load_reference_settings
 config=from_environment(); settings=load_reference_settings('/run/processing-reference/runtime.json',config)
 ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(settings.listener['certificate'],settings.listener['privateKey'])
 ssl.create_default_context(cafile=settings.listener['clientCA'])
-if set(settings.viewer_bearers.values())!={'staging'}:raise AssertionError('unexpected viewer environment')
+assert set(settings.viewer_bearers.values())=={'staging'}
 print(json.dumps({'settingsValid':True,'uidValidated':10001,'stagingOnly':True}))
 """
 

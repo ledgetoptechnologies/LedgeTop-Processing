@@ -61,6 +61,7 @@ class Stopped(ValueError):pass
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
 
+
 def cluster_http_json(route,token,deadline,limit=65536):
     """Fixed private NodeODM reads with one absolute header/body deadline."""
     if (route not in ('/info','/task/list') or type(token) is not str or not 1<=len(token)<=4096
