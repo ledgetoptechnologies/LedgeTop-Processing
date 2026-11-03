@@ -1034,7 +1034,7 @@ else:
         self.engines['cluster'].finish(engine_uuid)
         self.make_queue_service()
         self.assertEqual(self.task(identifier)['job']['status'], 'held')
-        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
         before = list(self.engines['cluster'].calls)
         with self.assertRaises(Conflict):
             self.service.cancel(identifier)
@@ -1289,7 +1289,7 @@ else:
         self.assertEqual(self.task(first)['job']['status'],'held')
         self.service.tick()
         self.assertEqual(self.task(first)['job']['status'],'held')
-        self.assertEqual(self.service.info(first)['status']['code'],20)
+        self.assertEqual(self.service.info(first)['status']['code'],10)
         self.assertEqual(self.task(second)['job']['status'],'queued')
         self.assertIsNone(self.task(second)['node_id'])
         self.assertEqual(len(self.fleet.commits),1)
@@ -1392,7 +1392,7 @@ else:
                 self.service.tick()
                 self.assertEqual(self.engines['cluster'].calls, before)
                 info = self.service.info(identifier)
-                self.assertEqual(info['status']['code'], 20)
+                self.assertEqual(info['status']['code'], 10)
                 self.assertIs(info['ledgetopHeld'], True)
                 # Resolve only the fake's known-not-started engine so the next
                 # independent subcase can use this shared test fixture.
@@ -1426,7 +1426,7 @@ else:
         self.assertEqual(sum(c[0] == 'cancel' for c in self.engines['cluster'].calls), 1)
         self.finish(identifier, 50)
         self.service.tick()
-        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
         self.assertTrue(self.service.info(identifier)['ledgetopHeld'])
         self.assertEqual(self.task(identifier)['job']['status'], 'held')
         self.assertEqual(self.task(identifier)['error'], 'cancel_termination_unverified')
@@ -1437,7 +1437,7 @@ else:
         self.service.tick()
         self.assertEqual(self.task(identifier)['job']['status'], 'held')
         self.assertEqual(self.task(identifier)['error'], 'cancel_termination_unverified')
-        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
         self.assertIsNone(self.task(next_id)['node_id'])
         self.assertEqual(self.fleet.max_active, 1)
 
@@ -1457,7 +1457,7 @@ else:
         self.make_queue_service()
         self.service.tick()
         self.assertEqual(self.task(identifier)['job']['status'], 'held')
-        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
         self.assertIsNone(self.task(next_id)['node_id'])
 
     def test_lost_commit_ack_queued_upstream_retains_slot_until_later_completion(self):

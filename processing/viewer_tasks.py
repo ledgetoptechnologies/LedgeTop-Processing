@@ -719,7 +719,9 @@ class TaskStore:
                             'progress':row['progress'],'imagesCount':count,'dateCreated':row['created_at']}
                 if job is None or job['status'] not in ('queued','running','held'):
                     raise
-                code=10 if job['status']=='queued' else 20
+                # Evidence corruption means observed execution state cannot be
+                # trusted; retain the job without claiming processing.
+                code=10
                 return {'uuid':identifier,'name':row['name'],'status':{'code':code},
                         'progress':row['progress'],'imagesCount':count,'dateCreated':row['created_at'],
                         'ledgetopHeld':True,'ledgetopHoldReason':'option_evidence_invalid'}
@@ -732,10 +734,10 @@ class TaskStore:
         cancelled_result = (job and state == 'failed' and isinstance(job['result'], dict)
                             and job['result'].get('cancelled') is True)
         if state == 'held':
-            # A hold is nonterminal and retains the shared slot. NodeODM has no
-            # held status; code 20 keeps existing clients polling rather than
-            # misreporting a failure and potentially starting a new attempt.
-            code = 20
+            # Never assert engine processing for a held task: the hold can
+            # arise before engine start, and older rows do not preserve proof.
+            # The explicit hold marker keeps compatible clients from retrying.
+            code = 10
         elif task['stage'] == 'cancelled' or cancelled_result:
             code = 50
         else:
@@ -747,7 +749,7 @@ class TaskStore:
         info = {'uuid': identifier, 'name': task['name'], 'status': status,
                 'progress': 100 if code == 40 else task['progress'],
                 'imagesCount': task['images_count'], 'dateCreated': task['created_at']}
-        if state == 'held' and code == 20:
+        if state == 'held':
             # Fixed marker only: held notes and engine error text can be private.
             info['ledgetopHeld'] = True
         return info

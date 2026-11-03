@@ -417,7 +417,7 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
         self.queue = Queue(self.root / 'queue', node_ids=('cluster', 'main'), treedar_node_ids=('main',))
         self.queue.allowed_profiles.add(VIEWER_PROFILE)
         self.store = TaskStore(self.queue, self.root / 'inputs')
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
         self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
         self.assertIsNone(self.claim())
         self.queue.complete(claimed['id'], {'claimToken': claimed['claimToken'], 'status': 'succeeded', 'result': {}})
@@ -444,10 +444,10 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
         self.queue = Queue(self.root / 'queue', node_ids=('cluster', 'main'),
                            treedar_node_ids=('main',), viewer_enabled=True)
         self.store = TaskStore(self.queue, self.root / 'inputs')
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
         self.assertEqual(self.store.task(self.identifier)['job']['status'], 'held')
         self.queue.operator(claim['id'], 'hold', {'note': 'operator uncertainty requires inspection'})
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
         self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
         self.assertNotIn('operator uncertainty requires inspection', str(self.store.info(self.identifier)))
 
@@ -472,7 +472,7 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
                     self.store.remove(self.identifier)
         self.assertEqual(self.queue.get(claimed['id'])['status'], 'held')
         self.store.update(self.identifier, stage='cancelled')
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
         self.assertIs(self.store.info(self.identifier)['ledgetopHeld'], True)
         self.store.update(self.identifier, stage='held')
         # A stale retry may query or repeat commit, but cannot replace inputs,
