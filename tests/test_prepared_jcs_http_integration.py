@@ -1,4 +1,4 @@
-import copy, hashlib, json, os, subprocess, sys, tempfile, threading, unittest, uuid
+import copy, hashlib, http.client, json, os, subprocess, sys, tempfile, threading, unittest, uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,18 +39,43 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.api=api
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         def post(obj, path='/ltds/prepared/v3/submissions', caller=token):
-            request=Request('http://127.0.0.1:%d%s'%(server.server_port,path),data=json.dumps(obj).encode(),headers={'Authorization':'Bearer '+caller},method='POST')
+            request=Request('http://127.0.0.1:%d%s'%(server.server_port,path),data=json.dumps(obj).encode(),headers={'Authorization':'Bearer '+caller,'X-LTDS-Expected-Coordinator-Authority':queue.authority_id},method='POST')
             try:
                 with urlopen(request,timeout=5) as response: return response.status,json.load(response)
             except HTTPError as error: return error.code,json.load(error)
         def get(path,caller=token):
-            request=Request('http://127.0.0.1:%d%s'%(server.server_port,path),headers={'Authorization':'Bearer '+caller})
+            request=Request('http://127.0.0.1:%d%s'%(server.server_port,path),headers={'Authorization':'Bearer '+caller,'X-LTDS-Expected-Coordinator-Authority':queue.authority_id})
             try:
                 with urlopen(request,timeout=5) as response: return response.status,json.load(response)
             except HTTPError as error: return error.code,json.load(error)
         try:
+            missing=Request('http://127.0.0.1:%d/ltds/prepared/v3/submissions'%server.server_port,data=json.dumps(env).encode(),headers={'Authorization':'Bearer '+token},method='POST')
+            with self.assertRaises(HTTPError) as missing_pin: urlopen(missing,timeout=5)
+            self.assertEqual(missing_pin.exception.code,400)
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+            try:
+                payload=json.dumps(env).encode();conn.putrequest('POST','/ltds/prepared/v3/submissions')
+                conn.putheader('Authorization','Bearer '+token)
+                conn.putheader('X-LTDS-Expected-Coordinator-Authority',queue.authority_id)
+                conn.putheader('X-LTDS-Expected-Coordinator-Authority',queue.authority_id)
+                conn.putheader('Content-Length',str(len(payload)));conn.endheaders(payload)
+                response=conn.getresponse();self.assertEqual(response.status,400);response.read()
+            finally: conn.close()
+
+            wrong=Request('http://127.0.0.1:%d/ltds/prepared/v3/submissions'%server.server_port,data=json.dumps(env).encode(),headers={'Authorization':'Bearer '+token,'X-LTDS-Expected-Coordinator-Authority':str(uuid.uuid4())},method='POST')
+            with self.assertRaises(HTTPError) as rejected: urlopen(wrong,timeout=5)
+            self.assertEqual(rejected.exception.code,503)
+            self.assertEqual(queue.list(),[])
             status,job=post(env); self.assertEqual(status,201)
             self.assertEqual(job['authorityId'],queue.authority_id)
+            delivery='/ltds/prepared/v3/submissions/'+env['submission']['submissionId']
+            for route in ('/source-grant','/accepted-copies'):
+                self.assertEqual(post({'synthetic':'payload'},delivery+route)[0],503)
+                self.assertEqual(post({'synthetic':'payload'},delivery+route,'synthetic-jcs-other-token-0001')[0],404)
+            with queue._db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_transfer_grants').fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],0)
+
             # A separately configured wrong installation pin must not use the DB's value.
             server.api=make_api(store,policy,str(uuid.uuid4()))
             self.assertEqual(post(env)[0],503)
@@ -76,7 +101,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
 
             with self.assertRaises(JCSRuntimeUnavailable): disabled_store.next_for_node('cluster')
             with self.assertRaises(JCSRuntimeUnavailable): disabled_store.list()
-            failure=disabled_api.handle('GET','/ltds/prepared/v2/submissions/'+env['submission']['submissionId'],{'Authorization':'Bearer '+token},protected_transport=True)
+            failure=disabled_api.handle('GET','/ltds/prepared/v2/submissions/'+env['submission']['submissionId'],{'Authorization':'Bearer '+token,'X-LTDS-Expected-Coordinator-Authority':queue.authority_id},protected_transport=True)
             self.assertEqual((failure.status,failure.body),(503,{'error':'prepared_runtime_unavailable'}))
             with self.assertRaises(ValueError): make_api(disabled_store,policy)
 
