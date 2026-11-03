@@ -178,11 +178,22 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 finally:undo()
                 census()
 
-    def test_failed_and_cancelled_complete_viewer_tasks_remain_retained(self):
+    def test_failed_and_cancelled_complete_viewer_tasks_survive_update_and_rollback(self):
         with self.queue._db() as db:
             db.execute("UPDATE viewer_tasks SET stage='failed' WHERE directory='task-0'")
             db.execute("UPDATE viewer_tasks SET stage='cancelled' WHERE directory='task-1'")
         self.assertEqual(module.volume_census(self.volume,uid=os.geteuid())['tables']['viewer_tasks']['count'],2)
+        operation=self.root/'terminal-operation';operation.mkdir(mode=0o700)
+        updater=module.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+        state=updater.prepare(TARGET,SOURCE,MAIN)
+        self.state=state  # the synthetic transport labels candidates with this operation
+        self.transport.loss='start'
+        with self.assertRaises(OSError):updater.activate(state)
+        self.assertEqual(updater.rollback(state)['phase'],'rolled_back')
+        self.assert_retained_viewer_bytes()
+        with self.queue._db() as db:
+            stages=sorted(row[0] for row in db.execute('SELECT stage FROM viewer_tasks'))
+        self.assertEqual(stages,['cancelled','failed'])
 
     def test_nonterminal_viewer_task_refuses_fresh_prepare(self):
         with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET phase='processing' WHERE directory='task-1'")

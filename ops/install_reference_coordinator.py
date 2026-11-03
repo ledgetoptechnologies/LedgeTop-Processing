@@ -158,6 +158,15 @@ def local_clients():
     return env, api, operator
 
 
+# One rule for every path that keeps Viewer tasks across an install, update,
+# backup or rollback: a task is retained only once it is complete with a
+# terminal stage. Failed and cancelled tasks are kept too; their inputs and
+# partial results are still client data. The scripts below spell out the same
+# SQL because they run inside the container; a test binds them to this rule.
+TERMINAL_VIEWER_TASK = "phase='complete' AND stage IN ('succeeded','failed','cancelled')"
+NOT_TERMINAL_VIEWER_TASK = 'NOT (' + TERMINAL_VIEWER_TASK + ')'
+
+
 def activity(api, *, retained_viewer=False):
     if api.json('GET', '/v1/prototype/authority')['authorityId'] != AUTHORITY:
         raise CutoverStopped('queue_authority_changed')
@@ -174,9 +183,10 @@ def activity(api, *, retained_viewer=False):
                 raise CutoverStopped('native_viewer_not_idle')
     # This facade intentionally has no /task/list endpoint. Read only aggregate
     # state through the existing owner container; never mistake a 404 for empty.
-    # retained_viewer: an update keeps terminal Viewer tasks; only count the
-    # ones that are not complete. The historical installer still requires none.
-    where = "stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'" if retained_viewer else 'removed=0'
+    # retained_viewer: an update keeps terminal Viewer tasks (succeeded, failed or
+    # cancelled, all complete) because their directories can hold client data;
+    # only count the others. The historical installer still requires none.
+    where = NOT_TERMINAL_VIEWER_TASK if retained_viewer else 'removed=0'
     query = """import json,sqlite3
 db=sqlite3.connect('file:/prototype-state/jobs.sqlite3?mode=ro',uri=True,timeout=3)
 try: print(json.dumps({'incompleteViewerTasks':db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE " + """ + repr(where) + """ ).fetchone()[0], 'viewerTaskCount':db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0]}))
@@ -350,7 +360,7 @@ def database(path):
   tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
   viewer_tasks=db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0] if 'viewer_tasks' in tables else 0
   if 'viewer_tasks' in tables:
-   assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0]==0
+   assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage IN ('succeeded','failed','cancelled'))").fetchone()[0]==0
   return {'count':len(jobs),'sha256':hashlib.sha256(json.dumps(jobs,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
    'nativeViewerTasks':viewer_tasks}
  finally:db.close()
@@ -557,7 +567,7 @@ try:
    result=json.loads(r['result']) if r['result'] else None,createdAt=r['created_at'],updatedAt=r['updated_at']))
  assert not any(s in ('queued','running','held') for s in statuses)
  native=db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0]
- incomplete=db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0]
+ incomplete=db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage IN ('succeeded','failed','cancelled'))").fetchone()[0]
  assert incomplete==0
  reference=db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0]
  history=dict(count=len(rows),statusCounts=dict(Counter(statuses)),sha256=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest(),nativeViewerTasks=native)
