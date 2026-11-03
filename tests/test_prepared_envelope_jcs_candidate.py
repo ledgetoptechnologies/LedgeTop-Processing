@@ -57,6 +57,27 @@ class PreparedEnvelopeJcsTests(unittest.TestCase):
         self.assertNotEqual(normalized['requestDigest'],candidate.p.digest(self.sub))
         self.assertNotEqual(normalized['pipelineDigest'],candidate.p.digest(self.sub['pipeline']))
 
+    def test_trusted_float_list_normalization_and_bool_separation(self):
+        self.policy['optionDefinitions']['resolution']['domain']=[1.0,-0.0]
+        for value in (1,1.0,0,-0.0):
+            self.sub['pipeline']['odm']['options']={'resolution':value}
+            self.run_candidate()
+        self.sub['pipeline']['odm']['options']={'resolution':True}
+        with self.assertRaises(ValueError): self.run_candidate()
+        for invalid in ([True],[float('nan')],[float('inf')],[]):
+            self.policy['optionDefinitions']['resolution']['domain']=invalid
+            self.sub['pipeline']['odm']['options']={'resolution':1}
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError): self.run_candidate()
+
+    def test_enum_requires_valid_explicit_domain_and_strings_remain_available(self):
+        self.sub['pipeline']['odm']['options']={'quality':'ultra','title':'custom'}
+        self.run_candidate()
+        for invalid in (None,[],['ultra',1],{'min':0,'max':1}):
+            self.policy['optionDefinitions']['quality']['domain']=invalid
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError): self.run_candidate()
+        self.policy['optionDefinitions']['quality']['domain']=['high']
+        with self.assertRaises(ValueError): self.run_candidate()
+
     def test_bounded_duplicate_safe_parser(self):
         for raw in (b'{"a":1,"a":2}',b'['*25+b'0'+b']'*25,b'{"a":NaN}', b'{"a":1e999}', b'{"a":9007199254740992}', b'\xff', b' '*(candidate.p.MAX_BODY_BYTES+1)):
             with self.subTest(raw=raw[:50]),self.assertRaises(ValueError): candidate.validate(raw,trusted_policy=self.policy,environment='production')

@@ -71,3 +71,8 @@ and canonical normalized input, recompute consistently in store and worker,
 separate v2/v3 replay identities, revalidate policy, and obtain Viewer agreement
 on treating all server-owned hashes as opaque. Shared end-to-end digest-chain
 vectors and compatibility tests are a release prerequisite.
+
+The pure function validates the supplied current policy even on an exact
+canonical replay. It does not establish whether an already accepted request
+should replay against its original durable policy or a changed current policy;
+policy freshness and authenticated recovery must be agreed before integration.
