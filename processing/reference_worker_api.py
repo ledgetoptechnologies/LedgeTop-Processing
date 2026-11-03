@@ -163,10 +163,12 @@ class ReferenceWorkerAPI:
                 if job['status'] != 'running':
                     raise Conflict('worker execution is not running')
                 if kind == 'reservation':
-                    return Response(200, self.store.reserve(job_id, payload[field], node_id=identity['node_id']))
+                    return Response(200, self.store.reserve(job_id, payload[field], node_id=identity['node_id'],
+                        worker_identity=identity, claim_token=payload['claimToken']))
                 if payload[field] not in ('fetching', 'processing'):
                     raise ValueError('worker may only advance transfer and processing phases')
-                return Response(200, self.store.update_phase(job_id, payload[field]))
+                return Response(200, self.store.update_phase(job_id, payload[field],
+                    worker_identity=identity, claim_token=payload['claimToken']))
             recovery = re.fullmatch(re.escape(PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(recovery-state|recover|recovery-receipts/([a-f0-9-]{36}))', path) if type(path) is str else None
             if recovery:
                 if self.recovery is None:

@@ -155,6 +155,21 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.assertEqual(response.body['job']['jobId'], self.job['jobId'])
         self.assertEqual(response.body['execution']['jobId'], self.job['jobId'])
 
+    def test_stale_reservation_request_cannot_mutate_reclaimed_job(self):
+        original_claim = self.claim()
+        original_owned = self.api._owned_job
+        def release_between_checks(job_id, identity, token):
+            result = original_owned(job_id, identity, token)
+            self.store.release_unstarted_claim(job_id, **identity,
+                claim_request_id='claim-1', claim_token=token)
+            self.store.claim(job_id, **identity, claim_request_id='claim-2')
+            return result
+        with patch.object(self.api, '_owned_job', side_effect=release_between_checks):
+            response = self.request('POST', '/jobs/' + self.job['jobId'] + '/reservation',
+                {'claimToken': original_claim['claimToken'], 'transferRequest': self.fixture['transferRequest']})
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'waiting_capacity')
+
     def test_candidate_inventory_private_api_discovers_second_node_while_first_busy(self):
         with tempfile.TemporaryDirectory() as directory:
             queue = Queue(directory, reference_enabled=True, node_ids=('cluster', 'main'),

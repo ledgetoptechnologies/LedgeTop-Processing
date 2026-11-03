@@ -571,10 +571,23 @@ class ReferenceStore:
             pipelineDigest=row['pipeline_digest'], status=row['queue_status'],
             executionPhase=row['phase'], heldReason=row['held_reason'])
 
-    def update_phase(self, job_id, phase, *, expected_phase=None, error=None):
+    @staticmethod
+    def _check_worker_claim(db, job_id, identity, token):
+        if identity is None:
+            return
+        claim = db.execute('SELECT node_id,worker_id,instance_id,token FROM reference_claims WHERE job_id=?',
+                           (job_id,)).fetchone()
+        if (claim is None or type(token) is not str or not token.isascii()
+                or tuple(claim[k] for k in ('node_id', 'worker_id', 'instance_id')) !=
+                   (identity['node_id'], identity['worker_id'], identity['worker_instance_id'])
+                or not hmac.compare_digest(claim['token'], token)):
+            raise Conflict('worker claim changed')
+
+    def update_phase(self, job_id, phase, *, expected_phase=None, error=None, worker_identity=None, claim_token=None):
         _reason(error)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_worker_claim(db, job_id, worker_identity, claim_token)
             row = self._row(db, job_id)
             self._transition(row, phase, expected_phase)
             if phase in ("fetching", "processing") and row["status"] != "running":
@@ -594,7 +607,7 @@ class ReferenceStore:
                            (error or "reference_held", job_id))
             return self._public(self._row(db, job_id))
 
-    def reserve(self, job_id, transfer_request, *, node_id):
+    def reserve(self, job_id, transfer_request, *, node_id, worker_identity=None, claim_token=None):
         """Record externally admitted capacity for the claimed worker.
 
         Expiry does not reset this reservation or release uncertain ownership.
@@ -620,6 +633,7 @@ class ReferenceStore:
         encoded = _json(transfer_request)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._check_worker_claim(db, job_id, worker_identity, claim_token)
             row = self._row(db, job_id)
             if row["status"] != "running" or row["node_id"] != node_id or not row["private_claim_token"]:
                 raise Conflict("reservation requires a running reference claim on this node")

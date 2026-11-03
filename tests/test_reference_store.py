@@ -188,6 +188,12 @@ class ReferenceStoreTests(unittest.TestCase):
             self.store.claim(job['jobId'], **binding)
         new = self.store.claim(job['jobId'], **{**binding, 'claim_request_id': 'new-request'})
         self.assertNotEqual(new['claimToken'], token)
+        identity = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')
+        with self.assertRaises(Conflict):
+            self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster',
+                               worker_identity=identity, claim_token=token)
+        with self.assertRaises(Conflict):
+            self.store.update_phase(job['jobId'], 'fetching', worker_identity=identity, claim_token=token)
         with self.assertRaises(Conflict):
             self.store.claim_snapshot(job['jobId'], node_id='cluster', worker_id='worker',
                 worker_instance_id='instance', claim_token=token)
