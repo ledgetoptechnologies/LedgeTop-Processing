@@ -63,6 +63,14 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
     def grant(self, token="test-token", **updates):
         return validate_source_grant(self.raw_grant(token, **updates), job=self.job, clock=lambda: 100)
 
+    def test_grant_may_expire_at_reservation_deadline(self):
+        grant = self.grant(expiresAt=self.transfer["expiresAt"])
+        self.assertEqual(grant.expires, 2082758400.0)
+
+    def test_grant_must_expire_before_it_is_already_stale(self):
+        with self.assertRaisesRegex(TransferError, "source grant expired"):
+            self.grant(expiresAt="1970-01-01T00:01:40Z")
+
     def make_client(self, opener=None):
         return SourceRangeClient("https://broker.example", self.root / "progress.sqlite",
                                  opener=opener or self.opener, clock=lambda: self.now)

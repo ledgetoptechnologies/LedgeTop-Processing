@@ -260,7 +260,7 @@ def validate_source_grant(grant, *, job, clock=time.time):
     lease_expires = timestamp(transfer["expiresAt"], "source reservation expiry")
     if expires <= _now(clock):
         raise TransferError("source grant expired")
-    if expires >= lease_expires or lease_expires <= _now(clock):
+    if expires > lease_expires or lease_expires <= _now(clock):
         raise TransferError("source grant exceeds reservation lease")
     return ValidatedSourceGrant(identity, expires, tuple(objects), grant["chunkBytes"],
                                 grant["requestBudget"], grant["byteBudget"], grant["attemptBudget"], token)
