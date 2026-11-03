@@ -794,6 +794,10 @@ class TaskStore:
         info = {'uuid': identifier, 'name': task['name'], 'status': status,
                 'progress': 100 if code == 40 else task['progress'],
                 'imagesCount': task['images_count'], 'dateCreated': task['created_at']}
+        if job and job['status'] == 'queued' and task['node_id'] is None:
+            # This is a queue observation, not a diagnosis of why dispatch has
+            # not happened. It also covers queued jobs beyond the queue head.
+            info['ledgetopQueueState'] = 'waiting_for_dispatch'
         if state == 'held':
             # Fixed marker only: held notes and engine error text can be private.
             info['ledgetopHeld'] = True
