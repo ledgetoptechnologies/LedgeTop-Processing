@@ -517,6 +517,32 @@ class ReferenceRuntimeTests(unittest.TestCase):
         changed["nodes"][0]["engineVersion"] = "synthetic-2"
         self.assertNotEqual(first[0], discovered_policy(changed, self.config)[0])
 
+    def test_inventory_order_and_capacity_are_bound_to_capability_fingerprint(self):
+        inventory = (dict(id='cluster', physicalHostId='small-pc', maxPhotos=1000,
+                          capabilities=['odm']),
+                     dict(id='main', physicalHostId='large-pc', maxPhotos=None,
+                          capabilities=['odm', 'treedar']))
+        baseline = discovered_policy(self.snapshot, replace(self.config, node_inventory=inventory))
+        reordered = discovered_policy(self.snapshot, replace(self.config, node_inventory=inventory[::-1]))
+        changed = ({**inventory[0], 'maxPhotos': 999}, inventory[1])
+        resized = discovered_policy(self.snapshot, replace(self.config, node_inventory=changed))
+        self.assertNotEqual(baseline[0], reordered[0])
+        self.assertNotEqual(baseline[0], resized[0])
+        self.assertEqual(baseline[1:], reordered[1:])
+
+    def test_held_inventory_settings_do_not_require_legacy_urls(self):
+        inventory = (dict(id='cluster', physicalHostId='small-pc', maxPhotos=1000,
+                          capabilities=['odm'], origin='http://192.0.2.1:3000', token=''),
+                     dict(id='main', physicalHostId='large-pc', maxPhotos=None,
+                          capabilities=['odm'], origin='http://192.0.2.2:3000', token=''))
+        self.config = replace(self.config, local_node_url='', main_node_url='',
+                              node_inventory=inventory, per_node_slots=True)
+        settings = self.settings()
+        self.assertEqual(set(settings.workers), {'cluster', 'main'})
+        self.config = replace(self.config, per_node_slots=False)
+        with self.assertRaises(RuntimeConfigurationError):
+            self.settings()
+
     def test_listener_only_starts_explicitly_and_stops_before_queue_release(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
         self.addCleanup(queue.close)

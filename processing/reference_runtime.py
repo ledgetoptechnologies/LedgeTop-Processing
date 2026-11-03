@@ -103,8 +103,12 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError("invalid TLS listener address")
         for field in ("certificate", "privateKey", "clientCA"):
             _file(listener[field], private=field == "privateKey")
-        if (not config.prototype_state_dir or not config.local_node_url or not config.main_node_url
-                or "main" not in config.prototype_node_ids):
+        inventory = getattr(config, 'node_inventory', ())
+        if (not config.prototype_state_dir or
+                (inventory and (not config.per_node_slots or
+                 tuple(node['id'] for node in inventory) != config.prototype_node_ids)) or
+                (not inventory and (not config.local_node_url or not config.main_node_url
+                                    or 'main' not in config.prototype_node_ids))):
             raise RuntimeConfigurationError("reference runtime requires persistent shared state and both configured nodes")
         viewers = value["viewerBearers"]
         workers = value["workers"]
@@ -238,11 +242,17 @@ def discovered_policy(snapshot, config):
         options.append(option)
     options.sort(key=lambda option: option["name"])
     options_fingerprint = p.digest(dict(protocol="reference-options-v1", definitions=options))
-    capability = p.digest(dict(protocol="reference-capabilities-v1", options=options_fingerprint,
+    policy = dict(protocol="reference-capabilities-v1", options=options_fingerprint,
         nodes=[{key: node.get(key) for key in ("role", "available", "capabilitiesSha256", "engine", "engineVersion")}
                for node in sorted(snapshot["nodes"], key=lambda node: node["role"])],
         localMaxPhotos=config.local_max_photos, localMaxInputBytes=config.local_max_input_bytes,
-        treedar=False, gaussian_splat=False))
+        treedar=False, gaussian_splat=False)
+    inventory = getattr(config, 'node_inventory', ())
+    if inventory:
+        # Order affects dispatch. Never incorporate endpoints or credentials.
+        policy['orderedInventory'] = [{key: node[key] for key in
+            ('id', 'physicalHostId', 'maxPhotos', 'capabilities')} for node in inventory]
+    capability = p.digest(policy)
     return capability, options_fingerprint, frozenset(option["name"] for option in options)
 
 
@@ -365,9 +375,13 @@ class ReferenceRuntime:
                     for environment, target in settings.viewer_acceptance_targets.items()}
                 self._viewer_transfer_worker = ReferenceViewerTransferWorker(self.store,
                     EnvironmentSender(senders), trusted_receipt_keys=settings.viewer_receipt_keys)
-            discover = discover or (lambda: catalog([
-                ("local", config.local_node_url, config.local_node_token),
-                ("main", config.main_node_url, config.main_node_token)]))
+            if discover is None:
+                if inventory:
+                    discover = lambda: catalog([(node['id'], node['origin'], node['token'])
+                        for node in inventory if 'odm' in node['capabilities']], inventory=True)
+                else:
+                    discover = lambda: catalog([("local", config.local_node_url, config.local_node_token),
+                                                ("main", config.main_node_url, config.main_node_token)])
             staged=None
             if settings.staged_ack_bearers is not None:
                 if not STAGED_ACK_SCHEMA_QUALIFIED:
