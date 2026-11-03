@@ -35,7 +35,7 @@ class GuardedUploadGateBusy(UnissuedGuardedUpload):
 
 class GuardedNativeProxy:
     def __init__(self, *, engine, engine_id, node_id, worker_id, authority_id,
-                 coordinator_origin, generation, bearer, spool_root):
+                 coordinator_origin, generation, bearer, spool_root, job_claim_key=None, require_job_claim=False):
         if (type(bearer) is not str or not 16 <= len(bearer) <= 4096
                 or not all(0x21 <= ord(c) <= 0x7e for c in bearer)):
             raise ValueError('private bearer required')
@@ -49,6 +49,13 @@ class GuardedNativeProxy:
         self.engine, self.engine_id = engine, engine_id
         self.node_id, self.worker_id, self.authority_id = node_id, worker_id, authority_id
         self.origin, self.generation, self._bearer, self.root = coordinator_origin, generation, bearer, root
+        if job_claim_key is not None and (not isinstance(job_claim_key, bytes) or not 32 <= len(job_claim_key) <= 4096
+                or hmac.compare_digest(job_claim_key, bearer.encode())):
+            raise ValueError('independent job claim key required')
+        if type(require_job_claim) is not bool or (require_job_claim and job_claim_key is None):
+            raise ValueError('job claim enforcement unavailable')
+        self._job_claim_key = job_claim_key
+        self._require_job_claim = require_job_claim
 
     def _auth(self, bearer, protected_transport):
         if (protected_transport is not True or type(bearer) is not str
@@ -91,7 +98,7 @@ class GuardedNativeProxy:
             requestDigest=digest, validation='native-engine-contract-passed')))
         return result
 
-    def initialize(self, task, *, bearer, protected_transport):
+    def initialize(self, task, *, bearer, protected_transport, job_claim=None):
         self._auth(bearer, protected_transport)
         if type(task) is not dict or set(task) != {'name', 'engine_uuid', 'outputs', 'options'}:
             raise GateError('invalid task')
@@ -115,6 +122,15 @@ class GuardedNativeProxy:
                 raise ValueError()
         except (ValueError, protocol.ProtocolError):
             raise GateError('invalid native task settings') from None
+        verified = None
+        if self._require_job_claim and job_claim is None:
+            raise GateError('signed job claim required')
+        if job_claim is not None:
+            from .node_job_claim import verify_job_claim
+            verified = verify_job_claim(job_claim, self._job_claim_key, node=self.node_id,
+                authority=self.authority_id, gate_generation=self.generation, task=identifier)
+            if verified['requestSha256'] != protocol.digest(task):
+                raise GateError('job claim request differs')
         with NodeGate(self.engine_id) as gate:
             receipt = secrets.token_hex(16)
             gate.reserve(self.node_id, self.origin, self.authority_id, self.generation, receipt)
@@ -122,6 +138,8 @@ class GuardedNativeProxy:
                 nodeId=self.node_id, authorityId=self.authority_id))
             journal = HostMutationJournal(gate, receipt).create()
             try:
+                if verified is not None:
+                    journal.bind_viewer_job(verified)
                 request = dict(task=identifier, name=task['name'], outputs=task['outputs'], options=task['options'])
                 self._mutate(journal, self._op(identifier, 'init'), 'init', request,
                     lambda: self.engine.initialize(task))
@@ -223,6 +241,30 @@ class GuardedNativeProxy:
             return {'schema': 'ledgetop-node-mutation-proof-v1', 'claim': dict(claim),
                     'state': evidence['state'], 'ackDigest': evidence['ackDigest'],
                     'held': True}
+
+    def inspect_bound_mutation(self, envelope, operation, *, bearer, protected_transport):
+        """Verify durable Viewer-to-node mapping; return observation only."""
+        self._auth(bearer, protected_transport)
+        from .node_job_claim import verify_job_claim
+        if (type(operation) is not dict or set(operation) != {'operationId', 'kind', 'requestDigest', 'nonce'}
+                or type(operation['nonce']) is not str or not re.fullmatch(r'[0-9a-f]{64}', operation['nonce'])):
+            raise GateError('invalid inspection operation')
+        claim = envelope.get('claim') if isinstance(envelope, dict) else None
+        task = claim.get('engineTaskId') if isinstance(claim, dict) else None
+        self._task(task)
+        verified = verify_job_claim(envelope, self._job_claim_key, node=self.node_id,
+            authority=self.authority_id, gate_generation=self.generation, task=task, admission=False)
+        with NodeGate(self.engine_id) as gate:
+            receipt = self._owner(gate, task)
+            journal = HostMutationJournal(gate, receipt).open()
+            try:
+                journal.verify_viewer_job(verified)
+                evidence = journal.inspect_operation(operation['operationId'], operation['kind'], operation['requestDigest'])
+            finally:
+                journal.close()
+        return {'schema': 'ledgetop-bound-node-observation-v1', 'claim': verified,
+                'operation': dict(operation), 'state': evidence['state'],
+                'ackDigest': evidence['ackDigest'], 'held': True}
 
     def recover_acknowledged_spool(self, budget, name):
         """Reconcile one locally owned upload, never an uncertain mutation.

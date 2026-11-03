@@ -100,6 +100,41 @@ class HostMutationJournal:
             raise GateError('guard journal invalid; inspection required') from error
         return self
 
+    def bind_viewer_job(self, claim):
+        """Durably bind a verified claim before issuing the first mutation.
+
+        The gate lock protects this separate journal transaction. Existing
+        journals with operations may not be retroactively bound.
+        """
+        self._ready()
+        from . import reference_protocol as protocol
+        if type(claim) is not dict or claim.get('engineTaskId') != self.job['id']:
+            raise GateError('invalid viewer job binding')
+        value = protocol.canonical_json(claim).decode('utf-8')
+        digest = protocol.digest(claim)
+        with self._transaction():
+            if self.db.execute('SELECT 1 FROM operations LIMIT 1').fetchone() is not None:
+                raise MutationHeld('cannot bind an issued mutation')
+            self.db.execute('CREATE TABLE IF NOT EXISTS viewer_job_binding '
+                            '(id INTEGER PRIMARY KEY CHECK(id=1), claim_json TEXT NOT NULL, claim_sha256 TEXT NOT NULL)')
+            prior = self.db.execute('SELECT claim_json, claim_sha256 FROM viewer_job_binding WHERE id=1').fetchone()
+            if prior is None:
+                self.db.execute('INSERT INTO viewer_job_binding VALUES(1,?,?)', (value,digest))
+            elif prior != (value,digest):
+                raise GateError('viewer job binding differs')
+
+    def verify_viewer_job(self, claim):
+        """Verify exact persisted identity; never authorize resume."""
+        self._current(allow_completion=True)
+        from . import reference_protocol as protocol
+        if self.db is None: raise GateError('guard journal not open')
+        try:
+            row = self.db.execute('SELECT claim_json, claim_sha256 FROM viewer_job_binding WHERE id=1').fetchone()
+            expected = (protocol.canonical_json(claim).decode('utf-8'), protocol.digest(claim))
+            if row != expected: raise GateError('viewer job binding differs')
+        except sqlite3.Error as exc:
+            raise GateError('viewer job binding unavailable') from exc
+
     def checkpoint_completion(self, *, engine_task, outbox_id, payload):
         """Atomically bind durable completion to this journal without releasing it.
 

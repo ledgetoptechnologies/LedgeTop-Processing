@@ -105,6 +105,11 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                 if self.path == '/v1/initialize' and set(request) == {'task'}:
                     adapter.initialize(request['task'], **args)
                     result = {'accepted': True}
+                elif self.path == '/v1/initialize-bound' and set(request) == {'task', 'jobClaim'}:
+                    adapter.initialize(request['task'], job_claim=request['jobClaim'], **args)
+                    result = {'accepted': True, 'held': True}
+                elif self.path == '/v1/inspect-bound-mutation' and set(request) == {'jobClaim', 'operation'}:
+                    result = adapter.inspect_bound_mutation(request['jobClaim'], request['operation'], **args)
                 elif self.path == '/v1/commit' and set(request) == {'task'}:
                     result = adapter.commit(request['task'], **args)
                 elif self.path == '/v1/inspect-mutation' and set(request) == {'claim'}:
