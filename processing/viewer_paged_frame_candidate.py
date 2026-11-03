@@ -46,7 +46,7 @@ def _item(value):
  else:raise ValueError()
  p._integer(value['byteSize'],'size',allow_zero=True);p._hash(value['sha256'],'digest')
 
-def verify(stream,*,expected_page_hashes,expected_items,_capture_selection=False):
+def verify(stream,*,expected_page_hashes,expected_items,_capture_selection=False,_dataset_count_v2=False):
  """Bound read/parse and validate pins; consume no untrusted external side effects.
 
  Expected hashes/count must be independently trusted. A successful result is
@@ -82,7 +82,7 @@ def verify(stream,*,expected_page_hashes,expected_items,_capture_selection=False
      generated+=1
      if generated>1:raise ValueError()
      gcp_refs=item['sourceFiles'];generated_record=dict(item)
-  if count!=expected_items or stream.read(1)!=b'':raise ValueError()
+  if (count-generated if _dataset_count_v2 else count)!=expected_items or stream.read(1)!=b'':raise ValueError()
   if any(source_facts.get(ref['datasetFileId'])!=(ref['relativePath'],ref['sha256']) for ref in gcp_refs):raise ValueError()
   result={'state':'held_no_viewer_authority_or_mapping','objects':count,'pages':len(expected_page_hashes),'generatedGcp':generated,'framedBytes':total}
   if _capture_selection:
@@ -93,3 +93,12 @@ def verify(stream,*,expected_page_hashes,expected_items,_capture_selection=False
    return result,selected
   return result
  except (ValueError,TypeError,KeyError,UnicodeError,OverflowError):raise FrameHeld('frame_validation_unavailable') from None
+
+
+def verify_dataset_count_v2(stream,*,expected_page_hashes,expected_dataset_items):
+ """Held versioned count contract: sourceCount counts dataset rows only.
+
+ Generated attempt GCP remains in the pinned frames, but is excluded from the
+ independently signed dataset count. Existing verify() retains original semantics.
+ """
+ return verify(stream,expected_page_hashes=expected_page_hashes,expected_items=expected_dataset_items,_dataset_count_v2=True)
