@@ -138,6 +138,24 @@ def make_handler(config: Config):
             return (probe_node("local", config.local_node_url, config.local_node_token),
                     probe_node("main", config.main_node_url, config.main_node_token))
 
+        def _inventory_nodes(self):
+            if queue is None:
+                raise Conflict('inventory queue unavailable')
+            jobs = queue.list()
+            occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
+            if any(node not in queue.node_ids for node in occupied):
+                raise Conflict('inventory occupancy unavailable')
+            result = []
+            for spec in config.node_inventory:
+                state = queue.get_node(spec['id'])
+                if state is None:
+                    raise Conflict('inventory node state unavailable')
+                report = probe_node(spec['id'], spec['origin'], spec['token'])
+                result.append({**report, 'id': spec['id'], 'physicalHostId': spec['physicalHostId'],
+                    'maxPhotos': spec['maxPhotos'], 'capabilities': list(spec['capabilities']),
+                    'state': state['state'], 'occupied': spec['id'] in occupied})
+            return result
+
         def do_GET(self):
             if facade and facade.handle(self):
                 return
@@ -195,7 +213,14 @@ def make_handler(config: Config):
             elif self.path == '/v1/options':
                 if self._authorized(observer=True):
                     if config.node_inventory:
-                        self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
+                        nodes = [(n['id'], n['origin'], n['token']) for n in config.node_inventory if 'odm' in n['capabilities']]
+                        if not nodes:
+                            self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
+                        snapshot = catalog(nodes, inventory=True)
+                        self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
+                            'viewerNativeApiEnabled': config.viewer_enabled,
+                            'viewerProviderReady': config.viewer_enabled and snapshot['ready'],
+                            'snapshotConsistency': 'best_effort_read_only', **snapshot}); return
                     snapshot = catalog([
                         ('local', config.local_node_url, config.local_node_token),
                         ('main', config.main_node_url, config.main_node_token)])
@@ -206,7 +231,11 @@ def make_handler(config: Config):
             elif self.path == "/v1/nodes":
                 if self._authorized():
                     if config.node_inventory:
-                        self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
+                        try:
+                            self._reply(200, {'nodes': self._inventory_nodes()})
+                        except Conflict:
+                            self._reply(503, {'error': 'inventory_diagnostic_unavailable'})
+                        return
                     self._reply(200, {"nodes": self._nodes()})
             else:
                 self._reply(404, {"error": "not_found"})
@@ -222,8 +251,6 @@ def make_handler(config: Config):
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return
-            if self.path == '/v1/plan' and config.node_inventory:
-                self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
             if prototype and queue is None:
                 self._reply(404, {"error": "prototype_disabled"})
                 return
@@ -301,6 +328,25 @@ def make_handler(config: Config):
             except (ValueError, TypeError, RecursionError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 self._reply(400, {"error": "invalid_request", "detail": str(exc)[:160]})
                 return
+            if config.node_inventory:
+                try:
+                    nodes = self._inventory_nodes()
+                except Conflict:
+                    self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
+                selected = None
+                for node in nodes:
+                    maximum, actual = node['maxPhotos'], node.get('maxImages')
+                    if ('odm' not in node['capabilities'] or node['occupied'] or node['state'] != 'active'
+                            or node.get('ready') is not True or type(node.get('taskQueueCount')) is not int
+                            or node['taskQueueCount'] != 0 or 'maxImages' not in node
+                            or (actual is not None and (type(actual) is not int or actual < 1))):
+                        continue
+                    if any(value is not None and photos > value for value in (maximum, actual)):
+                        continue
+                    selected = node['id']; break
+                self._reply(200, {'mode': 'routing_probe', 'executesWork': False,
+                    'decision': 'node' if selected else 'wait', 'nodeId': selected,
+                    'reason': 'first_eligible' if selected else 'no_eligible_node', 'nodes': nodes}); return
             local, main = self._nodes()
             decision = plan(photos, size, local, main,
                             config.local_max_photos, config.local_max_input_bytes)

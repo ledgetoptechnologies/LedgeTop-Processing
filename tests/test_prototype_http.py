@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -83,10 +84,11 @@ class PrototypeHTTPTests(unittest.TestCase):
         inventory = (
             {'id':'tree', 'physicalHostId':'host-tree', 'origin':'http://192.0.2.1:3000', 'token':'', 'maxPhotos':None, 'capabilities':('treedar',)},
             {'id':'photo', 'physicalHostId':'host-photo', 'origin':'http://192.0.2.2:3000', 'token':'', 'maxPhotos':1000, 'capabilities':('odm',)},
+            {'id':'third', 'physicalHostId':'host-third', 'origin':'http://192.0.2.3:3000', 'token':'', 'maxPhotos':None, 'capabilities':('odm',)},
         )
         self.handler = make_handler(Config(TOKEN, '', '', 1000, 20000,
             prototype_state_dir=self.directory.name, photo_smoke_enabled=True,
-            prototype_node_ids=('tree','photo'), treedar_node_ids=('tree',),
+            prototype_node_ids=('tree','photo','third'), treedar_node_ids=('tree',),
             per_node_slots=True, node_inventory=inventory))
         self.server = start_server(self.handler)
         self.origin = f'http://127.0.0.1:{self.server.server_port}'
@@ -95,10 +97,27 @@ class PrototypeHTTPTests(unittest.TestCase):
         self.assertIsNone(denied['job'])
         _, allowed = self.request('/v1/prototype/claim', {'workerId':'photo-worker', 'nodeId':'photo', 'profiles':[PHOTO_PROFILE]})
         self.assertEqual(allowed['job']['nodeId'], 'photo')
-        for path, body in (('/v1/options', None), ('/v1/nodes', None), ('/v1/plan', {'engine':'odm','photoCount':1,'inputBytes':1})):
-            with self.assertRaises(HTTPError) as caught:
-                self.request(path, body)
-            self.assertEqual(caught.exception.code, 503)
+        with patch('processing.app.probe_node', side_effect=lambda role, origin, token: {
+                'role':role, 'ready':True, 'maxImages':None, 'taskQueueCount':0}), \
+             patch('processing.app.catalog', return_value={'ready':True, 'nodes':[], 'commonOptions':[]}):
+            _, nodes = self.request('/v1/nodes')
+            self.assertEqual([n['id'] for n in nodes['nodes']], ['tree','photo','third'])
+            _, decision = self.request('/v1/plan', {'engine':'odm','photoCount':1001,'inputBytes':1})
+            self.assertEqual((decision['decision'], decision['nodeId']), ('node','third'))
+            _, options = self.request('/v1/options')
+            self.assertTrue(options['ready'])
+            with tempfile.TemporaryDirectory() as removed_dir:
+                removed_handler = make_handler(Config(TOKEN, '', '', 1000, 20000,
+                    prototype_state_dir=removed_dir, photo_smoke_enabled=True,
+                    prototype_node_ids=('tree','photo'), treedar_node_ids=('tree',),
+                    per_node_slots=True, node_inventory=inventory[:2]))
+                removed_server = start_server(removed_handler)
+                try:
+                    req = Request(f'http://127.0.0.1:{removed_server.server_port}/v1/nodes', headers={'Authorization':f'Bearer {TOKEN}'})
+                    with urlopen(req, timeout=5) as response:
+                        self.assertEqual([n['id'] for n in json.load(response)['nodes']], ['tree','photo'])
+                finally:
+                    removed_server.shutdown(); removed_server.server_close(); removed_handler.prototype_queue.close()
 
     def test_default_probe_has_no_job_queue(self):
         disabled = start_server(make_handler(Config(TOKEN, "", "", 800, 20000)))

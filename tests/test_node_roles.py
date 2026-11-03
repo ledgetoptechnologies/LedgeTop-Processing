@@ -38,6 +38,11 @@ class NodeRoleTests(unittest.TestCase):
                         from_environment()
             with patch.dict(os.environ, {'PROCESSING_NODE_INVENTORY':json.dumps([node])}):
                 self.assertEqual(from_environment().node_inventory[0]['maxPhotos'], 1000)
+                with patch.dict(os.environ, {'PROCESSING_PROTOTYPE_STATE_DIR':self.root.name}):
+                    with self.assertRaisesRegex(ValueError, 'explicit legacy host mapping'):
+                        from_environment()
+                    with patch.dict(os.environ, {'PROCESSING_INVENTORY_LEGACY_HOST_ID':'cluster-pc'}):
+                        self.assertEqual(from_environment().node_inventory[0]['maxPhotos'], 1000)
 
     def claim(self, node, profile):
         return self.queue.claim({'workerId': node + '-worker', 'nodeId': node,

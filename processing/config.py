@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
 ADMISSION_DRAIN_QUALIFIED = False
@@ -135,6 +136,14 @@ def from_environment() -> Config:
         raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
     inventory_raw = os.environ.get('PROCESSING_NODE_INVENTORY', '')
     inventory = parse_node_inventory(inventory_raw, os.environ) if inventory_raw else ()
+    legacy_state = os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR', '')
+    if inventory and legacy_state and (Path(legacy_state) / 'jobs.sqlite3').exists():
+        legacy_host = os.environ.get('PROCESSING_INVENTORY_LEGACY_HOST_ID', '')
+        mapped = [node for node in inventory if node['physicalHostId'] == legacy_host]
+        legacy_limit = _positive_int(os.environ.get('LOCAL_MAX_PHOTOS', '1000'), 'LOCAL_MAX_PHOTOS', 1_000_000)
+        if (not legacy_host or len(mapped) != 1 or mapped[0]['maxPhotos'] is None
+                or mapped[0]['maxPhotos'] > legacy_limit):
+            raise ValueError('existing state requires explicit legacy host mapping preserving the local photo limit')
     legacy_local = os.environ.get('LOCAL_NODE_URL', '')
     if inventory and legacy_local:
         legacy_limit = _positive_int(os.environ.get('LOCAL_MAX_PHOTOS', '1000'), 'LOCAL_MAX_PHOTOS', 1_000_000)
