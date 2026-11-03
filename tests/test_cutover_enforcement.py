@@ -151,6 +151,44 @@ class HotJournalPreflightTest(unittest.TestCase):
                     check(self.state)
         self.assertEqual(self.snapshot(journal), before)
 
+    def test_state_changing_during_the_private_copy_fails_closed(self):
+        journal = leave_hot_journal(self.database, [])
+        real_copy = authority_lease.shutil.copyfile
+
+        def mutate_appending(path):
+            with open(path, 'ab') as stream:
+                stream.write(b'\x00')
+
+        def mutate_mtime_only(path):
+            info = os.stat(path)
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 5_000_000_000))
+
+        for target, mutate in ((self.database, mutate_appending), (journal, mutate_appending),
+                               (self.database, mutate_mtime_only), (journal, mutate_mtime_only)):
+            with self.subTest(target=target.name, mutation=mutate.__name__):
+                before = self.snapshot(journal)
+                mutated = []
+
+                def copy_then_mutate(source, destination):
+                    result = real_copy(source, destination)
+                    if not mutated:  # a writer touches the state once, mid-copy
+                        mutate(target)
+                        mutated.append(True)
+                    return result
+
+                expected = dict(before)
+                with patch.object(authority_lease.shutil, 'copyfile', side_effect=copy_then_mutate):
+                    with self.assertRaisesRegex(authority_lease.LeaseUnavailable,
+                                                'authority_preflight_hot_journal_unreadable'):
+                        authority_lease.required(self.state)
+                self.assertEqual(mutated, [True])
+                if mutate is mutate_appending:
+                    expected[target] = before[target] + b'\x00'
+                self.assertEqual(self.snapshot(journal), expected)  # only the simulated write changed anything
+                if mutate is mutate_appending:  # undo the simulation for the next case
+                    with open(target, 'r+b') as stream:
+                        stream.truncate(len(before[target]))
+
     def test_unrelated_read_errors_are_not_masked(self):
         self.database.write_bytes(b'not a database' * 100)
         with self.assertRaises(sqlite3.DatabaseError):
