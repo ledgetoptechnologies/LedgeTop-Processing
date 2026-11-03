@@ -10,15 +10,15 @@ from processing import source_inventory_candidate as candidate
 
 class SourceInventoryCandidateTests(unittest.TestCase):
     def setUp(self):
-        self.gcp=b'EPSG:32616\n1 2 3 4 5 image.jpg\n'
+        self.gcp=b'EPSG:4326\n-88 44 100 1 2 photo-1.jpg\n-88 44 100 3 4 photo-1.jpg\n-88 44 100 5 6 photo-2.jpg\n'
         self.expected=dict(datasetId='dataset-1',manifestSha256='a'*64,
             viewerTaskId='10000000-0000-4000-8000-000000000001',
             viewerAttemptId='20000000-0000-4000-8000-000000000001',pipelineDigest='b'*64)
         self.inv=dict(protocol=candidate.PROTOCOL,schemaVersion=1,
             dataset=dict(id='dataset-1',manifestSha256='a'*64),
             binding={k:self.expected[k] for k in ('viewerTaskId','viewerAttemptId','pipelineDigest')},
-            processing=[dict(datasetFileId='photo-1',relativePath='A/cafe\u0301/photo.jpg',byteSize=1,sha256='c'*64,processingRole='image',contentType='image/jpeg'),
-                        dict(datasetFileId='photo-2',relativePath='B/café/photo.jpg',byteSize=2,sha256='d'*64,processingRole='image',contentType='image/jpeg')],
+            processing=[dict(datasetFileId='photo-1',relativePath='A/cafe\u0301/photo-1.jpg',byteSize=1,sha256='c'*64,processingRole='image',contentType='image/jpeg'),
+                        dict(datasetFileId='photo-2',relativePath='B/café/photo-2.jpg',byteSize=2,sha256='d'*64,processingRole='image',contentType='image/jpeg')],
             retained=[dict(datasetFileId='csv-1',relativePath='Original/GCP.csv',byteSize=3,sha256='e'*64,processingRole='gcp_source',contentType='text/csv')],
             generated=[dict(snapshotId=self.expected['viewerAttemptId'],byteSize=len(self.gcp),
                 sha256=hashlib.sha256(self.gcp).hexdigest(),sourceGcpDatasetFileIds=['csv-1'],
@@ -32,9 +32,9 @@ class SourceInventoryCandidateTests(unittest.TestCase):
              for disposition, group in (('processing',self.inv['processing']),('retained',self.inv['retained']))
              for v in group],key=lambda v:v['datasetFileId']))
         self.evidence=dict(snapshot=copy.deepcopy(self.inv['generated'][0]),correspondences=[
-            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-1'),
-            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-1'),
-            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-2')])
+            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-1',pointId='point-1',longitude=-88,latitude=44,elevationM=100,pixelX=1,pixelY=2),
+            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-1',pointId='point-2',longitude=-88,latitude=44,elevationM=100,pixelX=3,pixelY=4),
+            dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-2',pointId='point-3',longitude=-88,latitude=44,elevationM=100,pixelX=5,pixelY=6)])
 
     def validate(self, inventory=None, *, expected=None, gcp=None):
         raw=json.dumps(self.inv if inventory is None else inventory,ensure_ascii=False).encode()
@@ -47,8 +47,8 @@ class SourceInventoryCandidateTests(unittest.TestCase):
         canonical,digest,hold=self.validate()
         self.assertEqual(hold,'held_gcp_correspondence_unverified')
         decoded=json.loads(canonical)
-        self.assertEqual(decoded['processing'][0]['relativePath'],'A/cafe\u0301/photo.jpg')
-        self.assertEqual(decoded['processing'][1]['relativePath'],'B/café/photo.jpg')
+        self.assertEqual(decoded['processing'][0]['relativePath'],'A/cafe\u0301/photo-1.jpg')
+        self.assertEqual(decoded['processing'][1]['relativePath'],'B/café/photo-2.jpg')
         self.assertEqual(digest,hashlib.sha256(candidate.DOMAIN+canonical).hexdigest())
         for key in self.expected:
             expected=copy.deepcopy(self.expected);expected[key]='0'*64 if key.endswith('Digest') or key.endswith('Sha256') else 'other'
@@ -64,7 +64,8 @@ class SourceInventoryCandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.validate(obj)
         obj=copy.deepcopy(self.inv);obj['processing'][0]['relativePath']='a/Photo.jpg';obj['processing'][1]['relativePath']='a/photo.jpg'
         self.authoritative['files'][1]['relativePath']='a/Photo.jpg';self.authoritative['files'][2]['relativePath']='a/photo.jpg'
-        self.validate(obj)  # Inventory preserves case; a target must independently reject collisions.
+        obj['generated']=[]; self.selection['gcpRequired']=False
+        self.assertEqual(candidate.validate(json.dumps(obj).encode(),expected=self.expected,authoritative_dataset=self.authoritative,trusted_selection=self.selection,trusted_gcp_evidence=None,generated_gcp_bytes=None)[2],'held_source_authority_unverified')
         with self.assertRaisesRegex(ValueError,'basename collision'):candidate.reference_v1_names(obj['processing'])
         obj['processing'][0]['relativePath']='a/café.jpg'
         with self.assertRaises(ValueError):candidate.reference_v1_names(obj['processing'])
@@ -106,7 +107,9 @@ class SourceInventoryCandidateTests(unittest.TestCase):
         self.inv['processing']=[dict(photo,datasetFileId=f'photo-{i:05d}',relativePath=f'photos/{i:05d}.jpg') for i in range(9999)]
         self.inv['generated'][0]['imageDatasetFileIds']=['photo-00000']
         self.inv['generated'][0]['correspondenceCount']=1
-        self.evidence=dict(snapshot=copy.deepcopy(self.inv['generated'][0]),correspondences=[dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-00000')])
+        self.gcp=b'EPSG:4326\n-88 44 100 1 2 00000.jpg\n'
+        self.inv['generated'][0].update(byteSize=len(self.gcp),sha256=hashlib.sha256(self.gcp).hexdigest())
+        self.evidence=dict(snapshot=copy.deepcopy(self.inv['generated'][0]),correspondences=[dict(sourceGcpDatasetFileId='csv-1',imageDatasetFileId='photo-00000',pointId='point-1',longitude=-88,latitude=44,elevationM=100,pixelX=1,pixelY=2)])
         fields=('datasetFileId','relativePath','byteSize','sha256','contentType')
         self.authoritative['files']=sorted([{**{k:v[k] for k in fields},'mimeType':v['contentType']} for v in self.inv['processing']+self.inv['retained']],key=lambda v:v['datasetFileId'])
         self.selection['files']=sorted([dict(datasetFileId=v['datasetFileId'],processingRole=v['processingRole'],disposition=disposition)

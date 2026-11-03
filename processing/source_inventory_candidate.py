@@ -186,12 +186,14 @@ def validate(raw, *, expected, authoritative_dataset, trusted_selection, trusted
         if type(rows) is not list or len(rows)>MAX_CORRESPONDENCES or len(rows)!=aux['correspondenceCount']:
             raise ValueError('trusted GCP correspondence mismatch')
         for row in rows:
-            p._closed(row, ('sourceGcpDatasetFileId','imageDatasetFileId'), 'GCP correspondence')
+            p._closed(row, ('sourceGcpDatasetFileId','imageDatasetFileId','pointId','longitude','latitude','elevationM','pixelX','pixelY'), 'GCP correspondence')
             if type(row['sourceGcpDatasetFileId']) is not str or type(row['imageDatasetFileId']) is not str:
                 raise ValueError('invalid GCP correspondence')
         if (sorted({r['sourceGcpDatasetFileId'] for r in rows}) != gcp_ids
                 or sorted({r['imageDatasetFileId'] for r in rows}) != image_ids):
             raise ValueError('trusted GCP correspondence mismatch')
+        from .gcp_snapshot_semantics_candidate import validate_gcp_semantics
+        validate_gcp_semantics(generated_gcp_bytes,processing=processing,correspondences=rows)
     elif generated_gcp_bytes is not None:
         raise ValueError('unexpected GCP bytes')
     elif trusted_gcp_evidence is not None:
