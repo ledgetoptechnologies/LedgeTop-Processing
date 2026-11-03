@@ -367,6 +367,9 @@ class ReferenceEngineWorker:
 
         Transport authenticates the coordinator. A relay's fullyAccepted flag is
         never evidence: derive coverage from locally registered receipt subsets.
+        Signed receipts bind the Viewer wire manifest derived here from the
+        durable local result (v1 ODM-only, v2 TreeDar/combined), never a relayed
+        one; the ledger keeps its registered source-result identity.
         """
         if type(receipts) is not list or len(receipts) > p.MAX_OBJECTS:
             raise WorkerHeld('Viewer acceptance must be a bounded receipt list')
@@ -377,7 +380,7 @@ class ReferenceEngineWorker:
         job, reservation = identity['job'], identity['reservation']
         result = p.validate_result_manifest(json.loads(row['result']), job_id=job_id,
             generation=job['generation'], environment=job['environment'], pipeline_digest=job['pipelineDigest'])
-        checked, identities, signed_identities, receipt_owners = [], {}, {}, {}
+        checked, identities, signed_identities, receipt_owners, viewer = [], {}, {}, {}, None
         for envelope in receipts:
             viewer_receipt = None
             receipt = envelope
@@ -385,22 +388,34 @@ class ReferenceEngineWorker:
                 if not self.viewer_receipt_keys:
                     raise WorkerHeld('pinned Viewer receipt keys are not configured')
                 receipt, viewer_receipt = envelope['acceptance'], envelope['viewerReceipt']
-            value = p.validate_acceptance(receipt, result_manifest=result,
-                input_manifest_sha256=job['manifestSha256'])
-            if viewer_receipt is not None:
+            if viewer_receipt is None:
+                # Unsigned processing receipts remain source-bound metadata only.
+                value = p.validate_acceptance(receipt, result_manifest=result,
+                    input_manifest_sha256=job['manifestSha256'])
+            else:
                 from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+                from .viewer_result_manifest import derive_viewer_result_manifest, validate_viewer_acceptance
+                try:
+                    viewer = viewer or derive_viewer_result_manifest(result, job_id=job_id,
+                        generation=job['generation'], environment=job['environment'],
+                        pipeline_digest=job['pipelineDigest'])
+                    value = validate_viewer_acceptance(receipt, result_manifest=viewer,
+                        input_manifest_sha256=job['manifestSha256'])
+                except (TypeError, ValueError):
+                    raise WorkerHeld('Viewer acceptance does not bind the local Viewer result manifest') from None
                 expected = dict(jobId=job_id, generation=job['generation'], environment=job['environment'],
                     inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
-                    resultManifestSha256=result['resultManifestSha256'])
+                    resultManifestSha256=viewer['resultManifestSha256'])
                 try:
                     signed = verify_viewer_acceptance_receipt(viewer_receipt,
                         trusted_keys=self.viewer_receipt_keys, expected=expected,
-                        result_manifest=result, accepted_object_ids=value['acceptedObjectIds']).receipt
+                        result_manifest=viewer, accepted_object_ids=value['acceptedObjectIds']).receipt
                 except (TypeError, ValueError):
                     raise WorkerHeld('Viewer accepted-copy signature or binding is invalid') from None
                 bind_fields = ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
+                # v2 acceptance is manifest-ordered; signed receipt ids are sorted.
                 if (any(value[field] != signed[field] for field in bind_fields)
-                        or value['acceptedObjectIds'] != signed['acceptedObjectIds']
+                        or sorted(value['acceptedObjectIds']) != signed['acceptedObjectIds']
                         or {value['receiptId'], value['storageReceiptId']} & {signed['receiptId'], signed['storageReceiptId']}):
                     raise WorkerHeld('Viewer and processing acceptance bindings disagree')
             encoded = p.canonical_json(value)
@@ -426,7 +441,8 @@ class ReferenceEngineWorker:
             self.ledger.accept_receipt(reservation, receipt_id=receipt['receiptId'],
                 storage_receipt_id=receipt['storageReceiptId'], job_id=job_id, generation=receipt['generation'],
                 manifest_sha256=receipt['inputManifestSha256'], pipeline_sha256=receipt['pipelineDigest'],
-                result_manifest_sha256=receipt['resultManifestSha256'], accepted_object_ids=receipt['acceptedObjectIds'],
+                # Verified above against the local result; v2 digests derive from it.
+                result_manifest_sha256=result['resultManifestSha256'], accepted_object_ids=receipt['acceptedObjectIds'],
                 viewer_receipt=signed_viewer_receipt, verified_copy=signed_viewer_receipt is not None)
         with self.ledger._transaction() as db:
             accepted = {obj['id'] for obj in db.execute(
