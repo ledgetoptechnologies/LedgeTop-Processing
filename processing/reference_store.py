@@ -35,6 +35,18 @@ PHASES = {
 _NORMALIZED = {"schemaVersion", "submissionId", "manifest", "pipeline", "capabilityFingerprint",
                "environment", "requestDigest", "manifestSha256", "pipelineDigest"}
 
+_ACTIVATION_SCHEMA = """CREATE TABLE reference_viewer_activation (
+ job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), activation_id TEXT UNIQUE NOT NULL,
+ principal_id TEXT NOT NULL, environment TEXT NOT NULL, viewer_attempt_id TEXT NOT NULL,
+ binding_json TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
+ UNIQUE(principal_id, environment, viewer_attempt_id))"""
+_OWNER_SCHEMA = """CREATE TABLE reference_viewer_submission_owners (
+ job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), principal_id TEXT NOT NULL,
+ environment TEXT NOT NULL, request_digest TEXT NOT NULL, protocol TEXT NOT NULL)"""
+_SCHEMA_MARKER = """CREATE TABLE reference_viewer_activation_schema (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))"""
+_PREPARED_PROTOCOL = 'ltds-viewer-prepared-submit-v1'
+
 
 def _json(value):
     return protocol.canonical_json(value).decode("utf-8")
@@ -113,23 +125,58 @@ class ReferenceStore:
                   request_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL REFERENCES reference_jobs(job_id),
                   node_id TEXT NOT NULL, worker_id TEXT NOT NULL, instance_id TEXT NOT NULL,
                   token TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-                CREATE TABLE IF NOT EXISTS reference_viewer_activation (
-                  job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id),
-                  activation_id TEXT UNIQUE NOT NULL, principal_id TEXT NOT NULL,
-                  environment TEXT NOT NULL, viewer_attempt_id TEXT NOT NULL,
-                  binding_json TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
-                  UNIQUE(principal_id, environment, viewer_attempt_id));
                 CREATE TABLE IF NOT EXISTS reference_worker_receipts (
                   outbox_id TEXT PRIMARY KEY, payload_sha TEXT NOT NULL,
                   job_id TEXT NOT NULL, receipt_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reference_transfer_grants (
                   job_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, digest TEXT NOT NULL);
             """)
+            self._init_viewer_activation_schema(db)
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
+
+    @staticmethod
+    def _init_viewer_activation_schema(db):
+        expected = {'reference_viewer_activation': _ACTIVATION_SCHEMA,
+                    'reference_viewer_submission_owners': _OWNER_SCHEMA,
+                    'reference_viewer_activation_schema': _SCHEMA_MARKER}
+        existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        present = set(expected) & existing
+        if present and present != set(expected):
+            raise Conflict('partial Viewer activation schema requires reconciliation')
+        if not present:
+            db.execute('BEGIN IMMEDIATE')
+            for sql in expected.values():
+                db.execute(sql)
+            db.execute('INSERT INTO reference_viewer_activation_schema VALUES(1,1)')
+        normalize = lambda sql: ' '.join(sql.split())
+        for name, sql in expected.items():
+            row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+            if not row or normalize(row[0]) != normalize(sql):
+                raise Conflict('incompatible Viewer activation schema')
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (name,)).fetchone():
+                raise Conflict('unexpected Viewer activation trigger')
+        for name, wanted in (
+                ('reference_viewer_activation', {('job_id',), ('activation_id',), ('principal_id','environment','viewer_attempt_id')}),
+                ('reference_viewer_submission_owners', {('job_id',)})):
+            indexes = db.execute('PRAGMA index_list(' + name + ')').fetchall()
+            actual = set()
+            for index in indexes:
+                if not index['unique'] or index['partial'] or index['origin'] not in ('pk', 'u'):
+                    raise Conflict('unexpected Viewer activation index')
+                actual.add(tuple(row['name'] for row in db.execute('PRAGMA index_info(' + index['name'] + ')')))
+            if actual != wanted:
+                raise Conflict('incompatible Viewer activation indexes')
+            foreign = db.execute('PRAGMA foreign_key_list(' + name + ')').fetchall()
+            if (len(foreign) != 1 or (foreign[0]['table'], foreign[0]['from'], foreign[0]['to'],
+                    foreign[0]['on_update'], foreign[0]['on_delete'], foreign[0]['match']) !=
+                    ('reference_jobs', 'job_id', 'job_id', 'NO ACTION', 'NO ACTION', 'NONE')):
+                raise Conflict('incompatible Viewer activation foreign key')
+        if [tuple(row) for row in db.execute('SELECT singleton,version FROM reference_viewer_activation_schema')] != [(1,1)]:
+            raise Conflict('incompatible Viewer activation schema version')
 
     def _row(self, db, job_id):
         has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
@@ -180,6 +227,7 @@ class ReferenceStore:
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(CAST(binding_json AS BLOB))+length(binding_sha256)),0) FROM reference_viewer_activation").fetchone()[0]
+        used += db.execute("SELECT COALESCE(SUM(length(principal_id)+length(environment)+length(request_digest)+length(protocol)),0) FROM reference_viewer_submission_owners").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),
                               ("reference_viewer_transfers", "acceptance_json"),
@@ -203,6 +251,22 @@ class ReferenceStore:
             raise Conflict("reference metadata quota reached")
 
     def submit(self, validated):
+        """Legacy environment-only submission; never assigns a Viewer owner."""
+        return self._submit(validated, owner=None)
+
+    def prepare_viewer_submission(self, validated, *, authenticated_principal, authenticated_environment):
+        """Internal candidate: a future boundary must authenticate this principal.
+
+        No network endpoint exposes this method. An environment-only bearer is
+        not sufficient to establish the required independent principal identity.
+        """
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        if type(validated) is not dict or validated.get('environment') != authenticated_environment:
+            raise Conflict('Viewer submission environment differs')
+        return self._submit(validated, owner=(authenticated_principal, authenticated_environment))
+
+    def _submit(self, validated, *, owner):
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -220,11 +284,15 @@ class ReferenceStore:
             if old:
                 if (old["request_digest"], old["environment"]) != (checked["requestDigest"], checked["environment"]):
                     raise Conflict("submissionId belongs to a different reference request")
+                recorded = self._submission_owner(db, self._row(db, old['job_id']))
+                if (recorded is None) != (owner is None) or (recorded is not None and
+                        (recorded['principal_id'], recorded['environment']) != owner):
+                    raise Conflict('submission ownership differs')
                 return self._public(self._row(db, old["job_id"])), False
             pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
             if pending >= self.max_queued_jobs:
                 raise Conflict("reference pending job quota reached")
-            self._quota(db, len(encoded.encode("utf-8")))
+            self._quota(db, len(encoded.encode("utf-8")) + (512 if owner else 0))
             job_id = str(uuid.uuid4())
             # Namespaced request identity also prevents collisions with ordinary
             # multipart/legacy submission IDs in the shared jobs table.
@@ -234,6 +302,9 @@ class ReferenceStore:
               manifest_sha,pipeline_digest,phase) VALUES(?,?,?,?,?,?,?,'queued')""",
               (job_id, checked["submissionId"], checked["requestDigest"], checked["environment"], encoded,
                checked["manifestSha256"], checked["pipelineDigest"]))
+            if owner is not None:
+                db.execute('INSERT INTO reference_viewer_submission_owners VALUES(?,?,?,?,?)',
+                    (job_id, owner[0], owner[1], checked['requestDigest'], _PREPARED_PROTOCOL))
             return self._public(self._row(db, job_id)), True
 
     def get(self, job_id, *, private=False):
@@ -247,7 +318,52 @@ class ReferenceStore:
         with self.queue._db() as db:
             row = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=? AND environment=?',
                              (submission_id, environment)).fetchone()
-            return self._public(self._row(db, row[0])) if row else None
+            if not row:
+                return None
+            job = self._row(db, row[0])
+            return None if self._submission_owner(db, job) is not None else self._public(job)
+
+    def find_viewer_submission(self, submission_id, *, authenticated_principal, authenticated_environment):
+        """Private candidate recovery; the caller must authenticate principal and environment."""
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            found = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (submission_id,)).fetchone()
+            if found is None:
+                return None
+            job = self._row(db, found[0])
+            owner = self._submission_owner(db, job)
+            if owner is None or (owner['principal_id'], owner['environment']) != (authenticated_principal, authenticated_environment):
+                return None
+            return dict(self._public(job), submissionId=job['submission_id'], requestDigest=job['request_digest'])
+
+    def get_legacy_job(self, job_id, environment, *, private=False):
+        """Environment-only callers cannot inspect principal-owned prepared jobs."""
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            try:
+                job = self._row(db, job_id)
+            except Conflict:
+                return None
+            if job['environment'] != environment or self._submission_owner(db, job) is not None:
+                return None
+            return self._record(job, private)
+
+    @staticmethod
+    def _submission_owner(db, row):
+        owner = db.execute('SELECT * FROM reference_viewer_submission_owners WHERE job_id=?', (row['job_id'],)).fetchone()
+        if owner is None:
+            return None
+        try:
+            protocol._slug(owner['principal_id'], 'Viewer principal')
+            if (owner['protocol'] != _PREPARED_PROTOCOL or owner['environment'] != row['environment']
+                    or owner['environment'] != row['queue_environment'] or owner['request_digest'] != row['request_digest']):
+                raise ValueError('submission owner binding changed')
+        except (ValueError, TypeError, KeyError):
+            raise Conflict('Viewer submission provenance invalid') from None
+        return owner
 
     def list(self, *, private=False):
         with self.queue._db() as db:
@@ -266,6 +382,12 @@ class ReferenceStore:
             or submission['manifest']['inputCounts']['images'] > self.local_max_photos
             or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
         return self.main_node_id if requires_main else 'cluster'
+
+    @staticmethod
+    def _activation_bound_grant_ready():
+        # There is no configured or implemented broker/worker v2 binding yet.
+        # A caller must not turn this into a runtime override.
+        return False
 
     @staticmethod
     def _activation_binding(value):
@@ -289,6 +411,9 @@ class ReferenceStore:
         if stored is None:
             return None
         try:
+            owner = self._submission_owner(db, row)
+            if owner is None:
+                raise ValueError('Viewer submission provenance missing')
             binding = self._activation_binding(json.loads(stored['binding_json']))
             if (_json(binding) != stored['binding_json'] or protocol.digest(binding) != stored['binding_sha256']
                     or (stored['activation_id'], stored['principal_id'], stored['environment'], stored['viewer_attempt_id'])
@@ -297,7 +422,8 @@ class ReferenceStore:
                         binding['requestDigest'], binding['manifestSha256'], binding['pipelineDigest'])
                     != (row['job_id'], row['submission_id'], row['generation'], row['environment'],
                         row['request_digest'], row['manifest_sha'], row['pipeline_digest'])
-                    or row['queue_environment'] != row['environment']):
+                    or row['queue_environment'] != row['environment']
+                    or binding['principalId'] != owner['principal_id']):
                 raise ValueError('activation binding changed')
             return binding
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -319,6 +445,10 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, binding['jobId'])
+            owner = self._submission_owner(db, row)
+            if owner is None or (owner['principal_id'], owner['environment']) != (
+                    authenticated_principal, authenticated_environment):
+                raise Conflict('Viewer submission provenance required')
             existing = self._activation(db, row)
             if existing is not None:
                 if _json(existing) != encoded:
@@ -357,6 +487,8 @@ class ReferenceStore:
             row = self._row(db, head['id'])
             if self._activation(db, row) is None:
                 return None
+            if not self._activation_bound_grant_ready():
+                return None
             submission = json.loads(row['input_json'])
             if self._required_node(submission) != node_id:
                 return None
@@ -380,6 +512,8 @@ class ReferenceStore:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
             if self._activation(db, row) is None:
+                return None
+            if not self._activation_bound_grant_ready():
                 return None
             old = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if old:
@@ -491,8 +625,11 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
-            if phase in ('awaiting_transfer', 'fetching', 'processing') and self._activation(db, row) is None:
-                raise Conflict('Viewer activation required')
+            if phase in ('awaiting_transfer', 'fetching', 'processing'):
+                if self._activation(db, row) is None:
+                    raise Conflict('Viewer activation required')
+                if not self._activation_bound_grant_ready():
+                    raise Conflict('activation-bound source grant unavailable')
             self._transition(row, phase, expected_phase)
             if phase in ("fetching", "processing") and row["status"] != "running":
                 raise Conflict("execution requires a running shared queue claim")
@@ -540,6 +677,8 @@ class ReferenceStore:
             row = self._row(db, job_id)
             if self._activation(db, row) is None:
                 raise Conflict('Viewer activation required')
+            if not self._activation_bound_grant_ready():
+                raise Conflict('activation-bound source grant unavailable')
             if row["status"] != "running" or row["node_id"] != node_id or not row["private_claim_token"]:
                 raise Conflict("reservation requires a running reference claim on this node")
             if row["transfer_json"] == encoded and row["node_id"] == node_id:
@@ -576,6 +715,8 @@ class ReferenceStore:
             row = self._row(db, job_id)
             if self._activation(db, row) is None:
                 raise Conflict('Viewer activation required')
+            if not self._activation_bound_grant_ready():
+                raise Conflict('activation-bound source grant unavailable')
             encoded, digest = _json(grant), protocol.digest(grant)
             old = db.execute('SELECT digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
             if old:
@@ -610,6 +751,8 @@ class ReferenceStore:
             reference = self._row(db, job_id)
             if self._activation(db, reference) is None:
                 raise Conflict('Viewer activation required')
+            if not self._activation_bound_grant_ready():
+                raise Conflict('activation-bound source grant unavailable')
             row = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
             return json.loads(row[0]) if row else None
 

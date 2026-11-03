@@ -47,8 +47,19 @@ explicit activation conflict and seven dereferenced a missing claim or next-job;
 six failures expected HTTP 200 for a now-refused claim, one expected a next-job,
 one injected a queue-head change after assuming that next-job exists (the
 callback fails before the intended assertion), and one expected a claim-insert
-trigger to fire even though the gate prevented that insert. These tests must be
-adapted to use an explicit trusted test binding, then rerun to expose any later
-regressions. The broader suite and real process-death/mixed-version tests remain
+trigger to fire even though the gate prevented that insert. These failures were from the earlier baseline; the fixtures now use explicit
+prepared bindings and a test-only grant readiness mock, as described below. The broader suite and real process-death/mixed-version tests remain
 unqualified. Never deploy this candidate merely because its isolated gate
 tests pass.
+
+
+The provisional prepared-submission API stores the caller-supplied authenticated
+principal, environment, request digest and protocol provenance in the same
+transaction as the job. It provides no authentication or network endpoint; a
+real trusted identity contract remains required. Environment-only recovery cannot
+read prepared jobs, and legacy submissions cannot be adopted. Schema bootstrap
+requires a version marker, exact definitions, uniqueness and foreign keys and
+refuses incomplete or incompatible layouts. Until an activation-bound grant is
+implemented, the coordinator also refuses discovery, claims and v1 grant use.
+The legacy 31-test suites now use explicit prepared bindings and a test-only
+mock future-grant readiness; those tests do not establish v2 grant safety.

@@ -89,10 +89,10 @@ class ReferenceAPI:
 
     def _job(self, job_id, environment, *, private=False):
         try:
-            job = self.store.get(job_id, private=private)
+            job = self.store.get_legacy_job(job_id, environment, private=private)
         except Conflict:
             return None
-        if job["environment"] != environment:
+        if job is None:
             return None
         return job
 

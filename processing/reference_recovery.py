@@ -188,6 +188,7 @@ class ClaimRecoveryService:
         except Exception:raise Conflict('stored recovery receipt changed') from None
 
     def resume(self,job_id,payload,*,identity,claim_token):
+        if not self.store._activation_bound_grant_ready():raise Conflict('activation-bound source grant unavailable')
         self._check();request=self._request(payload);encoded=p.canonical_json(request).decode();digest=p.digest(request)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE');state=self._state(db,job_id,identity,claim_token)

@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from processing import reference_protocol as p
 from processing.maintenance import Conflict
@@ -29,12 +29,12 @@ class ViewerActivationTests(unittest.TestCase):
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
                                    'contracts/reference-v1.contract.json').read_text())
 
-    def submit(self, environment='production'):
+    def submit(self, environment='production', *, legacy=False):
         raw = copy.deepcopy(self.fixture['submission'])
         raw['submissionId'] = str(uuid.uuid4())
         checked = p.validate_submission(raw, environment=environment,
             capability_fingerprint=raw['capabilityFingerprint'])
-        job, _ = self.store.submit(checked)
+        job, _ = (self.store.submit(checked) if legacy else self.store.prepare_viewer_submission(checked, authenticated_principal='viewer-prod', authenticated_environment=environment))
         binding = dict(schemaVersion=1, protocol='ltds-viewer-activation-v1',
             activationId=str(uuid.uuid4()), principalId='viewer-prod', submissionId=raw['submissionId'],
             jobId=job['jobId'], generation=job['generation'], environment=environment,
@@ -51,7 +51,8 @@ class ViewerActivationTests(unittest.TestCase):
         return self.store.activate_viewer_binding(binding, authenticated_principal='viewer-prod',
                                                   authenticated_environment=binding['environment'])
 
-    def test_queued_job_never_discovered_or_claimed_before_activation(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_queued_job_never_discovered_or_claimed_before_activation(self, _ready):
         job, binding = self.submit()
         self.assertIsNone(self.store.next_for_node('cluster'))
         self.assertIsNone(self.claim(job))
@@ -64,7 +65,8 @@ class ViewerActivationTests(unittest.TestCase):
         self.assertEqual(self.activate(binding), acknowledgement)
         self.assertEqual(self.claim(job)['claimToken'], first_claim['claimToken'])
 
-    def test_unactivated_production_head_blocks_activated_staging(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_unactivated_production_head_blocks_activated_staging(self, _ready):
         prod, prod_binding = self.submit('production')
         staging, staging_binding = self.submit('staging')
         self.activate(staging_binding)
@@ -74,7 +76,8 @@ class ViewerActivationTests(unittest.TestCase):
         self.activate(prod_binding)
         self.assertEqual(self.store.next_for_node('cluster')['jobId'], prod['jobId'])
 
-    def test_worker_http_boundary_refuses_unactivated_job(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_worker_http_boundary_refuses_unactivated_job(self, _ready):
         job, binding = self.submit()
         token = 'synthetic-worker-token-0001'
         worker = ReferenceWorkerAPI(self.store, None, bearer_workers={token: dict(
@@ -91,7 +94,8 @@ class ViewerActivationTests(unittest.TestCase):
         self.assertEqual(allowed.status, 200)
         self.assertEqual(allowed.body['jobId'], job['jobId'])
 
-    def test_replay_after_restart_exact_and_conflict_rejected(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_replay_after_restart_exact_and_conflict_rejected(self, _ready):
         job, binding = self.submit()
         first = self.activate(binding)
         self.queue.close()
@@ -111,7 +115,8 @@ class ViewerActivationTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             reopened.activate_viewer_binding(binding, authenticated_principal='viewer-prod', authenticated_environment='staging')
 
-    def test_concurrent_exact_and_conflicting_first_writes(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_concurrent_exact_and_conflicting_first_writes(self, _ready):
         job, binding = self.submit()
         other = dict(binding, viewerAttemptId=str(uuid.uuid4()), activationId=str(uuid.uuid4()))
         def attempt(candidate):
@@ -126,7 +131,8 @@ class ViewerActivationTests(unittest.TestCase):
         self.assertEqual(wins[0], wins[1])
         self.assertEqual(self.store.next_for_node('cluster')['jobId'], job['jobId'])
 
-    def test_activation_and_claim_race_never_claims_without_binding(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_activation_and_claim_race_never_claims_without_binding(self, _ready):
         job, binding = self.submit()
         with ThreadPoolExecutor(max_workers=2) as pool:
             activation = pool.submit(self.activate, binding)
@@ -140,7 +146,8 @@ class ViewerActivationTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_viewer_activation WHERE job_id=?',
                                         (job['jobId'],)).fetchone()[0], 1)
 
-    def test_queue_environment_mismatch_cannot_activate_or_claim(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_queue_environment_mismatch_cannot_activate_or_claim(self, _ready):
         job, binding = self.submit('production')
         with self.queue._db() as db:
             db.execute("UPDATE jobs SET environment='staging' WHERE id=?", (job['jobId'],))
@@ -155,7 +162,7 @@ class ViewerActivationTests(unittest.TestCase):
             self.claim(job)
 
     def test_unbound_legacy_running_claim_cannot_replay_reserve_or_fetch(self):
-        job, binding = self.submit()
+        job, binding = self.submit(legacy=True)
         token = 'synthetic-claim-token'
         with self.queue._db() as db:
             db.execute("UPDATE jobs SET status='running',worker_id='worker',node_id='cluster',claim_hash=? WHERE id=?",
@@ -187,7 +194,8 @@ class ViewerActivationTests(unittest.TestCase):
         payload = json.dumps({'claimToken': token, 'transferRequest': self.fixture['transferRequest']}).encode()
         self.assertEqual(worker.handle('POST', prefix + '/reservation', headers, payload, protected_transport=True).status, 409)
 
-    def test_mismatched_or_corrupt_binding_fails_closed(self):
+    @patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)  # Synthetic future grant only.
+    def test_mismatched_or_corrupt_binding_fails_closed(self, _ready):
         job, binding = self.submit()
         with self.assertRaises(Conflict):
             self.activate(dict(binding, manifestSha256='f' * 64))
@@ -216,6 +224,44 @@ class ViewerActivationTests(unittest.TestCase):
         self.assertIsNone(self.claim(job))
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_viewer_activation').fetchone()[0], 0)
+
+    def test_legacy_same_environment_principal_cannot_adopt(self):
+        job, binding = self.submit(legacy=True)
+        binding['principalId'] = 'other-viewer'
+        with self.assertRaises(Conflict):
+            self.store.activate_viewer_binding(binding, authenticated_principal='other-viewer', authenticated_environment='production')
+        self.assertIsNone(self.store.next_for_node('cluster'))
+
+    def test_prepared_is_hidden_from_legacy_recovery(self):
+        job, binding = self.submit()
+        self.assertIsNone(self.store.find_submission(binding['submissionId'], environment='production'))
+        self.assertIsNone(self.store.get_legacy_job(job['jobId'], environment='production'))
+        self.assertIsNone(self.store.find_viewer_submission(binding['submissionId'], authenticated_principal='other-viewer', authenticated_environment='production'))
+        self.assertIsNotNone(self.store.find_viewer_submission(binding['submissionId'], authenticated_principal='viewer-prod', authenticated_environment='production'))
+
+    def test_activated_job_is_held_without_bound_grant(self):
+        job, binding = self.submit()
+        self.activate(binding)
+        self.assertIsNone(self.store.next_for_node('cluster'))
+        self.assertIsNone(self.claim(job))
+        with self.assertRaises(Conflict):
+            self.store.private_transfer_grant(job['jobId'])
+        with self.assertRaises(Conflict):
+            self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')
+
+    def test_partial_schema_fails_closed_on_restart(self):
+        with self.queue._db() as db:
+            db.execute('DROP TABLE reference_viewer_submission_owners')
+        with self.assertRaises(Conflict):
+            ReferenceStore(self.queue)
+
+    def test_incompatible_complete_schema_fails_closed_on_restart(self):
+        with self.queue._db() as db:
+            sql = db.execute("SELECT sql FROM sqlite_master WHERE name='reference_viewer_activation'").fetchone()[0]
+            db.execute('DROP TABLE reference_viewer_activation')
+            db.execute(sql.replace('activation_id TEXT UNIQUE NOT NULL', 'activation_id TEXT NOT NULL'))
+        with self.assertRaises(Conflict):
+            ReferenceStore(self.queue)
 
     def test_persisted_v1_grant_never_starts_fetch_or_new_execution(self):
         # The old grant format cannot bind activation/authority/epoch. This
