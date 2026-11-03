@@ -70,6 +70,10 @@ class GuardedViewerAdapterTests(BoundJobTests):
                 coordinator.service._guarded_engine_factory = factory
             coordinator.service.tick()  # actual Viewer scheduler claims and dispatches
             self.assertEqual(coordinator.task(identifier)['phase'], 'processing')
+            history = coordinator.service.store.guarded_dispatch_history(identifier)
+            self.assertEqual([row['operation'] for row in history], ['init', 'upload', 'commit'])
+            self.assertEqual([row['state'] for row in history], ['acknowledged'] * 3)
+            self.assertEqual([row['sequence'] for row in history], [1, 2, 3])
             coordinator.service.tick()  # observe synthetic node completion
             self.assertEqual(coordinator.service.info(identifier)['status']['code'], 40)
             return identifier

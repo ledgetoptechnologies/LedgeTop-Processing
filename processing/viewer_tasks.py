@@ -164,6 +164,12 @@ class TaskStore:
                 node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL,
                 sequence INTEGER NOT NULL, operation TEXT NOT NULL, evidence TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_guarded_dispatch_history (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL, job_id TEXT NOT NULL,
+                node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL,
+                sequence INTEGER NOT NULL, operation TEXT NOT NULL, evidence TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')),
+                PRIMARY KEY(uuid,sequence))''')
 
     def checkpoint_guarded_dispatch(self, identifier, operation, evidence):
         """Save the exact pending mutation before sending; this is not node proof."""
@@ -180,7 +186,16 @@ class TaskStore:
             previous = db.execute('SELECT * FROM viewer_guarded_dispatch_checkpoint WHERE uuid=?', (identifier,)).fetchone()
             if previous is not None and previous['state'] != 'acknowledged':
                 raise Conflict('guarded mutation requires reconciliation')
+            history = db.execute('SELECT * FROM viewer_guarded_dispatch_history WHERE uuid=? ORDER BY sequence DESC LIMIT 1', (identifier,)).fetchone()
+            # Do not manufacture a history for checkpoints written by an older
+            # binary: earlier operations cannot be recovered from the last row.
+            if (previous is None) != (history is None) or (previous is not None and dict(previous) != dict(history)):
+                raise Conflict('guarded dispatch history requires reconciliation')
             sequence = previous['sequence'] + 1 if previous is not None else 1
+            db.execute('''INSERT INTO viewer_guarded_dispatch_history
+                (uuid,generation,job_id,node_id,engine_uuid,sequence,operation,evidence,state)
+                VALUES(?,?,?,?,?,?,?,?, 'pending')''', (identifier,row['generation'],row['job_id'],row['node_id'],
+                row['engine_uuid'],sequence,operation,encoded))
             db.execute('''INSERT OR REPLACE INTO viewer_guarded_dispatch_checkpoint
                 (uuid,generation,job_id,node_id,engine_uuid,sequence,operation,evidence,state)
                 VALUES(?,?,?,?,?,?,?,?, 'pending')''', (identifier,row['generation'],row['job_id'],row['node_id'],
@@ -192,17 +207,38 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            current = db.execute('SELECT * FROM viewer_guarded_dispatch_checkpoint WHERE uuid=?', (identifier,)).fetchone()
+            history = db.execute('SELECT * FROM viewer_guarded_dispatch_history WHERE uuid=? AND sequence=?',
+                                 (identifier,sequence)).fetchone()
+            # An observed response must acknowledge the exact same intent in
+            # both records. In particular, a mismatched final commit has no
+            # subsequent checkpoint that would otherwise detect the split.
+            if current is None or history is None or dict(current) != dict(history):
+                raise Conflict('guarded dispatch history changed')
             changed = db.execute('''UPDATE viewer_guarded_dispatch_checkpoint SET state='acknowledged'
                 WHERE uuid=? AND sequence=? AND state='pending' AND generation=? AND job_id=?
                 AND node_id=? AND engine_uuid=?''', (identifier,sequence,row['generation'],row['job_id'],
                 row['node_id'],row['engine_uuid'])).rowcount
             if changed != 1:
                 raise Conflict('guarded dispatch checkpoint changed')
+            changed = db.execute('''UPDATE viewer_guarded_dispatch_history SET state='acknowledged'
+                WHERE uuid=? AND sequence=? AND state='pending' AND generation=? AND job_id=?
+                AND node_id=? AND engine_uuid=?''', (identifier,sequence,row['generation'],row['job_id'],
+                row['node_id'],row['engine_uuid'])).rowcount
+            if changed != 1:
+                raise Conflict('guarded dispatch history changed')
 
     def guarded_dispatch_checkpoint(self, identifier):
         with self._lock, self.queue._db() as db:
             row = db.execute('SELECT * FROM viewer_guarded_dispatch_checkpoint WHERE uuid=?', (identifier,)).fetchone()
             return dict(row) if row is not None else None
+
+    def guarded_dispatch_history(self, identifier):
+        """Return retained coordinator observations, not proof of node execution."""
+        with self._lock, self.queue._db() as db:
+            self._row(db, identifier)
+            return [dict(row) for row in db.execute(
+                'SELECT * FROM viewer_guarded_dispatch_history WHERE uuid=? ORDER BY sequence', (identifier,))]
 
     @staticmethod
     def _full_option_evidence(db, row):
