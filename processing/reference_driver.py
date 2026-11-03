@@ -557,12 +557,20 @@ class ReferenceDriver:
             # The stage itself is proof this is a failure flow even if its
             # payload is absent or damaged; do not run background first.
             if row['stage'] != 'completed':
+                self._hold_guarded_failure(execution)
                 raise DriverHeld('guarded_terminal_stop_unverified')
             data = json.loads(row['data'])
             # A completed row is safe to pass only when the worker explicitly
             # records successful delivery and no failure payload remains.
             if execution['phase'] != 'delivered' or data.get('failure') is not None:
+                self._hold_guarded_failure(execution)
                 raise DriverHeld('guarded_terminal_stop_unverified')
+
+    def _hold_guarded_failure(self, execution):
+        identity = json.loads(execution['identity'])
+        job = identity['job']
+        self.ledger.hold_guarded_failure_cleanup(identity['reservation'],
+            job_id=job['jobId'], generation=job['generation'])
 
     def _background(self):
         """One retained acknowledgement plus at most one separately fenced cleanup."""
@@ -606,6 +614,7 @@ class ReferenceDriver:
         # retain its journal and scratch reservation until independent stop
         # evidence and a durable failure handoff are implemented.
         if self.worker._row(job_id)['host_guarded']:
+            self._hold_guarded_failure(self.worker._row(job_id))
             raise DriverHeld('guarded_terminal_stop_unverified')
         claim = data['claim']
         failure = make_failure(job_id=job_id, generation=claim['generation'], environment=claim['environment'],
@@ -627,6 +636,7 @@ class ReferenceDriver:
         # Also fence records created by an older version before it can mark
         # scratch terminal or release a physical reservation.
         if self.worker._row(job_id)['host_guarded']:
+            self._hold_guarded_failure(self.worker._row(job_id))
             raise DriverHeld('guarded_terminal_stop_unverified')
         self.ledger.set_engine_state(data['reservation']['reservationId'], 'terminal', terminal_attested=True)
         local = self.worker._row(job_id)

@@ -80,6 +80,25 @@ class ScratchCleanupTests(unittest.TestCase):
         self.assertEqual(self.first.read_bytes(), b'abc')
         self.assertFalse((self.root / '.cleanup-journal').exists())
 
+    def test_guarded_failure_hold_survives_restart_and_blocks_real_executor(self):
+        # This fixture already has a terminal reservation and an accepted
+        # object: model a ledger incorrectly marked terminal by an older build.
+        self.assertEqual(len(self.ledger.cleanup_candidates()), 1)
+        self.ledger.hold_guarded_failure_cleanup('r1', job_id='j1', generation=1)
+        self.ledger = self.open_ledger()
+        self.executor = ScratchCleanupExecutor(self.ledger)
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        with self.assertRaises(PolicyConflict):
+            self.execute()
+        self.assertEqual(self.first.read_bytes(), b'abc')
+
+    def test_guarded_failure_hold_refuses_existing_cleanup_intent(self):
+        intent = self.ledger.begin_cleanup('r1', 'o1', generation=1, sha256=self.sha)
+        with self.assertRaisesRegex(PolicyConflict, 'existing cleanup intent'):
+            self.ledger.hold_guarded_failure_cleanup('r1', job_id='j1', generation=1)
+        self.assertEqual(self.first.read_bytes(), b'abc')
+        self.assertEqual(self.ledger.cleanup_intent('r1', 'o1')['intent_token'], intent['intent_token'])
+
     def test_wrong_bytes_or_generation_refuses_without_unlink(self):
         with self.assertRaises(CleanupRefused):
             self.execute(byte_size=4)

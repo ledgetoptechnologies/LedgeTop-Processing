@@ -344,6 +344,8 @@ class ReferenceDriverTests(unittest.TestCase):
                         self.assertEqual(result, {'state': 'held', 'reason': 'guarded_terminal_stop_unverified'})
                         with case.ledger._transaction() as db:
                             self.assertEqual(dict(case.ledger._reservation(db, reservation)), before)
+                            self.assertEqual(tuple(db.execute('SELECT job,generation,reason FROM cleanup_holds WHERE reservation=?', (reservation,)).fetchone()),
+                                (job['jobId'], data['claim']['generation'], 'guarded_failure_unverified'))
                         with NodeGate('engine') as gate:
                             self.assertEqual(gate.snapshot(), gate_before)
                         with case.failures._transaction() as db:
