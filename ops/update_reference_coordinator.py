@@ -153,7 +153,7 @@ def volume_census(root, *, uid=10001, offline=False):
 
     def sha(value):
         return hashlib.sha256(encode(value)).hexdigest()
-    allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers', 'viewer_reservations', 'viewer_option_evidence', 'viewer_full_option_evidence', 'reference_released_claims', 'viewer_guarded_dispatch_checkpoint', 'viewer_guarded_dispatch_history'}
+    allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'coordinator_authority_lease', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers', 'viewer_reservations', 'viewer_option_evidence', 'viewer_full_option_evidence', 'reference_released_claims', 'viewer_guarded_dispatch_checkpoint', 'viewer_guarded_dispatch_history'}
     files = []
     for path in sorted(root.rglob('*')):
         relative = path.relative_to(root).as_posix()
@@ -207,6 +207,13 @@ def volume_census(root, *, uid=10001, offline=False):
         viewer_extra = {'viewer_reservations', 'viewer_option_evidence'}
         if names & viewer_extra and not viewer_extra <= names:
             raise AssertionError('partial Viewer schema')
+        if 'coordinator_authority_lease' in names:
+            entries = [row for row in objects if row[2] == 'coordinator_authority_lease']
+            expected_lease = 'CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), required INTEGER NOT NULL CHECK(required=1))'
+            if (len(entries) != 1 or entries[0][:3] != ['table', 'coordinator_authority_lease', 'coordinator_authority_lease']
+                    or re.sub(r'\s+', ' ', entries[0][3]).strip() != expected_lease
+                    or list(db.execute('SELECT singleton,required FROM coordinator_authority_lease')) != [(1, 1)]):
+                raise AssertionError('authority lease marker invalid')
         expected = {
             'viewer_reservations': "CREATE TABLE viewer_reservations ( uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))",
             'viewer_option_evidence': "CREATE TABLE viewer_option_evidence ( uuid TEXT NOT NULL, generation INTEGER NOT NULL, definitions TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(uuid,generation))",

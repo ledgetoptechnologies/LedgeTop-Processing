@@ -261,6 +261,19 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             db.execute('ALTER TABLE viewer_guarded_dispatch_history ADD COLUMN unreviewed TEXT')
         with self.assertRaises(AssertionError):
             module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_authority_lease_marker_is_censused_and_must_remain_valid(self):
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), required INTEGER NOT NULL CHECK(required=1))')
+            db.execute('INSERT INTO coordinator_authority_lease VALUES(1,1)')
+        before=module.volume_census(self.volume,uid=os.geteuid())
+        self.assertEqual(before['tables']['coordinator_authority_lease']['count'],1)
+        copied=self.root/'lease-copy';shutil.copytree(self.volume,copied)
+        module.compatible(module.volume_census(copied,uid=os.geteuid(),offline=True),before)
+        with self.queue._db() as db:
+            db.execute('DELETE FROM coordinator_authority_lease')
+        with self.assertRaises(AssertionError):
+            module.volume_census(self.volume,uid=os.geteuid())
     def test_terminal_viewer_task_files_are_retained_and_censused(self):
         import hashlib,uuid
         identifier=str(uuid.uuid4())
