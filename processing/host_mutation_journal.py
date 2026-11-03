@@ -135,6 +135,19 @@ class HostMutationJournal:
         except sqlite3.Error as exc:
             raise GateError('viewer job binding unavailable') from exc
 
+    def has_viewer_job(self):
+        """A bound job may never fall back to the unbound mutation route."""
+        self._current(allow_completion=True)
+        if self.db is None: raise GateError('guard journal not open')
+        try:
+            table = self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_job_binding'").fetchone()
+            if table is None: return False
+            rows = self.db.execute('SELECT id FROM viewer_job_binding').fetchall()
+            if rows != [(1,)]: raise GateError('viewer job binding invalid')
+            return True
+        except sqlite3.Error as exc:
+            raise GateError('viewer job binding unavailable') from exc
+
     def checkpoint_completion(self, *, engine_task, outbox_id, payload):
         """Atomically bind durable completion to this journal without releasing it.
 
