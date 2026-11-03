@@ -845,6 +845,51 @@ class ReferenceStore:
                 raise Conflict('activation identity already bound') from None
             return {'activationId':binding['activationId'],'bindingSha256':digest,'created':True}
 
+    def inspect_viewer_v3_source_grant(self, submission_id, grant, *, authenticated_principal, authenticated_environment):
+        """Read-only candidate: reconcile durable evidence but never authorize fetching."""
+        from . import prepared_envelope_jcs_candidate as jcs
+        from . import viewer_source_v2_reconcile_candidate as source
+        from .source_range_transfer import source_version_for_manifest
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            self._check_jcs_capability(db)
+            found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,jcs.PROTOCOL)
+            if found is None: return None
+            row=self._row(db,found['job_id'])
+            owner=self._submission_owner(db,row)
+            if owner is None or owner['protocol']!=jcs.PROTOCOL or (owner['principal_id'],owner['environment'])!=(authenticated_principal,authenticated_environment):
+                return None
+            envelope=db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?',(row['job_id'],)).fetchone()
+            snapshot=db.execute('SELECT * FROM reference_viewer_v3_policy WHERE job_id=?',(row['job_id'],)).fetchone()
+            if envelope is None or snapshot is None or not row['transfer_json']:
+                raise Conflict('durable source reservation unavailable')
+            try:
+                policy=json.loads(snapshot['policy_json'])
+                if (_json(policy)!=snapshot['policy_json'] or
+                        hashlib.sha256(snapshot['policy_json'].encode()).hexdigest()!=snapshot['policy_sha256']):
+                    raise ValueError()
+                canonical,digest,normalized=jcs.validate(envelope['envelope_json'].encode(),trusted_policy=policy,environment=authenticated_environment)
+                if digest!=envelope['envelope_sha256'] or _json(normalized)!=row['input_json']:
+                    raise ValueError()
+                transfer=json.loads(row['transfer_json'])
+                if _json(transfer)!=row['transfer_json']: raise ValueError()
+                manifest=normalized['manifest']
+                total=manifest['totalBytes']; minimum=sum((x['byteSize']+source.CHUNK-1)//source.CHUNK for x in manifest['objects'])
+                budget={'chunkBytes':source.CHUNK,'requestBudget':minimum,'byteBudget':min(protocol.MAX_SAFE_INTEGER,total*3),
+                        'attemptBudget':min(protocol.MAX_SAFE_INTEGER,minimum*3)}
+                binding={'environment':row['environment'],'generation':row['generation'],'jobId':row['job_id'],
+                         'manifestSha256':row['manifest_sha'],'reservationId':transfer['reservationId'],
+                         'sourceVersion':source_version_for_manifest(manifest),'viewerAttemptId':envelope['viewer_attempt_id']}
+                objects=[{k:item[k] for k in ('id','byteSize','sha256')} for item in manifest['objects']]
+                source.reconcile(binding=binding,transfer=transfer,grant=grant,objects=objects,
+                    trusted_manifest=manifest,trusted_policy=budget,now=time.time())
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise Conflict('durable source grant evidence differs') from None
+            return {'state':'held','reason':'broker_authorization_unverified'}
+
     def next_for_node(self, node_id):
         """PRIVATE worker discovery; advisory only, claim remains atomic."""
         self.queue._known_node(node_id)
@@ -1035,9 +1080,13 @@ class ReferenceStore:
         """
         source_range_v2 = type(transfer_request) is dict and transfer_request.get('protocol') == 'source-range-v2'
         if source_range_v2:
-            protocol._closed(transfer_request, ("protocol", "reservationId", "generation", "expiresAt",
+            fields=("protocol", "reservationId", "generation", "expiresAt",
                 "manifestSha256", "sourceVersion", "objectIds", "chunkBytes", "requestBudget",
-                "byteBudget", "nonce", "attemptBudget"), "source-range-v2 transfer request")
+                "byteBudget", "nonce", "attemptBudget")
+            if 'viewerAttemptId' in transfer_request:
+                fields=(*fields,'viewerAttemptId')
+                protocol._uuid(transfer_request['viewerAttemptId'], 'Viewer attempt')
+            protocol._closed(transfer_request, fields, "source-range-v2 transfer request")
         else:
             protocol._closed(transfer_request, ("reservationId", "generation", "expiresAt", "manifestSha256", "byteBudget", "nonce"), "transfer request")
         for key in ("reservationId", "nonce"):
@@ -1074,10 +1123,18 @@ class ReferenceStore:
             db.execute("BEGIN IMMEDIATE")
             self._check_jcs_capability(db)
             row = self._row(db, job_id)
-            if self._activation(db, row) is None:
+            activation=self._activation(db, row)
+            if activation is None:
                 raise Conflict('Viewer activation required')
             if not self._activation_bound_grant_ready():
                 raise Conflict('activation-bound source grant unavailable')
+            owner=self._submission_owner(db,row)
+            prepared_v3=owner is not None and owner['protocol']=='ltds-viewer-prepared-envelope-jcs-v3'
+            if prepared_v3:
+                if not source_range_v2 or transfer_request.get('viewerAttemptId')!=activation['viewerAttemptId']:
+                    raise Conflict('prepared Viewer attempt binding differs')
+            elif source_range_v2 and 'viewerAttemptId' in transfer_request:
+                raise Conflict('Viewer attempt requires prepared v3 provenance')
             if row["status"] != "running" or row["node_id"] != node_id or not row["private_claim_token"]:
                 raise Conflict("reservation requires a running reference claim on this node")
             if row["transfer_json"] == encoded and row["node_id"] == node_id:
@@ -1099,6 +1156,9 @@ class ReferenceStore:
                         or transfer_request['attemptBudget'] < required_ranges
                         or transfer_request['attemptBudget'] > 3 * required_ranges):
                     raise Conflict('source-range-v2 transfer identity mismatch')
+                if prepared_v3 and (transfer_request['attemptBudget'] != min(protocol.MAX_SAFE_INTEGER, 3*required_ranges)
+                                    or transfer_request['byteBudget'] != min(protocol.MAX_SAFE_INTEGER, 3*total_bytes)):
+                    raise Conflict('prepared Viewer source policy differs')
             if ((transfer_request['generation'], transfer_request['manifestSha256']) != (
                     row['generation'], row['manifest_sha']) or not total_bytes <= transfer_request['byteBudget'] <=
                     min(protocol.MAX_SAFE_INTEGER, 3 * total_bytes)):

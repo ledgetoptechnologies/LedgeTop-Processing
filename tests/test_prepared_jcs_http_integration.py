@@ -12,6 +12,88 @@ from processing.reference_prepared_api_candidate import PreparedSubmissionAPI
 from processing.prepared_envelope_jcs_candidate import PROTOCOL
 
 class JCSHTTPIntegrationTests(unittest.TestCase):
+    def test_source_grant_inspection_uses_durable_prepared_attempt_and_reservation(self):
+        # Readiness is patched only in this synthetic test to exercise real
+        # activation/claim/reserve methods. Runtime readiness remains held.
+        from processing import reference_protocol as rp
+        from processing.viewer_source_v2_reconcile_candidate import CHUNK
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        queue=Queue(temp.name);queue.allowed_profiles.add(PROFILE);self.addCleanup(queue.close)
+        store=ReferenceStore(queue,jcs_runtime_enabled=True)
+        fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
+        submission=copy.deepcopy(fixture['submission']);manifest=submission['manifest']
+        manifest['id']='dataset-synthetic-source';manifest['sha256']=rp.manifest_sha256(manifest)
+        env=dict(schemaVersion=3,protocol=PROTOCOL,submission=submission,viewerTaskId=str(uuid.uuid4()),viewerAttemptId=str(uuid.uuid4()),activationId=str(uuid.uuid4()))
+        legacy=dict(capabilityFingerprint=fixture['capabilities']['capabilityFingerprint'],optionsFingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'],allowedOdmOptions=['resolution'],availableEngines=['odm'])
+        policy=dict(capabilityFingerprint=legacy['capabilityFingerprint'],optionsFingerprint=legacy['optionsFingerprint'],availableEngines=['odm'],optionDefinitions={'resolution':{'type':'float','domain':{'min':-100,'max':100}}})
+        primary='synthetic-jcs-viewer-token-0001';other='synthetic-jcs-other-token-0001';stage='synthetic-jcs-stage-token-0001'
+        def make_api(s):return PreparedSubmissionAPI(s,credentials=[dict(token=primary,principalId='viewer-a',environment='production'),dict(token=other,principalId='viewer-b',environment='production'),dict(token=stage,principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy})
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                raw=self.rfile.read(int(self.headers.get('content-length','0')));r=self.server.api.handle('POST',self.path,self.headers,raw,protected_transport=True)
+                out=json.dumps(r.body).encode();self.send_response(r.status);self.send_header('Content-Length',str(len(out)));self.end_headers();self.wfile.write(out)
+            def log_message(self,*args):pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.api=make_api(store)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        def post(path,value,token=primary):
+            req=Request('http://127.0.0.1:%d%s'%(server.server_port,path),data=json.dumps(value).encode(),headers={'Authorization':'Bearer '+token},method='POST')
+            try:
+                with urlopen(req,timeout=5) as response:return response.status,json.load(response)
+            except HTTPError as error:return error.code,json.load(error)
+        try:
+            status,job=post('/ltds/prepared/v3/submissions',env);self.assertEqual(status,201)
+            path='/ltds/prepared/v3/submissions/'+submission['submissionId']+'/source-grant-inspection'
+            self.assertEqual(post(path,{'grant':{}})[0],409)
+            total=manifest['totalBytes'];minimum=sum((o['byteSize']+CHUNK-1)//CHUNK for o in manifest['objects'])
+            transfer=dict(protocol='source-range-v2',viewerAttemptId=env['viewerAttemptId'],reservationId='synthetic-reservation',generation=job['generation'],expiresAt='2035-01-01T00:10:00.000Z',manifestSha256=manifest['sha256'],sourceVersion='dataset:synthetic-source:'+manifest['sha256'],objectIds=[o['id'] for o in manifest['objects']],chunkBytes=CHUNK,requestBudget=minimum,byteBudget=total*3,nonce='synthetic-nonce',attemptBudget=minimum*3)
+            grant={**transfer,'expiresAt':'2035-01-01T00:05:00.000Z','jobId':job['jobId'],'environment':'production','token':'z'*43}
+            found=store.find_viewer_envelope_v2(submission['submissionId'],authenticated_principal='viewer-a',authenticated_environment='production',expected_protocol=PROTOCOL)
+            activation=dict(activationId=env['activationId'],viewerTaskId=env['viewerTaskId'],viewerAttemptId=env['viewerAttemptId'],envelopeSha256=found['envelopeSha256'])
+            activation_path='/ltds/prepared/v3/submissions/'+submission['submissionId']+'/activation'
+            self.assertEqual(post(activation_path,activation)[0],503)
+            self.assertIsNone(store.claim(job['jobId'],node_id='cluster',worker_id='synthetic-worker',worker_instance_id='synthetic-instance',claim_request_id='synthetic-claim'))
+            with patch.object(ReferenceStore,'_v3_source_contract_ready',return_value=True),patch.object(ReferenceStore,'_activation_bound_grant_ready',return_value=True):
+                self.assertEqual(post(activation_path,activation)[0],200)
+                self.assertIsNotNone(store.claim(job['jobId'],node_id='cluster',worker_id='synthetic-worker',worker_instance_id='synthetic-instance',claim_request_id='synthetic-claim'))
+                bad=copy.deepcopy(transfer);bad['viewerAttemptId']=str(uuid.uuid4())
+                with self.assertRaisesRegex(Conflict,'attempt binding differs'):store.reserve(job['jobId'],bad,node_id='cluster')
+                bad=copy.deepcopy(transfer);bad['byteBudget']+=1
+                with self.assertRaises(Conflict):store.reserve(job['jobId'],bad,node_id='cluster')
+                stored=store.reserve(job['jobId'],transfer,node_id='cluster')
+                self.assertEqual(stored['transferRequest'],transfer)
+                self.assertEqual(store.reserve(job['jobId'],transfer,node_id='cluster')['transferRequest'],transfer)
+                changed=copy.deepcopy(transfer);changed['viewerAttemptId']=str(uuid.uuid4())
+                with self.assertRaisesRegex(Conflict,'attempt binding differs'):store.reserve(job['jobId'],changed,node_id='cluster')
+            with self.assertRaisesRegex(Conflict,'activation-bound source grant unavailable'):
+                store.reserve(job['jobId'],transfer,node_id='cluster')
+            expected=(200,{'state':'held','reason':'broker_authorization_unverified'})
+            self.assertEqual(post(path,{'grant':grant}),expected)
+            self.assertEqual(post(path,{'grant':grant},other)[0],404);self.assertEqual(post(path,{'grant':grant},stage)[0],404)
+            self.assertEqual(post(path,{'grant':grant},'invalid')[0],401)
+            for field,value in [('viewerAttemptId',str(uuid.uuid4())),('objectIds',['changed']),('byteBudget',transfer['byteBudget']+1)]:
+                bad=copy.deepcopy(grant);bad[field]=value
+                with self.subTest(field=field):self.assertEqual(post(path,{'grant':bad})[0],409)
+            reopened=ReferenceStore(queue,jcs_runtime_enabled=True);server.api=make_api(reopened)
+            self.assertEqual(post(path,{'grant':grant}),expected)
+            bad_transfer=copy.deepcopy(transfer);bad_transfer['byteBudget']+=1;bad_grant=copy.deepcopy(grant);bad_grant['byteBudget']+=1
+            with queue._db() as db:db.execute('UPDATE reference_jobs SET transfer_json=? WHERE job_id=?',(rp.canonical_json(bad_transfer).decode(),job['jobId']))
+            self.assertEqual(post(path,{'grant':bad_grant})[0],409)
+            bad_transfer=copy.deepcopy(transfer);bad_transfer['objectIds']=['changed'];bad_grant=copy.deepcopy(grant);bad_grant['objectIds']=['changed']
+            with queue._db() as db:db.execute('UPDATE reference_jobs SET transfer_json=? WHERE job_id=?',(rp.canonical_json(bad_transfer).decode(),job['jobId']))
+            self.assertEqual(post(path,{'grant':bad_grant})[0],409)
+            with queue._db() as db:
+                original=db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?',(job['jobId'],)).fetchone()[0]
+                corrupt=json.loads(original);corrupt['manifest']['objects'][0]['sha256']='c'*64
+                db.execute('UPDATE reference_jobs SET transfer_json=?,input_json=? WHERE job_id=?',(rp.canonical_json(transfer).decode(),rp.canonical_json(corrupt).decode(),job['jobId']))
+            self.assertEqual(post(path,{'grant':grant})[0],409)
+            with queue._db() as db:db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(original,job['jobId']))
+            self.assertIsNone(reopened.next_for_node('cluster'))
+            with queue._db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_transfer_grants').fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_viewer_activation').fetchone()[0],1)
+        finally:server.shutdown();server.server_close();thread.join(5)
+        self.assertFalse(thread.is_alive())
+
     def test_http_store_restart_replay_digest_and_policy(self):
         temp=tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         queue=Queue(temp.name); queue.allowed_profiles.add(PROFILE); self.addCleanup(queue.close)

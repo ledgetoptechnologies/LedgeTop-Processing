@@ -89,6 +89,13 @@ class PreparedSubmissionAPI:
                 job, created = self.store.prepare_viewer_envelope_jcs_v3(body, authenticated_principal=principal,
                     authenticated_environment=environment, trusted_policy=self._jcs_policies[environment])
                 return Response(201 if created else 200, job)
+            inspection = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/source-grant-inspection', path) if type(path) is str else None
+            if method == 'POST' and inspection and self._jcs_policies is not None:
+                request=p.decode_submission(body)
+                p._closed(request, ('grant',), 'source grant inspection')
+                result=self.store.inspect_viewer_v3_source_grant(inspection[1],request['grant'],
+                    authenticated_principal=principal,authenticated_environment=environment)
+                return Response(200,result) if result is not None else Response(404,{'error':'not_found'})
             view = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/(status|result-manifest|accepted-copies)', path) if type(path) is str else None
             if method == 'GET' and view and self._jcs_policies is not None:
                 if body: raise ValueError('GET body forbidden')
