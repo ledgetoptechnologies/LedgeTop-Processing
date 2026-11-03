@@ -338,7 +338,7 @@ class TaskStore:
             raise ValueError('safe supported input basename required')
         return name.casefold()
 
-    def upload(self, identifier, filename, stream, length, environment=None, capability=None, *, expected_generation=None, expected_sha256=None, expected_batch=None):
+    def upload(self, identifier, filename, stream, length, environment=None, capability=None, *, expected_generation=None, expected_sha256=None, expected_batch=None, expected_identity=None):
         key = self._filename(filename)
         if type(length) is not int or length <= 0:
             raise ValueError('invalid input length')
@@ -392,6 +392,9 @@ class TaskStore:
                         batch_id, batch_digest = expected_batch
                         from .viewer_batch_intent_candidate import attest, bounded_intent
                         attest(db)
+                        if expected_identity is not None:
+                            from .viewer_batch_identity_candidate import check_owner
+                            check_owner(db,self.queue,identifier,environment,expected_identity)
                         batch=bounded_intent(db,batch_id)
                         if batch is None or (batch['task_id'],batch['generation'],batch['environment'],batch['digest']) != (identifier,expected_generation,environment,batch_digest):
                             raise Conflict('batch intent changed')

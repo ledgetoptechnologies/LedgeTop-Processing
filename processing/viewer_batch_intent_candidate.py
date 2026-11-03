@@ -38,7 +38,7 @@ def initialize(store):
             for sql in TRIGGERS:db.execute(sql)
         attest(db)
 
-def prepare(store, task, environment, capability, generation, batch_id, files):
+def prepare(store, task, environment, capability, generation, batch_id, files, *, identity=None):
     if not isinstance(batch_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',batch_id) or type(generation) is not int or generation < 1 or type(files) is not list or not 1 <= len(files) <= 100:
         raise ValueError('invalid batch')
     canonical = []; seen = set()
@@ -52,6 +52,9 @@ def prepare(store, task, environment, capability, generation, batch_id, files):
     with store._lock, store.queue._db() as db:
         db.execute('BEGIN IMMEDIATE')
         attest(db)
+        if identity is not None:
+            from .viewer_batch_identity_candidate import check_owner
+            check_owner(db,store.queue,task,environment,identity)
         if store._reservation(db,task,environment,capability) is None: raise Conflict('reservation required')
         row=store._row(db,task)
         if row['generation']!=generation or row['environment']!=environment or row['stage']!='uploading' or row['job_id']: raise Conflict('task unavailable')
@@ -62,10 +65,13 @@ def prepare(store, task, environment, capability, generation, batch_id, files):
         else: db.execute('INSERT INTO held_batch_intent_v1 VALUES(?,?,?,?,?,?)',(batch_id,*identity))
     return {'state':'held_no_replay_authority','digest':digest}
 
-def upload_held(store, task, environment, capability, generation, batch_id, name, stream, length):
+def upload_held(store, task, environment, capability, generation, batch_id, name, stream, length, *, identity=None):
     with store._lock, store.queue._db() as db:
         db.execute('BEGIN')
         attest(db)
+        if identity is not None:
+            from .viewer_batch_identity_candidate import check_owner
+            check_owner(db,store.queue,task,environment,identity)
         if store._reservation(db,task,environment,capability) is None: raise Conflict('reservation required')
         row=store._row(db,task)
         if row['generation']!=generation or row['environment']!=environment or row['stage']!='uploading' or row['job_id']: raise Conflict('task unavailable')
@@ -91,4 +97,4 @@ def upload_held(store, task, environment, capability, generation, batch_id, name
         matches=[x for x in files if x['name']==name]
         if len(matches)!=1 or matches[0]['bytes']!=length: raise Conflict('input differs')
         expected_sha256=matches[0]['sha256']
-    return store.upload(task,name,stream,length,environment,capability,expected_generation=generation,expected_sha256=expected_sha256,expected_batch=(batch_id,intent['digest']))
+    return store.upload(task,name,stream,length,environment,capability,expected_generation=generation,expected_sha256=expected_sha256,expected_batch=(batch_id,intent['digest']),expected_identity=identity)
