@@ -158,6 +158,55 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         self.assertEqual(self.store.acceptance_receipts(self.job['jobId'])['receipts'], [])
         self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'awaiting_acceptance')
 
+    def test_legacy_completed_transfer_with_unrelated_signed_partial_is_held(self):
+        partial = self._full_acceptance()
+        partial['acceptedObjectIds'] = ['result-1']
+        signed = self.fixture.viewer_signer.receipt(partial, self.result)
+        route = '/jobs/' + self.job['jobId'] + '/acceptance'
+        response = self.fixture.request('POST', route, {'acceptance': partial, 'viewerReceipt': signed})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(response.body['fullyAccepted'])
+        self.store.ensure_viewer_transfer(self.job['jobId'])
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE reference_jobs SET phase='completed' WHERE job_id=?", (self.job['jobId'],))
+            db.execute("UPDATE reference_viewer_transfers SET completed_at='2026-01-01' WHERE job_id=?", (self.job['jobId'],))
+        self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+        self.assertEqual(len(self.store.acceptance_receipts(self.job['jobId'])['receipts']), 1)
+        self.assertIsNone(self.store.viewer_transfer_status(self.job['jobId'])['lastError'])
+
+    def test_completed_job_with_signed_partial_but_no_transfer_gets_full_transfer(self):
+        partial = self._full_acceptance()
+        partial['acceptedObjectIds'] = ['result-1']
+        signed = self.fixture.viewer_signer.receipt(partial, self.result)
+        response = self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance',
+                                        {'acceptance': partial, 'viewerReceipt': signed})
+        self.assertFalse(response.body['fullyAccepted'])
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE reference_jobs SET phase='completed' WHERE job_id=?", (self.job['jobId'],))
+        self.sender.fail = False
+        self.assertEqual(self.worker.run_once(), {'state': 'accepted', 'jobId': self.job['jobId']})
+        self.assertTrue(self.store.viewer_transfer_status(self.job['jobId'])['completed'])
+        self.assertFalse(self.store.has_viewer_acceptance_reconciliation())
+
+    def test_missing_matching_signed_row_invalidates_full_coverage_marker(self):
+        self.sender.fail = False
+        self.assertEqual(self.worker.run_once()['state'], 'accepted')
+        with self.fixture.queue._db() as db:
+            db.execute('DELETE FROM reference_viewer_receipts WHERE job_id=?', (self.job['jobId'],))
+        self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+
+    def test_non_viewer_policy_is_not_reinterpreted_after_config_enable(self):
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
+        configured_later = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
+        api = self.fixture.make_api(store=configured_later)
+        response = self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance',
+                                        self._full_acceptance(), api=api)
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.body['fullyAccepted'])
+        self.assertIsNone(configured_later.viewer_transfer_status(self.job['jobId']))
+        self.assertFalse(configured_later.has_viewer_acceptance_reconciliation())
+
     def test_full_page_of_conflicts_does_not_starve_later_job(self):
         self.sender.fail = False
         with self.fixture.queue._db() as db:

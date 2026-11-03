@@ -35,3 +35,8 @@ remain ambiguous and are held for reconciliation; a transfer marked complete
 without a signed Viewer receipt is also surfaced as needing reconciliation.
 The migration does not establish the history of old records, fence older
 binaries, or reconcile a pre-existing unsigned completion automatically.
+Full-transfer coverage is recorded only in the same transaction as the exact
+durable request and its verified signed receipt. A prior lone signed partial
+receipt does not prove that coverage. Pre-existing completed transfer rows
+without that new evidence are held for reconciliation; a later environment
+configuration change does not silently convert an explicitly non-Viewer job.

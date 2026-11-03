@@ -130,6 +130,10 @@ class ReferenceStore:
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
+            if 'verified_full_coverage' not in transfer_columns:
+                # Older completed transfer rows lack independently established
+                # full Viewer coverage and require reconciliation.
+                db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN verified_full_coverage INTEGER')
             job_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_jobs)')}
             if 'viewer_receipt_required' not in job_columns:
                 # Legacy NULL is deliberately ambiguous until reconciled.
@@ -676,8 +680,10 @@ class ReferenceStore:
             if fully:
                 db.execute("UPDATE reference_jobs SET phase='completed',updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
             if transfer and transfer['receipt_id'] == checked['receiptId']:
+                if viewer_checked is None or not fully:
+                    raise Conflict('complete signed Viewer coverage required for transfer')
                 db.execute('UPDATE reference_viewer_transfers SET completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP),'
-                           'lease_token=NULL,lease_until=NULL,last_error=NULL WHERE job_id=?', (job_id,))
+                           'verified_full_coverage=1,lease_token=NULL,lease_until=NULL,last_error=NULL WHERE job_id=?', (job_id,))
             return {"job": self._public(self._row(db, job_id)), "created": old is None,
                     "fullyAccepted": fully, "acceptedObjectIds": sorted(accepted)}
 
@@ -764,7 +770,18 @@ class ReferenceStore:
 
     def _viewer_pending_phase(self):
         return ("(r.viewer_receipt_required=1 AND (r.phase='awaiting_acceptance' OR "
-                "(r.phase='completed' AND NOT EXISTS (SELECT 1 FROM reference_viewer_receipts v WHERE v.job_id=r.job_id))))", ())
+                "(r.phase='completed' AND NOT " + self._viewer_full_coverage_sql() + ")))", ())
+
+    @staticmethod
+    def _viewer_full_coverage_sql():
+        # The marker is written only in the same transaction as exact durable
+        # acceptance and verified full signed coverage. Require those records
+        # still to be bound to this transfer; a lone partial receipt is not proof.
+        return ("EXISTS (SELECT 1 FROM reference_viewer_transfers t "
+                "JOIN reference_acceptances a ON a.job_id=t.job_id AND a.receipt_id=t.receipt_id "
+                "AND a.receipt_json=t.acceptance_json "
+                "JOIN reference_viewer_receipts v ON v.job_id=t.job_id AND v.acceptance_receipt_id=a.receipt_id "
+                "WHERE t.job_id=r.job_id AND t.completed_at IS NOT NULL AND t.verified_full_coverage=1)")
 
     def has_viewer_acceptance_reconciliation(self):
         """Surface ambiguous legacy policies and unsigned completed transfers."""
@@ -773,8 +790,8 @@ class ReferenceStore:
                 WHERE r.result_json IS NOT NULL AND r.phase IN ('awaiting_acceptance','completed')
                 AND ((r.viewer_receipt_required IS NULL OR r.viewer_receipt_required NOT IN (0,1))
                   OR (r.viewer_receipt_required=1 AND EXISTS
-                      (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id AND t.completed_at IS NOT NULL)
-                      AND NOT EXISTS (SELECT 1 FROM reference_viewer_receipts v WHERE v.job_id=r.job_id)))
+                      (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id
+                       AND t.completed_at IS NOT NULL) AND NOT ''' + self._viewer_full_coverage_sql() + '''))
                 LIMIT 1''').fetchone() is not None
 
     def pending_viewer_transfer_page(self, *, limit=20, after=None):
