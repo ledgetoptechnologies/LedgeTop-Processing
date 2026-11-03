@@ -39,3 +39,11 @@ rollback of the whole state still need external controls.
 The claim additionally binds production/staging and the exact configured
 coordinator origin. This does not independently prove either value: the shared
 signing key is still the trust boundary and is not a job-scoped credential.
+
+Admission checks current node ownership, generation, outstanding reservation,
+and journal lifecycle under the same held gate lock before consuming a new
+nonce. A busy or mismatched node therefore cannot burn an otherwise valid
+claim. A read-only ledger check still reports an existing same-reservation
+replay as held and rejects a consumed nonce before any reservation attempt.
+If the process dies after consumption but before reservation, the claim remains
+consumed and requires reconciliation; it is never silently reissued.

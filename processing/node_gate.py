@@ -241,7 +241,8 @@ class NodeGate:
         if type(generation) is not int or generation != state['generation']:
             raise GateError('stale node ownership generation')
 
-    def reserve(self, node_id, origin, authority_id, generation, receipt_id):
+    def check_reservable(self, node_id, origin, authority_id, generation, receipt_id):
+        """Validate reservation preconditions under this gate's held OS lock."""
         binding = _binding(node_id, origin, authority_id)
         state = self.snapshot()
         self._journal_blocks_lifecycle(state)
@@ -252,6 +253,10 @@ class NodeGate:
             raise GateError('invalid worker receipt identity')
         if state['reservation'] is not None:
             raise GateError('unresolved reservation blocks new work')
+        return state
+
+    def reserve(self, node_id, origin, authority_id, generation, receipt_id):
+        state = self.check_reservable(node_id, origin, authority_id, generation, receipt_id)
         state['reservation'] = {'receiptId': receipt_id, 'job': None, 'completionDigest': None}
         self._save(state)
         return state['reservation']

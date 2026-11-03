@@ -33,6 +33,46 @@ class JobClaimReplayTests(BoundJobTests):
             self.proxy.initialize(self.task, job_claim=env, **self.auth)
         self.assertEqual(self.backend.counts()['initialize'], 1)
 
+    def test_busy_node_does_not_consume_claim_and_retry_succeeds(self):
+        env = self.envelope()
+        receipt = 'c' * 32
+        with NodeGate('physical-engine') as gate:
+            gate.reserve('main', 'https://coordinator.invalid', self.authority, 1, receipt)
+        with self.assertRaises(GateError):
+            self.proxy.initialize(self.task, job_claim=env, **self.auth)
+        with NodeGate('physical-engine') as gate:
+            self.assertNotIn('jobClaimLedger', gate.snapshot())
+            gate.release_empty(receipt, {'job': None})
+        self.proxy.initialize(self.task, job_claim=env, **self.auth)
+        self.assertEqual(self.backend.counts()['initialize'], 1)
+
+    def test_busy_node_concurrent_clients_do_not_consume_claims(self):
+        env1 = self.envelope()
+        env2 = self.envelope()
+        receipt = 'c' * 32
+        with NodeGate('physical-engine') as gate:
+            gate.reserve('main', 'https://coordinator.invalid', self.authority, 1, receipt)
+        def attempt(env):
+            try: self.proxy.initialize(self.task, job_claim=env, **self.auth)
+            except GateError: return 'held'
+            return 'issued'
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(list(pool.map(attempt, [env1, env2])), ['held', 'held'])
+        with NodeGate('physical-engine') as gate:
+            self.assertNotIn('jobClaimLedger', gate.snapshot())
+            gate.release_empty(receipt, {'job': None})
+        self.proxy.initialize(self.task, job_claim=env2, **self.auth)
+        self.assertEqual(self.backend.counts()['initialize'], 1)
+
+    def test_wrong_gate_binding_does_not_consume_claim(self):
+        self.proxy.origin = 'https://other.invalid'
+        env = self.envelope(coordinatorOrigin='https://other.invalid')
+        with self.assertRaises(GateError):
+            self.proxy.initialize(self.task, job_claim=env, **self.auth)
+        with NodeGate('physical-engine') as gate:
+            self.assertNotIn('jobClaimLedger', gate.snapshot())
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+
     def test_crash_after_consumption_before_reservation_stays_consumed(self):
         env = self.envelope()
         with patch.object(NodeGate, 'reserve', side_effect=RuntimeError('synthetic interruption')):

@@ -135,7 +135,13 @@ class GuardedNativeProxy:
             receipt = secrets.token_hex(16)
             if verified is not None:
                 from .job_claim_ledger import JobClaimLedger
-                JobClaimLedger(gate).consume(verified, receipt)
+                ledger = JobClaimLedger(gate)
+                # Replay inspection is read-only. A new claim must pass all
+                # gate preconditions before it is consumed, otherwise a busy
+                # node would permanently burn a valid scheduler claim.
+                ledger.check_existing(verified)
+                gate.check_reservable(self.node_id, self.origin, self.authority_id, self.generation, receipt)
+                ledger.consume(verified, receipt)
             gate.reserve(self.node_id, self.origin, self.authority_id, self.generation, receipt)
             gate.bind(receipt, dict(id=identifier, workerId=self.worker_id,
                 nodeId=self.node_id, authorityId=self.authority_id))

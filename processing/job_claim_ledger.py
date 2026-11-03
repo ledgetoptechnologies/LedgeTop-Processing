@@ -62,6 +62,25 @@ class JobClaimLedger:
         except (OSError, sqlite3.Error, ValueError):
             raise GateError('claim ledger requires inspection') from None
 
+    def check_existing(self, claim):
+        """Read a prior consumption without creating or changing the ledger."""
+        state = self.gate.snapshot()
+        if state.get('jobClaimLedger') is None:
+            if self.path.exists() or self.path.is_symlink():
+                raise GateError('unmarked claim ledger requires inspection')
+            return
+        db = self._open()
+        try:
+            row = db.execute('SELECT claim_digest,receipt FROM claims WHERE nonce=?', (claim['nonce'],)).fetchone()
+        finally:
+            db.close()
+        if row is not None:
+            reservation = state['reservation']
+            if (row[0] == protocol.digest(claim) and reservation is not None
+                    and reservation['receiptId'] == row[1]):
+                raise MutationHeld('claim already bound; inspect existing reservation')
+            raise GateError('claim replay or collision requires inspection')
+
     def consume(self, claim, receipt):
         """Durably consume one nonce; replay is always held without mutation."""
         digest = protocol.digest(claim)
