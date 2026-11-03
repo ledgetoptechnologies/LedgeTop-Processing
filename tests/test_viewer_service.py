@@ -466,6 +466,8 @@ class ViewerServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(Conflict, 'reconciliation requires inspection'):
                 self.service.tick()
         self.assertEqual(self.task(first)['job']['status'], 'held')
+        self.assertEqual((self.task(first)['stage'], self.task(first)['phase'], self.task(first)['error']),
+                         ('held', 'held', 'reconciliation_error'))
         self.assertEqual(self.task(second)['job']['status'], 'succeeded')
 
     def test_opt_in_does_not_fallback_for_unavailable_cluster(self):
@@ -478,6 +480,8 @@ class ViewerServiceTests(unittest.TestCase):
     def test_per_node_configuration_rejects_obvious_same_host_aliases(self):
         from processing.config import require_distinct_node_hosts
         for local, main in (('http://localhost:3001', 'http://127.0.0.1:3004'),
+                            ('http://[::1]:3001', 'http://127.1.2.3:3004'),
+                            ('http://127.0.0.2:3001', 'http://127.0.0.3:3004'),
                             ('http://[::ffff:192.0.2.1]:3001', 'http://192.0.2.1:3004'),
                             ('http://NODE.example.:3001', 'http://node.example:3004'),
                             ('', 'http://192.0.2.2:3000')):

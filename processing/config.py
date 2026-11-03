@@ -51,6 +51,8 @@ def require_distinct_node_hosts(local_url: str, main_url: str):
             ip = ipaddress.ip_address(name)
             if getattr(ip, 'ipv4_mapped', None):
                 ip = ip.ipv4_mapped
+            if ip.is_loopback:
+                return '127.0.0.1'
             return str(ip)
         except ValueError:
             return name

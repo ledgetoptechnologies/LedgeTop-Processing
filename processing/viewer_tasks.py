@@ -540,6 +540,21 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (status,100 if status=='succeeded' else row['progress'],row['uuid']))
 
+    def hold_reconciliation_error(self, job_id):
+        """Hold an unambiguous Viewer job and its task in one transaction."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT uuid FROM viewer_tasks WHERE removed=0 AND job_id=? LIMIT 2', (job_id,)).fetchall()
+            job = db.execute('SELECT status,profile,environment,held_reason FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if len(rows) != 1 or job is None or job['profile'] != VIEWER_PROFILE:
+                raise Conflict('reconciliation hold identity unavailable')
+            if job['status'] != 'running' and not (job['status'] == 'held' and job['held_reason'] == 'coordinator_restart'):
+                raise Conflict('reconciliation hold state changed')
+            result = json.dumps({'environment': job['environment'], 'operatorAction': 'hold',
+                                 'note': 'reconciliation_error', 'workerStopped': False})
+            db.execute("UPDATE jobs SET status='held',result=?,held_reason='operator',updated_at=CURRENT_TIMESTAMP WHERE id=?", (result, job_id))
+            db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='reconciliation_error',updated_at=CURRENT_TIMESTAMP WHERE uuid=?", (rows[0]['uuid'],))
+
     def settle_operator_resolution(self, task):
         """Finish a hold the operator resolved before the Viewer row recorded it.
 

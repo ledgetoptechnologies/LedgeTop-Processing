@@ -641,7 +641,7 @@ class ViewerService:
                         try:
                             current = self.queue.get(job['id'])
                             if current and current['status'] == 'running':
-                                self.queue.operator(job['id'], 'hold', {'note': 'reconciliation_error'})
+                                self.store.hold_reconciliation_error(job['id'])
                         except Exception as hold_error:
                             reconciliation_errors.append(hold_error)
             if reconciliation_errors:
