@@ -225,6 +225,27 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
         self.assertEqual(self.fleet.max_active, 1)
 
+    def test_queue_indicator_covers_all_waiting_jobs_only_until_dispatch(self):
+        uploading = self.initialize()
+        self.assertNotIn('ledgetopQueueState', self.service.info(uploading))
+        first = self.submit()
+        second = self.submit()
+        for identifier in (first, second):
+            info = self.service.info(identifier)
+            self.assertEqual(info['status']['code'], 10)
+            self.assertEqual(info['ledgetopQueueState'], 'waiting_for_dispatch')
+        self.service.tick()
+        claimed = self.service.info(first)
+        self.assertEqual(claimed['status']['code'], 10)
+        self.assertNotIn('ledgetopQueueState', claimed)
+        self.assertEqual(self.service.info(second)['ledgetopQueueState'], 'waiting_for_dispatch')
+        self.service._hold(self.task(first), 'synthetic_hold')
+        held = self.service.info(first)
+        self.assertTrue(held['ledgetopHeld'])
+        self.assertNotIn('ledgetopQueueState', held)
+        self.service.cancel(second)
+        self.assertNotIn('ledgetopQueueState', self.service.info(second))
+
     def test_capabilities_report_the_enforced_cumulative_input_limit(self):
         from processing.viewer_http import MAX_UPLOAD_BYTES
         self.assertEqual(self.service.capabilities()['ledgetopMaxInputBytes'], self.service.store.max_input_bytes)
