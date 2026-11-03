@@ -276,13 +276,15 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
+            # Liveness first: an exact replay against terminal or expired scratch must
+            # not read as success, or a caller could seal a successor for dead scratch.
+            if row["state"] not in ("reserved", "engine_started", "uncertain") or row["terminal_at"] is not None:
+                raise PolicyConflict("extension outside a live reservation")
             old = db.execute("SELECT sequence,expires FROM reservation_extensions WHERE reservation=?", (reservation_id,)).fetchone()
             if old is not None and old["sequence"] == sequence:
                 if old["expires"] != float(expires_at):
                     raise PolicyConflict("reservation extension differs")
                 return dict(row, expires=self._expires(db, row))
-            if row["state"] not in ("reserved", "engine_started", "uncertain") or row["terminal_at"] is not None:
-                raise PolicyConflict("extension outside a live reservation")
             if sequence != (old["sequence"] if old else 0) + 1:
                 raise PolicyConflict("reservation extension sequence differs")
             if expires_at <= self._expires(db, row) or expires_at <= now:

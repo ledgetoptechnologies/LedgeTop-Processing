@@ -651,6 +651,28 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_reservation_successors WHERE job_id=?',
                                         (job['jobId'],)).fetchone()[0], 1)
 
+    def test_successor_replay_after_scratch_turned_terminal_holds_without_posting(self):
+        self.open_successor_gate()
+        job, state, clock, offset, real, posts = self.successor_fetching('terminal')
+        recording = self.driver._request
+        def lost(method, suffix, payload=None, **kwargs):
+            result = recording(method, suffix, payload, **kwargs)
+            if suffix.endswith('/reservation/successor') and len(posts) == 1:
+                raise OSError('synthetic lost successor reply')
+            return result
+        self.driver._request = lost
+        offset[0] = 241
+        with patch('processing.reference_store.time.time', side_effect=lambda: real() + offset[0]):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            reservation = self.driver_data(job)['reservation']['reservationId']
+            # Race: the scratch reservation is terminal before the journaled replay.
+            self.ledger.set_engine_state(reservation, 'terminal', terminal_attested=True)
+            self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state, clock=clock)
+            self.driver._request = recording
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'reservation_successor_scratch_unavailable'})
+        self.assertEqual(len(posts), 1)  # no successor is posted for dead scratch
+        self.assertIn('reservationSuccessor', self.driver_data(job))
+
     def test_committed_reservation_past_deadline_is_succeeded_then_replayed_when_gate_open(self):
         self.open_successor_gate()
         job, _state, _offset, _lost, posts = self.committed_reservation_with_lost_reply('successor')

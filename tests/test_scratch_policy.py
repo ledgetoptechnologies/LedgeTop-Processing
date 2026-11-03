@@ -337,6 +337,19 @@ class ScratchPolicyTests(unittest.TestCase):
         with self.assertRaises(PolicyConflict):
             self.ledger.extend('r1', sequence=2, expires_at=300)
 
+    def test_exact_extension_replay_refuses_terminal_or_expired_scratch(self):
+        self.reserve()  # t=100, expires=120
+        self.ledger.extend('r1', sequence=1, expires_at=150)
+        self.ledger.set_engine_state('r1', 'terminal', terminal_attested=True)
+        with self.assertRaisesRegex(PolicyConflict, 'outside a live reservation'):
+            self.ledger.extend('r1', sequence=1, expires_at=150)  # the exact replay is not a success
+        self.reserve(job_id='j2', reservation_id='r2')
+        self.ledger.extend('r2', sequence=1, expires_at=150)
+        self.now = 151  # unfenced, nothing allocated: the extension elapsed and expired it
+        self.ledger = self.open()
+        with self.assertRaisesRegex(PolicyConflict, 'outside a live reservation'):
+            self.ledger.extend('r2', sequence=1, expires_at=150)
+
     def test_extended_lease_admits_transfer_fence_after_original_expiry(self):
         self.reserve()
         self.now = 119
