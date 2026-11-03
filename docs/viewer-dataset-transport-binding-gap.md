@@ -71,3 +71,10 @@ provenance, buffered synthetic inputs and candidate tables; it supplies no
 signature, network authentication, current epoch, trusted source loader or
 production admission. Its held result cannot authorize processing or cleanup.
 A killed child test checks SQLite process recovery, not hardware power loss.
+
+The synthetic no-GCP initializer creates binding and frame namespaces together
+and refuses any partial namespace loss. A bounded same-transaction census
+rejects orphan pages, unmatched binding/receipt IDs and missing frame kinds.
+This does not prove content validity for unrelated historical jobs and cannot
+detect simultaneous total loss of every namespace. It does not fence old or
+noncooperative writers or cloned databases; all operation remains held.

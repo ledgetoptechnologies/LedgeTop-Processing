@@ -5,9 +5,37 @@ from . import viewer_dual_digest_binding_candidate as binding
 from . import paged_frame_receiver_candidate as frames
 from .viewer_import_confirmation_store import _preflight_stored_json
 from .viewer_paged_frame_candidate import _pairs
-from .paged_snapshot_journal_candidate import _check_frame_schema
+from .paged_snapshot_journal_candidate import _check_frame_schema, FRAME_MARKER_DDL, FRAME_RECEIPTS_DDL, FRAME_PAGES_DDL
 
 class NoGcpHeld(ValueError):pass
+
+def _history(db):
+ # Refuse oversized histories before joins; each bounded census scans at most
+ # its cap plus one and no client row payloads are materialized.
+ for table,cap in (('synthetic_viewer_dataset_transport_v1',10000),('candidate_frame_receipts',10000),('candidate_frame_pages',100000)):
+  if db.execute('SELECT count(*) FROM (SELECT 1 FROM '+table+' LIMIT ?)',(cap+1,)).fetchone()[0]>cap:raise ValueError('candidate history too large')
+ # Existence probes use primary-key joins and materialize at most one row.
+ for query in (
+  "SELECT 1 FROM candidate_frame_pages p LEFT JOIN candidate_frame_receipts r ON r.stage_id=p.stage_id WHERE r.stage_id IS NULL LIMIT 1",
+  "SELECT 1 FROM candidate_frame_receipts r LEFT JOIN synthetic_viewer_dataset_transport_v1 b ON b.job_id=r.stage_id WHERE b.job_id IS NULL LIMIT 1",
+  "SELECT 1 FROM synthetic_viewer_dataset_transport_v1 b LEFT JOIN candidate_frame_receipts r ON r.stage_id=b.job_id WHERE r.stage_id IS NULL LIMIT 1",
+  "SELECT 1 FROM candidate_frame_receipts r WHERE NOT EXISTS (SELECT 1 FROM candidate_frame_pages p WHERE p.stage_id=r.stage_id AND p.kind='source') OR NOT EXISTS (SELECT 1 FROM candidate_frame_pages p WHERE p.stage_id=r.stage_id AND p.kind='selected') OR NOT EXISTS (SELECT 1 FROM candidate_frame_pages p WHERE p.stage_id=r.stage_id AND p.kind='processing') LIMIT 1"):
+  if db.execute(query).fetchone():raise ValueError('unmatched candidate history')
+
+def initialize(db):
+ """Create both synthetic namespaces together or reject partial history."""
+ if db.in_transaction:raise NoGcpHeld('synthetic_schema_unavailable')
+ try:
+  db.execute('PRAGMA foreign_keys=ON');db.execute('BEGIN IMMEDIATE')
+  names={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE name IN ('synthetic_viewer_dataset_transport_v1','synthetic_viewer_dataset_transport_marker_v1','paged_snapshot_frame_marker_v1','candidate_frame_receipts','candidate_frame_pages')")}
+  if not names:
+   for ddl in (binding.DDL,binding.MARKER,FRAME_MARKER_DDL,FRAME_RECEIPTS_DDL,FRAME_PAGES_DDL):db.execute(ddl)
+   db.execute('INSERT INTO synthetic_viewer_dataset_transport_marker_v1 VALUES(1,1)');db.execute('INSERT INTO paged_snapshot_frame_marker_v1 VALUES(1,1)')
+  elif len(names)!=5:raise ValueError('partial candidate history')
+  binding._schema(db);_check_frame_schema(db);_history(db);db.commit()
+ except (ValueError,sqlite3.Error):
+  if db.in_transaction:db.rollback()
+  raise NoGcpHeld('synthetic_schema_unavailable') from None
 
 def stage(store,submission_id,statement,*,principal,environment,configured_authority,synthetic_viewer_provenance,synthetic_bundle,_fault=None):
  try:
@@ -38,6 +66,7 @@ def stage(store,submission_id,statement,*,principal,environment,configured_autho
    fk=[tuple(r) for r in db.execute('PRAGMA foreign_key_list(candidate_frame_pages)')]
    if fk!=[(0,0,'candidate_frame_receipts','stage_id','stage_id','NO ACTION','NO ACTION','NONE')]:raise ValueError()
    if list(db.execute('PRAGMA foreign_key_list(candidate_frame_receipts)')) or list(db.execute('PRAGMA foreign_key_list(paged_snapshot_frame_marker_v1)')) or list(db.execute('PRAGMA index_list(paged_snapshot_frame_marker_v1)')):raise ValueError()
+   binding._schema(db);_history(db)
    result=binding._stage_owned(db,store,submission_id,statement,principal=principal,environment=environment,configured_authority=configured_authority,synthetic_viewer_provenance=synthetic_viewer_provenance)
    if result is None:return None
    if _fault:_fault('binding')

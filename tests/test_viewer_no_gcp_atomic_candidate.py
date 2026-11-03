@@ -8,7 +8,7 @@ from processing.viewer_selected_frames_candidate import binding_digest
 from processing.large_paged_manifest_candidate import build,_digest
 from processing.viewer_dual_digest_binding_candidate import initialize as init_binding,PROVENANCE_FIELDS,VERSION
 from processing.paged_snapshot_journal_candidate import initialize_frames as init_frames, FRAME_PAGES_DDL, FRAME_MARKER_DDL, SnapshotHeld
-from processing.viewer_no_gcp_atomic_candidate import stage,NoGcpHeld
+from processing.viewer_no_gcp_atomic_candidate import stage,NoGcpHeld,initialize as init_combined
 from tests.test_paged_snapshot_signature_candidate import PagedSnapshotSignatureTests
 
 SCRIPT=r'''import base64,json,os,sys
@@ -40,7 +40,7 @@ class NoGcpAtomic(unittest.TestCase):
   self.statement=dict(version=VERSION,schemaVersion=1,principalId='viewer-a',environment='staging',coordinatorAuthorityId=self.queue.authority_id,submissionId=self.submission,jobId=job['jobId'],generation=job['generation'],activationId=env['activationId'],preparedEnvelopeSha256=found['envelopeSha256'],transportManifestSha256=manifest['sha256'],pipelineDigest=p.digest(env['submission']['pipeline']),**self.provenance)
   b=dict(datasetId=x['datasetId'],datasetManifestSha256=x['datasetManifestSha256'],principalId='viewer-a',environment='staging',authorityId=self.queue.authority_id,viewerTaskId=x['taskId'],viewerAttemptId=x['attemptId'],pipelineDigest=self.statement['pipelineDigest'],revocationEpoch=0,sourcePageHashes=x['sourcePageHashes'],sourceCount=x['sourceCount'],selectedPageHashes=x['selectedPageHashes'],selectedCount=x['selectedCount'],inputManifestSha256=x['inputManifestSha256'],processingClosureSha256=_digest(closure))
   self.bundle=dict(binding=b,bindingSha256=binding_digest(b),source=src,selection=sel,processingClosure=closure,processingPages=pages)
-  with self.queue._db() as db:init_binding(db);init_frames(db)
+  with self.queue._db() as db:init_combined(db)
  def call(self,bundle=None,fault=None):return stage(self.store,self.submission,self.statement,principal='viewer-a',environment='staging',configured_authority=self.queue.authority_id,synthetic_viewer_provenance=self.provenance,synthetic_bundle=bundle or self.bundle,_fault=fault)
  def counts(self):
   with self.queue._db() as db:return tuple(db.execute('SELECT (SELECT count(*) FROM synthetic_viewer_dataset_transport_v1),(SELECT count(*) FROM candidate_frame_receipts),(SELECT count(*) FROM candidate_frame_pages)').fetchone())
@@ -120,3 +120,35 @@ class NoGcpAtomic(unittest.TestCase):
    names={x[0] for x in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
    self.assertEqual(names,{'candidate_frame_receipts'})
   finally:db.close()
+
+ def test_cross_history_partial_loss_never_recreates(self):
+  for lost in ('frames','binding'):
+   db=sqlite3.connect(':memory:');init_combined(db)
+   try:
+    db.execute('PRAGMA foreign_keys=OFF')
+    if lost=='frames':
+     db.execute("INSERT INTO synthetic_viewer_dataset_transport_v1 VALUES('job','hash',X'01')")
+     for name in ('candidate_frame_pages','candidate_frame_receipts','paged_snapshot_frame_marker_v1'):db.execute('DROP TABLE '+name)
+    else:
+     db.execute("INSERT INTO candidate_frame_receipts VALUES('job','hash','{}','{}')")
+     for name in ('synthetic_viewer_dataset_transport_v1','synthetic_viewer_dataset_transport_marker_v1'):db.execute('DROP TABLE '+name)
+    db.commit();before=list(db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
+    with self.subTest(lost=lost),self.assertRaises(NoGcpHeld):init_combined(db)
+    self.assertEqual(before,list(db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")))
+   finally:db.close()
+ def test_orphan_history_holds_without_new_binding(self):
+  for mode in ('page','receipt','binding'):
+   with self.queue._db() as db:
+    if mode=='page':db.execute("INSERT INTO candidate_frame_pages VALUES('orphan','source',0,X'01')")
+    elif mode=='receipt':db.execute("INSERT INTO candidate_frame_receipts VALUES('orphan','hash','{}','{}')")
+    else:db.execute("INSERT INTO synthetic_viewer_dataset_transport_v1 VALUES('orphan','hash',X'01')")
+   with self.subTest(mode=mode),self.assertRaises(NoGcpHeld):self.call()
+   with self.queue._db() as db:
+    self.assertEqual(db.execute('SELECT count(*) FROM synthetic_viewer_dataset_transport_v1 WHERE job_id=?',(self.statement['jobId'],)).fetchone()[0],0)
+    db.execute("DELETE FROM candidate_frame_pages WHERE stage_id='orphan'");db.execute("DELETE FROM candidate_frame_receipts WHERE stage_id='orphan'");db.execute("DELETE FROM synthetic_viewer_dataset_transport_v1 WHERE job_id='orphan'")
+
+ def test_missing_frame_kind_is_not_accepted_as_history(self):
+  self.assertTrue(self.call()['created'])
+  with self.queue._db() as db:db.execute("DELETE FROM candidate_frame_pages WHERE stage_id=? AND kind='source'",(self.statement['jobId'],))
+  with self.assertRaises(NoGcpHeld):self.call()
+  self.assertEqual(self.counts()[:2],(1,1))
