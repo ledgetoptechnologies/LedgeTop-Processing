@@ -547,7 +547,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
 
     def test_prepare_refuses_predecessor_config_it_cannot_read(self):
-        for version in (4,5,None):
+        for version in (3,4,5,None):
             with self.subTest(version=version):
                 self.transport.config=dict(self.transport.config,schemaVersion=version)
                 operation=self.root/('config-'+str(version));operation.mkdir(mode=0o700)
@@ -557,10 +557,11 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
 
     def test_rollback_refused_when_predecessor_config_changes(self):
         self.five_retained()
-        self.assertEqual(self.state['predecessorConfig'],{'path':'runtime.json','bytes':512,'sha256':'a'*64,'schemaVersion':3})
+        self.assertEqual(self.state['predecessorConfig'],{'path':'runtime.json','bytes':512,'sha256':'a'*64,'schemaVersion':1})
         self.fail_after_start()
         calls=len(self.transport.calls)
-        for name,change in (('v4',dict(schemaVersion=4,sha256='4'*64)),('v5',dict(schemaVersion=5)),
+        for name,change in (('v2-new-bytes',dict(schemaVersion=2,sha256='2'*64)),('v3',dict(schemaVersion=3)),
+                            ('v4',dict(schemaVersion=4,sha256='4'*64)),('v5',dict(schemaVersion=5)),
                             ('same-version-new-bytes',dict(sha256='f'*64,bytes=513)),('unparsed',dict(schemaVersion=None))):
             with self.subTest(case=name):
                 self.transport.config=dict(self.state['predecessorConfig'],**change)
@@ -583,7 +584,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             save=staticmethod(module.legacy.save);private_file=staticmethod(module.legacy.private_file)
             def __init__(self):
                 self.calls=[];self.loss=None;self.hook=None
-                self.config={'path':'runtime.json','bytes':512,'sha256':'a'*64,'schemaVersion':3}
+                self.config={'path':'runtime.json','bytes':512,'sha256':'a'*64,'schemaVersion':1}
                 self.application={'PROCESSING_API_TOKEN':TOKEN,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OPERATOR,
                     'PROCESSING_REFERENCE_CONFIG':module.legacy.CONFIG_PATH}
                 self.old=self.container(module.OLD_ID,module.OLD_IMAGE,module.NAME,True)
