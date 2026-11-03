@@ -85,6 +85,7 @@ class ReferenceStore:
         if type(jcs_runtime_enabled) is not bool:
             raise ValueError('explicit JCS runtime flag required')
         self.jcs_runtime_enabled = jcs_runtime_enabled
+        self._receipt_namespace_gate = None
         if jcs_runtime_enabled:
             try:
                 import rfc8785
@@ -679,6 +680,18 @@ class ReferenceStore:
                 for row in db.execute('SELECT '+columns+' FROM '+table):
                     if identities & set(row): raise Conflict('receipt identity already reserved')
 
+    def configure_receipt_namespace_gate(self, gate):
+        """Attach a candidate gate only after a read-only clean census."""
+        from .receipt_namespace_authority_candidate import ReceiptNamespaceGate
+        if type(gate) is not ReceiptNamespaceGate or gate.queue is not self.queue:
+            raise JCSRuntimeUnavailable('shared receipt namespace unavailable')
+        try: result=gate.census()
+        except ValueError: raise JCSRuntimeUnavailable('shared receipt namespace unavailable') from None
+        gate.v1._receipt_namespace_gate=gate
+        gate.v2._receipt_namespace_gate=gate
+        self._receipt_namespace_gate=gate
+        return result
+
     def verify_viewer_v3_copy_held(self, submission_id, payload, *, authenticated_principal, authenticated_environment, expected_authority_id, trusted_keys):
         """Candidate verifies and journals only; it never records acceptance or cleanup authority."""
         from .prepared_envelope_jcs_candidate import PROTOCOL as JCS_PROTOCOL
@@ -690,6 +703,10 @@ class ReferenceStore:
             db.execute('BEGIN IMMEDIATE');self._check_jcs_capability(db);self._require_viewer_authority(db,expected_authority_id)
             found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,JCS_PROTOCOL)
             if found is None: return None
+            if self._receipt_namespace_gate is None:
+                raise JCSRuntimeUnavailable('shared receipt namespace unavailable')
+            try:self._receipt_namespace_gate.check_in_transaction(db)
+            except ValueError:raise JCSRuntimeUnavailable('shared receipt namespace unavailable') from None
             row=self._row(db,found['job_id']);owner=self._submission_owner(db,row)
             if owner is None: raise Conflict('owner unavailable')
             prepared=db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?',(row['job_id'],)).fetchone()

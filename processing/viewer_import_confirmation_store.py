@@ -420,6 +420,12 @@ class ImportConfirmationStore:
                 row = self._row(db, scope)
                 prior = row['confirmation_sha256'] if row else None
                 verified = self._verify(confirmation, context, prior=prior)
+                gate=getattr(self,'_receipt_namespace_gate',None)
+                if gate is not None:
+                    try:
+                        gate.check_in_transaction(db,proposed=() if row else (verified.confirmation['confirmationId'],))
+                    except ValueError:
+                        raise ImportConfirmationStoreHeld('shared_receipt_namespace_unavailable') from None
                 if row:
                     self._compare(row, verified, binding_sha)
                     result = RecordResult('replayed', verified.sha256)
