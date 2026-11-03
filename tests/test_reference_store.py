@@ -75,6 +75,28 @@ class ReferenceStoreTests(unittest.TestCase):
                                        (job['jobId'],)).fetchone()[0], 0)
         self.assertEqual(self.store.get(job['jobId'])['phase'], 'awaiting_acceptance')
 
+    def test_observed_copy_requirement_survives_restart_and_policy_relaxation(self):
+        job, result = self.result_ready()
+        receipt = self.receipt(job, result)
+        self.store.viewer_required_environments = frozenset(('staging',))
+        self.assertTrue(self.store.acceptance_receipts(job['jobId'])['viewerCopyRequired'])
+        reopened = ReferenceStore(self.queue, viewer_required_environments=())
+        self.assertTrue(reopened.acceptance_receipts(job['jobId'])['viewerCopyRequired'])
+        with self.assertRaises(Conflict):
+            reopened.accept(job['jobId'], receipt)
+        self.assertIn(job['jobId'], reopened.pending_viewer_transfer_jobs())
+
+    def test_rejected_unsigned_receipt_latches_requirement_before_rollback(self):
+        job, result = self.result_ready()
+        receipt = self.receipt(job, result)
+        self.store.viewer_required_environments = frozenset(('staging',))
+        with self.assertRaises(Conflict):
+            self.store.accept(job['jobId'], receipt)
+        reopened = ReferenceStore(self.queue, viewer_required_environments=())
+        self.assertTrue(reopened.acceptance_receipts(job['jobId'])['viewerCopyRequired'])
+        with self.assertRaises(Conflict):
+            reopened.accept(job['jobId'], receipt)
+
     def test_retry_transfer_budget_has_explicit_three_copy_ceiling(self):
         job, _ = self.store.submit(self.submission)
         self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',

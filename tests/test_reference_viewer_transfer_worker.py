@@ -107,7 +107,8 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         receipt = self._full_acceptance()
         with self.fixture.queue._db() as db:
             db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
-        self.assertEqual(self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance', receipt).status, 200)
+        legacy_api = self.fixture.make_api(store=ReferenceStore(self.fixture.queue))
+        self.assertEqual(self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance', receipt, api=legacy_api).status, 200)
         self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'completed')
         with self.fixture.queue._db() as db:
             db.execute('UPDATE reference_jobs SET viewer_receipt_required=NULL WHERE job_id=?', (self.job['jobId'],))
@@ -126,7 +127,8 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         first['acceptedObjectIds'] = ['result-1']
         with self.fixture.queue._db() as db:
             db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
-        self.assertEqual(self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance', first).status, 200)
+        legacy_api = self.fixture.make_api(store=ReferenceStore(self.fixture.queue))
+        self.assertEqual(self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance', first, api=legacy_api).status, 200)
         with self.fixture.queue._db() as db:
             db.execute('UPDATE reference_jobs SET viewer_receipt_required=1 WHERE job_id=?', (self.job['jobId'],))
         targeted = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
@@ -288,17 +290,18 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             self.assertIsNone(audit.call_args_list[0].kwargs['after_job'])
             self.assertEqual(audit.call_args_list[1].kwargs['after_job'], 'cursor-1')
 
-    def test_non_viewer_policy_is_not_reinterpreted_after_config_enable(self):
+    def test_config_enable_latches_copy_policy_for_legacy_job(self):
         with self.fixture.queue._db() as db:
             db.execute('UPDATE reference_jobs SET viewer_receipt_required=0 WHERE job_id=?', (self.job['jobId'],))
         configured_later = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
         api = self.fixture.make_api(store=configured_later)
         response = self.fixture.request('POST', '/jobs/' + self.job['jobId'] + '/acceptance',
                                         self._full_acceptance(), api=api)
-        self.assertEqual(response.status, 200)
-        self.assertTrue(response.body['fullyAccepted'])
+        self.assertEqual(response.status, 409)
+        reopened = ReferenceStore(self.fixture.queue)
+        self.assertTrue(reopened.acceptance_receipts(self.job['jobId'])['viewerCopyRequired'])
         self.assertIsNone(configured_later.viewer_transfer_status(self.job['jobId']))
-        self.assertFalse(configured_later.has_viewer_acceptance_reconciliation())
+        self.assertIn(self.job['jobId'], reopened.pending_viewer_transfer_jobs())
 
     def test_full_page_of_conflicts_does_not_starve_later_job(self):
         self.sender.fail = False

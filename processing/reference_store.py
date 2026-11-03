@@ -758,7 +758,27 @@ class ReferenceStore:
                 raise Conflict("operator-held worker results require explicit resolution")
             return self._seal_result(db, row, result, allow_recovery=True)
 
+    def _latch_viewer_copy_requirement(self, job_id):
+        """Persist observed tightening before responding, including on rejection.
+
+        NULL policy remains an explicit reconciliation case. A separate short
+        transaction ensures rejecting an unsigned receipt cannot roll back an
+        already observed requirement.
+        """
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, job_id)
+            if row['viewer_receipt_required'] not in (0, 1):
+                raise Conflict('legacy Viewer acceptance policy requires reconciliation')
+            required = (row['viewer_receipt_required'] == 1
+                        or row['environment'] in self.viewer_required_environments
+                        or db.execute('SELECT 1 FROM reference_viewer_transfers WHERE job_id=?', (job_id,)).fetchone())
+            if required and row['viewer_receipt_required'] == 0:
+                db.execute('UPDATE reference_jobs SET viewer_receipt_required=1,updated_at=CURRENT_TIMESTAMP WHERE job_id=?',
+                           (job_id,))
+
     def accept(self, job_id, receipt, *, viewer_receipt=None, trusted_viewer_receipt_keys=None):
+        self._latch_viewer_copy_requirement(job_id)
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
@@ -1155,6 +1175,7 @@ class ReferenceStore:
         the current environment target can each only tighten it; legacy NULL
         policy is never relayed as legacy-OK and requires reconciliation.
         """
+        self._latch_viewer_copy_requirement(job_id)
         with self.queue._db() as db:
             row = self._row(db, job_id)
             if row['viewer_receipt_required'] not in (0, 1):
