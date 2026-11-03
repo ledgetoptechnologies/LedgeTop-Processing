@@ -1,8 +1,8 @@
 """Synthetic existing Viewer queue over mTLS to the guarded node adapter.
 
-Only the test seam copies inputs to the node spool using a shared filesystem;
-production remote upload, authenticated queue-job identity, direct-engine
-isolation and completion/release are deliberately not implemented here.
+The input travels through the actual experimental streaming mTLS client.
+Authenticated queue-job identity, direct-engine isolation and completion/release
+are deliberately not implemented here.
 """
 import hashlib
 import http.client
@@ -19,6 +19,7 @@ from unittest.mock import patch
 import uuid
 
 from processing.guarded_native_https import create_guarded_https_server
+from processing.guarded_native_client import GuardedNativeClient
 from processing.viewer_service import EngineUnavailable
 from processing.prototype import Conflict
 from processing.viewer_http import ViewerFacade
@@ -53,11 +54,8 @@ class SyntheticMTLSBridge:
         self.call('initialize', {'task': selected})
 
     def upload(self, identifier, item):
-        dst = self.spool / (str(uuid.uuid4()) + '.jpg')
-        shutil.copyfile(item['path'], dst)
-        if os.name != 'nt': dst.chmod(0o600)
-        selected = {key: str(dst) if key == 'path' else item[key] for key in ('path', 'name', 'bytes', 'sha256')}
-        self.call('upload', {'task': identifier, 'item': selected})
+        GuardedNativeClient('127.0.0.1', self.server.server_port, self.context, self.token,
+                            timeout=5).upload(identifier, item)
 
     def action(self, action, identifier):
         if action != 'commit': raise EngineUnavailable('unsupported action')
@@ -104,6 +102,55 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         self.service.tick()
         self.assertTrue(self.service.info(job).get('ledgetopHeld'))
         self.assertEqual(self.native_fixture.counts()['initialize'], 0)
+
+    @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
+    def test_streamed_bad_digest_does_not_mutate_or_leave_spool(self):
+        bridge = self.service.engines['cluster']
+        task = str(uuid.uuid4())
+        bridge.initialize({'engine_uuid': task, 'name': 'synthetic', 'options': [], 'outputs': None})
+        source = self.root / 'source.jpg'
+        source.write_bytes(b'a' * 1048577)
+        client = GuardedNativeClient('127.0.0.1', bridge.server.server_port, bridge.context, TOKEN, timeout=10)
+        with self.assertRaises(EngineUnavailable):
+            client.upload(task, {'path': str(source), 'name': 'photo.jpg', 'bytes': source.stat().st_size,
+                                 'sha256': '0' * 64})
+        self.assertTrue(bridge.server.wait_drained(5))
+        self.assertEqual(self.native_fixture.counts()['upload'], 0)
+        self.assertEqual(list(bridge.spool.iterdir()), [])
+        self.assertEqual(self.journal_state()[1], [('init', 'done')])
+
+    @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
+    def test_streamed_upload_is_journaled_and_retry_never_replays(self):
+        bridge = self.service.engines['cluster']
+        task = str(uuid.uuid4())
+        bridge.initialize({'engine_uuid': task, 'name': 'synthetic', 'options': [], 'outputs': None})
+        source = self.root / 'source.jpg'
+        content = b'abc'
+        source.write_bytes(content)
+        item = {'path': str(source), 'name': 'photo.jpg', 'bytes': len(content),
+                'sha256': hashlib.sha256(content).hexdigest()}
+        client = GuardedNativeClient('127.0.0.1', bridge.server.server_port, bridge.context, TOKEN, timeout=10)
+        with patch('ops.native_node_fixture.MAX_BODY', 2 * 1024 * 1024):
+            client.upload(task, item)
+            self.assertEqual(self.native_fixture.counts()['upload'], 1)
+            self.assertEqual(self.journal_state()[1], [('init', 'done'), ('upload', 'done')])
+            with self.assertRaises(EngineUnavailable): client.upload(task, item)
+        self.assertEqual(self.native_fixture.counts()['upload'], 1)
+
+    @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
+    def test_stream_rejects_wrong_bearer_and_task_before_spooling(self):
+        bridge = self.service.engines['cluster']
+        task = str(uuid.uuid4())
+        bridge.initialize({'engine_uuid': task, 'name': 'synthetic', 'options': [], 'outputs': None})
+        source = self.root / 'source.jpg'; source.write_bytes(b'abc')
+        item = {'path': str(source), 'name': 'photo.jpg', 'bytes': 3,
+                'sha256': hashlib.sha256(b'abc').hexdigest()}
+        for token, identifier in (('wrong-token', task), (TOKEN, str(uuid.uuid4()))):
+            client = GuardedNativeClient('127.0.0.1', bridge.server.server_port, bridge.context, token, timeout=10)
+            with self.assertRaises(EngineUnavailable): client.upload(identifier, item)
+        self.assertTrue(bridge.server.wait_drained(5))
+        self.assertEqual(list(bridge.spool.iterdir()), [])
+        self.assertEqual(self.native_fixture.counts()['upload'], 0)
 
     def test_authenticated_wrong_engine_uuid_cannot_mutate_bound_task(self):
         job = self.submit()
