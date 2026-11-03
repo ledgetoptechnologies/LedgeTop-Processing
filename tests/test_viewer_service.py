@@ -1603,6 +1603,9 @@ else:
         self.assertEqual(task['job']['status'], 'held')
         checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
         self.assertEqual((checkpoint['operation'], checkpoint['state']), ('upload', 'pending'))
+        history = self.service.store.guarded_dispatch_history(identifier)
+        self.assertEqual([(entry['operation'], entry['state']) for entry in history],
+                         [('init', 'acknowledged'), ('upload', 'pending')])
         self.assertEqual(checkpoint['job_id'], task['job_id'])
         self.assertEqual(checkpoint['engine_uuid'], task['engine_uuid'])
         self.assertEqual(json.loads(checkpoint['evidence']), {
@@ -1612,6 +1615,7 @@ else:
         self.queue.close()
         self.make_queue_service()
         self.assertEqual(self.service.store.guarded_dispatch_checkpoint(identifier), checkpoint)
+        self.assertEqual(self.service.store.guarded_dispatch_history(identifier), history)
         self.service.tick()
         self.assertEqual(self.engines['cluster'].calls, calls)
         self.assertEqual(self.task(identifier)['job']['status'], 'held')
@@ -1625,6 +1629,43 @@ else:
         self.assertEqual((checkpoint['operation'], checkpoint['state']), ('commit', 'acknowledged'))
         self.assertEqual(json.loads(checkpoint['evidence']), {'engine_uuid': task['engine_uuid']})
         self.assertEqual(checkpoint['sequence'], len(task['files']) + 2)
+        history = self.service.store.guarded_dispatch_history(identifier)
+        self.assertEqual([entry['sequence'] for entry in history], list(range(1, len(task['files']) + 3)))
+        self.assertEqual([entry['operation'] for entry in history],
+                         ['init'] + ['upload'] * len(task['files']) + ['commit'])
+        self.assertTrue(all(entry['state'] == 'acknowledged' for entry in history))
+
+    def test_guarded_history_mismatch_rolls_back_acknowledgement(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        engine.node_guarded = True
+        original = engine.upload
+
+        def upload(task_uuid, item):
+            # Corrupt only the history row after intent is committed. An ACK
+            # must not leave the current checkpoint acknowledged on its own.
+            with self.queue._db() as db:
+                db.execute("DELETE FROM viewer_guarded_dispatch_history WHERE uuid=? AND operation='upload'", (identifier,))
+            return original(task_uuid, item)
+
+        engine.upload = upload
+        self.service.tick()
+        checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
+        self.assertEqual((checkpoint['operation'], checkpoint['state']), ('upload', 'pending'))
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+
+    def test_legacy_last_checkpoint_does_not_create_a_fabricated_history(self):
+        identifier = self.submit()
+        self.engines['cluster'].node_guarded = True
+        self.service.tick()
+        checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
+        with self.queue._db() as db:
+            db.execute('DELETE FROM viewer_guarded_dispatch_history WHERE uuid=?', (identifier,))
+        with self.assertRaises(Conflict):
+            self.service.store.checkpoint_guarded_dispatch(identifier, 'commit',
+                                                           {'engine_uuid': self.task(identifier)['engine_uuid']})
+        self.assertEqual(self.service.store.guarded_dispatch_checkpoint(identifier), checkpoint)
+        self.assertEqual(self.service.store.guarded_dispatch_history(identifier), [])
 
     def test_guarded_checkpoint_is_durable_before_engine_upload(self):
         identifier = self.submit()
